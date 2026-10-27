@@ -148,8 +148,11 @@ def _page_height(s: WelcomeScreen, width: float, scale: float = 1.0) -> float:
         if child.key == "welcome-ondevice-box":  # "Run on this phone": the preset cells (+ a note line)
             child = child.content
             if isinstance(child, ft.Column):
-                total += sum(_grid_height(c, scale) if isinstance(c, ft.ResponsiveRow) else text_height(c, width, scale)
-                             for c in child.controls) + (len(child.controls) - 1) * child.spacing
+                # hidden controls take no room; the GPU switch / Q4_0 button (OpenCL) take one tap-target row
+                shown = [c for c in child.controls if c.visible is not False]
+                total += sum(_grid_height(c, scale) if isinstance(c, ft.ResponsiveRow)
+                             else text_height(c, width, scale) if isinstance(c, ft.Text)
+                             else HIT * max(1.0, scale * 0.9) for c in shown) + (len(shown) - 1) * child.spacing
                 continue
         if isinstance(child, ft.Text):
             total += text_height(child, width, scale)
@@ -320,6 +323,37 @@ def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_pa
     rows = by_key(s.page_area.content)
     assert rows["welcome-gpu"].value is True and len(rows["welcome-ondevice"].controls) == len(names)
     assert not rows["welcome-gpu-presets"].visible  # nothing missing: the fallback button stays hidden
+
+
+@pytest.mark.parametrize("width", PHONES)
+def test_page_one_fits_with_the_gpu_friendly_presets(width, tmp_path):
+    """Hotfix 6 (owner 2026-10-27): on Android (OpenCL) the Q4_0 presets show with the GPU off, so page 1 has
+    eight cells; their smaller "Garbage GPU" names fit a quarter row."""
+    from glossarion_mobile.services.local_llm import presets as lp
+    from glossarion_mobile.ui.screens import welcome
+
+    kwargs, service, _engine = _engine_kwargs(tmp_path)
+    service.gpu_backend = "OpenCL"
+    s = screen(**kwargs)
+    rows = by_key(s.page_area.content)
+    assert rows["welcome-gpu"].value is False
+    cells = rows["welcome-ondevice"].controls
+    assert len(cells) == len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS)
+    names = [cell.content.controls[0] for cell in cells]
+    gpu = names[len(lp.DEFAULT_PRESETS):]
+    assert [n.value for n in gpu] == ["Garbage GPU", "Light GPU", "Medium GPU", "Heavy GPU"]
+    assert all(n.size == welcome.ONDEVICE_GPU_NAME_SIZE for n in gpu) and all(n.size is None for n in names[:4])
+    assert cells[len(lp.DEFAULT_PRESETS)].tooltip.startswith("Garbage · GPU (Q4_0)")
+    content_w = width - 32
+    quarter = (content_w - 3 * 6) / 4 - 12
+    for name in names:
+        size = name.size or tokens.TYPE_SCALE["label_medium"].size
+        assert text_width(name.value, size) <= quarter, (name.value, quarter)
+    budget = HEIGHTS[width] - (24 + 56 + 48 + 32 + 8 + 48 + 20)
+    if width >= 412:  # the owner's phone class: page 1 still fits
+        assert _page_height(s, content_w) <= budget, (width, budget)
+    else:  # 360 x 800: the second row of cells and the GPU switch need ~100 dp more than is left: it scrolls
+        assert s.page_area.content.scroll == ft.ScrollMode.AUTO
 
 
 def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path):

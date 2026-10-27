@@ -8,8 +8,9 @@
   current one first, unless the running job uses it (409, no thrash). Generations run one at a time in
   arrival order (FIFO, at most ``MAX_WAITERS`` waiting, then 503).
 * **RAM gate** before every load: ``need = size * 1.15 + n_ctx * 64 KiB + 400 MiB``. Android refuses
-  above total RAM and asks above available RAM (jobs fail with that message instead of asking); iOS
-  refuses above half of the RAM (the jetsam limit of an app without the increased-memory entitlement).
+  above total RAM; above available RAM it only warns ("confirm": the load goes ahead and the message is
+  logged and shown, owner 2026-10-27: Use always loads, the warning is cosmetic); iOS refuses above
+  half of the RAM (the jetsam limit of an app without the increased-memory entitlement).
   The first image request of a vision model checks again with its projector added
   (``projector_need``): the projector loads only then.
 * **Vision:** a model downloaded with its ``mmproj`` projector takes OpenAI ``image_url`` parts
@@ -752,13 +753,12 @@ class LocalEngineService:
             return "refuse", f"This phone has {_gb(total)} RAM; {name} needs about {_gb(need)}. Pick a smaller model."
         if available is not None and need > available and self.platform == "android":
             return "confirm", (f"{name} needs about {_gb(need)} and {_gb(available)} is free. Android may close "
-                               "Glossarion while this model runs. Load anyway?")
+                               "Glossarion while this model runs.")
         return "ok", ""
 
     # ---- load / unload (callers hold the gate) ---------------------------------------------------------
 
-    def _ensure_loaded(self, stem: str, *, force: bool = False, interactive: bool = False,
-                       vision: bool = False) -> None:
+    def _ensure_loaded(self, stem: str, *, vision: bool = False) -> None:
         engine = self._engine()
         n_ctx = self.context_for(stem)
         fallback = self.gpu_fallback()
@@ -769,7 +769,7 @@ class LocalEngineService:
         if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
                 and self._loaded_gpu == gpu:
             if vision and not engine.vision_loaded:  # the projector loads with the first image
-                self._gate_ram(stem, engine.n_ctx or self.context_for(stem), force, interactive, vision=True,
+                self._gate_ram(stem, engine.n_ctx or self.context_for(stem), vision=True,
                                gpu=bool(getattr(engine, "on_gpu", False)))
             return
         available, reason = self.engine_status()
@@ -778,7 +778,7 @@ class LocalEngineService:
         path = self.registry.file_path(stem)
         if not os.path.isfile(path):
             raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
-        self._gate_ram(stem, n_ctx, force, interactive, vision=vision, gpu=gpu)
+        self._gate_ram(stem, n_ctx, vision=vision, gpu=gpu)
         if engine.loaded:
             self._unload_locked()
         self._unload_when_idle = False
@@ -814,13 +814,14 @@ class LocalEngineService:
         self.last_used = self.clock()
         self._set("ready", stem)
 
-    def _gate_ram(self, stem: str, n_ctx: int, force: bool, interactive: bool, *, vision: bool,
-                  gpu: bool = False) -> None:
+    def _gate_ram(self, stem: str, n_ctx: int, *, vision: bool, gpu: bool = False) -> None:
+        """Only "refuse" stops a load; "confirm" (tight on free RAM) is a warning in the log, the load goes
+        ahead (owner 2026-10-27; the screens show the same message as a note)."""
         verdict, message = self.ram_check(stem, n_ctx, vision=vision, gpu=gpu)
-        if verdict == "refuse" or (verdict == "confirm" and not force):
-            if verdict == "confirm" and not interactive:
-                message = message.replace(" Load anyway?", " Load it in Model manager › On-device to run it anyway.")
+        if verdict == "refuse":
             raise LocalLLMError(507, "insufficient_memory", message, "server_error")
+        if verdict == "confirm":
+            log.warning("loading anyway: %s", message)
 
     def _unload_locked(self) -> None:
         engine = self.engine
@@ -832,21 +833,21 @@ class LocalEngineService:
         self._clear_gpu_attempt()  # unloaded normally: the GPU did not take the app down
         self._set("idle", None)
 
-    def load_blocking(self, stem: str, *, force: bool = False) -> tuple:
+    def load_blocking(self, stem: str) -> tuple:
         """Explicit Load (Model manager): ``(True, None)`` or ``(False, message)``; never waits for a
         running generation."""
         if not self.gate.try_acquire():
             return False, "The on-device model is busy; try again when the current answer is done"
         try:
-            self._ensure_loaded(stem, force=force, interactive=True)
+            self._ensure_loaded(stem)
             return True, None
         except LocalLLMError as exc:
             return False, exc.message
         finally:
             self.gate.release()
 
-    async def load(self, stem: str, *, force: bool = False) -> tuple:
-        return await self._io(lambda: self.load_blocking(stem, force=force))
+    async def load(self, stem: str) -> tuple:
+        return await self._io(lambda: self.load_blocking(stem))
 
     def unload(self, *, force: bool = False) -> bool:
         """Unload now (False when a generation holds the engine, unless ``force``: then the running
@@ -1004,7 +1005,7 @@ class LocalEngineService:
                     raise
                 # the GPU failed on this prompt: the same request again on the CPU
                 self._gpu_failed(stem, f"the GPU failed while answering ({exc})")
-                self._ensure_loaded(stem, force=True, vision=bool(images))
+                self._ensure_loaded(stem, vision=bool(images))
                 engine = self.engine
                 self._set("generating", stem)
                 deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)

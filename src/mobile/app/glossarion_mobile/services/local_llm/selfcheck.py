@@ -233,7 +233,7 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
         service = svc.LocalEngineService(prefs=prefs, registry=registry, watch=False)
         service.start()
         try:
-            ok, error = service.load_blocking(stem, force=True)
+            ok, error = service.load_blocking(stem)
             if not ok:
                 raise AssertionError(f"load failed: {error}")
             payload["load_s"] = service.log[-1][1] if service.log else None
@@ -318,7 +318,7 @@ def llama_vision_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None)
         try:
             if not service.is_vision(stem):
                 raise AssertionError(f"local/{stem} has no projector after the download")
-            ok, error = service.load_blocking(stem, force=True)
+            ok, error = service.load_blocking(stem)
             if not ok:
                 raise AssertionError(f"load failed: {error}")
             started = time.monotonic()

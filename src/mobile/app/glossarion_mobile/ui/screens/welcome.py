@@ -100,6 +100,16 @@ ONDEVICE_CELLS = 4
 #: a cell's second line by ``OnDeviceFlow.row_state`` (short: a quarter of a 360 dp row)
 ONDEVICE_LABELS = {"checking": "Checking…", "paused": "Resume", "busy": "Starting…", "error": "Retry",
                    "in_use": "✓ In use", "use": "Tap to use"}
+#: the GPU-friendly (Q4_0) preset cells (owner 2026-10-27: shown on every Android phone, they must fit a
+#: quarter row): a smaller name, "Garbage GPU" for "Garbage · GPU (Q4_0)" (the full name is the tooltip)
+ONDEVICE_GPU_NAME_SIZE = 10
+_GPU_NAME_SUFFIX = " · GPU (Q4_0)"
+
+
+def ondevice_cell_name(preset: dict) -> str:
+    """A preset's name in its Welcome cell: the stock Q4_0 suffix shortened to " GPU"."""
+    name = str(preset.get("name") or "")
+    return name[:-len(_GPU_NAME_SUFFIX)] + " GPU" if name.endswith(_GPU_NAME_SUFFIX) else name
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
@@ -263,6 +273,7 @@ class WelcomeScreen(Screen):
             self.ondevice = OnDeviceFlow(service=service, prefs=self.prefs, page=self.page,
                                          use_model=self._use_local_model, current_model=self.current_model,
                                          notify=self._ondevice_note, on_change=self.render_ondevice)
+            self.ondevice.offer_gpu_presets_once()  # Android: the Q4_0 presets show whatever the GPU switch says
             self._ondevice_unsub = service.downloads.subscribe(lambda state: self.render_ondevice())
         return self.ondevice
 
@@ -324,11 +335,14 @@ class WelcomeScreen(Screen):
         else:
             detail = " ".join(x for x in (dl.format_bytes(lp.download_size(preset)) if lp.download_size(preset)
                                           else "", mark) if x)
-        name = f"{preset.get('name')} ⭐" if suggested else str(preset.get("name"))
+        gpu = lp.is_gpu_quant(preset.get("file"))
+        name = ondevice_cell_name(preset) + (" ⭐" if suggested else "")
         color = {"refuse": ft.Colors.ERROR, "confirm": ft.Colors.TERTIARY}.get(verdict) if state == "download" else None
-        tooltip = " · ".join(x for x in (str(preset.get("note") or ""), words if state == "download" else status) if x)
+        tooltip = " · ".join(x for x in (str(preset.get("name") or "") if gpu else "", str(preset.get("note") or ""),
+                                         words if state == "download" else status) if x)
         lines: list[ft.Control] = [
-            ft.Text(name, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(name, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                    size=ONDEVICE_GPU_NAME_SIZE if gpu else None),
             ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
                     color=color or ft.Colors.ON_SURFACE_VARIANT),
         ]

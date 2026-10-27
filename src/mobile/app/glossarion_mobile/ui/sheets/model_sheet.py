@@ -424,6 +424,9 @@ class ModelSheet:
                                      visible=not self.one_shot and not self.field_mode)
         self._chat_scope_initial = False
         self.list_view = ft.ListView(controls=[], height=400, spacing=0, build_controls_on_demand=True)
+        # the On-device tab's rows at their full height instead of the list (owner 2026-10-27: every preset
+        # and the Model manager link without scrolling inside the list; the sheet scrolls as a whole)
+        self.ondevice_list = ft.Column(controls=[], spacing=0, tight=True, visible=False, key="model-ondevice-list")
         self.status_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                    visible=False)
         self.route_row = ft.Column([], spacing=6, tight=True, visible=False)
@@ -459,6 +462,7 @@ class ModelSheet:
                         self.chat_switch,
                         self.status_text,
                         self.list_view,
+                        self.ondevice_list,
                         self.route_row,
                         self.thinking,
                         self.thinking_others,
@@ -859,6 +863,7 @@ class ModelSheet:
                                          use_model=self._use_local_model,
                                          current_model=lambda: str(self.current.get("model") or ""),
                                          notify=self._note, spawn=self.env.spawn, on_change=self.render_ondevice)
+            self.ondevice.offer_gpu_presets_once()  # Android: the Q4_0 presets show whatever the GPU switch says
             try:
                 service.downloads.scan()  # paused parts of an earlier run (Resume)
             except Exception:
@@ -888,8 +893,8 @@ class ModelSheet:
         """Repaint only the On-device rows (download progress arrives several times a second)."""
         if self.closed or self.tab != "ondevice":
             return
-        self.list_view.controls = self.ondevice_rows()
-        _push(self.list_view)
+        self.ondevice_list.controls = self.ondevice_rows()
+        _push(self.ondevice_list)
 
     def _spawn(self, coro: Any) -> Any:
         spawn = self.env.spawn
@@ -1220,15 +1225,18 @@ class ModelSheet:
         for chip_id, chip in self.chips.items():
             chip.selected = chip_id == self.chip
         self.hide_item.checked = bool(self.snapshot.hide_unpolled)
+        ondevice = self.tab == "ondevice"
         if model_tab:
             rows = self.model_rows()
-        elif self.tab == "ondevice":
+        elif ondevice:
             rows = self.ondevice_rows()
         elif self.tab == "profile":
             rows = self.profile_rows()
         else:
             rows = self.language_rows()
-        self.list_view.controls = rows
+        self.list_view.visible, self.ondevice_list.visible = not ondevice, ondevice
+        self.list_view.controls = [] if ondevice else rows
+        self.ondevice_list.controls = rows if ondevice else []
         self._refresh_route_row()
         self._sync_poll_state()
 

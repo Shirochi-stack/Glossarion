@@ -104,18 +104,18 @@ def test_ram_gate(tmp_path):
     assert service.ram_check("fake-echo") == ("ok", "")
     memory["value"] = (8 * GB, 2 * GB)
     verdict, message = service.ram_check("fake-echo")
-    assert verdict == "confirm" and message.endswith("Android may close Glossarion while this model runs. Load anyway?")
-    ok, error = service.load_blocking("fake-echo")
-    assert not ok and "Load anyway?" in error  # the screen asks
-    with pytest.raises(svc.LocalLLMError) as info:  # a job / chat request never asks: it fails with the reason
-        _chat(service, "fake-echo")
-    assert info.value.status == 507 and "Load it in Model manager › On-device to run it anyway." in info.value.message
-    assert service.load_blocking("fake-echo", force=True) == (True, None)
+    assert verdict == "confirm" and message.endswith("Android may close Glossarion while this model runs.")
+    # owner 2026-10-27: tight on free RAM is a warning only; Use and a job / chat request both load
+    assert service.load_blocking("fake-echo") == (True, None)
+    service.unload()
+    _chat(service, "fake-echo")
+    assert service.loaded_stem == "fake-echo"
     service.unload()
     memory["value"] = (2 * GB, 1 * GB)
     verdict, message = service.ram_check("fake-echo")
     assert verdict == "refuse" and message.startswith("This phone has 2.1 GB RAM;")
-    assert service.load_blocking("fake-echo", force=True)[0] is False
+    ok, error = service.load_blocking("fake-echo")  # more than the phone has: still refused
+    assert not ok and error.startswith("This phone has 2.1 GB RAM;")
     service.platform = "ios"
     memory["value"] = (8 * GB, None)  # need ~3.2 GB: under half of 8 GB
     assert service.ram_check("fake-echo")[0] == "ok"

@@ -5,6 +5,11 @@ GPU-friendly Q4_0 presets (``presets.GPU_PRESETS``) at once, through the same ``
 Switching it off keeps every preset and downloaded file; a build of the panel never changes the list (a
 removed Q4_0 preset stays removed, the button is the fallback); iOS (Metal) and builds without a GPU
 backend add nothing. FakeEngine / FakePrefs, no network.
+
+Hotfix 6 (owner 2026-10-27: "gpu friendly presets are always shown regardless of toggle state"): on
+Android (OpenCL) the first time the presets show (Model manager, Welcome page, model picker) they are
+added quietly whatever the switch says (``offer_gpu_presets_once``), and the button shows while one is
+missing, switch on or off.
 """
 
 from __future__ import annotations
@@ -76,7 +81,7 @@ def test_switching_the_gpu_on_adds_the_q4_0_presets_at_once(tmp_path):
     panel, prefs, service, said = _panel(tmp_path)
     assert panel.gpu_switch.visible and panel.gpu_switch.value is False
     assert _names(prefs) == DEFAULT_NAMES and _shown(panel) == DEFAULT_NAMES
-    assert not panel.gpu_presets_button.visible
+    assert panel.gpu_presets_button.visible  # hotfix 6: offered while missing, whatever the switch says
     # on: the Q4_0 presets join the list, the card shows them at once, one short note, no button
     _tap_switch(panel, True)
     assert prefs.get(svc.GPU_KEY) is True and service.use_gpu()
@@ -148,24 +153,27 @@ def test_a_full_list_keeps_what_fits(tmp_path):
     assert said == [f"Keep it to {presets.MAX_PRESETS} presets: remove one to add the GPU-friendly presets"]
 
 
-def test_the_welcome_switch_adds_them_too(tmp_path):
-    """The Welcome page ("Run on this phone") shows the same switch (``OnDeviceFlow._gpu_section``)."""
+def test_the_welcome_page_shows_them_whatever_the_switch_says(tmp_path):
+    """The Welcome page ("Run on this phone") shows the same switch (``OnDeviceFlow._gpu_section``); hotfix 6:
+    its cells include the Q4_0 presets with the switch off, added without a note."""
     from test_welcome_drawer_compact import _engine_kwargs, by_key, screen
 
     kwargs, service, _engine = _engine_kwargs(tmp_path)
     service.gpu_backend = "OpenCL"
     s = screen(**kwargs)
     rows = by_key(s.page_area.content)
-    assert len(rows["welcome-ondevice"].controls) == len(DEFAULT_NAMES)
+    assert rows["welcome-gpu"].value is False and _names(kwargs["prefs"]) == DEFAULT_NAMES + GPU_NAMES
+    assert len(rows["welcome-ondevice"].controls) == len(DEFAULT_NAMES) + len(GPU_NAMES)
+    assert not rows["welcome-gpu-presets"].visible and "welcome-model-local" not in rows  # no note
     switch = rows["welcome-gpu"]
     switch.value = True
     switch.on_change(None)
     assert kwargs["prefs"].get(svc.GPU_KEY) is True and _names(kwargs["prefs"]) == DEFAULT_NAMES + GPU_NAMES
-    # the page re-rendered: a cell per preset, the switch on, no button, the note under the cells
+    # the page re-rendered: the same cells, the switch on, no button, still no note
     rows = by_key(s.page_area.content)
     assert rows["welcome-gpu"].value is True and not rows["welcome-gpu-presets"].visible
     assert len(rows["welcome-ondevice"].controls) == len(DEFAULT_NAMES) + len(GPU_NAMES)
-    assert rows["welcome-model-local"].value == ADDED_FOUR
+    assert "welcome-model-local" not in rows
 
 
 def test_a_gpu_switched_on_before_this_build_gets_the_presets_once_when_the_model_manager_opens(tmp_path):
@@ -177,7 +185,7 @@ def test_a_gpu_switched_on_before_this_build_gets_the_presets_once_when_the_mode
     panel, prefs, _service, said = _panel(tmp_path / "upgrade", prefs=prefs)
     assert _names(prefs) == DEFAULT_NAMES  # building the panel alone still changes nothing
     assert panel.offer_gpu_presets_once() == GPU_NAMES
-    assert _names(prefs) == DEFAULT_NAMES + GPU_NAMES and said == [ADDED_FOUR]
+    assert _names(prefs) == DEFAULT_NAMES + GPU_NAMES and said == []  # quiet (hotfix 6)
     assert prefs.get(lmp.GPU_PRESETS_OFFERED_KEY) is True and not panel.gpu_presets_button.visible
     light_gpu = len(DEFAULT_NAMES) + GPU_NAMES.index("Light · GPU (Q4_0)")
     assert panel.remove_preset(light_gpu)
@@ -185,12 +193,12 @@ def test_a_gpu_switched_on_before_this_build_gets_the_presets_once_when_the_mode
     assert panel.offer_gpu_presets_once() == [] and "Light · GPU (Q4_0)" not in _names(prefs) and said == []
 
 
-def test_the_one_time_offer_skips_gpu_off_metal_and_an_earlier_add(tmp_path):
+def test_the_one_time_offer_ignores_the_switch_and_skips_metal_and_an_earlier_add(tmp_path):
     from glossarion_mobile.ui.screens import local_models_panel as lmp
 
-    panel, prefs, _service, said = _panel(tmp_path / "off")  # GPU off
-    assert panel.offer_gpu_presets_once() == [] and _names(prefs) == DEFAULT_NAMES
-    assert prefs.get(lmp.GPU_PRESETS_OFFERED_KEY, False) is False  # still offered once it goes on
+    panel, prefs, _service, said = _panel(tmp_path / "off")  # GPU off: added all the same (hotfix 6)
+    assert panel.offer_gpu_presets_once() == GPU_NAMES and _names(prefs) == DEFAULT_NAMES + GPU_NAMES
+    assert prefs.get(lmp.GPU_PRESETS_OFFERED_KEY) is True and said == []
     panel, prefs, _service, said = _panel(tmp_path / "ios", backend="Metal", prefs=fakes.FakePrefs({svc.GPU_KEY: True}))
     assert panel.offer_gpu_presets_once() == [] and _names(prefs) == DEFAULT_NAMES
     # switched on in this build: the switch adds them, and the open afterwards does not repeat it

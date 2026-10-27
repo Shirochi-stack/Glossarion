@@ -152,7 +152,7 @@ def test_on_device_rows_list_presets_and_added_files_with_size_vision_ram_and_st
     sheet, selected = _sheet(service, prefs, opened=opened)
     sheet.tab = "ondevice"
     sheet.refresh()
-    rows = sheet.list_view.controls
+    rows = sheet.ondevice_list.controls
     # the model tab's search, chips and route rows are not shown on this tab
     assert not sheet.search.visible and not sheet.chip_row.visible and not sheet.route_row.visible
     assert not sheet.chat_switch.visible
@@ -180,16 +180,16 @@ def test_use_on_a_downloaded_hugging_face_file_picks_local_stem(tmp_path):
         service, engine = _service(tmp_path, prefs)
         _add_file(service, "Extra-Q4_K_M", "someone/Extra-GGUF", "Extra-Q4_K_M.gguf", payload=b"e" * 4096)
         sheet, selected = _sheet(service, prefs, tab="ondevice")
-        task = _find(sheet.list_view.controls, "ondevice-file-Extra-Q4_K_M-action").on_click(None)
+        task = _find(sheet.ondevice_list.controls, "ondevice-file-Extra-Q4_K_M-action").on_click(None)
         assert await task is True
         assert selected == [("model", "local/Extra-Q4_K_M", False)] and sheet.closed
         assert service.loaded_stem == "Extra-Q4_K_M" and engine.loads
         assert prefs.get("model_recents")[0] == "local/Extra-Q4_K_M"
         # opened again with it as the model: In use
         again, _sel = _sheet(service, prefs, current="local/Extra-Q4_K_M", tab="ondevice")
-        action = _find(again.list_view.controls, "ondevice-file-Extra-Q4_K_M-action")
+        action = _find(again.ondevice_list.controls, "ondevice-file-Extra-Q4_K_M-action")
         assert action.content == "In use" and action.disabled
-        assert _find(again.list_view.controls, "ondevice-file-Extra-Q4_K_M-status").value == "Loaded · in use"
+        assert _find(again.ondevice_list.controls, "ondevice-file-Extra-Q4_K_M-status").value == "Loaded · in use"
         service.stop()
 
     asyncio.run(scenario())
@@ -206,16 +206,16 @@ def test_download_asks_first_shows_cancel_then_loads_and_selects(tmp_path, fake_
         asked = []
         flow.confirm_fn = lambda title, body, label: asked.append((title, label)) or answer["value"]
         # No: nothing downloads, nothing is picked, the sheet stays open
-        task = _find(sheet.list_view.controls, "ondevice-preset-0-action").on_click(None)
+        task = _find(sheet.ondevice_list.controls, "ondevice-preset-0-action").on_click(None)
         assert await task is None and asked == [("Download Tiny?", "Download")]
         assert selected == [] and not sheet.closed and not any("/resolve/" in p for p, _r in fake_hf.requests)
-        assert _find(sheet.list_view.controls, "ondevice-preset-0-action").content == "Download"
+        assert _find(sheet.ondevice_list.controls, "ondevice-preset-0-action").content == "Download"
         # Yes: while it downloads the button is Cancel (the sheet repaints from the download events)
         answer["value"] = True
         seen = []
         unsub = service.downloads.subscribe(
-            lambda s: seen.append(_find(sheet.list_view.controls, "ondevice-preset-0-action").content))
-        task = _find(sheet.list_view.controls, "ondevice-preset-0-action").on_click(None)
+            lambda s: seen.append(_find(sheet.ondevice_list.controls, "ondevice-preset-0-action").content))
+        task = _find(sheet.ondevice_list.controls, "ondevice-preset-0-action").on_click(None)
         assert await task == "local/Tiny-Q4_K_M"
         unsub()
         assert "Cancel" in seen
@@ -224,7 +224,7 @@ def test_download_asks_first_shows_cancel_then_loads_and_selects(tmp_path, fake_
         # closed: the sheet no longer listens to downloads or the engine
         assert not sheet._ondevice_unsubs
         reopened, _sel = _sheet(service, prefs, current="local/Tiny-Q4_K_M", tab="ondevice")
-        rows = reopened.list_view.controls
+        rows = reopened.ondevice_list.controls
         assert _find(rows, "ondevice-preset-0-action").content == "In use"
         assert _find(rows, "ondevice-preset-0-status").value == "Loaded · in use"
         assert _find(rows, "ondevice-preset-0-vision") is not None
@@ -246,18 +246,18 @@ def test_cancel_while_downloading_stops_it_and_picks_nothing(tmp_path, fake_hf):
 
         def tap_cancel(state):
             if state.running and state.phase == "downloading" and state.bytes_done > 0 and not tapped:
-                button = _find(sheet.list_view.controls, "ondevice-preset-0-action")
+                button = _find(sheet.ondevice_list.controls, "ondevice-preset-0-action")
                 assert button.content == "Cancel"
-                assert _find(sheet.list_view.controls, "ondevice-preset-0-progress") is not None
+                assert _find(sheet.ondevice_list.controls, "ondevice-preset-0-progress") is not None
                 tapped.append(1)
                 button.on_click(None)
 
         service.downloads.subscribe(tap_cancel)
-        task = _find(sheet.list_view.controls, "ondevice-preset-0-action").on_click(None)
+        task = _find(sheet.ondevice_list.controls, "ondevice-preset-0-action").on_click(None)
         assert await task is None and tapped
         assert selected == [] and not sheet.closed
         assert not [n for n in os.listdir(service.registry.root) if ".part" in n]
-        assert _find(sheet.list_view.controls, "ondevice-preset-0-action").content == "Download"
+        assert _find(sheet.ondevice_list.controls, "ondevice-preset-0-action").content == "Download"
         sheet.close()
         service.stop()
 
@@ -274,12 +274,15 @@ def test_no_engine_message_and_render_only_on_the_open_on_device_tab(tmp_path):
     sheet.tab = "ondevice"
     sheet.refresh()
     assert sheet.ondevice is not None and sheet._ondevice_unsubs
-    rows = sheet.list_view.controls
+    rows = sheet.ondevice_list.controls
+    # owner 2026-10-27: the On-device rows at full height (a Column, no scrolling inside the list)
+    assert rows and sheet.ondevice_list.visible and not sheet.list_view.visible and not sheet.list_view.controls
     sheet.tab = "model"
     sheet.refresh()
     model_rows = sheet.list_view.controls
+    assert sheet.list_view.visible and not sheet.ondevice_list.visible and not sheet.ondevice_list.controls
     sheet.render_ondevice()  # a download event while the Model tab shows leaves its rows alone
-    assert sheet.list_view.controls is model_rows and rows is not model_rows
+    assert sheet.list_view.controls is model_rows and not sheet.ondevice_list.controls
     sheet._on_dismiss()
     assert not sheet._ondevice_unsubs and not service.downloads.listeners
     # the sheet without an engine (env.local_engine is None) never offers the tab; asked anyway it says why
@@ -296,7 +299,7 @@ def test_on_device_rows_fit_phone_widths(tmp_path, width):
     _add_file(service, "A-very-long-model-file-name-from-hugging-face-Q4_K_M", "someone/Long-GGUF",
               "A-very-long-model-file-name-from-hugging-face-Q4_K_M.gguf", payload=b"x" * 2048, mmproj=True)
     sheet, _sel = _sheet(service, prefs, tab="ondevice")
-    for row in sheet.list_view.controls:
+    for row in sheet.ondevice_list.controls:
         for c in _walk(row):
             fixed = getattr(c, "width", None)
             assert fixed is None or fixed <= width - 40, (type(c).__name__, fixed)
@@ -308,3 +311,33 @@ def test_on_device_rows_fit_phone_widths(tmp_path, width):
             assert len(buttons.controls) <= 2
             title = texts.controls[0]
             assert title.max_lines == 1 and title.overflow == ft.TextOverflow.ELLIPSIS
+
+
+def test_hotfix6_q4_0_presets_show_with_the_gpu_off_and_use_loads_when_ram_is_tight(tmp_path):
+    """Owner 2026-10-27: on Android (OpenCL) the picker lists the GPU-friendly presets whatever "Use GPU" says,
+    and Use on a model tight on free RAM loads it: the warning is the sheet's note, never a question."""
+    async def scenario():
+        prefs = fakes.FakePrefs()  # the default presets
+        engine = eng.FakeEngine()
+        memory = {"value": (8 * GIB, 6 * GIB)}
+        service = svc.LocalEngineService(prefs=prefs, registry=dl.Registry(str(tmp_path / "models")),
+                                         engine_factory=lambda: engine, watch=False, platform="android",
+                                         memory=lambda: memory["value"])
+        service.gpu_backend = "OpenCL"
+        _add_file(service, "Extra-Q4_K_M", "someone/Extra-GGUF", "Extra-Q4_K_M.gguf", payload=b"e" * 4096)
+        sheet, selected = _sheet(service, prefs, tab="ondevice")
+        assert not service.use_gpu()
+        names = [p["name"] for p in presets.load_presets(prefs)]
+        assert names == [p["name"] for p in presets.DEFAULT_PRESETS + presets.GPU_PRESETS]
+        for index in range(len(names)):
+            assert _find(sheet.ondevice_list.controls, f"ondevice-preset-{index}-action") is not None
+        memory["value"] = (8 * GIB, 256 * 1024 ** 2)  # 256 MB free: tight
+        assert service.ram_check("Extra-Q4_K_M")[0] == "confirm"
+        task = _find(sheet.ondevice_list.controls, "ondevice-file-Extra-Q4_K_M-action").on_click(None)
+        assert await task is True
+        assert selected == [("model", "local/Extra-Q4_K_M", False)] and service.loaded_stem == "Extra-Q4_K_M"
+        assert "Android may close Glossarion while this model runs." in sheet.refresh_note
+        assert "Load anyway" not in sheet.refresh_note
+        service.stop()
+
+    asyncio.run(scenario())

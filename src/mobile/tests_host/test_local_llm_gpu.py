@@ -305,7 +305,8 @@ def test_engine_card_gpu_switch_note_status_and_presets_button(tmp_path):
     panel.build()
     assert panel.gpu_switch.visible and panel.gpu_switch.value is False and panel.gpu_switch.key == "local-gpu"
     assert panel.gpu_switch.label == "Use GPU (experimental)" and "Adreno" in panel.gpu_note.value
-    assert "Q4_0" in panel.gpu_note.value and not panel.gpu_presets_button.visible
+    # hotfix 6: the missing Q4_0 presets are offered whatever the switch says
+    assert "Q4_0" in panel.gpu_note.value and panel.gpu_presets_button.visible
     panel.gpu_switch.value = True
     assert panel.save_gpu() is True and prefs.get(svc.GPU_KEY) is True
     # hotfix 3: switching it on adds the GPU-friendly presets at once; the button is only the fallback

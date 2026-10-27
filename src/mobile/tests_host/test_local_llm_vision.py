@@ -280,19 +280,21 @@ def test_the_first_image_checks_ram_with_the_projector(tmp_path, monkeypatch):
     assert service.ram_check("seer")[0] == "ok"
     verdict, message = service.ram_check("seer", vision=True)
     assert verdict == "confirm" and "seer with its image support needs about" in message
-    # text loads; the first image is refused for a job (it cannot ask), with how to go on
+    # text loads; the first image loads the projector too: tight on free RAM is a warning only (owner 2026-10-27)
     run = service.chat("seer", {"messages": [{"role": "user", "content": "hi"}]}, lambda: False)
     with run:
         assert "".join(run.deltas) == "Echo: hi"
-    with pytest.raises(svc.LocalLLMError) as info:
-        service.chat("seer", {"messages": [image_message(png_data_url(30, 30))]}, lambda: False)
-    assert info.value.status == 507 and "Load it in Model manager › On-device" in info.value.message
     assert engine.projector_loads == 0
-    memory["value"] = (8 * 1024 ** 3, 6 * 1024 ** 3)
     run = service.chat("seer", {"messages": [image_message(png_data_url(30, 30), "ok now")]}, lambda: False)
     with run:
         assert "".join(run.deltas) == "Echo: ok now [1 image]"
     assert engine.projector_loads == 1
+    # more than the phone has is still refused
+    service.unload()
+    memory["value"] = (int(1.2 * 1024 ** 3), int(1.0 * 1024 ** 3))
+    with pytest.raises(svc.LocalLLMError) as info:
+        service.chat("seer", {"messages": [image_message(png_data_url(30, 30))]}, lambda: False)
+    assert info.value.status == 507 and info.value.message.startswith("This phone has")
 
 
 def test_a_context_overflow_from_the_images_is_a_400_not_a_broken_stream(vision_service, monkeypatch):

@@ -14,12 +14,16 @@ the "Use GPU" switch through the session the way Flutter sends it (``host_tester
 ``change``). Only llama.cpp itself is missing on the host: ``engine.engine_status`` says it is there, as in
 the APK. Nothing loads or downloads, and the E2E network guard refuses every non-loopback connection.
 
+Hotfix 6 (owner 2026-10-27: "gpu friendly presets are always shown regardless of toggle state"): opening the
+Model manager already lists the Q4_0 presets with the GPU off (added once, without a note); the switch only
+turns the GPU on and off.
+
 ``test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model``:
 
-1. Before the switch: the four defaults plus the owner's own preset (downloaded) are listed. A Hugging Face
-   file no preset names sits under "Other downloads". No Q4_0 row and no "Add GPU-friendly presets" button.
-2. ONE tap on the switch, no other event: the Python tree and the patches the client received show the four
-   Q4_0 rows. The button stays hidden and the snack bar says "Added 4 GPU-friendly presets (Q4_0)".
+1. Before the switch: the four defaults, the owner's own preset (downloaded) and the four Q4_0 rows are
+   listed, in the Python tree and in the patches the client received. A Hugging Face file no preset names
+   sits under "Other downloads". No "Add GPU-friendly presets" button and no note.
+2. ONE tap on the switch, no other event: the GPU goes on, the list stays as it is, no note.
 3. Off: every row stays (the Q4_0 ones too), the owner's preset is still "On this device", the other file is
    still listed, and both files and registry entries are untouched.
 4. Repeated toggles (three on/off cycles, a three-tap burst, and a repeated "change true" while it is on):
@@ -85,7 +89,6 @@ from glossarion_mobile.services.local_llm import service as svc  # noqa: E402
 DEFAULT_NAMES = [p["name"] for p in presets.DEFAULT_PRESETS]
 GPU_NAMES = [p["name"] for p in presets.GPU_PRESETS]
 GPU_FILES = [(p["repo"], p["file"]) for p in presets.GPU_PRESETS]
-ADDED = "Added 4 GPU-friendly presets (Q4_0)"
 BUTTON = "Add GPU-friendly presets (Q4_0)"
 
 # the owner's own models: a preset of their own (downloaded) and a Hugging Face file no preset names
@@ -303,32 +306,30 @@ def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, 
             _seed_own_models(engine)
             prefs = app.prefs
 
-            # 1. Model manager › On-device: the defaults and the owner's preset, no Q4_0 row, no button
+            # 1. Model manager › On-device with the GPU off: every preset, the Q4_0 ones too (hotfix 6), no button
+            start = len(conn.raw_sent)
             screen, panel = await _open_on_device_tab(session, app, tester)
-            assert _row_names(panel) == DEFAULT_NAMES + [MINE["name"]]
-            for name in GPU_NAMES:
-                assert await _count(tester, text=name) == 0
+            assert not engine.use_gpu()
+            await _assert_list(tester, panel, prefs, gpu_on=False)
+            # the phone got them: the patches sent for the open carry every Q4_0 row
+            assert await _until(lambda: set(GPU_NAMES) <= set(_sent_strings(conn, start))), \
+                [s for s in _sent_strings(conn, start) if "GPU" in s or "Q4_0" in s]
             assert await _count(tester, text="Use GPU (experimental)") == 1
-            assert await _count(tester, key="local-gpu-presets") == 0
-            assert panel.other_card.visible and said == []
+            assert panel.other_card.visible and said == []  # added without a note
 
-            # 2. ONE tap on the switch and nothing else: the Q4_0 presets are in the list at once
-            events, start = len(tester.events), len(conn.raw_sent)
+            # 2. ONE tap on the switch and nothing else: the GPU goes on, the list stays as it is
+            events = len(tester.events)
             await _tap_switch(tester)
             assert tester.events[events:] == [("Switch", "local-gpu", "change")]
             assert prefs.get(svc.GPU_KEY) is True and engine.use_gpu()
             await _assert_list(tester, panel, prefs, gpu_on=True)
-            # the phone got them: the patches sent after the tap carry every Q4_0 row and the note
-            assert await _until(lambda: set(GPU_NAMES + [ADDED]) <= set(_sent_strings(conn, start))), \
-                [s for s in _sent_strings(conn, start) if "GPU" in s or "Q4_0" in s]
-            assert said == [ADDED]
-            assert await _until(lambda: _shown(tester, ADDED)), "the snack bar shows the note"
+            assert said == []
 
             # 3. off: every preset, the owner's preset and the other file stay
             await _tap_switch(tester)
             assert prefs.get(svc.GPU_KEY) is False and not engine.use_gpu()
             await _assert_list(tester, panel, prefs, gpu_on=False)
-            assert said == [ADDED]
+            assert said == []
 
             # 4. repeated toggles: on/off three times, a three-tap burst, a repeated "change true"
             for _cycle in range(3):
@@ -344,7 +345,7 @@ def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, 
             switch = tester.control((await tester.find_by_key("local-gpu")).first)
             await session.dispatch_event(switch._i, "change", "true")  # the client re-sends it while on
             await _assert_list(tester, panel, prefs, gpu_on=True)
-            assert said == [ADDED]  # one note in all; never "already in the list"
+            assert said == []  # no note in all; never "already in the list"
 
             # 5. closed and opened again: the rebuilt panel lists each preset once, the switch on
             # Android Back, then Settings › Model manager again (the hub tile, in-app navigation)
@@ -358,11 +359,11 @@ def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, 
             screen2, panel2 = await _open_on_device_tab(session, app, tester, route=False)
             assert screen2 is not screen and panel2 is not panel
             await _assert_list(tester, panel2, prefs, gpu_on=True)
-            assert said == [ADDED]
+            assert said == []
             # the model picker's On-device tab (chat › model) shows the same nine presets
             sheet = ms.ModelSheet(current_model=str(app.config_store.get("model", "") or ""), env=ms.sheet_env(),
                                   tab="ondevice")
-            texts = [t for row in sheet.list_view.controls for t in _texts_of(row)]
+            texts = [t for row in sheet.ondevice_list.controls for t in _texts_of(row)]
             assert f"Presets · {len(EXPECTED)}" in texts, [t for t in texts if t.startswith("Presets")]
             for name in GPU_NAMES:
                 assert texts.count(name) == 1, (name, texts.count(name))
@@ -383,10 +384,3 @@ def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, 
         assert not offline_events, offline_events[:3]
 
     asyncio.run(scenario())
-
-
-def _shown(tester, text: str) -> bool:
-    """``text`` is on screen (the snack bar is an open dialog of the page, in the tester's tree)."""
-    from host_tester import _texts
-
-    return any(text in _texts(c) for c in tester._walk())

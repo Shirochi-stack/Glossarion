@@ -10,10 +10,11 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   the on-device sampling fields, "Block CJK in translations (adaptive)" (on by default; ``script_ban``).
   Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
   default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
-  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". On Android, switching it on
-  appends the missing ``presets.GPU_PRESETS`` (Q4_0) at once; "Add GPU-friendly presets (Q4_0)" shows only
-  while the GPU is on and one is missing (removed, Restore defaults, switched on by an older build). iOS
-  (Metal) runs the default K-quants: no Q4_0 presets there.
+  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". On Android (OpenCL) the
+  ``presets.GPU_PRESETS`` (Q4_0) are in the list whatever the switch says (owner 2026-10-27): added once,
+  quietly, the first time the presets show (Model manager, Welcome page, model picker; ``offer_gpu_presets_once``),
+  and switching the GPU on adds any missing one; "Add GPU-friendly presets (Q4_0)" shows while one is
+  missing (removed, Restore defaults). iOS (Metal) runs the default K-quants: no Q4_0 presets there.
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -287,6 +288,7 @@ class OnDeviceFlow:
         self.editor: Optional[LocalPresetEditor] = None
         self.last_dialog: Any = None
         self.control: Optional[ft.Control] = None
+        self.gpu_presets_button: Optional[ft.TextButton] = None  # built by _gpu_section (Model manager, Welcome)
 
     def render(self, push: bool = True) -> None:
         if self.on_change is not None:
@@ -470,21 +472,19 @@ class OnDeviceFlow:
         return stem
 
     async def activate(self, stem: str, label: str = "") -> bool:
-        """Load ``stem`` (asking when RAM is tight) and make ``local/<stem>`` the model. Context goes back
-        to the model's own (``context_for``: 4,096 for Heavy), which the Context slider then shows."""
+        """Load ``stem`` and make ``local/<stem>`` the model. Context goes back to the model's own
+        (``context_for``: 4,096 for Heavy), which the Context slider then shows. Tight on free RAM only
+        says so (owner 2026-10-27: Use always loads, the warning is cosmetic)."""
         self.service.save_context(0)
         self.context_changed(stem)
         verdict, message = self.service.ram_check(stem)
         if verdict == "refuse":
             raise _Failed(message)
-        force = False
         if verdict == "confirm":
-            if not await self.ask("Load model", message, "Load anyway"):
-                return False
-            force = True
+            self.say(message)
         available, reason = self.service.engine_status()
         if available:
-            ok, error = await self.service.load(stem, force=force)
+            ok, error = await self.service.load(stem)
             if not ok:
                 raise _Failed(error or "Could not load the model")
         model = f"local/{stem}"
@@ -668,9 +668,10 @@ class OnDeviceFlow:
         return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_swap_box, self.gpu_presets_button]
 
     def _render_gpu_presets_button(self) -> None:
+        if self.gpu_presets_button is None:
+            return
         missing = presets.missing_gpu_presets(self.presets())
-        self.gpu_presets_button.visible = (self._gpu_backend() == "OpenCL" and bool(self.gpu_switch.value)
-                                           and bool(missing))
+        self.gpu_presets_button.visible = self._gpu_backend() == "OpenCL" and bool(missing)
 
     def save_gpu(self) -> bool:
         """The switch. Turning it on with Android's OpenCL backend also adds the GPU-friendly Q4_0 presets
@@ -737,18 +738,18 @@ class OnDeviceFlow:
         self._render_gpu_swap()
         return model
 
-    def add_gpu_presets(self, *, auto: bool = False) -> list:
+    def add_gpu_presets(self, *, auto: bool = False, quiet: bool = False) -> list:
         """Append the Q4_0 presets (``presets.GPU_PRESETS``) the list does not have yet: the button, and
-        ``save_gpu`` when the GPU goes on (``auto``: silent when none was added)."""
+        ``save_gpu`` when the GPU goes on (``auto``: silent when none was added; ``quiet``: silent)."""
         rows, added = presets.add_gpu_presets(self.prefs)
         if self.prefs is not None:
             self.prefs.set(GPU_PRESETS_OFFERED_KEY, True)  # offered once: a preset removed later stays removed
         self._render_gpu_presets_button()
         _push(self.gpu_presets_button)
         # said before the re-render: the Welcome page shows the note under its cells
-        if added:
+        if added and not quiet:
             self.say(f"Added {len(added)} GPU-friendly preset{'s' if len(added) != 1 else ''} (Q4_0)")
-        elif not auto:
+        elif not added and not auto:
             self.say(f"Keep it to {presets.MAX_PRESETS} presets: remove one to add the GPU-friendly presets"
                      if presets.missing_gpu_presets(rows) else "The GPU-friendly presets are already in the list")
         if added or not auto:
@@ -756,14 +757,15 @@ class OnDeviceFlow:
         return added
 
     def offer_gpu_presets_once(self) -> list:
-        """Owner 2026-10-26 (hotfix 2): a GPU switched on before this build, whose Q4_0 presets were never
-        added, gets them once when the Model manager opens (no extra tap). After that (or after any add)
-        the list is the user's: a Q4_0 preset removed later is not added back."""
+        """Owner 2026-10-27: on Android (OpenCL) the Q4_0 presets show whatever "Use GPU" says, so the
+        first time the presets show (Model manager, Welcome page, model picker) they are added, without a
+        note. After that (or after any add) the list is the user's: a Q4_0 preset removed later is not
+        added back (the button offers it)."""
         if self.prefs is None or self.prefs.get(GPU_PRESETS_OFFERED_KEY, False):
             return []
-        if self._gpu_backend() != "OpenCL" or not getattr(self.service, "use_gpu", lambda: False)():
+        if self._gpu_backend() != "OpenCL":
             return []
-        return self.add_gpu_presets(auto=True)
+        return self.add_gpu_presets(auto=True, quiet=True)
 
 
 class LocalModelsPanel(OnDeviceFlow):
