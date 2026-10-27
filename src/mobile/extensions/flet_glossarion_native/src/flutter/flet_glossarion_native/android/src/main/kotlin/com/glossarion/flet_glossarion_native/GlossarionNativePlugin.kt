@@ -48,7 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Android side of GlossarionNative (MethodChannel `glossarion_native/platform`).
  *
  * Dart -> Kotlin: attach, get_platform_info, clear_shared, init_notifications,
- * show_notification, cancel_notification, save_to_downloads, the document
+ * show_notification, cancel_notification, save_to_downloads, move_task_to_back, the document
  * destination methods handled by [DocumentDestinations] (pick_folder, ...) and
  * the in-app browser page methods handled by [HiddenWebPages] (web_open,
  * web_load, web_eval, web_title, web_close, web_reset, web_status).
@@ -418,6 +418,13 @@ class GlossarionNativePlugin :
                     result.success(null)
                 }
                 "save_to_downloads" -> saveToDownloadsAsync(context, call, result)
+                "move_task_to_back" -> {
+                    // System back on the chat while a job runs (hotfix 4): the task goes to the
+                    // background like Home, so the Activity, the Flutter engine and the Python
+                    // session stay (finishing the Activity stopped the job's in-app browser).
+                    val current = activityBinding?.activity
+                    result.success(current != null && current.moveTaskToBack(true))
+                }
                 else -> result.notImplemented()
             }
         } catch (e: Exception) {

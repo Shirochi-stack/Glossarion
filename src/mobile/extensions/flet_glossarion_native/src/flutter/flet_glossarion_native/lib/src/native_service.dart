@@ -273,6 +273,12 @@ class GlossarionNativeService extends FletService {
           return await _stopJobService();
         case 'is_job_service_running':
           return _isAndroid ? await FlutterForegroundTask.isRunningService : false;
+        case 'move_task_to_back':
+          // System back on the chat while a job runs: the task goes to the
+          // background like Home instead of finishing the Activity (hotfix 4).
+          return _isAndroid
+              ? (await _platform('move_task_to_back', args)) == true
+              : false;
         case 'begin_background_task':
           if (!_isIOS) return -1;
           final dynamic taskId = await _platform('begin_background_task', args);
@@ -387,6 +393,7 @@ class GlossarionNativeService extends FletService {
       case 'is_job_service_running':
       case 'start_continued_processing':
       case 'update_continued_processing':
+      case 'move_task_to_back':
         return false;
       default:
         return null;

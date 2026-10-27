@@ -85,6 +85,7 @@ constructor, so they are registered before the Dart service starts.
 | `show_notification(id, title, body, *, channel_id, payload, ongoing, progress, indeterminate, actions, auto_cancel, silent)` | NotificationCompat | UNUserNotificationCenter (progress shown as subtitle) | `False` |
 | `cancel_notification(id)`, `get_launch_notification()` | yes | yes | no-op / `None` |
 | `start_job_service(title, text, *, buttons, wake_lock, wifi_lock, ...)`, `update_job_service`, `stop_job_service`, `is_job_service_running` | flutter_foreground_task | `False` (use the iOS calls below) | `False` / no-op |
+| `move_task_to_back()` (hotfix 4) | `Activity.moveTaskToBack(true)`: the task goes to the background like Home (the app calls it for back on the chat while a job runs, so the Activity, the engine and the Python session stay); `True` when it moved | `False` (no system back) | `False` |
 | `begin_background_task(name, *, expiration_title, expiration_body, expiration_payload)`, `end_background_task`, `background_time_remaining` | `-1` / no-op / `None` | UIApplication background task | same |
 | `start_continued_processing(identifier=None, title, subtitle, *, strategy="fail", expiration_*)`, `update_continued_processing`, `finish_continued_processing` | `False` | iOS 26 BGContinuedProcessingTask | `False` |
 | `save_to_downloads(path, display_name, mime_type, subdir="Glossarion", replace_uri=None)` | MediaStore Downloads; `replace_uri` overwrites our own entry in place | `None` | `None` |
@@ -182,8 +183,12 @@ service they need no native code:
   `onResume`, `resumeTimers` or `setRendererPriorityPolicy(IMPORTANT, false)`
   here would change nothing.
 - Chromium still treats a page as hidden while its window is: it aligns timers
-  to once a second and stops `requestAnimationFrame`. Only a device can show
-  whether a site's own page needs more.
+  to once a second and stops `requestAnimationFrame`, and Blink freezes the
+  hidden page a minute or five later (seen on the emulator in hotfix 4: a page
+  load then fails after 90 s). The native pages below report a visible window
+  instead; on this fallback the routes' reply polls are bounded
+  (`browser_driver.ReplyWatch`), so a frozen page fails its request with the
+  reason.
 
 ### Open with / Share
 
@@ -401,13 +406,28 @@ Android (`HiddenWebPages.kt`):
   `web_close`; authchatgpt sends its message again on a new page. Cookies are
   flushed once when the last page closes (`web_reset` too: once for all its
   pages, since `CookieManager.flush()` blocks the main thread).
-- In the background the Activity window is invisible, so Chromium marks the
-  pages hidden, exactly as for flet-webview: timers slow to about once a second
-  and `requestAnimationFrame` stops, while scripts, fetch streams and
-  `evaluateJavascript` keep running under the foreground service. New pages can
-  open while the app is hidden (no parking or warm-up is needed any more).
-  Detaching the container while the app is stopped was considered and
-  deferred until there is device data.
+- **Background (hotfix 4).** In the background the Activity window is not
+  visible. AwContents shows a page only while it is attached to a visible
+  window (`BrowserViewRenderer::IsClientVisible`), so hotfix 3's pages turned
+  hidden, and Blink freezes a hidden page a minute (2025+ WebView) to five
+  minutes after it was hidden: its timers and fetch streams stop while
+  `evaluateJavascript` still answers. A reply in progress then waited until the
+  app was opened again (an owner job stood still for hours; the hidden
+  flet-webview pages of hotfix 2 froze the same way, during page loads). Every
+  page is therefore a `PageWebView`, which reports its window as visible
+  (`onWindowVisibilityChanged` passes `VISIBLE` on, and the attach reports it
+  too, because `View.dispatchAttachedToWindow` sends nothing for a window that
+  is not shown). The container still sits behind the opaque FlutterView, so the
+  page is never seen, and nothing is drawn while the Activity is stopped. Pages
+  open and run while the app is hidden (no parking or warm-up). Detached from
+  its window (no Activity) Chromium hides a page again until the next attach.
+  The CI emulator proves it: the self-test suite `background`
+  (`ci/android_smoke.sh` presses HOME) watches a loopback page for 75 s in the
+  background (`document.visibilityState` stays `visible`, its timers and
+  fetches keep running). Python bounds every reply too
+  (`browser_driver.ReplyWatch`): a page that stops answering or running fails
+  its request after 90 s with the reason instead of waiting out the request
+  timeout.
 - No manifest, Gradle or dependency change (no androidx.webkit).
 
 iOS (`HiddenWebPages.swift`):
@@ -429,6 +449,9 @@ iOS (`HiddenWebPages.swift`):
   reclaimed it.
 - **Background.** WebKit still suspends the web content process soon after the
   app leaves the screen, so requests pause until Glossarion is opened again.
+  Python counts none of that time against the page (hotfix 4: the driver's
+  `pages_suspended`, iOS with the app hidden; `browser_driver.ReplyWatch`), so
+  a suspended reply waits for the app instead of failing as a stopped page.
   Screen changes no longer lose the page. If iOS terminates the web content
   process in the background, the page reports `gone` when the app returns and
   authchatgpt sends its message again on a new page.
@@ -534,7 +557,9 @@ to every plugin.
   (native `WKWebView`s since hotfix 3, see above) therefore pause in the
   background even while a background task or continued processing keeps Python
   running. Public API offers no way around this; the requests continue when the
-  app is opened again (Accounts › Experimental says so).
+  app is opened again (Accounts › Experimental says so). The reply bound of
+  hotfix 4 does not count that time on iOS (it would otherwise fail every
+  attempt of a chapter while the user is away).
 - **Packaging.** SwiftPM (`ios/flet_glossarion_native/Package.swift`, which
   depends on `../FlutterFramework` like receive_sharing_intent 1.9.0 and
   flutter_foreground_task 11.0.3). `flet_glossarion_native.podspec` is the

@@ -44,7 +44,9 @@ import org.json.JSONTokener
  * - One [HiddenContainer] (application context, 1 x 1 px, clipChildren) sits at index 0 of the Activity's
  *   android.R.id.content, behind the opaque FlutterView. Each WebView is laid out at its viewport
  *   (dp * density) at (0,0): the 1 px clip keeps it "drawn" (View.draw's quickReject passes), alpha stays
- *   1 and it is never GONE / INVISIBLE, so Chromium treats the page as visible while the app is.
+ *   1 and it is never GONE / INVISIBLE, so Chromium treats the page as visible while the app is. In the
+ *   background too: each page is a [PageWebView], which reports its window as visible (hotfix 4), so Blink
+ *   never freezes it as a hidden page while a job runs under the foreground service.
  * - The ActivityAware callbacks only store [activity] (FlutterActivity attaches plugins before
  *   setContentView: touching the content view there would be dropped by PhoneWindow.setContentView);
  *   the attach is posted, finds the content view with peekDecorView (never creates the decor) and is
@@ -129,6 +131,31 @@ internal class HiddenWebPages(
         override fun hasOverlappingRendering(): Boolean = false
     }
 
+    /**
+     * A page WebView that always reports its window as visible to Chromium (hotfix 4).
+     *
+     * AwContents shows a WebView's page while the view is attached to a window whose visibility is
+     * VISIBLE (BrowserViewRenderer.IsClientVisible) and hides it otherwise. While the app is in the
+     * background the Activity window is not visible, so every page turned hidden, and Blink freezes a
+     * hidden page a minute or five later: no timers, no fetch stream, a reply in progress waited until
+     * the app was opened again. The container sits behind the opaque FlutterView, so a "visible" page is
+     * still never seen, and nothing is drawn while the Activity is stopped either way.
+     * View.dispatchAttachedToWindow skips onWindowVisibilityChanged while the window is not shown at
+     * all (a page attached to a stopped Activity), so the attach reports it as well. Detached from its
+     * window (no Activity) Chromium hides the page again until the next attach.
+     */
+    @SuppressLint("ViewConstructor")
+    private class PageWebView(context: Context) : WebView(context) {
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            super.onWindowVisibilityChanged(View.VISIBLE)
+        }
+
+        override fun onWindowVisibilityChanged(visibility: Int) {
+            super.onWindowVisibilityChanged(View.VISIBLE)
+        }
+    }
+
     fun handles(method: String): Boolean = method in METHODS
 
     /** get_platform_info()["web_pages"], or null when this phone has no WebView provider. */
@@ -199,8 +226,8 @@ internal class HiddenWebPages(
             .mapNotNull { it as? String }
             .filter { it.isNotEmpty() }
         val wrapper = MutableContextWrapper(activity ?: appContext)
-        val webView = try {
-            WebView(wrapper)
+        val webView: WebView = try {
+            PageWebView(wrapper)
         } catch (e: Throwable) {
             // MissingWebViewPackageException, a provider being updated, ...
             Log.w(TAG, "WebView unavailable: ${e.javaClass.simpleName}")

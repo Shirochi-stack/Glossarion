@@ -38,7 +38,7 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import flet as ft
 
@@ -68,6 +68,8 @@ _DRAWER_MIN_HEIGHT = 300.0
 #: report on some phones (owner, U11 item 2: the footer still needed a small scroll), so the box would be
 #: taller than its viewport. Only the chat list (``ChatDrawer.body``, expand) gets shorter.
 _DRAWER_SLACK = 24.0
+#: Seconds system back on the chat waits for ``move_to_background`` before it leaves the app as before.
+MOVE_TO_BACKGROUND_TIMEOUT = 5.0
 
 ScreenFactory = Callable[[RouteMatch], Screen]
 
@@ -117,6 +119,14 @@ class AppShell:
         self.global_strip = JobStrip(on_open=lambda: None)
         self.root_view: Optional[ft.View] = None
         self.nav_drawer: Optional[ft.NavigationDrawer] = None
+        self.drawer_open = False  # the phone drawer opened from Python (the menu button) and not dismissed
+        #: Hotfix 4: ``async () -> bool`` that sends Glossarion to the background like Home, keeping the
+        #: Activity, the engine and this session (``NativeBridge.move_task_to_back``; the app sets it on
+        #: Android). While a job runs (or waits in the queue) system back on the chat calls it instead of
+        #: leaving the app: leaving finished the Activity, which stopped the in-app browser the job needed
+        #: and left the next session's Jobs page showing the running job as Interrupted.
+        self.move_to_background: Optional[Callable[[], Awaitable[bool]]] = None
+        self._kept = False  # the root View holds back for a running job (what _sync_root_back last applied)
         self.drawer_box: Optional[ft.Container] = None
         self.sidebar: Optional[ft.Container] = None
         self.sidebar_strip_slot: Optional[ft.Container] = None
@@ -235,6 +245,7 @@ class AppShell:
         if not self._unsubs:
             self._unsubs = [
                 self.state.job_strip.subscribe(self._on_job_strip),
+                self.state.jobs_badge.subscribe(lambda _value: self._on_jobs_changed()),
                 self.state.text_scale.subscribe(lambda _value: self.apply_text_scale()),
                 ts.subscribe(lambda _value: self.apply_text_scale()),
             ]
@@ -283,7 +294,9 @@ class AppShell:
                 controls=[self.drawer_box],
                 width=layout.drawer_width,
                 bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+                on_dismiss=self._on_drawer_dismiss,
             )
+            self.drawer_open = False
             self.root_view = ft.View(
                 route="/",
                 appbar=self.chat_view.header.build(tablet=False),
@@ -388,9 +401,9 @@ class AppShell:
         if self.tablet:
             self.main_area.content = self._main_content()
             pushed = [e for e in self.stack if e.fullscreen]
-            self._sync_root_back()
         else:
             pushed = list(self.stack)
+        self._sync_root_back()
         for entry in pushed:
             views.append(self._entry_view(entry))
         views.extend(self.overlays)
@@ -405,23 +418,76 @@ class AppShell:
         self._place_strip()
 
     def _sync_root_back(self) -> None:
-        """Tablet: the system / gesture back on the one root View pops the main-area stack.
+        """The system / gesture back on the root View.
 
-        While the main area shows a screen the root View cannot pop (``can_pop=False``), so the
-        back reaches ``on_confirm_pop``: the screen's ``handle_back`` first (leave selection mode,
-        UI_SPEC §1.6 rule 2), else the main-area stack pops (rule 5). With the chat in the main
-        area the root can pop and the system default applies (rule 6: leave the app). An open
-        SidePanel is the tablet form of a sheet, so back closes it first (rule 1).
+        Tablet: it pops the main-area stack. While the main area shows a screen the root View
+        cannot pop (``can_pop=False``), so the back reaches ``on_confirm_pop``: the screen's
+        ``handle_back`` first (leave selection mode, UI_SPEC §1.6 rule 2), else the main-area stack
+        pops (rule 5). With the chat in the main area the root can pop and the system default
+        applies (rule 6: leave the app). An open SidePanel is the tablet form of a sheet, so back
+        closes it first (rule 1).
+
+        Phone and tablet (hotfix 4): while a job runs or waits in the queue (:meth:`_keeps_running`)
+        the root View cannot pop either, and back on the chat sends Glossarion to the background
+        (``move_to_background``) instead of leaving it, so the job keeps this session and its in-app
+        browser. On phones Flutter then cannot close the drawer through the root route, so back
+        closes a drawer the menu button opened first. Without a job, or when the app could not be
+        moved, back leaves the app as before.
         """
         root = self.root_view
         if root is None:
             return
-        root.can_pop = self._top_panel_entry() is None and not self.side_panel.is_open
+        keep = self._keeps_running()
+        self._kept = keep
+        if self.tablet:
+            root.can_pop = self._top_panel_entry() is None and not self.side_panel.is_open and not keep
+        else:
+            root.can_pop = not keep
         root.on_confirm_pop = self._on_root_confirm_pop
+
+    def _keeps_running(self) -> bool:
+        """A job runs or waits in the queue (the Jobs badge) and the app can be sent to the background."""
+        if self.move_to_background is None:
+            return False
+        badge = getattr(getattr(self.state, "jobs_badge", None), "value", None)
+        try:
+            return int(getattr(badge, "count", 0) or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _on_jobs_changed(self) -> None:
+        """``AppState.jobs_badge``: a job started, ended or was queued. Back on the chat leaves the app
+        again only when none runs or waits (:meth:`_sync_root_back`)."""
+        if self.root_view is None or self._keeps_running() == self._kept:
+            return
+        self._sync_root_back()
+        try:
+            self.root_view.update()
+        except Exception as exc:  # not mounted yet / no client
+            log.debug("root view update failed: %s", exc)
+
+    async def _send_to_background(self) -> bool:
+        """``move_to_background`` (bounded by :data:`MOVE_TO_BACKGROUND_TIMEOUT`); True when it moved."""
+        mover = self.move_to_background
+        if mover is None:
+            return False
+        try:
+            moved = mover()
+            if inspect.isawaitable(moved):
+                moved = await asyncio.wait_for(moved, MOVE_TO_BACKGROUND_TIMEOUT)
+        except Exception as exc:  # asyncio.TimeoutError included
+            log.info("sending Glossarion to the background failed (%s): back leaves the app", type(exc).__name__)
+            return False
+        if moved is True:
+            log.info("back on the chat while a job runs: Glossarion went to the background, the job keeps running")
+            return True
+        log.info("Glossarion could not go to the background: back leaves the app")
+        return False
 
     async def _on_root_confirm_pop(self, e: Any = None) -> None:
         view = getattr(e, "control", None) or self.root_view
-        leave = self._top_panel_entry() is None and not self.side_panel.is_open
+        # Phones: the root View is on top only with the chat showing (screens are Views of their own).
+        leave = (not self.tablet or self._top_panel_entry() is None) and not self.side_panel.is_open
         if self.side_panel.is_open:
             self.side_panel.close()  # rule 1: the panel (a sheet on phones) closes first
         elif not leave:
@@ -429,6 +495,11 @@ class AppShell:
                 self._on_tablet_back()
             except Exception:
                 log.exception("tablet back failed")
+        elif self.drawer_open:
+            leave = False  # the drawer closes first (rule 3); Flutter cannot while the root View is held
+            await self.close_drawer()
+        elif self._keeps_running():
+            leave = not await self._send_to_background()  # the job keeps this session (hotfix 4)
         try:
             # Never let Flutter pop the only View while a screen was showing (that leaves the app).
             await view.confirm_pop(leave)
@@ -679,14 +750,20 @@ class AppShell:
         if self.tablet or self.root_view is None or self.root_view.drawer is None:
             return
         await self.root_view.show_drawer()
+        self.drawer_open = True
 
     async def close_drawer(self) -> None:
+        self.drawer_open = False
         if self.tablet or self.root_view is None or self.root_view.drawer is None:
             return
         try:
             await self.root_view.close_drawer()
         except Exception as exc:  # drawer already closed / no client
             log.debug("close_drawer: %s", exc)
+
+    def _on_drawer_dismiss(self, e: Any = None) -> None:
+        """``NavigationDrawer.on_dismiss``: the drawer closed (scrim tap, swipe, back)."""
+        self.drawer_open = False
 
     # ---- side panel (components.surface host) ----------------------------------------------
 

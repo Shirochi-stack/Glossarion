@@ -106,6 +106,24 @@ class _DriverPage:
             raise AuthDSError("AuthDS browser script failed. Reload DeepSeek and sign in again.",
                               "browser_error") from exc
 
+    def hook_lost(self):
+        """True when the page's reply state (``window.__glossarionDS``) is gone: a new document, or a
+        renderer that stopped (``renderer_gone``). A None from ``evaluate`` does not say so: the in-app
+        browser also gives None when an answer was late. None: no answer again (no proof either)."""
+        if getattr(self.page, "renderer_gone", False) is True:
+            return True
+        try:
+            return self.page.run_js("!window.__glossarionDS", 10000)
+        except browser_driver.BrowserCancelled as exc:
+            raise AuthDSError("AuthDS: translation stopped by user", "cancelled") from exc
+        except Exception:
+            return None
+
+    def content_suspended(self):
+        """True while the system suspends the page by design (iOS, Glossarion off screen): the reply
+        poll's ``browser_driver.ReplyWatch`` does not count that time."""
+        return browser_driver.content_suspended(self.page)
+
 
 @contextmanager
 def _driver_page(cancel_check=None):
@@ -542,7 +560,16 @@ def _discover_worker(page):
     return None
 
 
-def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None):
+#: The reply poll. ``paused``: milliseconds a 0 ms probe timer has been waiting to run (0 once it ran); a
+#: page whose timers stopped (Android froze it as a hidden page) answers scripts but never runs it.
+_POLL = ("(() => {const s=window.__glossarionDS; if(!s) return null; const now=Date.now();"
+         " if(!s.probeAt){s.probeAt=now; setTimeout(()=>{s.probeAt=0;},0);}"
+         " return {chunks:s.chunks.splice(0),done:s.done,error:s.error,status:s.status,retryAfter:s.retryAfter||null,"
+         "paused:s.probeAt?now-s.probeAt:0};})()")
+
+
+def _complete(page, model, messages, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None, *,
+              log_fn=None):
     model_type, thinking = resolve_model(model)
     images = []
     cfg = {"model": model_type, "thinking": thinking, "prompt": build_prompt(messages, images=images),
@@ -555,12 +582,25 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
     parser = StreamParser()
     parser.on_thinking = on_thinking
     deadline = time.monotonic() + timeout
+    # Glossarion Mobile's in-app page: one that stopped answering or running fails the request
+    # (browser_driver.ReplyWatch), except while the system suspends it by design (iOS in the background).
+    watch = browser_driver.ReplyWatch(getattr(page, "driver", False) is True, route="AuthDS", site="DeepSeek",
+                                      host="chat.deepseek.com", error=AuthDSError, log_fn=log_fn,
+                                      hidden=getattr(page, "content_suspended", None))
     try:
         while time.monotonic() < deadline:
             _check(cancel_check)
-            state = page.evaluate("(() => {const s=window.__glossarionDS; return s ? {chunks:s.chunks.splice(0),done:s.done,error:s.error,status:s.status,retryAfter:s.retryAfter||null} : null;})()")
+            asked = watch.poll_started()
+            state = page.evaluate(_POLL)
             if not state:
-                raise AuthDSError("AuthDS page was reloaded during translation.", "browser_error")
+                # Desktop: no reply state means a new document. The in-app browser also answers None
+                # when an answer was late, so there the page is asked whether the state is gone.
+                probe = getattr(page, "hook_lost", None)
+                if probe is None or probe() is True:
+                    raise AuthDSError("AuthDS page was reloaded during translation.", "browser_error")
+                watch.unanswered(asked)  # an in-app page that never answers fails the request
+                time.sleep(.3)
+                continue
             if state.get("error"):
                 status = state.get("status", 0)
                 kind = "auth_error" if status == 401 else "access_denied" if status == 403 else "rate_limit" if status == 429 else "api_error"
@@ -583,6 +623,7 @@ def _complete(page, model, messages, timeout, cancel_check, on_delta, before_sen
                     raise AuthDSError("AuthDS returned no answer text. Thinking text was excluded.")
                 return {"content": parser.content, "reasoning_content": parser.reasoning,
                         "finish_reason": "stop", "usage": {"total_tokens": parser.tokens} if parser.tokens is not None else None}
+            watch.answered(asked, paused=state.get("paused"), data=bool(state.get("chunks")), streaming=True)
             time.sleep(.1)
         raise AuthDSError("AuthDS translation timed out; partial translation discarded.", "timeout")
     finally:
@@ -617,8 +658,11 @@ def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
                 while not page.evaluate(_TOKEN_PRESENT) and time.monotonic() < deadline:
                     _check(cancel_check)
                     time.sleep(.2)
+            # The in-app page's reply watch logs its "⏳" stall notice (desktop: the call as before).
+            watch_log = {"log_fn": log_fn} if getattr(page, "driver", False) is True else {}
             try:
-                return _complete(page, model, messages, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking)
+                return _complete(page, model, messages, float(timeout), cancel_check, on_delta, before_send_callback,
+                                 on_thinking, **watch_log)
             except AuthDSError as exc:
                 if exc.error_type != "auth_error" or attempt:
                     raise

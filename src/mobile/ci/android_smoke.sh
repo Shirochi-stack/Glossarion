@@ -11,6 +11,13 @@
 #     translate / graceful + force stop / kill & resume jobs against the app's built-in fake
 #     OpenAI server on 127.0.0.1, see glossarion_mobile/diagnostics/e2e.py) and wait for
 #     GLOSSARION_SELFTEST PASS {"suite":"e2e" (blocking; E2E_TIMEOUT, default 20 min);
+#  5b. the in-app browser in the background (hotfix 4; RUN_BG_WEB, default = RUN_E2E):
+#     glossarion://app/__selftest__?suite=background holds the foreground service like a job and
+#     loads a loopback page that beats every second; on GLOSSARION_BGWEB_READY this script presses
+#     HOME; the check watches the page while Glossarion is hidden (document.visibilityState stays
+#     visible, timers and fetches keep running) and prints GLOSSARION_BGWEB {json} (saved to
+#     bg_web_result.txt) before GLOSSARION_SELFTEST PASS {"suite":"background" (BG_WEB_TIMEOUT,
+#     default 6 min); then Glossarion is brought back to the screen;
 #  6. with RUN_LLAMA=1 only: the built-in llama.cpp engine suite glossarion://app/__selftest__?suite=llama
 #     (downloads the GLOSSARION_LLAMA_SUITE_PRESET GGUF from Hugging Face, default "Garbage"
 #     = Qwen3.5 0.8B, loads it, generates a few tokens through the in-app OpenAI-compatible
@@ -22,8 +29,9 @@
 #     app's last self-test report (debuggable builds) and a screenshot into the log dir.
 #
 # Environment overrides: GLOSSARION_PACKAGE, READY_TIMEOUT (300), SELFTEST_TIMEOUT (900),
-# SELFTEST_URL, RUN_E2E (1; 0 skips step 5), E2E_TIMEOUT (1200), E2E_URL, RUN_LLAMA (0; 1 runs step 6),
-# LLAMA_TIMEOUT (1800), LLAMA_URL, LOGCAT_TAG (flet.python).
+# SELFTEST_URL, RUN_E2E (1; 0 skips step 5), E2E_TIMEOUT (1200), E2E_URL, RUN_BG_WEB (RUN_E2E; 0 skips
+# step 5b), BG_WEB_TIMEOUT (360), BG_WEB_URL, RUN_LLAMA (0; 1 runs step 6), LLAMA_TIMEOUT (1800), LLAMA_URL,
+# LOGCAT_TAG (flet.python).
 set -uo pipefail
 
 APK="${1:?usage: android_smoke.sh <x86_64.apk> [log-dir]}"
@@ -35,6 +43,9 @@ SELFTEST_URL="${SELFTEST_URL:-glossarion://app/__selftest__?suite=smoke}"
 RUN_E2E="${RUN_E2E:-1}"
 E2E_TIMEOUT="${E2E_TIMEOUT:-1200}"
 E2E_URL="${E2E_URL:-glossarion://app/__selftest__?suite=e2e}"
+RUN_BG_WEB="${RUN_BG_WEB:-$RUN_E2E}"
+BG_WEB_TIMEOUT="${BG_WEB_TIMEOUT:-360}"
+BG_WEB_URL="${BG_WEB_URL:-glossarion://app/__selftest__?suite=background}"
 RUN_LLAMA="${RUN_LLAMA:-0}"
 LLAMA_TIMEOUT="${LLAMA_TIMEOUT:-1800}"
 LLAMA_URL="${LLAMA_URL:-glossarion://app/__selftest__?suite=llama}"
@@ -199,6 +210,9 @@ collect_diagnostics() {
   if [ "$RUN_LLAMA" = "1" ] && [ ! -s "$LOG_DIR/llama_result.txt" ]; then
     grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/llama_result.txt" || true
   fi
+  if [ "$RUN_BG_WEB" = "1" ] && [ ! -s "$LOG_DIR/bg_web_result.txt" ]; then
+    grep -a -h -E "$(marker_regex 'GLOSSARION_BGWEB')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/bg_web_result.txt" || true
+  fi
   if [ "$RUN_LLAMA" = "1" ] && [ ! -s "$LOG_DIR/llama_vision_result.txt" ]; then
     grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA_VISION')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/llama_vision_result.txt" || true
   fi
@@ -268,12 +282,10 @@ STAGE="ready"
 wait_for_marker GLOSSARION_READY "$READY_TIMEOUT"
 wait_for_marker GLOSSARION_BACKEND_READY "$READY_TIMEOUT"
 
-# run_suite <suite> <deep-link> <timeout-seconds>: fire the self-test deep link and wait for
-# that suite's PASS line (any GLOSSARION_SELFTEST FAIL, a crash or the timeout fails the run).
-run_suite() {
-  local suite="$1" url="$2" timeout="$3" pass_line
+# start_suite <suite> <deep-link> <timeout-seconds>: fire the self-test deep link of <suite>.
+start_suite() {
+  local suite="$1" url="$2" timeout="$3"
   STAGE="selftest-$suite"
-  pass_line="GLOSSARION_SELFTEST PASS {\"suite\":\"$suite\""
   log "starting self-test suite '$suite': $url (timeout ${timeout}s)"
   # adb shell joins its arguments into one device-side command line: keep the URL single-quoted
   # so the device shell does not glob the '?'.
@@ -282,8 +294,37 @@ run_suite() {
   if grep -q -E '^Error' "$LOG_DIR/selftest_${suite}_intent.txt"; then
     fail "the self-test deep link was not delivered: $(tr '\n' ' ' < "$LOG_DIR/selftest_${suite}_intent.txt")"
   fi
+}
+
+# wait_suite <suite> <timeout-seconds>: wait for that suite's PASS line (any GLOSSARION_SELFTEST FAIL,
+# a crash or the timeout fails the run).
+wait_suite() {
+  local suite="$1" timeout="$2" pass_line
+  pass_line="GLOSSARION_SELFTEST PASS {\"suite\":\"$suite\""
   wait_for_marker "$pass_line" "$timeout" fixed
   grep -a -h -F -- "$pass_line" "$TAG_LOG" "$FULL_LOG" | tail -n 1 > "$LOG_DIR/selftest_${suite}_result.txt" || true
+}
+
+# run_suite <suite> <deep-link> <timeout-seconds>: fire the self-test deep link and wait for
+# that suite's PASS line.
+run_suite() {
+  start_suite "$1" "$2" "$3"
+  wait_suite "$1" "$3"
+}
+
+# run_background_suite: suite=background (step 5b). The check holds the foreground service, loads its
+# page and prints GLOSSARION_BGWEB_READY; HOME then sends Glossarion to the background while the
+# check watches the page; afterwards Glossarion is brought back to the screen.
+run_background_suite() {
+  start_suite background "$BG_WEB_URL" "$BG_WEB_TIMEOUT"
+  wait_for_marker GLOSSARION_BGWEB_READY 180
+  log "pressing HOME: Glossarion goes to the background while the check watches its in-app page"
+  adb shell input keyevent KEYCODE_HOME > /dev/null 2>&1 || fail "adb could not press HOME"
+  wait_suite background "$BG_WEB_TIMEOUT"
+  grep -a -h -E "$(marker_regex 'GLOSSARION_BGWEB')" "$TAG_LOG" "$FULL_LOG" | tail -n 1 > "$LOG_DIR/bg_web_result.txt" || true
+  log "background in-app browser: $(cut -c1-500 "$LOG_DIR/bg_web_result.txt" 2>/dev/null)"
+  adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1 || true
+  sleep 5
 }
 
 run_suite smoke "$SELFTEST_URL" "$SELFTEST_TIMEOUT"
@@ -293,6 +334,12 @@ if [ "$RUN_E2E" = "1" ]; then
   run_suite e2e "$E2E_URL" "$E2E_TIMEOUT"
 else
   log "RUN_E2E=$RUN_E2E: skipping the end-to-end suite"
+fi
+
+if [ "$RUN_BG_WEB" = "1" ]; then
+  run_background_suite
+else
+  log "RUN_BG_WEB=$RUN_BG_WEB: skipping the in-app browser background suite"
 fi
 
 if [ "$RUN_LLAMA" = "1" ]; then
