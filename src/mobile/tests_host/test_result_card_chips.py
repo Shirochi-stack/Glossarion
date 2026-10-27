@@ -91,9 +91,11 @@ def test_result_card_shows_the_plan_chips_and_resume_runs_with_them(desktop_stor
             assert _label(chips["result-range"]) == panel.range_chip_label()
             opened: list = []
             view.open_model_sheet = lambda tab="model", **kw: opened.append(tab)
+            # hotfix 5: profile and language open the compact preview (configured entries, custom at the end)
+            view.open_mini_model_sheet = lambda tab="model": opened.append(f"mini-{tab}")
             for key in ("result-model", "result-profile", "result-language"):
                 chips[key].on_click(None)
-            assert opened == ["model", "profile", "language"]
+            assert opened == ["model", "mini-profile", "mini-language"]
 
             # a chip change (what an in-chat pick writes) refreshes the labels
             adapter.set_override(cid, "model", "gpt-new")

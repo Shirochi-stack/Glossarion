@@ -134,6 +134,7 @@ class LogConsole(ft.Column):
         self.jump_button = ft.IconButton(
             icon=ft.Icons.ARROW_DOWNWARD,
             tooltip="Jump to the newest lines",
+            size_constraints=HIT_TARGET,
             on_click=self.jump_to_end,
             style=ft.ButtonStyle(bgcolor=ft.Colors.SECONDARY_CONTAINER, color=ft.Colors.ON_SECONDARY_CONTAINER,
                                  elevation=2),

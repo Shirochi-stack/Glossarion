@@ -39,6 +39,7 @@ from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.drag_sheet import draggable_sheet_class, height_fraction
 from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 from glossarion_mobile.ui.sheets.model_sheet import MAX_ROWS, ModelSheet, _push
+from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["MiniModelSheet", "short_model_name"]
 
@@ -154,7 +155,7 @@ class MiniModelSheet(ModelSheet):
                                             on_submit=lambda e: self.use_custom_language(), key="language-custom")
         rows.append(ft.Container(
             content=ft.Row([self.custom_language,
-                            ft.IconButton(icon=ft.Icons.CHECK, tooltip="Use this language",
+                            ft.IconButton(icon=ft.Icons.CHECK, tooltip="Use this language", size_constraints=HIT_TARGET,
                                           on_click=lambda e: self.use_custom_language(), key="language-custom-use")],
                            vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.Padding.only(left=16, right=8, top=4, bottom=8), key="language-custom-row"))
