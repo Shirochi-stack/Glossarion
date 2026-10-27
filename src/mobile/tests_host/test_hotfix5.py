@@ -598,6 +598,232 @@ def test_scrolling_up_shows_the_jump_button_and_it_follows_again(monkeypatch):
     assert not console.following
 
 
+# ---- 5. Share file via link defaults to Gofile; the Result card follows a compile; Share / Export ------------
+
+
+class _Shares:
+    """A share-link service with every provider off (``enabled``: the ones switched on)."""
+
+    def __init__(self, enabled=()):
+        self.enabled = set(enabled)
+
+    def menu(self, path):
+        states = [{"id": pid, "label": label, "enabled": pid in self.enabled, "consented": pid in self.enabled,
+                   "handoff": pid == "transferit", "reason": None if pid in self.enabled else "Off · turn on in Settings"}
+                  for pid, label in (("transferit", "transfer.it"), ("gofile", "Gofile"), ("send", "Send"),
+                                     ("pixeldrain", "pixeldrain"))]
+        return [(state, state["reason"]) for state in states]
+
+
+def _share_actions(shares, calls):
+    from glossarion_mobile.ui.screens import cloud_sync as u10
+
+    actions = u10.U10Actions(shares=shares)
+
+    async def start_provider(provider, path, identity):
+        calls.append(("start", provider["id"]))
+
+    async def provider_sheet(path, identity):
+        calls.append(("sheet", None))
+
+    actions.start_provider = start_provider
+    actions.provider_sheet = provider_sheet
+    return actions
+
+
+def test_share_file_via_link_goes_to_gofile_while_every_service_is_off(tmp_path):
+    from glossarion_mobile.ui.screens import cloud_sync as u10
+
+    book = tmp_path / "Book.epub"
+    book.write_bytes(b"epub")
+    calls: list = []
+    off = _share_actions(_Shares(), calls)
+    # never "Turn on a service first": the tap goes on (consent sheet first: start_provider asks it)
+    assert off.share_reason([{"id": "gofile", "enabled": False}]) is None
+    assert off.share_reason([], has_outputs=False) == u10.NO_OUTPUT_REASON
+    asyncio.run(off.share_file(str(book), "Book"))
+    assert calls == [("start", u10.DEFAULT_SHARE_PROVIDER)] and u10.DEFAULT_SHARE_PROVIDER == "gofile"
+    asyncio.run(off.share_link([(str(book), "epub")], "Book"))  # one compiled file: straight on
+    assert calls[-1] == ("start", "gofile")
+    # a service the user turned on: the services sheet, as before
+    calls.clear()
+    on = _share_actions(_Shares(enabled={"send"}), calls)
+    asyncio.run(on.share_file(str(book), "Book"))
+    assert calls == [("sheet", None)]
+
+
+def test_result_cards_reread_their_files_when_a_job_ends():
+    from glossarion_mobile.services.jobs import JobState
+    from glossarion_mobile.ui.chat.integration import ChatFeature
+
+    scheduled: list = []
+    swept: list = []
+
+    async def sweep(reason=""):
+        swept.append(reason)
+
+    feature = types.SimpleNamespace(_u10_cards={1: object()}, _u10_full=False, _post=lambda fn: fn(),
+                                    _u10_schedule=lambda: scheduled.append(True), _active_job=lambda: object(),
+                                    _spawn=lambda coro: coro.close(), sweep=sweep)
+    assert ChatFeature._on_job_transition(feature, types.SimpleNamespace(state=JobState.RUNNING)) is None
+    assert scheduled == []
+    ChatFeature._on_job_transition(feature, types.SimpleNamespace(state=JobState.DONE))  # Compile ▾ ended
+    assert scheduled == [True] and feature._u10_full is True
+
+
+def test_share_export_offers_only_the_compiled_outputs(tmp_path):
+    from glossarion_mobile.ui.chat.chat_ops import export_outputs, workspace_outputs
+
+    book = tmp_path / "Novel"
+    (book / "SDLXLIFF").mkdir(parents=True)
+    (book / "Novel.epub").write_bytes(b"PK epub")
+    for index in range(1, 4):
+        (book / f"response_chapter{index:04d}.html.sdlxliff").write_text("<xliff/>", encoding="utf-8")
+        (book / "SDLXLIFF" / f"response_chapter{index:04d}.html.sdlxliff").write_text("<xliff/>", encoding="utf-8")
+    (book / "glossary.csv").write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    assert any(kind == "sdlxliff" for _p, kind in workspace_outputs(str(book)))  # what the sheet listed before
+    assert [(Path(p).name, k) for p, k in export_outputs(str(book), str(tmp_path / "Novel.epub"))] == \
+        [("Novel.epub", "epub")]
+    # a book not compiled yet: nothing (Compile ▾ first), never its chapter SDLXLIFF
+    (book / "Novel.epub").unlink()
+    assert export_outputs(str(book), "Novel.epub") == []
+    # an SDLXLIFF input's own results, a subtitle input's subtitles
+    assert {k for _p, k in export_outputs(str(book), "Project.sdlxliff")} == {"sdlxliff"}
+    subs = tmp_path / "Episode"
+    subs.mkdir()
+    (subs / "Episode_translated.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+    assert [k for _p, k in export_outputs(str(subs), "Episode.srt")] == ["subtitle"]
+
+
+def test_the_plan_cards_output_sheet_switches_modes():
+    from glossarion_mobile.ui.chat.mode_options_sheet import ModeOptionsSheet
+    from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
+
+    switched: list = []
+    sheet = ModeOptionsSheet("text", on_switch=switched.append)
+    assert sheet.mode_row is not None and list(sheet.mode_row.toggles) == [m.id for m in OUTPUT_MODES]
+    assert sheet.scroll_body.controls[0] is sheet.mode_row  # the toggles above the options
+    text_column = sheet.body_slot.content
+    assert sheet.mode_row.tap("vision") == "selected"
+    assert sheet.mode == "vision" and switched == ["vision"] and sheet.body_slot.content is not text_column
+    assert sheet.mode_row.tap("vision") == "options"  # the active one: nothing switches
+    assert switched == ["vision"]
+    # the composer's "Options for <Mode>…" sheet keeps its single mode (no toggles there)
+    assert ModeOptionsSheet("image").mode_row is None
+
+
+def test_the_plan_card_output_chip_opens_the_switching_sheet():
+    import inspect
+
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    source = inspect.getsource(ChatView._plan_controls)
+    assert 'on_click=lambda e: self.open_plan_mode(plan), key="plan-output"' in source
+    opened: list = []
+    plans: list = []
+    view = types.SimpleNamespace(cid="7", _update_plan=lambda cid, created, **kw: plans.append((cid, created, kw)),
+                                 render_transcript=lambda: opened.append("render"),
+                                 open_mode_options=lambda mode, on_switch=None: opened.append(mode) or on_switch)
+    on_switch = ChatView.open_plan_mode(view, {"created": 42, "output_mode": "text"})
+    assert opened == ["text"]
+    on_switch("image")
+    assert plans == [("7", 42, {"output_mode": "image"})] and opened[-1] == "render"
+
+
+# ---- 6. the glossary sheets; the profile / language previews ------------------------------------------------
+
+
+class _Page:
+    width, height, web = 412.0, 860.0, False
+    platform = types.SimpleNamespace(value="windows")
+
+    def __init__(self):
+        self.shown: list = []
+
+    def show_dialog(self, dialog):
+        self.shown.append(dialog)
+        dialog.open = True
+
+
+def _glossary_ctx(page):
+    from glossarion_mobile.services.glossary import GlossaryService
+    from glossarion_mobile.ui.glossary.common import GlossaryContext
+    from glossarion_mobile.state.config_store import MobileConfigStore
+
+    return GlossaryContext(service=GlossaryService(config=MobileConfigStore(None)), page=page, platform="android",
+                           notify=lambda *a, **k: None, navigate=lambda *a, **k: None)
+
+
+def test_the_glossary_mode_row_stands_out_and_the_mode_list_is_compact():
+    import flet as ft
+
+    from glossarion_mobile.ui.glossary.sheets import ModeSheet, PlanGlossarySheet
+
+    page = _Page()
+    ctx = _glossary_ctx(page)
+    noop = lambda: None
+    plan = PlanGlossarySheet(ctx, on_load_file=noop, on_clear=noop, on_review=noop, on_mode=noop,
+                             effective="Glossary: No Glossary (auto)")
+    tile = plan.mode_tile
+    assert tile.bgcolor == ft.Colors.SECONDARY_CONTAINER and tile.title.weight == ft.FontWeight.W_600
+    modes = ModeSheet(ctx).show(page)
+    assert len(modes.group.content.controls) == 8
+    assert modes.body.scroll is None  # only as tall as its eight modes: never the whole screen
+    small = _Page()
+    small.height = 420.0
+    assert ModeSheet(_glossary_ctx(small)).show(small).body.scroll is not None  # a small phone still scrolls
+
+
+def test_profile_and_language_chips_open_a_short_preview_with_custom_options_at_the_end():
+    from glossarion_mobile.ui.sheets.mini_model_sheet import MiniModelSheet
+    from glossarion_mobile.ui.sheets.model_sheet import SheetEnv
+
+    picked: list = []
+    languages = MiniModelSheet(tab="language", current_language="English", languages=("English", "Japanese", "Korean"),
+                               env=SheetEnv(), on_select=lambda f, v, chat: picked.append((f, v, chat)))
+    assert languages.mini_title.value == "Target language" and languages.mini_subtitle.value == "Now: English"
+    assert languages.chat_switch.visible and languages.chat_switch in languages.mini_header.content.controls
+    keys = [getattr(row, "key", None) for row in languages.row_controls]
+    assert keys[-1] == "language-custom-row" and "language-add" not in keys  # custom at the end of the list
+    assert {"language-Japanese", "language-Korean"} <= set(keys)
+    assert not languages.effort_dropdown.visible
+    languages.custom_language.value = "Klingon"
+    languages.chat_switch.value = True
+    assert languages.use_custom_language() == "Klingon"
+    assert picked == [("language", "Klingon", True)] and languages.closed
+    profiles = MiniModelSheet(tab="profile", current_profile="Universal", profiles=["Universal", "Korean_BeforeTranslation"],
+                              env=SheetEnv())
+    keys = [getattr(row, "key", None) for row in profiles.row_controls]
+    assert profiles.mini_title.value == "Prompt profile" and "profile-Universal" in keys
+    assert keys[-1] == "profile-extras"  # role, prefill and Edit / New / Manage at the end
+    page = _Page()
+    initial, maximum = profiles.sheet_sizes(page)
+    assert 0.3 <= initial <= 0.6 and maximum <= 1.0
+
+
+def test_apply_to_this_chat_only_keeps_a_profile_or_language_in_the_chat():
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    overrides: list = []
+    writes: list = []
+    env = types.SimpleNamespace(chats=types.SimpleNamespace(set_override=lambda cid, k, v: overrides.append((cid, k, v))),
+                                store=None, prefs=None)
+    view = types.SimpleNamespace(bound=True, cid="9", env=env, apply_settings_changed=lambda: writes.append("applied"))
+    ChatView._on_model_sheet_select(view, "language", "Japanese", True)
+    ChatView._on_model_sheet_select(view, "profile", "Universal", True)
+    assert overrides == [("9", "target_language", "Japanese"), ("9", "profile", "Universal")]
+    assert writes == ["applied", "applied"]
+
+
+def test_the_plan_card_profile_and_language_chips_open_the_preview():
+    import inspect
+
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    source = inspect.getsource(ChatView._setting_chips)
+    assert 'self.open_mini_model_sheet("profile")' in source and 'self.open_mini_model_sheet("language")' in source
+
+
 # ---- the layers agree (sources) -------------------------------------------------------------------------
 
 

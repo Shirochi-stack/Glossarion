@@ -1171,7 +1171,8 @@ def test_output_tab_cloud_lines_send_now_and_override(tmp_path):
         section = texts(tab.cloud_column)
         assert any(t.startswith("Copies go to Drive › Glossarion · only when you tap Send now") for t in section)
         assert find_key(tab.cloud_column, "out-cloud-send") is not None
-        assert chips(tab.cloud_column) == [u10.SHARE_OFF_REASON]  # sharing services are all off
+        # hotfix 5: every sharing service off is no reason any more (the tap goes to Gofile's consent sheet)
+        assert chips(tab.cloud_column) == []
         assert (await tab.send_now())["ok"]
         assert ("send_now", identity) in cloud.calls and "Saving to Drive › Glossarion…" not in env.said
         line = find_key(rows[2], "out-cloud-line-2")
@@ -1187,7 +1188,7 @@ def test_output_tab_cloud_lines_send_now_and_override(tmp_path):
         row_sheet = tab.open_sheet(env.pdf, "pdf")
         keys = [i.key for i in row_sheet.items]
         assert "output-cloud-pick" in keys and "output-cloud" in keys and "output-share-link" in keys
-        assert row_sheet.items[keys.index("output-share-link")].disabled_reason == u10.SHARE_OFF_REASON
+        assert row_sheet.items[keys.index("output-share-link")].disabled_reason is None  # hotfix 5
         # lost access: the section says so and Send now carries the reason
         cloud.dest = Dest("folder-abc", "folder", label="Drive › Glossarion", needs_relink="revoked")
         await tab.refresh_cloud()
@@ -1205,7 +1206,8 @@ def test_output_tab_without_services_or_destination_shows_reasons(tmp_path):
         cloud, shares = FakeCloud(), FakeShares()
         tab2, _env2 = _output_tab(tmp_path / "b", cloud=cloud, shares=shares)
         await tab2.reload()
-        assert {u10.NO_DESTINATION_REASON, u10.SHARE_OFF_REASON} <= set(chips(tab2.cloud_column))
+        assert u10.NO_DESTINATION_REASON in chips(tab2.cloud_column)
+        assert u10.SHARE_OFF_REASON not in chips(tab2.cloud_column)  # hotfix 5: the tap goes to Gofile
         assert find_key(tab2.cloud_column, "out-cloud-setup") is not None
 
     run(scenario())

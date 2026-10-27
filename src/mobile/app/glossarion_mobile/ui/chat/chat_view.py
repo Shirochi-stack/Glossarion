@@ -78,6 +78,7 @@ from glossarion_mobile.ui.chat.chat_ops import (
     transcript_markdown,
     turn_workspace,
     version_view,
+    export_outputs,
     workspace_outputs,
 )
 from glossarion_mobile.ui.chat.chat_ops import moved_workspace as _moved_workspace
@@ -2149,10 +2150,11 @@ class ChatView:
         settings = self.settings()
         chips = [
             ft.Chip(label=ft.Text(context.model), on_click=lambda e: self.open_model_sheet("model"), key=f"{key}-model"),
-            ft.Chip(label=ft.Text(context.profile), on_click=lambda e: self.open_model_sheet("profile"),
+            # hotfix 5: a short preview of the profiles / languages, custom options at its end (not the full sheet)
+            ft.Chip(label=ft.Text(context.profile), on_click=lambda e: self.open_mini_model_sheet("profile"),
                     key=f"{key}-profile"),
-            ft.Chip(label=ft.Text(f"→ {context.target_language}"), on_click=lambda e: self.open_model_sheet("language"),
-                    key=f"{key}-language"),
+            ft.Chip(label=ft.Text(f"→ {context.target_language}"),
+                    on_click=lambda e: self.open_mini_model_sheet("language"), key=f"{key}-language"),
             ft.Chip(label=ft.Text(self._glossary_chip_text()), leading=ft.Icon(ft.Icons.MENU_BOOK, size=16),
                     on_click=lambda e: self.open_plan_glossary([path]), key=f"{key}-glossary"),
         ]
@@ -2195,7 +2197,7 @@ class ChatView:
         chips = self._setting_chips(path, "plan")
         chips += [
             ft.Chip(label=ft.Text(f"{_output_mode(mode).emoji} {_output_mode(mode).label}"),
-                    on_click=lambda e: self.open_mode_options(mode), key="plan-output"),
+                    on_click=lambda e: self.open_plan_mode(plan), key="plan-output"),
             range_chip,
             ft.Chip(label=ft.Text(destination_label(destination)),
                     leading=ft.Icon(ft.Icons.LOCAL_LIBRARY if destination == "library" else ft.Icons.CHAT, size=16),
@@ -2979,18 +2981,20 @@ class ChatView:
         return self.env.chats.output_folder(self.cid)
 
     async def _export_outputs(self, item: Any = None) -> None:
-        """Share / Export the job card's output files (its own ``Attachments/<stem>`` workspace,
-        ``chat_ops.workspace_outputs``: compiled EPUB / PDF first, then ``*_translated.txt``,
-        subtitles, SDLXLIFF and the glossary); a choice when there are several. Without a turn
-        workspace: the chat's newest output folder (the desktop attachment rule, newest EPUB / PDF)."""
+        """Share / Export the job card's compiled outputs (its own ``Attachments/<stem>`` workspace,
+        ``chat_ops.export_outputs``: EPUB / PDF / TXT / HTML; a subtitle or SDLXLIFF input's own translated
+        files when it has none; hotfix 5: never a book run's per-chapter SDLXLIFF); a choice when there are
+        several (a short sheet). Without a turn workspace: the chat's newest output folder (the desktop
+        attachment rule, newest EPUB / PDF)."""
         folder = await self.env.run_io(self._job_workspace, item) if item is not None else ""
         if not folder:
             folder = self._last_output_folder()
         documents: list = []
         if folder and os.path.isdir(folder):
-            documents = [path for path, _kind in await self.env.run_io(workspace_outputs, folder)]
+            source = self._turn_source(item) if self.bound else ""
+            documents = [path for path, _kind in await self.env.run_io(export_outputs, folder, source)]
         if not documents:
-            self.notify("No output files in this turn's workspace yet")
+            self.notify("No compiled EPUB or PDF yet: use Compile ▾ first")
             return
         if len(documents) > 1 and self.page is not None:
             items = [ActionItem(f"{os.path.splitext(path)[1][1:].upper()} · {os.path.basename(path)}",
@@ -4311,14 +4315,25 @@ class ChatView:
             self.plus_sheet.close()
         self.composer.set_plus_open(False)
 
-    def open_mode_options(self, mode_id: str) -> ModeOptionsSheet:
+    def open_mode_options(self, mode_id: str, on_switch: Optional[Callable[[str], Any]] = None) -> ModeOptionsSheet:
         from glossarion_mobile.ui.sheets.model_sheet import sheet_env
 
         self.mode_sheet = ModeOptionsSheet(mode_id, ctx=sheet_env().ctx,  # ctx: the settings tiles (U4)
-                                           **self._mode_options_kwargs())
+                                           on_switch=on_switch, **self._mode_options_kwargs())
         self._hold_keyboard(getattr(self.mode_sheet, "dialog", None))
         self.mode_sheet.show(self.page)
         return self.mode_sheet
+
+    def open_plan_mode(self, plan: dict) -> ModeOptionsSheet:
+        """The Plan card's output chip (hotfix 5): the mode's options with the six mode toggles above them;
+        another mode becomes this send's mode (the plan's ``output_mode``) and the chip follows."""
+        cid, created = self.cid, plan.get("created")
+
+        def switched(mode: str) -> None:
+            self._update_plan(cid, created, output_mode=mode)
+            self.render_transcript()
+
+        return self.open_mode_options(str(plan.get("output_mode") or "text"), on_switch=switched)
 
     def set_mode_scope(self, this_chat: bool) -> None:
         """Mode options "This chat only": the mode lives in the chat override, else in the global
@@ -4447,12 +4462,13 @@ class ChatView:
         self._spawn(load())
         return sheet
 
-    def open_mini_model_sheet(self) -> Any:
+    def open_mini_model_sheet(self, tab: str = "model") -> Any:
         """The composer's model chip (hotfix 5): the chat model's provider in a sheet that grows with a swipe
         up, with the model's Effort; "All models" opens the full ModelSheet. A pick is this chat's model, as
-        in the full sheet."""
+        in the full sheet. ``tab`` "profile" / "language" (a card's profile / language chip): the configured
+        profiles / languages the same way, custom options at the end of the list."""
         if self.env is None:
-            return self.open_model_sheet("model")
+            return self.open_model_sheet(tab)
         from glossarion_mobile.services.oauth import sign_in_satisfied
         from glossarion_mobile.ui.sheets.mini_model_sheet import MiniModelSheet
         from glossarion_mobile.ui.sheets.model_sheet_min import load_model_catalog
@@ -4460,6 +4476,7 @@ class ChatView:
         context = self.state.chat_context.value
         signed = self.state.signed_in.value
         sheet = MiniModelSheet(
+            tab=tab,
             current_model=context.model,
             current_profile=context.profile,
             current_language=context.target_language,
@@ -4499,6 +4516,10 @@ class ChatView:
         override_key = {"model": "model", "profile": "profile", "language": "target_language"}[field_name]
         if field_name == "model" and self.bound and not global_scope:
             this_chat_only = True  # owner (U13): every chat keeps its own model; Settings sets the default
+            self.env.chats.set_override(self.cid, override_key, value)
+            remember_pick(self.env, field_name, value, global_scope=False)
+        elif this_chat_only and self.bound and not global_scope:
+            # "Apply to this chat only" (a profile / language): the chat's own value, as Chat settings › This chat
             self.env.chats.set_override(self.cid, override_key, value)
             remember_pick(self.env, field_name, value, global_scope=False)
         else:

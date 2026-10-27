@@ -37,6 +37,8 @@ __all__ = [
     "moved_workspace",
     "turn_workspace",
     "workspace_outputs",
+    "export_outputs",
+    "COMPILED_EXPORT_KINDS",
     "jump_entries",
     "safe_file_stem",
     "search_matches",
@@ -171,6 +173,30 @@ def workspace_outputs(folder: str) -> list:
     for name in ("glossary.csv", "glossary.json"):
         add(os.path.join(folder, name), "glossary")
     return out
+
+
+#: what Share / Export offers of a book's workspace: its compiled outputs only
+COMPILED_EXPORT_KINDS = ("epub", "pdf", "txt", "html")
+
+
+def export_outputs(folder: str, source: str = "") -> list:
+    """Blocking: ``[(path, kind)]`` Share / Export offers for a workspace (hotfix 5, owner: "The share/export button
+    should only include the compiled output. Not unrelated .sdlxliff files"): the compiled outputs (EPUB / PDF /
+    TXT / HTML) - never a book run's per-chapter SDLXLIFF or its glossary. A workspace without one offers the run's
+    own translated files only when its ``source`` is not a book: a subtitle input's subtitles, an SDLXLIFF / XLIFF
+    input's SDLXLIFF; a book not compiled yet offers nothing (Compile ▾ first)."""
+    outputs = workspace_outputs(folder)
+    compiled = [(path, kind) for path, kind in outputs if kind in COMPILED_EXPORT_KINDS]
+    if compiled:
+        return compiled
+    extension = os.path.splitext(str(source or ""))[1].lower()
+    if extension in (".sdlxliff", ".xliff", ".xlf"):
+        wanted = "sdlxliff"
+    elif extension and extension.endswith(_SUBTITLE_EXTENSIONS):
+        wanted = "subtitle"
+    else:
+        return []
+    return [(path, kind) for path, kind in outputs if kind == wanted]
 
 
 # ---------------------------------------------------------------------------

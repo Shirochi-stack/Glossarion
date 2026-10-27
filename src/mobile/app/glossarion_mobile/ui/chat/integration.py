@@ -1186,9 +1186,16 @@ class ChatFeature:
             self._post(self._announce, outcome)
 
     def _on_job_transition(self, snap: Any, previous: Any = None) -> Any:
-        """A job ended: once nothing runs, sweep (moves that waited for the jobs, and workspaces a job
-        was writing). Returns the sweep task (None when there is nothing to do yet)."""
-        if state_name(snap) not in TERMINAL_STATES or self._active_job() is not None:
+        """A job ended: the Result cards re-read their compiled files (hotfix 5: after Compile ▾ the card kept
+        "Compile an EPUB or PDF first" on Share file via link until it was rendered again); once nothing runs,
+        sweep (moves that waited for the jobs, and workspaces a job was writing). Returns the sweep task (None
+        when there is nothing to do yet)."""
+        if state_name(snap) not in TERMINAL_STATES:
+            return None
+        if self._u10_cards:
+            self._u10_full = True
+            self._post(self._u10_schedule)
+        if self._active_job() is not None:
             return None
         return self._spawn(self.sweep("idle"))
 

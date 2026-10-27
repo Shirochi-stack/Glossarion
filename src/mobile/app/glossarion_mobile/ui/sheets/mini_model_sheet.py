@@ -55,6 +55,14 @@ def short_model_name(model: str, provider: str) -> str:
     return text
 
 
+#: the mini sheet's title per tab (hotfix 5: the Plan card's profile / language chips open it too, owner: "should
+#: use a preview like the + button does. Only showing the configured profiles, not a full menu. Sames goes for the
+#: language button ..., but both allowing custom options when scrolling to the bottom")
+MINI_TITLES = {"model": "Select model", "profile": "Prompt profile", "language": "Target language"}
+#: estimated row heights (dp) per tab: a profile row carries a 3-line prompt preview
+MINI_ROW_HEIGHTS = {"model": 64.0, "profile": 96.0, "language": 52.0}
+
+
 class MiniModelSheet(ModelSheet):
     #: rows the half-height sheet is sized for (a longer provider list grows with a swipe up)
     COLLAPSED_ROWS = 5
@@ -78,11 +86,18 @@ class MiniModelSheet(ModelSheet):
 
     def _build(self) -> None:
         super()._build()  # the full sheet's controls: the catalog updates and the base methods use them
-        self.mini_title = ft.Text("Select model", theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600)
+        self.mini_title = ft.Text(MINI_TITLES.get(self.tab, "Select model"), theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
+                                  weight=ft.FontWeight.W_600)
         self.mini_subtitle = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.mini_header = ft.Container(content=ft.Column([self.mini_title, self.mini_subtitle], spacing=0, tight=True),
+        header: list = [self.mini_title, self.mini_subtitle]
+        if self.tab in ("profile", "language"):
+            # the full sheet's "Apply to this chat only" (a profile / language may still apply to every chat)
+            self.chat_switch.visible = True
+            header.append(self.chat_switch)
+        self.mini_header = ft.Container(content=ft.Column(header, spacing=0, tight=True),
                                         padding=ft.Padding.only(left=16, right=16, top=4, bottom=8),
                                         key="mini-model-header")
+        self.custom_language: Optional[ft.TextField] = None
         self.effort_dropdown = ft.Dropdown(label="Effort", dense=True, expand=True, options=[], visible=False,
                                            on_select=self._on_effort, key="mini-model-effort")
         self.pass_switch = ft.Switch(label=PASS_UNKNOWN_LABEL, value=False, visible=False,
@@ -116,18 +131,46 @@ class MiniModelSheet(ModelSheet):
         if getattr(self.snapshot, "custom_routes", ()) != getattr(self, "_routes_seen", None):
             self._providers = {}  # a custom route change can move models between providers
             self._routes_seen = self.snapshot.custom_routes
-        model = self.current["model"]
-        routes = list(self.snapshot.custom_routes)
-        self.provider = self._provider_of(model, routes) if model else ""
-        self._sync_poll_state()
-        self.row_controls = self.model_rows()
+        if self.tab == "profile":
+            # the configured profiles; the role, the prefill and Edit / New / Manage at the end of the list
+            self.mini_subtitle.value = f"Now: {self.current['profile']}" if self.current["profile"] else ""
+            self.row_controls = self.profile_rows()
+        elif self.tab == "language":
+            self.mini_subtitle.value = f"Now: {self.current['language']}" if self.current["language"] else ""
+            self.row_controls = self.mini_language_rows()
+        else:
+            model = self.current["model"]
+            routes = list(self.snapshot.custom_routes)
+            self.provider = self._provider_of(model, routes) if model else ""
+            self._sync_poll_state()
+            self.row_controls = self.model_rows()
         if self.mini_body is not None:
             self.mini_body.controls = self.row_controls
+
+    def mini_language_rows(self) -> list:
+        """The target languages (recent first), and at the end any other language typed in (a model writes it)."""
+        rows = [row for row in self.language_rows() if getattr(row, "key", None) != "language-add"]
+        self.custom_language = ft.TextField(hint_text="Another language", dense=True, expand=True,
+                                            on_submit=lambda e: self.use_custom_language(), key="language-custom")
+        rows.append(ft.Container(
+            content=ft.Row([self.custom_language,
+                            ft.IconButton(icon=ft.Icons.CHECK, tooltip="Use this language",
+                                          on_click=lambda e: self.use_custom_language(), key="language-custom-use")],
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.only(left=16, right=8, top=4, bottom=8), key="language-custom-row"))
+        return rows
+
+    def use_custom_language(self) -> Optional[str]:
+        value = str(getattr(self.custom_language, "value", "") or "").strip()
+        if not value:
+            return None
+        self.select("language", value)
+        return value
 
     def _sync_poll_state(self) -> None:
         """The provider under the title, with "checking online models…" while it polls (the full sheet's
         animated search border is not on this sheet)."""
-        if not hasattr(self, "mini_subtitle"):
+        if not hasattr(self, "mini_subtitle") or self.tab != "model":
             return
         label = mc.provider_label(self.provider) if self.provider else "No model selected"
         busy = bool(self.provider) and (self.provider in self._refreshing or self.snapshot.is_polling(self.provider))
@@ -174,7 +217,7 @@ class MiniModelSheet(ModelSheet):
     def _sync_effort(self) -> None:
         store = self.env.store
         control = None
-        if store is not None:
+        if store is not None and self.tab == "model":  # the profile / language sheets have no Effort
             try:
                 control = effort_control(self.current["model"], self._effective,
                                          custom_routes=list(self.snapshot.custom_routes))
@@ -225,12 +268,16 @@ class MiniModelSheet(ModelSheet):
             height = 0.0
         if height <= 0:
             return 0.5, 1.0
-        footer = self.FOOTER_HEIGHT + (self.SWITCH_HEIGHT if self.pass_switch.visible else 0.0)
+        model = self.tab == "model"
+        footer = (self.FOOTER_HEIGHT + (self.SWITCH_HEIGHT if self.pass_switch.visible else 0.0)) if model else 0.0
+        header = self.HEADER_HEIGHT + (0.0 if model else self.SWITCH_HEIGHT)  # "Apply to this chat only"
+        row = MINI_ROW_HEIGHTS.get(self.tab, self.ROW_HEIGHT)
         count = len(self.row_controls)
         shown = max(1, min(count, self.COLLAPSED_ROWS))
-        initial = height_fraction(page, self.HEADER_HEIGHT + shown * self.ROW_HEIGHT + footer, low=0.3, high=0.6)
-        everything = height_fraction(page, self.HEADER_HEIGHT + count * self.ROW_HEIGHT + footer, low=0.0, high=100.0)
-        maximum = 1.0 if (not self.snapshot.loaded or everything > initial) else initial
+        initial = height_fraction(page, header + shown * row + footer, low=0.3, high=0.6)
+        everything = height_fraction(page, header + count * row + footer, low=0.0, high=100.0)
+        loading = model and not self.snapshot.loaded
+        maximum = 1.0 if (loading or everything > initial) else initial
         return initial, maximum
 
     def _make_dialog(self, page: Any) -> ft.BottomSheet:
@@ -238,13 +285,15 @@ class MiniModelSheet(ModelSheet):
         self.native = sheet_cls is not None
         if sheet_cls is not None:
             initial, maximum = self.sheet_sizes(page)
-            self.mini_body = sheet_cls(controls=self.row_controls, header=self.mini_header, footer=self.mini_footer,
+            footer = self.mini_footer if self.tab == "model" else None  # Effort + All models
+            self.mini_body = sheet_cls(controls=self.row_controls, header=self.mini_header, footer=footer,
                                        initial_size=initial, min_size=round(initial / 2, 3), max_size=maximum,
                                        key="mini-model-sheet")
             content: ft.Control = self.mini_body
         else:  # desktop flet run: an ordinary scrolling sheet
             self.mini_body = ft.Column(self.row_controls, spacing=0, tight=True, key="mini-model-sheet")
-            content = sheet_frame(scroll_column([self.mini_header, self.mini_body], footer=[self.mini_footer], spacing=0),
+            footer_rows = [self.mini_footer] if self.tab == "model" else None
+            content = sheet_frame(scroll_column([self.mini_header, self.mini_body], footer=footer_rows, spacing=0),
                                   padding=ft.Padding.only(bottom=8))
         return ft.BottomSheet(content=content, show_drag_handle=True, scrollable=True, draggable=True,
                               bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH)
@@ -268,6 +317,9 @@ class MiniModelSheet(ModelSheet):
             tablet = False
         if tablet:  # the full sheet's 420 dp panel
             self.dialog.size_constraints = ft.BoxConstraints(max_width=420)
+        if self.tab != "model":  # a profile / language: no catalog to follow or load
+            page.show_dialog(self.dialog)
+            return
         catalog = self.env.catalog
         if catalog is not None:
             self._unsub = catalog.subscribe(self.apply_snapshot)

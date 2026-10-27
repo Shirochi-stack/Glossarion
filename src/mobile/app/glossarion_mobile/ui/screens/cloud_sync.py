@@ -136,7 +136,10 @@ NOT_IN_LIBRARY_DETAIL = ("Cloud sync copies the books in your Library. A finishe
                          "itself, and is copied then. Share file via link works now.")
 NO_OUTPUT_REASON = "Compile an EPUB or PDF first"
 NO_OUTPUT_DETAIL = "Cloud sync and share links use the book's compiled files (EPUB, PDF, TXT, HTML)."
-SHARE_OFF_REASON = "Turn on a service first"
+SHARE_OFF_REASON = "Turn on a service first"  # no longer blocks the button (hotfix 5: DEFAULT_SHARE_PROVIDER)
+#: "Share file via link" with every service off (hotfix 5, owner: "default to temp.sh or gofile"): this service's
+#: consent sheet, then its upload (temp.sh is not one of the vetted services)
+DEFAULT_SHARE_PROVIDER = "gofile"
 SHARE_OFF_DETAIL = (f"Every sharing service is off until you turn it on in {SETTINGS_PLACE}. Nothing is uploaded "
                     "until you tap a service.")
 SERVICE_OFF_REASON = "Off · turn on in Settings"
@@ -1309,13 +1312,13 @@ class U10Actions:
         return None
 
     def share_reason(self, providers: Sequence[Mapping], *, has_outputs: bool = True) -> Optional[str]:
-        """Why "Share file via link" cannot start (None: it can)."""
+        """Why "Share file via link" cannot start (None: it can). Every service off is no reason (hotfix 5,
+        owner: "The share file via link button is being lazy. It should redirect to the service and default to
+        ... gofile"): the tap goes to the default service, behind its consent sheet (``share_file``)."""
         if not self.shares.available:
             return NO_SERVICE_REASON
         if not has_outputs:
             return NO_OUTPUT_REASON
-        if not any(p.get("enabled") for p in providers):
-            return SHARE_OFF_REASON
         return None
 
     def explain(self, reason: str) -> None:
@@ -1416,12 +1419,25 @@ class U10Actions:
             self.say(NO_OUTPUT_DETAIL)
             return None
         if len(rows) == 1:
-            return await self.provider_sheet(rows[0][0], identity)
+            return await self.share_file(rows[0][0], identity)
         items = [ActionItem(f"{_KIND_LABELS.get(kind, kind.upper())} · {os.path.basename(path)}",
-                            (lambda p=path: self.spawn(self.provider_sheet(p, identity))),
+                            (lambda p=path: self.spawn(self.share_file(p, identity))),
                             icon="INSERT_DRIVE_FILE", key=f"share-file-{index}")
                  for index, (path, kind) in enumerate(rows)]
         return self._show_sheet(ActionSheet(items, title=SHARE_LABEL, subtitle="Which file?", tablet=self.tablet))
+
+    async def share_file(self, path: str, identity: str) -> Any:
+        """One file: with every service still off, the default service (``DEFAULT_SHARE_PROVIDER``, Gofile) at
+        once - its consent sheet first (the file leaves the phone only on its "Upload"), which also turns it on
+        - else the services sheet (``provider_sheet``: Sharing settings… lists the others)."""
+        menu = await self.io(self.shares.menu, path)
+        if not any(provider.get("enabled") for provider, _reason in menu):
+            for provider, reason in menu:
+                if provider.get("id") != DEFAULT_SHARE_PROVIDER:
+                    continue
+                if reason is None or reason == short_reason(provider.get("reason")):
+                    return await self.start_provider(provider, path, identity)
+        return await self.provider_sheet(path, identity)
 
     async def provider_sheet(self, path: str, identity: str) -> Optional[ActionSheet]:
         """The services the user can send ``path`` to; off ones stay listed with their reason (the service's
