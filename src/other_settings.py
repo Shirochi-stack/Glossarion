@@ -13920,6 +13920,29 @@ def _create_anti_duplicate_section(self, parent):
     block_scripts_warn.setMaximumWidth(520)
     block_scripts_warn.setContentsMargins(20, 0, 0, 8)
     bias_v.addWidget(block_scripts_warn)
+
+    # Opt-in emoticon exemption of the script ban (script_ban_core.KAOMOJI_RANGES; also the on-device ban)
+    self.script_ban_allow_kaomoji_var = self.config.get('script_ban_allow_kaomoji', False)
+    kaomoji_cb = self._create_styled_checkbox("Allow emoticons and symbols from other scripts (kaomoji)")
+    try:
+        kaomoji_cb.setChecked(bool(self.script_ban_allow_kaomoji_var))
+        kaomoji_cb.setToolTip(
+            "Lets kaomoji through the script ban: ¯\\_(ツ)_/¯, (ノ°▽°)ノ, ಠ_ಠ, ٩(◕‿◕)۶, (╯°□°）╯︵ ┻━┻.\n"
+            "Chinese / Japanese punctuation and brackets that carry no language (「」『』・｡、〜 ︵ ）) are never\n"
+            "blocked, and characters of other scripts that the source itself uses in emoticons can be copied.\n"
+            "Letting these characters through means a little more foreign text can slip by.\n"
+            "Applies to Block other scripts in translations and to the on-device engine's own switch."
+        )
+    except Exception:
+        pass
+    def _on_kaomoji_toggle(checked):
+        try:
+            self.script_ban_allow_kaomoji_var = bool(checked)
+        except Exception:
+            pass
+    kaomoji_cb.toggled.connect(_on_kaomoji_toggle)
+    kaomoji_cb.setContentsMargins(20, 0, 0, 0)
+    bias_v.addWidget(kaomoji_cb)
     bias_v.addStretch()
     
     # Provider compatibility info
@@ -14129,6 +14152,9 @@ def _reset_anti_duplicate_defaults(self):
 
     if hasattr(self, 'block_other_scripts_var'):
         self.block_other_scripts_var = False  # Default = disabled
+
+    if hasattr(self, 'script_ban_allow_kaomoji_var'):
+        self.script_ban_allow_kaomoji_var = False  # Default = disabled
 
     # Update enable/disable state
     self._toggle_anti_duplicate_controls()

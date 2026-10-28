@@ -7,7 +7,9 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   the engine's system info after the first load. Choosing a model resets Context to that model's own
   (8,192 tokens, 4,096 for files of 4 GB and more); a job on it asks for half the context as output. Without
   llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes. Below
-  the on-device sampling fields, "Block other scripts in translations (adaptive)" (on by default; ``script_ban``).
+  the on-device sampling fields, "Block other scripts in translations (adaptive)" (on by default; ``script_ban``)
+  and under it the Settings tile of "Allow emoticons and symbols from other scripts (kaomoji)" (config
+  ``script_ban_allow_kaomoji``, off by default; the same value as in Settings and on the desktop).
   Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
   default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
   after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". On Android (OpenCL) the
@@ -69,6 +71,8 @@ RAM_HINTS = {"ok": ("✓", "fits this phone"), "confirm": ("⚠", "tight on free
 CONTEXT_SLIDER = (2048, 16384, 1024)
 #: Prefs flag (mobile state, not config.json): the GPU-friendly Q4_0 presets were offered once.
 GPU_PRESETS_OFFERED_KEY = "local_gpu_presets_offered"
+#: config.json key of "Allow emoticons and symbols from other scripts (kaomoji)", shown under the script ban
+KAOMOJI_KEY = "script_ban_allow_kaomoji"
 
 
 def _push(*controls: Any) -> None:
@@ -772,6 +776,9 @@ class OnDeviceFlow:
 class LocalModelsPanel(OnDeviceFlow):
     """The On-device tab. ``build()`` returns its control; nothing runs until ``did_show()``."""
 
+    #: the Settings context of the shared config tiles (None: the app's, ``sheet_env().ctx``)
+    settings_ctx: Any = None
+
     # ---- build ------------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
@@ -943,7 +950,41 @@ class LocalModelsPanel(OnDeviceFlow):
                    "Hindi, Thai, Arabic, Cyrillic ...) while translating: only the target language's own "
                    "script, Latin letters, numbers and punctuation can be written. Glossary requests and the "
                    "single-pass auto glossary are never blocked.", key="local-block-cjk-note"),
+            *self._kaomoji_rows(),
         ]
+
+    def _kaomoji_rows(self) -> list:
+        """"Allow emoticons and symbols from other scripts (kaomoji)": the Settings tile of the shared config
+        key (``KAOMOJI_KEY``; also Settings › Anti-Duplicate Parameters › Logit Bias and the desktop), so
+        both places edit one value. Nothing without the Settings context (a screen built in a test)."""
+        self.kaomoji_tile = None
+        ctx = self.settings_ctx
+        if ctx is None:
+            from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+            ctx = sheet_env().ctx
+        if ctx is None:
+            return []
+        try:
+            spec = ctx.schema.spec(KAOMOJI_KEY)
+            if spec is None:
+                return []
+            from glossarion_mobile.ui.settings.tiles import make_tile
+
+            tile = self.kaomoji_tile = make_tile(spec, ctx)
+        except Exception:
+            log.exception("building the %s tile failed", KAOMOJI_KEY)
+            return []
+        observe = getattr(ctx.store, "observe", None)
+        if callable(observe):  # changed in Settings: the tile here follows
+            unsub = observe(KAOMOJI_KEY, lambda _key, _value: tile.refresh())
+            previous = getattr(self, "_kaomoji_unsub", None)
+            if previous in self._unsubs:  # a rebuilt section replaces its tile
+                self._unsubs.remove(previous)
+                previous()
+            self._kaomoji_unsub = unsub
+            self._unsubs.append(unsub)
+        return [tile.control]
 
     def save_block_cjk(self) -> bool:
         value = self.service.save_block_cjk(self.block_cjk_switch.value)

@@ -32,7 +32,9 @@ Script ban (``params["ban_scripts"]``, the ``script_ban.SCRIPTS`` names decided 
 passes a logits processor that sets the token ids of those scripts (Han / kana / Hangul, Devanagari,
 Thai, Arabic, Cyrillic ...) to -inf. The vocabulary is decoded once, on the first such request after a
 load (``script_ban.VocabScripts``; logged), and one processor per set of banned scripts is kept until the
-model is unloaded; a request without ``ban_scripts`` gets no processor.
+model is unloaded; a request without ``ban_scripts`` gets no processor. ``params["ban_allow_kaomoji"]``
+(the opt-in emoticon exemption) unbans the emoticon punctuation and the emoticon characters of the
+request's user messages.
 """
 
 from __future__ import annotations
@@ -418,10 +420,11 @@ class LlamaEngine(_Base):
                     log.debug("closing the model failed", exc_info=True)
                 del llm
 
-    def script_ban(self, scripts: Sequence[str]) -> Any:
+    def script_ban(self, scripts: Sequence[str], allow_kaomoji: bool = False, source: str = "") -> Any:
         """The loaded model's logits processor banning ``scripts`` (``script_ban``): the vocabulary is
         decoded on the first call after a load, each set of scripts' processor on its first use; both are
-        kept until the model is unloaded."""
+        kept until the model is unloaded. ``allow_kaomoji``: emoticons allowed, with the emoticon
+        characters of ``source`` (the request's user text) let through."""
         llm = self.llm
         if llm is None:
             raise EngineUnavailable("No model is loaded")
@@ -435,9 +438,9 @@ class LlamaEngine(_Base):
                 self._scripts = script_ban.VocabScripts(pieces)
                 log.info("on-device script ban: %d of %d tokens are non-Latin script, scanned in %.2f s",
                          len(self._scripts), n_vocab, time.monotonic() - started)
-            processor = self._scripts.processor(scripts)
-            log.debug("on-device script ban: %d tokens of %s (%.2f s)", len(processor), ",".join(scripts),
-                      time.monotonic() - started)
+            processor = self._scripts.processor(scripts, allow_kaomoji=allow_kaomoji, source=source)
+            log.debug("on-device script ban: %d tokens of %s%s (%.2f s)", len(processor), ",".join(scripts),
+                      " (emoticons allowed)" if allow_kaomoji else "", time.monotonic() - started)
             return processor
 
     def _prompt(self, messages: Sequence[dict]) -> str:
@@ -492,7 +495,9 @@ class LlamaEngine(_Base):
                 processors = importlib.import_module("llama_cpp").LogitsProcessorList
             except Exception:  # a test's fake model: any list of processors works the same
                 processors = list
-            kwargs["logits_processor"] = processors([self.script_ban(tuple(params["ban_scripts"]))])
+            allow = bool(params.get("ban_allow_kaomoji"))
+            source = "\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user") if allow else ""
+            kwargs["logits_processor"] = processors([self.script_ban(tuple(params["ban_scripts"]), allow, source)])
         self.last_finish = "stop"
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every

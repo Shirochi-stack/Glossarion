@@ -864,6 +864,7 @@ Text to analyze:
         self.bias_common_words_var = self.config.get('bias_common_words', False)
         self.bias_repetitive_phrases_var = self.config.get('bias_repetitive_phrases', False)
         self.block_other_scripts_var = self.config.get('block_other_scripts', False)
+        self.script_ban_allow_kaomoji_var = self.config.get('script_ban_allow_kaomoji', False)
 
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)

@@ -386,6 +386,7 @@ SETTINGS_MAP_ORDER = ('model',
  'bias_common_words',
  'bias_repetitive_phrases',
  'block_other_scripts',
+ 'script_ban_allow_kaomoji',
  'glossary_enable_anti_duplicate',
  'glossary_top_p',
  'glossary_min_p',
@@ -1285,6 +1286,7 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
  ('bias_common_words', ('bias_common_words_var',), ('value', False), ('bool',)),
  ('bias_repetitive_phrases', ('bias_repetitive_phrases_var',), ('value', False), ('bool',)),
  ('block_other_scripts', ('block_other_scripts_var',), ('value', False), ('bool',)),
+ ('script_ban_allow_kaomoji', ('script_ban_allow_kaomoji_var',), ('value', False), ('bool',)),
  ('glossary_enable_anti_duplicate',
   ('glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')),
   ('value', False),
@@ -10967,6 +10969,30 @@ SETTINGS = {
      'ui_group': 'Chapter Extraction Settings',
      'ui_sites': ('other.processing',),
      'var_names': ('scan_phase_mode_var',)},
+    'script_ban_allow_kaomoji': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('SCRIPT_BAN_ALLOW_KAOMOJI', 'translation', False),
+             ('SCRIPT_BAN_ALLOW_KAOMOJI', 'startup', False)),
+     'init_default': False,
+     'label': 'Allow emoticons and symbols from other scripts (kaomoji)',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': 'Lets kaomoji through the script ban: ¯\\_(ツ)_/¯, (ノ°▽°)ノ, ಠ_ಠ, ٩(◕‿◕)۶, (╯°□°）╯︵ '
+                '┻━┻.\n'
+                'Chinese / Japanese punctuation and brackets that carry no language (「」『』・｡、〜 ︵ ）) '
+                'are never\n'
+                'blocked, and characters of other scripts that the source itself uses in emoticons '
+                'can be copied.\n'
+                'Letting these characters through means a little more foreign text can slip by.\n'
+                "Applies to Block other scripts in translations and to the on-device engine's own "
+                'switch.',
+     'type': 'bool',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('script_ban_allow_kaomoji_var',)},
     'sdlxliff_one_column_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_one_row_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_two_column_layout': {'type': 'str', 'ui_sites': ('progress',)},

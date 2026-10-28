@@ -32,7 +32,9 @@
   scripts); glossary requests and a single-pass auto glossary's translations keep the default logits. The
   request kind and target come from the body fields ``unified_api_client`` adds for this endpoint only
   (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.banned_scripts``
-  decides and the engine gets ``params["ban_scripts"]``.
+  decides and the engine gets ``params["ban_scripts"]``. The opt-in "Allow emoticons and symbols from
+  other scripts (kaomoji)" (config ``script_ban_allow_kaomoji``, shared with the API models' ban; shown
+  under the switch too) arrives as ``glossarion_allow_kaomoji`` and becomes ``params["ban_allow_kaomoji"]``.
 * **GPU (experimental, off by default;** Prefs ``GPU_KEY``, Model manager › On-device › engine card): offered
   where the build has a GPU backend (``engine.gpu_offer``: Metal on iOS, OpenCL / Adreno on Android
   arm64). With it on, a load first tries the GPU (``engine.load(..., gpu=True)``); when that fails
@@ -1042,6 +1044,10 @@ class LocalEngineService:
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
         if scripts:
             params["ban_scripts"] = scripts
+            # "Allow emoticons and symbols from other scripts (kaomoji)": the shared config setting
+            # script_ban_allow_kaomoji, sent by unified_api_client like the request kind and target
+            if script_ban._truthy(body.get("glossarion_allow_kaomoji")):
+                params["ban_allow_kaomoji"] = True
         return params
 
     # ---- downloads -----------------------------------------------------------------------------------

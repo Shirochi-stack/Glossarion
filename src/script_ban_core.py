@@ -50,6 +50,26 @@ on their own. A token is banned when (``token_is_banned``)
 A token made only of continuation bytes, and an incomplete prefix that can also start an allowed
 character (0xCE: Greek; 0xE1: Latin Extended Additional and Greek Extended live there; 0xE2: punctuation;
 0xEA, 0xEF; 0xF0: emoji) is never banned.
+
+Emoticons (owner 2026-10-28, opt-in, off by default: "Allow emoticons and symbols from other scripts
+(kaomoji)", config ``script_ban_allow_kaomoji`` / env ``SCRIPT_BAN_ALLOW_KAOMOJI``, the ``allow_kaomoji``
+arguments here). Kaomoji are built from other scripts' characters: ¯\\_(ツ)_/¯, (ノ°▽°)ノ, ಠ_ಠ, ٩(◕‿◕)۶,
+「」, ｡, ︵. With the option on:
+
+* ``KAOMOJI_RANGES`` is never banned: the CJK and full-width punctuation and symbols that carry no
+  language (CJK Symbols and Punctuation without its iteration / numeral / kana-repeat marks, the katakana
+  middle dot and prolonged sound mark, the vertical and CJK compatibility forms, the full-width
+  punctuation, brackets and signs and the half-width CJK punctuation with the half-width prolonged and
+  (semi-)voiced sound marks). Full-width digits and letters (０-９, Ａ-Ｚ, ａ-ｚ) and the half-width kana
+  and Hangul stay banned: they spell words and numbers in CJK typesetting, not faces. An incomplete UTF-8
+  tail counts as exempt only once its completions are narrowed to 64 code points that include an exempt
+  one (E3 80, E3 83, EF BD ...): the lone lead byte E3 still covers 4,096 kana / CJK code points;
+* ``kaomoji_source_chars`` picks the banned-script characters a request's source uses in emoticons (ツ,
+  ノ, ಠ, ٩, ۶ ...): each of them stands alone next to a symbol in every place it occurs. A writing system
+  the source writes words in (Hangul in a Korean source, kana in a Japanese one, Devanagari in a Hindi
+  one) and Han ideographs are never picked, so a Korean source does not unban Hangul or its hanja. The
+  on-device engine lets the tokens made only of such characters through (``token_requirements``); the
+  API output guard already ignores runs that occur in the request.
 """
 
 from __future__ import annotations
@@ -59,10 +79,11 @@ import functools
 import re
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
-__all__ = ["BAN_TASKS", "BANNED_RANGES", "CJK", "LEAK_MIN_CHARS", "LEAK_MIN_SHARE", "OPENAI_LOGIT_BIAS_LIMIT",
-           "SCRIPTS", "banned_scripts", "banned_token_ids", "bias_token_ids", "foreign_script_leak",
-           "is_banned_char", "is_cjk_target", "openai_encoding_name", "openai_logit_bias", "retry_instruction",
-           "script_mask", "script_of", "target_scripts", "token_is_banned", "token_masks", "wants_ban"]
+__all__ = ["BAN_TASKS", "BANNED_RANGES", "CJK", "KAOMOJI_RANGES", "LEAK_MIN_CHARS", "LEAK_MIN_SHARE",
+           "OPENAI_LOGIT_BIAS_LIMIT", "SCRIPTS", "banned_scripts", "banned_token_ids", "bias_token_ids",
+           "foreign_script_leak", "is_banned_char", "is_cjk_target", "is_kaomoji_char", "kaomoji_source_chars",
+           "openai_encoding_name", "openai_logit_bias", "retry_instruction", "script_mask", "script_of",
+           "source_keys", "target_scripts", "token_is_banned", "token_masks", "token_requirements", "wants_ban"]
 
 CJK = "cjk"
 
@@ -117,6 +138,29 @@ _BITS = {name: 1 << index for index, name in enumerate(SCRIPTS)}
 _TABLE = sorted((lo, hi, _BITS[name]) for name, ranges in SCRIPTS.items() for lo, hi in ranges)
 _STARTS = [lo for lo, _hi, _bit in _TABLE]
 _SURROGATES = (0xD800, 0xDFFF)  # never valid in UTF-8: count as "cannot complete" for prefixes
+
+#: (first, last) code points never banned while emoticons are allowed (see the module doc): punctuation and
+#: symbols of the CJK blocks that carry no language. Sorted and disjoint.
+KAOMOJI_RANGES = (
+    (0x3000, 0x3004),    # ideographic space 、 。 〃 〄
+    (0x3008, 0x3020),    # 〈〉《》「」『』【】〒〓〔〕〖〗〘〙〚〛〜〝〞〟〠 (not 々 〆 〇: iteration mark, closing mark, zero)
+    (0x3030, 0x3030),    # 〰 wavy dash (not the Hangzhou numerals, tone marks and kana repeat marks 〡-〵)
+    (0x3036, 0x3037),    # 〶 〷
+    (0x303D, 0x303F),    # 〽 〾 〿 (not 〸-〺 numerals, 〻 〼)
+    (0x30FB, 0x30FC),    # ・ katakana middle dot, ー prolonged sound mark
+    (0xFE10, 0xFE1F),    # vertical forms ︐ ︙
+    (0xFE30, 0xFE4F),    # CJK compatibility forms ︵ ︶ ﹏
+    (0xFF01, 0xFF0F),    # ！＂＃＄％＆＇（）＊＋，－．／ (not the full-width digits ０-９)
+    (0xFF1A, 0xFF20),    # ：；＜＝＞？＠ (not Ａ-Ｚ)
+    (0xFF3B, 0xFF40),    # ［＼］＾＿｀ (not ａ-ｚ)
+    (0xFF5B, 0xFF65),    # ｛｜｝～｟｠ and the half-width ｡｢｣､･
+    (0xFF70, 0xFF70),    # ｰ half-width prolonged sound mark (not the half-width kana)
+    (0xFF9E, 0xFF9F),    # ﾞ ﾟ half-width (semi-)voiced sound marks: the eyes of (ﾟ∀ﾟ)
+    (0xFFE0, 0xFFEE),    # ￠￡￢￣￤￥￦ and the half-width forms │←↑→↓■○
+)
+_KAOMOJI_STARTS = [lo for lo, _hi in KAOMOJI_RANGES]
+#: a byte prefix whose completions span at most this many code points may count as exempt (module doc)
+_KAOMOJI_TAIL_SPAN = 64
 
 #: request kinds whose answer is target-language text (``key_contexts.CONTEXT_LABELS`` names)
 BAN_TASKS = frozenset({
@@ -205,8 +249,20 @@ def script_of(cp: int) -> Optional[str]:
     return next((name for name, value in _BITS.items() if value == bit), None) if bit else None
 
 
-def is_banned_char(cp: int, scripts: Iterable[str] = (CJK,)) -> bool:
-    return bool(_lookup(cp) & script_mask(scripts))
+def is_kaomoji_char(cp: int) -> bool:
+    """A character of ``KAOMOJI_RANGES`` (never banned while emoticons are allowed)."""
+    index = bisect.bisect_right(_KAOMOJI_STARTS, cp) - 1
+    return index >= 0 and cp <= KAOMOJI_RANGES[index][1]
+
+
+def _char_bits(cp: int, allow_kaomoji: bool = False) -> int:
+    if allow_kaomoji and is_kaomoji_char(cp):
+        return 0
+    return _lookup(cp)
+
+
+def is_banned_char(cp: int, scripts: Iterable[str] = (CJK,), *, allow_kaomoji: bool = False) -> bool:
+    return bool(_char_bits(cp, allow_kaomoji) & script_mask(scripts))
 
 
 def is_cjk_target(name: Any) -> bool:
@@ -305,9 +361,14 @@ def _prefix_interval(prefix: bytes) -> Optional[tuple]:
     return (first, last) if first <= last else None
 
 
-def _interval_bits(first: int, last: int) -> int:
+def _interval_bits(first: int, last: int, allow_kaomoji: bool = False) -> int:
     """The script bits of every code point in [first, last] (surrogates skipped); 0 when some code point
-    there belongs to no script (it can always become an allowed character)."""
+    there belongs to no script (it can always become an allowed character), or, with ``allow_kaomoji``,
+    when the interval is narrow (``_KAOMOJI_TAIL_SPAN``) and holds an exempt one."""
+    if allow_kaomoji and last - first < _KAOMOJI_TAIL_SPAN:
+        index = max(bisect.bisect_right(_KAOMOJI_STARTS, last) - 1, 0)
+        if KAOMOJI_RANGES[index][0] <= last and KAOMOJI_RANGES[index][1] >= first:
+            return 0
     bits, cp = 0, first
     while cp <= last:
         if _SURROGATES[0] <= cp <= _SURROGATES[1]:
@@ -333,13 +394,10 @@ def _sequence_length(lead: int) -> int:
     return 0  # a continuation byte or an invalid lead
 
 
-def token_masks(piece: bytes) -> Tuple[int, int]:
-    """(the script bits of the token's complete characters, the script bits every completion of its
-    incomplete UTF-8 tail can have, 0 when it has none or one completion is never banned)."""
-    data = bytes(piece or b"")
-    if data.isascii():
-        return 0, 0
-    chars, index, size = 0, 0, len(data)
+def _walk(data: bytes):
+    """Yield ``(code point, None)`` for each complete non-ASCII character of a token's bytes and, when it
+    ends inside a character, ``(None, that incomplete tail)`` last."""
+    index, size = 0, len(data)
     while index < size:
         lead = data[index]
         length = _sequence_length(lead)
@@ -351,34 +409,87 @@ def token_masks(piece: bytes) -> Tuple[int, int]:
             index += 1
             continue
         if len(tail) < length - 1:  # the token ends inside this character
-            interval = _prefix_interval(data[index:])
-            return chars, (_interval_bits(*interval) if interval else 0)
+            yield None, data[index:]
+            return
         try:
             cp = ord(data[index:index + length].decode("utf-8"))
         except UnicodeDecodeError:
             index += 1
             continue
-        chars |= _lookup(cp)
+        yield cp, None
+        index += length
+
+
+def token_masks(piece: bytes, allow_kaomoji: bool = False) -> Tuple[int, int]:
+    """(the script bits of the token's complete characters, the script bits every completion of its
+    incomplete UTF-8 tail can have, 0 when it has none or one completion is never banned)."""
+    data = bytes(piece or b"")
+    if data.isascii():
+        return 0, 0
+    chars, index, size = 0, 0, len(data)
+    while index < size:  # _walk inlined: the on-device engine runs this on every vocabulary token
+        lead = data[index]
+        length = _sequence_length(lead)
+        if length <= 1:  # ASCII, or a leading/stray continuation byte (a character we cannot see)
+            index += 1
+            continue
+        tail = data[index + 1:index + length]
+        if any(not 0x80 <= byte <= 0xBF for byte in tail):
+            index += 1
+            continue
+        if len(tail) < length - 1:  # the token ends inside this character
+            interval = _prefix_interval(data[index:])
+            return chars, (_interval_bits(*interval, allow_kaomoji) if interval else 0)
+        try:
+            cp = ord(data[index:index + length].decode("utf-8"))
+        except UnicodeDecodeError:
+            index += 1
+            continue
+        chars |= _char_bits(cp, allow_kaomoji) if allow_kaomoji else _lookup(cp)
         index += length
     return chars, 0
+
+
+def token_requirements(piece: bytes, allow_kaomoji: bool = True) -> Tuple[Tuple[Any, int, bool], ...]:
+    """What a token needs from a request's source to be copied (``source_keys``): ``(key, script bits,
+    is_tail)`` for each of its characters of some script (the character, ``KAOMOJI_RANGES`` excepted
+    with ``allow_kaomoji``) and for an incomplete tail of some script (its bytes)."""
+    data = bytes(piece or b"")
+    if data.isascii():
+        return ()
+    out: list = []
+    for cp, tail in _walk(data):
+        if tail is not None:
+            interval = _prefix_interval(tail)
+            bits = _interval_bits(*interval, allow_kaomoji) if interval else 0
+            if bits:
+                out.append((bytes(tail), bits, True))
+            break
+        bits = _char_bits(cp, allow_kaomoji)
+        if bits:
+            out.append((chr(cp), bits, False))
+    return tuple(out)
 
 
 def _banned(chars: int, tail: int, mask: int) -> bool:
     return bool(chars & mask) or (bool(tail) and not tail & ~mask)
 
 
-def token_is_banned(piece: bytes, scripts: Iterable[str] = (CJK,)) -> bool:
+def token_is_banned(piece: bytes, scripts: Iterable[str] = (CJK,), *, allow_kaomoji: bool = False) -> bool:
     """See the module doc: a character of a banned script, or an incomplete tail that can only become one."""
-    return _banned(*token_masks(piece), script_mask(scripts))
+    return _banned(*token_masks(piece, allow_kaomoji), script_mask(scripts))
 
 
-def banned_token_ids(pieces: Iterable[bytes], scripts: Iterable[str] = (CJK,)) -> list:
+def banned_token_ids(pieces: Iterable[bytes], scripts: Iterable[str] = (CJK,), *,
+                     allow_kaomoji: bool = False) -> list:
     """The ids (positions in ``pieces``, each token's raw bytes) to ban."""
     mask = script_mask(scripts)
-    return [token for token, piece in enumerate(pieces) if piece and _banned(*token_masks(piece), mask)]
+    return [token for token, piece in enumerate(pieces)
+            if piece and _banned(*token_masks(piece, allow_kaomoji), mask)]
 
 
-def bias_token_ids(pieces: Iterable[Tuple[int, bytes]], scripts: Iterable[str], limit: int) -> List[int]:
+def bias_token_ids(pieces: Iterable[Tuple[int, bytes]], scripts: Iterable[str], limit: int, *,
+                   allow_kaomoji: bool = False) -> List[int]:
     """The first ``limit`` banned ids of ``(id, raw bytes)`` pairs given lowest id first: in a BPE
     vocabulary a lower id is an earlier merge, so these are the most frequent banned tokens (the single
     lead bytes such as 0xE4 come first and stop the byte-spelled rare characters)."""
@@ -387,7 +498,7 @@ def bias_token_ids(pieces: Iterable[Tuple[int, bytes]], scripts: Iterable[str], 
     if not mask or limit <= 0:
         return found
     for token, piece in pieces:
-        if piece and _banned(*token_masks(piece), mask):
+        if piece and _banned(*token_masks(piece, allow_kaomoji), mask):
             found.append(int(token))
             if len(found) >= limit:
                 break
@@ -416,7 +527,8 @@ def openai_encoding_name(model: Any) -> Optional[str]:
 
 
 @functools.lru_cache(maxsize=32)
-def _openai_bias_ids(encoding_name: str, scripts: Tuple[str, ...], limit: int) -> Tuple[int, ...]:
+def _openai_bias_ids(encoding_name: str, scripts: Tuple[str, ...], limit: int,
+                     allow_kaomoji: bool = False) -> Tuple[int, ...]:
     import tiktoken  # the token counter's tokenizer; its files are cached on first use
 
     encoding = tiktoken.get_encoding(encoding_name)
@@ -429,20 +541,21 @@ def _openai_bias_ids(encoding_name: str, scripts: Tuple[str, ...], limit: int) -
             except Exception:
                 continue
 
-    return tuple(bias_token_ids(pieces(), scripts, limit))
+    return tuple(bias_token_ids(pieces(), scripts, limit, allow_kaomoji=allow_kaomoji))
 
 
-def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LOGIT_BIAS_LIMIT) -> Dict[str, int]:
+def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LOGIT_BIAS_LIMIT, *,
+                      allow_kaomoji: bool = False) -> Dict[str, int]:
     """``{"<token id>": -100}`` for the most frequent tokens of ``scripts`` in ``model``'s tokenizer, {}
     when the model takes no logit bias, nothing is banned or tiktoken cannot load the encoding. A
     whole script does not fit in the provider's cap; the output guard (``foreign_script_leak``) covers
-    the rest."""
+    the rest. ``allow_kaomoji`` leaves the ``KAOMOJI_RANGES`` tokens out."""
     name = openai_encoding_name(model)
     wanted = tuple(sorted(set(str(s) for s in scripts or ()) & set(SCRIPTS)))
     if not name or not wanted:
         return {}
     try:
-        ids = _openai_bias_ids(name, wanted, int(limit))
+        ids = _openai_bias_ids(name, wanted, int(limit), bool(allow_kaomoji))
     except Exception:
         return {}
     return {str(token): -100 for token in ids}
@@ -473,10 +586,12 @@ def _source_text(source: Any) -> str:
     return "\n".join(parts)
 
 
-def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "") -> Optional[Dict[str, Any]]:
+def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "", *,
+                        allow_kaomoji: bool = False) -> Optional[Dict[str, Any]]:
     """The banned-script characters of a response, None while below the threshold (``LEAK_MIN_CHARS`` and
     ``LEAK_MIN_SHARE``). A run of banned-script characters that also occurs in ``source`` (the request's
-    text or messages: a kept original name, a quoted line) is not counted.
+    text or messages: a kept original name, a quoted line) is not counted, nor (``allow_kaomoji``) a
+    character of ``KAOMOJI_RANGES``.
 
     Returns ``{"chars": n, "scripts": {name: n}, "sample": "<first runs>"}``."""
     body = str(text or "")
@@ -504,8 +619,9 @@ def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "") -> 
         if len(samples) < 5:
             samples.append(piece[:20])
 
+    allow = bool(allow_kaomoji)
     for ch in body:
-        if _lookup(ord(ch)) & mask:
+        if _char_bits(ord(ch), allow) & mask:
             run.append(ch)
         else:
             close()
@@ -516,6 +632,131 @@ def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "") -> 
     if total < LEAK_MIN_CHARS or total < LEAK_MIN_SHARE * visible:
         return None
     return {"chars": total, "scripts": counts, "sample": " ".join(samples)}
+
+
+# ------------------------------------------------- emoticons in the source (on-device, opt-in)
+
+#: punctuation of prose: a character next to these (or to a space) is not in an emoticon
+_PROSE_MARKS = frozenset(".,!?;:'\"“”‘’„«»‹›…·、。，．！？：；「」『』〈〉《》【】〔〕‥⋯〜~—–―─"
+                         + "".join(map(chr, (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))))  # zero-width spaces
+#: the kana-attached marks count as kana while reading the source (ー in スーパー keeps the word whole)
+_KANA_MARKS = "ーｰﾞﾟ"
+#: the CJK group read as its three writing systems (a Korean source writes Hangul words; a lone katakana
+#: ツ beside them is still an emoticon)
+_HANGUL = ((0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F), (0xAC00, 0xD7FF), (0xFFA0, 0xFFDC))
+_KANA = ((0x3040, 0x30FF), (0x31F0, 0x31FF), (0xFF65, 0xFF9F), (0x1AFF0, 0x1B16F))
+
+
+def _subtract(ranges, remove) -> List[Tuple[int, int]]:
+    """``ranges`` minus ``remove`` (both sorted, disjoint)."""
+    out: List[Tuple[int, int]] = []
+    for lo, hi in ranges:
+        start = lo
+        for r_lo, r_hi in remove:
+            if r_hi < start or r_lo > hi:
+                continue
+            if r_lo > start:
+                out.append((start, r_lo - 1))
+            start = r_hi + 1
+        if start <= hi:
+            out.append((start, hi))
+    return out
+
+
+def _intersect(ranges, keep) -> List[Tuple[int, int]]:
+    return [(max(lo, k_lo), min(hi, k_hi)) for lo, hi in ranges for k_lo, k_hi in keep
+            if max(lo, k_lo) <= min(hi, k_hi)]
+
+
+#: writing system -> its ranges for reading a source (``SCRIPTS`` with CJK split in Hangul, kana and Han)
+_PARTS: Dict[str, List[Tuple[int, int]]] = {
+    "hangul": _intersect(BANNED_RANGES, _HANGUL),
+    "kana": _intersect(BANNED_RANGES, _KANA),
+    "han": _subtract(_subtract(BANNED_RANGES, _HANGUL), _KANA),
+    **{name: list(ranges) for name, ranges in SCRIPTS.items() if name != CJK},
+}
+_PART_TABLE = sorted((lo, hi, name) for name, ranges in _PARTS.items() for lo, hi in ranges)
+_PART_STARTS = [lo for lo, _hi, _name in _PART_TABLE]
+
+
+def _part_of(cp: int) -> Optional[str]:
+    index = bisect.bisect_right(_PART_STARTS, cp) - 1
+    if index >= 0 and cp <= _PART_TABLE[index][1]:
+        return _PART_TABLE[index][2]
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _word_pattern(part: str):
+    """Two or more letters of ``part`` in a row (a word of it; the exempt symbols do not count)."""
+    ranges = _subtract(_PARTS[part], KAOMOJI_RANGES)
+    text = "".join(f"\\U{lo:08x}" if lo == hi else f"\\U{lo:08x}-\\U{hi:08x}" for lo, hi in ranges)
+    if part == "kana":
+        text += "".join(f"\\u{ord(ch):04x}" for ch in _KANA_MARKS)
+    return re.compile(f"[{text}]{{2,}}")
+
+
+def kaomoji_source_chars(text: Any, scripts: Iterable[str]) -> FrozenSet[str]:
+    """The characters of banned ``scripts`` that ``text`` (a request's source) uses in emoticons.
+
+    A writing system the source writes words in (two of its letters in a row anywhere: Hangul in a
+    Korean source, kana and Han in a Japanese one, Devanagari in a Hindi one) gives none, and Han never
+    does (a lone ideograph is a word: the hanja of 성(性)녀). Of the others,
+    a character counts when it touches a symbol somewhere and is never surrounded only by spaces, prose
+    punctuation (``_PROSE_MARKS``), Latin letters, digits or letters of the source's own writing: ツ in
+    ¯\\_(ツ)_/¯, ノ in (ノ°▽°)ノ, ಠ in ಠ_ಠ, ٩ and ۶ in ٩(◕‿◕)۶. ``KAOMOJI_RANGES`` characters are never
+    returned (they are exempt anyway)."""
+    body = text if isinstance(text, str) else _source_text(text)
+    mask = script_mask(scripts)
+    if not body or not mask or body.isascii():
+        return frozenset()
+    present: Dict[str, set] = {}
+    for ch in set(body):
+        cp = ord(ch)
+        if not _lookup(cp) & mask or is_kaomoji_char(cp):
+            continue
+        present.setdefault(_part_of(cp) or "", set()).add(ch)
+    if not present:
+        return frozenset()
+    prose = {part for part in present if part and _word_pattern(part).search(body)}
+    # a Han character is a word on its own (the hanja of 성(性)녀), never only a face
+    candidates = [ch for part, chars in present.items() if part not in prose and part != "han" for ch in chars]
+    picked: set = set()
+    size = len(body)
+    for ch in candidates:
+        symbol = plain = False
+        start = body.find(ch)
+        while start >= 0 and not plain:
+            near_symbol = False
+            for at in (start - 1, start + 1):
+                if not 0 <= at < size:
+                    continue
+                near = body[at]
+                if near.isspace() or near in _PROSE_MARKS:
+                    continue
+                if near.isalnum() and (not _lookup(ord(near)) or _part_of(ord(near)) in prose):
+                    continue  # a word of the prose: 5년, TV를, 다ツ
+                near_symbol = True
+            symbol = symbol or near_symbol
+            plain = not near_symbol
+            start = body.find(ch, start + 1)
+        if symbol and not plain:
+            picked.add(ch)
+    return frozenset(picked)
+
+
+def source_keys(chars: Iterable[str]) -> FrozenSet[Any]:
+    """The ``token_requirements`` keys ``chars`` cover: each character and its encoding without the last
+    byte (a byte-level vocabulary may spell ಠ as E0 B2 + A0; that prefix can only become one of 64 code
+    points). Shorter prefixes are not covered: the lone lead byte E0 or E3 would open thousands of
+    characters (all of Devanagari ... Tibetan, or all kana), the continuation bytes after it being free."""
+    keys: set = set()
+    for ch in chars:
+        keys.add(ch)
+        raw = ch.encode("utf-8")
+        if len(raw) > 1:
+            keys.add(raw[:-1])
+    return frozenset(keys)
 
 
 def retry_instruction(target: Any, scripts: Iterable[str] = ()) -> str:

@@ -1776,6 +1776,7 @@ class RunEnvMixin:
             'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var else '0',
             'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var else '0',
             'BLOCK_OTHER_SCRIPTS': '1' if getattr(self, 'block_other_scripts_var', False) else '0',
+            'SCRIPT_BAN_ALLOW_KAOMOJI': '1' if getattr(self, 'script_ban_allow_kaomoji_var', False) else '0',
             'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
             'VERTEX_AI_LOCATION': self.vertex_location_var if hasattr(self, 'vertex_location_var') and isinstance(self.vertex_location_var, str) else (self.vertex_location_var.text() if hasattr(self, 'vertex_location_var') and hasattr(self.vertex_location_var, 'text') else 'us-east5'),
@@ -2121,6 +2122,7 @@ class RunEnvMixin:
             'BIAS_COMMON_WORDS': 'Bias against common words',
             'BIAS_REPETITIVE_PHRASES': 'Bias against repetitive phrases',
             'BLOCK_OTHER_SCRIPTS': 'Block other scripts in translations',
+            'SCRIPT_BAN_ALLOW_KAOMOJI': 'Allow emoticons from other scripts (kaomoji)',
             
             # Azure
             'AZURE_API_VERSION': 'Azure API version',
@@ -2857,6 +2859,7 @@ class RunEnvMixin:
                 ('BIAS_COMMON_WORDS', '1' if getattr(self, 'bias_common_words_var', False) else '0'),
                 ('BIAS_REPETITIVE_PHRASES', '1' if getattr(self, 'bias_repetitive_phrases_var', False) else '0'),
                 ('BLOCK_OTHER_SCRIPTS', '1' if getattr(self, 'block_other_scripts_var', False) else '0'),
+                ('SCRIPT_BAN_ALLOW_KAOMOJI', '1' if getattr(self, 'script_ban_allow_kaomoji_var', False) else '0'),
 
                 # Azure API version
                 ('AZURE_API_VERSION', self.config.get('azure_api_version', '2025-01-01-preview')),

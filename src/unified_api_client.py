@@ -3563,7 +3563,15 @@ class UnifiedClient:
         target = (os.getenv('OUTPUT_LANGUAGE') or '').strip()
         if target:
             fields['target_language'] = target
+        if UnifiedClient._script_ban_allow_kaomoji():
+            fields['glossarion_allow_kaomoji'] = True
         return fields
+
+    @staticmethod
+    def _script_ban_allow_kaomoji() -> bool:
+        """"Allow emoticons and symbols from other scripts (kaomoji)" (SCRIPT_BAN_ALLOW_KAOMOJI, off by
+        default): the script ban lets kaomoji punctuation through (``script_ban_core.KAOMOJI_RANGES``)."""
+        return (os.getenv('SCRIPT_BAN_ALLOW_KAOMOJI') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
     def _script_ban_scripts(self, context=None) -> tuple:
         """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
@@ -3604,7 +3612,10 @@ class UnifiedClient:
         if not scripts:
             return {}
         import script_ban_core
-        bias = script_ban_core.openai_logit_bias(model, scripts)
+        if self._script_ban_allow_kaomoji():  # kaomoji punctuation left out of the 300 entries
+            bias = script_ban_core.openai_logit_bias(model, scripts, allow_kaomoji=True)
+        else:
+            bias = script_ban_core.openai_logit_bias(model, scripts)
         if not bias:
             return {}
         self._log_once(f"🔤 Block other scripts: logit_bias on {len(bias)} tokens for {model}")
@@ -3619,7 +3630,10 @@ class UnifiedClient:
         if not scripts or not isinstance(content, str) or not content.strip():
             return None
         import script_ban_core
-        leak = script_ban_core.foreign_script_leak(content, scripts, messages)
+        if self._script_ban_allow_kaomoji():  # kaomoji punctuation is not a leak
+            leak = script_ban_core.foreign_script_leak(content, scripts, messages, allow_kaomoji=True)
+        else:
+            leak = script_ban_core.foreign_script_leak(content, scripts, messages)
         if not leak:
             return None
         target = self._on_device_task_fields().get('target_language', '')
@@ -15376,7 +15390,7 @@ class UnifiedClient:
     _LOGISTICS_ANTI_DUPLICATE = (
         ("TOP_P", 1.0), ("MIN_P", 0.0), ("TOP_K", 0), ("FREQUENCY_PENALTY", 0.0), ("PRESENCE_PENALTY", 0.0),
         ("REPETITION_PENALTY", 1.0), ("CANDIDATE_COUNT", 1), ("CUSTOM_STOP_SEQUENCES", ""),
-        ("LOGIT_BIAS_ENABLED", "0"), ("BLOCK_OTHER_SCRIPTS", "0"),
+        ("LOGIT_BIAS_ENABLED", "0"), ("BLOCK_OTHER_SCRIPTS", "0"), ("SCRIPT_BAN_ALLOW_KAOMOJI", "0"),
     )
 
     def _anti_duplicate_snapshot(self, temperature=None):
