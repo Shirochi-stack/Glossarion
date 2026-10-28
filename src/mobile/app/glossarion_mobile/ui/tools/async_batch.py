@@ -32,6 +32,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
@@ -140,14 +141,13 @@ class AsyncBatchScreen(Screen):
         self.support_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="async-support")
         info = card("Model", [self.model_text, self.support_text, hint_text(DISCOUNT_NOTE, key="async-discount")],
                     icon="SCHEDULE_SEND", key="async-info")
-        self.wait_switch = ft.Switch(label="Wait for completion (the job keeps polling)",
-                                     value=bool(self.ctx.cfg(WAIT_KEY, False)), on_change=self._on_wait,
+        self.wait_switch = ft.Switch(value=bool(self.ctx.cfg(WAIT_KEY, False)), on_change=self._on_wait,
                                      key="async-wait")
         self.poll_field = commit_on_blur(
             ft.TextField(label="Poll interval (seconds)", value=str(self.ctx.cfg(POLL_KEY, 60)), dense=True,
                          keyboard_type=number_keyboard(), width=200, key="async-poll"),
             lambda _text: self._on_poll(), current=lambda: self.ctx.cfg(POLL_KEY, 60))
-        config = card("Async Processing Configuration", [self.wait_switch, self.poll_field,
+        config = card("Async Processing Configuration", [switch_row(self.wait_switch, "Wait for completion (the job keeps polling)"), self.poll_field,
                                                          hint_text(CHUNKING_NOTE, key="async-chunk-note")],
                       icon="TUNE", key="async-config")
         self.source_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_MEDIUM, key="async-source")

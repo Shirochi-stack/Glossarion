@@ -302,6 +302,29 @@ def test_log_console_never_changes_auto_scroll_and_holds_lines_while_paused(_fol
     assert seen and all(seen), "auto_scroll changed: Flet would rebuild the scroll view at the log's top"
 
 
+#: the longest built-in Switch label that still fits beside its switch on a 360 dp phone at 100 % text
+SWITCH_LABEL_FITS = 32
+
+
+def test_no_long_built_in_switch_label_anywhere_in_the_app():
+    """Owner (2026-10-28, after hotfix 1): every long switch label in the app wraps, not only the manga
+    translator's (Keys "Fallback Key Shuffle (skip keys on API delay cooldown)", QA custom "Check all file
+    pairs ...", glossary backups, Library review, cloud copy, on-device CJK block, notifications, async
+    batch). A label longer than SWITCH_LABEL_FITS goes through switch_row."""
+    import ast
+
+    app = MOBILE_DIR / "app" / "glossarion_mobile"
+    long_labels = []
+    for path in sorted(app.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Switch"):
+                for kw in node.keywords:
+                    if (kw.arg == "label" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)
+                            and len(kw.value.value) > SWITCH_LABEL_FITS):
+                        long_labels.append((path.relative_to(app).as_posix(), kw.value.value))
+    assert long_labels == [], long_labels
+
+
 def test_no_screen_switches_auto_scroll_on_a_mounted_list():
     """A change of ``auto_scroll`` rebuilds Flutter's Scrollable at offset 0 (the log console, the Job page,
     the Reader's live panel and the chat card's request list all threw their reader to the top). Only two

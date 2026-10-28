@@ -200,6 +200,7 @@ app_files = [
 	
 	('multi_api_key_manager.py', '.'),
 	('key_contexts.py', '.'),
+	('script_ban_core.py', '.'),
 	('request_schedule.py', '.'),
 	('ollama_settings_dialog.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
@@ -485,6 +486,7 @@ app_modules = [
     'individual_endpoint_dialog',
     'multi_api_key_manager',
     'key_contexts',
+    'script_ban_core',
     'request_schedule',
     'ollama_settings_dialog',
     'onnx_cpp_backend',

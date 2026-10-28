@@ -296,6 +296,15 @@ class GlossarionNativeService extends FletService {
           return _unfocus();
         case 'take_photo':
           return await _takePhoto();
+        case 'can_install_packages':
+        case 'open_install_settings':
+          // In-app updates (About › Updates): Android only; iOS apps cannot
+          // replace themselves.
+          return _isAndroid ? (await _platform(name, args)) == true : false;
+        case 'install_package':
+          if (!_isAndroid) return _defaultResult(name);
+          final dynamic installed = await _platform('install_package', args);
+          return installed is Map ? installed : _defaultResult(name);
         case 'begin_background_task':
           if (!_isIOS) return -1;
           final dynamic taskId = await _platform('begin_background_task', args);
@@ -448,6 +457,14 @@ class GlossarionNativeService extends FletService {
       };
     }
     switch (name) {
+      case 'install_package':
+        return <String, dynamic>{
+          'ok': false,
+          'error': 'unavailable',
+          'message': 'Installing updates needs the Android app',
+        };
+      case 'can_install_packages':
+      case 'open_install_settings':
       case 'exclude_from_backup':
       case 'release':
       case 'cancel_document_op':

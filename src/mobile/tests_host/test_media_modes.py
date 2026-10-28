@@ -1841,8 +1841,8 @@ def test_startup_sweep_moves_earlier_chat_books_once(desktop_store_cls, tmp_path
 def test_finished_listeners_run_after_the_commit_and_the_library_hooks(desktop_store_cls, tmp_path, iso_env,
                                                                        monkeypatch):
     """``subscribe_finished`` runs once the chat is saved and idle; the chat env's Library hooks (C2):
-    ``library_book`` finds the moved book's id, ``library_translate`` opens the Library translate sheet
-    for it (Resume / Retry failed of a moved workspace); the move itself shows no snackbar."""
+    ``library_book`` finds the moved book's id, ``library_translate`` resumes that Library book's run
+    (Resume / Retry failed of a moved workspace); the move itself shows no snackbar."""
     from glossarion_mobile.ui.chat.run_controller import ChatRun, ChatRuns
     from glossarion_mobile.ui.chat.run_request import DirectTextRun
     from glossarion_mobile.ui.chat.stream_bridge import RunStream
@@ -1883,13 +1883,14 @@ def test_finished_listeners_run_after_the_commit_and_the_library_hooks(desktop_s
     service.ensure_env()
     sheets = []
 
-    async def fake_sheet(ctx, books):
-        sheets.append((ctx, [dict(b) for b in books]))
+    async def fake_resume(ctx, book, config_overrides=None):
+        sheets.append((ctx, [dict(book)]))
         return "sheet"
 
     import glossarion_mobile.ui.library.translate_sheet as translate_sheet
 
-    monkeypatch.setattr(translate_sheet, "open_translate_sheet", fake_sheet)
+    # 9.15.7 batch issue 4: the run starts at once (resume_translation), no translate sheet
+    monkeypatch.setattr(translate_sheet, "resume_translation", fake_resume)
     try:
         feature, app, notes, routes = _chat_feature(
             adapter, _IdleJobs(), tmp_path, library=service,

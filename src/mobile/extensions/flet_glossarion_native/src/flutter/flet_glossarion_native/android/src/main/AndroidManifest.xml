@@ -24,6 +24,10 @@
     On-device) loads the phone's own OpenCL driver. Android 12+ (targetSdk 31+)
     hides vendor libraries from apps that do not declare them; required="false"
     keeps the app installable everywhere (no OpenCL: the GPU falls back to the CPU).
+  * In-app updates (About > Updates, AppUpdates.kt): REQUEST_INSTALL_PACKAGES lets the
+    app open the system installer for its own downloaded APK (the user still confirms,
+    and allows "Install unknown apps" for Glossarion once). GlossarionUpdateFileProvider
+    shares <cache>/updates only (res/xml/glossarion_native_update_paths.xml).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -31,6 +35,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <queries>
         <intent>
@@ -55,6 +60,16 @@
         <meta-data
             android:name="com.glossarion.native.notification_icon"
             android:resource="@drawable/glossarion_native_ic_notification" />
+
+        <provider
+            android:name="com.glossarion.flet_glossarion_native.GlossarionUpdateFileProvider"
+            android:authorities="${applicationId}.glossarion_native.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/glossarion_native_update_paths" />
+        </provider>
 
         <activity
             android:name="com.glossarion.flet_glossarion_native.ShareReceiverActivity"

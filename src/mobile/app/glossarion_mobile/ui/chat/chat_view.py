@@ -2898,8 +2898,8 @@ class ChatView:
 
     async def _resume_turn(self, item: Any, *, config: Optional[tuple] = None, pending: Optional[tuple] = None,
                            turn: Optional[dict] = None) -> Any:
-        """Resume / Retry failed of a Result card: a workspace that moved into the Library continues in
-        the Library's translate sheet (``ChatEnv.library_translate``: its own progress file); the chat's
+        """Resume / Retry failed of a Result card: a workspace that moved into the Library continues as the
+        Library book's run, started at once (``ChatEnv.library_translate``: its own progress file); the chat's
         run root otherwise (``ChatRuns.resubmit``). ``config``: the card's ``_take_resume_config`` (taken at the
         tap), ``pending``: the ``_resuming`` key ``begin_resume`` set, released here whatever happens."""
         cid = pending[0] if pending is not None else self.cid
@@ -2910,8 +2910,12 @@ class ChatView:
             if folder and not in_attachments and hand_off is not None:
                 if self._resume_cancelled(pending):
                     return None
-                # the card's "Only for this run" values go with it (the sheet starts switched on with them)
-                extra = {"run_config": run_config} if run_config else {}
+                # the run starts at once (no sheet, 9.15.7 batch issue 4) with what the card shows: its "Only
+                # for this run" values and the chat's model / profile / language now (as ``_resubmit``)
+                extra: dict = {"run_config": run_config} if run_config else {}
+                chat = self.run_overrides(cid) if self.env is not None and self.env.chats is not None else {}
+                if chat:
+                    extra["chat_overrides"] = chat
                 return await self._await(hand_off(folder, self._turn_source(item), **extra))
             if pending is None:
                 self._resume_last(run_config, run_key)

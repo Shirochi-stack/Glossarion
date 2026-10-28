@@ -14,6 +14,9 @@
 * Requests (N): request cards from the shared ``direct_text_stream`` request
   model fed by the job log (``JobService.request_segments``), in its order
   (spine order for attachments). A placeholder line until the build has it.
+  While the job is queued or running the cards sit in a box of ``JOB_REQUESTS_BOX_HEIGHT`` that follows
+  its newest card itself, so the page never grows above the Log card (v9.15.7 batch, see
+  ``JobDetailScreen._show_requests``); a finished job's short list is a plain Column.
 * Log: ``LogConsole`` over the job's ``LogBuffer`` (live), or the tail of
   ``<logs>/jobs/<id>.log`` for older jobs; Copy and Share log.
 * Outputs: one chip per output file -> Share / Save to… / Save to Downloads /
@@ -63,6 +66,10 @@ log = logging.getLogger("glossarion.jobs")
 MAX_REQUEST_CARDS = 60
 PREVIEW_CHARS = 280
 REQUEST_REFRESH_S = 1.0
+#: height (dp) of the box the request cards scroll in while the job runs (``_show_requests``); a finished
+#: job's list takes it once its cards (about ``JOB_REQUEST_CARD_HEIGHT`` each) would not fit
+JOB_REQUESTS_BOX_HEIGHT = 320
+JOB_REQUEST_CARD_HEIGHT = 96
 #: Library button (hotfix 3 issue 2): a finished chat book that did not reach the Library (``ChatFeature.
 #: library_translate``'s wording; a name clash waits for "Merge into Library…").
 NOT_IN_LIBRARY = "This book is not in the Library yet"
@@ -263,10 +270,18 @@ class JobDetailScreen(Screen):
             key="job-header",
         )
         self.requests_title = ft.Text("Requests", theme_style=ft.TextThemeStyle.TITLE_SMALL)
-        self.requests_column = ft.Column([], spacing=6, tight=True)
+        # the chat card's Requests pattern (U12 item 3): a list in a box of fixed height that follows its newest
+        # card (auto_scroll set once, every card laid out: v9.15.7 hotfix 1), or a plain Column at its natural
+        # height; ``requests_column`` is the shown one (_show_requests)
+        self.requests_short = ft.Column([], spacing=6, tight=True, key="job-requests-short")
+        self.requests_list = ft.ListView([], spacing=6, auto_scroll=True,
+                                         auto_scroll_animation=ft.Animation(0, ft.AnimationCurve.LINEAR),
+                                         cache_extent=LAYOUT_ALL_EXTENT, key="job-requests-list")
+        self.requests_column: Any = self.requests_short
+        self.requests_box = ft.Container(content=self.requests_short, height=None, key="job-requests-box")
         self.requests_tile = ft.ExpansionTile(
             title=self.requests_title,
-            controls=[self.requests_column],
+            controls=[self.requests_box],
             expanded=self.snap.is_active,
             controls_padding=ft.Padding.only(left=8, right=8, bottom=8),
             key="job-requests",
@@ -451,13 +466,32 @@ class JobDetailScreen(Screen):
             text = ("Request cards appear as API requests start." if self.service.has_request_stream(self.job_id)
                     else "Request cards appear here when the shared request classifier is in this build; "
                          "the log below shows every request.")
-            self.requests_column.controls = [ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL,
-                                                     color=ft.Colors.ON_SURFACE_VARIANT)]
+            self._show_requests([ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                         color=ft.Colors.ON_SURFACE_VARIANT)], cards=0)
             self.requests_title.value = "Requests"
             return
         cards = [request_card_data(seg, i) for i, seg in enumerate(segments)][-MAX_REQUEST_CARDS:]
         self.requests_title.value = f"Requests ({len(segments)})"
-        self.requests_column.controls = [self._request_card(card) for card in cards]
+        self._show_requests([self._request_card(card) for card in cards], cards=len(cards))
+
+    def _show_requests(self, rows: list, *, cards: int) -> None:
+        """The rows in the box of ``JOB_REQUESTS_BOX_HEIGHT`` while the job is queued or running (and for a
+        finished job whose cards would not fit), else in the plain Column.
+
+        v9.15.7 batch (owner: the log "scrolls past the bottom making it look like I'm passing scroll down";
+        emulator: one frame with the Log card 100-300 dp lower each time a request started): a card added
+        or grown above the Log grew the page, Flutter keeps the offset at layout and Flet's auto_scroll pin
+        is a post-frame jump, so that frame was painted with the Log card pushed down (a shrink: past the
+        page's end) before the pin. In the box only the box's own list moves; the page keeps its height."""
+        snap = self.snap
+        running = snap is not None and not snap.is_terminal
+        boxed = running or cards * JOB_REQUEST_CARD_HEIGHT > JOB_REQUESTS_BOX_HEIGHT
+        shown = self.requests_list if boxed else self.requests_short
+        (self.requests_short if boxed else self.requests_list).controls = []
+        shown.controls = rows
+        self.requests_column = shown
+        self.requests_box.content = shown
+        self.requests_box.height = JOB_REQUESTS_BOX_HEIGHT if boxed else None
 
     def _request_card(self, card: RequestCardData) -> ft.Control:
         header = [ft.Text(card.label, theme_style=ft.TextThemeStyle.LABEL_LARGE, expand=True, max_lines=2)]

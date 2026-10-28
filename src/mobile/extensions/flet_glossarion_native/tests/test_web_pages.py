@@ -788,9 +788,11 @@ def test_build_files_are_unchanged():
     assert re.search(r"^version: 0\.1\.0$", pubspec, re.M)
     root = ET.parse(MANIFEST).getroot()
     permissions = {p.get(ANDROID_NS + "name") for p in root.findall("uses-permission")}
+    # REQUEST_INSTALL_PACKAGES: About › Updates opens the system installer for the downloaded APK (v9.15.7 batch)
     assert permissions == {
         "android.permission.FOREGROUND_SERVICE", "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
         "android.permission.POST_NOTIFICATIONS", "android.permission.WAKE_LOCK",
+        "android.permission.REQUEST_INSTALL_PACKAGES",
     }
     assert gn.EXTENSION_VERSION == "0.1.0"
 
