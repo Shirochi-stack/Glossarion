@@ -1401,8 +1401,7 @@ def test_settings_tab_providers_inpainting_rendering_and_schema_groups(iso, tmp_
         keys = [str(getattr(c, "key", "") or "").rsplit("-g", 1)[0] for c in tab.ocr_card.content.controls]
         assert "ms-azure-key" in keys and "ms-azure-endpoint" in keys
         tab.select_provider("custom-api")
-        disable = next(c for c in tab.ocr_card.content.controls
-                       if str(getattr(c, "key", "") or "").startswith("ms-ocr-no-thinking-g"))
+        disable = _by_key(tab.ocr_card)["ms-ocr-no-thinking"]  # the switch inside its switch_row
         disable.value = False
         disable.on_change(types.SimpleNamespace(control=disable))
         assert store.get(("manga_settings", "ocr", "manga_ocr_disable_thinking")) is False
