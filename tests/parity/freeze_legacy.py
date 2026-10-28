@@ -636,10 +636,12 @@ def build_init_blocks(src: ModuleSource, init: ast.FunctionDef) -> list:
                 return i
         raise SystemExit(f"freeze_legacy: __init__ anchor not found: {what}")
 
-    # pre-U1: ``with open(CONFIG_FILE ...)``; U1+: ``self.config = load_config(CONFIG_FILE)``
+    # pre-U1: ``with open(CONFIG_FILE ...)``; U1+: ``self.config = load_config(CONFIG_FILE)``;
+    # 2026-10-29+: ``load_config_or_restore_backup(CONFIG_FILE)`` (restores a backup of an unreadable config)
     config_load = find(
         lambda s: isinstance(s, ast.Try)
-        and ("open(CONFIG_FILE" in ast.unparse(s) or "load_config(CONFIG_FILE" in ast.unparse(s)),
+        and any(anchor in ast.unparse(s) for anchor in (
+            "open(CONFIG_FILE", "load_config(CONFIG_FILE", "load_config_or_restore_backup(CONFIG_FILE")),
         what="config load try (open(CONFIG_FILE ...) / load_config(CONFIG_FILE))",
     )
     update_mgr = find(

@@ -1124,7 +1124,7 @@ fallback_compile_epub = scan_html_folder = None
 # override and the macOS App Translocation fallback) lives in app_paths so
 # GUI-free code shares it; the names stay importable from translator_gui.
 from app_paths import CONFIG_FILE, _APP_DIR, _atomic_json_write, _get_app_dir
-from config_store import load_config, save_config_file
+from config_store import load_config_or_restore_backup, save_config_file
 from key_pools import apply_key_pools_to_runtime
 # Shared GUI-free core (U2): TranslatorGUI inherits the moved methods; the module
 # constants stay importable from translator_gui for existing callers.
@@ -9024,6 +9024,22 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         except Exception as e:
             print(f"[Sanitizer] Failed to save config: {e}")
 
+    def _show_config_recovery_notice(self):
+        """Tell the user config.json was unreadable at startup and what was restored."""
+        notice = getattr(self, '_config_recovery_notice', None)
+        if not notice:
+            return
+        self._config_recovery_notice = None
+        try:
+            self.append_log(f"⚠️ {notice}")
+        except Exception:
+            pass
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Configuration Recovered", notice)
+        except Exception as e:
+            print(f"⚠️ Could not show the config recovery message: {e}")
+
     def _hook_save_default_config(self):
         """ConfigStateMixin._init_config_state: write config.json once the first-run default exists."""
         try:
@@ -9400,15 +9416,21 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.logo_img = None
         self.config_file_path = CONFIG_FILE
         
-        # Load config (config_store.load_config reads and decrypts API keys)
+        # Load config (reads and decrypts API keys). An unreadable config.json is moved aside
+        # and the earliest valid backup restored; only without one does it start from {}.
         try:
-            self.config = load_config(CONFIG_FILE)
+            self.config, recovery_notice = load_config_or_restore_backup(CONFIG_FILE)
+            if recovery_notice:
+                self._config_recovery_notice = recovery_notice  # shown once the window is up
 
             # Auto-fix malformed prompts in config
             self._sanitize_config_prompts()
-        except: 
-            self.config = {}
-            
+        except Exception as e:
+            # A failed prompt fix keeps the loaded config (it used to reset it to {} and save that)
+            print(f"⚠️ Config load/sanitize failed: {e}")
+            if not isinstance(getattr(self, 'config', None), dict):
+                self.config = {}
+
         self._init_config_state()
              
         # Initialize update manager AFTER config is loaded
@@ -30285,6 +30307,13 @@ if __name__ == "__main__":
                 QTimer.singleShot(300, main_window._show_glossary_mode_welcome)
         except Exception as e:
             print(f"⚠️ Welcome dialog scheduling failed: {e}")
+
+        try:
+            if getattr(main_window, '_config_recovery_notice', None):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(200, main_window._show_config_recovery_notice)
+        except Exception as e:
+            print(f"⚠️ Config recovery notice scheduling failed: {e}")
 
         # Re-enable quitOnLastWindowClosed now that the main window is visible.
         # This was disabled in splash_utils to prevent macOS from auto-quitting

@@ -246,8 +246,9 @@ def test_config_backup_no_longer_imports_translator_gui():
 def test_app_paths_is_the_verbatim_translator_gui_block():
     old = legacy_tree("src/translator_gui.py")
     new = current_tree("app_paths")
-    for name in ("_atomic_json_write", "_get_app_dir"):
-        assert dump(top_function(new, name)) == dump(top_function(old, name)), name
+    # _atomic_json_write was rewritten on 2026-10-29 (its direct-write fallback truncated config.json;
+    # tests/test_config_corruption_recovery.py covers it), so only _get_app_dir is still verbatim
+    assert dump(top_function(new, "_get_app_dir")) == dump(top_function(old, "_get_app_dir"))
 
     def app_dir_block(tree):
         body = tree.body
@@ -992,7 +993,8 @@ def parity(tmp_path_factory):
         new_bundle = freeze_legacy.load_legacy(WORKTREE_SHA)
 
     imports = new_bundle.manifest["imports"]
-    for name, module in (("load_config", "config_store"), ("save_config_file", "config_store"),
+    # load_config_or_restore_backup: load_config + backup recovery of an unreadable config (2026-10-29)
+    for name, module in (("load_config_or_restore_backup", "config_store"), ("save_config_file", "config_store"),
                          ("apply_key_pools_to_runtime", "key_pools"), ("_get_app_dir", "app_paths"),
                          ("sanitize_prompt_profiles", "prompt_defaults")):
         if name in imports:

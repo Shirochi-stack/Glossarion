@@ -2563,8 +2563,8 @@ def _create_danger_zone_section(self, parent):
                     try:
                         # Write temporary config with just the preserved keys
                         # This effectively resets everything else since the app will fill in defaults
-                        with open(config_path, 'w', encoding='utf-8') as f:
-                            json.dump(keys_to_preserve, f, indent=2, ensure_ascii=False)
+                        from app_paths import _atomic_json_write
+                        _atomic_json_write(config_path, keys_to_preserve)
                             
                         # Restart
                         import sys

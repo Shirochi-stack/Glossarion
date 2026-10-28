@@ -196,14 +196,25 @@ def restore_config_backup_file(path, backup_path, *, safety_backup=None):
     """
     config_file = _resolve(path)
     # Read first: creating a safety backup may prune the selected old backup.
-    with open(backup_path, 'rb') as source:
-        contents = source.read()
-    if not isinstance(json.loads(contents), dict):
-        raise ValueError("The backup must contain a configuration object.")
+    contents = _read_backup_contents(backup_path)
     if safety_backup is None:
         backup_config_file(config_file)
     else:
         safety_backup()
+    _replace_config_contents(config_file, contents)
+
+
+def _read_backup_contents(backup_path):
+    """Bytes of *backup_path*; raises unless they hold a JSON configuration object."""
+    with open(backup_path, 'rb') as source:
+        contents = source.read()
+    if not isinstance(json.loads(contents), dict):
+        raise ValueError("The backup must contain a configuration object.")
+    return contents
+
+
+def _replace_config_contents(config_file, contents):
+    """Atomically replace *config_file* with *contents* (temp file + fsync + os.replace)."""
     temp_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -218,6 +229,82 @@ def restore_config_backup_file(path, backup_path, *, safety_backup=None):
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+# ---------------------------------------------------------------------------
+# Startup recovery of an unreadable config.json
+# ---------------------------------------------------------------------------
+
+def move_corrupt_config_aside(path=None):
+    """Rename an unreadable config.json to ``config.corrupt-<time>.json`` (kept, never deleted).
+
+    Returns the new path, or None when there was nothing to move or the rename failed.
+    """
+    config_file = _resolve(path)
+    if not os.path.exists(config_file):
+        return None
+    root, ext = os.path.splitext(config_file)
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    target = f"{root}.corrupt-{stamp}{ext}"
+    counter = 1
+    while os.path.exists(target):
+        target = f"{root}.corrupt-{stamp}_{counter}{ext}"
+        counter += 1
+    try:
+        os.replace(config_file, target)
+    except OSError:
+        try:
+            # Locked (Windows): keep a copy instead; the restore then replaces the original.
+            shutil.copy2(config_file, target)
+        except OSError as e:
+            print(f"Warning: Could not keep a copy of the unreadable config: {e}")
+            return None
+    return target
+
+
+def load_config_or_restore_backup(path=None, *, decrypt=True):
+    """Load config.json; when it exists but cannot be read, restore a backup first.
+
+    Returns ``(config, notice)``. ``notice`` is None when config.json loaded (or does not
+    exist yet: first run, ``config`` is ``{}``). Otherwise the unreadable file is moved
+    aside (``move_corrupt_config_aside``) and the backups are tried from the EARLIEST one
+    on (owner's choice), skipping any that are unreadable or not a configuration object;
+    the first valid one atomically becomes config.json. Only when none is valid is
+    ``config`` ``{}`` (the caller's defaults). ``notice`` says what happened, for the log.
+    """
+    config_file = _resolve(path)
+    try:
+        config = load_config(config_file, decrypt=decrypt)
+    except FileNotFoundError:
+        return {}, None
+    except Exception as e:
+        load_error = e
+    else:
+        if isinstance(config, dict):
+            return config, None
+        load_error = ValueError("it does not hold a configuration object")
+    print(f"⚠️ config.json could not be loaded: {load_error}")
+    # Read the backups before anything else writes: a later backup_config_file prunes old ones.
+    backups = list(reversed(list_config_backups(config_file)))
+    corrupt_copy = move_corrupt_config_aside(config_file)
+    kept = (f" The unreadable file was kept as {os.path.basename(corrupt_copy)}."
+            if corrupt_copy else "")
+    for entry in backups:
+        try:
+            contents = _read_backup_contents(entry['path'])
+            _replace_config_contents(config_file, contents)
+            config = load_config(config_file, decrypt=decrypt)
+        except Exception as e:
+            print(f"⚠️ Skipping config backup {entry['name']}: {e}")
+            continue
+        notice = (f"config.json could not be loaded ({load_error}); restored settings from "
+                  f"backup {entry['name']}.{kept}")
+        print(f"♻️ {notice}")
+        return config, notice
+    notice = (f"config.json could not be loaded ({load_error}) and no valid backup was found; "
+              f"settings were reset to defaults.{kept}")
+    print(f"⚠️ {notice}")
+    return {}, notice
 
 
 # ---------------------------------------------------------------------------

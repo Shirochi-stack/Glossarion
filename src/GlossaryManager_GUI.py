@@ -8157,8 +8157,8 @@ Do not stop after the glossary."""
                 
                 # Save to config file (use proper macOS-aware config path)
                 from translator_gui import CONFIG_FILE as _cfg_path
-                with open(_cfg_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                from config_store import save_config_file  # backup, encrypted keys, atomic write
+                save_config_file(self.config, _cfg_path)
                 
                 msg = glossary_document.backup_settings_message(
                     backup_checkbox.isChecked(), max_backups_spinbox.value()

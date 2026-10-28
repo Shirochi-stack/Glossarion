@@ -80,6 +80,7 @@ jobs:
           tests/test_mobile_compat_patches_manga.py \
           tests/test_pdf_mupdf_html.py \
           tests/test_shared_core_p1.py \
+          tests/test_config_corruption_recovery.py \
           tests/test_headless_owner.py \
           tests/test_settings_schema.py \
           tests/test_job_runner.py \

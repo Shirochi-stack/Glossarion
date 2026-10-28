@@ -5186,8 +5186,8 @@ class MangaSettingsDialog(QDialog):
                 else:
                     # Try direct save as fallback
                     if hasattr(self.main_gui, 'config_file'):
-                        with open(self.main_gui.config_file, 'w') as f:
-                            json.dump(self.config, f, indent=2)
+                        from app_paths import _atomic_json_write
+                        _atomic_json_write(self.main_gui.config_file, self.config)
                         print("Settings saved directly to config file")
             except Exception as e:
                 print(f"Error saving configuration: {e}")
@@ -5238,13 +5238,13 @@ class MangaSettingsDialog(QDialog):
             elif hasattr(self.main_gui, 'save_configuration'):
                 self.main_gui.save_configuration()
             elif hasattr(self.main_gui, 'config_file') and isinstance(self.main_gui.config_file, str):
-                with open(self.main_gui.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                from app_paths import _atomic_json_write
+                _atomic_json_write(self.main_gui.config_file, self.config)
         except Exception:
             try:
                 if hasattr(self.main_gui, 'CONFIG_FILE') and isinstance(self.main_gui.CONFIG_FILE, str):
-                    with open(self.main_gui.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(self.config, f, ensure_ascii=False, indent=2)
+                    from app_paths import _atomic_json_write
+                    _atomic_json_write(self.main_gui.CONFIG_FILE, self.config)
             except Exception:
                 pass
         # Close and reopen dialog so defaults apply
