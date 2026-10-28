@@ -385,6 +385,7 @@ SETTINGS_MAP_ORDER = ('model',
  'logit_bias_strength',
  'bias_common_words',
  'bias_repetitive_phrases',
+ 'block_other_scripts',
  'glossary_enable_anti_duplicate',
  'glossary_top_p',
  'glossary_min_p',
@@ -1283,6 +1284,7 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
  ('logit_bias_strength', ('logit_bias_strength_var',), ('value', 1.0), ('float',)),
  ('bias_common_words', ('bias_common_words_var',), ('value', False), ('bool',)),
  ('bias_repetitive_phrases', ('bias_repetitive_phrases_var',), ('value', False), ('bool',)),
+ ('block_other_scripts', ('block_other_scripts_var',), ('value', False), ('bool',)),
  ('glossary_enable_anti_duplicate',
   ('glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')),
   ('value', False),
@@ -2585,6 +2587,35 @@ SETTINGS = {
      'ui_sites': ('other.anti_duplicate',),
      'ui_tab': 'Logit Bias',
      'var_names': ('bias_repetitive_phrases_var',)},
+    'block_other_scripts': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('BLOCK_OTHER_SCRIPTS', 'translation', False),
+             ('BLOCK_OTHER_SCRIPTS', 'startup', False)),
+     'init_default': False,
+     'label': 'Block other scripts in translations (adaptive, all models)',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': '⚠️ Can cause errors or retries: mixed-language books, kept original names, '
+                'targets it does not recognise.\n'
+                'Translations may only use the scripts of the target language: English output '
+                'blocks Chinese,\n'
+                "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's "
+                'own script is\n'
+                'never blocked, and glossary and single-pass glossary requests are left alone.\n'
+                'Official OpenAI chat models (GPT-4o / GPT-4.1) also get a logit bias against the '
+                'most common\n'
+                'tokens of those scripts. On every model, an answer with such text is sent again '
+                'with an\n'
+                'instruction to write only in the target language, using the normal retry budget '
+                '(Max Retries).\n'
+                'Works only while Enable Anti-Duplicate Parameters is on.',
+     'type': 'bool',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('block_other_scripts_var',)},
     'book_title_prompt': {'converter': ('str',),
      'default': '',
      'default_source': 'init',
