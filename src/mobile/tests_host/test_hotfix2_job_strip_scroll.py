@@ -281,6 +281,9 @@ class PageListClient:
     * with ``auto_scroll`` on, a rebuild of the ListView (one of its own properties patched) schedules a
       post-frame jump to the end in that frame; a ``ScrollMetricsNotification`` (dispatched in a microtask
       after the frame) whose ``maxScrollExtent`` grew schedules one for the next frame;
+    * a change of ``auto_scroll`` itself builds a new Flutter Scrollable (ScrollableControl wraps it in its
+      listener only while ``auto_scroll`` is on): the offset starts again at 0 with the pin on (v9.15.7
+      hotfix 1: on the emulator a scroll up that turned it off threw the Job page to its top);
     * every offset change reaches the server as a ``scroll`` event (scroll_notification_control.dart).
     """
 
@@ -294,6 +297,8 @@ class PageListClient:
         self.max_extent: Optional[float] = None
         self.viewport = viewport()
         self.pinned = True  # _pinnedToEnd starts true
+        self.auto = bool(page_list.auto_scroll)
+        self.resets = 0  # new Scrollables built by an auto_scroll change
         self.last_pixels = 0.0
         self.last_auto_max = 0.0
         self.next_frame: list[Callable[[], None]] = []
@@ -349,6 +354,11 @@ class PageListClient:
                     if offset < 0:
                         offset = float(self.max_extent or 0.0) + offset + 1
                     self._set_pixels(offset)
+        if bool(self.list.auto_scroll) != self.auto:  # a new Scrollable: offset 0, pin on, no scroll event
+            self.auto = bool(self.list.auto_scroll)
+            self.pixels = self.last_pixels = self.last_auto_max = 0.0
+            self.pinned = True
+            self.resets += 1
         # this frame's post-frame callbacks: the ones registered after the previous frame, then a rebuild's
         callbacks, self.next_frame = self.next_frame, []
         if rebuilt and self.list.auto_scroll:
@@ -681,10 +691,14 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
             assert heights[-1] > heights[0] + 200
             assert not [b for b in client.list_invokes if b.name == "scroll_to"], "the page chased its end"
 
-            # a reader who scrolled up keeps their place: nothing moves under them any more
-            await client.user_scroll_to(client.pixels - 300)
+            # a reader who scrolled up keeps their place: nothing moves under them any more. auto_scroll stays
+            # on (the client suspended its pin): turning it off threw the page to its top (v9.15.7 hotfix 1)
+            resets = client.resets
+            target = client.pixels - 300
+            await client.user_scroll_to(target)
             await client.frame()
-            assert not screen.page_list.auto_scroll
+            assert client.pixels == target, f"a scroll up threw the page to {client.pixels:.0f} dp"
+            assert screen.page_list.auto_scroll and client.resets == resets
             pixels = client.pixels
             for n in range(15, 18):
                 await h.job_tick(n)
@@ -695,10 +709,11 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
             # back at the end, the page follows it again
             await client.user_scroll_to(client.max_extent)
             await client.frame()
-            assert screen.page_list.auto_scroll
+            assert screen.page_list.auto_scroll and client.resets == resets  # re-pinned, no new Scrollable
             await h.job_tick(18)
             await client.frame()
             assert client.distance_from_end == 0.0
+            assert client.resets == 1  # turned on once, when the reader first reached the end
         finally:
             await h.stop()
 

@@ -48,7 +48,7 @@ from glossarion_mobile.services.jobs import (
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
-from glossarion_mobile.ui.components.log_console import LogConsole
+from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT, LogConsole
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.status import StatusChip
@@ -306,6 +306,9 @@ class JobDetailScreen(Screen):
             # pinned to its end on the client while the reader is there (_on_page_scroll)
             auto_scroll=False,
             auto_scroll_animation=ft.Animation(0, self._PIN_CURVES[0]),
+            # all four cards stay laid out (v9.15.7 hotfix 1): the page's end is measured, and the Log card is
+            # not dropped off-screen and rebuilt from the top of its log when it scrolls back into view
+            cache_extent=LAYOUT_ALL_EXTENT,
         )
         return self.page_list
 
@@ -321,9 +324,14 @@ class JobDetailScreen(Screen):
         header lines), so the Log card slid down under the reader, and chasing the end with
         ``scroll_to(offset=-1)`` ran on the client before the new content was laid out (against the previous
         end), leaving the page off its end until the next batch of log lines. Instead the page's ListView has
-        Flet's ``auto_scroll`` on while the reader is at its end: the client pins it after layout and
-        suspends the pin as soon as the reader scrolls up (this handler then turns it off). Anywhere else on
-        the page nothing moves."""
+        Flet's ``auto_scroll`` on once the reader has reached its end: the client pins it after layout,
+        suspends the pin as soon as the reader scrolls up and resumes it back at the end. Anywhere else on
+        the page nothing moves.
+
+        It is turned on once and never off (v9.15.7 hotfix 1): Flet 1.0.3 builds a new Flutter Scrollable,
+        starting at offset 0, whenever ``auto_scroll`` changes, so turning it off on a scroll up threw the
+        page to its top (emulator: 300 dp up from the end) and turning it on again flashed the top before the
+        pin. It stays off until the reader first reaches the end, so the page still opens at its top."""
         pixels, maximum = getattr(e, "pixels", None), getattr(e, "max_scroll_extent", None)
         if pixels is None or maximum is None:
             return
@@ -333,9 +341,9 @@ class JobDetailScreen(Screen):
             return
         self._page_at_end = at_end
         page_list = getattr(self, "page_list", None)
-        if page_list is None or bool(page_list.auto_scroll) == at_end:
+        if page_list is None or page_list.auto_scroll or not at_end:
             return
-        page_list.auto_scroll = at_end
+        page_list.auto_scroll = True
         try:
             page_list.update()
         except Exception:

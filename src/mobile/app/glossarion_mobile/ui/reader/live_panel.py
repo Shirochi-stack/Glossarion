@@ -141,11 +141,9 @@ class LivePanel:
             extent = float(getattr(e, "max_scroll_extent", 0.0) or 0.0)
         except (TypeError, ValueError):
             return
-        follow = pixels >= extent - 8
-        if follow != self._follow:
-            self._follow = follow
-            self.content_column.auto_scroll = follow
-            self._push(self.content_column)
+        # only noted: Flet's client suspends the column's auto_scroll pin itself while the reader is scrolled
+        # up. Turning auto_scroll off and on rebuilt the scroll view at the chapter's top (v9.15.7 hotfix 1)
+        self._follow = pixels >= extent - 8
 
     # ---- feeding ---------------------------------------------------------------------------
 

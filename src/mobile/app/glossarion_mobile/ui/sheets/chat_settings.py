@@ -76,6 +76,7 @@ from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.screens.profiles import (
     SPECIALISED_GROUP,
     ProfileService,
@@ -415,18 +416,11 @@ class ChatSettingsSheet:
     def _switch(self, field_name: str, label: str) -> ft.Control:
         switch = ft.Switch(value=bool(self.value_of(field_name)),
                            on_change=lambda e, f=field_name: self.set_value(f, bool(e.control.value)))
-
-        def toggle(e: Any, f: str = field_name) -> None:
-            switch.value = not bool(switch.value)
-            self.set_value(f, bool(switch.value))
-
-        # the label is its own Text so it wraps: a Switch label stays on one line and ran under the
+        # the label wraps (switch_row): a Switch label stays on one line and ran under the
         # "Inherited from: ..." badge on a phone (owner 2026-10-19)
-        text = ft.Container(content=ft.Text(label), expand=True, on_click=toggle)
         return ft.Column(
             [
-                ft.Row([switch, text, *self._badge(field_name)], spacing=8,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                switch_row(switch, label, trailing=self._badge(field_name)),
                 ft.Text(DESCRIPTIONS.get(field_name, ""), theme_style=ft.TextThemeStyle.BODY_SMALL,
                         color=ft.Colors.ON_SURFACE_VARIANT),
             ],
