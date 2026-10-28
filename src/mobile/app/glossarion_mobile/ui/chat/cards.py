@@ -791,8 +791,10 @@ class JobCard(ft.Container):
         # REQUEST_ROW_HEIGHT estimate were clipped in a tiny nested scroller), and the long list stops
         # following the newest row while the user scrolls up through it (every live repaint pulled it back
         # to the end, so it could not be scrolled while the job ran). ``requests_column`` is the shown one.
-        self.requests_list = ft.ListView([], spacing=2, auto_scroll=True, key="job-requests-list",
-                                         on_scroll=self._on_requests_scroll, scroll_interval=200)
+        # Flet's client suspends the auto_scroll pin itself while the user is scrolled up and resumes it at
+        # the end; auto_scroll stays on (v9.15.7 hotfix 1: turning it off on a scroll up rebuilt the scroll
+        # view at the first row, throwing the user to the top of the requests).
+        self.requests_list = ft.ListView([], spacing=2, auto_scroll=True, key="job-requests-list")
         self.requests_short = ft.Column([], spacing=2, tight=True, key="job-requests-short")
         self.requests_column: Any = self.requests_short
         self.requests_box = ft.Container(content=self.requests_column, height=None)
@@ -1100,19 +1102,6 @@ class JobCard(ft.Container):
                     self.set_requests(self.request_segments, force=True)
                 return True
         return False
-
-    def _on_requests_scroll(self, e: Any) -> None:
-        """Follow the newest row only while the long list is scrolled to its end (owner #28)."""
-        try:
-            at_end = float(e.pixels) >= float(e.max_scroll_extent) - REQUEST_ROW_HEIGHT / 2
-        except (AttributeError, TypeError, ValueError):
-            return
-        if self.requests_list.auto_scroll != at_end:
-            self.requests_list.auto_scroll = at_end
-            try:
-                self.requests_list.update()
-            except Exception:
-                pass
 
     def _on_requests_toggle(self, e: Any) -> None:
         value = getattr(e, "data", None)

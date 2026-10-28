@@ -550,10 +550,15 @@ def test_a_log_opens_on_its_newest_lines_even_while_auto_scroll_is_paused(monkey
 
     monkeypatch.setitem(lc.SESSION, "following", False)  # paused earlier in this app session
     console = lc.LogConsole(buffer=_log_buffer(30), dispatcher=_LogDispatcher(), backlog=500)
-    assert not console.following and not console.list_view.auto_scroll
-    console.attach()  # the backlog arrives: the client pins it after layout, whatever the session's choice
-    assert console.visible_text().endswith("line 29")
-    assert console.list_view.auto_scroll is False  # no loop here: the paused choice applies at once afterwards
+    # v9.15.7 hotfix 1: auto_scroll is always on (changing it rebuilt the scroll view at the log's top)
+    assert not console.following and console.list_view.auto_scroll
+    console.attach()  # the backlog arrives and shows: the client pins it after layout
+    assert console.visible_text().endswith("line 29") and not console.pending
+    from glossarion_mobile.services.dispatcher import LogLine
+
+    console.on_lines([LogLine(31, 0.0, "line 30", "info")], 0)  # paused: a later line waits, the view stays
+    assert [line.text for line in console.pending] == ["line 30"] and console.jump_holder.visible
+    assert console.list_view.auto_scroll and console.visible_text().endswith("line 30")
     lc.SESSION["following"] = True
     following = lc.LogConsole(buffer=_log_buffer(5), dispatcher=_LogDispatcher())
     following.attach()
@@ -592,7 +597,7 @@ def test_scrolling_up_shows_the_jump_button_and_it_follows_again(monkeypatch):
     assert console.following and not console.jump_holder.visible
     # a pause with the auto-scroll button stays a pause at the end
     console.follow_button.on_click(None)
-    assert not console.following and lc.SESSION["following"] is False and not console.list_view.auto_scroll
+    assert not console.following and lc.SESSION["following"] is False and console.list_view.auto_scroll
     _scroll(console, 500, 1000)
     _scroll(console, 1000, 1000)
     assert not console.following

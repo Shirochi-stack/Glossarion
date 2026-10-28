@@ -19,6 +19,12 @@
    measured. The log list and the pages that host a LogConsole (Job page, Manga Files tab, Diagnostics)
    now lay out every child (``LAYOUT_ALL_EXTENT`` as ``cache_extent``): the console is never dropped and
    rebuilt by its page, and the end a pin jumps to is measured.
+3. Found while checking 2 on the emulator: changing ``auto_scroll`` on a mounted list builds a new Flutter
+   Scrollable at offset 0 (Flet 1.0.3 wraps it in its auto-scroll listener only while it is on). The log's
+   auto-scroll button threw the log to its first line, and a 300 dp scroll up from the Job page's end threw
+   the page to its top (the page turned its pin off). The console keeps ``auto_scroll`` on and holds new
+   lines back while paused; the Job page turns its pin on once, when the reader first reaches the end, and
+   never off (``test_hotfix2_job_strip_scroll`` now models the new Scrollable and catches the old page).
 
 What only a device shows: the scrolling itself (the emulator check before / after is in the hotfix
 notes); these tests pin the layout that removes it.
@@ -247,6 +253,70 @@ def test_log_console_lays_out_every_block(_following):
     assert LAYOUT_ALL_EXTENT > console.max_blocks * console.block_lines * 4 * 20
     # following is still Flet's instant client pin, now onto a measured end
     assert view.auto_scroll and view.auto_scroll_animation.duration == 0
+
+
+def test_log_console_never_changes_auto_scroll_and_holds_lines_while_paused(_following):
+    from glossarion_mobile.services.dispatcher import LogLine
+
+    console = LogConsole()
+    view = console.list_view
+    seen = []
+
+    def check():
+        seen.append(view.auto_scroll)
+
+    def lines(*texts, start=[0]):
+        out = []
+        for text in texts:
+            start[0] += 1
+            out.append(LogLine(start[0], 0.0, text, "info"))
+        return out
+
+    def scroll(pixels, maximum=1000.0):
+        console._on_scroll(type("E", (), {"pixels": pixels, "max_scroll_extent": maximum})())
+
+    console.on_lines(lines("one", "two"), 0)
+    check()
+    console._toggle_follow()  # the auto-scroll button: paused, the view stays put
+    console.on_lines(lines("three"), 2)
+    check()
+    assert [line.text for line in console.pending] == ["three"] and console.pending_gap == 2
+    assert console.jump_holder.visible and "three" not in console.list_view.controls[-1].value
+    assert console.visible_text().endswith("three")  # Copy / Share still get every line
+    console.set_filter("errors")
+    console.set_filter("all")  # a filter change keeps the held lines held
+    assert [line.text for line in console.pending] == ["three"]
+    console.jump_to_end()  # ↓: the held lines (and the dropped-lines note) go in, following again
+    check()
+    shown = console.list_view.controls[-1].value
+    assert not console.pending and shown.endswith("… 2 earlier lines were dropped\nthree")
+    assert console.following and lc.SESSION["following"] is False  # ↓ does not change the session choice
+    scroll(1000.0)
+    scroll(400.0)  # a scroll up pauses this console only; lines wait
+    console.on_lines(lines("four"), 0)
+    check()
+    assert not console.following and [line.text for line in console.pending] == ["four"]
+    scroll(995.0)  # back at the end: they go in below and it follows again
+    check()
+    assert console.following and not console.pending and console.list_view.controls[-1].value.endswith("four")
+    assert seen and all(seen), "auto_scroll changed: Flet would rebuild the scroll view at the log's top"
+
+
+def test_no_screen_switches_auto_scroll_on_a_mounted_list():
+    """A change of ``auto_scroll`` rebuilds Flutter's Scrollable at offset 0 (the log console, the Job page,
+    the Reader's live panel and the chat card's request list all threw their reader to the top). Only two
+    assignments are left: the transcript sets it once in its constructor, and the Job page turns its pin on
+    once, when the reader first reaches the end."""
+    import re
+
+    app = MOBILE_DIR / "app" / "glossarion_mobile"
+    found = []
+    for path in sorted(app.rglob("*.py")):
+        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"\.auto_scroll\s*=(?!=)", text):
+                found.append((path.relative_to(app).as_posix(), text.strip()))
+    assert found == [("ui/chat/transcript.py", "self.auto_scroll = False"),
+                     ("ui/screens/job_detail.py", "page_list.auto_scroll = True")], found
 
 
 def test_job_page_keeps_its_cards_and_log_laid_out(tmp_path, _following):

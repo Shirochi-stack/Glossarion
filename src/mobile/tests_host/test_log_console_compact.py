@@ -161,7 +161,9 @@ def test_the_host_hears_every_painted_change_to_keep_its_page_at_the_end(monkeyp
     assert heard == [True] and scrolls == [] and console.list_view.auto_scroll
     console.set_following(False)
     console.on_lines([line("two")], 0)
-    assert heard == [True, False, False] and scrolls == [] and not console.list_view.auto_scroll  # the host hears
+    # the host hears; paused, the line waits (auto_scroll itself never changes, v9.15.7 hotfix 1)
+    assert heard == [True, False, False] and scrolls == [] and console.list_view.auto_scroll
+    assert [held.text for held in console.pending] == ["two"]
 
 
 def test_autoscroll_toggle_pauses_and_resumes_following(monkeypatch):
@@ -176,16 +178,17 @@ def test_autoscroll_toggle_pauses_and_resumes_following(monkeypatch):
     console.on_lines([line("first")], 0)
     assert scrolls == [] and console.list_view.auto_scroll  # following: the client pins the end after layout
 
-    button.on_click(None)  # off: lines are still appended, the view stays put
-    assert not console.following and not button.selected and not console.list_view.auto_scroll
+    button.on_click(None)  # off: new lines wait (the view stays put), Copy / Share still get them
+    assert not console.following and not button.selected and console.list_view.auto_scroll
     assert button.icon != on_icon and button.tooltip != on_tip and "paused" in button.tooltip.lower()
     console.on_lines([line("second"), line("third")], 0)
-    assert scrolls == []
+    assert scrolls == [] and [held.text for held in console.pending] == ["second", "third"]
     assert console.visible_text() == "first\nsecond\nthird"
 
-    button.on_click(None)  # on again: jumps to the end now (the lines are laid out already)
+    button.on_click(None)  # on again: the held lines go in and it jumps to the end now
     assert console.following and button.selected and button.icon == on_icon and button.tooltip == on_tip
     assert console.list_view.auto_scroll and len(scrolls) == 1 and scrolls[-1]["offset"] == -1
+    assert not console.pending and "third" in console.list_view.controls[-1].value
 
 
 def test_autoscroll_choice_lasts_for_the_session():

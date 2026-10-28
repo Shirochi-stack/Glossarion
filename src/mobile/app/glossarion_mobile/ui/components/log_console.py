@@ -31,6 +31,14 @@ top. On the emulator that jump landed past the real end (an empty box), sprang b
 second as blocks got measured, without a new line. Laid out, the end is exact and a pin is one jump that
 lands on it. Hosts in a lazy page list (Job page, Manga Files tab, Diagnostics) keep the console laid out
 the same way, so it is not dropped and rebuilt as the page scrolls.
+
+Same hotfix: ``auto_scroll`` never changes on a mounted list. Flet 1.0.3 wraps the scrollable in its
+auto-scroll listener only while ``auto_scroll`` is on, so turning it on or off builds a new Flutter
+Scrollable that starts at offset 0: the auto-scroll button threw the log to its first line (emulator), and
+turning it back on jumped from there to the end. The list keeps ``auto_scroll`` on (the client suspends its
+pin by itself while the reader is scrolled up and resumes it at the end), and a paused console holds new
+lines back (``pending``) instead: the view does not move, ↓ shows, and the held lines are added when it
+follows again (↓, the auto-scroll button, or scrolling back to the end after a scroll up).
 """
 
 from __future__ import annotations
@@ -60,9 +68,6 @@ CHIP_LABEL_PADDING = ft.Padding.symmetric(horizontal=4)
 COMPACT_BUTTON = ft.BoxConstraints(min_width=40, min_height=tokens.SIZES["hit_target"])
 #: how close to the list's end (dp) still counts as "at the end" (Flet's auto_scroll re-pins within 40 px)
 END_SLACK = 40.0
-#: a console opened while auto-scroll is paused stops following this long after its backlog arrived (the
-#: client pins the last backlog batch after laying it out)
-OPEN_SETTLE_SECONDS = 0.6
 #: ``cache_extent`` (dp) of a list that lays out all its children: more than the console's most blocks can
 #: span (max_blocks x block_lines lines, wrapped), so every block has a measured height and the end the
 #: auto-scroll pins to is exact (hotfix, see the module docstring)
@@ -97,6 +102,10 @@ class LogConsole(ft.Column):
         self.filter_id = "all"
         self.following = bool(SESSION["following"])
         self.lines: deque[LogLine] = deque(maxlen=self.block_lines * self.max_blocks)
+        #: lines that arrived while this console was paused (shown when it follows again) and the dropped
+        #: lines among them
+        self.pending: deque[LogLine] = deque(maxlen=self.block_lines * self.max_blocks)
+        self.pending_gap = 0
         self.gap_total = 0
         self.at_end = True  # the list shows its newest lines (on_scroll keeps it current)
         self._opening_seq: Optional[int] = None  # the backlog's last line while the console opens on its end
@@ -139,9 +148,10 @@ class LogConsole(ft.Column):
             padding=ft.Padding.all(8),
             height=self.list_height,
             expand=self.list_height is None,
-            # following: the client pins the end after layout (instant, no 1 s animation); ``attach`` turns it
-            # on for the backlog whatever the session's choice
-            auto_scroll=self.following,
+            # the client pins the end after layout (instant, no 1 s animation) while the reader is there.
+            # Always on: changing it rebuilds the scroll view at the log's top (module docstring); a paused
+            # console holds its new lines back instead
+            auto_scroll=True,
             auto_scroll_animation=ft.Animation(0, ft.AnimationCurve.LINEAR),
             # every block laid out: the end the pin jumps to is measured, not estimated
             cache_extent=LAYOUT_ALL_EXTENT,
@@ -190,10 +200,10 @@ class LogConsole(ft.Column):
 
     def attach(self) -> None:
         if self._unsubscribe is None and self.buffer is not None and self.dispatcher is not None:
-            # the console opens on its newest lines, also while auto-scroll is paused for the session
+            # the console opens on its newest lines, also while auto-scroll is paused for the session: the
+            # backlog is always shown (the client pins it), only later lines wait for the console to follow
             last = int(getattr(self.buffer, "last_seq", 0) or 0)
             self._opening_seq = last if last > 0 else None
-            self.list_view.auto_scroll = True
             self._unsubscribe = self.dispatcher.subscribe_log(self.buffer, self.on_lines, backlog=self.backlog)
 
     def detach(self) -> None:
@@ -214,32 +224,43 @@ class LogConsole(ft.Column):
         return kinds is None or line.kind in kinds
 
     def on_lines(self, lines: list[LogLine], gap: int) -> None:
-        """Dispatcher callback (loop thread): append new lines to the blocks."""
+        """Dispatcher callback (loop thread): append new lines to the blocks (held while paused)."""
         self.gap_total += gap
+        opening = self._opening_seq
+
+        def held(seq: Optional[int]) -> bool:
+            # paused: the backlog (up to the opening line) and a console's first lines still show
+            return (not self.following and (opening is None or seq is None or seq > opening)
+                    and bool(self.lines or self.pending))
+
         if gap:
-            self._append_text(f"… {gap} earlier lines were dropped", force_new_block=False)
+            if held(lines[0].seq if lines else None):
+                self.pending_gap += gap
+            else:
+                self._append_text(f"… {gap} earlier lines were dropped", force_new_block=False)
         for line in lines:
+            if held(line.seq):
+                self.pending.append(line)
+                continue
             self.lines.append(line)
             if self._visible(line):
                 self._append_text(line.text)
-        opening = self._opening_seq
         if opening is not None and lines and lines[-1].seq >= opening:
             self._opening_seq = None  # the backlog is in: the session's auto-scroll choice applies again
-            if not self.following:
-                self._settle_paused()
+        if self.pending:
+            self._show_jump()
         self._after_change()
 
-    def _settle_paused(self) -> None:
-        """A console opened while auto-scroll is paused: stop following once the client pinned the backlog."""
-        def settle() -> None:
-            if not self.following and self._opening_seq is None:
-                self.list_view.auto_scroll = False
-                self._push(self.list_view)
-
-        try:
-            asyncio.get_running_loop().call_later(OPEN_SETTLE_SECONDS, settle)
-        except RuntimeError:  # no loop (host tests drive it directly)
-            settle()
+    def _flush_pending(self) -> None:
+        """Add the lines held while paused (the console follows again)."""
+        if self.pending_gap:
+            self._append_text(f"… {self.pending_gap} earlier lines were dropped", force_new_block=False)
+            self.pending_gap = 0
+        held, self.pending = self.pending, deque(maxlen=self.pending.maxlen)
+        for line in held:
+            self.lines.append(line)
+            if self._visible(line):
+                self._append_text(line.text)
 
     def _append_text(self, text: str, force_new_block: bool = False) -> None:
         # identity, not ``in``: Flet controls are dataclasses whose ``==`` compares every field, and
@@ -310,17 +331,16 @@ class LogConsole(ft.Column):
             button.tooltip = "Auto-scroll is paused: tap to follow new lines"
 
     def set_following(self, following: bool, *, remember: bool = True) -> None:
-        """Auto-scroll on (jumps to the end now) or off; ``remember``: the choice lasts for the app session
-        (a scroll up pauses this console only)."""
+        """Auto-scroll on (adds the held lines and jumps to the end now) or off (new lines are held, the view
+        stays put); ``remember``: the choice lasts for the app session (a scroll up pauses this console
+        only). ``auto_scroll`` itself never changes (module docstring)."""
         self.following = bool(following)
         if remember:
             SESSION["following"] = self.following
         self._paint_follow()
         if self.following:
-            self.list_view.auto_scroll = True
+            self._flush_pending()
             self._jump()
-        elif self._opening_seq is None:
-            self.list_view.auto_scroll = False
         self._after_change()
 
     def _jump(self) -> None:
@@ -341,7 +361,11 @@ class LogConsole(ft.Column):
 
     def _set_at_end(self, at_end: bool) -> None:
         self.at_end = bool(at_end)
-        visible = not self.at_end and bool(self.lines)
+        self._show_jump()
+
+    def _show_jump(self) -> None:
+        """↓ shows while the reader is above the newest lines or lines are held back."""
+        visible = bool(self.lines) and (not self.at_end or bool(self.pending))
         if self.jump_holder.visible != visible:
             self.jump_holder.visible = visible
             self._push(self.jump_holder)
@@ -365,10 +389,15 @@ class LogConsole(ft.Column):
             self._paint_follow()
             self._push(self.follow_button)
         elif at_end and not was and self._scroll_paused:
+            # back at the end: the held lines go in below and the re-pinned client follows them
             self._scroll_paused = False
             self.following = True
             self._paint_follow()
             self._push(self.follow_button)
+            if self.pending:
+                self._flush_pending()
+                self._show_jump()
+                self._after_change()
 
     def _push(self, control: Any) -> None:
         if self._page_or_none() is None:
@@ -383,7 +412,8 @@ class LogConsole(ft.Column):
         self.set_following(not self.following)
 
     def visible_text(self) -> str:
-        return "\n".join(line.text for line in self.lines if self._visible(line))
+        """The filter's lines, the held ones too (Copy / Share take the whole log)."""
+        return "\n".join(line.text for line in (*self.lines, *self.pending) if self._visible(line))
 
     def _copy(self, e: Any = None) -> None:
         if self.copy_handler is not None:
