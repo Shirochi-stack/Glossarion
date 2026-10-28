@@ -209,7 +209,14 @@ def test_panel_shows_the_shared_tile_under_the_switch(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     panel = LocalModelsPanel(service=_service(tmp_path), prefs=fakes.FakePrefs(), current_model=lambda: None)
     panel.settings_ctx = ctx
+    # the tile's config observer must not stop the panel from following downloads and the engine (Build
+    # Mobile 40776917992: test_local_models_panel rows stuck on "Working…" once a Settings context existed)
+    calls = []
+    real_downloads, real_engine = panel.downloads.subscribe, panel.service.subscribe
+    panel.downloads.subscribe = lambda fn: (calls.append("downloads"), real_downloads(fn))[1]
+    panel.service.subscribe = lambda fn: (calls.append("engine"), real_engine(fn))[1]
     panel.build()
+    assert calls == ["downloads", "engine"]
     section = panel._sampling_section()
     switch_at = next(i for i, c in enumerate(section) if isinstance(c, ft.Row) and c.controls
                      and isinstance(c.controls[0], ft.Switch) and c.controls[0].key == "local-block-cjk")
@@ -223,6 +230,8 @@ def test_panel_shows_the_shared_tile_under_the_switch(tmp_path, monkeypatch):
     ctx.store.set(KAOMOJI_KEY, False)  # ...and follows a change made in Settings
     assert tile.switch.value is False
     panel.dispose()
+    ctx.store.set(KAOMOJI_KEY, True)  # disposed: the tile no longer follows
+    assert tile.switch.value is False
 
 
 def test_panel_without_settings_context_has_no_tile(tmp_path):

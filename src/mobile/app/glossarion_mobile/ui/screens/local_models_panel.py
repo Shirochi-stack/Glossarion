@@ -863,6 +863,12 @@ class LocalModelsPanel(OnDeviceFlow):
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        self._drop_kaomoji_observer()
+
+    def _drop_kaomoji_observer(self) -> None:
+        unsub, self._kaomoji_unsub = getattr(self, "_kaomoji_unsub", None), None
+        if callable(unsub):
+            unsub()
 
     # ---- engine card --------------------------------------------------------------------------------
 
@@ -977,13 +983,10 @@ class LocalModelsPanel(OnDeviceFlow):
             return []
         observe = getattr(ctx.store, "observe", None)
         if callable(observe):  # changed in Settings: the tile here follows
-            unsub = observe(KAOMOJI_KEY, lambda _key, _value: tile.refresh())
-            previous = getattr(self, "_kaomoji_unsub", None)
-            if previous in self._unsubs:  # a rebuilt section replaces its tile
-                self._unsubs.remove(previous)
-                previous()
-            self._kaomoji_unsub = unsub
-            self._unsubs.append(unsub)
+            # kept apart from ``_unsubs``: did_show subscribes to downloads / the engine only while that list
+            # is empty, so a build-time entry there left the On-device tab without progress updates
+            self._drop_kaomoji_observer()  # a rebuilt section replaces its tile
+            self._kaomoji_unsub = observe(KAOMOJI_KEY, lambda _key, _value: tile.refresh())
         return [tile.control]
 
     def save_block_cjk(self) -> bool:
