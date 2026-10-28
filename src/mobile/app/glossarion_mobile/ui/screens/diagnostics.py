@@ -33,7 +33,7 @@ from glossarion_mobile.services.dispatcher import LogBuffer, UiDispatcher
 from glossarion_mobile.state.app_state import AppState
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
-from glossarion_mobile.ui.components.log_console import LogConsole
+from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT, LogConsole
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.sheet import scroll_sheet
@@ -183,6 +183,9 @@ class DiagnosticsScreen(Screen):
             expand=True,
             spacing=tokens.SPACING["md"],
             padding=ft.Padding.all(tokens.SPACING["md"]),
+            # the cards stay laid out: the log console is not dropped and rebuilt from its top as the page
+            # scrolls (LAYOUT_ALL_EXTENT, v9.15.7 hotfix 1)
+            cache_extent=LAYOUT_ALL_EXTENT,
         )
 
     # ---- state ------------------------------------------------------------------------

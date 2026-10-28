@@ -48,7 +48,7 @@ from glossarion_mobile.services.jobs import (
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
-from glossarion_mobile.ui.components.log_console import LogConsole
+from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT, LogConsole
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.status import StatusChip
@@ -306,6 +306,9 @@ class JobDetailScreen(Screen):
             # pinned to its end on the client while the reader is there (_on_page_scroll)
             auto_scroll=False,
             auto_scroll_animation=ft.Animation(0, self._PIN_CURVES[0]),
+            # all four cards stay laid out (v9.15.7 hotfix 1): the page's end is measured, and the Log card is
+            # not dropped off-screen and rebuilt from the top of its log when it scrolls back into view
+            cache_extent=LAYOUT_ALL_EXTENT,
         )
         return self.page_list
 

@@ -45,6 +45,7 @@ from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
 from glossarion_mobile.ui.tools.manga.common import MangaTab, push, reason_or_chip
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
@@ -463,11 +464,13 @@ class SettingsTab(MangaTab):
                                   on_click=lambda e: self.ctx.go("settings.keys.pool", {"pool": "qa_vision"}),
                                   key=self.k("ms-vision-keys")),
                 ], wrap=True, spacing=8),
-                ft.Switch(label="Disable all thinking", value=disable_thinking, key=self.k("ms-ocr-no-thinking"),
-                          tooltip="Applies only to custom-api manga OCR requests. Removes thinking params for "
-                                  "faster OCR.",
-                          on_change=lambda e: self.set(("manga_settings", "ocr", "manga_ocr_disable_thinking"),
-                                                       bool(e.control.value))),
+                switch_row(ft.Switch(value=disable_thinking, key=self.k("ms-ocr-no-thinking"),
+                                     tooltip="Applies only to custom-api manga OCR requests. Removes thinking "
+                                             "params for faster OCR.",
+                                     on_change=lambda e: self.set(("manga_settings", "ocr",
+                                                                   "manga_ocr_disable_thinking"),
+                                                                  bool(e.control.value))),
+                           "Disable all thinking"),
                 ft.Row([
                     ft.Switch(label="Batch OCR requests", value=batch, key=self.k("ms-ocr-batch"),
                               on_change=lambda e: self.set("manga_custom_api_ocr_batch_enabled",
@@ -630,8 +633,10 @@ class SettingsTab(MangaTab):
     def _detection_controls(self, cfg: dict) -> list:
         enabled = bool(svc.effective_setting(cfg, svc.P_BUBBLE_DETECTION, True))
         current = str(svc.effective_setting(cfg, svc.P_DETECTOR, "rtdetr_onnx") or "rtdetr_onnx")
-        controls: list = [ft.Switch(label="AI bubble detection", value=enabled, key=self.k("ms-bubble-detection"),
-                                    on_change=lambda e: self.set(svc.P_BUBBLE_DETECTION, bool(e.control.value)))]
+        controls: list = [switch_row(ft.Switch(value=enabled, key=self.k("ms-bubble-detection"),
+                                               on_change=lambda e: self.set(svc.P_BUBBLE_DETECTION,
+                                                                            bool(e.control.value))),
+                                     "AI bubble detection")]
         for row in svc.detector_rows():
             selected = row.value == current
             controls.append(ft.ListTile(
@@ -713,9 +718,10 @@ class SettingsTab(MangaTab):
                               on_click=lambda e: self.edit_prompt("manga_full_page_context_prompt",
                                                                   "Full page context prompt", "context")),
             ], wrap=True, spacing=8),
-            ft.Switch(label="Include page image in translation requests (visual context)", value=visual,
-                      key=self.k("ms-visual"), on_change=lambda e: self.set("manga_visual_context_enabled",
-                                                                    bool(e.control.value))),
+            # its label ran off the screen as a Switch label (owner, 2026-10-28): switch_row wraps it
+            switch_row(ft.Switch(value=visual, key=self.k("ms-visual"),
+                                 on_change=lambda e: self.set("manga_visual_context_enabled", bool(e.control.value))),
+                       "Include page image in translation requests (visual context)"),
         ]
         tiles, found = schema_tiles(self.ctx, ("manga_settings.compression.enabled", "manga_settings.compression.format",
                                                "manga_settings.compression.jpeg_quality",
@@ -736,8 +742,9 @@ class SettingsTab(MangaTab):
                   (f"Generated: {os.path.basename(generated)}" if generated else "No glossary loaded"))
         files_tab = getattr(self.screen, "files_tab", None) if self.screen is not None else None
         return [
-            ft.Switch(label="Use loaded/generated glossary for translation", value=enabled, key=self.k("ms-glossary-on"),
-                      on_change=lambda e: self.set("manga_glossary_enabled", bool(e.control.value))),
+            switch_row(ft.Switch(value=enabled, key=self.k("ms-glossary-on"),
+                                 on_change=lambda e: self.set("manga_glossary_enabled", bool(e.control.value))),
+                       "Use loaded/generated glossary for translation"),
             ft.Row([
                 ft.TextButton(content="Glossary prompt", icon=ft.Icons.EDIT_NOTE, key=self.k("ms-glossary-prompt"),
                               on_click=lambda e: self.edit_prompt("manga_glossary_prompt", "Manga glossary prompt",
@@ -746,13 +753,15 @@ class SettingsTab(MangaTab):
                                      on_click=lambda e: self.ctx.spawn(files_tab.start(glossary_only=True))
                                      if files_tab is not None else None),
             ], wrap=True, spacing=8),
-            ft.Switch(label="Compress Glossary Prompt (same setting as Glossary Settings)", value=compress,
-                      key=self.k("ms-glossary-compress"),
-                      on_change=lambda e: self.set("compress_glossary_prompt", bool(e.control.value))),
-            ft.Switch(label="Save OCR/glossary debug subfolder", value=debug, key=self.k("ms-glossary-debug"),
-                      on_change=lambda e: self.set("manga_glossary_debug_ocr_text", bool(e.control.value))),
-            ft.Switch(label="Auto-load the generated glossary for this folder", value=auto, key=self.k("ms-glossary-auto"),
-                      on_change=lambda e: self._set_auto_load(bool(e.control.value))),
+            switch_row(ft.Switch(value=compress, key=self.k("ms-glossary-compress"),
+                                 on_change=lambda e: self.set("compress_glossary_prompt", bool(e.control.value))),
+                       "Compress Glossary Prompt (same setting as Glossary Settings)"),
+            switch_row(ft.Switch(value=debug, key=self.k("ms-glossary-debug"),
+                                 on_change=lambda e: self.set("manga_glossary_debug_ocr_text", bool(e.control.value))),
+                       "Save OCR/glossary debug subfolder"),
+            switch_row(ft.Switch(value=auto, key=self.k("ms-glossary-auto"),
+                                 on_change=lambda e: self._set_auto_load(bool(e.control.value))),
+                       "Auto-load the generated glossary for this folder"),
             ft.Row([
                 ft.FilledTonalButton(content="Load glossary", icon=ft.Icons.FILE_OPEN, key=self.k("ms-glossary-load"),
                                      on_click=lambda e: self.ctx.spawn(self.load_glossary())),
@@ -1186,8 +1195,8 @@ class SettingsTab(MangaTab):
         return path
 
     def _switch(self, label: str, key: Any, value: bool, ui_key: str) -> ft.Control:
-        return ft.Switch(label=label, value=bool(value), key=self.k(ui_key),
-                         on_change=lambda e: self._set_and_preview(key, bool(e.control.value)))
+        return switch_row(ft.Switch(value=bool(value), key=self.k(ui_key),
+                                    on_change=lambda e: self._set_and_preview(key, bool(e.control.value))), label)
 
     def _segmented(self, label: str, key: Any, options: Sequence[tuple], value: str, ui_key: str) -> ft.Control:
         return ft.Column([

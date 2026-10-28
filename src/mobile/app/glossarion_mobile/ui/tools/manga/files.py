@@ -42,6 +42,8 @@ from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.components.empty_state import faded_mascot
+from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, hint_text
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, TranslationModel, export_sheet, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
@@ -103,8 +105,7 @@ class FilesTab(MangaTab):
                                         key="mf-range")
         self.range_status = ft.Text("All images", theme_style=ft.TextThemeStyle.BODY_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT, key="mf-range-status")
-        self.split_switch = ft.Switch(label="Split first-level subfolders into groups",
-                                      value=self.session.files.split_first_level, on_change=self._on_split,
+        self.split_switch = ft.Switch(value=self.session.files.split_first_level, on_change=self._on_split,
                                       key="mf-split")
         self.group_picker = ft.Dropdown(label="Process group", options=[], visible=False, dense=True,
                                         on_select=self._on_group, key="mf-group")
@@ -126,12 +127,10 @@ class FilesTab(MangaTab):
         )
         cfg = self.ctx.config_snapshot()
         # the tab's defaults (manga_settings_defaults: both on, like the desktop checkboxes)
-        self.create_cbz_switch = ft.Switch(label="Create CBZ at end",
-                                           value=bool(svc.effective_setting(cfg, svc.K_CREATE_CBZ, True)),
+        self.create_cbz_switch = ft.Switch(value=bool(svc.effective_setting(cfg, svc.K_CREATE_CBZ, True)),
                                            on_change=lambda e: self.ctx.set_cfg(svc.K_CREATE_CBZ, bool(e.control.value)),
                                            key="mf-create-cbz")
-        self.consolidate_switch = ft.Switch(label="Auto consolidate images at translation end",
-                                            value=bool(svc.effective_setting(cfg, svc.K_CONSOLIDATE, True)),
+        self.consolidate_switch = ft.Switch(value=bool(svc.effective_setting(cfg, svc.K_CONSOLIDATE, True)),
                                             on_change=lambda e: self.ctx.set_cfg(svc.K_CONSOLIDATE,
                                                                                  bool(e.control.value)),
                                             key="mf-consolidate")
@@ -162,7 +161,7 @@ class FilesTab(MangaTab):
             ft.Row([self.sort_buttons, self.sort_direction], wrap=True, spacing=4),
             ft.Row([self.range_field, self.range_status], wrap=True, spacing=8,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            self.split_switch,
+            switch_row(self.split_switch, "Split first-level subfolders into groups"),
             self.group_picker,
             ft.Row([self.clear_button], wrap=True),
             self.selection_bar,
@@ -175,16 +174,19 @@ class FilesTab(MangaTab):
             self.imported_row,
             self.progress,
             self.run_status,
-            self.create_cbz_switch,
-            self.consolidate_switch,
+            switch_row(self.create_cbz_switch, "Create CBZ at end"),
+            switch_row(self.consolidate_switch, "Auto consolidate images at translation end"),
             self.console_holder,
         ], icon="PLAY_CIRCLE", key="mf-run")
         output = self.section("Output", [self.output_holder, self.output_list], icon="IOS_SHARE", key="mf-output")
         self.translation = TranslationModel(self.ctx)
         model = self.section("Translation model", self.translation.controls(), icon="SMART_TOY",
                              key="mf-translation")
+        # every section stays laid out: the Run section's log console is not dropped and rebuilt (re-pinned
+        # from its top) each time it scrolls back into view (LAYOUT_ALL_EXTENT)
         self.root = ft.ListView(controls=[sources, model, run, output], expand=True, spacing=tokens.SPACING["md"],
-                                padding=ft.Padding.symmetric(horizontal=12, vertical=8), key=self.key)
+                                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                                cache_extent=LAYOUT_ALL_EXTENT, key=self.key)
         self.refresh(push_now=False)
         return self.root
 

@@ -20,6 +20,17 @@ the state, key ``log-autoscroll``) whose choice lasts for the app session (``SES
 ``header_follow`` the host shows ``follow_button`` in its card header (next to Share) instead of the
 filter row. The filter chips and Copy are compact so All / Errors / Thinking / API and Copy fit a
 360 dp phone at 100 % text; the row still scrolls sideways at larger text.
+
+v9.15.7 hotfix 1 (owner: auto-scroll "triggers even when no log is being output" and "visibly scrolls down
+beyond the bottom ... like someone spamming scroll down"): the list lays out every block
+(``LAYOUT_ALL_EXTENT`` as Flutter's ``cacheExtent``). A lazy list measures only the blocks near the
+viewport and estimates the rest, and Flet's ``auto_scroll`` jumps to ``maxScrollExtent`` whenever the list
+is rebuilt or created (Flet 1.0.3 ``ScrollableControl.build``): a Job page refresh, or the Log card
+scrolled back into view after the page's own lazy list had dropped it, which starts the list again at its
+top. On the emulator that jump landed past the real end (an empty box), sprang back and stepped on for a
+second as blocks got measured, without a new line. Laid out, the end is exact and a pin is one jump that
+lands on it. Hosts in a lazy page list (Job page, Manga Files tab, Diagnostics) keep the console laid out
+the same way, so it is not dropped and rebuilt as the page scrolls.
 """
 
 from __future__ import annotations
@@ -35,8 +46,8 @@ from glossarion_mobile.services.dispatcher import LogBuffer, LogLine, UiDispatch
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.theme import HIT_TARGET, log_text, text_style
 
-__all__ = ["CHIP_LABEL", "CHIP_LABEL_PADDING", "CHIP_PADDING", "COMPACT_BUTTON", "FILTERS", "LogConsole",
-           "SESSION"]
+__all__ = ["CHIP_LABEL", "CHIP_LABEL_PADDING", "CHIP_PADDING", "COMPACT_BUTTON", "FILTERS", "LAYOUT_ALL_EXTENT",
+           "LogConsole", "SESSION"]
 
 #: per-viewer choices kept for the rest of the app session (every LogConsole opens with them)
 SESSION = {"following": True}
@@ -52,6 +63,10 @@ END_SLACK = 40.0
 #: a console opened while auto-scroll is paused stops following this long after its backlog arrived (the
 #: client pins the last backlog batch after laying it out)
 OPEN_SETTLE_SECONDS = 0.6
+#: ``cache_extent`` (dp) of a list that lays out all its children: more than the console's most blocks can
+#: span (max_blocks x block_lines lines, wrapped), so every block has a measured height and the end the
+#: auto-scroll pins to is exact (hotfix, see the module docstring)
+LAYOUT_ALL_EXTENT = 1_000_000.0
 
 # (filter id, chip label, LogLine.kind values shown)
 FILTERS = (
@@ -128,6 +143,8 @@ class LogConsole(ft.Column):
             # on for the backlog whatever the session's choice
             auto_scroll=self.following,
             auto_scroll_animation=ft.Animation(0, ft.AnimationCurve.LINEAR),
+            # every block laid out: the end the pin jumps to is measured, not estimated
+            cache_extent=LAYOUT_ALL_EXTENT,
             on_scroll=self._on_scroll,
             scroll_interval=100,
         )
