@@ -1001,6 +1001,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
     from glossarion_mobile.ui.components.section_card import SectionCard
     from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+    from glossarion_mobile.ui.components.switch_row import switch_row
     from glossarion_mobile.ui.foreground import poll_sleep
     from glossarion_mobile.ui.screens.base import Screen
     from glossarion_mobile.ui.settings.model import mask_secret
@@ -1329,10 +1330,10 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
                                       value=bool(self.controller.setting("use_main_key_fallback", True)),
                                       on_change=lambda e: self.controller.set_setting("use_main_key_fallback",
                                                                                       bool(e.control.value))))
-            children.append(ft.Switch(label="Fallback Key Shuffle (skip keys on API delay cooldown)",
-                                      value=bool(self.controller.setting("fallback_key_shuffle", False)),
-                                      on_change=lambda e: self.controller.set_setting("fallback_key_shuffle",
-                                                                                      bool(e.control.value))))
+            children.append(switch_row(ft.Switch(value=bool(self.controller.setting("fallback_key_shuffle", False)),
+                                                on_change=lambda e: self.controller.set_setting(
+                                                    "fallback_key_shuffle", bool(e.control.value))),
+                                      "Fallback Key Shuffle (skip keys on API delay cooldown)"))
         if not self.controller.backend.available:
             children.append(ReasonChip(reason="Key service missing", detail=SERVICE_MISSING))
         heading = str(spec.extra.get("section_title") or spec.title)  # desktop group title

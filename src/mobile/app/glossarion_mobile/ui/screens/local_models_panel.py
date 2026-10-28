@@ -49,6 +49,7 @@ from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.section_card import SectionCard
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.components.sheet import (bottom_sheet, fits_compact, page_width, scroll_column, sheet_frame,
                                                    text_height)
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
@@ -924,7 +925,7 @@ class LocalModelsPanel(OnDeviceFlow):
         }
         self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
-        self.block_cjk_switch = ft.Switch(label="Block CJK in translations (adaptive)", value=self.service.block_cjk(),
+        self.block_cjk_switch = ft.Switch(value=self.service.block_cjk(),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
@@ -937,7 +938,7 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
                                   on_click=lambda e: self.reset_sampling())], spacing=4),
             self.sampling_error,
-            self.block_cjk_switch,
+            switch_row(self.block_cjk_switch, "Block CJK in translations (adaptive)"),
             _small("Stops small models from slipping Chinese, Japanese or Korean characters into translations to "
                    "a non-CJK language. Glossary requests, the single-pass auto glossary and Chinese, Japanese "
                    "or Korean targets are never blocked.", key="local-block-cjk-note"),

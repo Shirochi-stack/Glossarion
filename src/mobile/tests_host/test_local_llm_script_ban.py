@@ -215,7 +215,8 @@ def test_engine_card_switch_turns_the_ban_off_and_on(tmp_path):
     panel = LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: f"local/{STEM}")
     panel.build()
     assert panel.block_cjk_switch.value is True
-    assert panel.block_cjk_switch.label == "Block CJK in translations (adaptive)"
+    # the label wraps beside the switch (switch_row), not as the Switch's own one-line label
+    assert not panel.block_cjk_switch.label
     panel.block_cjk_switch.value = False
     assert panel.save_block_cjk() is False and service.prefs.get(svc.BLOCK_CJK_KEY) is False
     assert service.block_cjk() is False

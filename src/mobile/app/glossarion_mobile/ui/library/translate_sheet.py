@@ -34,6 +34,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.library.models import size_text
 
 __all__ = ["OUTPUT_MISMATCH_TITLE", "TranslateSheet", "confirm_output_root", "open_translate_sheet",
@@ -194,9 +195,9 @@ class TranslateSheet:
             self.fact_chips.append(self.range_chip)
             run_controls.append(self.run_panel.control)
         supported = review_gate_supported()
-        self.review_switch = ft.Switch(label="Review glossary before translating", value=False,
+        self.review_switch = ft.Switch(value=False,
                                        disabled=not supported, key="review-glossary")
-        review_row: list[ft.Control] = [self.review_switch]
+        review_row: list[ft.Control] = [switch_row(self.review_switch, "Review glossary before translating")]
         if not supported:
             review_row.append(ReasonChip(reason="Not in this build",
                                          detail="The translate job pauses for glossary review only in the chat "

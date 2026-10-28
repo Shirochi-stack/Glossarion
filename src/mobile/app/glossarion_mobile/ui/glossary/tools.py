@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
 from glossarion_mobile.ui.glossary.entry_sheet import field_label
 from glossarion_mobile.ui.theme import number_keyboard
@@ -307,7 +308,7 @@ class BackupSettingsSheet:
         self.host = SheetHost(ctx)
         self.on_save = on_save
         self.on_backup_now = on_backup_now
-        self.enabled = ft.Switch(label="Enable automatic backups before modifications", value=bool(enabled),
+        self.enabled = ft.Switch(value=bool(enabled),
                                  on_change=lambda e: self._sync(), key="bk-enabled")
         self.max_field = ft.TextField(label="Maximum backups to keep", value=str(int(max_backups)), suffix="(0 = unlimited)",
                                       keyboard_type=number_keyboard(), dense=True, key="bk-max")
@@ -325,7 +326,7 @@ class BackupSettingsSheet:
         else:
             location.append(ft.Text("Backups", color=ft.Colors.ON_SURFACE_VARIANT))
         self.dialog = sheet("Automatic Backup Settings", [
-            self.enabled, self.max_field,
+            switch_row(self.enabled, "Enable automatic backups before modifications"), self.max_field,
             ft.Text("Backup naming pattern:", weight=ft.FontWeight.W_600),
             ft.Text("[original_name]_[operation]_[YYYYMMDD_HHMMSS].json", italic=True,
                     theme_style=ft.TextThemeStyle.BODY_SMALL),
