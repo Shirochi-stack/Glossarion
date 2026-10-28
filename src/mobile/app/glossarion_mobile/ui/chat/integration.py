@@ -1598,10 +1598,13 @@ class ChatFeature:
         except Exception:
             log.debug("refreshing the Library failed", exc_info=True)
 
-    async def library_translate(self, folder: str, source: str = "", run_config: Optional[dict] = None) -> Any:
-        """Resume / Retry failed of a chat book that moved into the Library: the Library translate sheet
-        for it (the Library resumes from the moved workspace's progress file); ``run_config``: the Result
-        card's "Only for this run" values, which the sheet's Run options start with."""
+    async def library_translate(self, folder: str, source: str = "", run_config: Optional[dict] = None,
+                                chat_overrides: Optional[dict] = None) -> Any:
+        """Resume / Retry failed of a chat book that moved into the Library: its translation run starts at
+        once (``translate_sheet.resume_translation``, no sheet: 9.15.7 batch issue 4) and continues from the
+        moved workspace's progress file. ``run_config``: the Result card's "Only for this run" values;
+        ``chat_overrides``: the chat's run overrides now (``ChatView.run_overrides``: model, profile, target
+        language, glossary prompts), which win over them as at a chat Resume (``run_request.with_chat_overrides``)."""
         notify = getattr(self.app, "notify", None)
         library = self.library_service()
         feature = getattr(self.app, "library_feature", None)
@@ -1613,11 +1616,11 @@ class ChatFeature:
             return None
         if source and not book.get("raw_source_path") and os.path.isfile(str(source)):
             book = dict(book, raw_source_path=str(source))
-        from glossarion_mobile.ui.library.translate_sheet import open_translate_sheet
+        from glossarion_mobile.ui.chat.run_request import with_chat_overrides
+        from glossarion_mobile.ui.library.translate_sheet import resume_translation
 
-        if run_config:
-            return await open_translate_sheet(feature.context(), [book], run_config=run_config)
-        return await open_translate_sheet(feature.context(), [book])
+        overrides = with_chat_overrides(run_config or {}, chat_overrides or {})
+        return await resume_translation(feature.context(), book, config_overrides=overrides)
 
     def job_workspace(self, snap: Any) -> str:
         """A chat job's persisted ``Direct Text/<chat>/Attachments/<stem>`` workspace (Jobs › job › Files): the

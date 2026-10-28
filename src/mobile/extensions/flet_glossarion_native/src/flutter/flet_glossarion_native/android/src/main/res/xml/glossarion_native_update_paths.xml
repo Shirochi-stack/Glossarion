@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GlossarionUpdateFileProvider (AppUpdates.kt): the in-app update shares the downloaded
+  APK with the system installer. Only <cache>/updates is shared (services/updates.py
+  UPDATES_SUBDIR); AppUpdates.install refuses any other path.
+-->
+<paths>
+    <cache-path name="glossarion_updates" path="updates/" />
+</paths>

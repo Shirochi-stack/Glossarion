@@ -1,52 +1,68 @@
-"""Adaptive CJK ban of the on-device engine ("Block CJK in translations", Model manager › On-device).
+"""Adaptive script ban of the on-device engine ("Block other scripts in translations", Model manager ›
+On-device; Prefs key ``local_llm_block_cjk`` kept from when it banned CJK only).
 
-Small on-device models (Qwen3.5 0.8B) leak Chinese characters into translations ("kanji bleed", e.g.
-Korean -> English). For a request that writes target-language text, every vocabulary token that produces
-Han, kana or Hangul gets the logit -inf; a request that must copy source text (glossary extraction, OCR, a
-single-pass auto glossary whose answer carries the raw names) is left alone.
+Small on-device models leak other writing systems into translations: Qwen3.5 0.8B slips Chinese
+characters in ("kanji bleed", Korean -> English), Qwen3.5 2B drifts into whole Hindi (Devanagari) lines
+(owner 2026-10-28). For a request that writes target-language text, every vocabulary token that produces
+a character of a script the target language does not use gets the logit -inf; a request that must copy
+source text (glossary extraction, OCR, a single-pass auto glossary whose answer carries the raw names) is
+left alone.
 
-Decision (``wants_ban``), owner 2026-10-19:
+Decision (``banned_scripts``; ``wants_ban`` is its bool), owner 2026-10-19, widened 2026-10-28:
 
 * the setting is off -> no ban;
-* the target language is Chinese (any variant), Japanese or Korean (``is_cjk_target``) -> no ban at all,
-  as if the setting were off (the target's own script must stay, and a CJK target quoting the other
-  CJK scripts is legitimate);
 * the request kind (``glossarion_task``, the key context ``unified_api_client`` labelled it with) is one of
   ``BAN_TASKS`` -> ban, except ``translation`` while the single-pass auto glossary is on
   (``glossarion_single_pass``: the translation answer carries the glossary's source-script names);
-* anything else (every glossary context, OCR / image scan, review, QA truncation checks, unknown) -> no ban.
+  anything else (every glossary context, OCR / image scan, review, QA truncation checks, unknown) and a
+  request without a target -> no ban;
+* what is banned: every script of ``SCRIPTS`` the target does not use (``target_scripts``: by name
+  "Hindi", "Chinese (Traditional)", "Serbian", by code "hi", "zh-TW", "sr-Latn", or written in its own
+  script "हिन्दी", "中文", "Русский"). English bans CJK, Devanagari, Thai, Arabic, Cyrillic, Hebrew and the
+  rest; Russian keeps Cyrillic; Hindi keeps Devanagari; Punjabi keeps Gurmukhi and Shahmukhi (Arabic). A
+  Chinese, Japanese or Korean target keeps all of Han, kana and Hangul (a CJK target quoting the other CJK
+  scripts is legitimate) and bans the other scripts (before 2026-10-28 a CJK target banned nothing);
+* a target this module does not know ("Other", a custom name in Latin letters) bans CJK only, as before
+  the widening: its own script is unknown, and banning it would leave the model nothing to write with.
 
-What is banned (``BANNED_RANGES``): Hangul Jamo, CJK radicals / Kangxi / ideographic description, the whole
-U+3000-U+9FFF block run (CJK symbols & punctuation such as 「」、。〜, hiragana, katakana, bopomofo,
-Hangul compatibility jamo, kanbun, CJK strokes, enclosed CJK letters, CJK compatibility, Extension A,
-Yijing hexagrams, the unified ideographs), Hangul Jamo Extended-A/B and syllables, CJK compatibility
-ideographs, vertical / CJK compatibility forms, halfwidth & fullwidth forms (fullwidth ，！ and halfwidth
-katakana), the kana supplements and the ideographic planes 2 and 3 (Extensions B-I). Nothing below
-U+1100 (ASCII, Latin, accented Latin, Greek, Cyrillic, general punctuation such as … “ ” —) is ever banned.
+Never banned, for any target: ASCII, Latin (accented, extended, fullwidth excepted), Greek (also used as
+symbols: α, Ω, μ), IPA, combining marks, general punctuation (… “ ” —), letterlike symbols, arrows, maths,
+box drawing, emoji, private use. ``SCRIPTS`` lists each script's Unicode blocks; the CJK ranges are those
+of the original ban (Hangul Jamo, CJK radicals / Kangxi, the U+3000-U+9FFF run with CJK punctuation such as
+「」、。〜, kana, bopomofo and the unified ideographs, Hangul syllables, CJK compatibility and vertical forms,
+halfwidth & fullwidth forms, the kana supplements and the ideographic planes 2 and 3).
 
 Byte-level BPE (Qwen): a rare character is spelled with byte tokens that do not decode on their own. A
 token is banned when (``token_is_banned``)
 
-* any complete character it decodes to is banned, or
-* it ends with an incomplete UTF-8 sequence whose every possible completion is a banned character (the
-  lead bytes 0xE3-0xE9, 0xEB, 0xEC and 0xED, and prefixes such as EA B0..BF, EF BC..BE, F0 A0..BF).
+* any complete character it decodes to belongs to a banned script, or
+* it ends with an incomplete UTF-8 sequence whose every possible completion belongs to a banned script
+  (for English: the lead bytes 0xD0-0xD7 and 0xD8-0xDF (Cyrillic, Armenian, Hebrew, Arabic), 0xE0
+  (U+0800-U+0FFF: Arabic extensions, the Indic scripts, Thai, Lao, Tibetan), 0xE3-0xE9, 0xEB-0xED (CJK),
+  and prefixes such as E0 A4 (Devanagari), EA B0..BF, EF BC..BE, F0 A0..BF).
 
-A token made only of continuation bytes, and an incomplete prefix that can also start an allowed character
-(0xEA alone: Latin Extended-D and Cyrillic Extended-B live there; 0xEF alone; 0xF0 alone: emoji) is
-never banned. The ids are computed once per loaded model (``LlamaEngine.cjk_ban``): Qwen3.5 0.8B bans
-66,509 of its 248,320 tokens (611 of them byte fragments), 0.6 s on a desktop CPU.
+A token made only of continuation bytes, and an incomplete prefix that can also start an allowed
+character (0xCE: Greek; 0xE1: Latin Extended Additional and Greek Extended live there; 0xE2: punctuation;
+0xEA, 0xEF; 0xF0: emoji) is never banned.
+
+Cost: ``VocabScripts`` decodes the vocabulary once per loaded model (every token's script bits; the
+ASCII tokens are skipped) and keeps one ``BanLogitsProcessor`` per set of banned scripts, so a second
+request into the same target language costs nothing (``LlamaEngine.script_ban``).
 """
 
 from __future__ import annotations
 
 import bisect
 import re
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Dict, FrozenSet, Iterable, Optional, Sequence, Tuple
 
-__all__ = ["BAN_TASKS", "BANNED_RANGES", "BanLogitsProcessor", "banned_token_ids", "is_banned_char",
-           "is_cjk_target", "token_is_banned", "wants_ban"]
+__all__ = ["BAN_TASKS", "BANNED_RANGES", "CJK", "SCRIPTS", "BanLogitsProcessor", "VocabScripts",
+           "banned_scripts", "banned_token_ids", "is_banned_char", "is_cjk_target", "script_of",
+           "target_scripts", "token_is_banned", "wants_ban"]
 
-#: (first, last) code points, sorted and disjoint
+CJK = "cjk"
+
+#: the original CJK ban's (first, last) code points, sorted and disjoint
 BANNED_RANGES = (
     (0x1100, 0x11FF),    # Hangul Jamo
     (0x2E80, 0x2FFF),    # CJK radicals supplement, Kangxi radicals, ideographic description characters
@@ -60,7 +76,42 @@ BANNED_RANGES = (
     (0x1AFF0, 0x1B16F),  # kana extended-B, kana supplement, kana extended-A, small kana extension
     (0x20000, 0x3FFFF),  # supplementary / tertiary ideographic planes (Extensions B-I, compat supplement)
 )
-_STARTS = [lo for lo, _hi in BANNED_RANGES]
+
+#: script -> its (first, last) Unicode blocks; no two ranges overlap. Neighbouring minor scripts share a
+#: group (Syriac, Thaana, NKo, Samaritan and Mandaic go with Arabic); "other" holds scripts no target uses.
+SCRIPTS: Dict[str, Tuple[Tuple[int, int], ...]] = {
+    CJK: BANNED_RANGES,
+    "cyrillic": ((0x0400, 0x052F), (0x1C80, 0x1C8F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F)),
+    "armenian": ((0x0530, 0x058F),),
+    "hebrew": ((0x0590, 0x05FF), (0xFB1D, 0xFB4F)),
+    "arabic": ((0x0600, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)),
+    "devanagari": ((0x0900, 0x097F), (0x1CD0, 0x1CFF), (0xA8E0, 0xA8FF)),
+    "bengali": ((0x0980, 0x09FF),),
+    "gurmukhi": ((0x0A00, 0x0A7F),),
+    "gujarati": ((0x0A80, 0x0AFF),),
+    "oriya": ((0x0B00, 0x0B7F),),
+    "tamil": ((0x0B80, 0x0BFF),),
+    "telugu": ((0x0C00, 0x0C7F),),
+    "kannada": ((0x0C80, 0x0CFF),),
+    "malayalam": ((0x0D00, 0x0D7F),),
+    "sinhala": ((0x0D80, 0x0DFF),),
+    "thai": ((0x0E00, 0x0E7F),),
+    "lao": ((0x0E80, 0x0EFF),),
+    "tibetan": ((0x0F00, 0x0FFF),),
+    "myanmar": ((0x1000, 0x109F), (0xA9E0, 0xA9FF), (0xAA60, 0xAA7F)),
+    "georgian": ((0x10A0, 0x10FF), (0x1C90, 0x1CBF), (0x2D00, 0x2D2F)),
+    "ethiopic": ((0x1200, 0x139F), (0x2D80, 0x2DDF), (0xAB00, 0xAB2F)),
+    "khmer": ((0x1780, 0x17FF), (0x19E0, 0x19FF)),
+    # Cherokee, Canadian syllabics, Ogham, Runic, Philippine scripts, Mongolian, Limbu, Tai Le, Buginese,
+    # Tai Tham, Balinese, Sundanese, Batak, Lepcha, Ol Chiki, Tifinagh, Yi, Lisu, Vai, Bamum, Syloti Nagri,
+    # Phags-pa, Saurashtra, Kayah Li, Rejang, Javanese, Cham, Tai Viet, Meetei Mayek
+    "other": ((0x13A0, 0x177F), (0x1800, 0x19DF), (0x1A00, 0x1C7F), (0x1CC0, 0x1CCF), (0x2D30, 0x2D7F),
+              (0xA000, 0xA63F), (0xA6A0, 0xA6FF), (0xA800, 0xA8DF), (0xA900, 0xA95F), (0xA980, 0xA9DF),
+              (0xAA00, 0xAA5F), (0xAA80, 0xAAFF), (0xAB70, 0xABFF)),
+}
+_BITS = {name: 1 << index for index, name in enumerate(SCRIPTS)}
+_TABLE = sorted((lo, hi, _BITS[name]) for name, ranges in SCRIPTS.items() for lo, hi in ranges)
+_STARTS = [lo for lo, _hi, _bit in _TABLE]
 _SURROGATES = (0xD800, 0xDFFF)  # never valid in UTF-8: count as "cannot complete" for prefixes
 
 #: request kinds whose answer is target-language text (``key_contexts.CONTEXT_LABELS`` names)
@@ -72,10 +123,86 @@ BAN_TASKS = frozenset({
 _CJK_WORDS = ("chinese", "mandarin", "cantonese", "japanese", "korean", "hanzi", "putonghua", "zhongwen")
 _CJK_CODES = re.compile(r"^(zh|ja|ko|jp|kr|cn|yue|cmn|jpn|kor|zho|chi)([-_].*)?$")
 
+#: target language names (lower-case words) and codes -> the scripts of ``SCRIPTS`` they write in; ""
+#: is Latin (or Greek): nothing of ``SCRIPTS`` is theirs. Covers every ``language_options.TARGET_LANGUAGES``.
+_LANGUAGES = {
+    "": ("english spanish castilian french german italian portuguese dutch flemish polish czech slovak slovenian "
+         "slovene croatian bosnian romanian moldovan hungarian swedish danish norwegian bokmal nynorsk finnish "
+         "estonian latvian lithuanian icelandic faroese irish gaelic welsh breton catalan valencian galician "
+         "basque occitan turkish azerbaijani azeri turkmen vietnamese indonesian indonesia malay melayu filipino "
+         "tagalog cebuano ilocano javanese sundanese swahili kiswahili afrikaans hausa yoruba igbo zulu xhosa "
+         "somali shona kinyarwanda malagasy maltese albanian esperanto latin maori hawaiian samoan tongan "
+         "fijian haitian luxembourgish frisian quechua guarani aymara greek",
+         "en es fr de it pt nl pl cs sk sl hr bs ro hu sv da no nb nn fi et lv lt is fo ga gd cy br ca gl eu oc "
+         "tr az tk vi id in ms fil tl ceb jv su sw af ha yo ig zu xh so sn rw mg mt sq eo la mi haw sm to fj ht "
+         "lb fy qu gn el"),
+    "cyrillic": ("russian ukrainian belarusian byelorussian bulgarian macedonian serbian montenegrin kazakh kyrgyz "
+                 "kirghiz tajik mongolian uzbek tatar bashkir chechen chuvash yakut buryat",
+                 "ru uk be bg mk sr cnr kk ky tg mn uz tt ba ce cv"),
+    "armenian": ("armenian", "hy"),
+    "georgian": ("georgian", "ka"),
+    "hebrew": ("hebrew yiddish", "he iw yi"),
+    "arabic": ("arabic persian farsi dari pashto pushto urdu sindhi uyghur uighur kurdish sorani kashmiri balochi "
+               "dhivehi maldivian punjabi panjabi shahmukhi saraiki hindustani",
+               "ar fa prs ps ur sd ug ku ckb ks dv pa"),
+    "devanagari": ("hindi marathi nepali sanskrit maithili bhojpuri konkani dogri bodo awadhi magahi rajasthani "
+                   "hindustani", "hi mr ne sa mai bho kok doi"),
+    "bengali": ("bengali bangla assamese manipuri meitei sylheti", "bn as mni"),
+    "gurmukhi": ("punjabi panjabi gurmukhi", "pa"),
+    "gujarati": ("gujarati", "gu"),
+    "oriya": ("odia oriya", "or"),
+    "tamil": ("tamil", "ta"),
+    "telugu": ("telugu", "te"),
+    "kannada": ("kannada", "kn"),
+    "malayalam": ("malayalam", "ml"),
+    "sinhala": ("sinhala sinhalese", "si"),
+    "thai": ("thai", "th"),
+    "lao": ("lao laotian", "lo"),
+    "tibetan": ("tibetan dzongkha", "bo dz"),
+    "myanmar": ("burmese myanmar", "my"),
+    "khmer": ("khmer cambodian", "km"),
+    "ethiopic": ("amharic tigrinya tigre geez", "am ti"),
+    CJK: (" ".join(_CJK_WORDS), "zh ja ko jp kr cn yue cmn jpn kor zho chi"),
+}
 
-def is_banned_char(cp: int) -> bool:
+
+def _invert(column: int) -> Dict[str, FrozenSet[str]]:
+    table: Dict[str, set] = {}
+    for script, columns in _LANGUAGES.items():
+        for word in columns[column].split():
+            table.setdefault(word, set())
+            if script:
+                table[word].add(script)
+    return {word: frozenset(scripts) for word, scripts in table.items()}
+
+
+_NAME_SCRIPTS = _invert(0)
+_CODE_SCRIPTS = _invert(1)
+_CODE = re.compile(r"^([a-z]{2,3})(?:[-_][a-z0-9]+)*$")
+
+
+def _lookup(cp: int) -> int:
     index = bisect.bisect_right(_STARTS, cp) - 1
-    return index >= 0 and cp <= BANNED_RANGES[index][1]
+    if index >= 0 and cp <= _TABLE[index][1]:
+        return _TABLE[index][2]
+    return 0
+
+
+def script_mask(scripts: Iterable[str]) -> int:
+    mask = 0
+    for name in scripts or ():
+        mask |= _BITS.get(str(name), 0)
+    return mask
+
+
+def script_of(cp: int) -> Optional[str]:
+    """The ``SCRIPTS`` name of a code point, None for one never banned (Latin, Greek, punctuation, emoji)."""
+    bit = _lookup(cp)
+    return next((name for name, value in _BITS.items() if value == bit), None) if bit else None
+
+
+def is_banned_char(cp: int, scripts: Iterable[str] = (CJK,)) -> bool:
+    return bool(_lookup(cp) & script_mask(scripts))
 
 
 def is_cjk_target(name: Any) -> bool:
@@ -92,25 +219,60 @@ def is_cjk_target(name: Any) -> bool:
     return any(is_banned_char(ord(ch)) for ch in text)
 
 
+def target_scripts(name: Any) -> Optional[FrozenSet[str]]:
+    """The ``SCRIPTS`` the target language writes in (empty for a Latin or Greek one), None when this
+    module does not recognise it."""
+    text = str(name or "").strip().casefold()
+    if not text:
+        return None
+    found: set = set()
+    known = False
+    code = _CODE.match(text)
+    if code and code.group(1) in _CODE_SCRIPTS:
+        known = True
+        found |= _CODE_SCRIPTS[code.group(1)]
+    for word in re.findall(r"[a-z]+", text):
+        if word in _NAME_SCRIPTS:
+            known = True
+            found |= _NAME_SCRIPTS[word]
+    for ch in text:  # written in its own script: 中文, हिन्दी, Русский
+        own = script_of(ord(ch))
+        if own:
+            known = True
+            found.add(own)
+    if is_cjk_target(text):
+        known = True
+        found.add(CJK)
+    return frozenset(found) if known else None
+
+
 def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes", "on", "single_pass")
     return bool(value)
 
 
-def wants_ban(task: Any, target: Any, *, single_pass: Any = False, enabled: bool = True) -> bool:
-    """Ban CJK for this request (see the module doc)."""
+def banned_scripts(task: Any, target: Any, *, single_pass: Any = False, enabled: bool = True) -> Tuple[str, ...]:
+    """The ``SCRIPTS`` to ban for this request, () for none (see the module doc)."""
     if not enabled:
-        return False
+        return ()
     target = str(target or "").strip()
-    if not target or is_cjk_target(target):
-        return False
+    if not target:
+        return ()
     kind = str(task or "").strip().lower()
     if "glossary" in kind or kind not in BAN_TASKS:
-        return False
+        return ()
     if kind == "translation" and _truthy(single_pass):
-        return False
-    return True
+        return ()
+    own = target_scripts(target)
+    if own is None:
+        return (CJK,)  # an unknown target: the original CJK-only ban
+    return tuple(name for name in SCRIPTS if name not in own)
+
+
+def wants_ban(task: Any, target: Any, *, single_pass: Any = False, enabled: bool = True) -> bool:
+    """Ban some script for this request (see the module doc)."""
+    return bool(banned_scripts(task, target, single_pass=single_pass, enabled=enabled))
 
 
 def _prefix_interval(prefix: bytes) -> Optional[tuple]:
@@ -137,17 +299,20 @@ def _prefix_interval(prefix: bytes) -> Optional[tuple]:
     return (first, last) if first <= last else None
 
 
-def _interval_banned(first: int, last: int) -> bool:
-    cp = first
+def _interval_bits(first: int, last: int) -> int:
+    """The script bits of every code point in [first, last] (surrogates skipped); 0 when some code point
+    there belongs to no script (it can always become an allowed character)."""
+    bits, cp = 0, first
     while cp <= last:
         if _SURROGATES[0] <= cp <= _SURROGATES[1]:
             cp = _SURROGATES[1] + 1
             continue
         index = bisect.bisect_right(_STARTS, cp) - 1
-        if index < 0 or cp > BANNED_RANGES[index][1]:
-            return False
-        cp = BANNED_RANGES[index][1] + 1
-    return True
+        if index < 0 or cp > _TABLE[index][1]:
+            return 0
+        bits |= _TABLE[index][2]
+        cp = _TABLE[index][1] + 1
+    return bits
 
 
 def _sequence_length(lead: int) -> int:
@@ -162,17 +327,17 @@ def _sequence_length(lead: int) -> int:
     return 0  # a continuation byte or an invalid lead
 
 
-def token_is_banned(piece: bytes) -> bool:
-    """See the module doc: a banned character, or an incomplete tail that can only become one."""
+def token_masks(piece: bytes) -> Tuple[int, int]:
+    """(the script bits of the token's complete characters, the script bits every completion of its
+    incomplete UTF-8 tail can have, 0 when it has none or one completion is never banned)."""
     data = bytes(piece or b"")
-    index, size = 0, len(data)
+    if data.isascii():
+        return 0, 0
+    chars, index, size = 0, 0, len(data)
     while index < size:
         lead = data[index]
         length = _sequence_length(lead)
-        if length == 1:
-            index += 1
-            continue
-        if length == 0:  # leading/stray continuation byte: belongs to a character we cannot see
+        if length <= 1:  # ASCII, or a leading/stray continuation byte (a character we cannot see)
             index += 1
             continue
         tail = data[index + 1:index + length]
@@ -181,21 +346,30 @@ def token_is_banned(piece: bytes) -> bool:
             continue
         if len(tail) < length - 1:  # the token ends inside this character
             interval = _prefix_interval(data[index:])
-            return bool(interval) and _interval_banned(*interval)
+            return chars, (_interval_bits(*interval) if interval else 0)
         try:
             cp = ord(data[index:index + length].decode("utf-8"))
         except UnicodeDecodeError:
             index += 1
             continue
-        if is_banned_char(cp):
-            return True
+        chars |= _lookup(cp)
         index += length
-    return False
+    return chars, 0
 
 
-def banned_token_ids(pieces: Iterable[bytes]) -> list:
+def _banned(chars: int, tail: int, mask: int) -> bool:
+    return bool(chars & mask) or (bool(tail) and not tail & ~mask)
+
+
+def token_is_banned(piece: bytes, scripts: Iterable[str] = (CJK,)) -> bool:
+    """See the module doc: a character of a banned script, or an incomplete tail that can only become one."""
+    return _banned(*token_masks(piece), script_mask(scripts))
+
+
+def banned_token_ids(pieces: Iterable[bytes], scripts: Iterable[str] = (CJK,)) -> list:
     """The ids (positions in ``pieces``, each token's raw bytes) to ban."""
-    return [token for token, piece in enumerate(pieces) if piece and token_is_banned(piece)]
+    mask = script_mask(scripts)
+    return [token for token, piece in enumerate(pieces) if piece and _banned(*token_masks(piece), mask)]
 
 
 class BanLogitsProcessor:
@@ -217,3 +391,40 @@ class BanLogitsProcessor:
 
     def __len__(self) -> int:
         return int(self.ids.size)
+
+
+class VocabScripts:
+    """A loaded model's vocabulary by script: decoded once (``pieces``: every token's raw bytes, in id
+    order), then one cached ``BanLogitsProcessor`` per set of banned scripts."""
+
+    def __init__(self, pieces: Iterable[bytes]) -> None:
+        tokens, chars, tails = [], [], []
+        n_vocab = 0
+        for token, piece in enumerate(pieces):
+            n_vocab = token + 1
+            if not piece:
+                continue
+            char_bits, tail_bits = token_masks(piece)
+            if char_bits or tail_bits:  # only tokens that touch some script are kept
+                tokens.append(token)
+                chars.append(char_bits)
+                tails.append(tail_bits)
+        self.n_vocab = n_vocab
+        self._tokens, self._chars, self._tails = tokens, chars, tails
+        self._processors: Dict[int, BanLogitsProcessor] = {}
+
+    def __len__(self) -> int:
+        """The number of tokens that touch some script of ``SCRIPTS``."""
+        return len(self._tokens)
+
+    def ids(self, scripts: Iterable[str]) -> list:
+        mask = script_mask(scripts)
+        return [token for token, chars, tail in zip(self._tokens, self._chars, self._tails)
+                if _banned(chars, tail, mask)]
+
+    def processor(self, scripts: Iterable[str]) -> BanLogitsProcessor:
+        mask = script_mask(scripts)
+        cached = self._processors.get(mask)
+        if cached is None:
+            cached = self._processors[mask] = BanLogitsProcessor(self.ids(scripts), self.n_vocab)
+        return cached

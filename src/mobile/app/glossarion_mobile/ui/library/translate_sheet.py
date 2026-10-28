@@ -20,6 +20,9 @@ mode (the chat's ``effective_glossary_label``, the desktop rule) - plus:
 Raw sources are resolved on the io pool before the sheet opens
 (:func:`open_translate_sheet`); books without one are listed with the desktop
 "missing raw" reason and are not started.
+
+The sheet is for a fresh Translate only: a chat Result card's Resume / Retry failed of a
+book that moved into the Library starts the run directly (:func:`resume_translation`).
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.library.models import size_text
 
 __all__ = ["OUTPUT_MISMATCH_TITLE", "TranslateSheet", "confirm_output_root", "open_translate_sheet",
-           "review_gate_supported"]
+           "resume_translation", "review_gate_supported", "submit_translation"]
 
 log = logging.getLogger("glossarion.library.ui")
 
@@ -183,7 +186,7 @@ class TranslateSheet:
         if settings_ctx is not None and ready:
             from glossarion_mobile.ui.chat.plan_card import RunOptionsPanel
 
-            # ``run_config``: a chat Result card's "Only for this run" values (Resume of a book in the Library)
+            # ``run_config``: "Only for this run" values the sheet starts switched on with
             self.run_panel = RunOptionsPanel(settings_ctx, values=dict(run_config or {}),
                                              only_this_run=bool(run_config),
                                              on_change=lambda values, only: self._refresh_range(),
@@ -265,15 +268,13 @@ class TranslateSheet:
             return None
         if not await confirm_output_root(self.ctx, self.ready_books):
             return None  # Cancel on "Output Folder Mismatch": the sheet stays open
-        service = self.ctx.service
         # The sources were resolved on the io pool when the sheet opened: never re-run the
         # registry reads / directory scans of raw_source() on the UI loop.
         if self.run_panel is not None:
             self.run_panel.commit()  # a number typed and not yet submitted when Start is tapped
         overrides = self.run_panel.config_overrides() if self.run_panel is not None else {}
-        spec = service.translate_spec(self.ready_books, review_glossary=bool(self.review_switch.value),
-                                      sources=self.ready_sources, config_overrides=overrides)
-        job_id = await service.submit(spec)
+        job_id = await submit_translation(self.ctx, self.ready_books, self.ready_sources,
+                                          review_glossary=bool(self.review_switch.value), config_overrides=overrides)
         self.started_job = job_id
         self.close()
         self.ctx.haptic("medium_impact")
@@ -350,10 +351,64 @@ class TranslateSheet:
         return self.chapters_sheet
 
 
+async def submit_translation(ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str], *,
+                             review_glossary: bool = False,
+                             config_overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """``LibraryService.translate_spec`` -> ``submit`` (the job service's own preflight, e.g. a missing
+    sign-in, says why when it queues nothing): the sheet's Start and :func:`resume_translation`."""
+    service = ctx.service
+    spec = service.translate_spec(list(books), review_glossary=review_glossary, sources=list(sources),
+                                  config_overrides=dict(config_overrides or {}))
+    return await service.submit(spec)
+
+
+async def resume_translation(ctx: Any, book: Mapping[str, Any],
+                             config_overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """Resume / Retry failed of a chat book that moved into the Library (issue 4 of the 9.15.7 batch: "clicking
+    resume opens a popup instead of just resuming"): the book's translation run starts at once with the
+    settings handed over (``config_overrides``: the chat's model / profile / language and the card's Run
+    options), and the pipeline continues from the workspace's progress file, like the desktop's resume. No
+    sheet: what would block the run is said in one short message instead (no raw source, no job service, a
+    model excluded on mobile, Cancel on "Output Folder Mismatch"); the sheet stays for a fresh Translate."""
+    service = ctx.service
+    book = dict(book)
+    name = str(book.get("name") or "this book")
+    if service.jobs is None or not service.has_job_kind("translate"):
+        ctx.say("The job service is not running")
+        return None
+    overrides = dict(config_overrides or {})
+    model = str(overrides.get("model") or service.cfg("model", "") or "")
+    from glossarion_mobile.services.model_catalog import model_block
+
+    block = model_block(model) if model else None
+    if block is not None:
+        ctx.say(f"Could not resume: {block[0]}")
+        return None
+    try:
+        source = await ctx.io(service.raw_source, book)
+    except Exception:
+        log.debug("resolving the raw source failed", exc_info=True)
+        source = ""
+    if not source:
+        ctx.say(MISSING_RAW_REASON)
+        return None
+    if not await confirm_output_root(ctx, [book]):
+        return None
+    try:
+        job_id = await submit_translation(ctx, [book], [source], config_overrides=overrides)
+    except Exception as exc:
+        ctx.say(f"Could not resume: {exc}")
+        return None
+    if job_id:
+        ctx.haptic("medium_impact")
+        ctx.say(f"Resuming “{name}”")
+    return job_id
+
+
 async def open_translate_sheet(ctx: Any, books: Sequence[Mapping[str, Any]],
                                run_config: Optional[Mapping[str, Any]] = None) -> TranslateSheet:
     """Resolve the raw sources on the io pool, then show the sheet (``run_config``: its Run options'
-    "Only for this run" values, from a chat Result card's Resume)."""
+    "Only for this run" values to start with)."""
     service = ctx.service
     books = [dict(b) for b in books]
     sources = await ctx.io(lambda: [service.raw_source(b) for b in books])

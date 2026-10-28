@@ -7,7 +7,7 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   the engine's system info after the first load. Choosing a model resets Context to that model's own
   (8,192 tokens, 4,096 for files of 4 GB and more); a job on it asks for half the context as output. Without
   llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes. Below
-  the on-device sampling fields, "Block CJK in translations (adaptive)" (on by default; ``script_ban``).
+  the on-device sampling fields, "Block other scripts in translations (adaptive)" (on by default; ``script_ban``).
   Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
   default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
   after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". On Android (OpenCL) the
@@ -938,10 +938,11 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
                                   on_click=lambda e: self.reset_sampling())], spacing=4),
             self.sampling_error,
-            switch_row(self.block_cjk_switch, "Block CJK in translations (adaptive)"),
-            _small("Stops small models from slipping Chinese, Japanese or Korean characters into translations to "
-                   "a non-CJK language. Glossary requests, the single-pass auto glossary and Chinese, Japanese "
-                   "or Korean targets are never blocked.", key="local-block-cjk-note"),
+            switch_row(self.block_cjk_switch, "Block other scripts in translations (adaptive)"),
+            _small("Stops small models from slipping into another writing system (Chinese, Japanese, Korean, "
+                   "Hindi, Thai, Arabic, Cyrillic ...) while translating: only the target language's own "
+                   "script, Latin letters, numbers and punctuation can be written. Glossary requests and the "
+                   "single-pass auto glossary are never blocked.", key="local-block-cjk-note"),
         ]
 
     def save_block_cjk(self) -> bool:

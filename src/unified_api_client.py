@@ -11778,6 +11778,12 @@ class UnifiedClient:
                     print("Arena setup/authentication error - use Arena Login before retrying")
                     raise
 
+                # DeepSeek web (authds/): a missing sign-in or browser does not appear through backoff
+                # (each retry opened DeepSeek again and saved the request as a failed payload).
+                if self.client_type == "authds" and e.error_type in ("auth_error", "config_error"):
+                    print("DeepSeek (authds/) sign-in/setup error - sign in to DeepSeek first; not retrying")
+                    raise
+
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
                     self._enable_image_request_quality_retry()
                     self._last_retry_error_type = 'payload_too_large_image_quality'

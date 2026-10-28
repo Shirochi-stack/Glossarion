@@ -79,10 +79,12 @@ def test_banned_ids_include_byte_fragments_and_never_latin_or_punctuation():
     ("Japanese", False), ("日本語", False), ("ja", False),
     ("Korean", False), ("한국어", False), ("ko-KR", False),
 ])
-def test_cjk_targets_ban_nothing_others_ban_all_three_scripts(target, banned):
-    """owner 2026-10-19: a Chinese / Japanese / Korean target gets the default logits (no processor);
-    every other target bans Han, kana and Hangul alike."""
-    assert sb.wants_ban("translation", target) is banned
+def test_cjk_targets_keep_cjk_others_ban_all_three_scripts(target, banned):
+    """owner 2026-10-19: a Chinese / Japanese / Korean target keeps Han, kana and Hangul; every other
+    target bans the three alike. Since 2026-10-28 a CJK target still bans the other scripts (Devanagari,
+    Thai ...; test_mobile_batch_9157_script_ban)."""
+    assert sb.wants_ban("translation", target)
+    assert (sb.CJK in sb.banned_scripts("translation", target)) is banned
     assert sb.is_cjk_target(target) is (not banned)
 
 
@@ -113,15 +115,15 @@ def test_service_routes_the_request_kind(tmp_path):
     service, _engine = _service(tmp_path)
     base = {"temperature": 0.7, "max_tokens": 64, "target_language": "English"}
     assert service.block_cjk() is True  # on by default
-    assert service._params({**base, "glossarion_task": "translation"}, 4096)["ban_cjk"] is True
-    assert "ban_cjk" not in service._params({**base, "glossarion_task": "glossary"}, 4096)
-    assert "ban_cjk" not in service._params({**base, "glossarion_task": "translation",
-                                             "glossarion_single_pass": True}, 4096)
-    assert "ban_cjk" not in service._params({**base, "glossarion_task": "translation",
-                                             "target_language": "Japanese"}, 4096)
-    assert "ban_cjk" not in service._params({"max_tokens": 64}, 4096)  # a plain OpenAI request (no fields)
+    assert sb.CJK in service._params({**base, "glossarion_task": "translation"}, 4096)["ban_scripts"]
+    assert "ban_scripts" not in service._params({**base, "glossarion_task": "glossary"}, 4096)
+    assert "ban_scripts" not in service._params({**base, "glossarion_task": "translation",
+                                                 "glossarion_single_pass": True}, 4096)
+    assert sb.CJK not in service._params({**base, "glossarion_task": "translation",
+                                          "target_language": "Japanese"}, 4096)["ban_scripts"]
+    assert "ban_scripts" not in service._params({"max_tokens": 64}, 4096)  # a plain OpenAI request (no fields)
     assert service.save_block_cjk(False) is False and service.block_cjk() is False
-    assert "ban_cjk" not in service._params({**base, "glossarion_task": "translation"}, 4096)
+    assert "ban_scripts" not in service._params({**base, "glossarion_task": "translation"}, 4096)
 
 
 def test_the_ban_reaches_the_engine_through_the_endpoint_path(tmp_path):
@@ -131,11 +133,11 @@ def test_the_ban_reaches_the_engine_through_the_endpoint_path(tmp_path):
     run = service.chat(f"local/{STEM}", body, lambda: False)
     list(run.deltas)
     run.close()
-    assert engine.calls[-1]["params"]["ban_cjk"] is True
+    assert sb.CJK in engine.calls[-1]["params"]["ban_scripts"]
     run = service.chat(f"local/{STEM}", {**body, "glossarion_task": "glossary"}, lambda: False)
     list(run.deltas)
     run.close()
-    assert "ban_cjk" not in engine.calls[-1]["params"]
+    assert "ban_scripts" not in engine.calls[-1]["params"]
 
 
 class _FakeLlama:
@@ -176,15 +178,15 @@ def test_llama_engine_passes_the_processor_and_computes_the_ids_once():
     params = {"max_tokens": 16, "temperature": 0.7}
     assert "".join(engine.chat(messages, params, lambda: False)) == f"{len(VOCAB)} allowed"
     assert "logits_processor" not in engine.llm.kwargs[-1]  # no ban asked: the default logits
-    out = "".join(engine.chat(messages, {**params, "ban_cjk": True}, lambda: False))
+    out = "".join(engine.chat(messages, {**params, "ban_scripts": (sb.CJK,)}, lambda: False))
     assert out == f"{len(VOCAB) - len(_expected())} allowed"
     (processor,) = engine.llm.kwargs[-1]["logits_processor"]
     assert list(processor.ids) == _expected()
     detokenized = engine.llm.detokenized
-    "".join(engine.chat(messages, {**params, "ban_cjk": True}, lambda: False))
+    "".join(engine.chat(messages, {**params, "ban_scripts": (sb.CJK,)}, lambda: False))
     assert engine.llm.detokenized == detokenized  # cached for the loaded model
     engine.unload()
-    assert engine._ban is None
+    assert engine._scripts is None
 
 
 def test_llama_engine_hands_the_dry_settings_to_the_model():

@@ -686,9 +686,12 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
                 assert client.distance_from_end == 0.0 and moved == 0.0, (
                     f"tick {n}: the page left its end by {client.distance_from_end:.0f} dp - the Log card moved "
                     f"{moved:+.0f} dp under the reader (content {heights[-2]:.0f} -> {heights[-1]:.0f} dp)")
-            # the scenario did what the phone does: the strip ticked and the content above the Log grew
+            # the scenario did what the phone does: the strip ticked and the requests above the Log grew - in
+            # their box of fixed height since the v9.15.7 batch (test_mobile_batch_9157_log_scroll), so the
+            # page itself kept its height
             assert len(set(strip_texts)) > 5
-            assert heights[-1] > heights[0] + 200
+            assert len(screen.requests_column.controls) >= 8 and screen.requests_box.height is not None
+            assert heights[-1] == heights[0]
             assert not [b for b in client.list_invokes if b.name == "scroll_to"], "the page chased its end"
 
             # a reader who scrolled up keeps their place: nothing moves under them any more. auto_scroll stays
@@ -704,7 +707,7 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
                 await h.job_tick(n)
                 await client.frame()
                 assert client.pixels == pixels
-            assert client.distance_from_end > 300
+            assert client.distance_from_end >= 300  # the page no longer grows below them (requests box)
 
             # back at the end, the page follows it again
             await client.user_scroll_to(client.max_extent)
