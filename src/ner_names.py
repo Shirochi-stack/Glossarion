@@ -146,13 +146,14 @@ class WordPiece:
 
 
 # ----------------------------------------------------------------------------------------- tagger
-def ner_threads() -> int:
-    """Cores one NER call uses (ONNX Runtime intra-op threads): at most 4, never more than the CPU has."""
-    return max(1, min(4, os.cpu_count() or 1))
+def ner_threads(workers: int = 1) -> int:
+    """Cores one NER call uses (ONNX Runtime intra-op threads): at most 4, never more than the CPU has;
+    with ``workers`` calls at once, the cores shared out between them (at least 1 each)."""
+    return max(1, min(4, (os.cpu_count() or 1) // max(1, int(workers))))
 
 
 class NerTagger:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, threads: Optional[int] = None):
         import numpy as np
         import onnxruntime as ort
 
@@ -163,10 +164,25 @@ class NerTagger:
             id2label = json.load(f)["id2label"]
         self.labels = [id2label[str(i)] for i in range(len(id2label))]
         options = ort.SessionOptions()
-        options.intra_op_num_threads = ner_threads()
+        self.model_path = model_path
+        self.threads = threads or ner_threads()
+        options.intra_op_num_threads = self.threads
         self.session = ort.InferenceSession(model_path, sess_options=options, providers=["CPUExecutionProvider"])
         self.inputs = {i.name for i in self.session.get_inputs()}
         self._cache: dict = {}
+
+    def with_threads(self, threads: int) -> "NerTagger":
+        """This model with ``threads`` intra-op threads per call ("Chapters checked at once" shares the
+        cores out); loaded once per count and kept, this tagger itself for its own count."""
+        threads = max(1, int(threads))
+        if threads == getattr(self, "threads", threads):
+            return self
+        key = (getattr(self, "model_path", ""), threads)
+        with _tagger_lock:
+            tagger = _taggers_by_threads.get(key)
+            if tagger is None:
+                tagger = _taggers_by_threads[key] = NerTagger(self.model_path, threads)
+        return tagger
 
     def _windows(self, text: str):
         """Word spans with their WordPiece ids, grouped into <= MAX_TOKENS windows at line ends."""
@@ -286,6 +302,7 @@ class NerTagger:
 
 
 _tagger_lock = threading.Lock()
+_taggers_by_threads: dict = {}  # (model path, threads) -> NerTagger (``NerTagger.with_threads``)
 _tagger: Optional[NerTagger] = None
 
 

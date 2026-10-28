@@ -863,7 +863,8 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '        config = dict(self.config or {})\n'
   "        for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',\n"
   "                    'glossary_name_check_min_chars', 'glossary_name_check_autofix_level',\n"
-  "                    'glossary_name_check_match_numbers'):\n"
+  "                    'glossary_name_check_match_numbers', 'glossary_name_check_plural_exclusion',\n"
+  "                    'glossary_name_check_tense_exclusion', 'glossary_name_check_inflection_skip_types'):\n"
   "            if hasattr(self, key + '_var'):\n"
   "                config[key] = getattr(self, key + '_var')\n"
   '        return name_check.settings_from_config(config)\n'
@@ -1370,58 +1371,59 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
  ('            detection_layout.addWidget(check_glossary_checkbox)\n\n',
   '            detection_layout.addWidget(check_glossary_checkbox)\n'
   '\n'
-  '            # the label says whether NER does the check (owner 2026-10-27: ✓ when its model is installed)\n'
+  '            # the label says whether NER does the check (owner 2026-10-27: ✓ when its model is installed); it\n'
+  '            # follows "Use Named Entity Recognition model (NER)" below as that changes (owner 2026-10-28)\n'
   '            import glossary_name_check as name_check\n'
-  "            ner_state = name_check.ner_status(bool(getattr(self, 'glossary_name_check_use_ner_var',\n"
-  "                                                           self.config.get('glossary_name_check_use_ner', True))))\n"
-  '            check_glossary_names_checkbox = self._create_styled_checkbox({\n'
+  '            ner_labels = {\n'
   '                "installed": "Check glossary names with NER (Experimental)",\n'
   '                "missing": "Check glossary names (Experimental) — NER not installed (downloads on first use)",\n'
   '                "unsupported": "Check glossary names (Experimental) — NER not supported in this build",\n'
-  '                "off": "Check glossary names (Experimental) — NER off in Other Settings",\n'
-  '            }[ner_state])\n'
+  '                "off": "Check glossary names (Experimental) — NER off",\n'
+  '            }\n'
+  '            check_glossary_names_checkbox = self._create_styled_checkbox(ner_labels["installed"])\n'
   "            check_glossary_names_checkbox.setChecked(qa_settings.get('check_glossary_names', False))\n"
   '            check_glossary_names_checkbox.setToolTip(\n'
   '                "Flags chapters where a glossary name from the source chapter was translated with a\\n"\n'
   '                "different spelling (e.g. \'Walter Argent\' for glossary \'Valter Argent\').\\n"\n'
   '                "Names are found with a named-entity recognition model (NER, 104 MB, downloaded on\\n"\n'
-  '                "first use); Other Settings › \\"Use Named Entity Recognition model (NER)\\" turns it off\\n"\n'
-  '                "for a capitalization heuristic (builds without ONNX Runtime always use the heuristic).\\n"\n'
-  '                "Checks the entry types below (the same setting as Other Settings › Emergency Glossary\\n"\n'
-  '                "Compliance and the name check) and the name check\'s minimum length (Other Settings).\\n"\n'
-  '                "Flagged chapters count as QA failures like other issues.")\n'
+  '                "first use); \\"Use Named Entity Recognition model (NER)\\" below turns it off for a\\n"\n'
+  '                "capitalization heuristic (builds without ONNX Runtime always use the heuristic).\\n"\n'
+  '                "The settings below are the same as the name check\'s in Other Settings (a change in\\n"\n'
+  '                "either shows in both). Flagged chapters count as QA failures like other issues.")\n'
   '            check_glossary_names_row = QWidget()\n'
   '            check_glossary_names_layout = QHBoxLayout(check_glossary_names_row)\n'
   '            check_glossary_names_layout.setContentsMargins(0, 0, 0, 0)\n'
   '            check_glossary_names_layout.addWidget(check_glossary_names_checkbox)\n'
-  '            if ner_state == "installed":\n'
-  '                ner_installed_icon = QLabel("✓")\n'
-  '                ner_installed_icon.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 12pt;")\n'
-  '                ner_installed_icon.setToolTip("The named-entity model (NER) is installed")\n'
-  '                check_glossary_names_layout.addWidget(ner_installed_icon)\n'
+  '            ner_installed_icon = QLabel("✓")\n'
+  '            ner_installed_icon.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 12pt;")\n'
+  '            ner_installed_icon.setToolTip("The named-entity model (NER) is installed")\n'
+  '            check_glossary_names_layout.addWidget(ner_installed_icon)\n'
   '            check_glossary_names_layout.addStretch()\n'
   '            detection_layout.addWidget(check_glossary_names_row)\n'
   '\n'
-  "            # Other Settings' entry types dropdown, Auto-fix strength, Chapters checked at once and Names keep\n"
-  '            # their numbers (one setting each: a change in either dialog shows in both)\n'
-  '            from other_settings import (glossary_entry_types_row, glossary_name_autofix_row, glossary_name_numbers_row,\n'
+  '            def _refresh_ner_label(_checked=None):\n'
+  "                state = name_check.ner_status(bool(getattr(self, 'glossary_name_check_use_ner_var',\n"
+  "                                                           self.config.get('glossary_name_check_use_ner', True))))\n"
+  '                check_glossary_names_checkbox.setText(ner_labels[state])\n'
+  '                ner_installed_icon.setVisible(state == "installed")\n'
+  '            _refresh_ner_label()\n'
+  '\n'
+  "            # Other Settings' name check settings, one setting each (a change in either dialog shows in both):\n"
+  '            # entry types, Auto-fix strength, Chapters checked at once, Names keep their numbers, plural / tense\n'
+  '            # exclusion (and the types they skip) and Use NER\n'
+  '            from other_settings import (glossary_entry_types_row, glossary_name_autofix_row,\n'
+  '                                        glossary_name_inflection_types_row, glossary_name_ner_row,\n'
+  '                                        glossary_name_numbers_row, glossary_name_plural_row, glossary_name_tense_row,\n'
   '                                        glossary_name_workers_row)\n'
-  '            glossary_names_types_row = glossary_entry_types_row(self, lambda: dialog)\n'
-  '            detection_layout.addWidget(glossary_names_types_row)\n'
-  '            glossary_names_types_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
-  '            check_glossary_names_checkbox.toggled.connect(glossary_names_types_row.setVisible)\n'
-  '            glossary_names_autofix_row = glossary_name_autofix_row(self)\n'
-  '            detection_layout.addWidget(glossary_names_autofix_row)\n'
-  '            glossary_names_autofix_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
-  '            check_glossary_names_checkbox.toggled.connect(glossary_names_autofix_row.setVisible)\n'
-  '            glossary_names_workers_row = glossary_name_workers_row(self)\n'
-  '            detection_layout.addWidget(glossary_names_workers_row)\n'
-  '            glossary_names_workers_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
-  '            check_glossary_names_checkbox.toggled.connect(glossary_names_workers_row.setVisible)\n'
-  '            glossary_names_numbers_row = glossary_name_numbers_row(self)\n'
-  '            detection_layout.addWidget(glossary_names_numbers_row)\n'
-  '            glossary_names_numbers_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
-  '            check_glossary_names_checkbox.toggled.connect(glossary_names_numbers_row.setVisible)\n'
+  '            for glossary_names_setting_row in (glossary_entry_types_row(self, lambda: dialog),\n'
+  '                                               glossary_name_autofix_row(self), glossary_name_workers_row(self),\n'
+  '                                               glossary_name_numbers_row(self), glossary_name_plural_row(self),\n'
+  '                                               glossary_name_tense_row(self),\n'
+  '                                               glossary_name_inflection_types_row(self, lambda: dialog),\n'
+  '                                               glossary_name_ner_row(self, on_change=_refresh_ner_label)):\n'
+  '                detection_layout.addWidget(glossary_names_setting_row)\n'
+  '                glossary_names_setting_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
+  '                check_glossary_names_checkbox.toggled.connect(glossary_names_setting_row.setVisible)\n'
   '\n'
   '            glossary_names_fix_row = QWidget()\n'
   '            glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)\n'
@@ -1669,8 +1671,15 @@ _MATCH_NUMBERS_SCHEMA = {'src/settings_schema_data.py': [(" 'glossary_name_check
 
 # 2026-10-27 "Chapters checked at once" (glossary_name_check_workers, 0 = Auto): the settings row in the
 # pinned sources (after the match-numbers row)
-_NAME_CHECK_WORKERS_LEGACY = {'src/translator_gui.py': [("                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")], 'src/settings_persistence.py': [("            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")]}
+_NAME_CHECK_WORKERS_LEGACY = {'src/translator_gui.py': [("                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")], 'src/settings_persistence.py': [("            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")]}
 
+
+# 2026-10-28 "NER plural exclusion" (glossary_name_check_plural_exclusion, on) and "NER tense exclusion"
+# (glossary_name_check_tense_exclusion, off; English output only): rows and env lines in the pinned sources
+_NAME_CHECK_INFLECTION_LEGACY = {'src/translator_gui.py': [("                ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "                ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n                ('glossary_name_check_plural_exclusion', ['glossary_name_check_plural_exclusion_var'], True, bool),\n                ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n            ('glossary_name_check_plural_exclusion', ['glossary_name_check_plural_exclusion_var'], True, bool),\n            ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n", "            ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True),\n            ('glossary_name_check_plural_exclusion_var', 'glossary_name_check_plural_exclusion', True),\n            ('glossary_name_check_tense_exclusion_var', 'glossary_name_check_tense_exclusion', False),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n"), ('            \'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\': "1" if getattr(self, \'glossary_name_check_match_numbers_var\', True) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n', '            \'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\': "1" if getattr(self, \'glossary_name_check_match_numbers_var\', True) else "0",\n            \'GLOSSARY_NAME_CHECK_PLURAL_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_plural_exclusion_var\', True) else "0",\n            \'GLOSSARY_NAME_CHECK_TENSE_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_tense_exclusion_var\', False) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n'), ("                ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "                ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n                ('glossary_name_check_inflection_skip_types', ['glossary_name_check_inflection_skip_types_var'], ['character', 'nicknames'], list),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n            ('glossary_name_check_inflection_skip_types', ['glossary_name_check_inflection_skip_types_var'], ['character', 'nicknames'], list),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ('            \'GLOSSARY_NAME_CHECK_TENSE_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_tense_exclusion_var\', False) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n', '            \'GLOSSARY_NAME_CHECK_TENSE_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_tense_exclusion_var\', False) else "0",\n            \'GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES\': json.dumps(getattr(self, \'glossary_name_check_inflection_skip_types_var\', self.config.get(\'glossary_name_check_inflection_skip_types\', [\'character\', \'nicknames\']))),\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n')], 'src/owner_state.py': [("            ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n", "            ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True),\n            ('glossary_name_check_plural_exclusion_var', 'glossary_name_check_plural_exclusion', True),\n            ('glossary_name_check_tense_exclusion_var', 'glossary_name_check_tense_exclusion', False),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n")], 'src/settings_persistence.py': [("            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(32, safe_int(v, 0)))),\n            ('glossary_name_check_plural_exclusion', ['glossary_name_check_plural_exclusion_var'], True, bool),\n            ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_tense_exclusion', ['glossary_name_check_tense_exclusion_var'], False, bool),\n            ('glossary_name_check_inflection_skip_types', ['glossary_name_check_inflection_skip_types_var'], ['character', 'nicknames'], list),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")], 'src/run_env.py': [('            \'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\': "1" if getattr(self, \'glossary_name_check_match_numbers_var\', True) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n', '            \'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\': "1" if getattr(self, \'glossary_name_check_match_numbers_var\', True) else "0",\n            \'GLOSSARY_NAME_CHECK_PLURAL_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_plural_exclusion_var\', True) else "0",\n            \'GLOSSARY_NAME_CHECK_TENSE_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_tense_exclusion_var\', False) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n'), ('            \'GLOSSARY_NAME_CHECK_TENSE_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_tense_exclusion_var\', False) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n', '            \'GLOSSARY_NAME_CHECK_TENSE_EXCLUSION\': "1" if getattr(self, \'glossary_name_check_tense_exclusion_var\', False) else "0",\n            \'GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES\': json.dumps(getattr(self, \'glossary_name_check_inflection_skip_types_var\', self.config.get(\'glossary_name_check_inflection_skip_types\', [\'character\', \'nicknames\']))),\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n')]}
+
+
+_QA_BROKEN_POOL_SCANNER = [('    Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).\n    """\n    try:\n', '    Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).\n    A worker that dies in native code (no memory left, a crashing library) writes its traceback to the\n    app\'s crash.log (the GUI exports GLOSSARION_LOG_DIR; a dead worker breaks the whole pool).\n    """\n    global _WORKER_FAULT_LOG\n    try:\n        log_dir = os.environ.get("GLOSSARION_LOG_DIR")\n        if log_dir and _WORKER_FAULT_LOG is None:\n            import faulthandler\n            _WORKER_FAULT_LOG = open(os.path.join(log_dir, "crash.log"), "a", encoding="utf-8")\n            faulthandler.enable(file=_WORKER_FAULT_LOG, all_threads=True)\n    except Exception:\n        pass\n    try:\n'), ('def _init_worker_process():\n', "_WORKER_FAULT_LOG = None  # crash.log, open for a QA scan worker's lifetime (_init_worker_process)\n\n\ndef _init_worker_process():\n"), ('    # Process files in parallel\n    results = []\n    processed_count = 0\n    \n    with _ExecutorCls(**_exec_kwargs) as executor:\n        # Submit all batches\n        futures = []\n', '    # Process files in parallel\n    results = []\n    processed_count = 0\n    broken_batches = []  # batches a broken process pool lost (a worker died): run again on threads below\n    \n    with _ExecutorCls(**_exec_kwargs) as executor:\n        # Submit all batches\n        futures = []\n        future_args = {}\n'), ('            future = executor.submit(process_html_file_batch, args)\n            futures.append(future)\n        \n        # Collect results as they complete\n        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):\n            if should_stop():\n                log("⛔ QA scan interrupted during processing.")\n', '            future = executor.submit(process_html_file_batch, args)\n            futures.append(future)\n            future_args[future] = args\n        \n        # Collect results as they complete\n        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):\n            if should_stop():\n                log("⛔ QA scan interrupted during processing.")\n'), ('                results.extend(batch_results)\n                \n            except Exception as e:\n                log(f"   ❌ Error processing batch: {e}")\n                import traceback\n                log(f"   Traceback: {traceback.format_exc()}")\n    \n    # Clear the progress line (like original)\n', '                results.extend(batch_results)\n                \n            except concurrent.futures.BrokenExecutor as e:\n                # a worker process died (a crash in native code or no memory left): every batch still in\n                # the pool fails with it; they run again once the pool is closed, on threads\n                if not broken_batches:\n                    log(f"   ⚠️ A QA scan worker process stopped unexpectedly ({e})")\n                broken_batches.append(future_args[future])\n            except Exception as e:\n                log(f"   ❌ Error processing batch: {e}")\n                import traceback\n                log(f"   Traceback: {traceback.format_exc()}")\n    \n    if broken_batches and not should_stop():\n        log(f"   🧵 Scanning the {len(broken_batches)} batch(es) it left with threads instead "\n            f"(its cause, if it crashed, is in crash.log in the logs folder)")\n        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as thread_executor:\n            for batch_results in thread_executor.map(process_html_file_batch, broken_batches):\n                if should_stop():\n                    log("⛔ QA scan interrupted during processing.")\n                    thread_executor.shutdown(wait=True, cancel_futures=True)\n                    return\n                processed_count += len(batch_results)\n                results.extend(batch_results)\n        log(f"   ✅ {processed_count}/{len(html_files)} files scanned")\n    \n    # Clear the progress line (like original)\n')]
 
 APPROVED = (
     {
@@ -2028,6 +2037,25 @@ APPROVED = (
         "what": "New glossary name check setting 'Chapters checked at once' (glossary_name_check_workers, "
                 "0 = Auto: the count Maximum parallel workers gave before)",
         "source": _NAME_CHECK_WORKERS_LEGACY,
+        "values": {},
+    },
+    {
+        "date": "2026-10-28",
+        "what": "New glossary name check settings 'NER plural exclusion' (on) and 'NER tense exclusion (not "
+                "recommended)' (off), English output only, and the entry types both skip ('Skip plural / "
+                "tense exclusion for', default character and nicknames); 'Chapters checked at once' up to "
+                "the cores (cap 32)",
+        "source": _NAME_CHECK_INFLECTION_LEGACY,
+        "values": {},
+    },
+    {
+        "date": "2026-10-28",
+        "what": "QA scan: the batches a dead process-pool worker leaves (BrokenProcessPool, one traceback per "
+                "batch in v9.15.6) run again on threads; a worker that dies in native code writes its "
+                "traceback to the app's crash.log",
+        "source": {
+            "src/scan_html_folder.py": _QA_BROKEN_POOL_SCANNER,
+        },
         "values": {},
     },
 )

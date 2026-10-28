@@ -125,6 +125,17 @@ class ChapterResult:
         return [f for f in self.findings if f.kind != KIND_MISSING]
 
 
+def _type_names(types):
+    """Entry type names as glossaries spell them: "terms" also matches type "term" and the other way round."""
+    names = set()
+    for t in types or ():
+        t_lower = str(t).lower().strip()
+        if t_lower:
+            names.add(t_lower)
+            names.add(t_lower[:-1] if t_lower.endswith("s") else t_lower + "s")
+    return frozenset(names)
+
+
 def entry_type_allowed(entry_type, mode, custom_types=()):
     """The Emergency Glossary Compliance entry-type filter (Characters / All / Custom)."""
     entry_type = str(entry_type or "").strip().lower()
@@ -132,14 +143,21 @@ def entry_type_allowed(entry_type, mode, custom_types=()):
     if mode == "all":
         return True
     if mode == "custom" and custom_types:
-        # "terms" matches type "term" and the other way round
-        allowed = set()
-        for t in custom_types:
-            t_lower = str(t).lower().strip()
-            allowed.add(t_lower)
-            allowed.add(t_lower[:-1] if t_lower.endswith("s") else t_lower + "s")
-        return entry_type in allowed
+        return entry_type in _type_names(custom_types)
     return entry_type == "character"
+
+
+# "Skip plural / tense exclusion for" (glossary_name_check_inflection_skip_types): the built-in gender types
+# but titles, whose names are personal ("Lucas" / "Luca" are two names); a custom type the user adds is not
+# skipped until it is ticked (owner 2026-10-28)
+DEFAULT_INFLECTION_SKIP_TYPES = ("character", "nicknames")
+
+
+def _skip_types(value):
+    """A saved skip list (a JSON list in the env); anything else is the default."""
+    if isinstance(value, (list, tuple)):
+        return tuple(str(t).strip() for t in value if str(t).strip())
+    return DEFAULT_INFLECTION_SKIP_TYPES
 
 
 def html_to_text(markup):
@@ -178,6 +196,234 @@ def _is_inflection(a, b):
     short, long_ = sorted((a, b), key=len)
     return (long_ in (short + "s", short + "es")
             or (short.endswith("y") and long_ == short[:-1] + "ies"))
+
+
+# ---- English plurals and verb forms ("NER plural exclusion" / "NER tense exclusion", owner 2026-10-28) ----
+# Compared word by word: "Heroes of the Sword" is "Hero of the Sword", "Beastmen" is "Beastman". Regular
+# endings by rule; irregular and classical forms only from these lists (a suffix rule would read "Morales"
+# as the plural of "Moralis" and hide a real misspelling).
+_IRREGULAR_PLURALS = {
+    "man": ("men",), "woman": ("women",), "child": ("children",), "person": ("people", "persons"),
+    "foot": ("feet",), "tooth": ("teeth",), "goose": ("geese",), "mouse": ("mice",), "louse": ("lice",),
+    "ox": ("oxen",), "die": ("dice",), "brother": ("brethren",), "staff": ("staves",), "dwarf": ("dwarves",),
+    "succubus": ("succubi",), "incubus": ("incubi",), "magus": ("magi",), "fungus": ("fungi",),
+    "cactus": ("cacti",), "cyclops": ("cyclopes",), "nucleus": ("nuclei",), "radius": ("radii",), "alumnus": ("alumni",),
+    "stimulus": ("stimuli",), "focus": ("foci",), "genius": ("genii",), "golem": ("golems",),
+    "seraph": ("seraphim",), "cherub": ("cherubim",), "phenomenon": ("phenomena",), "criterion": ("criteria",),
+    "automaton": ("automata",), "larva": ("larvae",), "nebula": ("nebulae",), "formula": ("formulae",),
+    "antenna": ("antennae",), "vertebra": ("vertebrae",), "crisis": ("crises",), "axis": ("axes",),
+    "thesis": ("theses",), "oasis": ("oases",), "analysis": ("analyses",), "basis": ("bases",),
+    "matrix": ("matrices",), "vertex": ("vertices",), "index": ("indices",), "appendix": ("appendices",),
+    "datum": ("data",), "medium": ("media",), "stratum": ("strata",), "curriculum": ("curricula",),
+}
+# heads that keep their irregular plural inside a compound ("Beastman" -> "Beastmen", "Swordsman")
+_COMPOUND_PLURAL_HEADS = ("man", "woman", "child", "foot", "tooth", "mouse", "goose")
+# irregular verbs common in titles and skills: base -> past / participle forms. Forms that are also an
+# ordinary noun or a common name (rose, saw, left, ground, wound, felt, found, bound, lay, bore, bit) are
+# left out: "Black Rose" must never read as a form of "Black Rise".
+_IRREGULAR_VERBS = {
+    "fall": ("fell", "fallen"), "rise": ("risen",), "arise": ("arose", "arisen"), "slay": ("slew", "slain"),
+    "awake": ("awoke", "awoken"), "wake": ("woke", "woken"), "forsake": ("forsook", "forsaken"),
+    "break": ("broke", "broken"), "choose": ("chose", "chosen"), "begin": ("began", "begun"),
+    "bite": ("bitten",), "blow": ("blew", "blown"), "bring": ("brought",), "burn": ("burnt",),
+    "buy": ("bought",), "catch": ("caught",), "come": ("came",), "do": ("did", "done"), "draw": ("drew", "drawn"),
+    "drink": ("drank", "drunk"), "drive": ("drove", "driven"), "eat": ("ate", "eaten"), "fight": ("fought",),
+    "flee": ("fled",), "fly": ("flew", "flown"), "forbid": ("forbade", "forbidden"), "forget": ("forgot", "forgotten"),
+    "forgive": ("forgave", "forgiven"), "freeze": ("froze", "frozen"), "give": ("gave", "given"),
+    "go": ("went", "gone"), "grow": ("grew", "grown"), "hang": ("hung",), "hide": ("hid", "hidden"),
+    "hold": ("held",), "keep": ("kept",), "know": ("knew", "known"), "lose": ("lost",), "make": ("made",),
+    "ride": ("rode", "ridden"), "run": ("ran",), "see": ("seen",), "seek": ("sought",), "shake": ("shook", "shaken"),
+    "shine": ("shone",), "shoot": ("shot",), "sing": ("sang", "sung"), "sink": ("sank", "sunk"),
+    "sleep": ("slept",), "speak": ("spoke", "spoken"), "spin": ("spun",), "stand": ("stood",),
+    "steal": ("stole", "stolen"), "strike": ("struck", "stricken"), "swear": ("swore", "sworn"),
+    "take": ("took", "taken"), "teach": ("taught",), "tear": ("tore", "torn"), "think": ("thought",),
+    "throw": ("threw", "thrown"), "wear": ("wore", "worn"), "weave": ("wove", "woven"), "weep": ("wept",),
+    "win": ("won",), "write": ("wrote", "written"), "become": ("became",), "overcome": ("overcame",),
+    "undo": ("undid", "undone"), "fear": ("feared",), "bless": ("blessed", "blest"), "curse": ("cursed", "curst"),
+}
+_VOWELS = "aeiou"
+
+
+def _plural_forms(word):
+    """The plurals of a lower-case word: regular endings, -ves, -oes, the lists above."""
+    # -s / -x / -z / -sh take -es only ("Foxes"; "Nebiness" is no plural of "Nebines"), -ch either
+    # ("Monarchs", "Witches")
+    forms = set() if re.search(r"(?:s|x|z|sh)$", word) else {word + "s"}
+    if re.search(r"(?:s|x|z|ch|sh)$", word):
+        forms.add(word + "es")
+    if len(word) > 2 and word.endswith("y") and word[-2] not in _VOWELS:
+        forms.add(word[:-1] + "ies")
+    if word.endswith("o"):
+        forms.add(word + "es")
+    if word.endswith("fe"):
+        forms.add(word[:-2] + "ves")
+    elif word.endswith("f") and not word.endswith("ff"):
+        forms.add(word[:-1] + "ves")
+    forms.update(_IRREGULAR_PLURALS.get(word, ()))
+    for head in _COMPOUND_PLURAL_HEADS:
+        if word.endswith(head) and len(word) > len(head) + 1:
+            forms.update(word[:-len(head)] + plural for plural in _IRREGULAR_PLURALS[head])
+    return forms
+
+
+def _pluralizable(word):
+    """A word that takes a plural: three letters or more with a vowel, or one of the lists; never a letter
+    grade ("S Rank" / "SS Rank" / "SSS Rank" are three ranks)."""
+    return word in _IRREGULAR_PLURALS or (len(word) >= 3 and re.search(r"[aeiouy]", word) is not None)
+
+
+def _is_plural_pair(a, b):
+    return a != b and ((b in _plural_forms(a) and _pluralizable(a)) or (a in _plural_forms(b) and _pluralizable(b)))
+
+
+def _verb_forms(word):
+    """Past and present forms of a lower-case verb (at least 3 letters by rule; the irregular list)."""
+    forms = set(_IRREGULAR_VERBS.get(word, ()))
+    if len(word) < 3 or not word.isalpha():
+        return forms
+    forms.add(word + "es" if re.search(r"(?:s|x|z|ch|sh)$", word) else word + "s")
+    double = (len(word) >= 3 and word[-1] not in _VOWELS + "wxy" and word[-2] in _VOWELS
+              and word[-3] not in _VOWELS)
+    if word.endswith("e"):
+        forms.update((word + "d", word[:-1] + "ing" if not word.endswith(("ee", "ye", "oe")) else word + "ing"))
+        if word.endswith("ie"):
+            forms.add(word[:-2] + "ying")
+    elif word.endswith("y") and word[-2] not in _VOWELS:
+        forms.update((word[:-1] + "ied", word[:-1] + "ies", word + "ing"))
+    else:
+        forms.update((word + "ed", word + "ing"))
+        if double:
+            forms.update((word + word[-1] + "ed", word + word[-1] + "ing"))
+    return forms
+
+
+def _verb_bases(word):
+    """The base forms a lower-case word could be a form of ("awakened" -> "awaken", "stopping" -> "stop")."""
+    bases = {word}
+    for ending in ("ing", "ed", "es", "s", "d"):
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            stem = word[:-len(ending)]
+            bases.update((stem, stem + "e"))
+            if len(stem) > 3 and stem[-1] == stem[-2]:
+                bases.add(stem[:-1])  # stopped / stopping -> stop
+            if ending in ("ed", "es") and stem.endswith("i"):
+                bases.add(stem[:-1] + "y")  # buried -> bury
+            if ending == "ing" and stem.endswith("y"):
+                bases.add(stem[:-1] + "ie")  # dying -> die
+    return bases
+
+
+def _is_tense_pair(a, b):
+    """Two forms of one verb (one may be the base form): "Fallen" / "Fell", "Awakened" / "Awakening"."""
+    if a == b:
+        return False
+    if b in _verb_forms(a) or a in _verb_forms(b):
+        return True
+    for base in _verb_bases(a) & _verb_bases(b):
+        forms = _verb_forms(base) | {base}
+        if a in forms and b in forms:
+            return True
+    for base, forms in _IRREGULAR_VERBS.items():  # "fell" / "fallen": two forms of "fall"
+        both = set(forms) | {base} | _verb_forms(base)
+        if a in both and b in both:
+            return True
+    return False
+
+
+def _plural_alternatives(word):
+    """The plurals and the singulars of a lower-case word ("beastmen" -> "beastman")."""
+    out = set(_plural_forms(word))
+    for ending, singulars in (("ies", ("y",)), ("ves", ("f", "fe")), ("es", ("",)), ("s", ("",))):
+        if word.endswith(ending):
+            out.update(word[:-len(ending)] + s for s in singulars)
+    out.update(single for single, plurals in _IRREGULAR_PLURALS.items() if word in plurals)
+    for head in _COMPOUND_PLURAL_HEADS:
+        for plural in _IRREGULAR_PLURALS[head]:
+            if word.endswith(plural) and len(word) > len(plural) + 1:
+                out.add(word[:-len(plural)] + head)
+    return {form for form in out if form and _is_plural_pair(word, form)}
+
+
+def _verb_alternatives(word):
+    """The other forms of the verb a lower-case word may be a form of ("fallen" -> "fell", "falling")."""
+    bases = _verb_bases(word) | {base for base, forms in _IRREGULAR_VERBS.items() if word in forms}
+    out = set()
+    for base in bases:
+        out |= _verb_forms(base) | {base}
+    return {form for form in out if form != word and _is_tense_pair(word, form)}
+
+
+def _inflected_forms(expected, plurals=True, tenses=False):
+    """Spellings of ``expected`` (folded) with one word in another plural / verb form, and with "will
+    <verb>" in another tense (or back); ``_inflected_same`` decides which of them count."""
+    parts = re.split(r"([\s\-]+)", _fold(expected).strip())
+    words = parts[::2]
+    out = set()
+    for i, word in enumerate(words):
+        forms = (_plural_alternatives(word) if plurals else set()) | (_verb_alternatives(word) if tenses else set())
+        out.update("".join(form if j == 2 * i else part for j, part in enumerate(parts)) for form in forms)
+    if tenses:
+        for i in range(1, len(words)):
+            if words[i] == "will" and i + 1 < len(words):
+                out.update(" ".join(words[:i] + [form] + words[i + 2:]) for form in _verb_alternatives(words[i + 1]))
+            elif words[i] != "will":
+                out.update(" ".join(words[:i] + ["will", form] + words[i + 1:])
+                           for form in _verb_alternatives(words[i]))
+    return out
+
+
+def _inflected_present(expected, text, plurals=True, tenses=False, names=frozenset(), match_numbers=True):
+    """``expected`` occurs in ``text`` in another plural / verb form (``_inflected_same``), tagged by NER
+    or not ("The Beastmen ran" for "Beastman")."""
+    folded = _fold(text)
+    return any(form in folded and _inflected_same(expected, form, plurals, tenses, names)
+               and _form_present(form, folded, match_numbers)
+               for form in sorted(_inflected_forms(expected, plurals, tenses)))
+
+
+def _form_present(form, folded_text, match_numbers=True):
+    """A generated form, as it is: no further ending ("Crown Princes" is not in "Crown Princess") and not
+    right after an apostrophe ("S Ranking" is not in "Hari's ranking")."""
+    before = r"(?<!\d)" if match_numbers and form[:1].isdigit() else r"(?<![\w'])"
+    return re.search(before + re.escape(form) + r"(?![\w])", folded_text) is not None
+
+
+def _name_words(name):
+    return [_fold(w) for w in re.split(r"[\s\-]+", str(name or "").strip()) if w]
+
+
+def _separators(name):
+    """The word breaks of a name, a hyphen apart from a space ("Half-Elf" is not spaced like "Half Elf")."""
+    return ["-" if "-" in sep else " " for sep in re.findall(r"[\s\-]+", str(name or "").strip())]
+
+
+def _inflected_same(expected, candidate, plurals=True, tenses=False, names=frozenset()):
+    """``candidate`` is the glossary name ``expected`` in another plural (``plurals``) or verb form
+    (``tenses``), word by word. A spacing / hyphen respelling is not (that stays a finding). The tense
+    rule changes one word only, never into a word that is itself a glossary name (``names``: ``_norm``
+    keys), and reads "will <verb>" as a past / present form only inside a title of three words or more,
+    never when "Will" opens it (a name)."""
+    ew, cw = _name_words(expected), _name_words(candidate)
+    if not ew or not cw:
+        return False
+    if len(ew) == len(cw):
+        pairs = [(x, y) for x, y in zip(ew, cw) if x != y]
+        if not pairs or _separators(expected) != _separators(candidate):
+            return False  # the same words, or a spacing / hyphen respelling as well: a finding
+        if plurals and all(_is_plural_pair(x, y) for x, y in pairs):
+            return True
+        if tenses and len(pairs) == 1:
+            x, y = pairs[0]
+            return _norm(y) not in names and _norm(x) not in names and _is_tense_pair(x, y)
+        return False
+    if not tenses or abs(len(ew) - len(cw)) != 1:
+        return False
+    longer, shorter = (ew, cw) if len(ew) > len(cw) else (cw, ew)
+    for i in range(1, len(longer) - 1):  # future: "Who Will Return" / "Who Returned"
+        if longer[i] == "will" and len(longer) >= 3 and longer[:i] == shorter[:i] \
+                and longer[i + 2:] == shorter[i + 1:] and _is_tense_pair(longer[i + 1], shorter[i]):
+            return _norm(shorter[i]) not in names
+    return False
 
 
 def _fold(text):
@@ -257,20 +503,28 @@ def _is_variant(expected, expected_key, candidate, candidate_key, match_numbers=
 class GlossaryNameEntries:
     """Entries to check plus every translated name in the glossary (never a variant)."""
 
-    def __init__(self, entries, known_names, autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True):
+    def __init__(self, entries, known_names, autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True,
+                 plural_exclusion=True, tense_exclusion=False, names=(),
+                 inflection_skip_types=DEFAULT_INFLECTION_SKIP_TYPES):
         self.entries = tuple(entries)
         self.known = frozenset(known_names)
         self.autofix_level = autofix_level
         self.match_numbers = match_numbers
+        self.plural_exclusion = plural_exclusion
+        self.tense_exclusion = tense_exclusion
+        self.names = frozenset(names)  # every translated name (``_norm``), not its parts
+        self.inflection_skip = _type_names(inflection_skip_types)  # types the plural / tense rules skip
 
     def __bool__(self):
         return bool(self.entries)
 
 
 def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_chars=0,
-                  autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True):
+                  autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True, plural_exclusion=True,
+                  tense_exclusion=False, inflection_skip_types=DEFAULT_INFLECTION_SKIP_TYPES):
     """Pick the entries to check from ``glossary_usage.parse_glossary_file`` rows."""
     known = set()
+    names = set()
     picked = {}
     for row in glossary_entries or ():
         raw = str(row.get("raw_name") or "").strip()
@@ -278,6 +532,7 @@ def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_c
         if not raw or not translated:
             continue
         known.add(_norm(translated))
+        names.add(_norm(translated))
         for part in re.split(r"[\s\-]+", translated):
             if part:
                 known.add(_norm(part))
@@ -290,7 +545,8 @@ def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_c
             continue  # untranslated names and non-Latin targets have nothing to check
         picked.setdefault(raw, NameEntry(raw, translated, entry_type, str(row.get("_origin") or "")))
     entries = sorted(picked.values(), key=lambda e: -len(e.raw))
-    return GlossaryNameEntries(entries, known, autofix_level, match_numbers)
+    return GlossaryNameEntries(entries, known, autofix_level, match_numbers, plural_exclusion, tense_exclusion, names,
+                               inflection_skip_types)
 
 
 _load_lock = threading.Lock()
@@ -347,7 +603,8 @@ def _layer_rows(layers):
 
 
 def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0, settings=None,
-                 autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True):
+                 autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True, plural_exclusion=True,
+                 tense_exclusion=False, inflection_skip_types=DEFAULT_INFLECTION_SKIP_TYPES):
     """The names to check from the book's glossary and the enabled extension / unified glossary
     (``glossary_layers``), parsed once per (file versions, options)."""
     if not glossary_path or not os.path.isfile(glossary_path):
@@ -358,13 +615,16 @@ def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars
         info = os.stat(path)
         stamps.append((os.path.normcase(os.path.abspath(path)), origin, info.st_size, info.st_mtime_ns))
     key = (tuple(stamps), str(mode or "characters").lower(), tuple(custom_types or ()), int(min_chars or 0),
-           int(autofix_level), bool(match_numbers))
+           int(autofix_level), bool(match_numbers), bool(plural_exclusion), bool(tense_exclusion),
+           tuple(inflection_skip_types or ()))
     with _load_lock:
         cached = _load_cache.get(key)
         if cached is not None:
             return cached
     entries = build_entries(_layer_rows(layers), mode=mode, custom_types=custom_types, min_chars=min_chars,
-                            autofix_level=autofix_level, match_numbers=match_numbers)
+                            autofix_level=autofix_level, match_numbers=match_numbers,
+                            plural_exclusion=plural_exclusion, tense_exclusion=tense_exclusion,
+                            inflection_skip_types=inflection_skip_types)
     with _load_lock:
         _load_cache.clear()
         _load_cache[key] = entries
@@ -408,6 +668,12 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
     output_text = html_to_text(output_markup)
     level = getattr(entries, "autofix_level", AUTOFIX_CONSERVATIVE)
     numbers = getattr(entries, "match_numbers", True)
+    plurals = getattr(entries, "plural_exclusion", True)
+    tenses = getattr(entries, "tense_exclusion", False)
+    names = getattr(entries, "names", frozenset())
+    skip_types = getattr(entries, "inflection_skip", None)
+    if skip_types is None:
+        skip_types = _type_names(DEFAULT_INFLECTION_SKIP_TYPES)
     candidates = None
     parts = frozenset()  # candidates that only count as a spacing / hyphen respelling (_ner_candidates)
     matched_raws = []
@@ -429,6 +695,15 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
             # A close spelling next to the right one is more often a second
             # character (Adele / Adela) than drift, so only absences are searched.
             continue
+        # the name in its plural ("Heroes of the Sword", "Beastmen") or, with "NER tense exclusion", another
+        # verb form ("Awakened One") is the name, not a respelling; never for the types "Skip plural / tense
+        # exclusion for" lists (personal names: "Lucas" / "Luca" are two names)
+        inflected = entry.entry_type not in skip_types
+        entry_plurals = plurals and inflected
+        entry_tenses = tenses and inflected
+        if (entry_plurals or entry_tenses) and _inflected_present(entry.translated, output_text, entry_plurals,
+                                                                  entry_tenses, names, numbers):
+            continue  # there in that form, whether NER tagged it or not
         if candidates is None:
             # with NER on, its names are the only candidates (owner, 2026-10-27); the capitalization
             # heuristic is the fallback where NER cannot run
@@ -440,6 +715,10 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
                     for key, core in _title_candidates(output_text).items():
                         candidates.setdefault(key, core)
         expected_key = _norm(entry.translated)
+        if (entry_plurals or entry_tenses) and any(
+                _inflected_same(entry.translated, core, entry_plurals, entry_tenses, names)
+                for core in candidates.values()):
+            continue
         # Another glossary name is never drift; a respelling of this one
         # ("Yoo So-jeong" for "Yoo Sojeong") normalizes to the same key.
         variants = [core for key, core in candidates.items()
@@ -560,10 +839,25 @@ def settings_from_env(env=None):
         min_chars = max(0, min(10, int(env.get("GLOSSARY_NAME_CHECK_MIN_CHARS", 2))))
     except (TypeError, ValueError):
         min_chars = 2
+    english = english_output(env.get("OUTPUT_LANGUAGE"))
+    try:
+        skip_types = json.loads(env.get("GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES") or "null")
+    except (TypeError, ValueError):
+        skip_types = None
     return {"mode": mode, "custom_types": tuple(custom_types if mode == "custom" else ()),
             "min_chars": min_chars,
             "autofix_level": _autofix_level(env.get("GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL")),
-            "match_numbers": _truthy(env.get("GLOSSARY_NAME_CHECK_MATCH_NUMBERS"), True)}
+            "match_numbers": _truthy(env.get("GLOSSARY_NAME_CHECK_MATCH_NUMBERS"), True),
+            # English plurals / verb forms: only for an English translation (owner 2026-10-28)
+            "plural_exclusion": english and _truthy(env.get("GLOSSARY_NAME_CHECK_PLURAL_EXCLUSION"), True),
+            "tense_exclusion": english and _truthy(env.get("GLOSSARY_NAME_CHECK_TENSE_EXCLUSION"), False),
+            "inflection_skip_types": _skip_types(skip_types)}
+
+
+def english_output(language):
+    """The translation is in English (Glossarion's default target): the plural / tense exclusion know
+    English forms only."""
+    return str(language or "English").strip().casefold().startswith("english")
 
 
 def _autofix_level(value, default=AUTOFIX_CONSERVATIVE):
@@ -593,6 +887,14 @@ def settings_from_config(config, env=None):
         scope["autofix_level"] = _autofix_level(config["glossary_name_check_autofix_level"], scope["autofix_level"])
     if "glossary_name_check_match_numbers" in config:
         scope["match_numbers"] = _truthy(config["glossary_name_check_match_numbers"], True)
+    if "glossary_name_check_plural_exclusion" in config:
+        scope["plural_exclusion"] = _truthy(config["glossary_name_check_plural_exclusion"], True)
+    if "glossary_name_check_tense_exclusion" in config:
+        scope["tense_exclusion"] = _truthy(config["glossary_name_check_tense_exclusion"], False)
+    if "glossary_name_check_inflection_skip_types" in config:
+        scope["inflection_skip_types"] = _skip_types(config["glossary_name_check_inflection_skip_types"])
+    if config.get("output_language") and not english_output(config["output_language"]):
+        scope["plural_exclusion"] = scope["tense_exclusion"] = False  # English rules, English output only
     return scope
 
 
@@ -740,8 +1042,14 @@ def max_workers_setting():
         return 1
 
 
-#: the top of "Chapters checked at once" (glossary_name_check_workers; 0 = Auto)
-MAX_CHAPTER_WORKERS = 8
+#: the most "Chapters checked at once" (glossary_name_check_workers; 0 = Auto) ever takes; the slider
+#: goes up to this machine's cores (``max_chapter_workers``)
+MAX_CHAPTER_WORKERS = 32
+
+
+def max_chapter_workers():
+    """The top of the "Chapters checked at once" slider: this machine's cores (at most MAX_CHAPTER_WORKERS)."""
+    return max(1, min(MAX_CHAPTER_WORKERS, os.cpu_count() or 1))
 
 
 def workers_from_config(config):
@@ -754,14 +1062,15 @@ def workers_from_config(config):
 
 def chapter_workers(ner, max_workers=None, chosen=0):
     """Chapters checked at once. Only NER calls run in parallel (the heuristic is pure Python): one
-    loaded model checks several chapters at the same time. ``chosen`` ("Chapters checked at once",
-    1-8) sets the count; 0 = Auto: each call uses ``ner_names.ner_threads()`` cores within the
+    loaded model checks several chapters at the same time. ``chosen`` ("Chapters checked at once", 1 up
+    to the cores, ``max_chapter_workers``) sets the count (each check then gets the cores shared out,
+    ``scan_folder``); 0 = Auto: each call uses ``ner_names.ner_threads()`` cores within the
     "Maximum parallel workers" budget: 16 cores and "All cores" check 4 chapters at once, 2 cores or
     "Single thread" one."""
     if ner is None:
         return 1
     if chosen:
-        return max(1, min(MAX_CHAPTER_WORKERS, int(chosen)))
+        return max(1, min(max_chapter_workers(), int(chosen)))
     cpus = os.cpu_count() or 1
     budget = max_workers_setting() if max_workers is None else max_workers
     budget = cpus if not budget or budget <= 0 else min(int(budget), cpus)
@@ -803,6 +1112,10 @@ def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None
         return result
 
     workers = chapter_workers(ner) if workers is None else max(1, int(workers))
+    if ner is not None and workers > 1 and hasattr(ner, "with_threads"):
+        # the cores shared out between the checks (Auto keeps 4 each: the same tagger)
+        import ner_names
+        ner = ner.with_threads(ner_names.ner_threads(workers))
     if workers > 1 and total > 1:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(workers, total), thread_name_prefix="name-check") as pool:

@@ -67,6 +67,9 @@ SETTINGS_MAP_ORDER = ('model',
  'glossary_name_check_use_ner',
  'glossary_name_check_match_numbers',
  'glossary_name_check_workers',
+ 'glossary_name_check_plural_exclusion',
+ 'glossary_name_check_tense_exclusion',
+ 'glossary_name_check_inflection_skip_types',
  'retry_duplicate_bodies',
  'token_limit_disabled',
  'enable_thoughts',
@@ -517,7 +520,19 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
  ('glossary_name_check_workers',
   ('glossary_name_check_workers_var',),
   ('value', 0),
-  ('safe_int', 0, 0, 8, 'max_min')),
+  ('safe_int', 0, 0, 32, 'max_min')),
+ ('glossary_name_check_plural_exclusion',
+  ('glossary_name_check_plural_exclusion_var',),
+  ('value', True),
+  ('bool',)),
+ ('glossary_name_check_tense_exclusion',
+  ('glossary_name_check_tense_exclusion_var',),
+  ('value', False),
+  ('bool',)),
+ ('glossary_name_check_inflection_skip_types',
+  ('glossary_name_check_inflection_skip_types_var',),
+  ('value', ['character', 'nicknames']),
+  ('list',)),
  ('retry_duplicate_bodies', ('retry_duplicate_var',), ('value', False), ('bool',)),
  ('token_limit_disabled', ('token_limit_disabled',), ('value', False), ('bool',)),
  ('enable_thoughts', ('enable_thoughts_var',), ('value', True), ('bool',)),
@@ -1418,6 +1433,12 @@ DESKTOP_BOOL_VARS = (('rolling_summary_var', 'use_rolling_summary', ('value', Fa
  ('glossary_name_check_var', 'glossary_name_check', ('value', False)),
  ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', ('value', True)),
  ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', ('value', True)),
+ ('glossary_name_check_plural_exclusion_var',
+  'glossary_name_check_plural_exclusion',
+  ('value', True)),
+ ('glossary_name_check_tense_exclusion_var',
+  'glossary_name_check_tense_exclusion',
+  ('value', False)),
  ('payload_summary_auto_update_var', 'payload_summary_auto_update', ('value', False)),
  ('payload_summary_decode_images_var', 'payload_summary_decode_images', ('value', False)),
  ('contextual_var', 'contextual', ('value', False)),
@@ -2947,7 +2968,8 @@ SETTINGS = {
      'origins': ('init', 'save', 'env'),
      'save_default': {'$expr': 'self.custom_entry_types'},
      'type': 'dict',
-     'ui_sites': ('glossary.balanced_full',
+     'ui_sites': ('other.processing',
+                  'glossary.balanced_full',
                   'glossary.refinement',
                   'glossary.editor',
                   'glossary.other',
@@ -5348,19 +5370,26 @@ SETTINGS = {
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing',),
      'var_names': ('glossary_name_check_autofix_level_var',)},
+    'glossary_name_check_inflection_skip_types': {'converter': ('list',),
+     'default': ['character', 'nicknames'],
+     'default_source': 'save',
+     'env': (('GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES',
+              'translation',
+              ['character', 'nicknames']),
+             ('GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES', 'translation', '<none>')),
+     'origins': ('settings_map', 'env'),
+     'save_default': ['character', 'nicknames'],
+     'type': 'list',
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
+     'var_names': ('glossary_name_check_inflection_skip_types_var',)},
     'glossary_name_check_match_numbers': {'converter': ('bool',),
      'default': True,
      'default_source': 'init',
-     'dialog_default': True,
      'env': (('GLOSSARY_NAME_CHECK_MATCH_NUMBERS', 'translation', True),),
      'init_default': True,
-     'label': 'Names keep their numbers',
-     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'origins': ('settings_map', 'init', 'env'),
      'save_default': True,
-     'tooltip': 'A spelling with another number, or none, is never taken for a glossary name\n'
-                "('Demon Kings' is not '72 Demon Kings'), and a name whose number is glued to the\n"
-                "word before it ('the72 Demon Kings', a missing space) counts as found.\n"
-                'Off: numbers are ignored when names are compared.',
      'type': 'bool',
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing',),
@@ -5392,39 +5421,67 @@ SETTINGS = {
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing',),
      'var_names': ('glossary_name_check_mode_var',)},
+    'glossary_name_check_plural_exclusion': {'converter': ('bool',),
+     'default': True,
+     'default_source': 'init',
+     'env': (('GLOSSARY_NAME_CHECK_PLURAL_EXCLUSION', 'translation', True),),
+     'init_default': True,
+     'origins': ('settings_map', 'init', 'env'),
+     'save_default': True,
+     'type': 'bool',
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
+     'var_names': ('glossary_name_check_plural_exclusion_var',)},
+    'glossary_name_check_tense_exclusion': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'env': (('GLOSSARY_NAME_CHECK_TENSE_EXCLUSION', 'translation', False),),
+     'init_default': False,
+     'origins': ('settings_map', 'init', 'env'),
+     'save_default': False,
+     'type': 'bool',
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
+     'var_names': ('glossary_name_check_tense_exclusion_var',)},
     'glossary_name_check_use_ner': {'converter': ('bool',),
      'default': True,
      'default_source': 'init',
      'dialog_default': True,
      'env': (('GLOSSARY_NAME_CHECK_USE_NER', 'translation', True),),
      'init_default': True,
-     'label': 'Use Named Entity Recognition model (NER)',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': True,
-     'tooltip': 'This build has no ONNX Runtime (the NoCuda / Heavy builds and Glossarion Mobile '
-                'have it).\n'
-                'The glossary name check uses its capitalization heuristic here.',
+     'tooltip': 'Flags chapters where a glossary name from the source chapter was translated with '
+                'a\n'
+                "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
+                'Names are found with a named-entity recognition model (NER, 104 MB, downloaded '
+                'on\n'
+                'first use); "Use Named Entity Recognition model (NER)" below turns it off for a\n'
+                'capitalization heuristic (builds without ONNX Runtime always use the heuristic).\n'
+                "The settings below are the same as the name check's in Other Settings (a change "
+                'in\n'
+                'either shows in both). Flagged chapters count as QA failures like other issues.',
      'type': 'bool',
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing', 'qa'),
      'var_names': ('glossary_name_check_use_ner_var',)},
-    'glossary_name_check_workers': {'converter': ('safe_int', 0, 0, 8, 'max_min'),
+    'glossary_name_check_workers': {'converter': ('safe_int', 0, 0, 32, 'max_min'),
      'default': 0,
      'default_source': 'save',
      'dialog_default': 0,
      'label': 'Chapters checked at once:',
-     'maximum': 8,
+     'maximum': 32,
      'minimum': 0,
      'origins': ('settings_map', 'dialog'),
      'save_default': 0,
      'tooltip': '<b>Chapters checked at once</b> (with the named-entity model, NER)<br>How many '
                 'chapters the glossary name check checks at the same time in the QA scan and in '
-                '<i>Check glossary names in existing output…</i>. One loaded model checks them '
-                'all; each check uses up to 4 CPU cores.<br><b>Auto</b> (default): the QA '
-                "Scanner's <i>Maximum parallel workers</i> ÷ 4 (2 with 8 workers, 4 with 16 or All "
-                'cores).<br>More is faster until the CPU is busy. The capitalization heuristic '
-                'checks one chapter at a time, and the check after each translated chapter is not '
-                'affected.',
+                "<i>Check glossary names in existing output…</i>, up to this machine's cores. One "
+                'loaded model checks them all; the cores are shared out between the checks (at '
+                "most 4 each).<br><b>Auto</b> (default): the QA Scanner's <i>Maximum parallel "
+                'workers</i> ÷ 4 (2 with 8 workers, 4 with 16 or All cores).<br>More is faster '
+                'until the CPU is busy. The capitalization heuristic checks one chapter at a time, '
+                'and the check after each translated chapter is not affected.',
      'type': 'int',
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing', 'qa'),
@@ -9487,15 +9544,11 @@ SETTINGS = {
                 "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
                 'Names are found with a named-entity recognition model (NER, 104 MB, downloaded '
                 'on\n'
-                'first use); Other Settings › "Use Named Entity Recognition model (NER)" turns it '
-                'off\n'
-                'for a capitalization heuristic (builds without ONNX Runtime always use the '
-                'heuristic).\n'
-                'Checks the entry types below (the same setting as Other Settings › Emergency '
-                'Glossary\n'
-                "Compliance and the name check) and the name check's minimum length (Other "
-                'Settings).\n'
-                'Flagged chapters count as QA failures like other issues.',
+                'first use); "Use Named Entity Recognition model (NER)" below turns it off for a\n'
+                'capitalization heuristic (builds without ONNX Runtime always use the heuristic).\n'
+                "The settings below are the same as the name check's in Other Settings (a change "
+                'in\n'
+                'either shows in both). Flagged chapters count as QA failures like other issues.',
      'type': 'bool',
      'ui_group': 'Detection Options',
      'ui_sites': ('qa',)},

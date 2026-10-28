@@ -380,11 +380,12 @@ def discover_glossary_entry_types(self):
     return sorted(discovered_types, key=lambda t: (0 if t.rstrip('s') == 'character' else 1, t))
 
 
-def open_glossary_entry_types_dialog(self, parent, title, prompt, current_types):
+def open_glossary_entry_types_dialog(self, parent, title, prompt, current_types, extra_types=()):
     """Checkbox dialog for picking glossary entry types.
 
     Returns the selected list on Save and None on Cancel. ``self`` is the
-    main GUI (for the styled checkboxes and the glossary lookup).
+    main GUI (for the styled checkboxes and the glossary lookup). ``extra_types``
+    are listed too when the current glossary has no such type.
     """
     try:
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QWidget
@@ -397,6 +398,14 @@ def open_glossary_entry_types_dialog(self, parent, title, prompt, current_types)
         dlg_layout.addWidget(QLabel(prompt))
 
         type_list = discover_glossary_entry_types(self)
+        listed = {t for listed_type in type_list
+                  for t in (listed_type, listed_type[:-1] if listed_type.endswith('s') else listed_type + 's')}
+        for extra in extra_types or ():
+            extra = str(extra).strip().lower()
+            if extra and extra not in listed:
+                type_list.append(extra)
+                listed.update((extra, extra[:-1] if extra.endswith('s') else extra + 's'))
+        type_list.sort(key=lambda t: (0 if t.rstrip('s') == 'character' else 1, t))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -578,46 +587,177 @@ def glossary_name_autofix_row(self):
     return name_check_autofix_level_row
 
 
-def glossary_name_numbers_row(self):
-    """The glossary name check's "Names keep their numbers" toggle (``glossary_name_check_match_numbers_var``,
-    default on). Other Settings and the QA Scanner settings each build one; a change in one moves every
-    other open row (saved by either dialog's save_config)."""
+def _glossary_name_toggle_row(self, var_name, config_key, default, text, tooltip, *, enabled=True,
+                              on_change=None):
+    """One of the glossary name check's toggles, shared by Other Settings and the QA Scanner settings:
+    each dialog builds a row; a change in one moves every other open row of the same setting (saved
+    by either dialog's save_config). ``on_change(checked)`` runs for this row's own value (the QA
+    scanner's label follows "Use NER"); ``enabled=False`` shows it unchecked and greyed out."""
     from PySide6.QtWidgets import QHBoxLayout, QWidget
 
-    # "Names keep their numbers": a candidate with another number (or none) is never a respelling, and a
-    # name glued to a number's left ("the72 Demon Kings") counts as present (owner 2026-10-27, default on)
-    if not hasattr(self, 'glossary_name_check_match_numbers_var'):
-        self.glossary_name_check_match_numbers_var = bool(self.config.get('glossary_name_check_match_numbers', True))
-    name_check_numbers_row = QWidget()
-    name_check_numbers_layout = QHBoxLayout(name_check_numbers_row)
-    name_check_numbers_layout.setContentsMargins(20, 0, 0, 0)
-    name_check_numbers_cb = self._create_styled_checkbox("Names keep their numbers")
-    name_check_numbers_cb.setChecked(bool(self.glossary_name_check_match_numbers_var))
-    name_check_numbers_cb.setToolTip(
+    if not hasattr(self, var_name):
+        setattr(self, var_name, bool(self.config.get(config_key, default)))
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(20, 0, 0, 0)
+    checkbox = self._create_styled_checkbox(text)
+    checkbox.setChecked(bool(getattr(self, var_name)) and enabled)
+    checkbox.setEnabled(enabled)
+    checkbox.setToolTip(tooltip)
+
+    rows_by_var = getattr(self, '_glossary_name_toggle_rows', None)
+    if rows_by_var is None:
+        rows_by_var = self._glossary_name_toggle_rows = {}
+    open_rows = rows_by_var.setdefault(var_name, [])
+    open_rows.append(checkbox)
+
+    def _on_toggle(checked):
+        setattr(self, var_name, bool(checked))
+        for other in list(open_rows):
+            try:
+                # not with signals blocked: the styled checkbox draws its ✓ from its own toggled signal (the
+                # other copy's handler then finds every row already set)
+                if other.isEnabled() and other.isChecked() != bool(checked):
+                    other.setChecked(bool(checked))
+            except RuntimeError:  # its dialog was closed and deleted
+                open_rows.remove(other)
+        if on_change is not None:
+            on_change(bool(checked))
+    checkbox.toggled.connect(_on_toggle)
+    layout.addWidget(checkbox)
+    layout.addStretch()
+    return row
+
+
+def glossary_name_numbers_row(self):
+    """"Names keep their numbers" (``glossary_name_check_match_numbers_var``, default on): a candidate
+    with another number (or none) is never a respelling, and a name glued to a number's left ("the72
+    Demon Kings") counts as present (owner 2026-10-27)."""
+    return _glossary_name_toggle_row(
+        self, 'glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True,
+        "Names keep their numbers",
         "A spelling with another number, or none, is never taken for a glossary name\n"
         "('Demon Kings' is not '72 Demon Kings'), and a name whose number is glued to the\n"
         "word before it ('the72 Demon Kings', a missing space) counts as found.\n"
         "Off: numbers are ignored when names are compared.")
 
-    open_rows = getattr(self, '_glossary_name_numbers_rows', None)
-    if open_rows is None:
-        open_rows = self._glossary_name_numbers_rows = []
-    open_rows.append(name_check_numbers_cb)
 
-    def _on_name_check_numbers_toggle(checked):
-        self.glossary_name_check_match_numbers_var = bool(checked)
-        for checkbox in list(open_rows):
+def glossary_name_plural_row(self):
+    """"NER plural exclusion" (``glossary_name_check_plural_exclusion_var``, default on; owner 2026-10-28)."""
+    return _glossary_name_toggle_row(
+        self, 'glossary_name_check_plural_exclusion_var', 'glossary_name_check_plural_exclusion', True,
+        "NER plural exclusion",
+        "A glossary name in its plural (or singular) is the same name, word by word:\n"
+        "'Heroes of the Sword' for 'Hero of the Sword', 'Beastmen' for 'Beastman', 'Wolves' for 'Wolf'.\n"
+        "Irregular and classical plurals (Children, Succubi, Seraphim...) come from a fixed list.\n"
+        "The plural counts wherever it is in the chapter, tagged by NER or not.\n"
+        "Not for the types 'Skip plural / tense exclusion for' lists (Character and Nicknames\n"
+        "by default: 'Luca' is not 'Lucas'). English output only.\n"
+        "Off: only an -s / -es / -ies at the end of the whole name counts.")
+
+
+def glossary_name_tense_row(self):
+    """"NER tense exclusion (not recommended)" (``glossary_name_check_tense_exclusion_var``, default off)."""
+    return _glossary_name_toggle_row(
+        self, 'glossary_name_check_tense_exclusion_var', 'glossary_name_check_tense_exclusion', False,
+        "NER tense exclusion (not recommended)",
+        "A glossary name in another verb form is the same name: past and present\n"
+        "('Fallen Angel' / 'Falling Angel', 'Awakened One' / 'Awakening One') and, inside a title,\n"
+        "'will' + verb ('The Hero Who Will Return' / 'The Hero Who Returned').\n"
+        "Only one word may differ, never into another glossary name, and not for the types\n"
+        "'Skip plural / tense exclusion for' lists (Character and Nicknames by default).\n"
+        "English output only.\n"
+        "Not recommended: two verb forms can be different names, so real drift could be hidden.")
+
+
+def glossary_name_inflection_types_row(self, dialog_parent):
+    """"Skip plural / tense exclusion for:" (``glossary_name_check_inflection_skip_types_var``): the entry
+    types whose names never count in another plural / verb form. Default Character and Nicknames, the
+    built-in gender types but titles; a custom entry type is not skipped until it is ticked (owner
+    2026-10-28). Shared by Other Settings and the QA Scanner settings like ``glossary_entry_types_row``
+    (a change in one shows in every open row; either dialog's save_config writes it)."""
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+    import glossary_name_check as name_check
+
+    if not hasattr(self, 'glossary_name_check_inflection_skip_types_var'):
+        self.glossary_name_check_inflection_skip_types_var = list(name_check._skip_types(
+            self.config.get('glossary_name_check_inflection_skip_types')))
+    tooltip = ("Entry types whose names never count in another plural or verb form\n"
+               "(personal names: 'Luca' is not 'Lucas', so 'Lucas missing' stays a finding).\n"
+               "Default: Character and Nicknames, the gender types but titles. A custom entry type\n"
+               "you add is not skipped until you tick it here.")
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(20, 0, 0, 0)
+    layout.setSpacing(8)
+    label = QLabel("Skip plural / tense exclusion for:")
+    label.setToolTip(tooltip)
+    layout.addWidget(label)
+    summary = QLabel()
+    summary.setToolTip(tooltip)
+    layout.addWidget(summary)
+    configure_btn = QPushButton("Configure…")
+    configure_btn.setFixedWidth(100)
+    configure_btn.setStyleSheet("background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
+    configure_btn.setToolTip(tooltip)
+    layout.addWidget(configure_btn)
+    layout.addStretch()
+
+    open_rows = getattr(self, '_glossary_name_inflection_type_rows', None)
+    if open_rows is None:
+        open_rows = self._glossary_name_inflection_type_rows = []
+    open_rows.append(summary)
+
+    def _show(types):
+        text = ", ".join(str(t).capitalize() for t in types) or "None"
+        for other in list(open_rows):
             try:
-                # not with signals blocked: the styled checkbox draws its ✓ from its own toggled signal (the
-                # other copy's handler then finds every row already set)
-                if checkbox.isChecked() != bool(checked):
-                    checkbox.setChecked(bool(checked))
+                other.setText(text)
             except RuntimeError:  # its dialog was closed and deleted
-                open_rows.remove(checkbox)
-    name_check_numbers_cb.toggled.connect(_on_name_check_numbers_toggle)
-    name_check_numbers_layout.addWidget(name_check_numbers_cb)
-    name_check_numbers_layout.addStretch()
-    return name_check_numbers_row
+                open_rows.remove(other)
+    _show(self.glossary_name_check_inflection_skip_types_var)
+
+    def _open_skip_types_dialog():
+        configured = getattr(self, 'custom_entry_types', None) or self.config.get('custom_entry_types')
+        current = self.glossary_name_check_inflection_skip_types_var
+        selected = open_glossary_entry_types_dialog(
+            self,
+            dialog_parent(),
+            "Skip Plural / Tense Exclusion",
+            "Entry types whose names never count in another plural or verb form:",
+            current,
+            # every configured type is listed, whatever the current glossary holds
+            extra_types=[*name_check.DEFAULT_INFLECTION_SKIP_TYPES,
+                         *(configured if isinstance(configured, dict) else ()), *current],
+        )
+        if selected is not None:
+            self.glossary_name_check_inflection_skip_types_var = selected
+            _show(selected)
+    configure_btn.clicked.connect(_open_skip_types_dialog)
+    return row
+
+
+def glossary_name_ner_row(self, on_change=None):
+    """"Use Named Entity Recognition model (NER)" (``glossary_name_check_use_ner_var``, default on);
+    greyed out with the reason in builds without ONNX Runtime."""
+    try:
+        import ner_names
+        ner_supported = ner_names.runtime_available()
+        ner_unsupported_reason = ner_names.UNSUPPORTED_REASON
+    except ImportError:
+        ner_supported, ner_unsupported_reason = False, "Not supported in this build"
+    if ner_supported:
+        return _glossary_name_toggle_row(
+            self, 'glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True,
+            "Use Named Entity Recognition model (NER)",
+            "Finds the names in each translated chapter with an English named-entity model\n"
+            "(person / place / organization; 104 MB, downloaded on first use).\n"
+            "Off: a capitalization heuristic finds them instead.", on_change=on_change)
+    return _glossary_name_toggle_row(
+        self, 'glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True,
+        f"Use Named Entity Recognition model (NER) — {ner_unsupported_reason}",
+        "This build has no ONNX Runtime (the NoCuda / Heavy builds and Glossarion Mobile have it).\n"
+        "The glossary name check uses its capitalization heuristic here.", enabled=False, on_change=on_change)
 
 
 def _glossary_name_workers_text(value):
@@ -647,7 +787,7 @@ def glossary_name_workers_row(self):
     name_check_workers_layout.setSpacing(8)
     name_check_workers_layout.addWidget(QLabel("Chapters checked at once:"))
     name_check_workers_slider = QSlider(Qt.Horizontal)
-    name_check_workers_slider.setRange(0, name_check.MAX_CHAPTER_WORKERS)
+    name_check_workers_slider.setRange(0, name_check.max_chapter_workers())  # up to this machine's cores
     name_check_workers_slider.setSingleStep(1)
     name_check_workers_slider.setPageStep(1)
     name_check_workers_slider.setTickPosition(QSlider.TicksBelow)
@@ -657,14 +797,14 @@ def glossary_name_workers_row(self):
     name_check_workers_slider.setToolTip(
         "<b>Chapters checked at once</b> (with the named-entity model, NER)<br>"
         "How many chapters the glossary name check checks at the same time in the QA scan and in "
-        "<i>Check glossary names in existing output…</i>. One loaded model checks them all; each "
-        "check uses up to 4 CPU cores.<br>"
+        "<i>Check glossary names in existing output…</i>, up to this machine's cores. One loaded model "
+        "checks them all; the cores are shared out between the checks (at most 4 each).<br>"
         "<b>Auto</b> (default): the QA Scanner's <i>Maximum parallel workers</i> ÷ 4 (2 with 8 "
         "workers, 4 with 16 or All cores).<br>"
         "More is faster until the CPU is busy. The capitalization heuristic checks one chapter at a "
         "time, and the check after each translated chapter is not affected.")
     try:
-        current_name_check_workers = max(0, min(name_check.MAX_CHAPTER_WORKERS, int(
+        current_name_check_workers = max(0, min(name_check.max_chapter_workers(), int(
             getattr(self, 'glossary_name_check_workers_var', self.config.get('glossary_name_check_workers', 0)))))
     except (TypeError, ValueError):
         current_name_check_workers = 0
@@ -9406,37 +9546,13 @@ def _create_processing_options_section(self, parent):
     name_check_numbers_row = glossary_name_numbers_row(self)
 
     # NER: an English named-entity model finds the names in the translation (ONNX Runtime builds:
-    # Heavy / NoCuda / mobile); without it the capitalization heuristic does.
-    if not hasattr(self, 'glossary_name_check_use_ner_var'):
-        self.glossary_name_check_use_ner_var = bool(self.config.get('glossary_name_check_use_ner', True))
-    try:
-        import ner_names
-        ner_supported = ner_names.runtime_available()
-        ner_unsupported_reason = ner_names.UNSUPPORTED_REASON
-    except ImportError:
-        ner_supported, ner_unsupported_reason = False, "Not supported in this build"
-    name_check_ner_row = QWidget()
-    name_check_ner_layout = QHBoxLayout(name_check_ner_row)
-    name_check_ner_layout.setContentsMargins(20, 0, 0, 0)
-    name_check_ner_cb = self._create_styled_checkbox("Use Named Entity Recognition model (NER)")
-    name_check_ner_cb.setChecked(bool(self.glossary_name_check_use_ner_var) and ner_supported)
-    if ner_supported:
-        name_check_ner_cb.setToolTip(
-            "Finds the names in each translated chapter with an English named-entity model\n"
-            "(person / place / organization; 104 MB, downloaded on first use).\n"
-            "Off: a capitalization heuristic finds them instead.")
-    else:
-        name_check_ner_cb.setEnabled(False)
-        name_check_ner_cb.setText(f"Use Named Entity Recognition model (NER) — {ner_unsupported_reason}")
-        name_check_ner_cb.setToolTip(
-            "This build has no ONNX Runtime (the NoCuda / Heavy builds and Glossarion Mobile have it).\n"
-            "The glossary name check uses its capitalization heuristic here.")
-
-    def _on_name_check_ner_toggle(checked):
-        self.glossary_name_check_use_ner_var = bool(checked)
-    name_check_ner_cb.toggled.connect(_on_name_check_ner_toggle)
-    name_check_ner_layout.addWidget(name_check_ner_cb)
-    name_check_ner_layout.addStretch()
+    # Heavy / NoCuda / mobile); without it the capitalization heuristic does. Plural / tense exclusion:
+    # a name in another plural / verb form is the same name. All shared with the QA Scanner settings.
+    name_check_ner_row = glossary_name_ner_row(self)
+    name_check_plural_row = glossary_name_plural_row(self)
+    name_check_tense_row = glossary_name_tense_row(self)
+    name_check_inflection_types_row = glossary_name_inflection_types_row(
+        self, lambda: self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self)
     name_check_desc = QLabel("Fixes or logs glossary names the model spelled differently<br>"
                              "in each finished chapter (uses the entry types below)")
     name_check_desc.setStyleSheet("color: gray; font-size: 10pt;")
@@ -9457,6 +9573,9 @@ def _create_processing_options_section(self, parent):
             name_check_autofix_level_row.setVisible(checked)
             name_check_workers_row.setVisible(checked)
             name_check_numbers_row.setVisible(checked)
+            name_check_plural_row.setVisible(checked)
+            name_check_tense_row.setVisible(checked)
+            name_check_inflection_types_row.setVisible(checked)
             name_check_ner_row.setVisible(checked)
             name_check_desc.setVisible(checked)
             _refresh_glossary_scope_rows()
@@ -9492,6 +9611,9 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(name_check_autofix_level_row)
     left_v.addWidget(name_check_workers_row)
     left_v.addWidget(name_check_numbers_row)
+    left_v.addWidget(name_check_plural_row)
+    left_v.addWidget(name_check_tense_row)
+    left_v.addWidget(name_check_inflection_types_row)
     left_v.addWidget(name_check_ner_row)
     left_v.addWidget(name_check_desc)
     left_v.addWidget(glossary_compliance_row)
@@ -9507,6 +9629,9 @@ def _create_processing_options_section(self, parent):
     name_check_autofix_level_row.setVisible(name_check_cb.isChecked())
     name_check_workers_row.setVisible(name_check_cb.isChecked())
     name_check_numbers_row.setVisible(name_check_cb.isChecked())
+    name_check_plural_row.setVisible(name_check_cb.isChecked())
+    name_check_tense_row.setVisible(name_check_cb.isChecked())
+    name_check_inflection_types_row.setVisible(name_check_cb.isChecked())
     name_check_ner_row.setVisible(name_check_cb.isChecked())
     name_check_desc.setVisible(name_check_cb.isChecked())
     

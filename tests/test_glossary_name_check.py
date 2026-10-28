@@ -83,6 +83,198 @@ def test_glued_and_cut_names_are_not_variants():
     assert [f.kind for f in g.check_chapter("사쿠라 미하일 싱리안 종", output, ents).findings] == ["missing"] * 3
 
 
+@pytest.mark.parametrize("expected,candidate,plurals,tenses,same", [
+    # plurals, word by word (owner 2026-10-28: "Heroes of the Sword", "Beastmen")
+    ("Hero of the Sword", "Heroes of the Sword", True, False, True),
+    ("Beastman", "Beastmen", True, False, True),
+    ("Beastmen", "Beastman", True, False, True),
+    ("Knight of the Round", "Knights of the Round", True, False, True),
+    ("Child of Light", "Children of Light", True, False, True),
+    ("Wolf", "Wolves", True, False, True), ("Dwarf", "Dwarves", True, False, True),
+    ("Witch", "Witches", True, False, True), ("Fairy", "Fairies", True, False, True),
+    ("Succubus", "Succubi", True, False, True), ("Seraph", "Seraphim", True, False, True),
+    ("Swordsman", "Swordsmen", True, False, True),
+    ("Hero of the Sword", "Heroes of the Sword", False, False, False),  # the toggle off
+    ("Minho Moralis", "Minho Morales", True, False, False),  # no blanket Latin rule: a real misspelling
+    ("Kang-hyun", "Kang Hyun", True, False, False),  # a spacing respelling stays one
+    ("S Rank", "S-ranks", True, True, False),  # a hyphen respelling stays one, plural or not (corpus)
+    ("Half-Elf", "Half-Elves", True, False, True), ("Cyclops", "Cyclopes", True, False, True),
+    ("Fallen Angel", "Falling Angel", True, False, False),  # a verb form is not a plural
+    # verb forms (off by default)
+    ("Fallen Angel", "Falling Angel", False, True, True),
+    ("Fallen Angel", "Fell Angel", False, True, True),
+    ("Awakened One", "Awakening One", False, True, True),
+    ("Stopped Time", "Stopping Time", False, True, True),
+    ("The Hero Who Will Return", "The Hero Who Returned", False, True, True),
+    ("The Girl Who Will Become the Saintess", "The Girl Who Became the Saintess", False, True, True),
+    ("Will Return", "Returned", False, True, False),  # "Will" opening a name is a name
+    ("Black Rose", "Black Rise", False, True, False),  # rose / saw / left... are left out of the verb list
+    ("Fallen Dark Angel", "Falling Dark Angels", False, True, False),  # one word only
+    ("Hunter", "Hunted", False, True, False),
+])
+def test_plural_and_tense_forms_are_the_same_name(expected, candidate, plurals, tenses, same):
+    assert g._inflected_same(expected, candidate, plurals, tenses) is same
+
+
+def test_tense_never_turns_a_word_into_another_glossary_name():
+    names = {g._norm("Falling Angel")}
+    assert g._inflected_same("Fallen Angel", "Falling Angel", False, True)
+    assert not g._inflected_same("Fallen Angel", "Falling Angel", False, True, names={g._norm("Falling")})
+    assert names  # the full names come from build_entries
+    ents = g.build_entries([{"type": "term", "raw_name": "타락천사", "translated_name": "Fallen Angel"},
+                            {"type": "term", "raw_name": "낙하", "translated_name": "Falling"}], mode="all")
+    assert g._norm("Falling") in ents.names and g._norm("Fallen Angel") in ents.names
+
+
+
+@pytest.mark.parametrize("expected,output,plurals,tenses,present", [
+    ("Beastman", "The Beastmen ran.", True, False, True),
+    ("Beastmen", "A lone Beastman.", True, False, True),
+    ("Hero of the Sword", "Generations of Heroes of the Sword.", True, False, True),
+    ("Fox Beastman", "The Fox Beastmen hid.", True, False, True),
+    ("Wolf", "Wolves howled.", True, False, True),
+    ("Succubus", "Two Succubi.", True, False, True),
+    ("Hero of the Sword", "Generations of Heroes of the Sword.", False, False, False),  # the toggle off
+    ("Kang-hyun", "Kang Hyun", True, False, False),
+    ("Fallen Angel", "A Falling Angel.", True, False, False),
+    ("Fallen Angel", "A Falling Angel.", False, True, True),
+    ("The Hero Who Will Return", "The Hero Who Returned.", False, True, True),
+    ("The Hero Who Returned", "The Hero Who Will Return.", False, True, True),
+    ("Will Return", "Returned.", False, True, False),
+    ("Black Rose", "Black Rise.", False, True, False),
+    ("Minho Moralis", "Minho Morales.", True, True, False),
+    # the 15,960-chapter corpus (2026-10-28): rank letters are no plurals, no "-ss" plural, the form as it is
+    ("SSS Rank", "Her SS Rank trait.", True, False, False),
+    ("S Rank", "Two SS-ranks.", True, False, False),
+    ("Nebines Mansion", "The Nebiness Mansion.", True, False, False),
+    ("Crown Prince", "Crown Princess Consort.", True, True, False),
+    ("S Rank", "Hari's ranking.", False, True, False),
+    ("Witch", "Two Witches.", True, False, True),
+    ("Monarch", "The Monarchs.", True, False, True),
+    ("Fox", "Foxes.", True, False, True),
+])
+def test_the_name_in_another_form_is_present_without_ner(expected, output, plurals, tenses, present):
+    assert g._inflected_present(expected, output, plurals, tenses) is present
+
+
+def test_a_plural_ner_did_not_tag_is_the_name_but_never_for_a_character(tmp_path):
+    """2026-10-28: "Beastman missing" where the chapter said "Beastmen" (NER tags no common noun);
+    "Luca" never makes the character "Lucas" present (the plural rule would read it as the singular)."""
+    rows = [{"type": "terms", "raw_name": "수인", "translated_name": "Beastman"},
+            {"type": "character", "raw_name": "루카스", "translated_name": "Lucas"}]
+    output = "<p>The Beastmen ran. Luca smiled.</p>"
+    tagger = _fake_tagger(tmp_path, g.html_to_text(output), {"Luca": 3})
+
+    def kinds(**settings):
+        ents = g.build_entries(rows, mode="all", **settings)
+        return {f.expected: f.kind for f in g.check_chapter("수인들 루카스", output, ents, ner=tagger).findings}
+
+    assert kinds(plural_exclusion=False) == {"Beastman": "missing", "Lucas": "missing"}
+    assert kinds() == {"Lucas": "missing"}
+
+
+
+def test_the_types_the_plural_and_tense_rules_skip_are_a_setting(tmp_path):
+    """2026-10-28 (owner): "Gender types except titles, but make it fully configurable ... for user added
+    custom entry types it is off by default"."""
+    rows = [{"type": "nicknames", "raw_name": "늑대들", "translated_name": "Wolves of the North"},
+            {"type": "skills", "raw_name": "송곳니", "translated_name": "Fang of the Wolf"},
+            {"type": "titles", "raw_name": "검의 용사", "translated_name": "Hero of the Sword"},
+            {"type": "character", "raw_name": "수인", "translated_name": "Beastman"}]
+    output = "<p>The Wolf of the North. Fangs of the Wolf. Heroes of the Sword. The Beastmen ran.</p>"
+    source = "늑대들 송곳니 검의 용사 수인"
+
+    def reported(**settings):
+        ents = g.build_entries(rows, mode="all", **settings)
+        return sorted(f.expected for f in g.check_chapter(source, output, ents).findings)
+
+    # default: character and nicknames keep their findings; titles and a custom type ("skills") do not
+    assert reported() == ["Beastman", "Wolves of the North"]
+    assert reported(inflection_skip_types=()) == []  # nothing skipped
+    assert reported(inflection_skip_types=("skill", "title")) == ["Fang of the Wolf", "Hero of the Sword"]  # term / terms
+    assert g.settings_from_env({})["inflection_skip_types"] == ("character", "nicknames")
+    env = {"GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES": '["skills"]'}
+    assert g.settings_from_env(env)["inflection_skip_types"] == ("skills",)
+    assert g.settings_from_env({"GLOSSARY_NAME_CHECK_INFLECTION_SKIP_TYPES": "not json"})["inflection_skip_types"] \
+        == ("character", "nicknames")
+    config = {"glossary_name_check_inflection_skip_types": []}
+    assert g.settings_from_config(config)["inflection_skip_types"] == ()
+    book = tmp_path / "book"
+    book.mkdir()
+    (book / "glossary.csv").write_text("type,raw_name,translated_name\nnicknames,늑대들,Wolves of the North\n",
+                                       encoding="utf-8")
+    assert g.load_entries(str(book / "glossary.csv"), mode="all").inflection_skip == {
+        "character", "characters", "nicknames", "nickname"}
+    assert g.load_entries(str(book / "glossary.csv"), mode="all", inflection_skip_types=()).inflection_skip == set()
+
+
+def test_plural_and_tense_exclusion_in_the_check(tmp_path):
+    """2026-10-28 (owner): "Heroes of the Sword → Hero of the Sword" and "Beastmen → Beastman" were reported."""
+    rows = [{"type": "titles", "raw_name": "검의 용사", "translated_name": "Hero of the Sword"},
+            {"type": "terms", "raw_name": "수인", "translated_name": "Beastman"},
+            {"type": "terms", "raw_name": "타락천사", "translated_name": "Fallen Angel"},
+            {"type": "character", "raw_name": "아리아", "translated_name": "Fallen Aria"}]
+    output = "<p>Weapons of generations of Heroes of the Sword. The Beastmen ran. A Falling Angel. Falling Aria.</p>"
+    text = g.html_to_text(output)
+    tagger = _fake_tagger(tmp_path, text, {"Heroes": 5, "of": 6, "the": 6, "Sword": 6, "Beastmen": 1, "Falling": 3,
+                                           "Angel": 4, "Aria": 4})
+    source = "역대 검의 용사들 수인들 타락천사 아리아"
+
+    def kinds(**settings):
+        ents = g.build_entries(rows, mode="all", **settings)
+        return {f.expected: f.kind for f in g.check_chapter(source, output, ents, ner=tagger).findings}
+
+    old = kinds(plural_exclusion=False)
+    assert old["Hero of the Sword"] != "missing" and old["Beastman"] != "missing"  # reported before
+    new = kinds()  # plural exclusion on (default), tense off
+    assert "Hero of the Sword" not in new and "Beastman" not in new  # found: the plural is the name
+    assert new["Fallen Angel"] != "missing"  # tense exclusion is off by default
+    tense = kinds(tense_exclusion=True)
+    assert "Fallen Angel" not in tense
+    assert tense["Fallen Aria"] != "missing"  # never for a character name
+
+
+def test_plural_and_tense_exclusion_only_for_english_output():
+    assert g.english_output(None) and g.english_output("English") and g.english_output("english (US)")
+    assert not g.english_output("French")
+    on = {"GLOSSARY_NAME_CHECK_PLURAL_EXCLUSION": "1", "GLOSSARY_NAME_CHECK_TENSE_EXCLUSION": "1"}
+    assert g.settings_from_env(on)["plural_exclusion"] and g.settings_from_env(on)["tense_exclusion"]
+    scope = g.settings_from_env(dict(on, OUTPUT_LANGUAGE="Korean"))
+    assert not scope["plural_exclusion"] and not scope["tense_exclusion"]
+    assert not g.settings_from_config({"output_language": "Spanish"}, on)["plural_exclusion"]
+    assert g.settings_from_env({})["plural_exclusion"] and not g.settings_from_env({})["tense_exclusion"]
+
+
+def test_chapters_at_once_go_up_to_the_cores_and_share_them_out(monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    assert g.max_chapter_workers() == 16 and g.chapter_workers(object(), chosen=99) == 16
+    assert g.workers_from_config({"glossary_name_check_workers": 20}) == 20  # saved values up to 32
+    assert [ner_names.ner_threads(n) for n in (1, 2, 4, 8, 16)] == [4, 4, 4, 2, 1]
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
+    assert g.max_chapter_workers() == g.MAX_CHAPTER_WORKERS == 32
+
+
+def test_scan_folder_shares_the_cores_out_between_the_checks(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    book = _book(tmp_path, "<p>Walter Argent smiled.</p>")
+    asked = []
+
+    class Tagger:
+        threads = 4
+
+        def with_threads(self, n):
+            asked.append(n)
+            return self
+
+        def entities(self, text):
+            return []
+
+    ents = g.load_entries(str(book / "glossary.csv"))
+    g.scan_folder(str(book), ents, ner=Tagger(), workers=8)
+    g.scan_folder(str(book), ents, ner=Tagger(), workers=1)
+    assert asked == [2]  # 8 at once: 16 cores / 8; one at a time keeps the tagger as it is
+
+
 def test_numbers_must_match_and_a_number_glued_to_a_word_is_present():
     """2026-10-27 (owner): "slain one of the72 Demon Kings" (a missing space) was reported as "Demon Kings → 72
     Demon Kings", whose fix would have written "the7272 Demon Kings"."""
@@ -167,12 +359,14 @@ def test_settings_from_env_and_config():
            "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5",
            "GLOSSARY_NAME_CHECK_MIN_CHARS": "2"}
     assert g.settings_from_env(env) == {"mode": "custom", "custom_types": ("term",), "min_chars": 2,
-                                        "autofix_level": 1, "match_numbers": True}
+                                        "autofix_level": 1, "match_numbers": True, "plural_exclusion": True,
+                                        "tense_exclusion": False, "inflection_skip_types": ("character", "nicknames")}
     assert g.settings_from_config({"emergency_glossary_compliance_mode": "all",
                                    "emergency_glossary_compliance_min_chars": 5,
                                    "glossary_name_check_min_chars": 4,
                                    "glossary_name_check_autofix_level": 3}, env) == {
-        "mode": "all", "custom_types": (), "min_chars": 4, "autofix_level": 3, "match_numbers": True}
+        "mode": "all", "custom_types": (), "min_chars": 4, "autofix_level": 3, "match_numbers": True,
+        "plural_exclusion": True, "tense_exclusion": False, "inflection_skip_types": ("character", "nicknames")}
     assert g.settings_from_env({"GLOSSARY_NAME_CHECK_MATCH_NUMBERS": "0"})["match_numbers"] is False
     assert g.settings_from_config({"glossary_name_check_match_numbers": False}, {})["match_numbers"] is False
     assert g.settings_from_env({"GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL": "9"})["autofix_level"] == 3
@@ -560,7 +754,7 @@ def test_chapter_workers_follow_the_qa_performance_setting(monkeypatch, cpus, se
     assert g.chapter_workers(None, setting) == 1  # the heuristic alone is pure Python
     # "Chapters checked at once" (glossary_name_check_workers): 0 = Auto (the rule above), else that count
     assert g.chapter_workers(object(), setting, chosen=0) == expected
-    assert g.chapter_workers(object(), setting, chosen=3) == 3
+    assert g.chapter_workers(object(), setting, chosen=3) == min(3, cpus)  # never more than the cores
     assert g.chapter_workers(None, setting, chosen=3) == 1
 
 
@@ -569,7 +763,7 @@ def test_chapters_at_once_setting_reads_and_clamps():
     assert g.workers_from_config({"glossary_name_check_workers": 3}) == 3
     assert g.workers_from_config({"glossary_name_check_workers": 99}) == g.MAX_CHAPTER_WORKERS
     assert g.workers_from_config({"glossary_name_check_workers": "x"}) == 0
-    assert g.chapter_workers(object(), chosen=99) == g.MAX_CHAPTER_WORKERS
+    assert g.chapter_workers(object(), chosen=99) == g.max_chapter_workers()  # the cores
 
 
 def test_parallel_scan_keeps_file_order_and_results(tmp_path):
@@ -750,6 +944,38 @@ out["numbers_off"] = [b.isChecked() for b in boxes] + [owner.glossary_name_check
 shiboken6.delete(rows[1])
 boxes[0].setChecked(True)
 out["numbers_after_close"] = [boxes[0].isChecked(), owner.glossary_name_check_match_numbers_var]
+seen = []
+pairs = {name: [getattr(other_settings, name)(owner) for _ in range(2)]
+         for name in ("glossary_name_plural_row", "glossary_name_tense_row")}
+pairs["glossary_name_ner_row"] = [other_settings.glossary_name_ner_row(owner, on_change=seen.append)
+                                  for _ in range(2)]
+out["toggles_start"] = {n: [r.findChild(QCheckBox).isChecked() for r in rs] for n, rs in pairs.items()}
+out["toggles_text"] = {n: rs[0].findChild(QCheckBox).text() for n, rs in pairs.items()}
+for rs in pairs.values():
+    box = rs[1].findChild(QCheckBox)
+    box.setChecked(not box.isChecked())
+out["toggles_flipped"] = {n: [r.findChild(QCheckBox).isChecked() for r in rs] for n, rs in pairs.items()}
+out["toggles_vars"] = [owner.glossary_name_check_plural_exclusion_var, owner.glossary_name_check_tense_exclusion_var,
+                       owner.glossary_name_check_use_ner_var]
+out["ner_seen"] = seen
+listed = []
+real_exec = QDialog.exec
+QDialog.exec = lambda dlg: listed.extend(cb.text() for cb in dlg.findChildren(QCheckBox)) or 0
+out["dialog_listed"] = [other_settings.open_glossary_entry_types_dialog(
+    owner, None, "t", "p", ["nicknames"], extra_types=["character", "nicknames", "skills"]), listed]
+QDialog.exec = real_exec
+asked = []
+def fake_dialog(self_, parent, title, prompt, current, extra_types=()):
+    asked.append([list(current), list(extra_types)])
+    return ["character", "skills"]
+other_settings.open_glossary_entry_types_dialog = fake_dialog
+owner.custom_entry_types = {"character": {}, "titles": {}, "nicknames": {}, "skills": {}}
+skip_rows = [other_settings.glossary_name_inflection_types_row(owner, lambda: None) for _ in range(2)]
+summary = lambda row: row.findChildren(QLabel)[1].text()
+out["skip_start"] = [summary(r) for r in skip_rows]
+next(b for b in skip_rows[1].findChildren(QPushButton) if b.text() == "Configure…").click()
+out["skip_after"] = [summary(r) for r in skip_rows] + [owner.glossary_name_check_inflection_skip_types_var]
+out["skip_asked"] = asked
 print("SYNC=" + json.dumps(out))
 '''
 
@@ -779,6 +1005,22 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
     assert out["numbers_start"] == [True, True, "Names keep their numbers", "Names keep their numbers"]
     assert out["numbers_off"] == [False, False, False]
     assert out["numbers_after_close"] == [True, True]
+    # plural exclusion on, tense exclusion off ("not recommended"), Use NER on: one setting each in both rows
+    assert out["toggles_start"] == {"glossary_name_plural_row": [True, True], "glossary_name_tense_row": [False, False],
+                                    "glossary_name_ner_row": [True, True]}
+    assert out["toggles_text"]["glossary_name_tense_row"] == "NER tense exclusion (not recommended)"
+    assert out["toggles_text"]["glossary_name_plural_row"] == "NER plural exclusion"
+    assert out["toggles_flipped"] == {"glossary_name_plural_row": [False, False],
+                                      "glossary_name_tense_row": [True, True], "glossary_name_ner_row": [False, False]}
+    assert out["toggles_vars"] == [False, True, False]
+    assert out["ner_seen"] == [False, False]  # each row's own change: the QA label follows
+    # "Skip plural / tense exclusion for": one setting in both rows, every configured type in its dialog
+    assert out["skip_start"] == ["Character, Nicknames", "Character, Nicknames"]
+    assert out["skip_after"] == ["Character, Skills", "Character, Skills", ["character", "skills"]]
+    current, extra = out["skip_asked"][0]
+    assert current == ["character", "nicknames"] and {"character", "nicknames", "titles", "skills"} <= set(extra)
+    selected, listed = out["dialog_listed"]
+    assert selected is None and listed.count("Character") == 1 and {"Nicknames", "Skills"} <= set(listed)
     # both dialogs build it from the one helper; the QA row sits right below the name check toggle
     with open(os.path.join(SRC, "other_settings.py"), encoding="utf-8") as f:
         other = f.read()
@@ -794,4 +1036,11 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
             < qa.index("glossary_name_autofix_row(self)")
             < qa.index("glossary_name_workers_row(self)")
             < qa.index("glossary_name_numbers_row(self)")
+            < qa.index("glossary_name_plural_row(self)")
+            < qa.index("glossary_name_tense_row(self)")
+            < qa.index("glossary_name_inflection_types_row(self, lambda: dialog)")
+            < qa.index("glossary_name_ner_row(self, on_change=_refresh_ner_label)")
             < qa.index("detection_layout.addWidget(glossary_names_fix_row)"))
+    for builder in ("glossary_name_plural_row(self)", "glossary_name_tense_row(self)", "glossary_name_ner_row(self)",
+                    "glossary_name_inflection_types_row(\n        self, "):
+        assert builder in body, builder

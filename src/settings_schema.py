@@ -854,10 +854,32 @@ TOOLTIP_OVERRIDES = {
     "payload_cleanup_limit_mb": (
         "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, at "
         "startup and exit. 0 = never clean up."),
+    "glossary_name_check_match_numbers": (
+        "A spelling with another number, or none, is never taken for a glossary name ('Demon Kings' is not "
+        "'72 Demon Kings'), and a name whose number is glued to the word before it ('the72 Demon Kings', a "
+        "missing space) counts as found. Off: numbers are ignored when names are compared."),
+    "glossary_name_check_plural_exclusion": (
+        "A glossary name in its plural (or singular) is the same name, word by word: 'Heroes of the Sword' "
+        "for 'Hero of the Sword', 'Beastmen' for 'Beastman', 'Wolves' for 'Wolf'. Irregular and classical "
+        "plurals come from a fixed list; the plural counts wherever it is in the chapter, tagged by NER or "
+        "not. Not for the types 'Skip plural / tense exclusion for' lists (Character and Nicknames by "
+        "default; 'Luca' is not 'Lucas'). English output only. Off: only an -s / "
+        "-es / -ies at the end of the whole name counts."),
+    "glossary_name_check_inflection_skip_types": (
+        "Entry types whose names never count in another plural or verb form: personal names, where "
+        "'Luca' is not 'Lucas'. Default Character and Nicknames (the gender types but titles); a custom "
+        "entry type you add is not skipped until you tick it here."),
+    "glossary_name_check_tense_exclusion": (
+        "Not recommended: a glossary name in another verb form is the same name ('Fallen Angel' / 'Falling "
+        "Angel', and 'will' + verb inside a title). One word may differ, never into another glossary name, "
+        "and not for the types 'Skip plural / tense exclusion for' lists. English output only. Two verb "
+        "forms can be different names, so real "
+        "drift could be hidden."),
     "glossary_name_check_workers": (
         "How many chapters the named-entity model (NER) checks at the same time in the QA scan and the glossary "
-        "name review. 0 = Auto: the QA Scanner's Maximum parallel workers ÷ 4 (each check uses up to 4 CPU "
-        "cores). The capitalization heuristic checks one chapter at a time."),
+        "name review, up to this device's cores (they are shared out between the checks, at most 4 each). "
+        "0 = Auto: the QA Scanner's Maximum parallel workers ÷ 4. The capitalization heuristic checks one "
+        "chapter at a time."),
     "glossary_name_check_autofix_level": (
         "Which findings Auto-fix replaces (and the review pre-checks). 1 Conservative: one close spelling of "
         "a character name. 2 Balanced: also the other entry types in scope. 3 Aggressive: every close "
@@ -935,6 +957,12 @@ LABEL_OVERRIDES = {
     "glossary_name_check_mode": "Glossary name check mode",
     # the QA scanner's toggle text says whether NER is installed (picked at runtime, 2026-10-27)
     "check_glossary_names": "Check glossary names with NER (Experimental)",
+    # the name check toggles Other Settings and the QA scanner build with one shared row (2026-10-28)
+    "glossary_name_check_use_ner": "Use Named Entity Recognition model (NER)",
+    "glossary_name_check_match_numbers": "Names keep their numbers",
+    "glossary_name_check_plural_exclusion": "NER plural exclusion",
+    "glossary_name_check_tense_exclusion": "NER tense exclusion (not recommended)",
+    "glossary_name_check_inflection_skip_types": "Skip plural / tense exclusion for",
     "output_language": "Target language",
     "contextual": "Contextual translation",
     "token_limit": "Input token limit",

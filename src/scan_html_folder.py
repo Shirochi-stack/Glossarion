@@ -10221,12 +10221,26 @@ def process_html_file_batch(args):
     return batch_results
 
 
+_WORKER_FAULT_LOG = None  # crash.log, open for a QA scan worker's lifetime (_init_worker_process)
+
+
 def _init_worker_process():
     """Initializer for worker processes to keep GUI responsive.
     - On Windows: lower priority to BELOW_NORMAL and reserve some cores via affinity
     - On POSIX: increase niceness
     Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).
+    A worker that dies in native code (no memory left, a crashing library) writes its traceback to the
+    app's crash.log (the GUI exports GLOSSARION_LOG_DIR; a dead worker breaks the whole pool).
     """
+    global _WORKER_FAULT_LOG
+    try:
+        log_dir = os.environ.get("GLOSSARION_LOG_DIR")
+        if log_dir and _WORKER_FAULT_LOG is None:
+            import faulthandler
+            _WORKER_FAULT_LOG = open(os.path.join(log_dir, "crash.log"), "a", encoding="utf-8")
+            faulthandler.enable(file=_WORKER_FAULT_LOG, all_threads=True)
+    except Exception:
+        pass
     try:
         # Reserve some CPUs for the GUI/main process
         reserve = 1
@@ -11236,10 +11250,12 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Process files in parallel
     results = []
     processed_count = 0
+    broken_batches = []  # batches a broken process pool lost (a worker died): run again on threads below
     
     with _ExecutorCls(**_exec_kwargs) as executor:
         # Submit all batches
         futures = []
+        future_args = {}
         
         for args in worker_args:
             if should_stop():
@@ -11249,6 +11265,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             
             future = executor.submit(process_html_file_batch, args)
             futures.append(future)
+            future_args[future] = args
         
         # Collect results as they complete
         for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):
@@ -11317,10 +11334,29 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 
                 results.extend(batch_results)
                 
+            except concurrent.futures.BrokenExecutor as e:
+                # a worker process died (a crash in native code or no memory left): every batch still in
+                # the pool fails with it; they run again once the pool is closed, on threads
+                if not broken_batches:
+                    log(f"   ⚠️ A QA scan worker process stopped unexpectedly ({e})")
+                broken_batches.append(future_args[future])
             except Exception as e:
                 log(f"   ❌ Error processing batch: {e}")
                 import traceback
                 log(f"   Traceback: {traceback.format_exc()}")
+    
+    if broken_batches and not should_stop():
+        log(f"   🧵 Scanning the {len(broken_batches)} batch(es) it left with threads instead "
+            f"(its cause, if it crashed, is in crash.log in the logs folder)")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as thread_executor:
+            for batch_results in thread_executor.map(process_html_file_batch, broken_batches):
+                if should_stop():
+                    log("⛔ QA scan interrupted during processing.")
+                    thread_executor.shutdown(wait=True, cancel_futures=True)
+                    return
+                processed_count += len(batch_results)
+                results.extend(batch_results)
+        log(f"   ✅ {processed_count}/{len(html_files)} files scanned")
     
     # Clear the progress line (like original)
     print()  # New line after progress indicator

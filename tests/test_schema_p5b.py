@@ -291,15 +291,18 @@ def test_mutable_defaults_are_fresh_for_every_build():
     owner = _owners(1, 3)[0]
     first, second = ss.desktop_settings_map(owner), ss.desktop_settings_map(owner)
     mutable = [(a, b) for a, b in zip(first, second) if isinstance(a[2], (list, dict))]
-    assert len(mutable) == 8                  # prompt_profiles {}, gemini_safety_category_thresholds {},
-                                              # request_queue_schedule {} + five []
+    assert len(mutable) == 9                  # prompt_profiles {}, gemini_safety_category_thresholds {},
+                                              # request_queue_schedule {} + five [] + the name check's
+                                              # skip types ['character', 'nicknames'] (2026-10-28)
     for a, b in mutable:
         assert a[2] is not b[2] and a[1] is not b[1]
         a[2].append("x") if isinstance(a[2], list) else a[2].update(x=1)
-    assert all(not row[2] for row in ss.desktop_settings_map(owner) if isinstance(row[2], (list, dict)))
+    fresh = {row[0]: row[2] for row in ss.desktop_settings_map(owner) if isinstance(row[2], (list, dict))}
+    assert fresh.pop("glossary_name_check_inflection_skip_types") == ["character", "nicknames"]
+    assert all(not default for default in fresh.values())
     for _key, _sources, default, _conv in ssd.DESKTOP_SETTINGS_MAP:
         if default[0] == "value" and isinstance(default[1], (list, dict)):
-            assert not default[1]                                     # the data rows stay untouched
+            assert default[1] in ([], {}, ["character", "nicknames"])  # the data rows stay untouched
 
 
 def test_image_only_title_default_is_the_shared_constant():

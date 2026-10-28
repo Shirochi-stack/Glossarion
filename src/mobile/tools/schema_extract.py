@@ -178,6 +178,10 @@ HELPER_ROW_KEYS = {
     "glossary_name_autofix_row": ("glossary_name_check_autofix_level",),
     "glossary_name_workers_row": ("glossary_name_check_workers",),
     "glossary_name_numbers_row": ("glossary_name_check_match_numbers",),
+    "glossary_name_plural_row": ("glossary_name_check_plural_exclusion",),
+    "glossary_name_tense_row": ("glossary_name_check_tense_exclusion",),
+    "glossary_name_inflection_types_row": ("glossary_name_check_inflection_skip_types",),
+    "glossary_name_ner_row": ("glossary_name_check_use_ner",),
 }
 # U9 P5b: the desktop builds its three settings tables from the schema
 # (``settings_map = desktop_settings_map(self)`` in settings_persistence, ``bool_vars =

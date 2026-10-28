@@ -1280,3 +1280,81 @@ def test_update_new_format_progress_hashes_flagged_translation_artifacts(tmp_pat
         entries = [e for e in prog["chapters"].values() if e.get("output_file") == name]
         assert entries, (name, prog["chapters"])
         assert entries[0]["content_hash"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+
+def _broken_pool_workspace(root: Path, count: int) -> Path:
+    root.mkdir()
+    for n in range(1, count + 1):
+        (root / f"response_chapter{n:04d}.html").write_text(
+            RESPONSE_SHELL.format(body=f"<h1>Chapter {n}</h1>\n<p>The knight rode north at dawn.</p>"),
+            encoding="utf-8")
+    return root
+
+
+def test_a_broken_process_pool_finishes_its_batches_on_threads(tmp_path, monkeypatch):
+    """User-approved desktop fix (2026-10-28): a v9.15.6 QA scan ended with one BrokenProcessPool
+    traceback per batch ('A process in the process pool was terminated abruptly') and no results
+    for those chapters. The batches a dead worker leaves now run again on threads."""
+    import concurrent.futures
+    from concurrent.futures.process import BrokenProcessPool
+
+    import scan_html_folder as shf
+
+    class DyingPool:
+        """The first batch is scanned; a worker then dies and every other batch fails with it."""
+
+        def __init__(self, max_workers=None, initializer=None):
+            self.submitted = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, fn, args):
+            self.submitted += 1
+            future = concurrent.futures.Future()
+            if self.submitted == 1:
+                future.set_result(fn(args))
+            else:
+                future.set_exception(BrokenProcessPool("A process in the process pool was terminated abruptly "
+                                                       "while the future was running or pending."))
+            return future
+
+        def shutdown(self, wait=True):
+            pass
+
+    for name in ("QA_USE_THREAD_EXECUTOR", "GLOSSARION_NO_PROCESSES", "GLOSSARION_MOBILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", DyingPool)
+    folder = _broken_pool_workspace(tmp_path / "book", 25)  # batches of 10: three batches
+    settings = qa_scan_runtime.default_qa_scan_settings()
+    settings.update({key: False for key in settings if key.startswith("check_")})
+    settings.update({"target_language": "english", "foreign_char_threshold": 0, "use_thread_executor": False})
+    log = []
+    shf.scan_html_folder(str(folder), log=log.append, mode="quick-scan", qa_settings=settings)
+
+    rows = json.loads((folder / "book_Scan Report" / "validation_results.json").read_text(encoding="utf-8"))
+    assert sorted(r["filename"] for r in rows) == [f"response_chapter{n:04d}.html" for n in range(1, 26)]
+    lines = [str(line) for line in log]
+    assert sum("stopped unexpectedly" in line for line in lines) == 1  # one line, not a traceback per batch
+    assert any("Scanning the 2 batch(es) it left with threads instead" in line for line in lines)
+    assert any("25/25 files scanned" in line for line in lines)
+    assert not any("Error processing batch" in line for line in lines)
+
+
+def test_a_qa_scan_worker_writes_its_native_crash_to_crash_log(tmp_path):
+    """A worker that dies in native code leaves its traceback in the app's crash.log (GLOSSARION_LOG_DIR,
+    which the GUI exports to its children) instead of only breaking the pool."""
+    code = ("import faulthandler, scan_html_folder\n"
+            "scan_html_folder._init_worker_process()\n"
+            "faulthandler._sigsegv()\n")
+    env = dict(os.environ, GLOSSARION_LOG_DIR=str(tmp_path), PYTHONPATH=str(SRC), GLOSSARION_HTTP_LOG="0",
+               QA_RESERVE_CORES="0")
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path), env=env, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=300)
+    assert proc.returncode != 0
+    crash = (tmp_path / "crash.log").read_text(encoding="utf-8", errors="replace")
+    assert "Fatal Python error" in crash and "most recent call first" in crash, (crash, proc.stderr[-2000:])
