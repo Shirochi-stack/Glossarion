@@ -651,6 +651,8 @@ class JobSnapshot:
     # Issue 12: the pending glossary question is being refined (``JobService.refine_at_gate``): its "action
     # required" alerts (notification, JobStrip warning, Book page review) stay hidden until it ends
     refining: bool = False
+    # hotfix 8: where the job is, "[5] Ch. 3 (1/4)" (``request_position``); transient (never persisted)
+    position: str = ""
 
     def active_issue(self, now: Optional[float] = None) -> Optional[dict]:
         """The issue chip state while the job runs and the wait has not expired, else None."""
@@ -838,6 +840,8 @@ class _Job:
     message_lock: threading.RLock = field(default_factory=threading.RLock)
     issue: Optional[dict] = None  # U9: the last request wait (direct_text_stream.classify_request_issue)
     refining: bool = False  # issue 12: the gate's glossary is being refined (``refine_at_gate``)
+    position: str = ""  # hotfix 8: the newest in-flight request, "[5] Ch. 3 (1/4)" (``request_position``)
+    spine: dict = field(default_factory=dict)  # source file basename -> its 1-based spine position (or 0)
     # hotfix 1 issue 5: what the job works on (``job_target``) and its request (``spec_key``), set at submit
     target: Optional[JobTarget] = None
     spec_key: str = ""
@@ -869,6 +873,7 @@ class _Job:
             result=dict(self.result),
             issue=dict(self.issue) if self.issue else None,
             refining=self.refining,
+            position=self.position,
         )
 
 
@@ -985,6 +990,34 @@ def _request_queue_note(snap: Any, now: Optional[float] = None) -> str:
     return f"⏳ waiting until {starts}" if starts else "⏳ waiting (Request Queue)"
 
 
+_POSITION_CHAPTER = re.compile(r"\b(chapter|section|merged)\s+(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+_POSITION_CHUNK = re.compile(r"\bchunk\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+_POSITION_FILE = re.compile(r"([\w.-]+\.(?:x?html?|txt))\b", re.IGNORECASE)
+
+
+def request_position(segments: Sequence[Any], spine_of: Callable[[str], int] = lambda name: 0) -> str:
+    """The newest in-flight request card of a job (``direct_text_stream`` segments, spine order) as
+    "[5] Ch. 3 (1/4)": its spine position (``spine_of(file)``, left out when unknown), chapter number
+    and chunk; "Sec. 2" for text sources. '' when no request
+    names a chapter."""
+    for segment in reversed(list(segments or ())):
+        if not isinstance(segment, Mapping) or segment.get("complete"):
+            continue
+        label = str(segment.get("label") or "")
+        chapter = _POSITION_CHAPTER.search(label)
+        if not chapter:
+            continue
+        word = {"chapter": "Ch.", "section": "Sec.", "merged": "Merged"}[chapter.group(1).lower()]
+        text = f"{word} {chapter.group(2)}"
+        chunk = _POSITION_CHUNK.search(label)
+        if chunk:
+            text += f" ({chunk.group(1)}/{chunk.group(2)})"
+        found = _POSITION_FILE.search(label)
+        spine = spine_of(found.group(1)) if found else 0
+        return f"[{spine}] {text}" if spine else text
+    return ""
+
+
 def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     """"Ch 12/80 · 3 in flight · 12:41" (UI_SPEC §1.7 subtitle); the phase while the total is unknown."""
     parts: list[str] = []
@@ -1001,7 +1034,9 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     elif snap.state is JobState.FORCE_STOPPING:
         parts.append("Force stopping…")
     progress = snap.progress
-    if progress.total:
+    if snap.position and snap.is_active:
+        parts.append(snap.position)
+    elif progress.total:
         parts.append(f"Ch {progress.completed}/{progress.total}")
     elif snap.phase and not parts:
         parts.append(snap.phase)
@@ -1027,7 +1062,9 @@ def notification_text(snap: JobSnapshot) -> str:
     text = f"{kind_verb(snap.kind)} {snap.title}"
     progress = snap.progress
     details: list[str] = []
-    if progress.total:
+    if snap.position and snap.is_active:
+        details.append(snap.position)
+    elif progress.total:
         details.append(f"{progress.completed}/{progress.total} chapters")
     if snap.in_flight:
         details.append(f"{snap.in_flight} in flight")
@@ -2464,6 +2501,37 @@ class JobService:
                 except Exception:
                     log.exception("ProgressWatcher.stop failed")
 
+    def _track_position(self, job: _Job) -> None:
+        """Hotfix 8 (owner 2026-10-30: the "Ch 8/9" tracker "is not tracking the actual remaining chapters"):
+        the newest in-flight request as "[spine] Ch. N (chunk/total)" for the job line and notification."""
+        stream = job.stream
+        try:
+            segments = list(stream.segments(drain=False)) if stream is not None else []
+        except Exception:
+            return
+        position = request_position(segments, lambda name: self._spine_position(job, name))
+        if position == job.position:
+            return
+        with self._lock:
+            job.position = position
+        self._changed()
+
+    @staticmethod
+    def _spine_position(job: _Job, name: str) -> int:
+        """``name``'s 1-based place in the book's spine (the workspace OPF, like the Progress manager's
+        "[005]"); 0 when unknown. Looked up once per file."""
+        key = os.path.basename(str(name or "")).lower()
+        if key not in job.spine:
+            position = 0
+            try:
+                from TransateKRtoEN import _single_pass_spine_ref_for_file
+
+                position = int(_single_pass_spine_ref_for_file(job.output_dir, key)[1] or 0)
+            except Exception:
+                log.debug("spine position of %s unavailable", key, exc_info=True)
+            job.spine[key] = position
+        return job.spine[key]
+
     @contextlib.contextmanager
     def _draining(self, job: _Job) -> Iterator[None]:
         """Keep the job's request stream classified on a ``gl-job-stream`` thread while it runs.
@@ -2486,6 +2554,7 @@ class JobService:
                     drain(final=False)
                 except Exception:
                     log.debug("request stream drain failed", exc_info=True)
+                self._track_position(job)
 
         thread = threading.Thread(target=loop, name="gl-job-stream", daemon=True)
         thread.start()
