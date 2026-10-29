@@ -3052,9 +3052,14 @@ class ChatView:
         await self._export_document(documents[0])
 
     def _outputs_for(self, item: Any) -> list:
-        """Blocking: ``[(path, kind)]`` of a job card's turn workspace (``workspace_outputs``)."""
+        """Blocking: ``[(path, kind)]`` of a job card's turn workspace (``workspace_outputs``). A book run's
+        per-chapter SDLXLIFF sidecars are left out (owner 2026-10-30: "bloat"; Tools › SDLXLIFF reviewer
+        opens them); an SDLXLIFF input's run, whose only outputs they are, keeps them."""
         folder = self._job_workspace(item)
-        return workspace_outputs(folder) if folder else []
+        outputs = workspace_outputs(folder) if folder else []
+        if any(kind not in ("sdlxliff", "glossary") for _path, kind in outputs):
+            return [(path, kind) for path, kind in outputs if kind != "sdlxliff"]
+        return outputs
 
     async def _open_job_output(self, item: Any = None) -> None:
         """Job card › Open output: the turn's ``Attachments/<stem>`` workspace in Files (else the chat's
