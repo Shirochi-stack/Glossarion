@@ -418,6 +418,12 @@ class GlossarionNative(ft.Service):
         which stopped the in-app browser the job needed). False off Android or on failure."""
         return (await self._call("move_task_to_back", default=False)) is True
 
+    async def bring_to_front(self) -> bool:
+        """Android: start the app's own Activity again (``FLAG_ACTIVITY_CLEAR_TOP``), which closes the Custom
+        Tab above it in the app's task; the app calls it when a Grok device sign-in finished while the browser
+        was in front (v9.15.7 hotfix 6). True when started; False off Android or on failure."""
+        return (await self._call("bring_to_front", default=False)) is True
+
     async def unfocus(self) -> bool:
         """Drop the focus of the text field that held it at the last touch, and with it the keyboard
         (Flutter's ``FocusNode.unfocus``); the app calls it from every field's ``on_tap_outside``

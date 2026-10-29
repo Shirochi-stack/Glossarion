@@ -86,6 +86,7 @@ constructor, so they are registered before the Dart service starts.
 | `cancel_notification(id)`, `get_launch_notification()` | yes | yes | no-op / `None` |
 | `start_job_service(title, text, *, buttons, wake_lock, wifi_lock, ...)`, `update_job_service`, `stop_job_service`, `is_job_service_running` | flutter_foreground_task | `False` (use the iOS calls below) | `False` / no-op |
 | `move_task_to_back()` (hotfix 4) | `Activity.moveTaskToBack(true)`: the task goes to the background like Home (the app calls it for back on the chat while a job runs, so the Activity, the engine and the Python session stay); `True` when it moved | `False` (no system back) | `False` |
+| `bring_to_front()` (v9.15.7 hotfix 6) | starts the app's own Activity with `FLAG_ACTIVITY_CLEAR_TOP`, closing the Custom Tab above it (a Grok sign-in that finished in the browser); `True` when started | `False` (Python closes SFSafariViewController) | `False` |
 | `begin_background_task(name, *, expiration_title, expiration_body, expiration_payload)`, `end_background_task`, `background_time_remaining` | `-1` / no-op / `None` | UIApplication background task | same |
 | `start_continued_processing(identifier=None, title, subtitle, *, strategy="fail", expiration_*)`, `update_continued_processing`, `finish_continued_processing` | `False` | iOS 26 BGContinuedProcessingTask | `False` |
 | `save_to_downloads(path, display_name, mime_type, subdir="Glossarion", replace_uri=None)` | MediaStore Downloads; `replace_uri` overwrites our own entry in place | `None` | `None` |

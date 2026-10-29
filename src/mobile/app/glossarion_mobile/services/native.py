@@ -131,6 +131,9 @@ class NativeStub:
     async def move_task_to_back(self) -> bool:
         return False
 
+    async def bring_to_front(self) -> bool:
+        return False
+
     async def unfocus(self) -> bool:
         return False
 
@@ -603,6 +606,11 @@ class NativeBridge:
         engine and this session (system back on the chat while a job runs, hotfix 4); True when it
         moved. False elsewhere, on a timeout or without the extension."""
         return (await self.call("move_task_to_back", default=False)) is True
+
+    async def bring_to_front(self) -> bool:
+        """Android: Glossarion's Activity in front again, closing the Custom Tab above it (a Grok sign-in
+        that finished in the browser, v9.15.7 hotfix 6). False elsewhere, on a timeout or without the extension."""
+        return (await self.call("bring_to_front", default=False)) is True
 
     async def unfocus(self) -> bool:
         """The focused text field lets go of the focus and its keyboard (a tap outside it, hotfix 5);
