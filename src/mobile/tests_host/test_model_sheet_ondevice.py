@@ -220,7 +220,7 @@ def test_download_asks_first_shows_cancel_then_loads_and_selects(tmp_path, fake_
         unsub()
         assert "Cancel" in seen
         assert selected == [("model", "local/Tiny-Q4_K_M", False)] and sheet.closed
-        assert service.loaded_stem == "Tiny-Q4_K_M" and engine.loads and service.is_vision("Tiny-Q4_K_M")
+        assert service.loaded_stem == "Tiny-Q4_K_M" and engine.loads and not service.is_vision("Tiny-Q4_K_M")
         # closed: the sheet no longer listens to downloads or the engine
         assert not sheet._ondevice_unsubs
         reopened, _sel = _sheet(service, prefs, current="local/Tiny-Q4_K_M", tab="ondevice")

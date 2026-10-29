@@ -641,7 +641,8 @@ def test_stop_then_resume_from_every_surface_resumes_once(iso, offline, snacks):
         await I12._finished(app, resumed, RUN_TIMEOUT)
         assert resumed.state == "done" and resumed.error is None, (resumed.state, resumed.error)
         assert subs.created == [stopped, resumed_id], subs.created
-        assert [s.id for s in subs.jobs()] == [stopped, resumed_id]
+        # hotfix 7 (owner 2026-10-29): the resumed run replaced the Stopped entry in Finished (no duplicate)
+        assert [s.id for s in subs.jobs()] == [resumed_id]
         # the first Start queued the stopped job; every call after it answered the resumed job, which one of them
         # queued (a resume that queues is recorded with its own submit)
         first, later = subs.calls[0], subs.calls[1:]

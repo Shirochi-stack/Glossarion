@@ -88,7 +88,7 @@ def test_default_presets_carry_their_vision_projector():
         assert row["mmproj"] == "mmproj-F16.gguf" and row["mmproj_size"] > 100_000_000
         assert len(row["mmproj_sha256"]) == 64
     light = next(r for r in presets.DEFAULT_PRESETS if r["name"] == "Light")
-    assert presets.download_size(light) == 1339752704 + 668227264
+    assert presets.download_size(light) == 1339752704  # the projector downloads on the first image
     prefs = fakes.FakePrefs()
     rows = presets.restore_defaults(prefs)
     assert rows[1]["mmproj_sha256"] == light["mmproj_sha256"]

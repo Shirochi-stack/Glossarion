@@ -361,10 +361,11 @@ class OnDeviceFlow:
         return verdict, mark, message or words
 
     def is_vision_preset(self, preset: dict, stem: Optional[str] = None) -> bool:
-        """The preset's model reads images: downloaded with its projector, or the preset names one."""
+        """The preset's model reads images: downloaded with its projector, or the preset names one (it
+        downloads with the first image)."""
         stem = stem or self.stem_of_preset(preset)
-        if stem and self.service.registry.resolve(stem):
-            return bool(self.service.is_vision(stem))
+        if stem and self.service.registry.resolve(stem) and self.service.is_vision(stem):
+            return True
         return bool(preset.get("mmproj"))
 
     def stem_of_preset(self, preset: dict) -> Optional[str]:
@@ -416,10 +417,15 @@ class OnDeviceFlow:
 
     # ---- the one-tap flow -------------------------------------------------------------------------
 
-    async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None, choose: bool = False) -> Optional[str]:
-        """Resolve ``ref`` on Hugging Face, ask for big files, download the model and, when the preset or
-        the repository has one, its vision projector (the same tap); the stem, or None (cancelled /
-        failed: the row or status line says why). A failed projector keeps the model (text only).
+    async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None, choose: bool = False,
+                    image_support: bool = False) -> Optional[str]:
+        """Resolve ``ref`` on Hugging Face, ask for big files, download the model; the stem, or None
+        (cancelled / failed: the row or status line says why).
+
+        ``image_support`` (Add image support, an image sent to a text-only model): also its vision
+        projector, when the preset or the repository has one. Owner 2026-10-29: image support is
+        downloaded when an image needs it, not with every model (205-918 MB). A failed projector keeps
+        the model (text only).
 
         ``choose`` (Add from Hugging Face): a ref naming no file and no quant lists every runnable file of
         the repository (smallest first; split GGUF sets are left out) with the automatic pick preselected;
@@ -445,7 +451,9 @@ class OnDeviceFlow:
         stem = existing or self.service.spec_for(ref.repo, listing.commit, file).stem
         if preset is not None:
             self.preset_stems[self.preset_key(preset)] = stem
-        need_projector = projector is not None and not (existing and self.service.is_vision(existing))
+        if image_support and projector is None:
+            self.say(f"{ref.repo} has no vision projector: this model reads text only")
+        need_projector = image_support and projector is not None and not (existing and self.service.is_vision(existing))
         total = (0 if existing else int(file.size or 0)) + (int(projector.size or 0) if need_projector else 0)
         pending = self.downloads.pending_spec(stem) or self.downloads.pending_spec(registry.projector_key(stem))
         if total > 0 and not pending:
@@ -453,7 +461,7 @@ class OnDeviceFlow:
             # warn about mobile data.
             names = ([] if existing else [file.name]) + ([f"{projector.name} (image support)"] if need_projector else [])
             label = str((preset or {}).get("name") or "").strip()
-            title = f"Download {label}?" if label else "Download model?"
+            title = "Download image support?" if existing else (f"Download {label}?" if label else "Download model?")
             body = f"Download {dl.format_bytes(total)} from Hugging Face?\n\n{ref.repo} · {' + '.join(names)}"
             if total >= dl.CONFIRM_BYTES:
                 body += "\n\nThis is a large download: use Wi-Fi unless your mobile data plan allows it."
@@ -506,6 +514,28 @@ class OnDeviceFlow:
         self.render()
         return True
 
+    async def ensure_image_support(self, model: str) -> bool:
+        """Before an image goes to ``model``: True when it can take it (not an on-device model, or one that
+        reads images), else asks to download the on-device model's image support now (the confirm shows
+        its size) - True once it is downloaded, False when declined or when the model has none."""
+        if not str(model or "").lower().startswith("local/"):
+            return True
+        registry = self.service.registry
+        stem = registry.resolve(model)
+        if not stem:
+            return True  # not downloaded: the request's own error says so
+        if self.service.is_vision(stem):
+            return True
+        entry = registry.load().get(stem) or {}
+        preset = next((p for p in self.presets() if self.stem_of_preset(p) == stem), None)
+        try:
+            await self.fetch(hf.HfRef(str(entry.get("repo") or ""), str(entry.get("file") or "") or None),
+                             preset=preset, image_support=True)
+        except _Failed as exc:
+            self.say(str(exc))
+            return False
+        return bool(self.service.is_vision(stem))
+
     async def add_vision(self, index: int) -> bool:
         """Menu "Add image support": download the projector of a text-only download (the model reloads
         with it on the next request)."""
@@ -521,11 +551,8 @@ class OnDeviceFlow:
         self.render()
         try:
             ref = hf.HfRef(preset["repo"], preset.get("file") or None, quant=preset.get("quant") or None)
-            await self.fetch(ref, preset=preset)
-            if not self.service.is_vision(stem):
-                self.say(f"{preset['repo']} has no vision projector: this model reads text only")
-                return False
-            return True
+            await self.fetch(ref, preset=preset, image_support=True)
+            return bool(self.service.is_vision(stem))
         except _Failed as exc:
             self.say(str(exc))
             return False

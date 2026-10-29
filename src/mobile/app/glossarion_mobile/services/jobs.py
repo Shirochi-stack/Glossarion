@@ -522,6 +522,22 @@ def spec_key(spec: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: a job title with one of these endings is still its source file's name (``_take_translated_title``)
+FILE_TITLE_EXTENSIONS = (".epub", ".txt", ".pdf", ".md", ".html", ".htm", ".docx", ".odt", ".rtf")
+
+
+def translated_book_title(path: str) -> str:
+    """The translated ``title`` of a book's ``metadata.json`` (``title_translated`` set), else ''."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict) or not data.get("title_translated"):
+        return ""
+    return " ".join(str(data.get("title") or "").split())
+
+
 @dataclass(frozen=True)
 class JobSpec:
     """What to run. ``params`` and ``origin`` must be JSON-friendly (persisted for Resume)."""
@@ -801,6 +817,7 @@ class _Job:
     error: Optional[str] = None
     stop_mode: Optional[str] = None
     stop_requested_at: Optional[float] = None
+    metadata_mtime: float = 0.0  # the output folder's metadata.json last read for its translated title
     issued_stop: Optional[str] = None  # the last stop mode whose protocol ran for this job
     sign_in_flagged: bool = False  # a "sign_in_required" event was sent for this job
     announced: threading.Event = field(default_factory=threading.Event)  # its QUEUED transition was posted
@@ -1936,10 +1953,21 @@ class JobService:
                     log.exception("resume params hook failed")
                     params = None
             result = self.submit_job(snap.spec if params is None else replace(snap.spec, params=dict(params)))
+            left_finished = False
             with self._lock:
                 self._resumed_into[job_id] = result.job_id
+                if not from_interrupted and result.job_id != job_id:
+                    # owner 2026-10-29: a resumed Stopped / Failed job carries on under Running; its old entry
+                    # leaves Finished (it was the same job shown twice). Its new run lands there when it ends.
+                    kept = [s for s in self._history if s.id != job_id]
+                    if len(kept) != len(self._history):
+                        self._history = kept
+                        self._write_history_locked()
+                        left_finished = True
             if from_interrupted:
                 self._resolve_interrupted(job_id, "resumed")
+            if left_finished:
+                self._changed()
             return result
 
     def discard(self, job_id: str) -> bool:
@@ -2795,12 +2823,38 @@ class JobService:
                 consumed = False
             checkpoint_due = kind in ("progress", "output_dirs") and (
                 self.clock() - job.last_checkpoint >= self.checkpoint_interval or kind == "output_dirs")
+        if kind in ("progress", "output_dirs", "output_dir") and self._take_translated_title(job):
+            checkpoint_due = True
         if checkpoint_due:
             self._checkpoint(job)
         if not consumed:
             payload = dict(data)
             self._post(self._deliver_event, job.id, kind, payload)
         self._changed()
+
+    def _take_translated_title(self, job: _Job) -> bool:
+        """Owner 2026-10-29: a book job still named after its file ("[213524] 히어로….epub", a chat's
+        attachment) takes its translated title once the metadata translation wrote it (the output folder's
+        metadata.json: ``title`` with ``title_translated``). A Library book's job keeps the book's name.
+        True when renamed."""
+        folder = job.output_dir
+        if not folder or os.path.splitext(job.spec.title)[1].lower() not in FILE_TITLE_EXTENSIONS:
+            return False
+        path = os.path.join(folder, "metadata.json")
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return False
+        if mtime == job.metadata_mtime:
+            return False
+        job.metadata_mtime = mtime
+        title = translated_book_title(path)
+        if not title or title == job.spec.title:
+            return False
+        with self._lock:
+            job.spec = replace(job.spec, title=title)
+        log.info("job %s renamed after its metadata translation: %s", job.id, title)
+        return True
 
     def _deliver_event(self, job_id: str, kind: str, data: Mapping[str, Any]) -> None:
         for callback in list(self._event_listeners):

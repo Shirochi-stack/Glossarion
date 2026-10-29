@@ -167,10 +167,10 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         assert "local/Tiny-Q4_K_M" in catalog.snapshot.models
         assert _find(panel.preset_column, "local-preset-action-0").content == "In use"
         assert _find(panel.preset_column, "local-preset-status-0").value == "Loaded · in use"
-        # the repository has a vision projector: it came in the same tap and the model reads images
-        assert engine_service.is_vision("Tiny-Q4_K_M") and engine.mmproj.endswith("Tiny-Q4_K_M.mmproj.gguf")
-        assert _find(panel.preset_column, "local-preset-vision-0") is not None
-        assert panel.engine_state.value == "Ready · Tiny-Q4_K_M · reads images" and not panel.unload_button.disabled
+        # the repository has a vision projector: it waits for the first image (hotfix 7), the model reads text
+        assert not engine_service.is_vision("Tiny-Q4_K_M") and not engine.mmproj
+        assert not os.path.exists(engine_service.registry.file_path(engine_service.registry.projector_key("Tiny-Q4_K_M")))
+        assert panel.engine_state.value == "Ready · Tiny-Q4_K_M" and not panel.unload_button.disabled
         assert not any(n.startswith("Model: local/") for n in notes)  # silent (owner 2026-10-20)
 
         # the file-less preset of the same repo auto-picks Q4_K_M: already there, so it is just used
@@ -312,7 +312,7 @@ def test_add_from_hugging_face_saves_a_preset_and_asks_for_big_files(tmp_path, f
 def test_add_from_hugging_face_lists_every_quant(tmp_path, fake_hf):
     """Owner 2026-10-21: a repo id offered one auto-picked file. Now Add from Hugging Face lists every
     runnable GGUF file (no mmproj, no split sets), smallest first, the automatic pick preselected; the
-    chosen file is downloaded (with the projector); a quant or file reference skips the list."""
+    chosen file is downloaded (its projector waits for the first image); a quant or file reference skips the list."""
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
 
     async def scenario():
@@ -336,8 +336,8 @@ def test_add_from_hugging_face_lists_every_quant(tmp_path, fake_hf):
         panel.hf_field.value = REPO
         assert await panel.download_typed() == "Tiny-BF16"
         assert offered == [(REPO, ["Tiny-BF16.gguf", FILE, "Tiny-Q8_0.gguf"], FILE)]
-        assert "Tiny-BF16.gguf + mmproj-F16.gguf (image support)" in asked[-1]
-        assert service.is_vision("Tiny-BF16")
+        assert "Tiny-BF16.gguf" in asked[-1] and "mmproj" not in asked[-1]
+        assert not service.is_vision("Tiny-BF16")
         # a quant or a file reference goes straight to the download question
         for text in (f"{REPO}:Q4_K_M", f"https://huggingface.co/{REPO}/blob/main/{FILE}"):
             panel.hf_field.value = text
