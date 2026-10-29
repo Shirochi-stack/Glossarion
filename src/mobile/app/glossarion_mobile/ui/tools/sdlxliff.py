@@ -11,9 +11,11 @@ the session's methods run on the io pool:
   ``‹ ›`` steppers.
 * **Legend filter chips** (the dialog's legend: "green ok" · "yellow density/tag-level" ·
   "purple MT inaccurate" · "red dropped/added/empty/untranslated") filter the rows.
-* **Row cards**: source (small, muted) over an editable output field with the status colour
-  bar and reason; a changed field saves on blur through ``save_row`` (the shared save
-  semantics incl. Manual editing). A save replaces only that row's card (and the header
+* **Row cards** (the dialog's ``_add_review_row``): a frame tinted by the status, the tag label
+  and reason, the source (small, muted), the MT preview, an editable output field saved 500 ms
+  after typing stops and on blur through ``save_row`` (the shared save semantics incl. Manual
+  editing), ↩️ Undo All Edits (``undo_row``), 📥 Inject and the source / output length bars; the
+  summary is the dialog's detail header. A save replaces only that row's card (and the header
   counts): the other fields keep their focus and text. Full re-renders (piece / book / filter /
   layout changes, an action's result) first save any typed text, and the 2 s poll does not
   reload while a field has focus or unsaved text.
@@ -24,13 +26,13 @@ the session's methods run on the io pool:
   and per-row **Inject MT** (``inject_machine_translation``).
 * **🟣 Flag Inaccurate** (``flag_inaccurate``) with "Set Score Threshold…" / "Reset Threshold".
 * **Piece ⋯**: Mark as Completed / Undo (``translation_progress.json`` +
-  ``SDLXLIFF/review_status_overrides.json``), Edit Output (the text editor on the output file).
+  ``SDLXLIFF/review_status_overrides.json``) - the dialog has no Edit Output.
 * **↻ Refresh** (``refresh(force=True)``: missing / stale sidecars are regenerated) and a 2 s
   ``changed_on_disk`` poll while the screen is visible: on top of the stack and the app in the
   foreground (like the Library and Book page pollers).
-* **Notepad layout** (tablets only): the piece's whole output document (``notepad_document``,
-  built on the io pool) in a code editor (XML) saved with ``edit_document`` + ``flush_edits``;
-  on phones the layout toggle is shown disabled with the ReasonChip "Tablet layout only".
+* **Notepad layout**: the desktop's rendered, live HTML editor in a WebView
+  (``sdlxliff_notepad.NotepadView``: the shared editing script, captures saved through
+  ``edit_document`` + ``flush_edits``); where no WebView runs the toggle is disabled with its reason.
 * **Edits are never dropped**: like the dialog's ``closeEvent`` (Notepad HTML captured, queued
   edits flushed), leaving the reviewer saves an edited Notepad document and any typed row text;
   a re-render (piece / book / filter / layout / refresh) saves them first too.
@@ -71,7 +73,7 @@ STATUS_COLORS = {"green": "#28a745", "yellow": "#d39e00", "purple": "#b967ff", "
 PROVIDERS = (("auto", "Auto"), ("google", "Google"), ("deepl", "DeepL"), ("bing", "Bing"),
              ("argos", "Argos Translate"), ("yandex", "Yandex"))
 ARGOS_REASON = "Offline engine (ctranslate2) not available on mobile"
-NOTEPAD_REASON = "Tablet layout only"
+NOTEPAD_REASON = "Needs the in-app browser (Android / iOS)"
 NO_CORE = "The SDLXLIFF reviewer core is not available in this build"
 #: The dialog's credential prompts per provider: (session keyword, label, secret).
 CREDENTIAL_FIELDS = {
@@ -80,6 +82,8 @@ CREDENTIAL_FIELDS = {
     "yandex": (("api_key", "Yandex Cloud API key:", True), ("folder_id", "Yandex Cloud folder ID:", False)),
 }
 POLL_SECONDS = 2.0
+#: a row's output is saved this long after the last keystroke (the dialog's ``_edit_save_timer``)
+ROW_SAVE_DELAY = 0.5
 
 
 @dataclass
@@ -160,6 +164,7 @@ class ReviewerBinding:
         opener = getattr(core, "open_sdlxliff_review", None) if core is not None else None
         if not callable(opener):
             raise LookupError(NO_CORE)
+        self.core = core
         self.output_dir = output_dir
         self.focus = focus
         self.parent = ConfigParent(dict(config or {}), save)
@@ -231,9 +236,22 @@ class ReviewerBinding:
     def notepad_document(self, piece_index: int) -> str:
         return str(self.session.notepad_document(piece_index) or "")
 
-    def save_document(self, piece_index: int, html_text: str) -> str:
-        self.session.edit_document(piece_index, html_text)
+    def save_document(self, piece_index: int, html_text: str, user_added_target_indexes: Any = None,
+                      user_added_break_positions: Any = None) -> str:
+        self.session.edit_document(piece_index, html_text, user_added_target_indexes=user_added_target_indexes,
+                                   user_added_break_positions=user_added_break_positions)
         return str(self.session.flush_edits() or "")
+
+    def undo_row(self, piece_index: int, row_index: int) -> str:
+        """Row "↩️ Undo All Edits": back to the text the row was loaded with."""
+        return str(self.session.undo_row(piece_index, row_index) or "")
+
+    def header(self, piece_index: int) -> str:
+        """The dialog's detail header (``_piece_header_text``)."""
+        try:
+            return str(self.session.piece_summary(piece_index).get("header") or "")
+        except Exception:
+            return ""
 
     def mark_completed(self, piece_index: int) -> str:
         return str(self.session.mark_completed([piece_index]) or "")
@@ -309,9 +327,8 @@ class SdlxliffScreen(Screen):
         self.rows_piece_index = 0  # the piece the row cards show
         self._row_gen = 0  # row card keys are unique per build: a rebuilt card is a new control
         self._focused_row: Optional[int] = None
-        self.notepad_editor: Any = None
-        self.notepad_base: Optional[str] = None  # the document the Notepad editor was loaded with
-        self.notepad_piece = 0  # the piece that document belongs to
+        self._row_tokens: dict = {}  # row index -> the pending typing save (``_schedule_row_save``)
+        self.notepad_view: Any = None  # sdlxliff_notepad.NotepadView of the piece shown in the Notepad layout
         self._notepad_token: Any = None
         self._render_pending = False  # a polled refresh came in during an edit: re-render after it
         self._poll_task: Any = None
@@ -352,13 +369,14 @@ class SdlxliffScreen(Screen):
                                                 on_click=lambda e: self.ctx.spawn(self.flag()))
         self.threshold_button = ft.TextButton(content="Threshold", key="sdl-threshold",
                                               on_click=lambda e: self.open_threshold_sheet())
-        tablet = bool(getattr(self.ctx, "tablet", False))
-        self.layout_switch = ft.Switch(label="Notepad layout", value=False, disabled=not tablet,
+        webview = self._webview_ok()
+        self.layout_switch = ft.Switch(label="Notepad layout", value=False, disabled=not webview,
                                        on_change=self._on_layout, key="sdl-layout")
         layout_row: list = [self.layout_switch]
-        if not tablet:
-            layout_row.append(ReasonChip(reason=NOTEPAD_REASON, detail="The Notepad layout edits the whole output "
-                                                                       "document and needs a tablet-sized screen."))
+        if not webview:
+            layout_row.append(ReasonChip(reason=NOTEPAD_REASON, detail="The Notepad layout is the desktop's live "
+                                                                       "HTML editor: the chapter as it reads, edited "
+                                                                       "in place. It runs in the in-app browser."))
         self.rows_column = ft.Column(spacing=8, key="sdl-rows")
         self.body_holder = ft.Container(content=self.rows_column, key="sdl-holder")
         header = ft.Column([
@@ -517,16 +535,16 @@ class SdlxliffScreen(Screen):
         if binding is None:
             return None
         rows = [(self.rows_piece_index, index, str(self.row_fields[index].value or "")) for index in self._dirty_rows()]
-        document = (self.notepad_piece, str(self.notepad_editor.value or "")) if self._document_dirty() else None
-        if not rows and document is None:
+        notepad = self.notepad_view if self._document_dirty() else None
+        if not rows and notepad is None:
             return None
 
         async def save() -> None:
             try:
                 for piece_index, row_index, text in rows:
                     await self.ctx.io(binding.save_row, piece_index, row_index, text)
-                if document is not None:
-                    await self.ctx.io(binding.save_document, *document)
+                if notepad is not None:
+                    await notepad.flush()
             except Exception as exc:
                 log.exception("saving the SDLXLIFF edits on leave failed")
                 self.ctx.say(f"Could not save the SDLXLIFF edits: {exc}")
@@ -634,7 +652,7 @@ class SdlxliffScreen(Screen):
         binding = self.binding
         self.row_fields, self.row_base, self.row_cards = {}, {}, {}
         self._focused_row = None
-        self.notepad_editor, self.notepad_base = None, None
+        self.notepad_view = None
         self._notepad_token = None
         if self.notepad and piece is not None and binding is not None:
             # the document is built from the output HTML (BeautifulSoup): on the io pool
@@ -678,8 +696,11 @@ class SdlxliffScreen(Screen):
         else:
             completed = " · ✅ Completed" if piece.get("manual_green_override") else ""
             manual = " · Manual editing" if piece.get("manual_editing") else ""
-            self.summary.value = (f"{piece.get('source_count', 0)} source · {piece.get('target_count', 0)} output"
-                                  f"{manual}{completed}")
+            # the dialog's detail header ("[002] … - source 7 text units - output 7 - OK - 0 flagged rows …")
+            header_of = getattr(binding, "header", None)
+            header = header_of(self.piece_index) if callable(header_of) else ""
+            self.summary.value = (header or f"{piece.get('source_count', 0)} source · "
+                                            f"{piece.get('target_count', 0)} output") + f"{manual}{completed}"
         provider = binding.provider() if binding is not None else "auto"
         labels = binding.provider_labels() if binding is not None else dict(PROVIDERS)
         self.mt_provider.content = f"Provider: {labels.get(provider, 'Auto')}"
@@ -687,25 +708,53 @@ class SdlxliffScreen(Screen):
         self.piece_menu.items = self._piece_menu_items()
         return piece
 
+    def _reader_server(self) -> Any:
+        """The Reader's local server (it serves the Notepad page and its images), started on demand."""
+        reader = getattr(self.ctx, "reader", None)
+        feature = reader() if callable(reader) else reader
+        ensure = getattr(feature, "ensure_server", None)
+        return ensure() if callable(ensure) else None
+
     async def _load_notepad(self, token: Any, piece_index: int) -> Optional[str]:
+        """The Notepad layout: the desktop's live HTML editor (``sdlxliff_notepad.NotepadView``)."""
+        from glossarion_mobile.ui.tools.sdlxliff_notepad import NO_WEBVIEW, NotepadView
+
         binding = self.binding
+        server = self._reader_server() if self._webview_ok() else None
+        if binding is None or server is None:
+            self.body_holder.content = hint_text(NO_WEBVIEW, key="sdl-notepad-error")
+            self._push(self.body_holder)
+            return None
+        view = NotepadView(core=binding.core, session=binding.session, piece_index=piece_index, server=server,
+                           io=self.ctx.io, spawn=self.ctx.spawn, save=binding.save_document,
+                           on_saved=self._notepad_saved)
         error = ""
         try:
-            text: Optional[str] = await self.ctx.io(binding.notepad_document, piece_index)
+            url: Optional[str] = await self.ctx.io(view.build_page)
         except Exception as exc:
-            log.exception("building the Notepad document failed")
-            text, error = None, str(exc)
+            log.exception("building the Notepad page failed")
+            url, error = None, str(exc)
         if token is not self._notepad_token or not self.notepad:
             return None  # another render replaced this one meanwhile
-        if text is None:
+        if url is None:
             self.body_holder.content = hint_text(f"The output document could not be read: {error}",
                                                  key="sdl-notepad-error")
         else:
-            self.notepad_base = text
-            self.notepad_piece = piece_index
-            self.body_holder.content = self._notepad(text)
+            self.notepad_view = view
+            height = getattr(getattr(self.ctx, "page", None), "height", None) or 800
+            self.body_holder.content = ft.Container(content=view.make_control(), height=max(420, height * 0.78),
+                                                    border_radius=tokens.RADII["card"], key="sdl-notepad-frame",
+                                                    clip_behavior=ft.ClipBehavior.HARD_EDGE)
         self._push(self.body_holder)
-        return text
+        return url
+
+    def _notepad_saved(self, status: str) -> None:
+        """A Notepad save: the header, legend counts and status follow (the page itself stays)."""
+        self._render_header()
+        if status:
+            self.status_text.value = status
+        self._render_side_list()
+        self._push(self.legend, self.summary, self.status_text, self.piece_dropdown)
 
     def _row_cards(self, piece: Optional[dict]) -> list:
         if piece is None:
@@ -720,48 +769,90 @@ class SdlxliffScreen(Screen):
         return cards or [hint_text("No rows with that status", key="sdl-no-rows")]
 
     def _row_card(self, index: int, row: Mapping[str, Any], status: str) -> ft.Control:
+        """The dialog's row (``_add_review_row``): a frame tinted by the row's status, the tag label
+        ("p #3", "h1→p") and reason, the source text, the machine translation preview, the editable output
+        (saved 500 ms after typing stops, like the dialog's ``_schedule_target_edit``) and the row controls:
+        ↩️ Undo All Edits, 📥 Inject Machine Translation, the source / output length bars."""
         self._row_gen += 1
         gen = self._row_gen
         target = str(row.get("target") or "")
+        source = str(row.get("source") or "")
+        color = STATUS_COLORS.get(status, STATUS_COLORS["green"])
         piece_index = self.rows_piece_index
         field_control = ft.TextField(value=target, multiline=True, min_lines=1, dense=True,
-                                     label=str(row.get("target_tag_label") or "Output"),
+                                     hint_text="(empty output)",
                                      on_focus=lambda e, i=index: self._set_focused(i, True),
                                      key=f"sdl-target-{index}-{gen}")
         # the blur saves the text of this field into this piece, whatever was re-rendered meanwhile
         field_control.on_blur = lambda e, i=index, f=field_control, p=piece_index: (
             self._set_focused(i, False), self.ctx.spawn(self.save_row(i, f, p)))
+        field_control.on_change = lambda e, i=index, f=field_control, p=piece_index: self._schedule_row_save(i, f, p)
         self.row_fields[index] = field_control
         self.row_base[index] = target
+        source_tag = str(row.get("source_tag_label") or row.get("source_tag") or "")
+        target_tag = str(row.get("target_tag_label") or row.get("target_tag") or "")
+        tag = source_tag if not target_tag or target_tag == source_tag else (
+            f"{source_tag}→{target_tag}" if source_tag else target_tag)
+        reason = str(row.get("reason") or "")
+        head: list = [ft.Container(width=10, height=10, bgcolor=color, border_radius=5)]
+        if tag:
+            head.append(ft.Text(tag, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, weight=ft.FontWeight.W_600))
+        if reason and status != "green":
+            head.append(ft.Text(reason, theme_style=ft.TextThemeStyle.LABEL_SMALL, color=color, expand=True,
+                                max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
         parts: list = [
-            ft.Text(f"{row.get('source_tag_label') or 'Source'} · {row.get('reason') or status}",
-                    theme_style=ft.TextThemeStyle.LABEL_SMALL, color=STATUS_COLORS.get(status)),
-            ft.Text(str(row.get("source") or ""), theme_style=ft.TextThemeStyle.BODY_SMALL,
+            ft.Row(head, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Text(source or "(no source text)", theme_style=ft.TextThemeStyle.BODY_SMALL,
                     color=ft.Colors.ON_SURFACE_VARIANT, selectable=True),
-            field_control,
         ]
         preview = str(row.get("tooltip_translation_error") or row.get("tooltip_translation") or "")
         if row.get("tooltip_translation_pending"):
             preview = str(row.get("tooltip_translation_status") or "⏳ Generating machine translation preview...")
         if preview:
-            parts.append(ft.Row([
-                ft.Text(f"MT: {preview}", theme_style=ft.TextThemeStyle.BODY_SMALL, expand=True, selectable=True),
-                ft.TextButton(content="Inject MT", key=f"sdl-inject-{index}",
-                              disabled=not row.get("tooltip_translation") or bool(row.get("tooltip_translation_pending")),
-                              on_click=lambda e, i=index: self.ctx.spawn(self.inject(i))),
-            ], vertical_alignment=ft.CrossAxisAlignment.CENTER))
+            parts.append(ft.Text(f"🌐 {preview}", theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True,
+                                 italic=True, key=f"sdl-mt-{index}"))
+        parts.append(field_control)
+        edited = target != str(row.get("target_original", target) or "")
+        controls: list = [
+            ft.TextButton(content="↩️ Undo All Edits", key=f"sdl-undo-{index}", disabled=not edited,
+                          on_click=lambda e, i=index: self.ctx.spawn(self.undo_row(i))),
+        ]
+        if preview:
+            controls.append(ft.TextButton(
+                content="📥 Inject Machine Translation", key=f"sdl-inject-{index}",
+                disabled=not row.get("tooltip_translation") or bool(row.get("tooltip_translation_pending")),
+                on_click=lambda e, i=index: self.ctx.spawn(self.inject(i))))
+        longest = max(len(source), len(target), 1)
+        bars = ft.Column([
+            ft.Container(width=max(2.0, 72.0 * len(source) / longest), height=4, border_radius=2,
+                         bgcolor=ft.Colors.ON_SURFACE_VARIANT, tooltip=f"source {len(source)} characters"),
+            ft.Container(width=max(2.0, 72.0 * len(target) / longest), height=4, border_radius=2, bgcolor=color,
+                         tooltip=f"output {len(target)} characters"),
+        ], spacing=3, tight=True, key=f"sdl-bars-{index}")
+        parts.append(ft.Row([ft.Row(controls, wrap=True, spacing=0, expand=True), bars],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER))
         card = ft.Container(
-            content=ft.Row([
-                ft.Container(width=4, bgcolor=STATUS_COLORS.get(status, STATUS_COLORS["green"]), border_radius=2),
-                ft.Column(parts, spacing=4, expand=True, tight=True),
-            ], vertical_alignment=ft.CrossAxisAlignment.STRETCH, spacing=8),
-            padding=ft.Padding.symmetric(horizontal=8, vertical=8),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            content=ft.Column(parts, spacing=4, tight=True),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            bgcolor=ft.Colors.with_opacity(0.10 if status == "green" else 0.16, color),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25 if status == "green" else 0.6, color)),
             border_radius=tokens.RADII["card"],
             key=f"sdl-row-{index}-{gen}",
         )
         self.row_cards[index] = card
         return card
+
+    def _schedule_row_save(self, index: int, field_control: Any, piece_index: int) -> None:
+        """Typing in a row: saved ``ROW_SAVE_DELAY`` after the last keystroke (the dialog's 500 ms)."""
+        self._row_tokens[index] = token = object()
+
+        async def later() -> None:
+            await asyncio.sleep(ROW_SAVE_DELAY)
+            if self._row_tokens.get(index) is token:
+                self._row_tokens.pop(index, None)
+                await self.save_row(index, field_control, piece_index)
+
+        self.ctx.spawn(later())
 
     def _set_focused(self, index: int, focused: bool) -> None:
         if focused:
@@ -774,10 +865,9 @@ class SdlxliffScreen(Screen):
         return [i for i, f in self.row_fields.items() if str(f.value or "") != self.row_base.get(i, "")]
 
     def _document_dirty(self) -> bool:
-        """Notepad: the document in the editor differs from the one it was loaded with / last saved."""
-        editor = self.notepad_editor
-        return bool(self.notepad and editor is not None and self.notepad_base is not None
-                    and str(editor.value or "") != self.notepad_base)
+        """Notepad: an edit was captured from the page and is not saved yet."""
+        view = self.notepad_view
+        return bool(self.notepad and view is not None and view.dirty)
 
     def _editing(self) -> bool:
         """A field has focus or unsaved text (Notepad: the document was edited)."""
@@ -796,15 +886,8 @@ class SdlxliffScreen(Screen):
     async def _flush_edits(self) -> None:
         """Save everything a full re-render would drop: typed row texts and an edited Notepad document."""
         await self._flush_rows()
-        if self._document_dirty() and self.binding is not None:
-            text = str(self.notepad_editor.value or "")
-            try:
-                await self.ctx.io(self.binding.save_document, self.notepad_piece, text)
-            except Exception as exc:
-                log.exception("saving the Notepad document failed")
-                self.ctx.say(f"Could not save: {exc}")
-                return
-            self.notepad_base = text
+        if self._document_dirty():
+            await self.notepad_view.flush()
 
     def _rerender(self) -> None:
         """A full re-render after a navigation; typed row text / the edited document is saved first."""
@@ -817,29 +900,12 @@ class SdlxliffScreen(Screen):
         await self._flush_edits()
         self.render()
 
-    def _notepad(self, text: str) -> ft.Control:
-        try:
-            import flet_code_editor as fce
-
-            self.notepad_editor = fce.CodeEditor(value=text, language=getattr(fce.CodeLanguage, "XML", None),
-                                                 expand=True)
-        except Exception:
-            self.notepad_editor = ft.TextField(value=text, multiline=True, min_lines=20, key="sdl-notepad",
-                                               text_style=ft.TextStyle(font_family=getattr(self.ctx, "mono", None),
-                                                                       size=13))
-        return ft.Column([
-            self.notepad_editor,
-            ft.Row([ft.FilledButton(content="Save document", key="sdl-notepad-save",
-                                    on_click=lambda e: self.ctx.spawn(self.save_document()))]),
-        ], spacing=6)
-
     def _piece_menu_items(self) -> list:
         piece = self.current_piece() if self.binding is not None else None
         completed = bool(piece and piece.get("manual_green_override"))
         return [
-            ft.PopupMenuItem(content="Undo Completed" if completed else "Mark as Completed", key="sdl-complete",
-                             on_click=lambda e: self.ctx.spawn(self.toggle_completed())),
-            ft.PopupMenuItem(content="Edit Output", key="sdl-edit-output", on_click=lambda e: self.edit_output()),
+            ft.PopupMenuItem(content="↩️ Undo Completed Mark" if completed else "✅ Mark as Completed",
+                             key="sdl-complete", on_click=lambda e: self.ctx.spawn(self.toggle_completed())),
         ]
 
     # ---- navigation / filters -------------------------------------------------------------------------
@@ -879,8 +945,15 @@ class SdlxliffScreen(Screen):
         self.filter_status = status
         self._rerender()
 
+    def _webview_ok(self) -> bool:
+        check = getattr(self.ctx, "webview_ok", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:
+            return False
+
     def _on_layout(self, e: Any = None) -> None:
-        if not getattr(self.ctx, "tablet", False):
+        if not self._webview_ok():
             self.layout_switch.value = False
             self.ctx.say(NOTEPAD_REASON)
             return
@@ -939,18 +1012,6 @@ class SdlxliffScreen(Screen):
             controls[position] = self._row_card(row_index, row, str(row.get("status") or "green"))
         self._push(self.legend, self.summary, self.status_text, self.piece_dropdown, self.rows_column)
 
-    async def save_document(self) -> bool:
-        binding, editor = self.binding, self.notepad_editor
-        if binding is None or editor is None:
-            return False
-        try:
-            message = await self.ctx.io(binding.save_document, self.notepad_piece, str(editor.value or ""))
-        except Exception as exc:
-            self.ctx.say(f"Could not save: {exc}")
-            return False
-        self._done(message or "Saved")
-        return True
-
     async def toggle_completed(self) -> str:
         binding, piece = self.binding, self.current_piece()
         if binding is None or piece is None:
@@ -958,17 +1019,6 @@ class SdlxliffScreen(Screen):
         await self._flush_edits()
         fn = binding.undo_completed if piece.get("manual_green_override") else binding.mark_completed
         return self._done(await self.ctx.io(fn, self.piece_index))
-
-    def edit_output(self) -> Optional[str]:
-        from glossarion_mobile.ui.tools import text_editor
-
-        if self.binding is None or self.current_piece() is None:
-            return None
-        path = self.binding.output_path(self.piece_index)
-        if not path or not os.path.isfile(path):
-            self.ctx.say("This piece has no output file yet")
-            return None
-        return text_editor.open_text_editor(self.ctx, path)
 
     async def translate_piece(self) -> str:
         if self.binding is None or self.current_piece() is None:
@@ -987,6 +1037,15 @@ class SdlxliffScreen(Screen):
             return ""
         await self._flush_edits()
         return self._done(await self.ctx.io(self.binding.inject, self.piece_index, row_index))
+
+    async def undo_row(self, row_index: int) -> str:
+        """Row ↩️ Undo All Edits: the row's output goes back to the text it was loaded with."""
+        if self.binding is None:
+            return ""
+        self._row_tokens.pop(row_index, None)
+        self.row_fields.pop(row_index, None)  # its typed text is what is being undone
+        await self._flush_edits()
+        return self._done(await self.ctx.io(self.binding.undo_row, self.piece_index, row_index))
 
     async def flag(self) -> str:
         if self.binding is None or self.current_piece() is None:
