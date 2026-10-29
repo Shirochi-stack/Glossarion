@@ -1,10 +1,12 @@
 """v9.15.7 hotfix 6, owner (2026-10-29, phone, a Grok sign-in): "Grok needs to auto close this page, as login was
 already successful. It just confuses the user on a page that never loads" - the 127.0.0.1 "Return to Glossarion" page
 the app served after the device approval; the sign-in service stopped right after opening it, so Android froze the
-app that serves it.
+app that serves it. Also: the notification and battery-optimisation dialogs "should also appear on their own
+existing page in the welcome screen".
 
 Fix: Android brings the app's Activity back over the Custom Tab (``bring_to_front``, closing it), iOS closes the
-in-app browser; the return page only when Android could not come back.
+in-app browser; the return page only when Android could not come back. The Welcome's Permissions page asks
+what is not granted yet by itself on its first visit.
 
 Run from src/mobile with the mobile venv::
 
@@ -89,3 +91,60 @@ def test_ios_closes_the_in_app_browser(tmp_path, monkeypatch):
 
     opened = _grok_sign_in(tmp_path, close_browser=close_browser)
     assert closed == [True] and not _return_pages(opened)
+
+
+def test_welcome_permissions_page_asks_what_is_missing_by_itself(monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens import welcome as W
+
+    monkeypatch.setattr(W, "PERMISSIONS_ASK_DELAY", 0)
+    asked: list = []
+    granted = {"notifications": False, "battery": False}
+
+    async def request(key):
+        asked.append(key)
+        granted[key] = True
+
+    async def status():
+        return dict(granted)
+
+    async def scenario():
+        screen = W.WelcomeScreen(parse_route("/welcome"), is_android=True,
+                                 on_request_notifications=lambda: request("notifications"),
+                                 on_request_battery=lambda: request("battery"))
+        screen.on_permission_status = status
+        screen.get_body()
+        screen.go("permissions")
+        assert await AP._wait_for(lambda: asked == ["notifications", "battery"])
+        assert await AP._wait_for(lambda: screen.permission_state == {"notifications": True, "battery": True})
+        screen.back()
+        screen.go("permissions")  # a second visit only shows the ticks
+        await asyncio.sleep(0.05)
+        assert asked == ["notifications", "battery"]
+
+    asyncio.run(scenario())
+
+
+def test_welcome_permissions_page_skips_what_is_already_granted(monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens import welcome as W
+
+    monkeypatch.setattr(W, "PERMISSIONS_ASK_DELAY", 0)
+    asked: list = []
+
+    async def request(key):
+        asked.append(key)
+
+    async def status():
+        return {"notifications": True, "battery": False}
+
+    async def scenario():
+        screen = W.WelcomeScreen(parse_route("/welcome"), is_android=True,
+                                 on_request_notifications=lambda: request("notifications"),
+                                 on_request_battery=lambda: request("battery"))
+        screen.on_permission_status = status
+        screen.get_body()
+        screen.go("permissions")
+        assert await AP._wait_for(lambda: asked == ["battery"])
+
+    asyncio.run(scenario())
