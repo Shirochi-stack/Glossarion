@@ -515,6 +515,8 @@ def install_views_guard() -> None:
         return
 
     def show_dialog(self: Any, dialog: Any) -> None:
+        if _keyed_twin(self, dialog):
+            return
         guard = _guard(self) if reports_dismissals(self) else None
         if guard is not None and _route_dialog(dialog):
             if guard.pending or guard.queued:
@@ -532,3 +534,37 @@ def install_views_guard() -> None:
 
     setattr(show_dialog, _HOOK, True)
     BasePage.show_dialog = show_dialog
+
+    restore = BasePage._restore_dialog_on_dismiss
+
+    def restore_dialog_on_dismiss(self: Any, dialog: Any) -> None:
+        # a dialog Flet diffed as frozen (a keyed twin) must still be able to leave page._dialogs; Flet's own
+        # use_dialog strips the marker the same way before it sets open=False
+        _unmark(dialog, "_frozen")
+        restore(self, dialog)
+
+    BasePage._restore_dialog_on_dismiss = restore_dialog_on_dismiss
+
+
+def _keyed_twin(page: Any, dialog: Any) -> bool:
+    """True when ``dialog`` must not be shown: another dialog with the same explicit key is already in
+    ``page._dialogs`` (v9.15.7 hotfix 3). Two quick taps opened the DeepSeek sign-in sheet twice; Flet diffs a
+    keyed pair of different objects as frozen, the second sheet's dismiss then raised "Frozen controls cannot
+    be updated" and both sheets stayed stuck. An open twin wins (the second tap does nothing); a closed one
+    still waiting for its dismiss leaves first, so the new dialog opens as a fresh control."""
+    key = getattr(dialog, "key", None)
+    dialogs = getattr(page, "_dialogs", None)
+    if key is None or dialogs is None:
+        return False
+    for other in list(dialogs.controls):
+        if other is dialog or getattr(other, "key", None) != key:
+            continue
+        if getattr(other, "open", False):
+            log.info("not showing a second %r dialog (one with the same key is open)", key)
+            return True
+        try:
+            page._restore_dialog_on_dismiss(other)
+        except Exception:
+            log.debug("restoring the closed twin's on_dismiss failed", exc_info=True)
+        dialogs.controls.remove(other)
+    return False

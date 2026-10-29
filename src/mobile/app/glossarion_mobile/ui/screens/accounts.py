@@ -679,11 +679,23 @@ async def deepseek_session_present(run_io: Optional[Callable[..., Any]] = None) 
         return False
 
 
+#: the DeepSeek sign-in sheet's key (one open at a time: ``show_deepseek_sign_in``)
+DEEPSEEK_SHEET_KEY = "authds-signin-sheet"
+
+
 def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = None,
                           on_signed_in: Optional[Callable[[], Any]] = None) -> Any:
     """chat.deepseek.com in a visible in-app browser (Accounts and the Welcome). The session is checked every
     few seconds while it is open and the sheet closes by itself once DeepSeek is signed in, then calls
     ``on_signed_in`` (no "I'm signed in" button to mis-tap)."""
+    # one at a time (v9.15.7 hotfix 3, owner: sign-in "crashes the mobile app"): a second tap before the first
+    # sheet was drawn opened a second sheet with the same key; Flet diffs a keyed pair as frozen, and the
+    # frozen sheet's dismiss raised "Frozen controls cannot be updated", leaving both sheets stuck
+    dialogs = getattr(page, "_dialogs", None)
+    for dialog in list(getattr(dialogs, "controls", None) or []):
+        if getattr(dialog, "key", None) == DEEPSEEK_SHEET_KEY and getattr(dialog, "open", False):
+            return dialog
+
     import flet_webview as fwv
 
     from glossarion_mobile.ui.components.sheet import bottom_sheet
@@ -731,7 +743,7 @@ def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = N
                spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ft.Container(content=fwv.WebView(url=DEEPSEEK_URL, expand=True), expand=True),
     ], spacing=6), padding=ft.Padding.only(left=8, right=8, bottom=8))
-    sheet = bottom_sheet(content, key="authds-signin-sheet")
+    sheet = bottom_sheet(content, key=DEEPSEEK_SHEET_KEY)
     sheet_ref["sheet"] = sheet
     sheet_ref["open"] = True
     previous = getattr(sheet, "on_dismiss", None)
@@ -1200,6 +1212,9 @@ class AccountsScreen(Screen):
     # ---- actions ----------------------------------------------------------------------------
 
     def open_login(self, provider: str, account_id: int) -> Optional[LoginSheet]:
+        current = self.sheet
+        if isinstance(current, LoginSheet) and getattr(current.dialog, "open", False):
+            return current  # a second tap before the first sheet was drawn (v9.15.7 hotfix 3)
         sheet = LoginSheet(self.oauth, provider=provider, account_id=account_id, copy_text=self.copy_text,
                            on_done=lambda status, p=provider: self._signed_in(p, status))
         self.sheet = sheet
