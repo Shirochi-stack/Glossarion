@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.screens.page_base import PageScreen, section
 
 __all__ = ["CHANNEL_ROWS", "IOS_NOTE", "NotificationsScreen", "STATE_LABELS"]
@@ -146,12 +147,11 @@ class NotificationsScreen(PageScreen):
                                                                    "the Android / iOS app."))
         controls = [section("Notifications", rows + channels, key="notif-card",
                             subtitle="Progress, finished jobs and jobs that need you.")]
-        self.auto_accept = ft.Switch(label="Always accept generated glossaries",
-                                     value=bool(self._pref(AUTO_ACCEPT_GLOSSARY_PREF, False)),
+        self.auto_accept = ft.Switch(value=bool(self._pref(AUTO_ACCEPT_GLOSSARY_PREF, False)),
                                      on_change=self._on_auto_accept, disabled=not self._has("_set_pref"),
                                      key="notif-auto-accept")
         controls.append(section("Glossary review", [
-            self.auto_accept,
+            switch_row(self.auto_accept, "Always accept generated glossaries"),
             ft.Text(AUTO_ACCEPT_HELP, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
         ], key="notif-glossary-review", subtitle="When a chat's generated glossary is ready (\"Glossary ready: "
                                                  "review needed\")."))
@@ -166,10 +166,10 @@ class NotificationsScreen(PageScreen):
                                      key="notif-battery"),
                 self.battery_status,
             ]
-        self.keep_awake = ft.Switch(label="Keep the screen on while a job runs", value=self._keep_screen_on(),
+        self.keep_awake = ft.Switch(value=self._keep_screen_on(),
                                     on_change=self._on_keep_awake, disabled=self.background is None,
                                     key="notif-keep-awake")
-        background_rows.append(self.keep_awake)
+        background_rows.append(switch_row(self.keep_awake, "Keep the screen on while a job runs"))
         background_rows.append(ft.Text(IOS_NOTE, theme_style=ft.TextThemeStyle.BODY_SMALL,
                                        color=ft.Colors.ON_SURFACE_VARIANT, key="notif-ios-note"))
         controls.append(section("Background", background_rows, key="notif-background"))

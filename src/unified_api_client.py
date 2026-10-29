@@ -3563,7 +3563,96 @@ class UnifiedClient:
         target = (os.getenv('OUTPUT_LANGUAGE') or '').strip()
         if target:
             fields['target_language'] = target
+        if UnifiedClient._script_ban_allow_kaomoji():
+            fields['glossarion_allow_kaomoji'] = True
         return fields
+
+    @staticmethod
+    def _script_ban_allow_kaomoji() -> bool:
+        """"Allow emoticons and symbols from other scripts (kaomoji)" (SCRIPT_BAN_ALLOW_KAOMOJI, off by
+        default): the script ban lets kaomoji punctuation through (``script_ban_core.KAOMOJI_RANGES``)."""
+        return (os.getenv('SCRIPT_BAN_ALLOW_KAOMOJI') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def _script_ban_scripts(self, context=None) -> tuple:
+        """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
+        this request (Other Settings › Anti-Duplicate Parameters › Logit Bias; BLOCK_OTHER_SCRIPTS, only
+        while ENABLE_ANTI_DUPLICATE is on), () for none. The same decision as the on-device engine's own
+        switch (``script_ban_core.banned_scripts`` with ``_on_device_task_fields``); a send whose own
+        context is not a target-language request (review, QA, OCR, glossary) never bans."""
+        try:
+            if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
+                return ()
+            if self._get_anti_duplicate_env("BLOCK_OTHER_SCRIPTS", "0") != "1":
+                return ()
+            import script_ban_core
+            kind = str(context or '').strip().lower()
+            if kind and kind not in script_ban_core.BAN_TASKS:
+                return ()
+            fields = self._on_device_task_fields()
+            return tuple(script_ban_core.banned_scripts(
+                fields.get('glossarion_task'), fields.get('target_language'),
+                single_pass=fields.get('glossarion_single_pass')))
+        except Exception:
+            return ()
+
+    def _script_ban_logit_bias(self, provider, model, base_url, use_responses_api=False) -> dict:
+        """``{"logit_bias": {...}}`` pushing down the banned scripts' most frequent tokens, for official
+        OpenAI chat models only (their tokenizer is known: ``script_ban_core.openai_logit_bias``); {} for
+        every other route, which relies on the output guard (``_script_leak_retry_messages``)."""
+        if use_responses_api or str(provider or '').strip().lower() != 'openai':
+            return {}
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(str(base_url or '')).hostname or '').lower() if base_url else 'api.openai.com'
+        except Exception:
+            host = ''
+        if host != 'api.openai.com':
+            return {}
+        scripts = self._script_ban_scripts(getattr(self, 'context', None))
+        if not scripts:
+            return {}
+        import script_ban_core
+        if self._script_ban_allow_kaomoji():  # kaomoji punctuation left out of the 300 entries
+            bias = script_ban_core.openai_logit_bias(model, scripts, allow_kaomoji=True)
+        else:
+            bias = script_ban_core.openai_logit_bias(model, scripts)
+        if not bias:
+            return {}
+        self._log_once(f"🔤 Block other scripts: logit_bias on {len(bias)} tokens for {model}")
+        return {"logit_bias": bias}
+
+    def _script_leak_retry_messages(self, messages, content, context=None):
+        """The output guard of "Block other scripts": None while the answer keeps to the target's
+        scripts (``script_ban_core.foreign_script_leak``; runs also found in the request, such as kept
+        names, are ignored), else ``(messages with the write-only-in-the-target instruction added to
+        the last user message, the leak)``."""
+        scripts = self._script_ban_scripts(context)
+        if not scripts or not isinstance(content, str) or not content.strip():
+            return None
+        import script_ban_core
+        if self._script_ban_allow_kaomoji():  # kaomoji punctuation is not a leak
+            leak = script_ban_core.foreign_script_leak(content, scripts, messages, allow_kaomoji=True)
+        else:
+            leak = script_ban_core.foreign_script_leak(content, scripts, messages)
+        if not leak:
+            return None
+        target = self._on_device_task_fields().get('target_language', '')
+        note = script_ban_core.retry_instruction(target, tuple(leak['scripts']))
+        updated = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
+        for message in reversed(updated):
+            if not isinstance(message, dict) or message.get('role') != 'user':
+                continue
+            body = message.get('content')
+            if isinstance(body, str):
+                if note not in body:
+                    message['content'] = f"{body}\n\n{note}"
+                return updated, leak
+            if isinstance(body, list):
+                if not any(isinstance(p, dict) and p.get('text') == note for p in body):
+                    message['content'] = list(body) + [{"type": "text", "text": note}]
+                return updated, leak
+        updated.append({"role": "user", "content": note})
+        return updated, leak
 
     def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
         """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
@@ -11329,7 +11418,24 @@ class UnifiedClient:
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
 
-                                
+                # "Block other scripts in translations (adaptive, all models)": an answer with text in a
+                # script the target language does not use is sent again with an instruction, on this
+                # loop's own retry budget (like the image-quality retry); the last attempt's answer is kept.
+                if not self._is_truncation_finish_reason(self._normalize_finish_reason(finish_reason) or finish_reason):
+                    leak_retry = self._script_leak_retry_messages(messages, extracted_content, context)
+                    if leak_retry is not None:
+                        retry_messages, leak = leak_retry
+                        shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
+                        if attempt < internal_retries - 1 and not self._should_abort_retry():
+                            print(f"🔤 Answer contains {leak['chars']} characters of another script ({shown}: "
+                                  f"{leak['sample']}); retrying with a target-language-only instruction "
+                                  f"(attempt {attempt + 1}/{internal_retries})")
+                            self._last_retry_error_type = 'foreign_script'
+                            messages = retry_messages
+                            continue
+                        print(f"⚠️ Answer still contains {leak['chars']} characters of another script ({shown}); "
+                              f"no retries left - keeping it")
+
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
                 
@@ -11776,6 +11882,12 @@ class UnifiedClient:
 
                 if self.client_type == "autharena" and e.error_type in ("auth_error", "config_error"):
                     print("Arena setup/authentication error - use Arena Login before retrying")
+                    raise
+
+                # DeepSeek web (authds/): a missing sign-in or browser does not appear through backoff
+                # (each retry opened DeepSeek again and saved the request as a failed payload).
+                if self.client_type == "authds" and e.error_type in ("auth_error", "config_error"):
+                    print("DeepSeek (authds/) sign-in/setup error - sign in to DeepSeek first; not retrying")
                     raise
 
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
@@ -15278,7 +15390,7 @@ class UnifiedClient:
     _LOGISTICS_ANTI_DUPLICATE = (
         ("TOP_P", 1.0), ("MIN_P", 0.0), ("TOP_K", 0), ("FREQUENCY_PENALTY", 0.0), ("PRESENCE_PENALTY", 0.0),
         ("REPETITION_PENALTY", 1.0), ("CANDIDATE_COUNT", 1), ("CUSTOM_STOP_SEQUENCES", ""),
-        ("LOGIT_BIAS_ENABLED", "0"),
+        ("LOGIT_BIAS_ENABLED", "0"), ("BLOCK_OTHER_SCRIPTS", "0"), ("SCRIPT_BAN_ALLOW_KAOMOJI", "0"),
     )
 
     def _anti_duplicate_snapshot(self, temperature=None):
@@ -25347,6 +25459,7 @@ class UnifiedClient:
                             params["max_completion_tokens"] = norm_max_completion_tokens
                         elif norm_max_tokens is not None:
                             params["max_tokens"] = norm_max_tokens
+                        params.update(self._script_ban_logit_bias(provider, effective_model, base_url))
 
                     if (req_temperature is None or self._temperature_parameter_disabled()
                             or model_rejects_temperature(effective_model)):
@@ -27537,6 +27650,7 @@ class UnifiedClient:
             if not use_responses_api:
                 data.update(anti_dupe_params)
                 data.update(anti_dupe_min_p_params)
+                data.update(self._script_ban_logit_bias(provider, effective_model, base_url))
             self._log_anti_duplicate_applied(
                 {
                     **(anti_dupe_params if not use_responses_api else {}),

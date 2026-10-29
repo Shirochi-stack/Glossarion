@@ -437,6 +437,31 @@ class GlossarionNative(ft.Service):
         return {"path": str(path) if path else None, "error": result.get("error") or None,
                 "message": str(result.get("message") or "")}
 
+    # ------------------------------------------------------- in-app updates
+    #
+    # Android only (About › Updates): a sideloaded app cannot update itself silently, so the APK is
+    # handed to the system installer, which asks the user to confirm. The first time Android also wants
+    # the user's "Install unknown apps" switch for Glossarion (REQUEST_INSTALL_PACKAGES).
+
+    async def can_install_packages(self) -> bool:
+        """``PackageManager.canRequestPackageInstalls()``: the user allowed installs from Glossarion."""
+        return (await self._call("can_install_packages", default=False)) is True
+
+    async def open_install_settings(self) -> bool:
+        """Open Settings › Install unknown apps › Glossarion; True when the page opened."""
+        return (await self._call("open_install_settings", default=False)) is True
+
+    async def install_package(self, path: str) -> dict[str, Any]:
+        """Open the system installer for the APK at ``path``, which must lie in the app's
+        ``<cache>/updates`` folder (shared through the extension's FileProvider). ``{"ok": True}`` once the
+        installer opened, else ``{"ok": False, "error": "permission" | "missing" | "bad_args" |
+        "unavailable", "message": str}``."""
+        result = await self._call("install_package", {"path": str(path or "")}, default=None)
+        if not isinstance(result, dict):
+            return {"ok": False, "error": "unavailable", "message": "Installing updates needs the Android app"}
+        return {"ok": result.get("ok") is True, "error": result.get("error") or None,
+                "message": str(result.get("message") or "")}
+
     # ------------------------------------------------ iOS background execution
 
     async def begin_background_task(

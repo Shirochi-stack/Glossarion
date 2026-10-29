@@ -560,9 +560,10 @@ def test_an_older_turns_resume_never_runs_the_latest_turns_job(desktop_store_cls
 
 @needs_flet
 def test_a_book_in_the_library_still_continues_in_its_translate_sheet(desktop_store_cls, isolated_env):
-    """Retry failed / Resume of a turn whose workspace moved into the Library opens the Library translate sheet
-    (its own progress file), whichever job is the chat's latest: the older-run check is the chat run's only.
-    The card is the running card until the sheet is up, then the Result again (the Library runs the book)."""
+    """Retry failed / Resume of a turn whose workspace moved into the Library resumes the Library book's run
+    (its own progress file; no sheet since the 9.15.7 batch issue 4), whichever job is the chat's latest: the
+    older-run check is the chat run's only. The card is the running card until the run is handed over, then
+    the Result again (the Library runs the book)."""
     from glossarion_mobile.ui.chat import chat_view as cv
 
     tmp_path = isolated_env

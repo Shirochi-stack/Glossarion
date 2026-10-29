@@ -58,6 +58,7 @@ from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, unavailable_tile
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.screens.page_base import PageScreen, human_size, section
 from glossarion_mobile.ui.theme import icon_data
 
@@ -1937,7 +1938,7 @@ class CloudSyncScreen(PageScreen):
         self.destination_text = ft.Text("…", theme_style=ft.TextThemeStyle.BODY_LARGE, key="cloud-destination")
         self.dest_actions = ft.Row([], wrap=True, spacing=8, key="cloud-dest-actions")
         self.destinations_column = ft.Column(spacing=0, key="cloud-destinations")
-        self.auto_switch = ft.Switch(label="Copy finished books automatically", value=False,
+        self.auto_switch = ft.Switch(value=False,
                                      on_change=self._on_auto, key="cloud-auto")
         self.auto_reason = ft.Row([], wrap=True, key="cloud-auto-reason")
         self.kind_chips = {
@@ -1965,7 +1966,7 @@ class CloudSyncScreen(PageScreen):
                    wrap=True, spacing=8),
             self.dest_actions,
             self.destinations_column,
-            self.auto_switch,
+            switch_row(self.auto_switch, "Copy finished books automatically"),
             self.auto_reason,
             ft.Text("Formats", theme_style=ft.TextThemeStyle.LABEL_LARGE),
             ft.Row(list(self.kind_chips.values()), wrap=True, spacing=8, run_spacing=4, key="cloud-kinds"),

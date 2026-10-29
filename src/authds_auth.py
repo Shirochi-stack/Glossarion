@@ -63,6 +63,50 @@ def has_session():
     return (profile_dir() / ".signed_in").exists()
 
 
+#: Seconds a hidden in-app page (Glossarion Mobile) is given to show the saved DeepSeek session before a
+#: request says it is not signed in, and the default for the Accounts / Welcome sign-in check.
+DRIVER_SESSION_SECONDS = 20.0
+DRIVER_CHECK_SECONDS = 10.0
+#: Seconds a mobile "not signed in" answer is remembered: the next chapters of a job fail at once instead
+#: of opening a hidden DeepSeek page each. A sign-in check that finds a session forgets it.
+NO_SESSION_SECONDS = 60.0
+_no_session = {"at": None}
+
+
+def _mark_session(present):
+    """The ``.signed_in`` hint: written (its folder too: on Glossarion Mobile no browser profile creates
+    it) when a DeepSeek session was seen, removed when none was."""
+    marker = profile_dir() / ".signed_in"
+    if present:
+        _no_session["at"] = None
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(mode=0o600)
+    else:
+        marker.unlink(missing_ok=True)
+
+
+def _not_signed_in_error():
+    return AuthDSError(f"AuthDS: not signed in. {MOBILE_SIGN_IN_HINT}", "auth_error")
+
+
+def _driver_token_present(page, cancel_check=None, timeout=None):
+    """Whether a hidden in-app page shows a DeepSeek session within ``timeout`` seconds (default
+    ``DRIVER_SESSION_SECONDS``). Asked again until then: the page's first answer can be late (None) or
+    come before the site has read its storage."""
+    deadline = time.monotonic() + float(DRIVER_SESSION_SECONDS if timeout is None else timeout)
+    while True:
+        _check(cancel_check)
+        try:
+            if page.evaluate(_TOKEN_PRESENT):
+                return True
+        except AuthDSError as exc:
+            if exc.error_type == "cancelled":
+                raise
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(.3)
+
+
 def _browser_binary():
     found = cdp_browser.find_browser_binary(
         "AUTHDS_BROWSER_BINARY", lambda message: AuthDSError(message, "config_error"))
@@ -159,16 +203,13 @@ def _driver_page(cancel_check=None):
         page.close()
 
 
-def driver_session_present(cancel_check=None):
-    """Mobile sign-in check: whether the in-app WebView storage holds a DeepSeek session (marks it)."""
+def driver_session_present(cancel_check=None, timeout=None):
+    """Mobile sign-in check: whether the in-app WebView storage holds a DeepSeek session within ``timeout``
+    seconds (default ``DRIVER_CHECK_SECONDS``); marks it, so Accounts and the translate route agree."""
     with _driver_page(cancel_check) as page:
-        present = bool(page.evaluate(_TOKEN_PRESENT))
-    marker = profile_dir() / ".signed_in"
-    if present:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch(mode=0o600)
-    else:
-        marker.unlink(missing_ok=True)
+        present = _driver_token_present(page, cancel_check,
+                                        DRIVER_CHECK_SECONDS if timeout is None else timeout)
+    _mark_session(present)
     return present
 
 
@@ -240,15 +281,12 @@ _TOKEN_PRESENT = """(() => {
 def _wait_login(page, log_fn, cancel_check=None, timeout=300):
     if getattr(page, "driver", False):
         # a hidden in-app page cannot show DeepSeek's login: only an existing session counts
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            _check(cancel_check)
-            if page.evaluate(_TOKEN_PRESENT):
-                (profile_dir() / ".signed_in").touch(mode=0o600)
-                return
-            time.sleep(.3)
-        (profile_dir() / ".signed_in").unlink(missing_ok=True)
-        raise AuthDSError(f"AuthDS: not signed in. {MOBILE_SIGN_IN_HINT}", "auth_error")
+        if _driver_token_present(page, cancel_check):
+            _mark_session(True)
+            return
+        _mark_session(False)
+        _no_session["at"] = time.monotonic()
+        raise _not_signed_in_error()
     log_fn("AuthDS: Sign in on the DeepSeek browser window. You can choose Continue with Google; Glossarion does not receive your Google password.")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -260,7 +298,7 @@ def _wait_login(page, log_fn, cancel_check=None, timeout=300):
                 raise
             present = False  # Google sign-in redirects replace the JS context.
         if present:
-            (profile_dir() / ".signed_in").touch(mode=0o600)
+            _mark_session(True)
             return
         time.sleep(.5)
     raise AuthDSError("AuthDS login timed out. Select DeepSeek Login and try again.", "auth_error")
@@ -640,6 +678,11 @@ def send_chat_completion(*, messages, model="flash", timeout=300, log_fn=print,
     build_prompt(messages, images=[])
     if time.time() < _muted["until"]:
         raise AuthDSError(_muted["message"], "rate_limit", retry_after=math.inf)
+    # Glossarion Mobile, found signed out a moment ago: fail at once (it cannot show DeepSeek's login).
+    missing_since = _no_session["at"]
+    if (missing_since is not None and time.monotonic() - missing_since < NO_SESSION_SECONDS
+            and not has_session() and browser_driver.use_driver("AUTHDS_MODE")):
+        raise _not_signed_in_error()
     login_generation = _login_generation
     # Try the saved session once, then permit an interactive re-login once.
     for attempt in range(2):

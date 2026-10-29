@@ -178,8 +178,8 @@ def test_resume_runs_with_what_the_result_card_shows(desktop_store_cls, isolated
 
 @needs_flet
 def test_resume_of_a_book_in_the_library_takes_the_cards_run_options(desktop_store_cls, isolated_env):
-    """A workspace that moved into the Library resumes in the Library translate sheet: the card's "Only for
-    this run" values go with it (the sheet starts switched on with them); switched off, nothing to carry."""
+    """A workspace that moved into the Library resumes as the Library book's run: the card's "Only for
+    this run" values go with it; switched off, nothing to carry (the run reads the settings itself)."""
     tmp_path = isolated_env
     handed: list = []
 
@@ -202,7 +202,7 @@ def test_resume_of_a_book_in_the_library_takes_the_cards_run_options(desktop_sto
             params = {"run": {"temp_root": str(tmp_path / "root")}, "config_overrides": {"batch_size": 7}}
             panel = view._resume_panel(item, params)
             await view._resume_turn(item)
-            assert handed[-1] == (moved, {})  # switched off: the sheet reads the settings itself
+            assert handed[-1] == (moved, {})  # switched off: the run reads the settings itself
             panel = view._resume_panel(item, params)
             panel.switch.value = True
             panel._on_switch()

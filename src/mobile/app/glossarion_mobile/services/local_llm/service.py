@@ -26,11 +26,15 @@
 * **Stop:** a queued request gives up on the client closing its connection or any job Stop
   (``process_stop_state``: graceful or immediate); the answer being generated stops within a few tokens
   on an immediate Stop, a disconnect or a forced unload, and runs to its end on a graceful one.
-* **Adaptive CJK ban** ("Block CJK in translations", Prefs ``BLOCK_CJK_KEY``, on by default): a request
-  that writes target-language text into a non-CJK target bans Han / kana / Hangul tokens; glossary
-  requests, a single-pass auto glossary's translations and CJK targets keep the default logits. The
+* **Adaptive script ban** ("Block other scripts in translations", Prefs ``BLOCK_CJK_KEY``, on by default):
+  a request that writes target-language text bans the tokens of every script the target does not use
+  (English: Han / kana / Hangul, Devanagari, Thai, Arabic, Cyrillic ...; a CJK target keeps all three CJK
+  scripts); glossary requests and a single-pass auto glossary's translations keep the default logits. The
   request kind and target come from the body fields ``unified_api_client`` adds for this endpoint only
-  (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.wants_ban`` decides.
+  (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.banned_scripts``
+  decides and the engine gets ``params["ban_scripts"]``. The opt-in "Allow emoticons and symbols from
+  other scripts (kaomoji)" (config ``script_ban_allow_kaomoji``, shared with the API models' ban; shown
+  under the switch too) arrives as ``glossarion_allow_kaomoji`` and becomes ``params["ban_allow_kaomoji"]``.
 * **GPU (experimental, off by default;** Prefs ``GPU_KEY``, Model manager › On-device › engine card): offered
   where the build has a GPU backend (``engine.gpu_offer``: Metal on iOS, OpenCL / Adreno on Android
   arm64). With it on, a load first tries the GPU (``engine.load(..., gpu=True)``); when that fails
@@ -94,8 +98,9 @@ SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
                    "presence_penalty": "Presence penalty", "frequency_penalty": "Frequency penalty",
                    "repeat_penalty": "Repeat penalty", "dry_multiplier": "DRY multiplier",
                    "dry_base": "DRY base", "dry_allowed_length": "DRY allowed length"}
-#: Prefs key of "Block CJK in translations (adaptive)" (Model manager > On-device > engine card; a bool,
-#: on when unset): see ``script_ban``
+#: Prefs key of "Block other scripts in translations (adaptive)" (Model manager > On-device > engine card;
+#: a bool, on when unset; named from when it banned CJK only, kept so the saved choice stays): see
+#: ``script_ban``
 BLOCK_CJK_KEY = "local_llm_block_cjk"
 #: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
 GPU_KEY = "local_llm_gpu"
@@ -583,7 +588,7 @@ class LocalEngineService:
         return out, None
 
     def block_cjk(self) -> bool:
-        """"Block CJK in translations (adaptive)": on unless switched off."""
+        """"Block other scripts in translations (adaptive)": on unless switched off."""
         try:
             raw = self.prefs.get(BLOCK_CJK_KEY, None) if self.prefs is not None else None
         except Exception:
@@ -1035,9 +1040,14 @@ class LocalEngineService:
             params["stop"] = [str(s) for s in stop][:8]
         kwargs = body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {}
         params["enable_thinking"] = bool(kwargs.get("enable_thinking", False))
-        if script_ban.wants_ban(body.get("glossarion_task"), body.get("target_language"),
-                                single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk()):
-            params["ban_cjk"] = True
+        scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
+                                            single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
+        if scripts:
+            params["ban_scripts"] = scripts
+            # "Allow emoticons and symbols from other scripts (kaomoji)": the shared config setting
+            # script_ban_allow_kaomoji, sent by unified_api_client like the request kind and target
+            if script_ban._truthy(body.get("glossarion_allow_kaomoji")):
+                params["ban_allow_kaomoji"] = True
         return params
 
     # ---- downloads -----------------------------------------------------------------------------------

@@ -137,6 +137,15 @@ class NativeStub:
     async def take_photo(self) -> dict:
         return {"path": None, "error": "unavailable", "message": "The camera is only available in the phone app"}
 
+    async def can_install_packages(self) -> bool:
+        return False
+
+    async def open_install_settings(self) -> bool:
+        return False
+
+    async def install_package(self, path: str) -> dict:
+        return {"ok": False, "error": "unavailable", "message": "Installing updates needs the Android app"}
+
     async def begin_background_task(self, *args: Any, **kwargs: Any) -> int:
         return -1
 
@@ -608,6 +617,27 @@ class NativeBridge:
             return {"path": None, "error": "unavailable", "message": "The camera is only available in the phone app"}
         path = result.get("path")
         return {"path": str(path) if path else None, "error": result.get("error") or None,
+                "message": str(result.get("message") or "")}
+
+    # ---- in-app updates (About › Updates, ``services.updates.ApkInstaller``) ---------------------------
+
+    async def can_install_packages(self) -> bool:
+        """Android: may Glossarion open the system installer (``canRequestPackageInstalls``, the user's
+        "Install unknown apps" switch for Glossarion)? False elsewhere."""
+        return (await self.call("can_install_packages", default=False)) is True
+
+    async def open_install_settings(self) -> bool:
+        """Android: open "Install unknown apps" for Glossarion (one switch); True when it opened."""
+        return (await self.call("open_install_settings", default=False)) is True
+
+    async def install_package(self, path: str) -> dict:
+        """Android: hand the APK at ``path`` (in ``<cache>/updates``) to the system installer, which asks
+        the user to confirm the update: ``{"ok": True}`` once its screen opened, else ``{"ok": False,
+        "error": "permission" | "missing" | "bad_args" | "unavailable" | "native_error", "message"}``."""
+        result = await self.call("install_package", str(path or ""), default=None)
+        if not isinstance(result, dict):
+            return {"ok": False, "error": "unavailable", "message": "Installing updates needs the Android app"}
+        return {"ok": result.get("ok") is True, "error": result.get("error") or None,
                 "message": str(result.get("message") or "")}
 
     async def begin_background_task(self, name: str) -> int:

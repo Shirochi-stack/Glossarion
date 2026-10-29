@@ -48,7 +48,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Android side of GlossarionNative (MethodChannel `glossarion_native/platform`).
  *
  * Dart -> Kotlin: attach, get_platform_info, clear_shared, init_notifications,
- * show_notification, cancel_notification, save_to_downloads, move_task_to_back, the document
+ * show_notification, cancel_notification, save_to_downloads, move_task_to_back, the in-app
+ * update methods in [AppUpdates] (can_install_packages, open_install_settings, install_package), the document
  * destination methods handled by [DocumentDestinations] (pick_folder, ...) and
  * the in-app browser page methods handled by [HiddenWebPages] (web_open,
  * web_load, web_eval, web_title, web_close, web_reset, web_status).
@@ -425,6 +426,13 @@ class GlossarionNativePlugin :
                     val current = activityBinding?.activity
                     result.success(current != null && current.moveTaskToBack(true))
                 }
+                // In-app updates (About > Updates), see AppUpdates.kt.
+                "can_install_packages" -> result.success(AppUpdates.canInstall(context))
+                "open_install_settings" ->
+                    result.success(AppUpdates.openInstallSettings(context, activityBinding?.activity))
+                "install_package" -> result.success(
+                    AppUpdates.install(context, activityBinding?.activity, call.argument<String>("path"))
+                )
                 else -> result.notImplemented()
             }
         } catch (e: Exception) {

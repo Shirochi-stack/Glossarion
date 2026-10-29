@@ -28,10 +28,13 @@ load uses ``split_mode`` NONE with ``main_gpu`` -1: no offload device at all, ev
 was registered earlier in the process. ``device`` names what runs the model. The vision projector
 always stays on the CPU.
 
-CJK ban (``params["ban_cjk"]``, decided by the service, ``script_ban``): ``LlamaEngine`` passes a logits
-processor that sets the model's Han / kana / Hangul token ids to -inf. The ids are computed from the
-vocabulary on the first such request after a load (about 0.6 s for Qwen3.5's 248k tokens on a desktop
-CPU; logged) and kept until the model is unloaded; a request without ``ban_cjk`` gets no processor.
+Script ban (``params["ban_scripts"]``, the ``script_ban.SCRIPTS`` names decided by the service): ``LlamaEngine``
+passes a logits processor that sets the token ids of those scripts (Han / kana / Hangul, Devanagari,
+Thai, Arabic, Cyrillic ...) to -inf. The vocabulary is decoded once, on the first such request after a
+load (``script_ban.VocabScripts``; logged), and one processor per set of banned scripts is kept until the
+model is unloaded; a request without ``ban_scripts`` gets no processor. ``params["ban_allow_kaomoji"]``
+(the opt-in emoticon exemption) unbans the emoticon punctuation and the emoticon characters of the
+request's user messages.
 """
 
 from __future__ import annotations
@@ -331,7 +334,7 @@ class LlamaEngine(_Base):
         self.llm: Any = None
         self.formatter: Any = None
         self.vision_handler: Any = None
-        self._ban: Any = None  # the loaded model's script_ban.BanLogitsProcessor (computed on first use)
+        self._scripts: Any = None  # the loaded model's script_ban.VocabScripts (computed on first use)
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -400,7 +403,7 @@ class LlamaEngine(_Base):
             llm, self.llm = self.llm, None
             handler, self.vision_handler = self.vision_handler, None
             self.formatter = None
-            self._ban = None
+            self._scripts = None
             self.path = None
             self.mmproj = None
             self.on_gpu = False
@@ -417,24 +420,28 @@ class LlamaEngine(_Base):
                     log.debug("closing the model failed", exc_info=True)
                 del llm
 
-    def cjk_ban(self) -> Any:
-        """The loaded model's CJK-ban logits processor (``script_ban``), computed from its vocabulary on
-        the first call after a load and kept until the model is unloaded."""
+    def script_ban(self, scripts: Sequence[str], allow_kaomoji: bool = False, source: str = "") -> Any:
+        """The loaded model's logits processor banning ``scripts`` (``script_ban``): the vocabulary is
+        decoded on the first call after a load, each set of scripts' processor on its first use; both are
+        kept until the model is unloaded. ``allow_kaomoji``: emoticons allowed, with the emoticon
+        characters of ``source`` (the request's user text) let through."""
         llm = self.llm
         if llm is None:
             raise EngineUnavailable("No model is loaded")
         with self._lock:
-            if self._ban is None:
+            started = time.monotonic()
+            if self._scripts is None:
                 from glossarion_mobile.services.local_llm import script_ban
 
-                started = time.monotonic()
                 n_vocab = int(llm.n_vocab())
                 pieces = (llm.detokenize([token], special=False) for token in range(n_vocab))
-                ids = script_ban.banned_token_ids(pieces)
-                self._ban = script_ban.BanLogitsProcessor(ids, n_vocab)
-                log.info("on-device CJK ban: %d of %d tokens in %.2f s", len(ids), n_vocab,
-                         time.monotonic() - started)
-            return self._ban
+                self._scripts = script_ban.VocabScripts(pieces)
+                log.info("on-device script ban: %d of %d tokens are non-Latin script, scanned in %.2f s",
+                         len(self._scripts), n_vocab, time.monotonic() - started)
+            processor = self._scripts.processor(scripts, allow_kaomoji=allow_kaomoji, source=source)
+            log.debug("on-device script ban: %d tokens of %s%s (%.2f s)", len(processor), ",".join(scripts),
+                      " (emoticons allowed)" if allow_kaomoji else "", time.monotonic() - started)
+            return processor
 
     def _prompt(self, messages: Sequence[dict]) -> str:
         if self.formatter is not None:
@@ -483,12 +490,14 @@ class LlamaEngine(_Base):
                             "base": float(params.get("dry_base") or 1.75),
                             "allowed_length": int(params.get("dry_allowed_length") or 2),
                             "penalty_last_n": -1, "seq_breakers": list(DRY_SEQUENCE_BREAKERS)}
-        if params.get("ban_cjk"):
+        if params.get("ban_scripts"):
             try:
                 processors = importlib.import_module("llama_cpp").LogitsProcessorList
             except Exception:  # a test's fake model: any list of processors works the same
                 processors = list
-            kwargs["logits_processor"] = processors([self.cjk_ban()])
+            allow = bool(params.get("ban_allow_kaomoji"))
+            source = "\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user") if allow else ""
+            kwargs["logits_processor"] = processors([self.script_ban(tuple(params["ban_scripts"]), allow, source)])
         self.last_finish = "stop"
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every

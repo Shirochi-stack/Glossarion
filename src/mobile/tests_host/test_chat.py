@@ -2040,7 +2040,7 @@ def test_plus_sheet_and_slash_qa_scan_the_chats_latest_workspace(desktop_store_c
 def test_open_in_library_action_and_moved_workspace_retry(desktop_store_cls, isolated_env):
     """No Migrate on mobile (owner #4): the Result card's "Open in Library" waits (ReasonChip) while
     the workspace is in Attachments/, then opens the Library book it became; Retry failed of a moved
-    workspace goes to the Library's translate sheet (``ChatEnv.library_translate``)."""
+    workspace resumes the Library book's run (``ChatEnv.library_translate``)."""
     import flet as ft
 
     from glossarion_mobile.ui.chat.cards import ATTACHMENT_ACTIONS, LIBRARY_WAIT_REASON, JobCard

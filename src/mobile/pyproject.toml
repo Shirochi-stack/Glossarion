@@ -221,6 +221,7 @@ dependencies = [
 "android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
 "android.permission.WAKE_LOCK" = true
 "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" = true
+"android.permission.REQUEST_INSTALL_PACKAGES" = true   # About › Updates opens the system installer for the APK
 "android.permission.READ_EXTERNAL_STORAGE" = false
 "android.permission.WRITE_EXTERNAL_STORAGE" = false
 "android.permission.MANAGE_EXTERNAL_STORAGE" = false

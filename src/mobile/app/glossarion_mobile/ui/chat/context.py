@@ -51,8 +51,9 @@ class ChatEnv(SettingsContext):
     # (the app Prefs) is the SettingsContext field. ``library_service``: () -> app.library (LibraryService)
     # or None; ``library_book``: async (workspace folder) -> the Library book id of the row whose
     # workspace is that folder (a quiet rescan first when the Library is stale), or None;
-    # ``library_translate``: async (workspace folder, attachment path) -> the Library translate sheet
-    # for that book (Resume / Retry failed of a workspace that moved into the Library).
+    # ``library_translate``: async (workspace folder, attachment path, run_config=, chat_overrides=) -> the
+    # job id of that book's translation run, started at once with no sheet (Resume / Retry failed of a
+    # workspace that moved into the Library), or None when it did not start.
     library_service: Optional[Callable[[], Any]] = None
     library_book: Optional[Callable[[str], Any]] = None
     library_translate: Optional[Callable[..., Any]] = None
