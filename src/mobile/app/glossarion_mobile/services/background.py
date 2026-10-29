@@ -380,9 +380,20 @@ class BackgroundExecution:
             log.info("launch notification request failed: %s", exc)
             return None
 
-    async def ask_permissions_on_launch(self, delay: float = LAUNCH_ASK_DELAY) -> None:
+    async def ask_permissions_on_launch(self, delay: float = LAUNCH_ASK_DELAY,
+                                        defer: Optional[Callable[[], bool]] = None) -> None:
         """First launch: the notification dialog, then (Android) the battery-optimisation dialog by itself,
-        one after the other; each is asked once (a Run tap or Welcome step 4 can still ask)."""
+        one after the other; each is asked once (a Run tap or Welcome step 4 can still ask). ``defer`` (checked
+        after ``delay``) True: not now; the first-run Welcome asks these itself and calls this again when it
+        closes (v9.15.7 hotfix 5)."""
+        if defer is not None:
+            await asyncio.sleep(delay)
+            delay = 0.0
+            try:
+                if defer():
+                    return
+            except Exception:
+                log.debug("launch permission defer check failed", exc_info=True)
         await self.ask_notifications_on_launch(delay)
         if not self.is_android or self._pref(PREF_BATTERY_PROMPT, False):
             return

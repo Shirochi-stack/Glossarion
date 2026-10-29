@@ -67,6 +67,8 @@ log = logging.getLogger("glossarion.chat")
 FLUSH_LIFECYCLE_STATES = ("inactive", "hide", "pause", "detach")
 SCREEN_ROUTES = ("settings.accounts", "welcome", "chat.message.edit", "chat.attachments", "chat.compose")
 WELCOME_PREF = "welcome_completed"
+#: seconds after the Welcome closes before the launch permission dialogs it held back (the chat settles first)
+WELCOME_PERMISSIONS_DELAY = 0.8
 
 #: ``auto_migrate`` outcomes: moved into the Library; left where it is for good (not a book, a run that
 #: can still be resumed, ...); left for the next idle sweep (a job is running or writing it); left
@@ -744,6 +746,10 @@ class ChatFeature:
             navigate = getattr(self.app, "navigate_to", None)
             if navigate is not None:
                 navigate("home")
+            jobs = getattr(self.app, "jobs", None)
+            background = getattr(jobs, "background", None)
+            if background is not None:  # the launch dialogs held back while the Welcome was up (hotfix 5)
+                jobs.spawn(background.ask_permissions_on_launch(WELCOME_PERMISSIONS_DELAY))
 
         def try_action(try_id: str) -> None:
             chat_view = getattr(self.app, "chat_view", None)
@@ -812,6 +818,16 @@ class ChatFeature:
             pass
         env = self.env
         return not (env is not None and env.config_get("glossary_mode_dialog_shown", False))
+
+    def remember_welcome_done(self) -> None:
+        """The Welcome is not needed (finished, skipped, or chosen on the desktop): say so in the prefs, so the
+        next launch shows no first-run cover."""
+        prefs = getattr(self.app, "prefs", None)
+        try:
+            if prefs is not None and not self.needs_welcome() and not prefs.get(WELCOME_PREF):
+                prefs.set(WELCOME_PREF, True)
+        except Exception:
+            pass
 
     def maybe_show_welcome(self) -> bool:
         if self.welcome_shown or not self.needs_welcome():

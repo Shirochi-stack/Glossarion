@@ -442,3 +442,14 @@ def prefs_path_for(data_dir: PathLike) -> Path:
     """``<data>/mobile_state.json``."""
     return Path(data_dir) / PREFS_FILE_NAME
 
+
+def pref_on_disk(data_dir: PathLike, key: str) -> Any:
+    """One top-level pref read straight from ``mobile_state.json`` before ``Prefs`` is loaded (the app's
+    first frame decides on it); None when the file is missing or unreadable."""
+    try:
+        with open(prefs_path_for(data_dir), encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data.get(key) if isinstance(data, dict) else None
+    except Exception:
+        return None
+

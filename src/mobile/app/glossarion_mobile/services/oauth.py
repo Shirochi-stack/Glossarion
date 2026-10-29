@@ -301,6 +301,7 @@ class SignInState:
     plan: str = ""
     user_code: str = ""  # device-code flow (Grok)
     verification_uri: str = ""
+    approve_url: str = ""  # device flow: the approval page itself, without the sign-out first
     manual_url: str = ""  # Claude: the code page (code#state to paste)
     notice: str = ""  # waiting, but maybe stuck: the LoginPanel shows this and the paste field
 
@@ -593,7 +594,7 @@ class OAuthBridge:
         self._pasting = False
         self._paste_claimed = False
         self._set(provider=provider, step="opening", message="", account_id=account_id, auth_url="",
-                  email="", plan="", user_code="", verification_uri="", manual_url="", notice="")
+                  email="", plan="", user_code="", verification_uri="", approve_url="", manual_url="", notice="")
         if info.flow == "device":
             return await self._sign_in_device(provider, account_id)
         try:
@@ -660,8 +661,12 @@ class OAuthBridge:
         verification = str(_first_attr(session, ("verification_uri", "verification_url")) or "")
         open_url = str(_first_attr(session, ("open_url", "signed_out_url", "browser_url", "verification_uri_complete",
                                              "verification_url_complete")) or verification)
+        # the approval page itself (code filled in) for "Open verification page"; the first open goes through
+        # xAI's sign-out so the account can be chosen
+        approve_url = str(_first_attr(session, ("verification_uri_complete", "verification_url_complete")) or "")
         await self._start_fgs(info)
         self._set(step="waiting", auth_url=open_url, verification_uri=verification or open_url,
+                  approve_url=approve_url or verification,
                   user_code=str(_first_attr(session, ("user_code",)) or ""))
         self._open(open_url)
         try:
@@ -777,7 +782,13 @@ class OAuthBridge:
             log.warning("opening the sign-in page failed: %s", exc)
 
     def reopen_browser(self) -> bool:
-        url = self.state.auth_url or getattr(self._session, "auth_url", "")
+        """Open the sign-in page again. A device sign-in (Grok) opens its approval page directly: the first open
+        signed xAI out, and signing back in there can end on xAI's home page instead of the approval (v9.15.7
+        hotfix 5, owner: "my account is clearly logged, just not caught" until a second try); opening the
+        sign-out page again would sign the user out once more."""
+        state = self.state
+        url = ((state.approve_url if state.device else "") or state.auth_url
+               or getattr(self._session, "auth_url", ""))
         if not url:
             return False
         if self._service_missing():
@@ -902,7 +913,7 @@ class OAuthBridge:
         with self._lock:
             self.signed_in.discard(slot_key(provider, account_id))
         if self.state.provider == provider and self.state.account_id == account_id:
-            self._set(step="idle", message="", email="", plan="", user_code="", verification_uri="", manual_url="")
+            self._set(step="idle", message="", email="", plan="", user_code="", verification_uri="", approve_url="", manual_url="")
 
     def sign_out_everywhere(self, config_get: Optional[Callable[[str, Any], Any]] = None) -> list:
         """Blocking: sign every slot of every provider out; returns the slot keys cleared."""
