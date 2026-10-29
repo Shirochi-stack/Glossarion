@@ -522,6 +522,10 @@ def spec_key(spec: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: a job title with one of these endings is still its source file's name (``_take_translated_title``)
+FILE_TITLE_EXTENSIONS = (".epub", ".txt", ".pdf", ".md", ".html", ".htm", ".docx", ".odt", ".rtf")
+
+
 def translated_book_title(path: str) -> str:
     """The translated ``title`` of a book's ``metadata.json`` (``title_translated`` set), else ''."""
     try:
@@ -2829,10 +2833,12 @@ class JobService:
         self._changed()
 
     def _take_translated_title(self, job: _Job) -> bool:
-        """Owner 2026-10-29: a book job takes its translated title once the metadata translation wrote it
-        (the output folder's metadata.json: ``title`` with ``title_translated``). True when renamed."""
+        """Owner 2026-10-29: a book job still named after its file ("[213524] 히어로….epub", a chat's
+        attachment) takes its translated title once the metadata translation wrote it (the output folder's
+        metadata.json: ``title`` with ``title_translated``). A Library book's job keeps the book's name.
+        True when renamed."""
         folder = job.output_dir
-        if not folder:
+        if not folder or os.path.splitext(job.spec.title)[1].lower() not in FILE_TITLE_EXTENSIONS:
             return False
         path = os.path.join(folder, "metadata.json")
         try:

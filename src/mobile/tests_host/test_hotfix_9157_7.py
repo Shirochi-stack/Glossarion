@@ -115,6 +115,10 @@ def test_a_job_takes_its_translated_title_from_metadata_json(tmp_path):
     assert JobService._take_translated_title(fake, job) is True
     assert job.spec.title == "The Hero World's Succubus"
     assert JobService._take_translated_title(fake, job) is False  # unchanged file: not read again
+    # a Library book's job keeps the book's name
+    library = types.SimpleNamespace(id="j2", output_dir=str(folder), metadata_mtime=0.0,
+                                    spec=JobSpec(kind="translate", title="[TS] I'm the Only Genius Girl"))
+    assert JobService._take_translated_title(fake, library) is False and library.spec.title.startswith("[TS]")
 
 
 def test_the_requests_panel_is_hidden_until_its_first_card():
