@@ -66,6 +66,19 @@ class LocalLLMError(Exception):
                                      "param": None}}).encode("utf-8")
 
 
+def wants_thinking(body: Any) -> bool:
+    """Whether a request asks the model to think: ``chat_template_kwargs.enable_thinking`` when it says,
+    else an OpenAI ``reasoning_effort`` other than none (hotfix 8, owner 2026-10-30: "Pass thinking to
+    unknown routes" sends ``reasoning_effort``, which the engine used to ignore - Qwen3.5 never thought)."""
+    if not isinstance(body, dict):
+        return False
+    kwargs = body.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and "enable_thinking" in kwargs:
+        return bool(kwargs.get("enable_thinking"))
+    effort = str(body.get("reasoning_effort") or "").strip().lower()
+    return bool(effort) and effort not in ("none", "off", "disabled", "false", "0")
+
+
 class ChatRun:
     """One admitted generation: iterate ``deltas`` (text), then read ``usage`` / ``finish_reason``;
     ``close()`` (always) gives the engine back to the next request."""
@@ -318,8 +331,7 @@ class _Handler(BaseHTTPRequestHandler):
         created = int(time.time())
         rid = "chatcmpl-" + uuid.uuid4().hex[:24]
         model_id = f"local/{run.stem}"
-        thinking = bool((body.get("chat_template_kwargs") or {}).get("enable_thinking")) \
-            if isinstance(body.get("chat_template_kwargs"), dict) else False
+        thinking = wants_thinking(body)
         strip = None if thinking else ThinkStripper()
         with run:
             if not stream:

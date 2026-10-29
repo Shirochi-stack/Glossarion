@@ -108,3 +108,17 @@ def test_a_result_whose_book_runs_in_another_job_stops_offering_resume():
     assert ChatView._book_job_elsewhere(view, other) is None
     # the card then shows a Result without Resume / Retry
     assert not offers_resume(CardPhase("done"), RESUMED_ELSEWHERE)
+
+
+def test_on_device_models_think_when_the_request_asks_with_reasoning_effort():
+    """Owner 2026-10-30: "but i enabled the pass thinking to unknown routes toggle" - the toggle sends
+    ``reasoning_effort``; the on-device engine only read ``chat_template_kwargs.enable_thinking``."""
+    from glossarion_mobile.services.local_llm.server import wants_thinking
+
+    assert wants_thinking({"reasoning_effort": "medium"}) is True
+    assert wants_thinking({"reasoning_effort": "max"}) is True
+    assert wants_thinking({"reasoning_effort": "none"}) is False  # the GPT thinking switch off
+    assert wants_thinking({}) is False and wants_thinking(None) is False
+    # an explicit template flag wins either way
+    assert wants_thinking({"reasoning_effort": "high", "chat_template_kwargs": {"enable_thinking": False}}) is False
+    assert wants_thinking({"chat_template_kwargs": {"enable_thinking": True}}) is True

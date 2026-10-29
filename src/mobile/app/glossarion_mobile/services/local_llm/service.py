@@ -62,7 +62,7 @@ from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import engine as eng
 from glossarion_mobile.services.local_llm import hf, presets, script_ban, stem_of
 from glossarion_mobile.services.local_llm import vision as vis
-from glossarion_mobile.services.local_llm.server import ChatRun, LocalLLMError, LocalLLMServer
+from glossarion_mobile.services.local_llm.server import ChatRun, LocalLLMError, LocalLLMServer, wants_thinking
 
 log = logging.getLogger("glossarion.local_llm")
 
@@ -1038,8 +1038,7 @@ class LocalEngineService:
             stop = [stop]
         if isinstance(stop, list) and stop:
             params["stop"] = [str(s) for s in stop][:8]
-        kwargs = body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {}
-        params["enable_thinking"] = bool(kwargs.get("enable_thinking", False))
+        params["enable_thinking"] = wants_thinking(body)
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
         if scripts:
