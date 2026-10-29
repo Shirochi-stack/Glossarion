@@ -83,6 +83,8 @@ BATCH_SLIDER = (1, 50)
 #: desktop defaults when nothing is saved (``translation_temperature`` 0.3; the API call delay of a config
 #: without ``delay`` is the range 3-7 s: ``settings_rules.delay_range_text``)
 DEFAULT_TEMPERATURE = 0.3
+#: seconds after the Permissions page opens before its system dialogs come up (the page slides in first)
+PERMISSIONS_ASK_DELAY = 0.4
 #: the temperature for an on-device model (``setting_writes.ON_DEVICE_TEMPERATURE``)
 from glossarion_mobile.state.setting_writes import ON_DEVICE_TEMPERATURE as ONDEVICE_TEMPERATURE  # noqa: E402
 RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower delays send them faster: respect your "
@@ -176,6 +178,7 @@ class WelcomeScreen(Screen):
         self.on_permission_status: Optional[Callable[[], Any]] = None
         self.permission_state: dict = {}
         self._permission_check: Any = None
+        self._permissions_asked = False  # the Permissions page asked its dialogs (once per Welcome)
         self.on_try = on_try
         self.is_android = is_android
         self.is_ios = is_ios
@@ -870,9 +873,24 @@ class WelcomeScreen(Screen):
                 color=ft.Colors.ON_SURFACE_VARIANT,
             )
         )
-        if self.on_permission_status is not None and self._permission_check is None:
+        if not self._permissions_asked and (self.on_request_notifications or self.on_request_battery):
+            self._permissions_asked = True
+            self._permission_check = call_handler(self._ask_missing_permissions)
+        elif self.on_permission_status is not None and self._permission_check is None:
             self._permission_check = call_handler(self.refresh_permissions)
         return ft.Column(rows, spacing=10, scroll=ft.ScrollMode.AUTO)
+
+    async def _ask_missing_permissions(self) -> None:
+        """The Permissions page's first visit asks the dialogs itself, notifications then (Android) the battery
+        exemption, skipping what is already granted (v9.15.7 hotfix 6, owner: they "should also appear on
+        their own existing page in the welcome screen"); its buttons stay for a later try."""
+        await asyncio.sleep(PERMISSIONS_ASK_DELAY)
+        await self.refresh_permissions()
+        for key, handler in (("notifications", self.on_request_notifications),
+                             ("battery", self.on_request_battery if self.is_android else None)):
+            if handler is None or self.permission_state.get(key) or self.flow.step_id != "permissions":
+                continue  # nothing to ask, already granted, or the user moved on
+            await self._ask_permission(handler)
 
     def _permission_control(self, key: str, granted_label: str, button_label: str,
                             handler: Optional[Callable[[], Any]]) -> ft.Control:

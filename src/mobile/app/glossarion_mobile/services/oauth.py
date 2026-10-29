@@ -687,8 +687,32 @@ class OAuthBridge:
             self._set(step="error", message=str(exc))
             await self._stop_fgs()
             raise
-        self._open_device_return_page(provider, info.label)
+        await self._leave_device_page(provider, info.label)
         return await self._finished(account_id, provider)
+
+    async def _leave_device_page(self, provider: str, label: str) -> None:
+        """The approval finished in the browser: back to the app, the browser closed (v9.15.7 hotfix 6, owner:
+        the "Return to Glossarion" page after a Grok sign-in never loaded - the app's sign-in service stopped
+        right after opening it, so Android froze the app that serves it). Android starts the app's Activity
+        again over the Custom Tab (Custom Tabs have no close call); iOS closes SFSafariViewController. The
+        return page only when Android could not come back (an older native extension)."""
+        if self.is_android and self.native is not None:
+            try:
+                if await self.native.bring_to_front():
+                    return
+            except Exception as exc:
+                log.info("bringing the app back after the device sign-in failed: %s", exc)
+            self._open_device_return_page(provider, label)
+            return
+        if self.close_browser is not None:
+            try:
+                result = self.close_browser()
+                if asyncio.iscoroutine(result):
+                    await result
+                return
+            except Exception:
+                log.debug("closing the in-app browser failed", exc_info=True)
+        self._open_device_return_page(provider, label)
 
     def _open_device_return_page(self, provider: str, label: str) -> None:
         """U11 item 4: a device-code sign-in (Grok) ends on the provider's own page, so it never showed the

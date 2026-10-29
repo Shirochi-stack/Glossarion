@@ -258,28 +258,30 @@ def _values(control):
 def test_effort_runs_from_off_to_what_each_model_supports():
     gpt = _effort("gpt-5.2")
     assert (gpt.family, gpt.unknown, gpt.value) == ("gpt", False, "medium")
-    assert _values(gpt) == ["off", "low", "medium", "high", "xhigh", "max"]
-    assert [c.label for c in gpt.choices][4] == "Extra high"
+    assert _values(gpt) == ["off", "none", "low", "medium", "high", "xhigh", "max"]
+    assert [c.label for c in gpt.choices][1] == "None" and [c.label for c in gpt.choices][5] == "Extra high"
     assert gpt.choice("high").writes == (("enable_gpt_thinking", True), ("gpt_effort", "high"))
     assert gpt.choice("off").writes == (("enable_gpt_thinking", False),)
     assert _effort("gpt-5.2", enable_gpt_thinking=False).value == "off"
-    assert _effort("gpt-5.2", gpt_effort="none").value == "off"
-    # GPT-6 cannot turn reasoning off (the backend sends low for none)
+    assert _effort("gpt-5.2", gpt_effort="none").value == "none"  # desktop's none, apart from Off (hotfix 6)
+    assert gpt.choice("none").writes == (("enable_gpt_thinking", True), ("gpt_effort", "none"))
+    # authgpt / GPT-6: Off (the thinking switch) and None as well (v9.15.7 hotfix 6; the backend sends low for none)
     luna = _effort("authgpt/gpt-6-luna", enable_gpt_thinking=False)
-    assert "off" not in _values(luna) and luna.value == "low"
-    # Gemini 3+: levels, never off; Pro has no minimal
+    assert _values(luna)[:2] == ["off", "none"] and luna.value == "off"
+    assert _effort("authgpt/gpt-6-luna", gpt_effort="none").value == "none"
+    # Gemini 3+: Off then levels; Pro has no minimal
     pro = _effort("authgem/gemini-3-pro")
-    assert (pro.family, _values(pro), pro.value) == ("gemini", ["low", "medium", "high"], "high")
-    assert _values(_effort("gemini-3-flash")) == ["minimal", "low", "medium", "high"]
-    assert _effort("gemini-3-flash", enable_gemini_thinking=False).value == "minimal"
+    assert (pro.family, _values(pro), pro.value) == ("gemini", ["off", "low", "medium", "high"], "high")
+    assert _values(_effort("gemini-3-flash")) == ["off", "minimal", "low", "medium", "high"]
+    assert _effort("gemini-3-flash", enable_gemini_thinking=False).value == "off"
     assert pro.choice("medium").writes == (("enable_gemini_thinking", True), ("thinking_level", "medium"))
-    # Gemini 2.x: budgets; 2.5 Pro cannot turn it off (its lowest budget is 128)
+    # Gemini 2.x: budgets; Off on 2.5 Pro too (the switch)
     flash = _effort("gemini-2.5-flash", thinking_budget=8192)
     assert _values(flash) == ["off", "dynamic", "budget:1024", "budget:8192", "budget:24576"]
     assert flash.value == "budget:8192"
     assert flash.choice("dynamic").writes == (("enable_gemini_thinking", True), ("thinking_budget", -1))
     old_pro = _effort("gemini-2.5-pro", enable_gemini_thinking=False)
-    assert "off" not in _values(old_pro) and old_pro.value == "budget:128"
+    assert _values(old_pro)[0] == "off" and old_pro.value == "off"
     # Claude: adaptive effort (4.7+), budgets before; a stored budget of its own is listed
     opus = _effort("authcd/claude-opus-4-7", enable_anthropic_thinking=True, anthropic_effort="xhigh")
     assert (_values(opus), opus.value) == (["off", "low", "medium", "high", "xhigh", "max"], "xhigh")

@@ -290,6 +290,12 @@ class GlossarionNativeService extends FletService {
           return _isAndroid
               ? (await _platform('move_task_to_back', args)) == true
               : false;
+        case 'bring_to_front':
+          // A finished Grok sign-in: the app comes back over its Custom Tab
+          // (closing it); iOS closes SFSafariViewController from Python.
+          return _isAndroid
+              ? (await _platform('bring_to_front', args)) == true
+              : false;
         case 'unfocus':
           // A tap outside a text field closes the keyboard (hotfix 5); pure
           // Flutter, so every platform answers.
@@ -483,6 +489,7 @@ class GlossarionNativeService extends FletService {
       case 'start_continued_processing':
       case 'update_continued_processing':
       case 'unfocus':
+      case 'bring_to_front':
       case 'move_task_to_back':
         return false;
       default:
