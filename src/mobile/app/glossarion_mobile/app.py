@@ -69,6 +69,8 @@ from glossarion_mobile.ui.theme import Appearance, apply_theme, is_dark
 __all__ = ["GlossarionApp", "main"]
 
 log = logging.getLogger("glossarion.app")
+#: seconds the first-run cover stays after the Welcome is pushed (its page slides in meanwhile)
+FIRST_RUN_COVER_HOLD = 0.7
 
 _HUB_INTROS = {
     "settings": "Settings mirror the desktop Other Settings. Pages arrive milestone by milestone; "
@@ -601,13 +603,17 @@ class GlossarionApp:
         cover, self._first_run_cover = getattr(self, "_first_run_cover", None), None
         if cover is None:
             return
-        try:
-            cover.opacity = 0  # fades over the Welcome (or the chat), then leaves the overlay
-            self.page.update()
-        except Exception:
-            pass
+        # the Welcome page slides in after its route is pushed: fading at once showed the bare chat for a moment
+        # (emulator, hotfix 5 build), so the cover stays until the slide is done
+        hold = FIRST_RUN_COVER_HOLD if self.shell.current_route.startswith("/welcome") else 0.0
 
         async def remove() -> None:
+            await asyncio.sleep(hold)
+            try:
+                cover.opacity = 0  # fades over the Welcome (or the chat), then leaves the overlay
+                self.page.update()
+            except Exception:
+                pass
             await asyncio.sleep(motion.duration() / 1000 + 0.05)
             try:
                 self.page.overlay.remove(cover)
