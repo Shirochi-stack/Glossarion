@@ -41,6 +41,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui import motion
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
@@ -184,6 +185,7 @@ class WelcomeScreen(Screen):
         self.page = page
         self.login_sheet: Any = None
         self.provider_status: dict = {}
+        self.signing_in: set = set()  # providers whose sign-in is under way (their button spins)
         self.catalog = catalog
         self.current_model = current_model
         self.on_set_model = on_set_model
@@ -430,26 +432,27 @@ class WelcomeScreen(Screen):
                        ReasonChip(reason="Settings › Endpoints")], wrap=True, key="welcome-local")
 
     def _sign_in_row(self, provider: str, label: str) -> ft.Control:
-        """One sign-in cell: half the row (two per row on a phone); signed in, the whole row."""
-        control = self._sign_in_control(provider, label)
-        return ft.Container(content=control, col={"xs": 12 if provider in self.provider_status else 6})
+        """One sign-in cell: half the row (two per row on a phone), signed in or not."""
+        return ft.Container(content=self._sign_in_control(provider, label), col={"xs": 6})
 
     def _sign_in_control(self, provider: str, label: str) -> ft.Control:
+        """The provider's button, in place through the whole sign-in (v9.15.7 hotfix 4, owner: it "stayed silent
+        and disappeared"): it spins while the sign-in is under way, then shows a checkmark and opens the
+        ModelSheet on that provider's models; the model check's line sits under it."""
         short = label.replace("Sign in with ", "")
-        done = self.provider_status.get(provider) if provider in self.provider_status else None
+        small = provider in SMALL_LABELS
         if provider in self.provider_status:
+            done = self.provider_status.get(provider) or {}
             who = done.get("email") or done.get("name") or ""
-            row: list[ft.Control] = [ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
-                                     ft.Text(f"{short} signed in" + (f" · {who}" if who else ""))]
-            if self.on_use_provider is not None or self.on_choose_model is not None:
-                row.append(ft.TextButton(content="Change model", key=f"welcome-use-{provider}",
-                                         on_click=lambda e, p=provider: self.use_provider(p)))
+            tip = f"{short} signed in" + (f" · {who}" if who else "") + " · change model"
+            lines: list[ft.Control] = [self._cell_button(short, tip, lambda e, p=provider: self.use_provider(p),
+                                                         f"welcome-use-{provider}", small=small, state="done")]
             note = self.model_notes.get(provider)
-            lines: list[ft.Control] = [ft.Row(row, wrap=True)]
             if note:
                 lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                      key=f"welcome-model-{provider}"))
             return ft.Column(lines, spacing=2, tight=True, key=f"welcome-signed-{provider}")
+        state = "busy" if provider in self.signing_in else "idle"
         if provider == "authds":  # DeepSeek's own site in the in-app browser (not an OAuth sign-in)
             from glossarion_mobile.services import webview_bridge
 
@@ -458,22 +461,35 @@ class WelcomeScreen(Screen):
                 return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
                                ReasonChip(reason="Needs the in-app browser", detail=reason)],
                               wrap=True, key="welcome-signin-authds")
-            return self._cell_button(short, label, lambda e: self.open_deepseek_sign_in(), "welcome-signin-authds")
+            return self._cell_button(short, label, lambda e: self.open_deepseek_sign_in(), "welcome-signin-authds",
+                                     state=state)
         if self.oauth is None:
             return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
                            ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
         return self._cell_button(short, label, lambda e, p=provider: self.open_sign_in(p),
-                                 f"welcome-signin-{provider}", small=provider in SMALL_LABELS)
+                                 f"welcome-signin-{provider}", small=small, state=state)
 
     @staticmethod
     def _cell_button(text: str, tooltip: str, on_click: Callable[[Any], Any], key: str,
-                     small: bool = False) -> ft.Control:
+                     small: bool = False, state: str = "idle") -> ft.Control:
         """A half-row button: the provider's name only (the section title says what it does).
-        ``small`` uses smaller type for a long name."""
+        ``small`` uses smaller type for a long name. ``state``: "busy" spins (and ignores taps), "done" shows
+        a checkmark; the label cross-fades between them."""
         style = ft.TextThemeStyle.LABEL_SMALL if small else None
-        return ft.Row([ft.OutlinedButton(content=ft.Text(text, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
-                                                         theme_style=style),
-                                         tooltip=tooltip, on_click=on_click, key=key, expand=True,
+        name = ft.Text(text, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, theme_style=style,
+                       expand=True, expand_loose=True)
+        mark: Optional[ft.Control] = None
+        if state == "busy":
+            mark = ft.ProgressRing(width=14, height=14, stroke_width=2)
+        elif state == "done":
+            mark = ft.Icon(ft.Icons.CHECK_CIRCLE, size=16, color=ft.Colors.PRIMARY)
+        label = ft.Row([mark, name] if mark is not None else [name], spacing=6, tight=True,
+                       alignment=ft.MainAxisAlignment.CENTER, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                       key=f"{state}:{key}")
+        content = ft.AnimatedSwitcher(content=label, duration=motion.duration(), reverse_duration=motion.duration(),
+                                      transition=motion.switcher_transition(ft.AnimatedSwitcherTransition.SCALE))
+        return ft.Row([ft.OutlinedButton(content=content, tooltip=tooltip, key=key, expand=True,
+                                         on_click=None if state == "busy" else on_click, disabled=state == "busy",
                                          style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8)))])
 
     def _keyless_row(self, provider: str, label: str) -> ft.Control:
@@ -1010,7 +1026,8 @@ class WelcomeScreen(Screen):
         from glossarion_mobile.ui.screens.accounts import LoginSheet
 
         sheet = LoginSheet(self.oauth, provider=provider, account_id=0, copy_text=self.copy_text,
-                           on_done=lambda status, p=provider: self._provider_signed_in(p, status))
+                           on_done=lambda status, p=provider: self._provider_signed_in(p, status),
+                           on_closed=lambda p=provider: self._sign_in_ended(p))
         self.login_sheet = sheet
         page = self.page
         if page is None and self.body is not None:
@@ -1019,8 +1036,19 @@ class WelcomeScreen(Screen):
             except Exception:
                 page = None
         if page is not None:
+            self._sign_in_started(provider)
             sheet.show(page)
         return sheet
+
+    def _sign_in_started(self, provider: str) -> None:
+        self.signing_in.add(provider)
+        self.render()
+
+    def _sign_in_ended(self, provider: str) -> None:
+        """The sign-in sheet went away without a sign-in: the button is tappable again."""
+        if provider in self.signing_in:
+            self.signing_in.discard(provider)
+            self.render()
 
     def open_deepseek_sign_in(self) -> Any:
         """DeepSeek: the same in-app browser sheet as Accounts; it closes by itself once signed in."""
@@ -1039,19 +1067,22 @@ class WelcomeScreen(Screen):
 
     async def _deepseek_sign_in(self, page: Any) -> None:
         """Already signed in to DeepSeek (Accounts, an earlier visit): use it at once; else the sign-in sheet,
-        which reports the sign-in when it closes by itself, or when it is closed after signing in."""
-        from glossarion_mobile.ui.screens.accounts import deepseek_session_present, show_deepseek_sign_in
+        which reports the sign-in when it closes by itself, or when it is closed after signing in. The slow
+        check (a hidden DeepSeek page) runs only when a sign-in was seen before; the button spins meanwhile."""
+        from glossarion_mobile.ui.screens.accounts import (deepseek_session_marked, deepseek_session_present,
+                                                           show_deepseek_sign_in)
 
-        self.model_notes["authds"] = "Checking your DeepSeek sign-in…"
-        self.render()
-        if await deepseek_session_present():
+        if "authds" in self.signing_in:
+            return
+        self._sign_in_started("authds")
+        if deepseek_session_marked() and await deepseek_session_present():
             self._provider_signed_in("authds", {})
             return
-        self.model_notes.pop("authds", None)
-        self.render()
-        show_deepseek_sign_in(page, on_signed_in=lambda: self._provider_signed_in("authds", {}))
+        show_deepseek_sign_in(page, on_signed_in=lambda: self._provider_signed_in("authds", {}),
+                              on_closed=lambda: self._sign_in_ended("authds"))
 
     def _provider_signed_in(self, provider: str, status: dict) -> None:
+        self.signing_in.discard(provider)
         self.provider_status[provider] = dict(status or {})
         self.flow.signed_in = True
         self.flow.skipped_sign_in = False

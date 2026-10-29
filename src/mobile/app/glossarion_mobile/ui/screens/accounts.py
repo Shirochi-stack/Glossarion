@@ -492,9 +492,12 @@ class LoginSheet:
         provider: str = "authgpt",
         account_id: Optional[int] = None,
         copy_text: Optional[Callable[[str], Any]] = None,
+        on_closed: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._page: Any = None
         self._on_done = on_done
+        self._on_closed = on_closed  # once, when the sheet goes away without a sign-in (Welcome's busy button)
+        self._ended = False
         info = PROVIDER_INFO[provider]
         self.panel = LoginPanel(oauth, provider=provider, account_id=account_id, on_done=self._done,
                                 on_cancel=self.close, autostart=autostart, copy_text=copy_text)
@@ -516,8 +519,23 @@ class LoginSheet:
             scrollable=True,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         )
+        previous = getattr(self.dialog, "on_dismiss", None)
+
+        def dismissed(e: Any = None) -> None:
+            if callable(previous):
+                previous(e)
+            self._end()
+        self.dialog.on_dismiss = dismissed
+
+    def _end(self) -> None:
+        if self._ended:
+            return
+        self._ended = True
+        if self._on_closed is not None:
+            call_handler(self._on_closed)
 
     def _done(self, status: dict) -> None:
+        self._ended = True  # a sign-in, not a close
         self.close()
         if self._on_done is not None:
             self._on_done(status)
@@ -530,6 +548,7 @@ class LoginSheet:
         # By identity: pop_dialog() would close a newer SnackBar (e.g. "Copied") instead of the sheet.
         if self._page is not None:
             close_dialog(self._page, self.dialog)
+        self._end()
 
 
 class GcpProjectPicker:
@@ -679,15 +698,31 @@ async def deepseek_session_present(run_io: Optional[Callable[..., Any]] = None) 
         return False
 
 
+def deepseek_session_marked() -> bool:
+    """The instant DeepSeek hint (``authds_auth.has_session``: the ``.signed_in`` marker every check that saw a
+    session writes). Without it there is nothing to check before the sign-in sheet: the full check
+    (``deepseek_session_present``) loads DeepSeek in a hidden page and waits up to 10 s for a session (v9.15.7
+    hotfix 4, owner: the Welcome's DeepSeek tap took 5 s to respond). The sheet's own check still closes it at
+    once when a session exists without the marker."""
+    try:
+        import authds_auth
+
+        return bool(authds_auth.has_session())
+    except Exception:
+        return False
+
+
 #: the DeepSeek sign-in sheet's key (one open at a time: ``show_deepseek_sign_in``)
 DEEPSEEK_SHEET_KEY = "authds-signin-sheet"
 
 
 def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = None,
-                          on_signed_in: Optional[Callable[[], Any]] = None) -> Any:
+                          on_signed_in: Optional[Callable[[], Any]] = None,
+                          on_closed: Optional[Callable[[], Any]] = None) -> Any:
     """chat.deepseek.com in a visible in-app browser (Accounts and the Welcome). The session is checked every
     few seconds while it is open and the sheet closes by itself once DeepSeek is signed in, then calls
-    ``on_signed_in`` (no "I'm signed in" button to mis-tap)."""
+    ``on_signed_in`` (no "I'm signed in" button to mis-tap). ``on_closed`` runs once when it ended without a
+    sign-in (after the closing check)."""
     # one at a time (v9.15.7 hotfix 3, owner: sign-in "crashes the mobile app"): a second tap before the first
     # sheet was drawn opened a second sheet with the same key; Flet diffs a keyed pair as frozen, and the
     # frozen sheet's dismiss raised "Frozen controls cannot be updated", leaving both sheets stuck
@@ -725,6 +760,11 @@ def show_deepseek_sign_in(page: Any, *, run_io: Optional[Callable[..., Any]] = N
         # closed with ✕ or swiped away right after signing in (before the next check): still a sign-in
         if await deepseek_session_present(run_io):
             await signed_in()
+        elif on_closed is not None and not sheet_ref.get("ended"):
+            sheet_ref["ended"] = True
+            result = on_closed()
+            if asyncio.iscoroutine(result):
+                await result
 
     def close(e: Any = None) -> None:
         was_open = sheet_ref.get("open")

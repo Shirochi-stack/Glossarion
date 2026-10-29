@@ -973,9 +973,11 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     signed = rows["welcome-signed-authgem"]
     texts = [getattr(c, "value", "") for c in signed.controls]
     assert any("gemini-3.5-flash" in str(v) for v in texts), texts
-    use = next(c for c in signed.controls[0].controls if getattr(c, "key", None) == "welcome-use-authgem")
+    # hotfix 4: the provider's own button stays, with a checkmark; it opens the ModelSheet on its models
+    use = rows["welcome-use-authgem"]
+    assert "change model" in use.tooltip and "gem@example.com" in use.tooltip
     use.on_click(None)
-    assert queries == ["authgem"] and use.content == "Change model"
+    assert queries == ["authgem"]
     # the ModelSheet's pick (the global model, ChatView.open_model_sheet(global_scope=True)) comes back to that row
     screen.model_chosen("authgem/gemini-3.5-pro")
     assert screen.model_notes["authgem"] == "✓ Using authgem/gemini-3.5-pro" and screen.changing_provider is None

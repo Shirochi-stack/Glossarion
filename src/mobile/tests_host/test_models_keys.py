@@ -222,6 +222,7 @@ def test_auth_menu_offers_deepseek(monkeypatch):
         return True
 
     monkeypatch.setattr(accounts, "deepseek_session_present", present)
+    monkeypatch.setattr(accounts, "deepseek_session_marked", lambda: True)  # hotfix 4: checked only when marked
     asyncio.run(row.on_select())
     assert selected == [("model", "authds/flash", False)]
 
