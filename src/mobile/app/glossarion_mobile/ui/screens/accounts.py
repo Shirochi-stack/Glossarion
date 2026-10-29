@@ -286,7 +286,10 @@ class LoginPanel(ft.Column):
                 [ft.Text("Approve this sign-in on the xAI page. If it asks for a code, enter:",
                          theme_style=ft.TextThemeStyle.BODY_SMALL),
                  self.code_text,
-                 ft.Row([self.copy_button, self.verify_button], wrap=True, spacing=4)],
+                 ft.Row([self.copy_button, self.verify_button], wrap=True, spacing=4),
+                 ft.Text("Signed in on xAI but no Approve button? Tap Open verification page.",
+                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                         key="device-approve-hint")],
                 spacing=6, tight=True,
             ),
         )

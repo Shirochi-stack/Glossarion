@@ -393,6 +393,18 @@ def sign_in_label(provider: str, account_id: int = 0) -> str:
     return f"{name} #{account_id}" if account_id else name
 
 
+def _welcome_pending(app: Any) -> bool:
+    """The first-run Welcome is (or is about to be) on screen: the launch permission dialogs wait for it. The
+    chat feature installs after this one; until it does, a home launch with no finished Welcome counts."""
+    feature = getattr(app, "chat_feature", None)
+    try:
+        if feature is not None:
+            return bool(feature.needs_welcome())
+        return getattr(app, "_first_run_cover", None) is not None
+    except Exception:
+        return False
+
+
 class JobsFeature:
     def __init__(self, app: Any, *, service: Optional[JobService] = None) -> None:
         self.app = app
@@ -468,7 +480,10 @@ class JobsFeature:
         feature = cls(app)
         feature.attach(app)
         feature.spawn(feature.recover())
-        feature.spawn(feature.background.ask_permissions_on_launch())  # U11 item 8: the system dialogs
+        # U11 item 8: the system dialogs; never over the first-run Welcome (v9.15.7 hotfix 5, owner: they came up a
+        # second after it, under a finger reaching for Sign in): it asks on its Permissions step, and when it
+        # closes the dialogs it did not ask come up (``ChatFeature.welcome_screen`` done)
+        feature.spawn(feature.background.ask_permissions_on_launch(defer=lambda: _welcome_pending(app)))
         return feature
 
     def attach(self, app: Any) -> None:

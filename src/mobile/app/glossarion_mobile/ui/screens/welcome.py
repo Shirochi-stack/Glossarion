@@ -457,6 +457,7 @@ class WelcomeScreen(Screen):
             from glossarion_mobile.services import webview_bridge
 
             available, reason = webview_bridge.availability()
+            self._authds_drawn_available = available
             if not available:
                 return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
                                ReasonChip(reason="Needs the in-app browser", detail=reason)],
@@ -1039,6 +1040,18 @@ class WelcomeScreen(Screen):
             self._sign_in_started(provider)
             sheet.show(page)
         return sheet
+
+    def refresh_availability(self) -> bool:
+        """The app installed the in-app browser after this page was drawn (the Welcome opens before every
+        feature is up, v9.15.7 hotfix 5): draw the DeepSeek button now. True when it re-rendered."""
+        from glossarion_mobile.services import webview_bridge
+
+        if getattr(self, "_authds_drawn_available", True) or self.flow.step_id != "sign_in":
+            return False
+        if not webview_bridge.availability()[0]:
+            return False
+        self.render()
+        return True
 
     def _sign_in_started(self, provider: str) -> None:
         self.signing_in.add(provider)

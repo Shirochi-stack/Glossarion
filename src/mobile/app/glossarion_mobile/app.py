@@ -55,6 +55,7 @@ from glossarion_mobile.services.haptics import Haptics
 from glossarion_mobile.services.native import NativeBridge
 from glossarion_mobile.state.app_state import AppState
 from glossarion_mobile.state.chat_index import ChatSummary
+from glossarion_mobile.ui import motion
 from glossarion_mobile.ui.chat.chat_view import ChatView
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import show_snackbar
@@ -68,6 +69,8 @@ from glossarion_mobile.ui.theme import Appearance, apply_theme, is_dark
 __all__ = ["GlossarionApp", "main"]
 
 log = logging.getLogger("glossarion.app")
+#: seconds the first-run cover stays after the Welcome is pushed (its page slides in meanwhile)
+FIRST_RUN_COVER_HOLD = 0.7
 
 _HUB_INTROS = {
     "settings": "Settings mirror the desktop Other Settings. Pages arrive milestone by milestone; "
@@ -253,6 +256,7 @@ class GlossarionApp:
         page.on_view_pop = self.on_view_pop
         page.on_resize = self.on_resize
         page.on_app_lifecycle_state_change = self.on_lifecycle
+        self._first_run_cover = self._cover_for_first_run()
         page.update()
 
         rb.set_url_opener(self.opener.open_threadsafe)
@@ -269,6 +273,12 @@ class GlossarionApp:
         await self._install_chat()  # chat history (decrypted keys), runs, sign-in, welcome
         await self._install_models_keys()  # model catalog + ModelSheet services, keys, endpoints
         await self._install_pages()  # accounts (all providers), profiles, prefill, data pages
+        # The Welcome as soon as it can be built (chat, models & keys, pages), not after every feature below
+        # (v9.15.7 hotfix 5, owner: it took ~5 s and the chat showed first); deep links still wait for them.
+        home_launch = self._launch_route_is_home(page.route)
+        if home_launch:
+            await self._maybe_welcome(await self.dispatch_route(page.route, source="initial"))
+        self._drop_first_run_cover()
         await self._install_library()  # Library shelves, Book page, Progress manager, intents
         await self._install_reader()  # /reader/<bid> (after the Library: it resolves book ids)
         await self._install_glossary()  # Glossary Manager + the Library's glossary hooks (after the Library)
@@ -283,8 +293,10 @@ class GlossarionApp:
         self._install_keyboard()  # Ctrl+= / Ctrl+- / Ctrl+0 text size on hardware keyboards (U9)
         self._install_diagnostics()  # HTTP log / payload / memory switches, cache cap, freeze watchdog (U9)
         self.dispatcher.spawn(self._after_ready())
-        match = await self.dispatch_route(page.route, source="initial")
-        await self._maybe_welcome(match)
+        if not home_launch:
+            match = await self.dispatch_route(page.route, source="initial")
+            await self._maybe_welcome(match)
+        self._refresh_welcome()
 
     async def _install_backend_keys(self) -> None:
         """SecureStorage keys -> ``set_key_material`` / ``set_symmetric_key`` (plan §4 bootstrap)."""
@@ -556,6 +568,80 @@ class GlossarionApp:
         except Exception:
             log.exception("keyboard shortcuts unavailable")
 
+    @staticmethod
+    def _launch_route_is_home(route: Optional[str]) -> bool:
+        match = parse_route(route or "/")
+        return match is not None and match.name == "home"
+
+    def _cover_for_first_run(self) -> Any:
+        """A fresh install opens on the Welcome: cover the chat until it is on screen (v9.15.7 hotfix 5, owner:
+        "the first thing I see is the chat window"). Only on a home launch whose ``mobile_state.json`` has no
+        finished Welcome; ``_drop_first_run_cover`` lifts it once the Welcome is up (or not needed)."""
+        from glossarion_mobile.state.prefs import pref_on_disk
+        from glossarion_mobile.ui.chat.integration import WELCOME_PREF
+        from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
+
+        try:
+            data = getattr(self.paths, "data", None)
+            if data is None or not self._launch_route_is_home(self.page.route) or pref_on_disk(data, WELCOME_PREF):
+                return None
+            cover = ft.Container(
+                content=ft.Column([ft.Image(src=HALGAKOS_ASSET, width=96, height=96),
+                                   ft.ProgressRing(width=24, height=24, stroke_width=3),
+                                   ft.Text("Setting up Glossarion…", theme_style=ft.TextThemeStyle.BODY_MEDIUM)],
+                                  horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                  alignment=ft.MainAxisAlignment.CENTER, spacing=16, tight=True),
+                alignment=ft.Alignment.CENTER, bgcolor=ft.Colors.SURFACE, expand=True,
+                animate_opacity=motion.duration(), key="first-run-cover")
+            self.page.overlay.append(cover)
+            # the overlay is drawn inside the top view's body: while the Welcome slides in, the home view under
+            # it showed its bare chat for a frame (and its app bar above the cover), so those hide until it lifts
+            view = self.shell.root_view
+            self._first_run_hidden = [c for c in [view.appbar, *view.controls] if c is not None and c.visible]
+            for control in self._first_run_hidden:
+                control.visible = False
+            return cover
+        except Exception:
+            log.exception("first-run cover unavailable")
+            return None
+
+    def _drop_first_run_cover(self) -> None:
+        cover, self._first_run_cover = getattr(self, "_first_run_cover", None), None
+        if cover is None:
+            return
+        # the Welcome page slides in after its route is pushed: fading at once showed the bare chat for a moment
+        # (emulator, hotfix 5 build), so the cover stays until the slide is done
+        hold = FIRST_RUN_COVER_HOLD if self.shell.current_route.startswith("/welcome") else 0.0
+
+        hidden, self._first_run_hidden = getattr(self, "_first_run_hidden", []), []
+
+        async def remove() -> None:
+            await asyncio.sleep(hold)
+            try:
+                for control in hidden:
+                    control.visible = True
+                cover.opacity = 0  # fades over the Welcome (or the chat), then leaves the overlay
+                self.page.update()
+            except Exception:
+                pass
+            await asyncio.sleep(motion.duration() / 1000 + 0.05)
+            try:
+                self.page.overlay.remove(cover)
+                self.page.update()
+            except Exception:
+                pass
+        self.dispatcher.spawn(remove())
+
+    def _refresh_welcome(self) -> None:
+        """The features installed after an early Welcome (the in-app browser for DeepSeek) are drawn now."""
+        screen = getattr(self.chat_feature, "_welcome_screen", None)
+        refresh = getattr(screen, "refresh_availability", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                log.debug("refreshing the Welcome failed", exc_info=True)
+
     async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
         """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome
         flow, only when the app opened on the chat home (never over a deep link or the
@@ -565,6 +651,7 @@ class GlossarionApp:
             return
         try:
             if feature.welcome_shown or not feature.needs_welcome():
+                feature.remember_welcome_done()  # no first-run cover on the next launch
                 return
             feature.welcome_shown = True
             await self.navigate(build_route("welcome"))
