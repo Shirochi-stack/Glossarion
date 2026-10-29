@@ -13,9 +13,10 @@ supports follows the backend's own rules. Every list starts with Off: the family
 off (v9.15.7 hotfix 6, owner: "should've included off, which just maps to the thinking toggle state being off"),
 also for the models that cannot send a "none" effort.
 
-* GPT family (OpenAI, ChatGPT, OpenRouter, NIM, OpenCode): Off · Low · Medium · High · Extra high · Max
-  (``enable_gpt_thinking`` + ``gpt_effort``); a stored ``none`` shows as Low on models that cannot send it
-  (GPT-6: ``reasoning_compatibility.NO_NONE_SUPPORT``, the backend sends ``low``).
+* GPT family (OpenAI, ChatGPT, OpenRouter, NIM, OpenCode): Off · None · Low · Medium · High · Extra high · Max
+  (``enable_gpt_thinking`` + ``gpt_effort``, desktop's effort list; v9.15.7 hotfix 6, owner: "why is authgpt
+  missing none there? Add it too"). GPT-6 cannot send ``none``: the backend sends ``low``
+  (``reasoning_compatibility.normalize_none_effort``).
 * Gemini 3 and later (``gemini_policy.uses_gemini_thinking_level``): Off · Minimal · Low · Medium · High
   (``thinking_level``; Pro has no Minimal). Gemini 2.x / Gemma: Off · Dynamic · token budgets
   (``thinking_budget``).
@@ -49,17 +50,15 @@ PASS_UNKNOWN_KEY = "pass_thinking_all_openai"
 PASS_UNKNOWN_LABEL = "Pass thinking to unknown routes"
 NO_THINKING_PROVIDERS = frozenset({"deepl", "google-translate", "google-translate-free"})
 
-LEVEL_LABELS = {"minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
+LEVEL_LABELS = {"none": "None", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
                 "max": "Max"}
-GPT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+GPT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 GEMINI_LEVELS = ("minimal", "low", "medium", "high")
 ANTHROPIC_LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEEPSEEK_LEVELS = ("low", "high", "max")
 #: token budgets offered for budget-based models (a stored budget that is none of them is listed too)
 GEMINI_BUDGETS = ((1024, "Low"), (8192, "Medium"), (24576, "High"))
 ANTHROPIC_BUDGETS = ((4096, "Low"), (10000, "Medium"), (32000, "High"))
-#: reasoning_compatibility.NO_NONE_SUPPORT when the backend is not importable (host tests without src/)
-_NO_NONE_FALLBACK = (r"(?:^|/)gpt-?6(?:[.-]|$)",)
 
 
 @dataclass(frozen=True)
@@ -106,17 +105,6 @@ def _bare(model: str) -> str:
     return str(model or "").strip().lower().rsplit("/", 1)[-1]
 
 
-def _no_none(model: str) -> bool:
-    try:
-        from reasoning_compatibility import NO_NONE_SUPPORT  # shared backend
-    except Exception:
-        patterns: tuple = _NO_NONE_FALLBACK
-    else:
-        patterns = tuple(NO_NONE_SUPPORT)
-    name = str(model or "").strip().lower()
-    return any(re.search(pattern, name) for pattern in patterns)
-
-
 def _uses_level(model: str) -> bool:
     try:
         from gemini_policy import uses_gemini_thinking_level
@@ -156,12 +144,7 @@ def _gpt(model: str, effective: Callable[[str], Any], *, unknown: bool) -> Effor
     enabled = _bool(effective("enable_gpt_thinking"))
     effort = str(effective("gpt_effort") or "medium").strip().lower()
     choices = [_off("enable_gpt_thinking")] + _levels("enable_gpt_thinking", "gpt_effort", GPT_LEVELS)
-    if not enabled:
-        value = "off"
-    elif effort in GPT_LEVELS:
-        value = effort
-    else:  # "none": what the backend sends
-        value = "low" if _no_none(model) else "off"
+    value = (effort if effort in GPT_LEVELS else "medium") if enabled else "off"
     return EffortControl("gpt", tuple(choices), value, unknown=unknown,
                          pass_unknown=_bool(effective(PASS_UNKNOWN_KEY)) if unknown else False)
 

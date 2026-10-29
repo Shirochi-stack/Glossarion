@@ -258,16 +258,17 @@ def _values(control):
 def test_effort_runs_from_off_to_what_each_model_supports():
     gpt = _effort("gpt-5.2")
     assert (gpt.family, gpt.unknown, gpt.value) == ("gpt", False, "medium")
-    assert _values(gpt) == ["off", "low", "medium", "high", "xhigh", "max"]
-    assert [c.label for c in gpt.choices][4] == "Extra high"
+    assert _values(gpt) == ["off", "none", "low", "medium", "high", "xhigh", "max"]
+    assert [c.label for c in gpt.choices][1] == "None" and [c.label for c in gpt.choices][5] == "Extra high"
     assert gpt.choice("high").writes == (("enable_gpt_thinking", True), ("gpt_effort", "high"))
     assert gpt.choice("off").writes == (("enable_gpt_thinking", False),)
     assert _effort("gpt-5.2", enable_gpt_thinking=False).value == "off"
-    assert _effort("gpt-5.2", gpt_effort="none").value == "off"
-    # GPT-6: Off is the thinking switch turned off (v9.15.7 hotfix 6); a stored "none" is sent as low
+    assert _effort("gpt-5.2", gpt_effort="none").value == "none"  # desktop's none, apart from Off (hotfix 6)
+    assert gpt.choice("none").writes == (("enable_gpt_thinking", True), ("gpt_effort", "none"))
+    # authgpt / GPT-6: Off (the thinking switch) and None as well (v9.15.7 hotfix 6; the backend sends low for none)
     luna = _effort("authgpt/gpt-6-luna", enable_gpt_thinking=False)
-    assert _values(luna)[0] == "off" and luna.value == "off"
-    assert _effort("authgpt/gpt-6-luna", gpt_effort="none").value == "low"
+    assert _values(luna)[:2] == ["off", "none"] and luna.value == "off"
+    assert _effort("authgpt/gpt-6-luna", gpt_effort="none").value == "none"
     # Gemini 3+: Off then levels; Pro has no minimal
     pro = _effort("authgem/gemini-3-pro")
     assert (pro.family, _values(pro), pro.value) == ("gemini", ["off", "low", "medium", "high"], "high")
