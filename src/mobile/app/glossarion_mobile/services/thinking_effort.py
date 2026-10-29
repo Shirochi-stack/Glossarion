@@ -9,15 +9,16 @@ this compact. Effort dropdown + pass thinking to unknown routes toggle".
 Settings › Thinking & reasoning show (``model_catalog.THINKING_FIELDS``) and folds a family's enable switch
 and its effort into one list; a choice's ``writes`` are what a pick stores (the caller writes them through
 ``setting_writes.write_settings``, so the full sheet and Settings show the same values). What a model
-supports follows the backend's own rules:
+supports follows the backend's own rules. Every list starts with Off: the family's thinking switch turned
+off (v9.15.7 hotfix 6, owner: "should've included off, which just maps to the thinking toggle state being off"),
+also for the models that cannot send a "none" effort.
 
 * GPT family (OpenAI, ChatGPT, OpenRouter, NIM, OpenCode): Off · Low · Medium · High · Extra high · Max
-  (``enable_gpt_thinking`` + ``gpt_effort``); models that cannot turn reasoning off (GPT-6:
-  ``reasoning_compatibility.NO_NONE_SUPPORT``, the backend sends ``low`` for ``none``) have no Off.
-* Gemini 3 and later (``gemini_policy.uses_gemini_thinking_level``): Minimal · Low · Medium · High
-  (``thinking_level``; no Off: the backend sends the lowest level for a disabled budget; Pro has no
-  Minimal). Gemini 2.x / Gemma: Off · Dynamic · token budgets (``thinking_budget``; 2.5 Pro cannot turn it
-  off, its lowest budget is 128).
+  (``enable_gpt_thinking`` + ``gpt_effort``); a stored ``none`` shows as Low on models that cannot send it
+  (GPT-6: ``reasoning_compatibility.NO_NONE_SUPPORT``, the backend sends ``low``).
+* Gemini 3 and later (``gemini_policy.uses_gemini_thinking_level``): Off · Minimal · Low · Medium · High
+  (``thinking_level``; Pro has no Minimal). Gemini 2.x / Gemma: Off · Dynamic · token budgets
+  (``thinking_budget``).
 * Claude: adaptive models (``temperature_compatibility.claude_uses_adaptive_thinking``, or Force adaptive
   on) Off · Low ... Max (``anthropic_effort``); older ones Off · token budgets
   (``anthropic_thinking_budget``); both behind ``enable_anthropic_thinking``.
@@ -56,7 +57,6 @@ ANTHROPIC_LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEEPSEEK_LEVELS = ("low", "high", "max")
 #: token budgets offered for budget-based models (a stored budget that is none of them is listed too)
 GEMINI_BUDGETS = ((1024, "Low"), (8192, "Medium"), (24576, "High"))
-GEMINI_25_PRO_MIN_BUDGET = 128
 ANTHROPIC_BUDGETS = ((4096, "Low"), (10000, "Medium"), (32000, "High"))
 #: reasoning_compatibility.NO_NONE_SUPPORT when the backend is not importable (host tests without src/)
 _NO_NONE_FALLBACK = (r"(?:^|/)gpt-?6(?:[.-]|$)",)
@@ -155,13 +155,13 @@ def _budgets(enable_key: str, budget_key: str, presets: tuple, current: Optional
 def _gpt(model: str, effective: Callable[[str], Any], *, unknown: bool) -> EffortControl:
     enabled = _bool(effective("enable_gpt_thinking"))
     effort = str(effective("gpt_effort") or "medium").strip().lower()
-    can_off = not _no_none(model)
-    choices = ([_off("enable_gpt_thinking")] if can_off else []) + _levels("enable_gpt_thinking", "gpt_effort",
-                                                                            GPT_LEVELS)
-    if enabled and effort in GPT_LEVELS:
+    choices = [_off("enable_gpt_thinking")] + _levels("enable_gpt_thinking", "gpt_effort", GPT_LEVELS)
+    if not enabled:
+        value = "off"
+    elif effort in GPT_LEVELS:
         value = effort
-    else:  # disabled, or "none": what the backend sends
-        value = "off" if can_off else "low"
+    else:  # "none": what the backend sends
+        value = "low" if _no_none(model) else "off"
     return EffortControl("gpt", tuple(choices), value, unknown=unknown,
                          pass_unknown=_bool(effective(PASS_UNKNOWN_KEY)) if unknown else False)
 
@@ -173,21 +173,19 @@ def _gemini(model: str, effective: Callable[[str], Any]) -> EffortControl:
         pro = "pro" in name and "flash" not in name
         levels = GEMINI_LEVELS[1:] if pro else GEMINI_LEVELS
         level = str(effective("thinking_level") or "high").strip().lower()
-        if not enabled:  # a disabled budget: the backend sends the lowest level
-            value = levels[0]
+        if not enabled:
+            value = "off"
         else:
             value = level if level in levels else ("low" if level == "minimal" else "high")
-        return EffortControl("gemini", tuple(_levels("enable_gemini_thinking", "thinking_level", levels)), value)
-    can_off = "gemini-2.5-pro" not in name
+        return EffortControl("gemini", tuple([_off("enable_gemini_thinking")]
+                                             + _levels("enable_gemini_thinking", "thinking_level", levels)), value)
     budget = _int(effective("thinking_budget"), -1)
-    choices: list = [_off("enable_gemini_thinking")] if can_off else []
+    choices: list = [_off("enable_gemini_thinking")]
     choices.append(EffortChoice("dynamic", "Dynamic", (("enable_gemini_thinking", True), ("thinking_budget", -1))))
     custom = budget if enabled and budget > 0 else None
-    if not can_off and (not enabled or budget == 0):
-        custom = GEMINI_25_PRO_MIN_BUDGET  # what the backend sends when it is turned off
     choices.extend(_budgets("enable_gemini_thinking", "thinking_budget", GEMINI_BUDGETS, custom))
     if not enabled or budget == 0:
-        value = "off" if can_off else f"budget:{GEMINI_25_PRO_MIN_BUDGET}"
+        value = "off"
     elif budget < 0:
         value = "dynamic"
     else:
