@@ -9417,7 +9417,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.config_file_path = CONFIG_FILE
         
         # Load config (reads and decrypts API keys). An unreadable config.json is moved aside
-        # and the earliest valid backup restored; only without one does it start from {}.
+        # and the newest valid backup restored; only without one does it start from {}.
         try:
             self.config, recovery_notice = load_config_or_restore_backup(CONFIG_FILE)
             if recovery_notice:

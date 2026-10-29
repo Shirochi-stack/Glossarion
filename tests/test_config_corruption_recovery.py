@@ -41,21 +41,21 @@ def _corrupt_copies(config_path):
 # Startup recovery
 # ---------------------------------------------------------------------------
 
-def test_corrupted_config_is_restored_from_the_earliest_valid_backup(config_path):
+def test_corrupted_config_is_restored_from_the_newest_valid_backup(config_path):
     truncated = '{\n  "model": "current",\n  "prompt_profiles": {"Universal": "tr'
     config_path.write_text(truncated, encoding="utf-8")
-    _write_backup(config_path, "config_20261027_090000.json.bak", "", age_hours=50)  # empty: skipped
-    _write_backup(config_path, "config_20261027_100000.json.bak", "[1, 2]", age_hours=49)  # not an object
-    _write_backup(config_path, "config_20261027_110000.json.bak",
-                  '{"model": "earliest", "auto_update_check": false}', age_hours=48)
-    _write_backup(config_path, "config_20261029_080000.json.bak",
-                  '{"model": "newest", "auto_update_check": false}', age_hours=1)
+    _write_backup(config_path, "config_20261027_090000.json.bak",
+                  '{"model": "earliest", "auto_update_check": false}', age_hours=50)
+    _write_backup(config_path, "config_20261028_110000.json.bak",
+                  '{"model": "newest valid", "auto_update_check": false}', age_hours=20)
+    _write_backup(config_path, "config_20261029_070000.json.bak", "[1, 2]", age_hours=2)  # not an object
+    _write_backup(config_path, "config_20261029_080000.json.bak", "", age_hours=1)  # empty: skipped
 
     config, notice = config_store.load_config_or_restore_backup(str(config_path))
 
-    assert config == {"model": "earliest", "auto_update_check": False}
+    assert config == {"model": "newest valid", "auto_update_check": False}
     assert json.loads(config_path.read_text(encoding="utf-8")) == config
-    assert "config_20261027_110000.json.bak" in notice
+    assert "config_20261028_110000.json.bak" in notice
     corrupt = _corrupt_copies(config_path)
     assert len(corrupt) == 1 and corrupt[0].read_text(encoding="utf-8") == truncated
     assert corrupt[0].name in notice

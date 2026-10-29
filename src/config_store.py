@@ -267,8 +267,8 @@ def load_config_or_restore_backup(path=None, *, decrypt=True):
 
     Returns ``(config, notice)``. ``notice`` is None when config.json loaded (or does not
     exist yet: first run, ``config`` is ``{}``). Otherwise the unreadable file is moved
-    aside (``move_corrupt_config_aside``) and the backups are tried from the EARLIEST one
-    on (owner's choice), skipping any that are unreadable or not a configuration object;
+    aside (``move_corrupt_config_aside``) and the backups are tried from the NEWEST one
+    on (owner's choice: the least lost), skipping any that are unreadable or not a configuration object;
     the first valid one atomically becomes config.json. Only when none is valid is
     ``config`` ``{}`` (the caller's defaults). ``notice`` says what happened, for the log.
     """
@@ -285,7 +285,7 @@ def load_config_or_restore_backup(path=None, *, decrypt=True):
         load_error = ValueError("it does not hold a configuration object")
     print(f"⚠️ config.json could not be loaded: {load_error}")
     # Read the backups before anything else writes: a later backup_config_file prunes old ones.
-    backups = list(reversed(list_config_backups(config_file)))
+    backups = list_config_backups(config_file)  # newest first
     corrupt_copy = move_corrupt_config_aside(config_file)
     kept = (f" The unreadable file was kept as {os.path.basename(corrupt_copy)}."
             if corrupt_copy else "")
