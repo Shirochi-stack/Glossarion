@@ -1680,6 +1680,37 @@ _NAME_CHECK_INFLECTION_LEGACY = {'src/translator_gui.py': [("                ('g
 
 
 _QA_BROKEN_POOL_SCANNER = [('    Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).\n    """\n    try:\n', '    Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).\n    A worker that dies in native code (no memory left, a crashing library) writes its traceback to the\n    app\'s crash.log (the GUI exports GLOSSARION_LOG_DIR; a dead worker breaks the whole pool).\n    """\n    global _WORKER_FAULT_LOG\n    try:\n        log_dir = os.environ.get("GLOSSARION_LOG_DIR")\n        if log_dir and _WORKER_FAULT_LOG is None:\n            import faulthandler\n            _WORKER_FAULT_LOG = open(os.path.join(log_dir, "crash.log"), "a", encoding="utf-8")\n            faulthandler.enable(file=_WORKER_FAULT_LOG, all_threads=True)\n    except Exception:\n        pass\n    try:\n'), ('def _init_worker_process():\n', "_WORKER_FAULT_LOG = None  # crash.log, open for a QA scan worker's lifetime (_init_worker_process)\n\n\ndef _init_worker_process():\n"), ('    # Process files in parallel\n    results = []\n    processed_count = 0\n    \n    with _ExecutorCls(**_exec_kwargs) as executor:\n        # Submit all batches\n        futures = []\n', '    # Process files in parallel\n    results = []\n    processed_count = 0\n    broken_batches = []  # batches a broken process pool lost (a worker died): run again on threads below\n    \n    with _ExecutorCls(**_exec_kwargs) as executor:\n        # Submit all batches\n        futures = []\n        future_args = {}\n'), ('            future = executor.submit(process_html_file_batch, args)\n            futures.append(future)\n        \n        # Collect results as they complete\n        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):\n            if should_stop():\n                log("⛔ QA scan interrupted during processing.")\n', '            future = executor.submit(process_html_file_batch, args)\n            futures.append(future)\n            future_args[future] = args\n        \n        # Collect results as they complete\n        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):\n            if should_stop():\n                log("⛔ QA scan interrupted during processing.")\n'), ('                results.extend(batch_results)\n                \n            except Exception as e:\n                log(f"   ❌ Error processing batch: {e}")\n                import traceback\n                log(f"   Traceback: {traceback.format_exc()}")\n    \n    # Clear the progress line (like original)\n', '                results.extend(batch_results)\n                \n            except concurrent.futures.BrokenExecutor as e:\n                # a worker process died (a crash in native code or no memory left): every batch still in\n                # the pool fails with it; they run again once the pool is closed, on threads\n                if not broken_batches:\n                    log(f"   ⚠️ A QA scan worker process stopped unexpectedly ({e})")\n                broken_batches.append(future_args[future])\n            except Exception as e:\n                log(f"   ❌ Error processing batch: {e}")\n                import traceback\n                log(f"   Traceback: {traceback.format_exc()}")\n    \n    if broken_batches and not should_stop():\n        log(f"   🧵 Scanning the {len(broken_batches)} batch(es) it left with threads instead "\n            f"(its cause, if it crashed, is in crash.log in the logs folder)")\n        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as thread_executor:\n            for batch_results in thread_executor.map(process_html_file_batch, broken_batches):\n                if should_stop():\n                    log("⛔ QA scan interrupted during processing.")\n                    thread_executor.shutdown(wait=True, cancel_futures=True)\n                    return\n                processed_count += len(batch_results)\n                results.extend(batch_results)\n        log(f"   ✅ {processed_count}/{len(html_files)} files scanned")\n    \n    # Clear the progress line (like original)\n')]
+# 2026-10-29 config.json writes are atomic (app_paths._atomic_json_write): the manga settings
+# dialog's direct-write fallbacks no longer truncate config.json when a write fails
+_ATOMIC_CONFIG_MANGA_DIALOG = [
+    ("                    if hasattr(self.main_gui, 'config_file'):\n"
+     "                        with open(self.main_gui.config_file, 'w') as f:\n"
+     "                            json.dump(self.config, f, indent=2)\n",
+     "                    if hasattr(self.main_gui, 'config_file'):\n"
+     "                        from app_paths import _atomic_json_write\n"
+     "                        _atomic_json_write(self.main_gui.config_file, self.config)\n"),
+    ("            elif hasattr(self.main_gui, 'config_file') and isinstance(self.main_gui.config_file, str):\n"
+     "                with open(self.main_gui.config_file, 'w', encoding='utf-8') as f:\n"
+     "                    json.dump(self.config, f, ensure_ascii=False, indent=2)\n",
+     "            elif hasattr(self.main_gui, 'config_file') and isinstance(self.main_gui.config_file, str):\n"
+     "                from app_paths import _atomic_json_write\n"
+     "                _atomic_json_write(self.main_gui.config_file, self.config)\n"),
+    ("                if hasattr(self.main_gui, 'CONFIG_FILE') and isinstance(self.main_gui.CONFIG_FILE, str):\n"
+     "                    with open(self.main_gui.CONFIG_FILE, 'w', encoding='utf-8') as f:\n"
+     "                        json.dump(self.config, f, ensure_ascii=False, indent=2)\n",
+     "                if hasattr(self.main_gui, 'CONFIG_FILE') and isinstance(self.main_gui.CONFIG_FILE, str):\n"
+     "                    from app_paths import _atomic_json_write\n"
+     "                    _atomic_json_write(self.main_gui.CONFIG_FILE, self.config)\n"),
+]
+# ... and the QA scanner's custom-mode save
+_ATOMIC_CONFIG_QA_SCANNER = [
+    ("                    # Write to file\n"
+     "                    with open(config_file, 'w', encoding='utf-8') as f:\n"
+     "                        json.dump(encrypted_config, f, ensure_ascii=False, indent=2)\n",
+     "                    # Write to file (atomically: a failed write never truncates config.json)\n"
+     "                    from app_paths import _atomic_json_write\n"
+     "                    _atomic_json_write(config_file, encrypted_config)\n"),
+]
 
 # 2026-10-28 "Block other scripts in translations (adaptive, all models)" (block_other_scripts /
 # BLOCK_OTHER_SCRIPTS, off): the settings / init rows and the env lines in the pinned sources, and the
@@ -2091,6 +2122,17 @@ APPROVED = (
         "source": {
             **_SCRIPT_BAN_ALLOW_KAOMOJI_LEGACY,
             **_SCRIPT_BAN_ALLOW_KAOMOJI_SCHEMA,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-29",
+        "what": "config.json is never left truncated: every writer goes through the atomic write "
+                "(no direct-write fallback), here the manga settings dialog's save fallbacks and the "
+                "QA scanner's custom-mode save",
+        "source": {
+            "src/manga_settings_dialog.py": _ATOMIC_CONFIG_MANGA_DIALOG,
+            "src/QA_Scanner_GUI.py": _ATOMIC_CONFIG_QA_SCANNER,
         },
         "values": {},
     },

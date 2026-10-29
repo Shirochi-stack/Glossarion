@@ -4,7 +4,8 @@ Moved verbatim from translator_gui.py (module level) so GUI-free code can
 resolve the same paths without importing the Qt application. translator_gui
 re-imports every name (``_APP_DIR``, ``CONFIG_FILE``, ``_atomic_json_write``,
 ``_get_app_dir``), so ``translator_gui.CONFIG_FILE`` and all existing call
-sites resolve exactly as before.
+sites resolve exactly as before. ``_atomic_json_write`` was later rewritten to be
+truly atomic (no direct-write fallback, fsync, unique temp file, one writer lock).
 
 The only override is the pre-existing ``GLOSSARION_APP_DIR`` seam; desktop
 never sets it. Stdlib only; must stay importable on Python 3.10 without Qt.
@@ -14,6 +15,9 @@ import json
 import os
 import platform
 import sys
+import tempfile
+import threading
+import time
 
 # Resolve the application directory (where config.json, logs, etc. live).
 # In frozen (PyInstaller) builds, this is next to the executable.
@@ -59,25 +63,49 @@ if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
 CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 
 
-def _atomic_json_write(filepath, data):
-    """Write JSON atomically using write-to-temp-then-rename.
+# One writer at a time per process (GUI thread saves, the key manager's background save,
+# dialogs that write config.json directly).
+_ATOMIC_WRITE_LOCK = threading.RLock()
 
-    Prevents config corruption if the app crashes or power is lost mid-write.
-    os.replace is atomic on POSIX and near-atomic on Windows.
+# Windows refuses os.replace onto a file another handle holds open (WinError 5/32: a
+# reader in a worker thread or subprocess, antivirus, cloud sync); such locks are short.
+_REPLACE_RETRY_SECONDS = 3.0
+
+
+def _atomic_json_write(filepath, data):
+    """Write JSON atomically: serialize, write a unique temp file, fsync, os.replace.
+
+    The old file stays untouched until the complete new one replaces it, so a crash,
+    power loss, a value that cannot be serialized or a dict changed by another thread
+    never leaves a truncated file. On failure the temp file is removed and the error
+    raised; there is no direct-write fallback (that truncated config.json whenever
+    os.replace was refused on Windows and the dump then failed or was interrupted).
     """
-    tmp_path = filepath + ".tmp"
-    try:
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, filepath)
-    except Exception:
-        # Fallback: direct write (better than losing data entirely)
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    directory = os.path.dirname(os.path.abspath(filepath))
+    with _ATOMIC_WRITE_LOCK:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=directory, prefix='.' + os.path.basename(filepath) + '.', suffix='.tmp')
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            deadline = time.monotonic() + _REPLACE_RETRY_SECONDS
+            while True:
+                try:
+                    os.replace(tmp_path, filepath)
+                    break
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _get_app_dir() -> str:

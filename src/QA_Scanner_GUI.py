@@ -1908,9 +1908,9 @@ class QAScannerMixin:
                     # Get config file path
                     config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
-                    # Write to file
-                    with open(config_file, 'w', encoding='utf-8') as f:
-                        json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
+                    # Write to file (atomically: a failed write never truncates config.json)
+                    from app_paths import _atomic_json_write
+                    _atomic_json_write(config_file, encrypted_config)
 
                     # Show success message
                     self.append_log("✅ Custom settings saved to config.json")

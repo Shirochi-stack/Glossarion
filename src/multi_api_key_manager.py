@@ -3723,10 +3723,9 @@ class MultiAPIKeyDialog(QDialog):
                 google_creds_path = config_snapshot.get('google_cloud_credentials')
                 if google_creds_path:
                     encrypted_config['google_cloud_credentials'] = google_creds_path
-                tmp_path = f"{config_path}.tmp.{os.getpid()}.{threading.get_ident()}"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, config_path)
+                # Shares the GUI save's write lock; a failed write leaves no temp file behind
+                from app_paths import _atomic_json_write
+                _atomic_json_write(config_path, encrypted_config)
             except Exception as exc:
                 print(f"[MULTI_KEY_SAVE] Warning: lightweight config save failed: {exc}")
 
