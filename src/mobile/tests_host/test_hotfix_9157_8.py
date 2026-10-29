@@ -77,3 +77,34 @@ def test_the_service_tracks_the_position_after_each_drain(tmp_path):
     JobService._track_position(service, job)
     # chapter0004.xhtml is not in a workspace OPF here: no spine number, remembered as unknown
     assert job.position == "Ch. 4 (2/2)" and job.spine["chapter0004.xhtml"] == 0 and changed == [1, 1]
+
+
+def test_a_result_whose_book_runs_in_another_job_stops_offering_resume():
+    """Owner 2026-10-30: "I clicked resume, and the resume button worked, but the response card did not update
+    ... It still says resume" - the Resume of a book that moved into the Library starts a Library job, which the
+    chat's own run never sees."""
+    from glossarion_mobile.ui.chat.chat_view import RESUMED_ELSEWHERE, ChatView
+    from glossarion_mobile.ui.chat.job_binding import CardPhase
+    from glossarion_mobile.ui.chat.cards import offers_resume
+
+    running = types.SimpleNamespace(id="lib1", is_active=True)
+    asked = []
+
+    def active_job_for(path, family):
+        asked.append((path, family))
+        return running if path == "/books/hero.epub" else None
+
+    jobs = types.SimpleNamespace(snapshot=lambda jid: running if jid == "lib1" else None, active_job_for=active_job_for)
+    view = types.SimpleNamespace(env=types.SimpleNamespace(jobs=jobs), cid="c1", _handed_off={},
+                                 _turn_source=lambda item: item.source)
+    item = types.SimpleNamespace(index=3, source="/books/hero.epub")
+    assert ChatView._book_job_elsewhere(view, item) is running and asked == [("/books/hero.epub", "translation")]
+    other = types.SimpleNamespace(index=4, source="/books/other.epub")
+    assert ChatView._book_job_elsewhere(view, other) is None
+    # the job the card's Resume handed to the Library is found by its id, whatever its source
+    view._handed_off[("c1", 4)] = "lib1"
+    assert ChatView._book_job_elsewhere(view, other) is running
+    running.is_active = False
+    assert ChatView._book_job_elsewhere(view, other) is None
+    # the card then shows a Result without Resume / Retry
+    assert not offers_resume(CardPhase("done"), RESUMED_ELSEWHERE)
