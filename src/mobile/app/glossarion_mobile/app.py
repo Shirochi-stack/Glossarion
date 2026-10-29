@@ -594,6 +594,12 @@ class GlossarionApp:
                 alignment=ft.Alignment.CENTER, bgcolor=ft.Colors.SURFACE, expand=True,
                 animate_opacity=motion.duration(), key="first-run-cover")
             self.page.overlay.append(cover)
+            # the overlay is drawn inside the top view's body: while the Welcome slides in, the home view under
+            # it showed its bare chat for a frame (and its app bar above the cover), so those hide until it lifts
+            view = self.shell.root_view
+            self._first_run_hidden = [c for c in [view.appbar, *view.controls] if c is not None and c.visible]
+            for control in self._first_run_hidden:
+                control.visible = False
             return cover
         except Exception:
             log.exception("first-run cover unavailable")
@@ -607,9 +613,13 @@ class GlossarionApp:
         # (emulator, hotfix 5 build), so the cover stays until the slide is done
         hold = FIRST_RUN_COVER_HOLD if self.shell.current_route.startswith("/welcome") else 0.0
 
+        hidden, self._first_run_hidden = getattr(self, "_first_run_hidden", []), []
+
         async def remove() -> None:
             await asyncio.sleep(hold)
             try:
+                for control in hidden:
+                    control.visible = True
                 cover.opacity = 0  # fades over the Welcome (or the chat), then leaves the overlay
                 self.page.update()
             except Exception:

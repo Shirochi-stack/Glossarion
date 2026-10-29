@@ -51,6 +51,8 @@ def _record_startup(monkeypatch, seen: dict) -> None:
 
     async def install_jobs(self):
         seen["cover_at_jobs"] = getattr(self, "_first_run_cover", None) is not None
+        view = self.shell.root_view
+        seen["home_shown_at_jobs"] = any(c.visible for c in [view.appbar, *view.controls] if c is not None)
         await jobs(self)
 
     async def install_library(self):
@@ -71,9 +73,12 @@ def test_first_run_covers_the_chat_and_opens_the_welcome_before_the_later_featur
         _m, conn, session, page, app = await TF._start("android", first_run=True)
         try:
             assert seen["cover_at_jobs"] is True  # the chat never shows on its own first
+            assert seen["home_shown_at_jobs"] is False  # nor under the Welcome's slide (the overlay is per view)
             assert seen["route_at_library"] == "/welcome" and seen["cover_at_library"] is False
             assert await TF._wait(lambda: not any(getattr(c, "key", None) == "first-run-cover" for c in page.overlay))
             assert TF._routes(page)[-1] == "/welcome"
+            view = app.shell.root_view
+            assert all(c.visible for c in [view.appbar, *view.controls] if c is not None)  # back under the Welcome
         finally:
             app.jobs.close()
             await TF._stop(app)
@@ -90,6 +95,7 @@ def test_returning_user_gets_no_cover_and_a_finished_welcome_is_remembered(app_e
         _m, conn, session, page, app = await TF._start("android")
         try:
             assert seen["cover_at_jobs"] is False and seen["route_at_library"] == "/"
+            assert seen["home_shown_at_jobs"] is True
             assert TF._routes(page)[-1] == "/"
         finally:
             app.jobs.close()
