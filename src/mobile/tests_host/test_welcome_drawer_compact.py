@@ -202,14 +202,15 @@ def test_page_one_fits_the_phone_without_scrolling(width, with_engine, tmp_path)
     assert s.page_area.content.scroll == ft.ScrollMode.AUTO
 
 
-def test_page_one_signed_in_row_takes_the_whole_width():
+def test_page_one_signed_in_button_keeps_its_half_row():
+    # v9.15.7 hotfix 4 (owner: the button "disappeared" into a full-width row): signed in, it keeps its cell
     s = screen()
     s.provider_status["authgem"] = {"email": "gem@example.com"}
     s.render()
     grid = by_key(s.page_area.content)["welcome-sign-ins"]
     cols = {c.content.key: c.col for c in grid.controls if getattr(c.content, "key", None)}
-    assert cols["welcome-signed-authgem"] == {"xs": 12}
-    assert all(v == {"xs": 6} for k, v in cols.items() if k != "welcome-signed-authgem")
+    assert cols["welcome-signed-authgem"] == {"xs": 6}
+    assert all(v == {"xs": 6} for v in cols.values())
 
 
 # ==========================================================================

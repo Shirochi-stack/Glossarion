@@ -1720,9 +1720,11 @@ class ModelSheet:
                           key="auth-menu-authds")
 
     async def _deepseek_switch(self, model: str) -> None:
-        from glossarion_mobile.ui.screens.accounts import deepseek_session_present, show_deepseek_sign_in
+        from glossarion_mobile.ui.screens.accounts import (deepseek_session_marked, deepseek_session_present,
+                                                           show_deepseek_sign_in)
 
-        if await deepseek_session_present(self.env.run_io):
+        # the slow check (a hidden DeepSeek page, up to 10 s) only when a sign-in was seen before
+        if deepseek_session_marked() and await deepseek_session_present(self.env.run_io):
             self.select("model", model)
             return
         page = self._page
