@@ -489,8 +489,8 @@ class GlossarionNativeService extends FletService {
       case 'start_continued_processing':
       case 'update_continued_processing':
       case 'unfocus':
-      case 'move_task_to_back':
       case 'bring_to_front':
+      case 'move_task_to_back':
         return false;
       default:
         return null;
