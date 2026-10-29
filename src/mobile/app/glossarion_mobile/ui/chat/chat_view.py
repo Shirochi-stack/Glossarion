@@ -1821,11 +1821,12 @@ class ChatView:
         dialog.show(self.page)
         return dialog
 
-    def begin_send(self, once: Optional[dict] = None) -> None:
+    def begin_send(self, once: Optional[dict] = None, *, image_checked: bool = False) -> None:
         """``_on_enter_clicked`` -> ``_start_translation`` (asks the manual glossary first when required).
 
         ``once``: chat override keys (model / profile / target_language) for this send only, from
-        long-press Send -> "Translate once with another model…" (UI_SPEC §2.2 one-shot)."""
+        long-press Send -> "Translate once with another model…" (UI_SPEC §2.2 one-shot).
+        ``image_checked``: the image's on-device model already has its image support (``_image_model``)."""
         if self._send_waiting:
             return  # a second tap while the attachment's Library lookup finishes
         text = self.composer.send_text()
@@ -1841,11 +1842,50 @@ class ChatView:
         if not text and not record:
             self.notify("Enter text or attach a TXT, EPUB, PDF, CBZ, or image file to translate.")
             return
+        image_model = "" if image_checked else self._image_model(record, once)
+        if image_model:
+            self._send_waiting = True
+            self._spawn(self._send_after_image_support(image_model, once))
+            return
         settings = self.settings()
         if settings.glossary_override_mode == "manual":
             self.open_manual_glossary(lambda source: self._send(text, record, settings, source, once))
             return
         self._send(text, record, settings, None, once)
+
+    def _image_model(self, record: Optional[dict], once: Optional[dict] = None) -> str:
+        """The on-device model an image attachment goes to when it reads text only for now, else ''.
+        Owner 2026-10-29: a model's image support is downloaded when an image first needs it."""
+        if not record or not is_vision_attachment(record.get("path")):
+            return ""
+        model = str((once or {}).get("model") or getattr(self.state.chat_context.value, "model", "") or "")
+        if not model.lower().startswith("local/"):
+            return ""
+        from glossarion_mobile.services.local_llm.service import default_service
+
+        service = default_service()
+        stem = service.registry.resolve(model) if service is not None else None
+        return model if stem and not service.is_vision(stem) else ""
+
+    async def _send_after_image_support(self, model: str, once: Optional[dict]) -> None:
+        """Ask to download ``model``'s image support (``OnDeviceFlow.ensure_image_support``), then send;
+        declined (or a model without one): nothing is sent, the composer keeps the image."""
+        try:
+            from glossarion_mobile.services.local_llm.service import default_service
+            from glossarion_mobile.ui.screens.local_models_panel import OnDeviceFlow
+
+            flow = OnDeviceFlow(service=default_service(), page=self.page, notify=self.notify, spawn=self._spawn)
+            ready = await flow.ensure_image_support(model)
+        except Exception as exc:
+            log.exception("downloading image support failed")
+            self.notify(f"Image support was not downloaded: {exc}")
+            ready = False
+        finally:
+            self._send_waiting = False
+        if ready:
+            self.begin_send(once, image_checked=True)
+        else:
+            self.notify(f"Not sent: {model} reads images once its image support is downloaded")
 
     def _send(self, text: str, record: Optional[dict], settings: DirectTextSettings,
               manual: Optional[ManualGlossarySource], once: Optional[dict] = None) -> None:

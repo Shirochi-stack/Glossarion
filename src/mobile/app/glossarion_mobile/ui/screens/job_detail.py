@@ -265,7 +265,9 @@ class JobDetailScreen(Screen):
                 self.qa_chip,
                 ft.Row([self.review_button, self.stop_button, self.resume_button, self.files_button,
                         self.progress_button, self.library_button, self.library_reason], wrap=True, spacing=8,
-                       run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                       run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                       # a button wrapped onto its own line sits in the middle (owner 2026-10-29)
+                       alignment=ft.MainAxisAlignment.CENTER, key="job-actions"),
             ],
             key="job-header",
         )
@@ -286,6 +288,10 @@ class JobDetailScreen(Screen):
             controls_padding=ft.Padding.only(left=8, right=8, bottom=8),
             key="job-requests",
         )
+        # hidden until the first request card (owner 2026-10-29: an empty Requests box only took space)
+        self.requests_card = ft.Container(content=self.requests_tile, bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+                                          border_radius=tokens.RADII["card"], visible=False,
+                                          key="job-requests-card")
         self.outputs_row = ft.Row([], wrap=True, spacing=8, run_spacing=8)
         self.outputs_card = SectionCard(title="Outputs", icon="FOLDER", children=[self.outputs_row],
                                         key="job-outputs")
@@ -311,9 +317,7 @@ class JobDetailScreen(Screen):
         self._apply(self.snap)
         self._refresh_requests(force=True)
         self.page_list = ft.ListView(
-            controls=[header, self.outputs_card, ft.Container(content=self.requests_tile,
-                                                               bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                                                               border_radius=tokens.RADII["card"]), log_card],
+            controls=[header, self.outputs_card, self.requests_card, log_card],
             spacing=tokens.SPACING["md"],
             padding=ft.Padding.all(tokens.SPACING["md"]),
             expand=True,
@@ -388,6 +392,8 @@ class JobDetailScreen(Screen):
 
     def _apply(self, snap: JobSnapshot) -> None:
         self.snap = snap
+        if getattr(self, "title_text", None) is not None and snap.title and self.title_text.value != snap.title:
+            self.title_text.value = snap.title  # renamed after its metadata translation (hotfix 7)
         self.state_chip.status = status_key(snap)
         self.state_chip.text = snap.state_label
         origin = origin_route(snap)
@@ -462,6 +468,7 @@ class JobDetailScreen(Screen):
             return
         self._last_requests = now
         segments = self.service.request_segments(self.job_id)
+        self.requests_card.visible = bool(segments)
         if not segments:
             text = ("Request cards appear as API requests start." if self.service.has_request_stream(self.job_id)
                     else "Request cards appear here when the shared request classifier is in this build; "

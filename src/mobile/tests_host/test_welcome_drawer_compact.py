@@ -368,11 +368,11 @@ def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path)
     cells = {k: rows[k] for k in ("welcome-ondevice-garbage", "welcome-ondevice-light", "welcome-ondevice-medium",
                                   "welcome-ondevice-heavy")}
     lines = {k: [t.value for t in c.content.controls if isinstance(t, ft.Text)] for k, c in cells.items()}
-    # model + its image support; the engine's RAM gate on a 6 GB phone with 3 GB free
-    assert lines["welcome-ondevice-garbage"] == ["Garbage", "764 MB ✓"]
-    assert lines["welcome-ondevice-light"] == ["Light ⭐", "2.0 GB ✓"]
-    assert lines["welcome-ondevice-medium"] == ["Medium", "3.6 GB ⚠"]
-    assert lines["welcome-ondevice-heavy"] == ["Heavy", "6.6 GB ✕"]
+    # the model alone (image support downloads on the first image); the engine's RAM gate on a 6 GB phone with 3 GB free
+    assert lines["welcome-ondevice-garbage"] == ["Garbage", "559 MB ✓"]
+    assert lines["welcome-ondevice-light"] == ["Light ⭐", "1.3 GB ✓"]
+    assert lines["welcome-ondevice-medium"] == ["Medium", "2.9 GB ⚠"]
+    assert lines["welcome-ondevice-heavy"] == ["Heavy", "5.7 GB ✕"]
     assert "Android may close Glossarion" in cells["welcome-ondevice-medium"].tooltip
     assert "Pick a smaller model" in cells["welcome-ondevice-heavy"].tooltip
     # a 2 GB phone: Light does not fit, the biggest preset that does is suggested instead
@@ -389,7 +389,7 @@ def test_page_one_on_device_without_an_engine_points_to_the_model_manager():
 
 
 def test_page_one_on_device_one_tap_downloads_loads_and_selects(tmp_path, monkeypatch):
-    """One tap on a cell: the Model manager's flow downloads the GGUF and its vision projector (inline
+    """One tap on a cell: the Model manager's flow downloads the GGUF (its vision projector waits for the first image; inline
     progress in the cell), loads it and selects local/<stem>; the Welcome then counts as set up."""
     import asyncio
     import hashlib
@@ -426,7 +426,7 @@ def test_page_one_on_device_one_tap_downloads_loads_and_selects(tmp_path, monkey
         assert asked and asked[0][0] == "Download Light?" and asked[0][2] == "Download"  # every download asks first
         assert model == "local/Tiny-Q4_K_M" and chosen == ["local/Tiny-Q4_K_M"]
         assert any(text.endswith("% · ✕") and bar for text, bar in seen), seen  # tap again to cancel
-        assert service.loaded_stem == "Tiny-Q4_K_M" and service.is_vision("Tiny-Q4_K_M")
+        assert service.loaded_stem == "Tiny-Q4_K_M" and not service.is_vision("Tiny-Q4_K_M")
         assert s.flow.signed_in and s.model_notes["local"] == "✓ Using local/Tiny-Q4_K_M · runs on this phone"
         cell = by_key(s.page_area.content)["welcome-ondevice-light"]
         assert cell.content.controls[1].value == "✓ In use"

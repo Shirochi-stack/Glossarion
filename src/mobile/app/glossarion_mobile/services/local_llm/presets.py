@@ -2,8 +2,8 @@
 
 A row is ``{"name", "repo", "file", "quant", "note", "n_ctx"}`` plus, when known, the file's ``size``
 and ``sha256`` (Hugging Face's LFS oid; the download re-reads both from Hugging Face), and for a vision
-model its projector: ``mmproj`` (the ``mmproj-*.gguf`` file of the same repository, downloaded in the
-same tap), ``mmproj_size`` and ``mmproj_sha256``. Without ``mmproj`` the repository's own projector is
+model its projector: ``mmproj`` (the ``mmproj-*.gguf`` file of the same repository, downloaded when
+an image first needs it), ``mmproj_size`` and ``mmproj_sha256``. Without ``mmproj`` the repository's own projector is
 used when it has one (``hf.pick_projector``). ``file`` may be
 empty (the auto-pick of ``hf.pick_file`` applies), ``quant`` may name one (``Q5_K_M``), ``n_ctx`` 0
 means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a saved list (even an empty
@@ -130,8 +130,9 @@ def _clean(row: Any) -> Optional[dict]:
 
 
 def download_size(row: dict) -> int:
-    """Bytes one tap downloads for ``row`` when known: the model plus its vision projector."""
-    return int(row.get("size") or 0) + int(row.get("mmproj_size") or 0)
+    """Bytes one tap downloads for ``row`` when known: the model (its vision projector, ``mmproj_size``,
+    downloads when an image first needs it)."""
+    return int(row.get("size") or 0)
 
 
 def _defaults() -> list:
