@@ -2256,6 +2256,7 @@ class FakeReviewSession:
 
     def edit_document(self, piece_index, html_text, **kw):
         self.calls.append(("document", piece_index, html_text))
+        self.document_kwargs = kw
 
     def flush_edits(self):
         self.status = "Saved"
@@ -2263,6 +2264,14 @@ class FakeReviewSession:
 
     def output_path(self, piece_index):
         return os.path.join(self.output_dir, self.pieces[piece_index]["output_name"])
+
+    def _notepad_renderable_document_html(self, piece, html_text, url_for=None):
+        return html_text
+
+    def undo_row(self, piece_index, row_index):
+        self.calls.append(("undo", piece_index, row_index))
+        self.status = "Saved"
+        return self.status
 
     def mark_completed(self, indices):
         for index in indices:
@@ -2327,9 +2336,68 @@ class FakeReviewSession:
         return self._threshold
 
 
+class _FakeNotepadMixin:
+    """The core's Notepad helpers (the real ones are covered by the desktop tests)."""
+
+    @staticmethod
+    def _notepad_document_prefix(html_text):
+        return "<!DOCTYPE html>" if str(html_text).startswith("<!DOCTYPE html>") else ""
+
+    @classmethod
+    def notepad_document_from_browser_html(cls, document_html, prefix=""):
+        document = str(document_html).replace(' data-sdl-notepad-text=""', "")
+        return prefix + document, [3], [{"row": 0}]
+
+
 def _fake_sdl_core():
     FakeReviewSession.opened = []
-    return _module("sdlxliff_review_core", open_sdlxliff_review=FakeReviewSession)
+    return _module("sdlxliff_review_core", open_sdlxliff_review=FakeReviewSession,
+                   NOTEPAD_EDITING_SCRIPT="/*editor*/", SdlxliffReviewCoreMixin=_FakeNotepadMixin)
+
+
+class _FakeReaderServer:
+    def __init__(self):
+        self.published, self.images = [], []
+
+    def publish(self, html, *, name="reader.html", script_nonce=None):
+        self.published.append((name, html, script_nonce))
+        return f"http://127.0.0.1:9/tok/{name}?v={len(self.published)}"
+
+    def register_image(self, key, source, mime=None):
+        self.images.append(key)
+        return "/tok/img/1"
+
+
+def _notepad_env(monkeypatch, ctx):
+    """A WebView-capable context: the Reader's server and a recording ``flet_webview.WebView``."""
+    import types as _types
+
+    import flet as ft
+
+    server = _FakeReaderServer()
+    ctx.webview_ok = lambda: True
+    ctx.reader = lambda: _types.SimpleNamespace(ensure_server=lambda: server)
+    views = []
+
+    def web_view(**kw):
+        control = ft.Container(key=kw.get("key"))
+        control.webview_kwargs = kw
+        views.append(control)
+        return control
+
+    monkeypatch.setitem(sys.modules, "flet_webview", _module("flet_webview", WebView=web_view))
+    return server, views
+
+
+def _capture(view, html, seq=1):
+    """The page's capture poll posting ``html`` (in two console parts)."""
+    import json as _json
+    import types as _types
+
+    half = max(1, len(html) // 2)
+    for part, chunk in enumerate((html[:half], html[half:])):
+        view.on_console(_types.SimpleNamespace(message="GLSDL:" + _json.dumps(
+            {"id": seq, "part": part, "parts": 2, "chunk": chunk})))
 
 
 @needs_flet
@@ -2362,15 +2430,14 @@ def test_sdlxliff_screen_compact_review_edit_complete_mt_flag_and_notepad_rule(t
         assert screen.piece_index == 1 and screen.piece_dropdown.value == "1"  # the focused piece
         assert [o.text for o in screen.piece_dropdown.options] == ["Ch.1", "Ch.2"]
         assert [c.key for c in screen.legend.controls] == [f"sdl-legend-{s}" for s, _t in sx.LEGEND]
-        # phones: the Notepad layout is a tablet-only toggle
+        # no in-app browser here: the Notepad layout (a live HTML editor) is off with its reason
         assert screen.layout_switch.disabled is True
         screen.layout_switch.value = True
         screen._on_layout()
         assert screen.notepad is False and ctx.notes[-1] == sx.NOTEPAD_REASON
-        # Piece ⋯ Edit Output: the text editor on the piece's output
-        out_fid = screen.edit_output()
-        assert ctx.navigated[-1] == ("tools.text", {"fid": out_fid}, None)
-        te.take_request(out_fid)
+        # the piece ⋯ menu is the dialog's: no "Edit Output" text-editor detour
+        assert [i.key for i in screen.piece_menu.items] == ["sdl-complete"]
+        assert not hasattr(screen, "edit_output") and te is not None
         # compact edit: a changed field saves through the shared session
         screen.step(-1)
         assert screen.piece_index == 0 and len(screen.row_fields) == 2
@@ -2382,7 +2449,7 @@ def test_sdlxliff_screen_compact_review_edit_complete_mt_flag_and_notepad_rule(t
         screen.set_filter(None)
         # Mark as Completed / Undo
         assert await screen.toggle_completed() == "Marked 1 SDLXLIFF sidecar completed"
-        assert screen.piece_menu.items[0].content == "Undo Completed"
+        assert screen.piece_menu.items[0].content == "↩️ Undo Completed Mark"
         assert (await screen.toggle_completed()).startswith("Undid completed mark")
         # MT provider: credentials first (the dialog's prompts), then the provider
         ctx.extras["credentials"] = [None]
@@ -2474,18 +2541,24 @@ def test_sdlxliff_row_save_keeps_the_other_fields_and_their_typed_text(tmp_path,
 
 
 @needs_flet
-def test_sdlxliff_notepad_layout_on_tablets(tmp_path, monkeypatch):
+def test_sdlxliff_notepad_layout_is_the_live_html_editor(tmp_path, monkeypatch):
+    """Owner 2026-10-30: the desktop's Notepad mode "is not a text editor, but a real time html editor". The
+    piece's document is published on the Reader's server with the shared editing script (nonce'd) and shown
+    in a WebView; the page's captures are saved through edit_document 0.5 s after the last one."""
     monkeypatch.setitem(sys.modules, "sdlxliff_review_core", _fake_sdl_core())
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.tools import sdlxliff as sx
+    from glossarion_mobile.ui.tools import sdlxliff_notepad as sn
 
+    monkeypatch.setattr(sn, "SAVE_DELAY", 0.01)
     out = tmp_path / "Output" / "Book"
     out.mkdir(parents=True)
 
     async def scenario():
         _conn, session = _tb()._fake_session("android")
         page = session.page
-        ctx = _tools_ctx(page, tablet=True)
+        ctx = _tools_ctx(page)  # a phone: the Notepad layout no longer needs a tablet
+        server, views = _notepad_env(monkeypatch, ctx)
         fid = sx.open_reviewer(ctx, str(out), focus="response_ch002.html")
         screen = sx.SdlxliffScreen(parse_route(f"/tools/sdlxliff?out={fid}"), ctx)
         _tools()._mount(page, screen.get_body())
@@ -2493,17 +2566,28 @@ def test_sdlxliff_notepad_layout_on_tablets(tmp_path, monkeypatch):
         assert screen.layout_switch.disabled is False
         screen.layout_switch.value = True
         screen._on_layout()
-        assert screen.notepad and screen.notepad_editor is None  # the document is built on the io pool
         for _ in range(200):
-            if screen.notepad_editor is not None:
+            if screen.notepad_view is not None:
                 break
             await asyncio.sleep(0.01)
-        assert screen.notepad_editor.value == "<p>Three</p>" and screen.notepad_base == "<p>Three</p>"
-        assert not screen._editing()
-        _client_set(screen.notepad_editor, "value", "<p>Drei</p>")
-        assert screen._editing()  # an edited document: the 2 s poll does not reload over it
-        assert await screen.save_document() is True
+        view = screen.notepad_view
+        name, html, nonce = server.published[-1]
+        assert name == sn.DOCUMENT_NAME and nonce and f'<script nonce="{nonce}">' in html
+        assert "<p>Three</p>" in html and "/*editor*/" in html and sn.CAPTURE_SCRIPT in html
+        assert views[-1].webview_kwargs["url"] == view.url and not screen._editing()
+        _capture(view, '<p data-sdl-notepad-text="">Drei</p>')
+        assert screen._editing()  # a captured edit waits: the 2 s poll does not reload over it
+        for _ in range(200):
+            if ("document", 1, "<p>Drei</p>") in binding.session.calls:
+                break
+            await asyncio.sleep(0.01)
         assert ("document", 1, "<p>Drei</p>") in binding.session.calls
+        assert binding.session.document_kwargs == {"user_added_target_indexes": [3],
+                                                   "user_added_break_positions": [{"row": 0}]}
+        assert not screen._editing() and screen.status_text.value == "Saved"
+        # an older capture arriving late never replaces a newer one
+        _capture(view, "<p>old</p>", seq=0)
+        assert not view.dirty
         screen.dispose()
 
     asyncio.run(scenario())
@@ -2533,8 +2617,12 @@ def test_sdlxliff_edits_are_saved_on_leave_and_the_poll_runs_only_when_shown(tmp
     async def scenario():
         _conn, session = _tb()._fake_session("android")
         page = session.page
-        # ---- Notepad layout (tablets): a piece switch, then leaving the reviewer -------------------
-        ctx = _tools_ctx(page, tablet=True)
+        # ---- Notepad layout: a piece switch, then leaving the reviewer ------------------------------
+        from glossarion_mobile.ui.tools import sdlxliff_notepad as sn
+
+        monkeypatch.setattr(sn, "SAVE_DELAY", 30.0)  # only the switch / the leave save here
+        ctx = _tools_ctx(page)
+        server, _views = _notepad_env(monkeypatch, ctx)
         fid = sx.open_reviewer(ctx, str(out), focus="response_ch002.html")
         screen = sx.SdlxliffScreen(parse_route(f"/tools/sdlxliff?out={fid}"), ctx)
         _tools()._mount(page, screen.get_body())
@@ -2542,12 +2630,12 @@ def test_sdlxliff_edits_are_saved_on_leave_and_the_poll_runs_only_when_shown(tmp
         calls = binding.session.calls
         screen.layout_switch.value = True
         screen._on_layout()
-        assert await wait_for(lambda: screen.notepad_editor is not None)
-        _client_set(screen.notepad_editor, "value", "<p>Drei</p>")
-        screen.step(-1)  # piece 1 -> piece 0: the edited document is saved into piece 1 first
-        assert await wait_for(lambda: screen.notepad_editor is not None and screen.notepad_piece == 0)
-        assert ("document", 1, "<p>Drei</p>") in calls and screen.notepad_editor.value == "<p>Text</p>"
-        _client_set(screen.notepad_editor, "value", "<p>Eins</p>")
+        assert await wait_for(lambda: screen.notepad_view is not None)
+        _capture(screen.notepad_view, "<p>Drei</p>")
+        screen.step(-1)  # piece 1 -> piece 0: the captured document is saved into piece 1 first
+        assert await wait_for(lambda: screen.notepad_view is not None and screen.notepad_view.piece_index == 0)
+        assert ("document", 1, "<p>Drei</p>") in calls and "<p>Text</p>" in server.published[-1][1]
+        _capture(screen.notepad_view, "<p>Eins</p>")
         screen.dispose()  # Back / a drawer destination
         assert await wait_for(lambda: ("document", 0, "<p>Eins</p>") in calls)
         # ---- compact rows: text typed in a field that never lost focus ---------------------------

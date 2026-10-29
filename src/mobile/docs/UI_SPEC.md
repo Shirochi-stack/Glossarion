@@ -1788,17 +1788,17 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 
 - Book / piece selector (`Dropdown` on phone, side list on tablet).
 - Legend filter chips (status colours).
-- **Row cards:** source (bodySmall, muted), then an editable output `TextField`, with a status colour bar. Saves follow the shared manual-editing semantics. A row saves on blur and only its own card (and the legend counts) is rebuilt, so the field being typed in keeps its focus and text; full re-renders (piece / book / filter / layout changes, an action's result) save typed text first.
+- **Row cards** (the dialog's `_add_review_row`): a frame tinted by the row's status, the tag label ("p #3", "h1→p") and reason, the source (bodySmall, muted), the MT preview, an editable output `TextField` (saved 500 ms after typing stops, like the dialog's `_schedule_target_edit`), ↩️ Undo All Edits, 📥 Inject Machine Translation and source / output length bars. The summary line is the dialog's detail header (`piece_summary.header`). Saves follow the shared manual-editing semantics. A row saves on blur and only its own card (and the legend counts) is rebuilt, so the field being typed in keeps its focus and text; full re-renders (piece / book / filter / layout changes, an action's result) save typed text first.
 - **Machine translation sheet:**
   - provider Auto / Google / DeepL / Bing / Yandex;
   - Argos is shown disabled with a ReasonChip ("Offline engine (ctranslate2) not available on mobile"), and the google-translate-free fallback chain skips it;
   - "Configure … API key" (Bing region, Yandex folder id);
   - MT preview; **Inject MT**.
 - **Flag inaccurate** with "Set Score Threshold…" / "Reset Threshold".
-- Piece ⋯: Mark as Completed / Undo; Edit Output.
-- Refresh + sidecar regeneration; polling every 2 s while visible: on top of the stack (not under its own Edit Output editor) and the app in the foreground (no reload while a field has focus or unsaved text, or the Notepad document is edited).
+- Piece ⋯: ✅ Mark as Completed / ↩️ Undo Completed Mark (the dialog has no Edit Output: the Notepad layout edits the document).
+- Refresh + sidecar regeneration; polling every 2 s while visible: on top of the stack and the app in the foreground (no reload while a field has focus or unsaved text, or the Notepad document is edited).
 - Edits are never dropped (the dialog's `closeEvent` captures the Notepad HTML and flushes its queued edits): leaving the reviewer saves an edited Notepad document and typed row text, and a re-render (piece / book / filter / layout / refresh / an action) saves them first.
-- **Notepad layout:** CodeEditor (`CodeLanguage.XML`), tablets only; the document is built on the io pool. On phones the layout toggle is shown disabled with a ReasonChip "Tablet layout only".
+- **Notepad layout** (`ui/tools/sdlxliff_notepad.py`): the desktop's rendered, live HTML editor, not a text editor. The piece's document (`notepad_document`, images served by the Reader's server via `_notepad_renderable_document_html(url_for=)`) is published on the Reader's local server with the shared `sdlxliff_review_core.NOTEPAD_EDITING_SCRIPT` and a capture poll in one nonce'd script that removes itself; a `flet_webview.WebView` shows it. Edits set `__sdlNotepadDirty`; every 350 ms the DOM is posted as `GLSDL:` console parts, cleaned by `notepad_document_from_browser_html` and saved 500 ms after the last capture (`edit_document` with the user-added indexes / breaks + `flush_edits`). Phones and tablets alike; where no WebView runs (web, desktop host) the toggle is disabled with the ReasonChip "Needs the in-app browser (Android / iOS)".
 
 ### 4.10 RPG Maker, File browser, Text editor
 
@@ -2604,7 +2604,7 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 
 **Recorded mobile divergences (accepted in the plan)**
 - Chat switching during a run, queued sends (the `queue` state), delete message, and edit-and-resend versions.
-- Reader double page only on tablets in landscape. SDLXLIFF Notepad layout only on tablets.
+- Reader double page only on tablets in landscape. SDLXLIFF Notepad layout wherever the in-app browser runs.
 - **Output root.** It is limited to app storage or the iOS Files-visible Documents folder, plus the Android phone folder (Downloads/Glossarion). (U5: the mirror uses the native `save_to_downloads`, i.e. the MediaStore Downloads collection, which accepts only `Download/...` relative paths; below API 29 its legacy branch needs WRITE_EXTERNAL_STORAGE, which the app does not request, so Android 8-9 get no Downloads copy. A Documents/Glossarion target would need the MediaStore Files collection in the native extension.) U10 adds copies into the user's own cloud storage through the extension's document-destination API (`flet_glossarion_native` README "Document destinations (U10)": `pick_folder`, `pick_save_location`, `pick_document`, `list_children`, `create_file`, `create_folder`, `write_file`, `rename_document`, `stat`, `delete`, `query_root`, `release`, `list_grants`, `cancel_document_op`, `take_document_results`; Android SAF persisted grants, iOS security-scoped bookmarks; typed error codes `permission_lost`, `missing`, `unsupported_mode`, `provider_error`, `no_space`, `cancelled`, …). The output root itself stays in app storage.
 - **U10 cloud sync and share links** are mobile-only (§4.18; tests/parity/DISCREPANCIES.md "U10"). Book outputs reach Downloads/Glossarion only through the phone-folder destination (one entry per output, overwritten in place); the Storage switch copies the other outputs once.
 - Config is snapshotted at job start; desktop reads live widgets per file.
@@ -2617,7 +2617,7 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
   - "🔊 Open Audio File" hands the file to another app (Share) instead of an inline player. (U9: it is "🔊 Play audio" in the in-app MediaViewer now, with Share as a secondary action.)
   - RPG Maker: a picked game folder is copied into the Inbox and a ZIP game is extracted into `<output root>/RPG Maker` (the shared entry `rpgmaker_job.prepare_rpgmaker_game`; the run patches the game's `data` folder, so it needs a writable copy); "Share game as ZIP" afterwards is mobile-only.
   - Google Cloud TTS voices: `google-cloud-texttospeech` has no Android / iOS build (grpcio >= 1.84 has no cp313 mobile wheel, and its requests floor conflicts with the pinned requests), so the Audio options show a ReasonChip; the REST fallback is a U9 tier-B item (dependency rule). (U9: google-cloud-texttospeech 2.38.0 resolves with the grpcio 1.81 / grpcio-status 1.81 pins and ships; no REST fallback was needed.)
-  - The text editor and the SDLXLIFF Notepad layout use a monospace text field while `flet-code-editor` is not in the build.
+  - The text editor uses a monospace text field while `flet-code-editor` is not in the build.
   - SDLXLIFF reviewer: Mark as Completed updates the reviewer session's copy of the progress; the Book page reads the change from disk on its next 2 s poll.
   - Not built yet at U7 (both built in U9 on shared helpers): source-only SDLXLIFF sidecars for Not Translated rows in Manual editing (`progress_core.untranslated_manual_entries`, moved from Retranslation_GUI's `_progress_manager_untranslated_entries` closure); the "✏️ Edit file" jump to the QA issue (`progress_actions.qa_issue_search_target`).
 
