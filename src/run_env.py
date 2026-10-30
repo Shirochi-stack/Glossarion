@@ -1778,6 +1778,8 @@ class RunEnvMixin:
             'BLOCK_OTHER_SCRIPTS': '1' if getattr(self, 'block_other_scripts_var', False) else '0',
             'SCRIPT_BAN_ALLOW_KAOMOJI': '1' if getattr(self, 'script_ban_allow_kaomoji_var', False) else '0',
             'SCRIPT_BAN_WHITELIST_SOURCE': '1' if getattr(self, 'script_ban_whitelist_source_var', False) else '0',
+            'FORCED_TRUNCATION': '1' if getattr(self, 'forced_truncation_enabled_var', False) else '0',
+            'FORCED_TRUNCATION_SECONDS': str(getattr(self, 'forced_truncation_seconds_var', 10)),
             'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
             'VERTEX_AI_LOCATION': self.vertex_location_var if hasattr(self, 'vertex_location_var') and isinstance(self.vertex_location_var, str) else (self.vertex_location_var.text() if hasattr(self, 'vertex_location_var') and hasattr(self.vertex_location_var, 'text') else 'us-east5'),
@@ -2125,6 +2127,8 @@ class RunEnvMixin:
             'BLOCK_OTHER_SCRIPTS': 'Block other scripts in translations',
             'SCRIPT_BAN_ALLOW_KAOMOJI': 'Allow emoticons from other scripts (kaomoji)',
             'SCRIPT_BAN_WHITELIST_SOURCE': 'Whitelist source text',
+            'FORCED_TRUNCATION': 'Forced Truncation',
+            'FORCED_TRUNCATION_SECONDS': 'Forced Truncation seconds',
             
             # Azure
             'AZURE_API_VERSION': 'Azure API version',
@@ -2863,6 +2867,8 @@ class RunEnvMixin:
                 ('BLOCK_OTHER_SCRIPTS', '1' if getattr(self, 'block_other_scripts_var', False) else '0'),
                 ('SCRIPT_BAN_ALLOW_KAOMOJI', '1' if getattr(self, 'script_ban_allow_kaomoji_var', False) else '0'),
                 ('SCRIPT_BAN_WHITELIST_SOURCE', '1' if getattr(self, 'script_ban_whitelist_source_var', False) else '0'),
+                ('FORCED_TRUNCATION', '1' if getattr(self, 'forced_truncation_enabled_var', False) else '0'),
+                ('FORCED_TRUNCATION_SECONDS', str(getattr(self, 'forced_truncation_seconds_var', 10))),
 
                 # Azure API version
                 ('AZURE_API_VERSION', self.config.get('azure_api_version', '2025-01-01-preview')),

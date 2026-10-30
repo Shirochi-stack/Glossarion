@@ -3581,6 +3581,37 @@ class UnifiedClient:
         characters of its own source text, not only the ones that always may (``source_whitelisted``)."""
         return (os.getenv('SCRIPT_BAN_WHITELIST_SOURCE') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
+    def _repeat_watch(self, messages, base_url=None):
+        """The ``forced_truncation.RepetitionWatch`` of one streamed answer, None while "Forced Truncation" is off
+        (FORCED_TRUNCATION) and for the on-device endpoint, whose engine watches its own answer."""
+        if (os.getenv('FORCED_TRUNCATION') or '0').strip().lower() not in ('1', 'true', 'yes', 'on'):
+            return None
+        if base_url and self._is_on_device_endpoint(base_url):
+            return None
+        import forced_truncation
+        users = [m.get('content') for m in (messages or []) if isinstance(m, dict) and m.get('role') == 'user']
+        source = "\n".join(c if isinstance(c, str) else " ".join(str(p.get('text') or '') for p in c if isinstance(p, dict))
+                           for c in users if isinstance(c, (str, list)))
+        return forced_truncation.RepetitionWatch(source, os.getenv('FORCED_TRUNCATION_SECONDS') or forced_truncation.DEFAULT_SECONDS)
+
+    def _note_forced_truncation(self, watch) -> None:
+        """This thread's answer was stopped by Forced Truncation (``_trim_forced_truncation`` trims it)."""
+        print(f"✂️ Forced Truncation: the answer repeated the same text for {watch.seconds:.0f} s and the source does not; "
+              f"it ends here, marked truncated")
+        self._get_thread_local_client()._forced_truncation = True
+
+    def _trim_forced_truncation(self, content, finish_reason):
+        """A stopped answer without the copies of its repeat. On-device models stop inside their engine, which
+        says only ``length``: their answer is checked by that."""
+        tls = self._get_thread_local_client()
+        stopped, tls._forced_truncation = getattr(tls, '_forced_truncation', False), False
+        on_device = str(getattr(self, 'model', '') or '').lower().startswith('local/')
+        if not isinstance(content, str) or not (stopped or (on_device and self._is_truncation_finish_reason(
+                self._normalize_finish_reason(finish_reason) or finish_reason))):
+            return content
+        import forced_truncation
+        return forced_truncation.trim_repeats(content)
+
     def _script_ban_scripts(self, context=None) -> tuple:
         """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
         this request (Other Settings › Anti-Duplicate Parameters › Logit Bias and Ollama Settings › Sampling;
@@ -11580,6 +11611,7 @@ class UnifiedClient:
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
 
+                extracted_content = self._trim_forced_truncation(extracted_content, finish_reason)
                 self._warn_script_leak(messages, extracted_content, context)
 
                 # Track success
@@ -26485,7 +26517,12 @@ class UnifiedClient:
 
                         _check_cancel_during_stream()
                         
+                        repeat_watch = self._repeat_watch(messages, base_url)
                         for event in _iter_stream_events():
+                            if repeat_watch is not None and repeat_watch.feed_parts(text_parts):
+                                self._note_forced_truncation(repeat_watch)
+                                finish_reason = 'length'
+                                break
                             _check_cancel_during_stream()
                             try:
                                 event_usage = event.get('usage') if isinstance(event, dict) else getattr(event, 'usage', None)
@@ -29603,9 +29640,10 @@ class UnifiedClient:
                     self._active_streams.discard(response)
 
             ban_scripts, ban_exempt = self._script_ban_request(messages, request_context)
+            repeat_watch = self._repeat_watch(messages)
             result = chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                stream=use_streaming, ban_scripts=ban_scripts, ban_exempt_chars=ban_exempt,
+                stream=use_streaming, ban_scripts=ban_scripts, ban_exempt_chars=ban_exempt, repeat_watch=repeat_watch,
                 allow_kaomoji=self._script_ban_allow_kaomoji(),
                 log_stream=self._stream_logging_enabled(use_streaming),
                 log_thinking=self._stream_thinking_logging_enabled(),
@@ -29616,6 +29654,8 @@ class UnifiedClient:
                 on_response_open=register,
                 on_response_close=unregister,
             )
+            if repeat_watch is not None and repeat_watch.fired:
+                self._note_forced_truncation(repeat_watch)
             return UnifiedResponse(
                 content=result['content'], finish_reason=result['finish_reason'],
                 usage=result['usage'], raw_response=result['raw_response'],

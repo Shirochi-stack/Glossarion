@@ -105,6 +105,9 @@ SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
 #: a bool, on when unset; named from when it banned CJK only, kept so the saved choice stays): see
 #: ``script_ban``
 BLOCK_CJK_KEY = "local_llm_block_cjk"
+#: "Forced Truncation" of the on-device engine (on by default) and its seconds (``forced_truncation``)
+FORCED_TRUNCATION_KEY = "local_llm_forced_truncation"
+FORCED_TRUNCATION_SECONDS_KEY = "local_llm_forced_truncation_seconds"
 #: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
 GPU_KEY = "local_llm_gpu"
 #: Prefs key of the GPU fallback: ``{"stem", "reason"}`` (that model runs on the CPU until the setting or
@@ -598,6 +601,28 @@ class LocalEngineService:
             raw = None
         return raw is None or bool(raw)
 
+    def forced_truncation(self) -> bool:
+        """"Forced Truncation": on unless switched off."""
+        raw = self._pref(FORCED_TRUNCATION_KEY)
+        return raw is None or bool(raw)
+
+    def forced_truncation_seconds(self) -> int:
+        try:
+            return max(1, min(600, int(self._pref(FORCED_TRUNCATION_SECONDS_KEY))))
+        except (TypeError, ValueError):
+            return 10
+
+    def save_forced_truncation(self, enabled: Any, seconds: Any = None) -> tuple:
+        """Save the switch and, when given, its seconds; the values now in force."""
+        if self.prefs is not None:
+            self.prefs.set(FORCED_TRUNCATION_KEY, bool(enabled))
+            if seconds is not None:
+                try:
+                    self.prefs.set(FORCED_TRUNCATION_SECONDS_KEY, max(1, min(600, int(float(seconds)))))
+                except (TypeError, ValueError):
+                    pass
+        return self.forced_truncation(), self.forced_truncation_seconds()
+
     def save_block_cjk(self, enabled: Any) -> bool:
         value = bool(enabled)
         if self.prefs is not None:
@@ -1042,6 +1067,8 @@ class LocalEngineService:
         if isinstance(stop, list) and stop:
             params["stop"] = [str(s) for s in stop][:8]
         params["enable_thinking"] = wants_thinking(body)
+        if self.forced_truncation():
+            params["forced_truncation_seconds"] = self.forced_truncation_seconds()
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
         always = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))

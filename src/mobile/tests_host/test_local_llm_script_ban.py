@@ -255,3 +255,16 @@ def test_vocabulary_whitelist_keeps_only_the_tokens_of_the_source():
     assert len(whitelisted) == len(plain) - 2
     assert vocab.processor(scripts, source="김민준은 웃었다", whitelist=True) is whitelisted  # kept per source
     assert vocab.processor(scripts, source="", whitelist=True) is plain
+
+
+def test_forced_truncation_is_on_by_default_on_device(tmp_path):
+    """Owner 2026-10-30: on by default on device, off elsewhere."""
+    service, _engine = _service(tmp_path)
+    base = {"temperature": 0.7, "max_tokens": 64, "target_language": "English"}
+    assert service.forced_truncation() is True and service.forced_truncation_seconds() == 10
+    assert service._params(base, 4096)["forced_truncation_seconds"] == 10
+    assert service.save_forced_truncation(True, "25") == (True, 25)
+    assert service._params(base, 4096)["forced_truncation_seconds"] == 25
+    assert service.save_forced_truncation(True, "nonsense") == (True, 25)
+    assert service.save_forced_truncation(False) == (False, 25)
+    assert "forced_truncation_seconds" not in service._params(base, 4096)

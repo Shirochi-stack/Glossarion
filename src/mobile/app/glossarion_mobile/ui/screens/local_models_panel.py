@@ -967,6 +967,13 @@ class LocalModelsPanel(OnDeviceFlow):
         }
         self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
+        self.forced_truncation_switch = ft.Switch(value=self.service.forced_truncation(), key="local-forced-truncation",
+                                                  on_change=lambda e: self.save_forced_truncation())
+        self.forced_truncation_seconds = ft.TextField(value=str(self.service.forced_truncation_seconds()), dense=True,
+                                                      label="Seconds", width=118, key="local-forced-truncation-seconds",
+                                                      keyboard_type=ft.KeyboardType.NUMBER,
+                                                      on_blur=lambda e: self.save_forced_truncation(),
+                                                      on_submit=lambda e: self.save_forced_truncation())
         self.block_cjk_switch = ft.Switch(value=self.service.block_cjk(),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
@@ -980,6 +987,10 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
                                   on_click=lambda e: self.reset_sampling())], spacing=4),
             self.sampling_error,
+            switch_row(self.forced_truncation_switch, "Forced Truncation"),
+            self.forced_truncation_seconds,
+            _small("When the model keeps repeating the same text for this many seconds, the answer stops and the "
+                   "chapter is marked truncated, so the run moves on. Text the source itself repeats is left alone."),
             switch_row(self.block_cjk_switch, "Block other scripts in translations (adaptive)"),
             _small("Stops small models from slipping into another writing system (Chinese, Japanese, Korean, "
                    "Hindi, Thai, Arabic, Cyrillic ...) while translating: only the target language's own "
@@ -1024,6 +1035,12 @@ class LocalModelsPanel(OnDeviceFlow):
             self._drop_kaomoji_observer()  # a rebuilt section replaces its tiles
             self._kaomoji_unsub = lambda: [unsub() for unsub in observers if callable(unsub)]
         return rows
+
+    def save_forced_truncation(self) -> tuple:
+        enabled, seconds = self.service.save_forced_truncation(self.forced_truncation_switch.value,
+                                                               self.forced_truncation_seconds.value)
+        self.forced_truncation_seconds.value = str(seconds)
+        return enabled, seconds
 
     def save_block_cjk(self) -> bool:
         value = self.service.save_block_cjk(self.block_cjk_switch.value)

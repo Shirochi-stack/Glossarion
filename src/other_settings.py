@@ -13997,6 +13997,48 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(whitelist_cb)
     _bias_note("Extract Glossary, the single-pass auto glossary and refinement always whitelist their source text "
                "while Block other scripts is on.")
+
+    # An answer stuck repeating itself is stopped and marked truncated (forced_truncation.py; on device: its own switch)
+    from PySide6.QtWidgets import QSpinBox
+    self.forced_truncation_enabled_var = self.config.get('forced_truncation_enabled', False)
+    self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 10)
+    forced_row = QHBoxLayout()
+    forced_row.setContentsMargins(0, 8, 0, 0)
+    forced_cb = self._create_styled_checkbox("Forced Truncation")
+    try:
+        forced_cb.setChecked(bool(self.forced_truncation_enabled_var))
+        forced_cb.setToolTip(
+            "When a streamed answer keeps repeating the same text for this many seconds, it is stopped and\n"
+            "ends with finish reason length, so the Progress Manager marks the chapter truncated and the run\n"
+            "moves on. Text that the source itself repeats as often is left alone, like in the QA scanner.\n"
+            "Works on ollamapull/ and OpenAI-compatible endpoints. On-device models have their own switch."
+        )
+    except Exception:
+        pass
+    def _on_forced_truncation_toggle(checked):
+        try:
+            self.forced_truncation_enabled_var = bool(checked)
+        except Exception:
+            pass
+    forced_cb.toggled.connect(_on_forced_truncation_toggle)
+    forced_row.addWidget(forced_cb)
+    forced_spin = QSpinBox()
+    forced_spin.setRange(1, 600)
+    forced_spin.setSuffix(" s")
+    forced_spin.setFixedWidth(80)
+    try:
+        forced_spin.setValue(int(self.forced_truncation_seconds_var))
+    except (TypeError, ValueError):
+        forced_spin.setValue(10)
+    def _on_forced_truncation_seconds(value):
+        try:
+            self.forced_truncation_seconds_var = int(value)
+        except Exception:
+            pass
+    forced_spin.valueChanged.connect(_on_forced_truncation_seconds)
+    forced_row.addWidget(forced_spin)
+    forced_row.addStretch()
+    bias_v.addLayout(forced_row)
     bias_v.addStretch()
     
     # Provider compatibility info
@@ -14211,6 +14253,10 @@ def _reset_anti_duplicate_defaults(self):
         self.script_ban_allow_kaomoji_var = False  # Default = disabled
     if hasattr(self, 'script_ban_whitelist_source_var'):
         self.script_ban_whitelist_source_var = False  # Default = disabled
+    if hasattr(self, 'forced_truncation_enabled_var'):
+        self.forced_truncation_enabled_var = False  # Default = disabled
+    if hasattr(self, 'forced_truncation_seconds_var'):
+        self.forced_truncation_seconds_var = 10
 
     # Update enable/disable state
     self._toggle_anti_duplicate_controls()

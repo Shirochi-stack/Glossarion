@@ -1179,7 +1179,7 @@ def _iter_llama_stream(response: requests.Response, should_stop: Optional[Callab
 
 def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Optional[float] = None,
          max_tokens: Optional[int] = None, stream: bool = True, ban_scripts: tuple = (), allow_kaomoji: bool = False,
-         ban_exempt_chars=frozenset(),
+         ban_exempt_chars=frozenset(), repeat_watch: Any = None,
          log_stream: bool = False, log_thinking: bool = False,
          progress: Optional[Callable[[str], None]] = None,
          should_stop: Optional[Callable[[], bool]] = None,
@@ -1189,9 +1189,11 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
 
     ``ban_scripts``: the ``script_ban_core.SCRIPTS`` the answer may not use: the request goes to llama-server with a
     token ban (``_token_ban_request``), except tokens that only need ``ban_exempt_chars``. Only on this PC: a
-    remote Ollama's model file is out of reach."""
+    remote Ollama's model file is out of reach. ``repeat_watch`` (``forced_truncation.RepetitionWatch``): the answer
+    stops with finish reason ``length`` when it says so; the request streams even when the logs do not."""
     name = native_model_name(model_name)
     _check_stop(should_stop)
+    stream = bool(stream) or repeat_watch is not None
     settings = model_settings(name)
     options: dict[str, Any] = {}
     if temperature is not None:
@@ -1297,6 +1299,10 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                         content_log_buffer = _stream_log_fragment(content_log_buffer, str(content))
                 if item.get("done"):
                     final = item
+                elif repeat_watch is not None and repeat_watch.feed(content or thinking):
+                    final = {**item, "done": True, "done_reason": "length"}
+                    response.close()
+                    break
             if log_stream:
                 if thinking_log_buffer:
                     _stream_log_fragment(thinking_log_buffer, "", prefix="    ", force=True)

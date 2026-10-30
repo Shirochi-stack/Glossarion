@@ -520,6 +520,12 @@ class LlamaEngine(_Base):
                 llm.chat_handler = text_handler
         else:
             chunks = llm.create_chat_completion(**kwargs)
+        repeat_watch = None
+        if params.get("forced_truncation_seconds"):
+            from forced_truncation import RepetitionWatch
+
+            repeat_watch = RepetitionWatch("\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user"),
+                                           params["forced_truncation_seconds"])
         try:
             for index, chunk in enumerate(chunks):
                 choice = (chunk.get("choices") or [{}])[0]
@@ -528,6 +534,10 @@ class LlamaEngine(_Base):
                 if text:
                     completion += 1
                     yield text
+                    if repeat_watch is not None and repeat_watch.feed(text):
+                        # Forced Truncation: closing the generator stops sampling; the client sees length
+                        self.last_finish = "length"
+                        break
                 if choice.get("finish_reason"):
                     self.last_finish = choice["finish_reason"]
                 if index % STOP_CHECK_EVERY == 0 and should_stop():
