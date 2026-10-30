@@ -10,7 +10,9 @@ desktop"). Two users:
   translations (adaptive, all models)", config ``block_other_scripts`` / env ``BLOCK_OTHER_SCRIPTS``,
   only while Enable Anti-Duplicate Parameters is on; ``unified_api_client``): official OpenAI chat models
   get ``openai_logit_bias`` (the provider caps the map, so it can only push down the most frequent
-  tokens), and every route gets the output guard ``foreign_script_leak``: a translation whose text has
+  tokens), an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM: ``/tokenize``)
+  gets ``server_logit_bias`` built from its own token ids for ``server_probe_text``, and every route gets
+  the output guard ``foreign_script_leak``: a translation whose text has
   characters of a banned script the source does not have is sent again, within the client's own retry
   budget, with ``retry_instruction`` added.
 
@@ -82,8 +84,9 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 __all__ = ["BAN_TASKS", "BANNED_RANGES", "CJK", "KAOMOJI_RANGES", "LEAK_MIN_CHARS", "LEAK_MIN_SHARE",
            "OPENAI_LOGIT_BIAS_LIMIT", "SCRIPTS", "banned_scripts", "banned_token_ids", "bias_token_ids",
            "foreign_script_leak", "is_banned_char", "is_cjk_target", "is_kaomoji_char", "kaomoji_source_chars",
-           "openai_encoding_name", "openai_logit_bias", "retry_instruction", "script_mask", "script_of",
-           "source_keys", "target_scripts", "token_is_banned", "token_masks", "token_requirements", "wants_ban"]
+           "openai_encoding_name", "openai_logit_bias", "piece_bytes", "retry_instruction", "script_mask",
+           "script_of", "server_logit_bias", "server_probe_text", "source_keys", "target_scripts",
+           "token_is_banned", "token_masks", "token_requirements", "wants_ban"]
 
 CJK = "cjk"
 
@@ -559,6 +562,124 @@ def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LO
     except Exception:
         return {}
     return {str(token): -100 for token in ids}
+
+
+# ------------------------------------------- logit bias from a server's own tokenizer (API)
+
+#: banned-script strings sent to a server's ``/tokenize`` (llama.cpp server, vLLM) to find its own token
+#: ids for them, per banned script: the most frequent banned tokens of o200k_base (a multilingual BPE
+#: vocabulary, lower id = more frequent), decoded. Per script, so CJK is not crowded out by Cyrillic and
+#: Arabic (o200k's most frequent banned tokens) when an English target bans them all
+SERVER_BIAS_PROBES_PER_SCRIPT = 1500
+#: entries of a bias built from a server's tokenizer (local servers take far more than OpenAI's 300)
+SERVER_LOGIT_BIAS_LIMIT = 8000
+
+
+@functools.lru_cache(maxsize=16)
+def _probe_strings(scripts: Tuple[str, ...], allow_kaomoji: bool) -> Tuple[str, ...]:
+    import tiktoken
+
+    encoding = tiktoken.get_encoding("o200k_base")
+    found: List[str] = []
+    per_script: Dict[str, int] = {}
+    mask = script_mask(scripts)
+    for token in range(int(getattr(encoding, "n_vocab", 0) or 0)):
+        try:
+            piece = encoding.decode_single_token_bytes(token)
+            text = piece.decode("utf-8").strip()
+        except Exception:  # an id gap, or a byte token that is not a character on its own
+            continue
+        if not text or not _banned(*token_masks(piece, allow_kaomoji), mask):
+            continue
+        script = next((script_of(ord(ch)) for ch in text if script_of(ord(ch))), "other")
+        if per_script.get(script, 0) < SERVER_BIAS_PROBES_PER_SCRIPT:
+            per_script[script] = per_script.get(script, 0) + 1
+            found.append(text)
+    return tuple(dict.fromkeys(found))
+
+
+def server_probe_text(scripts: Iterable[str], *, allow_kaomoji: bool = False) -> str:
+    """The text to send to a server's ``/tokenize`` for ``scripts``: each banned character of the probe
+    strings alone, the probe strings one per line, then run together (so the server's single characters
+    and its multi-character words are both found); "" when nothing is banned or tiktoken cannot load
+    o200k_base."""
+    wanted = tuple(sorted(set(str(s) for s in scripts or ()) & set(SCRIPTS)))
+    if not wanted:
+        return ""
+    try:
+        probes = _probe_strings(wanted, bool(allow_kaomoji))
+    except Exception:
+        return ""
+    if not probes:
+        return ""
+    allow = bool(allow_kaomoji)
+    mask = script_mask(wanted)
+    chars = dict.fromkeys(ch for probe in probes for ch in probe if _char_bits(ord(ch), allow) & mask)
+    return "\n".join(chars) + "\n" + "\n".join(probes) + "\n" + "".join(probes)
+
+
+@functools.lru_cache(maxsize=1)
+def _byte_level_alphabet() -> Dict[str, int]:
+    """GPT-2's byte-level BPE alphabet (``bytes_to_unicode``), character -> byte."""
+    keep = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    chars = keep[:]
+    extra = 0
+    for byte in range(256):
+        if byte not in keep:
+            keep.append(byte)
+            chars.append(256 + extra)
+            extra += 1
+    return {chr(char): byte for byte, char in zip(keep, chars)}
+
+
+_BYTE_TOKEN = re.compile(r"^<0x([0-9A-Fa-f]{2})>$")
+
+
+def is_byte_level(pieces: Iterable[Any]) -> bool:
+    """Whether a tokenizer's own spellings are GPT-2 byte-level BPE: a piece uses the alphabet's
+    remapped control / space bytes (U+0100-U+0143: "Ġ" for a space, "Ċ" for a newline)."""
+    return any(isinstance(p, str) and any(0x100 <= ord(ch) <= 0x143 for ch in p) for p in pieces)
+
+
+def piece_bytes(piece: Any, byte_level: bool = False) -> bytes:
+    """A server's token piece as raw bytes: llama.cpp's ``with_pieces`` gives text, or a list of byte
+    values for a partial character; vLLM's ``token_strs`` are the tokenizer's own spelling (``byte_level``:
+    GPT-2 byte-level characters such as "æĪĳ"; else SentencePiece "▁" and "<0xE6>" byte tokens)."""
+    if isinstance(piece, (list, tuple)):
+        return bytes(int(b) & 0xFF for b in piece)
+    text = str(piece or "")
+    byte = _BYTE_TOKEN.match(text)
+    if byte:
+        return bytes([int(byte.group(1), 16)])
+    alphabet = _byte_level_alphabet()
+    if byte_level and text and all(ch in alphabet for ch in text):
+        return bytes(alphabet[ch] for ch in text)
+    return text.replace("▁", " ").encode("utf-8", "surrogatepass")
+
+
+def server_logit_bias(tokens: Iterable[Tuple[Any, Any]], scripts: Iterable[str], *, allow_kaomoji: bool = False,
+                      limit: int = SERVER_LOGIT_BIAS_LIMIT, byte_level: Optional[bool] = None) -> Dict[str, int]:
+    """``{"<token id>": -100}`` for the ``(id, piece)`` pairs a server's ``/tokenize`` returned for
+    ``server_probe_text`` whose piece is banned (``token_masks``, as on device), first ``limit``.
+    ``byte_level`` None: told by the pieces themselves (``is_byte_level``)."""
+    mask = script_mask(scripts)
+    bias: Dict[str, int] = {}
+    if not mask:
+        return bias
+    tokens = list(tokens)
+    if byte_level is None:
+        byte_level = is_byte_level(piece for _token, piece in tokens)
+    for token, piece in tokens:
+        try:
+            raw = piece_bytes(piece, byte_level)
+            key = str(int(token))
+        except (TypeError, ValueError):
+            continue
+        if raw and key not in bias and _banned(*token_masks(raw, allow_kaomoji), mask):
+            bias[key] = -100
+            if len(bias) >= limit:
+                break
+    return bias
 
 
 # ------------------------------------------------------------------------------ output guard (API)

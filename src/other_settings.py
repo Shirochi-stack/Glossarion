@@ -13824,17 +13824,40 @@ def _create_anti_duplicate_section(self, parent):
     stop_v.addWidget(stop_row)
     stop_v.addStretch()
     
-    # Tab 4: Logit Bias (OpenAI)
+    # Tab 4: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
     bias_frame = QWidget()
     bias_v = QVBoxLayout(bias_frame)
     bias_v.setContentsMargins(10, 10, 10, 10)
     self.anti_duplicate_notebook.addTab(bias_frame, "Logit Bias")
-    
+
+    def _bias_heading(text, top=0):
+        heading = QLabel(text)
+        heading.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        heading.setContentsMargins(0, top, 0, 4)
+        bias_v.addWidget(heading)
+
+    def _bias_note(text):
+        note = QLabel(text)
+        note.setStyleSheet("color: gray; font-size: 8pt;")
+        note.setWordWrap(True)
+        note.setMaximumWidth(620)
+        note.setContentsMargins(0, 0, 0, 4)
+        note.ensurePolished()  # reserve the wrapped height (see block_scripts_warn below)
+        note.setMinimumHeight(note.heightForWidth(620))
+        bias_v.addWidget(note)
+
+    _bias_heading("Word Bias (official OpenAI chat models only)")
+    _bias_note("GPT-4o, GPT-4.1, GPT-4.5, GPT-4 and GPT-3.5 on api.openai.com. Other models and endpoints ignore this section.")
+
     # Logit Bias Enable
     self.logit_bias_enabled_var = self.config.get('logit_bias_enabled', False)
-    bias_cb = self._create_styled_checkbox("Enable Logit Bias (OpenAI only)")
+    bias_cb = self._create_styled_checkbox("Enable word bias")
     try:
         bias_cb.setChecked(bool(self.logit_bias_enabled_var))
+        bias_cb.setToolTip(
+            "Makes the words ticked below less likely in the answer (OpenAI logit_bias).\n"
+            "Only official OpenAI chat models take it; Block other scripts below works on every model."
+        )
     except Exception:
         pass
     def _on_bias_enable_toggle(checked):
@@ -13846,18 +13869,26 @@ def _create_anti_duplicate_section(self, parent):
     bias_cb.setContentsMargins(0, 0, 0, 5)
     bias_v.addWidget(bias_cb)
     
-    # Logit Bias Strength
-    self.logit_bias_strength_var = self.config.get('logit_bias_strength', -0.5)
-    bias_slider, self.bias_strength_value_label = _create_slider_row(bias_v, "Bias Strength:", self, 'logit_bias_strength_var', -2.0, 2.0, decimals=1)
-    
+    # Logit Bias Strength: how far the words are pushed down (sent as -strength; older configs kept a sign)
+    try:
+        self.logit_bias_strength_var = abs(float(self.config.get('logit_bias_strength', 1.0)))
+    except (TypeError, ValueError):
+        self.logit_bias_strength_var = 1.0
+    bias_slider, self.bias_strength_value_label = _create_slider_row(bias_v, "Strength (0 = off):", self, 'logit_bias_strength_var', 0.0, 2.0, decimals=1)
+    try:
+        bias_slider.setToolTip("How much less likely the ticked words become (logit bias -0.1 to -2).\n"
+                               "OpenAI treats -1 to 1 as a nudge; the words stay possible.")
+    except Exception:
+        pass
+
     # Preset bias targets
-    preset_title = QLabel("Preset Bias Targets:")
-    preset_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
-    preset_title.setContentsMargins(0, 10, 0, 5)
+    preset_title = QLabel("Words to use less often:")
+    preset_title.setStyleSheet("font-size: 9pt;")
+    preset_title.setContentsMargins(0, 6, 0, 2)
     bias_v.addWidget(preset_title)
-    
+
     self.bias_common_words_var = self.config.get('bias_common_words', False)
-    common_cb = self._create_styled_checkbox("Bias against common words (the, and, said)")
+    common_cb = self._create_styled_checkbox("Common words (the, and, said)")
     try:
         common_cb.setChecked(bool(self.bias_common_words_var))
     except Exception:
@@ -13871,9 +13902,10 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(common_cb)
     
     self.bias_repetitive_phrases_var = self.config.get('bias_repetitive_phrases', False)
-    phrases_cb = self._create_styled_checkbox("Bias against repetitive phrases")
+    phrases_cb = self._create_styled_checkbox("Overused words (suddenly, instantly, slightly, faintly, …)")
     try:
         phrases_cb.setChecked(bool(self.bias_repetitive_phrases_var))
+        phrases_cb.setToolTip("suddenly, instantly, immediately, slightly, faintly, indeed, however, actually, really, very")
     except Exception:
         pass
     def _on_phrases_toggle(checked):
@@ -13885,6 +13917,9 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(phrases_cb)
 
     # Universal adaptive script ban (script_ban_core; the on-device engine has its own switch)
+    _bias_heading("Script Ban (separate from Word Bias)", top=12)
+    _bias_note("Does not need Enable word bias or Strength. Official OpenAI models and local servers with a "
+               "tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; every model gets an answer check.")
     self.block_other_scripts_var = self.config.get('block_other_scripts', False)
     block_scripts_cb = self._create_styled_checkbox("Block other scripts in translations (adaptive, all models)")
     try:
@@ -13894,9 +13929,10 @@ def _create_anti_duplicate_section(self, parent):
             "Translations may only use the scripts of the target language: English output blocks Chinese,\n"
             "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's own script is\n"
             "never blocked, and glossary and single-pass glossary requests are left alone.\n"
-            "Official OpenAI chat models (GPT-4o / GPT-4.1) also get a logit bias against the most common\n"
-            "tokens of those scripts. On every model, an answer with such text is sent again with an\n"
-            "instruction to write only in the target language, using the normal retry budget (Max Retries).\n"
+            "Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most common tokens of\n"
+            "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
+            "a ban built from its own tokens. On every model, an answer with such text (or a copy of the source)\n"
+            "is sent again with an instruction to write only in the target language (Max Retries).\n"
             "Works only while Enable Anti-Duplicate Parameters is on."
         )
     except Exception:
@@ -14145,7 +14181,7 @@ def _reset_anti_duplicate_defaults(self):
         self.logit_bias_enabled_var = False  # Default = disabled
     
     if hasattr(self, 'logit_bias_strength_var'):
-        self.logit_bias_strength_var = -0.5  # Default strength
+        self.logit_bias_strength_var = 0.5  # Default strength (sent as -0.5)
     
     if hasattr(self, 'bias_common_words_var'):
         self.bias_common_words_var = False  # Default = disabled

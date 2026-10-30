@@ -3595,31 +3595,169 @@ class UnifiedClient:
         except Exception:
             return ()
 
-    def _script_ban_logit_bias(self, provider, model, base_url, use_responses_api=False) -> dict:
-        """``{"logit_bias": {...}}`` pushing down the banned scripts' most frequent tokens, for official
-        OpenAI chat models only (their tokenizer is known: ``script_ban_core.openai_logit_bias``); {} for
-        every other route, which relies on the output guard (``_script_leak_retry_messages``)."""
-        if use_responses_api or str(provider or '').strip().lower() != 'openai':
-            return {}
+    @staticmethod
+    def _bias_host(base_url) -> str:
+        """The host a request goes to (no base URL: the official OpenAI API)."""
+        if not base_url:
+            return 'api.openai.com'
         try:
             from urllib.parse import urlparse
-            host = (urlparse(str(base_url or '')).hostname or '').lower() if base_url else 'api.openai.com'
+            return (urlparse(str(base_url)).hostname or '').lower()
         except Exception:
-            host = ''
-        if host != 'api.openai.com':
+            return ''
+
+    def _official_openai_chat(self, provider, base_url, use_responses_api=False) -> bool:
+        return (not use_responses_api and str(provider or '').strip().lower() == 'openai'
+                and self._bias_host(base_url) == 'api.openai.com')
+
+    #: "Preset Bias Targets" (Other Settings › Anti-Duplicate Parameters › Logit Bias, also the Glossary
+    #: Manager's GLOSSARY_ copies): the words pushed down, each as "w", " w", "W", " W" when that is one token
+    PRESET_BIAS_WORDS = {
+        'BIAS_COMMON_WORDS': ('the', 'and', 'said'),
+        'BIAS_REPETITIVE_PHRASES': ('suddenly', 'instantly', 'immediately', 'slightly', 'faintly', 'indeed',
+                                    'however', 'actually', 'really', 'very'),
+    }
+
+    def _preset_logit_bias(self, provider, model, base_url, use_responses_api=False) -> dict:
+        """``{token id: bias}`` of "Enable Logit Bias (OpenAI only)" with its preset targets, for official
+        OpenAI chat models (``script_ban_core.openai_encoding_name``; tiktoken knows their tokenizer). The
+        bias is -|Bias Strength| (0 to -2: OpenAI documents -1..1 as a nudge, -100 as a ban)."""
+        if not self._official_openai_chat(provider, base_url, use_responses_api):
+            return {}
+        if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
+            return {}
+        if self._get_anti_duplicate_env("LOGIT_BIAS_ENABLED", "0") != "1":
+            return {}
+        words = [w for key, group in self.PRESET_BIAS_WORDS.items()
+                 if self._get_anti_duplicate_env(key, "0") == "1" for w in group]
+        if not words:
+            return {}
+        try:
+            import script_ban_core
+            import tiktoken
+            name = script_ban_core.openai_encoding_name(model)
+            if not name:
+                return {}
+            encoding = tiktoken.get_encoding(name)
+            strength = float(self._get_anti_duplicate_env("LOGIT_BIAS_STRENGTH", "1.0") or 1.0)
+        except Exception:
+            return {}
+        value = -min(abs(strength), 100.0)
+        if not value:
+            return {}
+        bias = {}
+        for word in words:
+            for variant in (word, f" {word}", word.capitalize(), f" {word.capitalize()}"):
+                ids = encoding.encode(variant)
+                if len(ids) == 1 and ids[0] <= 100256:  # a key every OpenAI chat model accepts
+                    bias[str(ids[0])] = round(value, 2)
+        return bias
+
+    _SERVER_BIAS_CACHE: dict = {}
+    _SERVER_BIAS_LOCK = threading.Lock()
+
+    def _server_tokenize(self, base_url, model, text):
+        """``[(id, piece)]`` for ``text`` from an OpenAI-compatible server's own tokenizer: llama.cpp's
+        ``POST /tokenize {"content", "with_pieces"}``, then vLLM's ``{"model", "prompt",
+        "return_token_strs"}``; None when the server has neither."""
+        root = str(base_url or '').rstrip('/')
+        if root.endswith('/v1'):
+            root = root[:-3]
+        headers = {'Content-Type': 'application/json'}
+        if getattr(self, 'api_key', None):
+            headers['Authorization'] = f"Bearer {self.api_key}"
+        bodies = ({'content': text, 'with_pieces': True, 'add_special': False},
+                  {'model': model, 'prompt': text, 'return_token_strs': True, 'add_special_tokens': False})
+        for body in bodies:
+            try:
+                reply = requests.post(f"{root}/tokenize", json=body, headers=headers, timeout=(3, 20))
+                if reply.status_code != 200:
+                    continue
+                data = reply.json()
+            except Exception:
+                continue
+            tokens = data.get('tokens') if isinstance(data, dict) else None
+            if not isinstance(tokens, list) or not tokens:
+                continue
+            if isinstance(tokens[0], dict):  # llama.cpp with_pieces
+                pairs = [(t.get('id'), t.get('piece')) for t in tokens if isinstance(t, dict)]
+            else:  # vLLM: ids beside their spellings
+                strs = data.get('token_strs')
+                if not isinstance(strs, list) or len(strs) != len(tokens):
+                    continue
+                pairs = list(zip(tokens, strs))
+            if pairs:
+                return pairs
+        return None
+
+    def _server_script_ban_bias(self, provider, model, base_url, scripts, allow_kaomoji) -> dict:
+        """The script ban as a ``logit_bias`` built from an OpenAI-compatible server's own tokenizer
+        (``script_ban_core.server_logit_bias``), asked once per server, model and ban; {} for servers
+        without ``/tokenize`` (the output guard stays their only ban)."""
+        if not base_url or self._is_on_device_endpoint(base_url):  # mobile's engine bans on its own
+            return {}
+        import ipaddress
+        host = self._bias_host(base_url)
+        try:
+            private = host == 'localhost' or host.endswith(('.local', '.localhost', '.lan')) or (
+                ipaddress.ip_address(host).is_private or ipaddress.ip_address(host).is_loopback)
+        except ValueError:
+            private = False
+        if str(provider or '').strip().lower() not in ('openai', 'local') and not private:
+            return {}
+        key = (str(base_url).rstrip('/'), str(model or ''), tuple(scripts), bool(allow_kaomoji))
+        with self._SERVER_BIAS_LOCK:
+            if key in self._SERVER_BIAS_CACHE:
+                return self._SERVER_BIAS_CACHE[key]
+            import script_ban_core
+            text = script_ban_core.server_probe_text(scripts, allow_kaomoji=allow_kaomoji)
+            pairs = self._server_tokenize(base_url, model, text) if text else None
+            bias = script_ban_core.server_logit_bias(pairs or (), scripts, allow_kaomoji=allow_kaomoji)
+            self._SERVER_BIAS_CACHE[key] = bias
+            if bias:
+                print(f"🔤 Block other scripts: {len(bias)} tokens from {host}'s own tokenizer for {model}")
+            return bias
+
+    def _script_ban_logit_bias(self, provider, model, base_url, use_responses_api=False, limit=None) -> dict:
+        """``{"logit_bias": {...}}`` pushing down the banned scripts' tokens: official OpenAI chat models
+        get their most frequent ones (tiktoken knows the tokenizer: ``script_ban_core.openai_logit_bias``),
+        an OpenAI-compatible server with ``/tokenize`` (llama.cpp server, vLLM) gets ids from its own
+        tokenizer (``_server_script_ban_bias``); {} for every other route, which relies on the output
+        guard (``_script_leak_retry_messages``)."""
+        if use_responses_api:
             return {}
         scripts = self._script_ban_scripts(getattr(self, 'context', None))
         if not scripts:
             return {}
         import script_ban_core
-        if self._script_ban_allow_kaomoji():  # kaomoji punctuation left out of the 300 entries
-            bias = script_ban_core.openai_logit_bias(model, scripts, allow_kaomoji=True)
-        else:
-            bias = script_ban_core.openai_logit_bias(model, scripts)
+        allow = self._script_ban_allow_kaomoji()
+        if not self._official_openai_chat(provider, base_url):
+            bias = self._server_script_ban_bias(provider, model, base_url, scripts, allow)
+            return {"logit_bias": dict(bias)} if bias else {}
+        kwargs = {}
+        if allow:  # kaomoji punctuation left out of the 300 entries
+            kwargs['allow_kaomoji'] = True
+        if limit is not None:
+            kwargs['limit'] = limit
+        bias = script_ban_core.openai_logit_bias(model, scripts, **kwargs)
         if not bias:
             return {}
         self._log_once(f"🔤 Block other scripts: logit_bias on {len(bias)} tokens for {model}")
         return {"logit_bias": bias}
+
+    def _logit_bias_params(self, provider, model, base_url, use_responses_api=False) -> dict:
+        """The request's ``logit_bias``: the preset targets (``_preset_logit_bias``) and the script ban
+        (``_script_ban_logit_bias``; its -100 wins a shared token) in one map, within OpenAI's 300."""
+        import script_ban_core
+        presets = self._preset_logit_bias(provider, model, base_url, use_responses_api)
+        room = script_ban_core.OPENAI_LOGIT_BIAS_LIMIT - len(presets)
+        ban = self._script_ban_logit_bias(provider, model, base_url, use_responses_api,
+                                          limit=room if presets else None).get('logit_bias') or {}
+        if not presets and not ban:
+            return {}
+        if presets:
+            self._log_once(f"🎯 Logit bias: {len(presets)} preset tokens at {next(iter(presets.values()))} for {model}")
+        return {"logit_bias": {**presets, **ban}}
 
     def _script_leak_retry_messages(self, messages, content, context=None):
         """The output guard of "Block other scripts": None while the answer keeps to the target's
@@ -25459,7 +25597,7 @@ class UnifiedClient:
                             params["max_completion_tokens"] = norm_max_completion_tokens
                         elif norm_max_tokens is not None:
                             params["max_tokens"] = norm_max_tokens
-                        params.update(self._script_ban_logit_bias(provider, effective_model, base_url))
+                        params.update(self._logit_bias_params(provider, effective_model, base_url))
 
                     if (req_temperature is None or self._temperature_parameter_disabled()
                             or model_rejects_temperature(effective_model)):
@@ -27650,7 +27788,7 @@ class UnifiedClient:
             if not use_responses_api:
                 data.update(anti_dupe_params)
                 data.update(anti_dupe_min_p_params)
-                data.update(self._script_ban_logit_bias(provider, effective_model, base_url))
+                data.update(self._logit_bias_params(provider, effective_model, base_url))
             self._log_anti_duplicate_applied(
                 {
                     **(anti_dupe_params if not use_responses_api else {}),

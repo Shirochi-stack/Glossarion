@@ -186,11 +186,119 @@ def test_client_bans_nothing_unless_both_switches_are_on(client, monkeypatch):
 def test_client_logit_bias_only_for_official_openai(client, monkeypatch):
     _turn_on(monkeypatch)
     monkeypatch.setattr(sbc, "openai_logit_bias", lambda model, scripts: {"1": -100})
+    monkeypatch.setattr(client, "_server_tokenize", lambda *a: None)  # a server without /tokenize
     client.context = "translation"
     assert client._script_ban_logit_bias("openai", "gpt-4o", "https://api.openai.com/v1") == {"logit_bias": {"1": -100}}
     assert client._script_ban_logit_bias("openai", "gpt-4o", "https://my-proxy.example/v1") == {}
     assert client._script_ban_logit_bias("deepseek", "deepseek-chat", "https://api.deepseek.com/v1") == {}
     assert client._script_ban_logit_bias("openai", "gpt-4o", "https://api.openai.com/v1", True) == {}
+
+
+# ----------------------------------------------- a server's own tokenizer (llama.cpp server, vLLM)
+
+def _byte_level(text):
+    spell = {byte: ch for ch, byte in sbc._byte_level_alphabet().items()}
+    return "".join(spell[b] for b in text.encode("utf-8"))
+
+
+def test_server_pieces_decode_in_every_tokenizer_spelling():
+    # llama.cpp with_pieces: text, or byte values for a partial character
+    assert sbc.server_logit_bias([(10, "人"), (11, " the"), (12, [0xE6]), (13, [0xC3])], ENGLISH_BANS) == \
+        {"10": -100, "12": -100}
+    # vLLM token_strs, byte-level BPE (Qwen, Llama 3): 人 is "äºº", which alone looks like Latin-1 text
+    pairs = [(1, _byte_level("人")), (2, _byte_level(" 的")), (3, "Ġthe"), (4, "Ċ"), (5, _byte_level("é"))]
+    assert sbc.server_logit_bias(pairs, ENGLISH_BANS) == {"1": -100, "2": -100}
+    # vLLM token_strs, SentencePiece (Mistral, Gemma): "▁" spaces and <0xE6> byte tokens
+    assert sbc.server_logit_bias([(20, "▁人"), (21, "<0xE6>"), (22, "▁the"), (23, "<0x41>")], ENGLISH_BANS) == \
+        {"20": -100, "21": -100}
+
+
+def test_server_probe_text_covers_each_banned_script():
+    text = sbc.server_probe_text(ENGLISH_BANS)
+    lines = set(text.split("\n"))
+    for ch in "的人我是说你ไक्षаب":  # common Han, Thai, Devanagari, Cyrillic, Arabic characters, alone
+        assert ch in lines or any(ch in line for line in lines), ch
+    assert "的" in lines and "а" in lines
+    assert sbc.server_probe_text(()) == ""
+
+
+def test_client_asks_a_tokenizing_server_once_and_merges_nothing_else(client, monkeypatch):
+    _turn_on(monkeypatch)
+    client.context = "translation"
+    import unified_api_client as api
+    monkeypatch.setattr(api.UnifiedClient, "_SERVER_BIAS_CACHE", {})
+    asked = []
+
+    def tokenize(base_url, model, text):
+        asked.append((base_url, model))
+        return [(7, "人"), (8, " the"), (9, "ру")]
+
+    monkeypatch.setattr(client, "_server_tokenize", tokenize)
+    params = client._logit_bias_params("openai", "qwen2.5-7b", "http://127.0.0.1:8080/v1")
+    assert params == {"logit_bias": {"7": -100, "9": -100}}
+    assert client._logit_bias_params("openai", "qwen2.5-7b", "http://127.0.0.1:8080/v1") == params
+    assert asked == [("http://127.0.0.1:8080/v1", "qwen2.5-7b")]  # cached per server and model
+    # a cloud provider that is not an OpenAI-compatible custom endpoint is never probed
+    assert client._logit_bias_params("deepseek", "deepseek-chat", "https://api.deepseek.com/v1") == {}
+    assert len(asked) == 1
+    monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "0")
+    assert client._logit_bias_params("openai", "qwen2.5-7b", "http://127.0.0.1:8080/v1") == {}
+
+
+def test_server_tokenize_reads_llamacpp_and_vllm_replies(client, monkeypatch):
+    import unified_api_client as api
+    replies = {"content": (200, {"tokens": [{"id": 5, "piece": "人"}, {"id": 6, "piece": [0xE6]}]}),
+               "prompt": (200, {"tokens": [5, 6], "token_strs": ["äºº", "Ġthe"]})}
+    sent = []
+
+    class Reply:
+        def __init__(self, status, data):
+            self.status_code, self._data = status, data
+
+        def json(self):
+            return self._data
+
+    def post(url, json=None, headers=None, timeout=None):
+        sent.append((url, sorted(json)))
+        kind = "content" if "content" in json else "prompt"
+        status, data = replies[kind]
+        return Reply(status, data)
+
+    monkeypatch.setattr(api.requests, "post", post)
+    assert client._server_tokenize("http://h:8080/v1", "m", "人") == [(5, "人"), (6, [0xE6])]
+    assert sent[-1][0] == "http://h:8080/tokenize"
+    replies["content"] = (404, {})  # vLLM: the llama.cpp body is refused, the vLLM one answers
+    assert client._server_tokenize("http://h:8000/v1/", "m", "人") == [(5, "äºº"), (6, "Ġthe")]
+    replies["prompt"] = (404, {})
+    assert client._server_tokenize("http://h:8000/v1", "m", "人") is None
+
+
+# ------------------------------------------------------------- word bias (Enable word bias presets)
+
+def test_word_bias_presets_reach_official_openai_merged_with_the_script_ban(client, monkeypatch):
+    client.context = "translation"
+    monkeypatch.setenv("ENABLE_ANTI_DUPLICATE", "1")
+    monkeypatch.setenv("LOGIT_BIAS_ENABLED", "1")
+    monkeypatch.setenv("BIAS_COMMON_WORDS", "1")
+    monkeypatch.setenv("LOGIT_BIAS_STRENGTH", "-0.5")  # an older config's signed value: same as 0.5
+    import tiktoken
+    enc = tiktoken.get_encoding("o200k_base")
+    the = str(enc.encode(" the")[0])
+    params = client._logit_bias_params("openai", "gpt-4o", "https://api.openai.com/v1")
+    assert params["logit_bias"][the] == -0.5 and set(params["logit_bias"].values()) == {-0.5}
+    # with the script ban on, both are sent in one map within OpenAI's 300 entries
+    monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "1")
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    merged = client._logit_bias_params("openai", "gpt-4o", "https://api.openai.com/v1")["logit_bias"]
+    assert merged[the] == -0.5 and -100 in merged.values() and len(merged) <= sbc.OPENAI_LOGIT_BIAS_LIMIT
+    # never for other models / endpoints, nor with the switch, the presets or the strength off
+    assert client._preset_logit_bias("openai", "gpt-5", "https://api.openai.com/v1") == {}
+    assert client._preset_logit_bias("openai", "gpt-4o", "http://127.0.0.1:8080/v1") == {}
+    monkeypatch.setenv("LOGIT_BIAS_STRENGTH", "0")
+    assert client._preset_logit_bias("openai", "gpt-4o", "https://api.openai.com/v1") == {}
+    monkeypatch.setenv("LOGIT_BIAS_STRENGTH", "1")
+    monkeypatch.setenv("LOGIT_BIAS_ENABLED", "0")
+    assert client._preset_logit_bias("openai", "gpt-4o", "https://api.openai.com/v1") == {}
 
 
 def _scripted_responses(monkeypatch, client, answers):
