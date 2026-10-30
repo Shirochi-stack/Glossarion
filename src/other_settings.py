@@ -10159,7 +10159,6 @@ def _create_processing_options_section(self, parent):
     
     chunk_prompt_desc = QLabel("Split chapter context")
     chunk_prompt_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    chunk_prompt_desc.setContentsMargins(0, 0, 0, 15)
     right_v.addWidget(chunk_prompt_desc)
     
 
@@ -10167,7 +10166,7 @@ def _create_processing_options_section(self, parent):
     # Break Split Count option
     break_split_w = QWidget()
     break_split_h = QHBoxLayout(break_split_w)
-    break_split_h.setContentsMargins(0, 5, 0, 0)
+    break_split_h.setContentsMargins(0, 0, 0, 0)
     break_split_h.addWidget(QLabel("Break Split Count:"))
     break_split_edit = QLineEdit()
     break_split_edit.setFixedWidth(60)
