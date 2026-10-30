@@ -261,8 +261,15 @@ def test_forced_truncation_is_on_by_default_on_device(tmp_path):
     """Owner 2026-10-30: on by default on device, off elsewhere."""
     service, _engine = _service(tmp_path)
     base = {"temperature": 0.7, "max_tokens": 64, "target_language": "English"}
-    assert service.forced_truncation() is True and service.forced_truncation_seconds() == 10
-    assert service._params(base, 4096)["forced_truncation_seconds"] == 10
+    assert service.forced_truncation() is True and service.forced_truncation_seconds() == 3
+    assert service._params(base, 4096)["forced_truncation_seconds"] == 3
+    # a stopped glossary request is complete by default, the switch of this engine; other requests stay truncated
+    assert service.mark_glossary_complete() is True
+    assert service._params({**base, "glossarion_task": "glossary"}, 4096)["forced_truncation_finish"] == "stop"
+    assert "forced_truncation_finish" not in service._params({**base, "glossarion_task": "translation"}, 4096)
+    assert service.save_mark_glossary_complete(False) is False
+    assert "forced_truncation_finish" not in service._params({**base, "glossarion_task": "glossary"}, 4096)
+    service.save_mark_glossary_complete(True)
     assert service.save_forced_truncation(True, "25") == (True, 25)
     assert service._params(base, 4096)["forced_truncation_seconds"] == 25
     assert service.save_forced_truncation(True, "nonsense") == (True, 25)
