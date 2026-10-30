@@ -1925,3 +1925,20 @@ def test_on_device_prompts_format_like_the_extractors(monkeypatch, bucket):
     assert "type" not in system_prompt and "description" not in system_prompt
     # the Minimal pass replaces its placeholders with str.replace, never str.format
     assert prompt.replace("{language}", "English") == system_prompt
+
+
+def test_dedup_applies_skip_identical_entries_to_old_entries(monkeypatch):
+    """Owner 2026-10-30: entries saved while "Skip identical entries" was off go at the next deduplication."""
+    entries = [
+        {"type": "character", "raw_name": "노인", "translated_name": "노인", "gender": "Male"},
+        {"type": "character", "raw_name": "이벨", "translated_name": "Ibel", "gender": "Male"},
+        {"type": "term", "raw_name": "명인 ", "translated_name": " 명인", "gender": ""},
+        {"type": "book", "raw_name": "Title", "translated_name": "Title", "gender": ""},
+    ]
+    monkeypatch.setenv("GLOSSARY_SKIP_IDENTICAL_ENTRIES", "1")
+    assert [e["raw_name"] for e in skip_duplicate_entries([dict(e) for e in entries])] == ["이벨", "Title"]
+    original, log = skip_duplicate_entries([dict(e) for e in entries], dry_run=True)
+    assert len(original) == 4  # a dry run leaves the list alone and reports the decision
+    assert [row["dropped"] for row in log if row["action"] == "removed_identical"] == ["노인", "명인"]
+    monkeypatch.setenv("GLOSSARY_SKIP_IDENTICAL_ENTRIES", "0")
+    assert len(skip_duplicate_entries([dict(e) for e in entries])) == 4
