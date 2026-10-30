@@ -227,3 +227,47 @@ def test_the_setting_is_wired_through_desktop_schema_and_specs():
 @pytest.mark.parametrize("seconds, expected", [(0, 1.0), ("abc", 3.0), (None, 3.0), (15, 15.0)])
 def test_seconds_are_read_safely(seconds, expected):
     assert ft.RepetitionWatch("", seconds).seconds == expected
+
+
+SWORD = 'A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"\n'
+GUILD = 'A mysterious and somewhat eccentric guild leader who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"\n'
+FOUR_LINE_LOOP = (f'character,제페토,Jepeoto,unknown,"{SWORD}' f'character,더스티,Dersti,unknown,"{GUILD}'
+                  f'character,문자문자,문자문자,unknown,"{SWORD}' f'character,이벨,Ibel,unknown,"{SWORD}')
+
+
+def _feed_in_tokens(watch, clock, text, token=9, per_second=120):
+    for index in range(0, len(text), token):
+        clock.now += 1.0 / per_second
+        if watch.feed(text[index:index + token]):
+            return True
+    return False
+
+
+def test_a_loop_whose_lines_share_their_ending_is_found_wherever_the_answer_stops():
+    """Owner 2026-10-30 (qwen3.5:0.8b, glossary): four lines, three of them ending the same way. The nearest earlier
+    copy of the answer's end is only the previous line, and a miss restarted the time."""
+    for cut in range(0, len(FOUR_LINE_LOOP), 37):
+        text = FOUR_LINE_LOOP * 6 + FOUR_LINE_LOOP[:cut]
+        period, count = ft.repeat_run(text)
+        assert period == len(FOUR_LINE_LOOP) and count >= ft.MIN_REPEATS, cut
+
+
+def test_that_loop_is_stopped_in_time():
+    watch, clock = _watch(seconds=3)
+    assert _feed_in_tokens(watch, clock, FOUR_LINE_LOOP * 40)
+    assert ft.trim_repeats(FOUR_LINE_LOOP * 9) == FOUR_LINE_LOOP
+
+
+def test_ordinary_punctuation_and_short_lines_in_the_source_do_not_excuse_a_loop():
+    """Every Korean chapter has "...", and short lines like "네." come back often: they are not the model's loop."""
+    source = "그는 말했다...... 정말로......\n" + "네.\n" * 60 + "".join(f"<p>문장 번호 {i} 입니다.</p>\n" for i in range(30))
+    assert not ft.source_repeats(source, 3)
+    watch, clock = _watch(source, seconds=3)
+    assert _feed_in_tokens(watch, clock, FOUR_LINE_LOOP * 40)
+
+
+def test_the_count_keeps_growing_past_what_the_tail_holds():
+    """A source sentence repeated 100 times excuses 100 repeats, not the rest of the token limit."""
+    source = "\n".join(["그는 끝없이 같은 말을 되풀이하고 있었다."] * 100)
+    watch, clock = _watch(source, seconds=1)
+    assert _feed_in_tokens(watch, clock, FOUR_LINE_LOOP * 110, per_second=2000)

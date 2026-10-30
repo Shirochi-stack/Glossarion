@@ -27,6 +27,9 @@ DEFAULT_SECONDS = 3
 #: the same text this many times in a row is a repeat; shorter runs are ordinary text
 MIN_REPEATS = 3
 _SIGNATURE = 32  # the characters of the answer's end looked for earlier in it
+_MAX_CANDIDATES = 64  # earlier copies of them tried as the unit's start: lines of a loop can share their ending
+#: the shortest sentence that counts as the source repeating itself: the QA scanner's lowest floor for a source
+_SOURCE_SENTENCE_MIN = 10
 _TAIL = 12000  # the characters of the answer's end a repeat is looked for in
 _CHECK_EVERY = 0.25  # seconds between checks: the answer's end is compared, not every token
 _TAG = re.compile(r"<[^>]+>")
@@ -37,16 +40,22 @@ def repeat_run(text: str) -> Tuple[int, int]:
     size = len(text)
     if size < _SIGNATURE * 2:
         return 0, 0
-    found = text.rfind(text[-_SIGNATURE:], 0, size - 1)
-    if found < 0:
-        return 0, 0
-    period = size - _SIGNATURE - found
-    unit = text[-period:]
-    count, end = 1, size - period
-    while end >= period and text[end - period:end] == unit:
-        count += 1
-        end -= period
-    return period, count
+    signature = text[-_SIGNATURE:]
+    search_end = size - 1
+    for _ in range(_MAX_CANDIDATES):
+        found = text.rfind(signature, 0, search_end)
+        if found < 0:
+            break
+        period = size - _SIGNATURE - found
+        unit = text[-period:]
+        count, end = 1, size - period
+        while end >= period and text[end - period:end] == unit:
+            count += 1
+            end -= period
+        if count >= MIN_REPEATS:
+            return period, count
+        search_end = found + _SIGNATURE - 1  # the next copy further back
+    return 0, 0
 
 
 def trim_repeats(text: str) -> str:
@@ -63,19 +72,20 @@ def trim_repeats(text: str) -> str:
 
 
 def source_repeats(source: Any, count: int) -> bool:
-    """The source has text repeated at least ``count`` times: a sentence or line (the QA scanner's count), or a
-    run of a short unit in a row. Markup does not count: every paragraph has the same tags."""
+    """The source has text repeated at least ``count`` times: a sentence or line (the QA scanner's count, with its
+    lowest length floor), or a run of a short unit in a row on one line ("ㅋㅋㅋ"). Markup, punctuation ("......") and
+    short lines ("네.") do not count: every chapter has those, and they say nothing about the model's loop."""
     body = _TAG.sub(" ", source if isinstance(source, str) else "\n".join(_texts(source)))
     if not body.strip():
         return False
     try:
         from scan_html_folder import _repeating_sentence_counts
 
-        if _repeating_sentence_counts(body, min_repeats=count, min_sentence_length=2):
+        if _repeating_sentence_counts(body, min_repeats=count, min_sentence_length=_SOURCE_SENTENCE_MIN):
             return True
     except Exception:
         log.debug("the QA scanner's repetition count is unavailable", exc_info=True)
-    run = re.compile(r"(\S.{0,59}?)(?:\s*\1){%d,}" % max(1, count - 1), re.DOTALL)
+    run = re.compile(r"([^\W\d_][^\n]{0,59}?)(?:[ \t]*\1){%d,}" % max(1, count - 1))
     return run.search(body) is not None
 
 
@@ -100,11 +110,16 @@ class RepetitionWatch:
         self._since = None
         self._checked = clock()
         self._consumed = 0
+        self._fed = 0  # characters of the answer so far
+        self._since_fed = 0  # ... when the repeat began
+        self._since_count = 0  # the repeat's count then
 
     def feed(self, text: Any) -> bool:
         """Add the answer's next text; True once the answer is to be stopped."""
         if text:
-            self._tail = (self._tail + str(text))[-_TAIL:]
+            text = str(text)
+            self._fed += len(text)
+            self._tail = (self._tail + text)[-_TAIL:]
         now = self.clock()
         if self.fired or now - self._checked < _CHECK_EVERY:
             return self.fired
@@ -114,7 +129,9 @@ class RepetitionWatch:
             self._since = None
             return False
         if self._since is None:
-            self._since = now
+            self._since, self._since_fed, self._since_count = now, self._fed, count
+        # the tail holds only so many copies: past that the count goes on from what was generated
+        count = max(count, self._since_count + (self._fed - self._since_fed) // period)
         if now - self._since < self.seconds or source_repeats(self.source, count):
             return False
         self.fired = True
