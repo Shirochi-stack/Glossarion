@@ -13784,29 +13784,28 @@ def _create_anti_duplicate_section(self, parent):
     stop_row = QWidget()
     stop_h = QHBoxLayout(stop_row)
     stop_h.setContentsMargins(0, 5, 0, 5)
-    stop_h.addWidget(QLabel("Custom Stop Sequences:"))
-    
+    stop_h.addWidget(QLabel("Custom Stop Sequences:"), 0, Qt.AlignTop)
+
     self.custom_stop_sequences_var = self.config.get('custom_stop_sequences', '')
-    stop_entry = QLineEdit()
-    stop_entry.setFixedWidth(300)
+    stop_entry = QTextEdit()
+    stop_entry.setAcceptRichText(False)
+    stop_entry.setMinimumHeight(60)
     try:
-        stop_entry.setText(str(self.custom_stop_sequences_var))
+        stop_entry.setPlainText(str(self.custom_stop_sequences_var))
     except Exception:
         pass
-    def _on_stop_seq_changed(text):
+    def _on_stop_seq_changed():
         try:
-            self.custom_stop_sequences_var = text
+            self.custom_stop_sequences_var = stop_entry.toPlainText().replace("\n", ",")  # a new line separates too
         except Exception:
             pass
     stop_entry.textChanged.connect(_on_stop_seq_changed)
-    stop_h.addWidget(stop_entry)
-    
+    stop_h.addWidget(stop_entry, 1)
+
     stop_tip = QLabel("(comma-separated)")
     stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
-    stop_h.addWidget(stop_tip)
-    stop_h.addStretch()
-    core_v.addWidget(stop_row)
-    core_v.addStretch()
+    stop_h.addWidget(stop_tip, 0, Qt.AlignTop)
+    core_v.addWidget(stop_row, 1)  # fills the rest of the tab
 
     # Tab 2: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
     bias_frame = QWidget()
