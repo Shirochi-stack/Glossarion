@@ -13919,6 +13919,9 @@ def _create_anti_duplicate_section(self, parent):
     block_scripts_warn.setWordWrap(True)
     block_scripts_warn.setMaximumWidth(520)
     block_scripts_warn.setContentsMargins(20, 0, 0, 8)
+    # The tab page sizes a word-wrapped label from its one-line hint: reserve its wrapped height at full width
+    block_scripts_warn.ensurePolished()
+    block_scripts_warn.setMinimumHeight(block_scripts_warn.heightForWidth(520))
     bias_v.addWidget(block_scripts_warn)
 
     # Opt-in emoticon exemption of the script ban (script_ban_core.KAOMOJI_RANGES; also the on-device ban)

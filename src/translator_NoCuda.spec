@@ -1467,6 +1467,14 @@ excludes = [
     'onnxruntime-gpu',
     'onnxruntime_gpu',
 
+    # Silent truncation detection deps and Argos Translate: Heavy build only
+    'sentence_transformers', 'sentence_transformers.*',
+    'deep_translator', 'deep_translator.*',
+    'sklearn', 'sklearn.*', 'scikit-learn',
+    'argostranslate', 'argostranslate.*',
+    'ctranslate2', 'ctranslate2.*',
+    'stanza', 'stanza.*',
+
     # Optional GPU/training accelerators pulled in by transformers/diffusers
     # hooks from a developer's global site-packages. NoCuda keeps CPU torch,
     # transformers, diffusers, and ONNX Runtime, but should not analyze these.

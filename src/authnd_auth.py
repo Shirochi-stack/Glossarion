@@ -524,6 +524,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _missing_browser_module(error: Any) -> str:
+    """The Qt WebEngine module a token helper could not import (builds without the in-app browser), else ""."""
+    match = re.search(r"No module named '(PySide6\.QtWebEngine\w*)'", str(error or ""))
+    return match.group(1) if match else ""
+
+
 def _captcha_token_failure_hint(error: Any) -> str:
     text = str(error or "").lower()
     if "timeout waiting for hcaptcha" in text or "hcaptcha timed out" in text:
@@ -2943,6 +2949,15 @@ def send_chat_completion(
         except RuntimeError as exc:
             if _request_cancelled() or "cancelled" in str(exc).lower():
                 raise RuntimeError("stream cancelled") from exc
+            missing_module = _missing_browser_module(exc)
+            if missing_module:
+                # Lite / TurboLite leave out the browser: a fresh helper would fail the same way
+                _log(
+                    log_fn,
+                    f"⚠️ AuthND is not supported in this build. Missing dependency: {missing_module} "
+                    "(the in-app browser). Use the full Glossarion or NoCuda build for authnd/.",
+                )
+                raise RuntimeError(f"AuthND is not supported in this build (missing {missing_module})") from exc
             error_detail = _short_error(exc)
             _log(
                 log_fn,

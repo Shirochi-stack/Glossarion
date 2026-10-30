@@ -4497,7 +4497,7 @@ class QAScannerMixin:
                 check_truncation_checkbox.setEnabled(False)
                 check_truncation_checkbox.setStyleSheet("color: #606060;")
                 missing_str = ", ".join(_truncation_deps_missing)
-                truncation_desc = QLabel(f"⚠️ Missing dependencies: {missing_str}\n"
+                truncation_desc = QLabel(f"⚠️ Not supported in this build. Missing dependencies: {missing_str}\n"
                                          f"Install with: pip install {' '.join(_truncation_deps_missing)}")
                 truncation_desc.setFont(QFont('Arial', 9))
                 truncation_desc.setStyleSheet("color: #b06040;")

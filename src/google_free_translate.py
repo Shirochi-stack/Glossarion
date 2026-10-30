@@ -736,7 +736,7 @@ class GoogleFreeTranslateNew:
             import argostranslate.package
             import argostranslate.translate
         except ImportError:
-            self.logger.warning("⚠️ Argos Translate not available on lite package. Skipping Argos fallback.")
+            self.logger.warning("⚠️ Argos Translate is not supported in this build. Missing dependency: argostranslate. Skipping Argos fallback.")
             return None
 
         try:
