@@ -566,6 +566,10 @@ def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LO
 #: a response counts as leaking once its foreign-script characters reach both of these
 LEAK_MIN_CHARS = 3
 LEAK_MIN_SHARE = 0.001  # of the response's non-space characters
+#: a run copied from the request passes as a kept name or quote only up to this length, and only while
+#: such runs stay under KEPT_MAX_SHARE of the response (a copied paragraph or an echoed source is a leak)
+KEPT_RUN_MAX_CHARS = 12
+KEPT_MAX_SHARE = 0.2
 
 _SCRIPT_NAMES = {CJK: "Chinese, Japanese or Korean characters", "other": "other scripts"}
 
@@ -589,9 +593,10 @@ def _source_text(source: Any) -> str:
 def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "", *,
                         allow_kaomoji: bool = False) -> Optional[Dict[str, Any]]:
     """The banned-script characters of a response, None while below the threshold (``LEAK_MIN_CHARS`` and
-    ``LEAK_MIN_SHARE``). A run of banned-script characters that also occurs in ``source`` (the request's
-    text or messages: a kept original name, a quoted line) is not counted, nor (``allow_kaomoji``) a
-    character of ``KAOMOJI_RANGES``.
+    ``LEAK_MIN_SHARE``). A short run (``KEPT_RUN_MAX_CHARS``) of banned-script characters that also occurs
+    in ``source`` (the request's text or messages: a kept original name) is not counted while such runs
+    stay under ``KEPT_MAX_SHARE`` of the response: an answer that copies the source is a leak. Nor
+    (``allow_kaomoji``) a character of ``KAOMOJI_RANGES``.
 
     Returns ``{"chars": n, "scripts": {name: n}, "sample": "<first runs>"}``."""
     body = str(text or "")
@@ -603,21 +608,26 @@ def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "", *,
     samples: List[str] = []
     total = 0
     run: List[str] = []
+    kept: List[str] = []
 
-    def close() -> None:
+    def count(piece: str) -> None:
         nonlocal total
-        if not run:
-            return
-        piece = "".join(run)
-        run.clear()
-        if piece in request:
-            return
         total += len(piece)
         for ch in piece:
             name = script_of(ord(ch)) or "other"
             counts[name] = counts.get(name, 0) + 1
         if len(samples) < 5:
             samples.append(piece[:20])
+
+    def close() -> None:
+        if not run:
+            return
+        piece = "".join(run)
+        run.clear()
+        if len(piece) <= KEPT_RUN_MAX_CHARS and piece in request:
+            kept.append(piece)
+        else:
+            count(piece)
 
     allow = bool(allow_kaomoji)
     for ch in body:
@@ -626,9 +636,12 @@ def foreign_script_leak(text: Any, scripts: Iterable[str], source: Any = "", *,
         else:
             close()
     close()
+    visible = sum(1 for ch in body if not ch.isspace())
+    if sum(map(len, kept)) > KEPT_MAX_SHARE * visible:  # too much copied text to be kept names
+        for piece in kept:
+            count(piece)
     if not total:
         return None
-    visible = sum(1 for ch in body if not ch.isspace())
     if total < LEAK_MIN_CHARS or total < LEAK_MIN_SHARE * visible:
         return None
     return {"chars": total, "scripts": counts, "sample": " ".join(samples)}

@@ -101,6 +101,24 @@ def test_leak_counts_foreign_runs_but_not_names_from_the_request():
     assert leak["scripts"] == {"cjk": 5, "devanagari": 6}
 
 
+def test_an_answer_that_copies_the_source_is_a_leak():
+    """Owner 2026-10-30 (ollamapull/qwen3.5:2b): the model streamed the Chinese chapter back unchanged and
+    no retry followed, because every copied run was "also in the request"."""
+    chapter = ("<h2>第 25 章 寻找摩根勒菲的踪迹(三更)</h2>\n<p>某个小木屋中。</p>\n"
+               "<p>“是么，你就是我妹妹之前提起过的那个岛对面的朋友么？”</p>\n<p>然后——</p>")
+    source = [{"role": "system", "content": "Output only english translations with html tags"},
+              {"role": "user", "content": chapter}]
+    leak = sbc.foreign_script_leak(chapter, ENGLISH_BANS, source)
+    assert leak and leak["chars"] > 40 and "cjk" in leak["scripts"]
+    # one long copied line in an otherwise English answer is not a kept name either
+    mixed = "<h2>Chapter 25</h2>\n<p>In a small cabin.</p>\n<p>“是么，你就是我妹妹之前提起过的那个岛对面的朋友么？”</p>"
+    assert sbc.foreign_script_leak(mixed + "<p>Then —</p>" * 20, ENGLISH_BANS, source)
+    # names kept in a real translation still pass, however often they occur
+    names = [{"role": "user", "content": "<p>摩根勒菲和凯在小木屋中。</p>"}]
+    english = "<p>Morgan (摩根勒菲) looked at Kay. Morgan (摩根勒菲) smiled and left the small cabin.</p>" * 5
+    assert sbc.foreign_script_leak(english, ENGLISH_BANS, names) is None
+
+
 def test_leak_threshold_tolerates_a_stray_character():
     assert sbc.foreign_script_leak("He said 你好 and left.", ENGLISH_BANS) is None  # 2 < LEAK_MIN_CHARS
     long_text = "word " * 2000 + "你好吗"  # 3 chars but under 0.1 % of ~8000
