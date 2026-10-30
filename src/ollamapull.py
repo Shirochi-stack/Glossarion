@@ -927,6 +927,8 @@ def _llama_server_executable() -> Optional[str]:
 def _llama_backend_env(server: str) -> dict[str, str]:
     """The environment that gives ``server`` a GPU: Ollama keeps each backend in its own folder and loads the one
     that works, the fastest first; none means the CPU."""
+    if not mobile_runtime.subprocesses_available():
+        return {}
     if server in _ban_backends:
         return _ban_backends[server]
     folder = Path(server).parent
@@ -1056,6 +1058,8 @@ def _start_ban_server(name: str, options: dict[str, Any], vision: bool,
     """(llama-server's URL, model file): the one running with these load settings, else a new one. Ollama's copy
     of the model is unloaded first, or the GPU would hold it twice."""
     global _ban_server
+    if not mobile_runtime.subprocesses_available():
+        raise OllamaPullError("Block other scripts needs a llama-server, which a phone cannot start.")
     executable = _llama_server_executable()
     if not executable:
         raise OllamaPullError("Block other scripts needs the llama-server of a current Ollama, and this install "
@@ -1247,7 +1251,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
         threading.Thread(target=report_wait, daemon=True).start()
     try:
         token_ban = bool(ban_scripts)
-        if token_ban and base_url() != BASE_URL:
+        if token_ban and (base_url() != BASE_URL or not mobile_runtime.subprocesses_available()):
             token_ban = False
             _chat_status(progress, "Block other scripts is not applied: the token ban needs Ollama on this device.")
         chat_url = f"{base_url()}/api/chat"
