@@ -4,9 +4,10 @@ On-device; Prefs key ``local_llm_block_cjk`` kept from when it banned CJK only).
 Small on-device models leak other writing systems into translations: Qwen3.5 0.8B slips Chinese
 characters in ("kanji bleed", Korean -> English), Qwen3.5 2B drifts into whole Hindi (Devanagari) lines
 (owner 2026-10-28). For a request that writes target-language text, every vocabulary token that produces
-a character of a script the target language does not use gets the logit -inf; a request that must copy
-source text (glossary extraction, OCR, a single-pass auto glossary whose answer carries the raw names) is
-left alone.
+a character of a script the target language does not use gets the logit -inf; Extract Glossary and a
+single-pass auto glossary's translation, whose answers copy raw names, keep the tokens made only of their
+source text's characters (owner 2026-10-30: ``processor(whitelist=True)``); other requests that must copy
+source text (OCR) are left alone.
 
 Which requests ban which scripts, the script table and which token bytes count as a banned script live in
 the shared desktop module ``script_ban_core`` (src/; the universal "Block other scripts in translations
@@ -32,10 +33,10 @@ from __future__ import annotations
 import collections
 from typing import Any, Dict, Iterable, Optional, Sequence
 
-from script_ban_core import (BAN_TASKS, BANNED_RANGES, CJK, KAOMOJI_RANGES, SCRIPTS, _banned, _truthy,  # noqa: F401
-                             banned_scripts, banned_token_ids, is_banned_char, is_cjk_target,
-                             kaomoji_source_chars, script_mask, script_of, source_keys, target_scripts,
-                             token_is_banned, token_masks, token_requirements, wants_ban)
+from script_ban_core import (BAN_TASKS, BANNED_RANGES, CJK, KAOMOJI_RANGES, SCRIPTS, SOURCE_WHITELIST_TASKS,  # noqa: F401
+                             _banned, _truthy, banned_scripts, banned_token_ids, is_banned_char, is_cjk_target,
+                             kaomoji_source_chars, needs_met, script_mask, script_of, source_chars, source_keys, source_whitelisted,
+                             target_scripts, token_is_banned, token_masks, token_requirements, wants_ban)
 
 #: processors kept per (banned scripts, emoticon characters of a source)
 SOURCE_CACHE = 16
@@ -100,8 +101,8 @@ class VocabScripts:
         self._processors: Dict[tuple, BanLogitsProcessor] = {}
         # emoticons allowed (built on first use): the changed masks, the per-character index
         self._kaomoji_masks: Optional[Dict[int, tuple]] = None
-        self._requirements: Optional[list] = None
-        self._index: Optional[Dict[Any, list]] = None
+        self._requirements: Dict[bool, list] = {}
+        self._index: Dict[bool, Dict[Any, list]] = {}
         self._source_processors: "collections.OrderedDict[tuple, BanLogitsProcessor]" = collections.OrderedDict()
 
     def __len__(self) -> int:
@@ -122,54 +123,56 @@ class VocabScripts:
         mask = script_mask(scripts)
         return [token for token, chars, tail in self._masks(bool(allow_kaomoji)) if _banned(chars, tail, mask)]
 
-    def source_ids(self, scripts: Iterable[str], chars: Iterable[str]) -> list:
-        """The tokens (with emoticons allowed) that only need ``chars`` (``kaomoji_source_chars``) of the
-        banned ``scripts``: every character of a banned script they have, and their incomplete tail, comes
-        from ``chars`` (``token_requirements``, ``source_keys``)."""
+    def source_ids(self, scripts: Iterable[str], chars: Iterable[str], *, allow_kaomoji: bool = True) -> list:
+        """The tokens that only need ``chars`` (``kaomoji_source_chars``, ``source_chars``) of the banned
+        ``scripts``: every character of a banned script they have, and their incomplete tail, comes from
+        ``chars`` (``token_requirements``, ``source_keys``)."""
         mask = script_mask(scripts)
         keys = source_keys(chars)
         if not mask or not keys:
             return []
-        if self._index is None:
+        allow = bool(allow_kaomoji)
+        if allow not in self._index:
             requirements, index = [], {}
             for position, piece in enumerate(self._pieces):
-                needs = token_requirements(piece, True)
+                needs = token_requirements(piece, allow)
                 requirements.append(needs)
                 for key, _bits, _tail in needs:
                     index.setdefault(key, []).append(position)
-            self._requirements, self._index = requirements, index
+            self._requirements[allow], self._index[allow] = requirements, index
         found = []
         seen = set()
         for key in keys:
-            for position in self._index.get(key, ()):
+            for position in self._index[allow].get(key, ()):
                 if position in seen:
                     continue
                 seen.add(position)
-                if all(key in keys or not (_banned(0, bits, mask) if tail else bits & mask)
-                       for key, bits, tail in self._requirements[position]):
+                if needs_met(self._requirements[allow][position], keys, mask):
                     found.append(self._tokens[position])
         return found
 
-    def processor(self, scripts: Iterable[str], *, allow_kaomoji: bool = False, source: Any = None) -> BanLogitsProcessor:
+    def processor(self, scripts: Iterable[str], *, allow_kaomoji: bool = False, source: Any = None,
+                  whitelist: bool = False) -> BanLogitsProcessor:
         """The processor banning ``scripts``; with ``allow_kaomoji``, without the ``KAOMOJI_RANGES`` tokens and
-        (``source``: the request's user text) the tokens of its emoticon characters."""
+        (``source``: the request's user text) the tokens of its emoticon characters; with ``whitelist``,
+        without the tokens of all of ``source``'s characters (``SOURCE_WHITELIST_TASKS``)."""
         mask = script_mask(scripts)
         allow = bool(allow_kaomoji)
         key = (mask, allow)
         cached = self._processors.get(key)
         if cached is None:
             cached = self._processors[key] = BanLogitsProcessor(self.ids(scripts, allow_kaomoji=allow), self.n_vocab)
-        if not allow or not source:
+        if not source or not (allow or whitelist):
             return cached
-        chars = kaomoji_source_chars(source, scripts)
+        chars = source_chars(source, scripts, allow_kaomoji=allow) if whitelist else kaomoji_source_chars(source, scripts)
         if not chars:
             return cached
-        source_key = (mask, chars)
+        source_key = (mask, allow, chars)
         found = self._source_processors.get(source_key)
         if found is not None:
             self._source_processors.move_to_end(source_key)
             return found
-        allowed = self.source_ids(scripts, chars)
+        allowed = self.source_ids(scripts, chars, allow_kaomoji=allow)
         found = cached.without(allowed) if allowed else cached
         self._source_processors[source_key] = found
         while len(self._source_processors) > SOURCE_CACHE:

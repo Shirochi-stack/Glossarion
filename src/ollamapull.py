@@ -891,6 +891,7 @@ _ban_server: Optional[dict[str, Any]] = None  # {"process", "url", "key"}
 _ban_backends: dict[str, dict[str, str]] = {}  # llama-server path -> environment of its GPU backend
 _ban_contexts: dict[str, int] = {}  # model -> the context size Ollama chose for it
 _ban_bias_cache: dict[tuple, list] = {}  # (model file, scripts, kaomoji) -> llama-server's logit_bias
+_ban_needs_cache: dict[tuple, dict] = {}  # the same key -> banned token -> what it needs from a source
 
 
 def _llama_server_executable() -> Optional[str]:
@@ -965,20 +966,28 @@ def _gguf_tokens(path: str) -> list[str]:
     raise OllamaPullError(f"{path} has no vocabulary.")
 
 
-def _token_ban_bias(model_file: str, scripts: tuple, allow_kaomoji: bool) -> list:
+def _token_ban_bias(model_file: str, scripts: tuple, allow_kaomoji: bool, exempt_chars=frozenset()) -> list:
     """llama-server's ``logit_bias`` that forbids every token of ``scripts`` (``[id, false]``), the same tokens
-    the on-device engine masks (``script_ban_core.banned_token_ids``)."""
+    the on-device engine masks (``script_ban_core.banned_token_ids``), except those that only need
+    ``exempt_chars`` (the source of an Extract Glossary request)."""
+    import script_ban_core
+
     key = (model_file, scripts, allow_kaomoji)
     with _ban_server_lock:
         if key not in _ban_bias_cache:
-            import script_ban_core
-
             tokens = _gguf_tokens(model_file)
             byte_level = script_ban_core.is_byte_level(tokens)
             pieces = [script_ban_core.piece_bytes(token, byte_level) for token in tokens]
             banned = script_ban_core.banned_token_ids(pieces, scripts, allow_kaomoji=allow_kaomoji)
             _ban_bias_cache[key] = [[token, False] for token in banned]
-        return _ban_bias_cache[key]
+            _ban_needs_cache[key] = {token: script_ban_core.token_requirements(pieces[token], allow_kaomoji)
+                                     for token in banned}
+        if not exempt_chars:
+            return _ban_bias_cache[key]
+        keys = script_ban_core.source_keys(exempt_chars)
+        mask = script_ban_core.script_mask(scripts)
+        return [[token, False] for token, needs in _ban_needs_cache[key].items()
+                if not script_ban_core.needs_met(needs, keys, mask)]
 
 
 def _model_files(name: str) -> tuple[str, str]:
@@ -1081,14 +1090,14 @@ def _start_ban_server(name: str, options: dict[str, Any], vision: bool,
 
 def _token_ban_request(name: str, messages: list[dict[str, Any]], payload: dict[str, Any], scripts: tuple,
                        allow_kaomoji: bool, progress: Optional[Callable[[str], None]],
-                       should_stop: Optional[Callable[[], bool]]) -> tuple[str, dict[str, Any]]:
+                       should_stop: Optional[Callable[[], bool]], exempt_chars=frozenset()) -> tuple[str, dict[str, Any]]:
     """(URL, body) of the banned request: the native ``payload`` as llama-server's chat request."""
     options = payload.get("options") or {}
     vision = any(isinstance(part, dict) and part.get("type") == "image_url"
                  for message in messages if isinstance(message.get("content"), list) for part in message["content"])
     url, model_file = _start_ban_server(name, options, vision, progress, should_stop)
     body: dict[str, Any] = {"messages": messages, "stream": bool(payload.get("stream")),
-                            "logit_bias": _token_ban_bias(model_file, scripts, allow_kaomoji)}
+                            "logit_bias": _token_ban_bias(model_file, scripts, allow_kaomoji, exempt_chars)}
     if body["stream"]:
         body["stream_options"] = {"include_usage": True}
     body.update({key: options[key] for key in _LLAMA_REQUEST_OPTIONS if options.get(key) is not None})
@@ -1155,6 +1164,7 @@ def _iter_llama_stream(response: requests.Response, should_stop: Optional[Callab
 
 def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Optional[float] = None,
          max_tokens: Optional[int] = None, stream: bool = True, ban_scripts: tuple = (), allow_kaomoji: bool = False,
+         ban_exempt_chars=frozenset(),
          log_stream: bool = False, log_thinking: bool = False,
          progress: Optional[Callable[[str], None]] = None,
          should_stop: Optional[Callable[[], bool]] = None,
@@ -1163,7 +1173,8 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
     """Send one native chat request and return text, finish reason, and usage.
 
     ``ban_scripts``: the ``script_ban_core.SCRIPTS`` the answer may not use: the request goes to llama-server with a
-    token ban (``_token_ban_request``). Only on this PC: a remote Ollama's model file is out of reach."""
+    token ban (``_token_ban_request``), except tokens that only need ``ban_exempt_chars``. Only on this PC: a
+    remote Ollama's model file is out of reach."""
     name = native_model_name(model_name)
     _check_stop(should_stop)
     settings = model_settings(name)
@@ -1223,7 +1234,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
         chat_url = f"{base_url()}/api/chat"
         if token_ban:
             chat_url, payload = _token_ban_request(name, messages, payload, tuple(ban_scripts), allow_kaomoji,
-                                                   progress, should_stop)
+                                                   progress, should_stop, ban_exempt_chars)
         else:
             _stop_ban_server()  # its GPU memory is Ollama's again
         response = requests.post(chat_url, json=payload, stream=stream, timeout=(5, 600))

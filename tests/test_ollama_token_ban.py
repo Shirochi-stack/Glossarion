@@ -57,6 +57,15 @@ def test_bias_forbids_exactly_the_banned_tokens_and_is_kept(tmp_path, monkeypatc
     assert ollamapull._token_ban_bias(path, ENGLISH, False) is bias
 
 
+def test_bias_lets_the_sources_tokens_through(tmp_path):
+    tokens = ["hello", "김민", "김金", "金", "안"]
+    path = _write_gguf(tmp_path / "w.gguf", tokens)
+    bias = ollamapull._token_ban_bias(path, ENGLISH, False, frozenset("김민"))
+    assert {tokens[i] for i, _flag in bias} == {"김金", "金", "안"}
+    # the plain ban of the same file is untouched
+    assert {tokens[i] for i, _flag in ollamapull._token_ban_bias(path, ENGLISH, False)} == {"김민", "김金", "金", "안"}
+
+
 def _request(monkeypatch, payload, messages=None):
     seen = {}
 
@@ -174,5 +183,5 @@ def test_a_remote_ollama_runs_unbanned_and_says_so(monkeypatch):
 
 def test_client_passes_the_ban_to_the_ollama_route():
     source = (SRC / "unified_api_client.py").read_text(encoding="utf-8")
-    assert "ban_scripts=self._script_ban_scripts(request_context)" in source
+    assert "ban_scripts=ban_scripts, ban_exempt_chars=ban_exempt" in source
     assert os.path.exists(SRC / "script_ban_core.py")

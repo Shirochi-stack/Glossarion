@@ -13789,7 +13789,10 @@ def _create_anti_duplicate_section(self, parent):
     self.custom_stop_sequences_var = self.config.get('custom_stop_sequences', '')
     stop_entry = QTextEdit()
     stop_entry.setAcceptRichText(False)
+    stop_entry.setFixedWidth(300)
     stop_entry.setMinimumHeight(60)
+    # Takes what the tab has left and asks for nothing: its default height hint would make every tab taller
+    stop_entry.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
     try:
         stop_entry.setPlainText(str(self.custom_stop_sequences_var))
     except Exception:
@@ -13800,11 +13803,12 @@ def _create_anti_duplicate_section(self, parent):
         except Exception:
             pass
     stop_entry.textChanged.connect(_on_stop_seq_changed)
-    stop_h.addWidget(stop_entry, 1)
+    stop_h.addWidget(stop_entry)
 
     stop_tip = QLabel("(comma-separated)")
     stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
     stop_h.addWidget(stop_tip, 0, Qt.AlignTop)
+    stop_h.addStretch()
     core_v.addWidget(stop_row, 1)  # fills the rest of the tab
 
     # Tab 2: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
@@ -13911,7 +13915,8 @@ def _create_anti_duplicate_section(self, parent):
             "⚠️ Mixed-language books, original names kept in their own script and targets it does not recognise can suffer.\n"
             "Translations may only use the scripts of the target language: English output blocks Chinese,\n"
             "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's own script is\n"
-            "never blocked, and glossary and single-pass glossary requests are left alone.\n"
+            "never blocked. Extract Glossary and single-pass glossary translations may also use the characters of\n"
+            "their own source text, for raw names; glossary refinement is left alone.\n"
             "Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most common tokens of\n"
             "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
             "a ban built from its own tokens. Other models have no token ban: an answer with such text is kept\n"

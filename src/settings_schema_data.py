@@ -2607,7 +2607,9 @@ SETTINGS = {
                 'blocks Chinese,\n'
                 "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's "
                 'own script is\n'
-                'never blocked, and glossary and single-pass glossary requests are left alone.\n'
+                'never blocked. Extract Glossary and single-pass glossary translations may also '
+                'use the characters of\n'
+                'their own source text, for raw names; glossary refinement is left alone.\n'
                 'Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most '
                 'common tokens of\n'
                 'those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp '

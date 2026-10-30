@@ -93,8 +93,8 @@ def test_service_passes_the_body_field_only_when_on(tmp_path):
     assert "ban_allow_kaomoji" not in service._params({**base, "glossarion_allow_kaomoji": False}, 4096)
     on = service._params({**base, "glossarion_allow_kaomoji": True}, 4096)
     assert on["ban_allow_kaomoji"] is True and on["ban_scripts"] == ENGLISH
-    # nothing banned (glossary): nothing to allow either
-    assert "ban_allow_kaomoji" not in service._params({**base, "glossarion_task": "glossary",
+    # nothing banned (glossary refinement): nothing to allow either
+    assert "ban_allow_kaomoji" not in service._params({**base, "glossarion_task": "glossary_refinement",
                                                        "glossarion_allow_kaomoji": True}, 4096)
 
 

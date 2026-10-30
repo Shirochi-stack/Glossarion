@@ -81,8 +81,11 @@ def test_every_listed_target_keeps_its_own_script():
 
 def test_unknown_targets_glossary_and_single_pass():
     assert sbc.banned_scripts("translation", "Klingon") == ("cjk",)
-    assert sbc.banned_scripts("glossary", "English") == ()
-    assert sbc.banned_scripts("translation", "English", single_pass=True) == ()
+    assert sbc.banned_scripts("glossary", "English") == ENGLISH_BANS  # its source's characters are let through
+    assert sbc.banned_scripts("glossary_refinement", "English") == ()
+    assert sbc.banned_scripts("translation", "English", single_pass=True) == ENGLISH_BANS  # whitelisted, as glossary
+    assert sbc.source_whitelisted("translation", single_pass=True) and sbc.source_whitelisted("glossary")
+    assert not sbc.source_whitelisted("translation") and not sbc.source_whitelisted("metadata", single_pass=True)
     assert sbc.banned_scripts("review", "English") == ()
     assert sbc.banned_scripts("translation", "") == ()
 
@@ -174,7 +177,8 @@ def test_client_bans_nothing_unless_both_switches_are_on(client, monkeypatch):
     monkeypatch.setenv("ENABLE_ANTI_DUPLICATE", "1")
     assert client._script_ban_scripts("translation") == ENGLISH_BANS
     assert client._script_ban_scripts("review") == ()
-    assert client._script_ban_scripts("glossary") == ()
+    assert client._script_ban_scripts("glossary_refinement") == ()
+    assert client._script_ban_scripts("glossary") == ENGLISH_BANS  # Extract Glossary
 
 
 def test_client_logit_bias_only_for_official_openai(client, monkeypatch):
@@ -309,6 +313,60 @@ def _scripted_responses(monkeypatch, client, answers, finish_reason="stop"):
 
 MESSAGES = [{"role": "system", "content": "Translate to English."},
             {"role": "user", "content": "<p>그는 웃었다.</p>"}]
+
+
+def test_extract_glossary_may_use_the_characters_of_its_source_only(client, monkeypatch, caplog):
+    """Owner 2026-10-30: the ban for Extract Glossary too, with the provided source text's characters whitelisted."""
+    caplog.set_level("INFO")
+    _turn_on(monkeypatch)
+    # the glossary section's own switches do not decide: the toggle is one for all requests
+    monkeypatch.setenv("GLOSSARY_ENABLE_ANTI_DUPLICATE", "0")
+    monkeypatch.setattr(client, "context", "glossary")
+    source = [{"role": "system", "content": "예시 名字"}, {"role": "user", "content": "김민준은 웃었다."}]
+    scripts, exempt = client._script_ban_request(source, "glossary")
+    assert scripts == ENGLISH_BANS and "김" in exempt and "웃" in exempt
+    assert "예" not in exempt and "名" not in exempt and "h" not in exempt  # only the user's text, only banned scripts
+    assert client._script_ban_request(source, "translation") == (ENGLISH_BANS, frozenset())
+    # an image's glossary has no text to take the characters from
+    image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
+    assert client._script_ban_request(image, "glossary") == ((), frozenset())
+    # however many names are copied, only what is not in the source is reported
+    client._warn_script_leak(source, "김민준,Kim Minjun\n" * 40, "glossary")
+    assert "another script" not in caplog.text
+    client._warn_script_leak(source, "김민준,金敏俊 Kim Minjun", "glossary")
+    assert "another script" in caplog.text
+
+
+def test_single_pass_translation_may_use_the_characters_of_its_source(client, monkeypatch):
+    """Owner 2026-10-30: "apply that whitelist to single pass as well"."""
+    _turn_on(monkeypatch)
+    source = [{"role": "user", "content": "김민준은 웃었다."}]
+    assert client._script_ban_request(source, "translation") == (ENGLISH_BANS, frozenset())
+    monkeypatch.setenv("AUTO_GLOSSARY_MODE", "single_pass")
+    scripts, exempt = client._script_ban_request(source, "translation")
+    assert scripts == ENGLISH_BANS and "김" in exempt
+    assert client._script_ban_request(source, "metadata") == (ENGLISH_BANS, frozenset())  # no names to copy
+
+
+def test_whitelisted_tokens_only_need_the_sources_characters():
+    chars = sbc.source_chars("김민준은 웃었다 ok", ENGLISH_BANS)
+    assert chars == frozenset("김민준은웃었다")
+    bias = sbc.server_logit_bias([(1, "김민"), (2, "김金"), (3, "金"), (4, "hello")], ENGLISH_BANS, byte_level=False,
+                                 exempt_chars=chars)
+    assert bias == {"2": -100, "3": -100}
+    ids = sbc.bias_token_ids([(1, "민".encode()), (2, "金".encode()), (3, "김".encode()[:2]), (4, "金".encode()[:2])],
+                             ENGLISH_BANS, 10, exempt_chars=chars)
+    assert ids == [2, 4]  # the prefix of a source character stays, the prefix of another one does not
+    assert sbc.source_chars("hello", ENGLISH_BANS) == frozenset()
+
+
+def test_openai_bias_leaves_the_sources_tokens_out(client, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(sbc, "openai_logit_bias", lambda model, scripts, **kw: calls.update(kw) or {"7": -100})
+    _turn_on(monkeypatch)
+    monkeypatch.setattr(client, "context", "glossary")
+    assert client._script_ban_logit_bias("openai", "gpt-4o", None, messages=[{"role": "user", "content": "김"}])
+    assert calls["exempt_chars"] == frozenset("김")
 
 
 def test_a_leaking_answer_is_kept_and_the_log_says_so(client, monkeypatch, caplog):
