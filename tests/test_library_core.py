@@ -1848,7 +1848,8 @@ def test_image_probes_agree_with_qt(tmp_path):
         data = buf.getvalue()
         # QImageReader misreports Pillow's TGA / multi-size ICO headers; sizes compared elsewhere
         (decode_only if fmt in ("TGA", "ICO") else samples).append(data)
-        if fmt != "ICO":  # Qt decodes some cut ICO directories Pillow cannot open (DISCREPANCIES U5)
+        # Qt decodes some cut ICO directories Pillow cannot open (DISCREPANCIES U5), and on Ubuntu 26.04 cut TGA too
+        if fmt not in ("ICO", "TGA"):
             for fraction in (0.97, 0.6, 0.3):
                 decode_only.append(data[:max(1, int(len(data) * fraction))])
             for cut in (40, 54, 55, 56, 62, 66, 70, 72, 74, 80, 130):  # header / first-pixel edges
