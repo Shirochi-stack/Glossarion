@@ -185,3 +185,24 @@ def test_client_passes_the_ban_to_the_ollama_route():
     source = (SRC / "unified_api_client.py").read_text(encoding="utf-8")
     assert "ban_scripts=ban_scripts, ban_exempt_chars=ban_exempt" in source
     assert os.path.exists(SRC / "script_ban_core.py")
+
+
+def _stream_log(chunks, capsys, size=None):
+    pending = ""
+    for chunk in chunks:
+        pending = ollamapull._stream_log_fragment(pending, chunk)
+    ollamapull._stream_log_fragment(pending, "", force=True)
+    return capsys.readouterr().out.splitlines()
+
+
+def test_stream_log_breaks_after_closing_tags(capsys):
+    """Owner 2026-10-30: the log ran every paragraph together; the output itself was clean."""
+    assert _stream_log(["<h2>One</h", "2><p>Two</p", "><p>  <br/></p><p>Thr", "ee</p>\n<p>Four"], capsys) == [
+        "<h2>One</h2>", "<p>Two</p>", "<p>  <br/></p>", "<p>Three</p>", "<p>Four"]
+
+
+def test_stream_log_never_cuts_a_long_line_inside_a_word_or_tag(capsys):
+    words = ["word"] * 100
+    lines = _stream_log([" ".join(words[:50]) + " ", '<a href="x">', " ".join(words[50:])], capsys)
+    assert len(lines) > 1 and all(len(line) <= 170 for line in lines)
+    assert " ".join(lines).split() == (" ".join(words[:50]) + ' <a href="x">' + " ".join(words[50:])).split()

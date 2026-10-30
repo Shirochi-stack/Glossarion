@@ -165,15 +165,30 @@ def _chat_status(callback: Optional[Callable[[str], None]], message: str) -> Non
             pass
 
 
+_STREAM_LOG_BREAK = re.compile(r"\n|</(?:h[1-6]|p|div|li|ul|ol|table|tr|blockquote|head|body|html)>", re.IGNORECASE)
+
+
 def _stream_log_fragment(pending: str, fragment: str, *, prefix: str = "",
                          force: bool = False) -> str:
-    """Emit readable live log lines while retaining a short incomplete line."""
+    """Emit readable live log lines while retaining a short incomplete line: a line ends at a new line or after
+    a closing block tag, and a long one at its last space, never inside a word or tag."""
     pending += fragment
-    while "\n" in pending:
-        line, pending = pending.split("\n", 1)
+    while True:
+        found = _STREAM_LOG_BREAK.search(pending)
+        if found is None:
+            break
+        line, pending = pending[:found.end()], pending[found.end():]
         if line.strip():
-            print(f"{prefix}{line}", flush=True)
-    if pending and (force or len(pending) >= 160):
+            print(f"{prefix}{line.rstrip()}", flush=True)
+    while len(pending) >= 160:
+        cut = pending.rfind(" ", 0, 160)
+        if cut <= 0:
+            cut = pending.find(" ", 160)
+        if cut <= 0:
+            break
+        print(f"{prefix}{pending[:cut]}", flush=True)
+        pending = pending[cut + 1:]
+    if pending and force:
         print(f"{prefix}{pending}", flush=True)
         pending = ""
     return pending
