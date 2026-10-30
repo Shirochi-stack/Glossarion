@@ -13999,7 +13999,7 @@ def _create_anti_duplicate_section(self, parent):
                "while Block other scripts is on.")
 
     # An answer stuck repeating itself is stopped and marked truncated (forced_truncation.py; on device: its own switch)
-    from PySide6.QtWidgets import QSpinBox
+    from PySide6.QtWidgets import QDoubleSpinBox
     self.forced_truncation_enabled_var = self.config.get('forced_truncation_enabled', False)
     self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 10)
     forced_row = QHBoxLayout()
@@ -14022,10 +14022,13 @@ def _create_anti_duplicate_section(self, parent):
             pass
     forced_cb.toggled.connect(_on_forced_truncation_toggle)
     forced_row.addWidget(forced_cb)
-    forced_spin = QSpinBox()
+    forced_spin = QDoubleSpinBox()  # like GUI Font Scale: this dialog's stylesheet restyles a plain QSpinBox's arrows
     forced_spin.setRange(1, 600)
+    forced_spin.setDecimals(0)
     forced_spin.setSuffix(" s")
     forced_spin.setFixedWidth(80)
+    forced_spin.setFocusPolicy(Qt.StrongFocus)
+    forced_spin.wheelEvent = lambda e: e.ignore()
     try:
         forced_spin.setValue(int(self.forced_truncation_seconds_var))
     except (TypeError, ValueError):
