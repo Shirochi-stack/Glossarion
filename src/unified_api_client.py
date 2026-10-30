@@ -3565,6 +3565,8 @@ class UnifiedClient:
             fields['target_language'] = target
         if UnifiedClient._script_ban_allow_kaomoji():
             fields['glossarion_allow_kaomoji'] = True
+        if UnifiedClient._script_ban_whitelist_source():
+            fields['glossarion_whitelist_source'] = True
         return fields
 
     @staticmethod
@@ -3573,27 +3575,96 @@ class UnifiedClient:
         default): the script ban lets kaomoji punctuation through (``script_ban_core.KAOMOJI_RANGES``)."""
         return (os.getenv('SCRIPT_BAN_ALLOW_KAOMOJI') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
+    @staticmethod
+    def _script_ban_whitelist_source() -> bool:
+        """"Whitelist source text" (SCRIPT_BAN_WHITELIST_SOURCE, off by default): every banned request may use the
+        characters of its own source text, not only the ones that always may (``source_whitelisted``)."""
+        return (os.getenv('SCRIPT_BAN_WHITELIST_SOURCE') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def _repeat_watch(self, messages, base_url=None):
+        """The ``forced_truncation.RepetitionWatch`` of one streamed answer, None while "Forced Truncation" is off
+        (FORCED_TRUNCATION) and for the on-device endpoint, whose engine watches its own answer."""
+        if (os.getenv('FORCED_TRUNCATION') or '0').strip().lower() not in ('1', 'true', 'yes', 'on'):
+            return None
+        if base_url and self._is_on_device_endpoint(base_url):
+            return None
+        import forced_truncation
+        users = [m.get('content') for m in (messages or []) if isinstance(m, dict) and m.get('role') == 'user']
+        source = "\n".join(c if isinstance(c, str) else " ".join(str(p.get('text') or '') for p in c if isinstance(p, dict))
+                           for c in users if isinstance(c, (str, list)))
+        return forced_truncation.RepetitionWatch(source, os.getenv('FORCED_TRUNCATION_SECONDS') or forced_truncation.DEFAULT_SECONDS)
+
+    def _note_forced_truncation(self, watch) -> None:
+        """This thread's answer was stopped by Forced Truncation (``_trim_forced_truncation`` trims it)."""
+        print(f"✂️ Forced Truncation: the answer repeated the same text for {watch.seconds:.0f} s and the source does not; "
+              f"it ends here, marked truncated")
+        self._get_thread_local_client()._forced_truncation = True
+
+    def _trim_forced_truncation(self, content, finish_reason, context=None) -> tuple:
+        """(the answer, its finish reason) after Forced Truncation: a stopped answer without the copies of its
+        repeat. "Mark glossary forced truncation as complete" (MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE): a stopped
+        glossary request ends with ``stop``. On-device models stop inside their engine, which has its own switch and
+        already chose the finish reason: only the copies are taken off here."""
+        tls = self._get_thread_local_client()
+        stopped, tls._forced_truncation = getattr(tls, '_forced_truncation', False), False
+        on_device = str(getattr(self, 'model', '') or '').lower().startswith('local/')
+        glossary = 'glossary' in str(context or '').lower()
+        if not isinstance(content, str) or not (stopped or (on_device and (glossary or self._is_truncation_finish_reason(
+                self._normalize_finish_reason(finish_reason) or finish_reason)))):
+            return content, finish_reason
+        import forced_truncation
+        trimmed = forced_truncation.trim_repeats(content)
+        if (stopped and glossary and not on_device
+                and (os.getenv('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE') or '0').strip().lower() in ('1', 'true', 'yes', 'on')):
+            print("✂️ Forced Truncation: this glossary request counts as complete")
+            finish_reason = 'stop'
+        return trimmed, finish_reason
+
     def _script_ban_scripts(self, context=None) -> tuple:
         """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
-        this request (Other Settings › Anti-Duplicate Parameters › Logit Bias; BLOCK_OTHER_SCRIPTS, only
-        while ENABLE_ANTI_DUPLICATE is on), () for none. The same decision as the on-device engine's own
-        switch (``script_ban_core.banned_scripts`` with ``_on_device_task_fields``); a send whose own
-        context is not a target-language request (review, QA, OCR, glossary) never bans."""
+        this request (Other Settings › Anti-Duplicate Parameters › Logit Bias and Ollama Settings › Sampling;
+        BLOCK_OTHER_SCRIPTS, only while ENABLE_ANTI_DUPLICATE is on, except on ollamapull/, whose own dialog
+        has the switch and which sends no anti-duplicate parameter), () for none. The same decision as the
+        on-device engine's own switch (``script_ban_core.banned_scripts`` with ``_on_device_task_fields``); a
+        send whose own context is not a target-language request (review, QA, OCR, other glossary kinds) never
+        bans; Extract Glossary bans too (``_script_ban_request`` lets its source's characters through). The
+        switch is one for all requests: a glossary request does not read the GLOSSARY_ settings for it."""
         try:
-            if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
+            if (os.getenv("ENABLE_ANTI_DUPLICATE", "0") != "1"
+                    and not str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')):
                 return ()
-            if self._get_anti_duplicate_env("BLOCK_OTHER_SCRIPTS", "0") != "1":
+            if os.getenv("BLOCK_OTHER_SCRIPTS", "0") != "1":
                 return ()
             import script_ban_core
             kind = str(context or '').strip().lower()
-            if kind and kind not in script_ban_core.BAN_TASKS:
+            if kind and kind not in script_ban_core.BAN_TASKS and kind not in script_ban_core.SOURCE_WHITELIST_TASKS:
                 return ()
             fields = self._on_device_task_fields()
+            task = kind if kind in script_ban_core.SOURCE_WHITELIST_TASKS else fields.get('glossarion_task')
             return tuple(script_ban_core.banned_scripts(
-                fields.get('glossarion_task'), fields.get('target_language'),
-                single_pass=fields.get('glossarion_single_pass')))
+                task, fields.get('target_language'), single_pass=fields.get('glossarion_single_pass')))
         except Exception:
             return ()
+
+    def _script_ban_request(self, messages, context=None) -> tuple:
+        """(banned scripts, the characters of them this request may still use) for one request. Extract
+        Glossary, refinement and a single-pass translation copy raw names: the characters of the user text
+        are let through, and without text (an image) there is nothing to tell them by, so nothing is banned.
+        "Whitelist source text" lets every other request's text through too; its image keeps the plain ban."""
+        scripts = self._script_ban_scripts(context)
+        if not scripts:
+            return (), frozenset()
+        import script_ban_core
+        fields = self._on_device_task_fields()
+        kind = str(context or '').strip().lower() or str(fields.get('glossarion_task') or '')
+        always = script_ban_core.source_whitelisted(kind, single_pass=fields.get('glossarion_single_pass'))
+        if not always and not self._script_ban_whitelist_source():
+            return scripts, frozenset()
+        users = [m for m in (messages or []) if isinstance(m, dict) and m.get('role') == 'user']
+        if any(isinstance(m.get('content'), list) and any(isinstance(p, dict) and p.get('type') != 'text' for p in m['content'])
+               for m in users):
+            return ((), frozenset()) if always else (scripts, frozenset())
+        return scripts, script_ban_core.source_chars(users, scripts, allow_kaomoji=self._script_ban_allow_kaomoji())
 
     @staticmethod
     def _bias_host(base_url) -> str:
@@ -3654,6 +3725,8 @@ class UnifiedClient:
         return bias
 
     _SERVER_BIAS_CACHE: dict = {}
+
+    _SERVER_PAIRS_CACHE: dict = {}  # the same key -> the server's (id, piece) pairs
     _SERVER_BIAS_LOCK = threading.Lock()
 
     def _server_tokenize(self, base_url, model, text):
@@ -3690,7 +3763,7 @@ class UnifiedClient:
                 return pairs
         return None
 
-    def _server_script_ban_bias(self, provider, model, base_url, scripts, allow_kaomoji) -> dict:
+    def _server_script_ban_bias(self, provider, model, base_url, scripts, allow_kaomoji, exempt_chars=frozenset()) -> dict:
         """The script ban as a ``logit_bias`` built from an OpenAI-compatible server's own tokenizer
         (``script_ban_core.server_logit_bias``), asked once per server, model and ban; {} for servers
         without ``/tokenize`` (the output guard stays their only ban)."""
@@ -3707,36 +3780,41 @@ class UnifiedClient:
             return {}
         key = (str(base_url).rstrip('/'), str(model or ''), tuple(scripts), bool(allow_kaomoji))
         with self._SERVER_BIAS_LOCK:
-            if key in self._SERVER_BIAS_CACHE:
-                return self._SERVER_BIAS_CACHE[key]
             import script_ban_core
-            text = script_ban_core.server_probe_text(scripts, allow_kaomoji=allow_kaomoji)
-            pairs = self._server_tokenize(base_url, model, text) if text else None
-            bias = script_ban_core.server_logit_bias(pairs or (), scripts, allow_kaomoji=allow_kaomoji)
-            self._SERVER_BIAS_CACHE[key] = bias
-            if bias:
-                print(f"🔤 Block other scripts: {len(bias)} tokens from {host}'s own tokenizer for {model}")
-            return bias
+            if key not in self._SERVER_BIAS_CACHE:
+                text = script_ban_core.server_probe_text(scripts, allow_kaomoji=allow_kaomoji)
+                pairs = self._server_tokenize(base_url, model, text) if text else None
+                bias = script_ban_core.server_logit_bias(pairs or (), scripts, allow_kaomoji=allow_kaomoji)
+                self._SERVER_BIAS_CACHE[key] = bias
+                self._SERVER_PAIRS_CACHE[key] = pairs or ()
+                if bias:
+                    print(f"🔤 Block other scripts: {len(bias)} tokens from {host}'s own tokenizer for {model}")
+            if not exempt_chars:
+                return self._SERVER_BIAS_CACHE[key]
+            return script_ban_core.server_logit_bias(self._SERVER_PAIRS_CACHE.get(key) or (), scripts,
+                                                     allow_kaomoji=allow_kaomoji, exempt_chars=exempt_chars)
 
-    def _script_ban_logit_bias(self, provider, model, base_url, use_responses_api=False, limit=None) -> dict:
+    def _script_ban_logit_bias(self, provider, model, base_url, use_responses_api=False, limit=None, messages=None) -> dict:
         """``{"logit_bias": {...}}`` pushing down the banned scripts' tokens: official OpenAI chat models
         get their most frequent ones (tiktoken knows the tokenizer: ``script_ban_core.openai_logit_bias``),
         an OpenAI-compatible server with ``/tokenize`` (llama.cpp server, vLLM) gets ids from its own
         tokenizer (``_server_script_ban_bias``); {} for every other route, which relies on the output
-        guard (``_script_leak_retry_messages``)."""
+        warning (``_warn_script_leak``)."""
         if use_responses_api:
             return {}
-        scripts = self._script_ban_scripts(getattr(self, 'context', None))
+        scripts, exempt = self._script_ban_request(messages, getattr(self, 'context', None))
         if not scripts:
             return {}
         import script_ban_core
         allow = self._script_ban_allow_kaomoji()
         if not self._official_openai_chat(provider, base_url):
-            bias = self._server_script_ban_bias(provider, model, base_url, scripts, allow)
+            bias = self._server_script_ban_bias(provider, model, base_url, scripts, allow, exempt)
             return {"logit_bias": dict(bias)} if bias else {}
         kwargs = {}
         if allow:  # kaomoji punctuation left out of the 300 entries
             kwargs['allow_kaomoji'] = True
+        if exempt:
+            kwargs['exempt_chars'] = exempt
         if limit is not None:
             kwargs['limit'] = limit
         bias = script_ban_core.openai_logit_bias(model, scripts, **kwargs)
@@ -3745,52 +3823,37 @@ class UnifiedClient:
         self._log_once(f"🔤 Block other scripts: logit_bias on {len(bias)} tokens for {model}")
         return {"logit_bias": bias}
 
-    def _logit_bias_params(self, provider, model, base_url, use_responses_api=False) -> dict:
+    def _logit_bias_params(self, provider, model, base_url, use_responses_api=False, messages=None) -> dict:
         """The request's ``logit_bias``: the preset targets (``_preset_logit_bias``) and the script ban
         (``_script_ban_logit_bias``; its -100 wins a shared token) in one map, within OpenAI's 300."""
         import script_ban_core
         presets = self._preset_logit_bias(provider, model, base_url, use_responses_api)
         room = script_ban_core.OPENAI_LOGIT_BIAS_LIMIT - len(presets)
-        ban = self._script_ban_logit_bias(provider, model, base_url, use_responses_api,
-                                          limit=room if presets else None).get('logit_bias') or {}
+        ban = self._script_ban_logit_bias(provider, model, base_url, use_responses_api, limit=room if presets else None,
+                                          messages=messages).get('logit_bias') or {}
         if not presets and not ban:
             return {}
         if presets:
             self._log_once(f"🎯 Logit bias: {len(presets)} preset tokens at {next(iter(presets.values()))} for {model}")
         return {"logit_bias": {**presets, **ban}}
 
-    def _script_leak_retry_messages(self, messages, content, context=None):
-        """The output guard of "Block other scripts": None while the answer keeps to the target's
-        scripts (``script_ban_core.foreign_script_leak``; runs also found in the request, such as kept
-        names, are ignored), else ``(messages with the write-only-in-the-target instruction added to
-        the last user message, the leak)``."""
-        scripts = self._script_ban_scripts(context)
+    def _warn_script_leak(self, messages, content, context=None) -> None:
+        """Say so in the log when an answer has text in a script the target does not use
+        (``script_ban_core.foreign_script_leak``; runs also found in the request, such as kept names, are
+        ignored). The answer is kept: only a ban while sampling can prevent this, and a route without one has
+        none to offer."""
+        scripts, exempt = self._script_ban_request(messages, context)
         if not scripts or not isinstance(content, str) or not content.strip():
-            return None
+            return
         import script_ban_core
-        if self._script_ban_allow_kaomoji():  # kaomoji punctuation is not a leak
-            leak = script_ban_core.foreign_script_leak(content, scripts, messages, allow_kaomoji=True)
-        else:
-            leak = script_ban_core.foreign_script_leak(content, scripts, messages)
-        if not leak:
-            return None
-        target = self._on_device_task_fields().get('target_language', '')
-        note = script_ban_core.retry_instruction(target, tuple(leak['scripts']))
-        updated = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
-        for message in reversed(updated):
-            if not isinstance(message, dict) or message.get('role') != 'user':
-                continue
-            body = message.get('content')
-            if isinstance(body, str):
-                if note not in body:
-                    message['content'] = f"{body}\n\n{note}"
-                return updated, leak
-            if isinstance(body, list):
-                if not any(isinstance(p, dict) and p.get('text') == note for p in body):
-                    message['content'] = list(body) + [{"type": "text", "text": note}]
-                return updated, leak
-        updated.append({"role": "user", "content": note})
-        return updated, leak
+        if exempt:  # names copied on purpose: every character of the source is fine, however many
+            content = "".join(ch for ch in content if ch not in exempt)
+        leak = script_ban_core.foreign_script_leak(content, scripts, "" if exempt else messages,
+                                                   allow_kaomoji=self._script_ban_allow_kaomoji())
+        if leak:
+            shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
+            print(f"⚠️ Answer contains {leak['chars']} characters of another script ({shown}: {leak['sample']}); "
+                  f"this route has no token ban that could prevent it")
 
     def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
         """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
@@ -11556,23 +11619,8 @@ class UnifiedClient:
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
 
-                # "Block other scripts in translations (adaptive, all models)": an answer with text in a
-                # script the target language does not use is sent again with an instruction, on this
-                # loop's own retry budget (like the image-quality retry); the last attempt's answer is kept.
-                if not self._is_truncation_finish_reason(self._normalize_finish_reason(finish_reason) or finish_reason):
-                    leak_retry = self._script_leak_retry_messages(messages, extracted_content, context)
-                    if leak_retry is not None:
-                        retry_messages, leak = leak_retry
-                        shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
-                        if attempt < internal_retries - 1 and not self._should_abort_retry():
-                            print(f"🔤 Answer contains {leak['chars']} characters of another script ({shown}: "
-                                  f"{leak['sample']}); retrying with a target-language-only instruction "
-                                  f"(attempt {attempt + 1}/{internal_retries})")
-                            self._last_retry_error_type = 'foreign_script'
-                            messages = retry_messages
-                            continue
-                        print(f"⚠️ Answer still contains {leak['chars']} characters of another script ({shown}); "
-                              f"no retries left - keeping it")
+                extracted_content, finish_reason = self._trim_forced_truncation(extracted_content, finish_reason, context)
+                self._warn_script_leak(messages, extracted_content, context)
 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
@@ -15529,6 +15577,7 @@ class UnifiedClient:
         ("TOP_P", 1.0), ("MIN_P", 0.0), ("TOP_K", 0), ("FREQUENCY_PENALTY", 0.0), ("PRESENCE_PENALTY", 0.0),
         ("REPETITION_PENALTY", 1.0), ("CANDIDATE_COUNT", 1), ("CUSTOM_STOP_SEQUENCES", ""),
         ("LOGIT_BIAS_ENABLED", "0"), ("BLOCK_OTHER_SCRIPTS", "0"), ("SCRIPT_BAN_ALLOW_KAOMOJI", "0"),
+        ("SCRIPT_BAN_WHITELIST_SOURCE", "0"),
     )
 
     def _anti_duplicate_snapshot(self, temperature=None):
@@ -25597,7 +25646,7 @@ class UnifiedClient:
                             params["max_completion_tokens"] = norm_max_completion_tokens
                         elif norm_max_tokens is not None:
                             params["max_tokens"] = norm_max_tokens
-                        params.update(self._logit_bias_params(provider, effective_model, base_url))
+                        params.update(self._logit_bias_params(provider, effective_model, base_url, messages=messages))
 
                     if (req_temperature is None or self._temperature_parameter_disabled()
                             or model_rejects_temperature(effective_model)):
@@ -26476,7 +26525,12 @@ class UnifiedClient:
 
                         _check_cancel_during_stream()
                         
+                        repeat_watch = self._repeat_watch(messages, base_url)
                         for event in _iter_stream_events():
+                            if repeat_watch is not None and repeat_watch.feed_parts(text_parts):
+                                self._note_forced_truncation(repeat_watch)
+                                finish_reason = 'length'
+                                break
                             _check_cancel_during_stream()
                             try:
                                 event_usage = event.get('usage') if isinstance(event, dict) else getattr(event, 'usage', None)
@@ -27788,7 +27842,7 @@ class UnifiedClient:
             if not use_responses_api:
                 data.update(anti_dupe_params)
                 data.update(anti_dupe_min_p_params)
-                data.update(self._logit_bias_params(provider, effective_model, base_url))
+                data.update(self._logit_bias_params(provider, effective_model, base_url, messages=messages))
             self._log_anti_duplicate_applied(
                 {
                     **(anti_dupe_params if not use_responses_api else {}),
@@ -29593,9 +29647,12 @@ class UnifiedClient:
                 with self._active_streams_lock:
                     self._active_streams.discard(response)
 
+            ban_scripts, ban_exempt = self._script_ban_request(messages, request_context)
+            repeat_watch = self._repeat_watch(messages)
             result = chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                stream=use_streaming,
+                stream=use_streaming, ban_scripts=ban_scripts, ban_exempt_chars=ban_exempt, repeat_watch=repeat_watch,
+                allow_kaomoji=self._script_ban_allow_kaomoji(),
                 log_stream=self._stream_logging_enabled(use_streaming),
                 log_thinking=self._stream_thinking_logging_enabled(),
                 progress=lambda message: logger.info("Ollama: %s", message),
@@ -29605,6 +29662,8 @@ class UnifiedClient:
                 on_response_open=register,
                 on_response_close=unregister,
             )
+            if repeat_watch is not None and repeat_watch.fired:
+                self._note_forced_truncation(repeat_watch)
             return UnifiedResponse(
                 content=result['content'], finish_reason=result['finish_reason'],
                 usage=result['usage'], raw_response=result['raw_response'],

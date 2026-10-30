@@ -10159,7 +10159,6 @@ def _create_processing_options_section(self, parent):
     
     chunk_prompt_desc = QLabel("Split chapter context")
     chunk_prompt_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    chunk_prompt_desc.setContentsMargins(0, 0, 0, 15)
     right_v.addWidget(chunk_prompt_desc)
     
 
@@ -10167,7 +10166,7 @@ def _create_processing_options_section(self, parent):
     # Break Split Count option
     break_split_w = QWidget()
     break_split_h = QHBoxLayout(break_split_w)
-    break_split_h.setContentsMargins(0, 5, 0, 0)
+    break_split_h.setContentsMargins(0, 0, 0, 0)
     break_split_h.addWidget(QLabel("Break Split Count:"))
     break_split_edit = QLineEdit()
     break_split_edit.setFixedWidth(60)
@@ -13772,59 +13771,46 @@ def _create_anti_duplicate_section(self, parent):
     self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
     pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=2)
     
-    core_v.addStretch()
-    
-    # Tab 2: Advanced Parameters
-    advanced_frame = QWidget()
-    advanced_v = QVBoxLayout(advanced_frame)
-    advanced_v.setContentsMargins(10, 10, 10, 10)
-    self.anti_duplicate_notebook.addTab(advanced_frame, "Advanced")
-    
     # Repetition Penalty
     self.repetition_penalty_var = self.config.get('repetition_penalty', 1.0)
-    rep_slider, self.rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
-    
+    rep_slider, self.rep_penalty_value_label = _create_slider_row(core_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
+
     # Candidate Count (Gemini)
     self.candidate_count_var = self.config.get('candidate_count', 1)
-    candidate_slider, self.candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self, 'candidate_count_var', 1, 4, is_int=True)
-    
-    advanced_v.addStretch()
-    
-    # Tab 3: Stop Sequences
-    stop_frame = QWidget()
-    stop_v = QVBoxLayout(stop_frame)
-    stop_v.setContentsMargins(10, 10, 10, 10)
-    self.anti_duplicate_notebook.addTab(stop_frame, "Stop Sequences")
-    
+    candidate_slider, self.candidate_value_label = _create_slider_row(core_v, "Candidate Count (Gemini):", self, 'candidate_count_var', 1, 4, is_int=True)
+
     # Custom Stop Sequences
     stop_row = QWidget()
     stop_h = QHBoxLayout(stop_row)
     stop_h.setContentsMargins(0, 5, 0, 5)
-    stop_h.addWidget(QLabel("Custom Stop Sequences:"))
-    
+    stop_h.addWidget(QLabel("Custom Stop Sequences:"), 0, Qt.AlignTop)
+
     self.custom_stop_sequences_var = self.config.get('custom_stop_sequences', '')
-    stop_entry = QLineEdit()
+    stop_entry = QTextEdit()
+    stop_entry.setAcceptRichText(False)
     stop_entry.setFixedWidth(300)
+    stop_entry.setMinimumHeight(60)
+    # Takes what the tab has left and asks for nothing: its default height hint would make every tab taller
+    stop_entry.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
     try:
-        stop_entry.setText(str(self.custom_stop_sequences_var))
+        stop_entry.setPlainText(str(self.custom_stop_sequences_var))
     except Exception:
         pass
-    def _on_stop_seq_changed(text):
+    def _on_stop_seq_changed():
         try:
-            self.custom_stop_sequences_var = text
+            self.custom_stop_sequences_var = stop_entry.toPlainText().replace("\n", ",")  # a new line separates too
         except Exception:
             pass
     stop_entry.textChanged.connect(_on_stop_seq_changed)
     stop_h.addWidget(stop_entry)
-    
+
     stop_tip = QLabel("(comma-separated)")
     stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
-    stop_h.addWidget(stop_tip)
+    stop_h.addWidget(stop_tip, 0, Qt.AlignTop)
     stop_h.addStretch()
-    stop_v.addWidget(stop_row)
-    stop_v.addStretch()
-    
-    # Tab 4: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
+    core_v.addWidget(stop_row, 1)  # fills the rest of the tab
+
+    # Tab 2: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
     bias_frame = QWidget()
     bias_v = QVBoxLayout(bias_frame)
     bias_v.setContentsMargins(10, 10, 10, 10)
@@ -13918,22 +13904,24 @@ def _create_anti_duplicate_section(self, parent):
 
     # Universal adaptive script ban (script_ban_core; the on-device engine has its own switch)
     _bias_heading("Script Ban (separate from Word Bias)", top=12)
-    _bias_note("Does not need Enable word bias or Strength. Official OpenAI models and local servers with a "
-               "tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; every model gets an answer check.")
+    _bias_note("Does not need Enable word bias or Strength. Official OpenAI models, ollamapull/ and local servers "
+               "with a tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; on other models the log only warns.")
     self.block_other_scripts_var = self.config.get('block_other_scripts', False)
     block_scripts_cb = self._create_styled_checkbox("Block other scripts in translations (adaptive, all models)")
     try:
         block_scripts_cb.setChecked(bool(self.block_other_scripts_var))
         block_scripts_cb.setToolTip(
-            "⚠️ Can cause errors or retries: mixed-language books, kept original names, targets it does not recognise.\n"
+            "⚠️ Mixed-language books, original names kept in their own script and targets it does not recognise can suffer.\n"
             "Translations may only use the scripts of the target language: English output blocks Chinese,\n"
             "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's own script is\n"
-            "never blocked, and glossary and single-pass glossary requests are left alone.\n"
+            "never blocked. Extract Glossary, refinement and single-pass glossary translations may also use the\n"
+            "characters of their own source text, for raw names (Whitelist source text: every request).\n"
             "Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most common tokens of\n"
             "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
-            "a ban built from its own tokens. On every model, an answer with such text (or a copy of the source)\n"
-            "is sent again with an instruction to write only in the target language (Max Retries).\n"
-            "Works only while Enable Anti-Duplicate Parameters is on."
+            "a ban built from its own tokens. Other models have no token ban: an answer with such text is kept\n"
+            "and the log warns about it.\n"
+            "ollamapull/ gets a full token ban on the llama-server that comes with Ollama, and its own dialog\n"
+            "has the same switch. Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/."
         )
     except Exception:
         pass
@@ -13943,13 +13931,14 @@ def _create_anti_duplicate_section(self, parent):
         except Exception:
             pass
     block_scripts_cb.toggled.connect(_on_block_scripts_toggle)
+    self.block_other_scripts_checkbox = block_scripts_cb  # Ollama Settings saves the same switch
     block_scripts_cb.setContentsMargins(0, 10, 0, 0)
     bias_v.addWidget(block_scripts_cb)
 
     block_scripts_warn = QLabel(
-        "⚠️ Think before enabling: it can cause errors or extra retries with mixed-language books, "
-        "original names kept in their own script, or a target language Glossarion does not recognise "
-        "(those block Chinese, Japanese and Korean only)."
+        "⚠️ Think before enabling: where the model has a token ban, it cannot write mixed-language text or "
+        "original names kept in their own script. A target language Glossarion does not recognise "
+        "blocks Chinese, Japanese and Korean only."
     )
     block_scripts_warn.setStyleSheet("color: #e0a040; font-size: 8pt;")
     block_scripts_warn.setWordWrap(True)
@@ -13980,8 +13969,98 @@ def _create_anti_duplicate_section(self, parent):
         except Exception:
             pass
     kaomoji_cb.toggled.connect(_on_kaomoji_toggle)
+    self.script_ban_allow_kaomoji_checkbox = kaomoji_cb  # Ollama Settings saves the same switch
     kaomoji_cb.setContentsMargins(20, 0, 0, 0)
     bias_v.addWidget(kaomoji_cb)
+
+    # The ban lets the characters of a request's own source text through (script_ban_core.source_chars; also on device)
+    self.script_ban_whitelist_source_var = self.config.get('script_ban_whitelist_source', False)
+    whitelist_cb = self._create_styled_checkbox("Whitelist source text")
+    try:
+        whitelist_cb.setChecked(bool(self.script_ban_whitelist_source_var))
+        whitelist_cb.setToolTip(
+            "Every request blocked by Block other scripts may also use the characters of its own source text,\n"
+            "so original names can be kept. Characters that are not in the source stay blocked.\n"
+            "This also lets a model copy the source instead of translating it.\n"
+            "Applies to Block other scripts in translations and to the on-device engine's own switch."
+        )
+    except Exception:
+        pass
+    def _on_whitelist_toggle(checked):
+        try:
+            self.script_ban_whitelist_source_var = bool(checked)
+        except Exception:
+            pass
+    whitelist_cb.toggled.connect(_on_whitelist_toggle)
+    self.script_ban_whitelist_source_checkbox = whitelist_cb  # Ollama Settings saves the same switch
+    whitelist_cb.setContentsMargins(20, 0, 0, 0)
+    bias_v.addWidget(whitelist_cb)
+    _bias_note("Extract Glossary, the single-pass auto glossary and refinement always whitelist their source text "
+               "while Block other scripts is on.")
+
+    # An answer stuck repeating itself is stopped and marked truncated (forced_truncation.py; on device: its own switch)
+    from PySide6.QtWidgets import QDoubleSpinBox
+    self.forced_truncation_enabled_var = self.config.get('forced_truncation_enabled', False)
+    self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 3)
+    forced_row = QHBoxLayout()
+    forced_row.setContentsMargins(0, 8, 0, 0)
+    forced_cb = self._create_styled_checkbox("Forced Truncation")
+    try:
+        forced_cb.setChecked(bool(self.forced_truncation_enabled_var))
+        forced_cb.setToolTip(
+            "When a streamed answer keeps repeating the same text for this many seconds, it is stopped and\n"
+            "ends with finish reason length, so the Progress Manager marks the chapter truncated and the run\n"
+            "moves on. Text that the source itself repeats as often is left alone, like in the QA scanner.\n"
+            "Works on ollamapull/ and OpenAI-compatible endpoints. On-device models have their own switch."
+        )
+    except Exception:
+        pass
+    def _on_forced_truncation_toggle(checked):
+        try:
+            self.forced_truncation_enabled_var = bool(checked)
+        except Exception:
+            pass
+    forced_cb.toggled.connect(_on_forced_truncation_toggle)
+    forced_row.addWidget(forced_cb)
+    forced_spin = QDoubleSpinBox()  # like GUI Font Scale: this dialog's stylesheet restyles a plain QSpinBox's arrows
+    forced_spin.setRange(1, 600)
+    forced_spin.setDecimals(0)
+    forced_spin.setSuffix(" s")
+    forced_spin.setFixedWidth(80)
+    forced_spin.setFocusPolicy(Qt.StrongFocus)
+    forced_spin.wheelEvent = lambda e: e.ignore()
+    try:
+        forced_spin.setValue(int(self.forced_truncation_seconds_var))
+    except (TypeError, ValueError):
+        forced_spin.setValue(3)
+    def _on_forced_truncation_seconds(value):
+        try:
+            self.forced_truncation_seconds_var = int(value)
+        except Exception:
+            pass
+    forced_spin.valueChanged.connect(_on_forced_truncation_seconds)
+    forced_row.addWidget(forced_spin)
+    forced_row.addStretch()
+    bias_v.addLayout(forced_row)
+
+    self.mark_glossary_forced_truncation_complete_var = self.config.get('mark_glossary_forced_truncation_complete', False)
+    mark_complete_cb = self._create_styled_checkbox("Mark glossary forced truncation as complete")
+    try:
+        mark_complete_cb.setChecked(bool(self.mark_glossary_forced_truncation_complete_var))
+        mark_complete_cb.setToolTip(
+            "A glossary request stopped by Forced Truncation counts as finished: its chapter is marked complete\n"
+            "with the entries it has, instead of truncated, so it is not extracted again.\n"
+            "Entries after the point where the model began repeating are never extracted."
+        )
+    except Exception:
+        pass
+    def _on_mark_complete_toggle(checked):
+        try:
+            self.mark_glossary_forced_truncation_complete_var = bool(checked)
+        except Exception:
+            pass
+    mark_complete_cb.toggled.connect(_on_mark_complete_toggle)
+    bias_v.addWidget(mark_complete_cb)
     bias_v.addStretch()
     
     # Provider compatibility info
@@ -14015,7 +14094,7 @@ def _create_anti_duplicate_section(self, parent):
     section_v.addWidget(content_container)
     
     # Store all tab frames for enable/disable
-    self.anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
+    self.anti_duplicate_tabs = [core_frame, bias_frame]
     
     # Place the section at row 6, spanning both columns
     try:
@@ -14194,6 +14273,14 @@ def _reset_anti_duplicate_defaults(self):
 
     if hasattr(self, 'script_ban_allow_kaomoji_var'):
         self.script_ban_allow_kaomoji_var = False  # Default = disabled
+    if hasattr(self, 'script_ban_whitelist_source_var'):
+        self.script_ban_whitelist_source_var = False  # Default = disabled
+    if hasattr(self, 'forced_truncation_enabled_var'):
+        self.forced_truncation_enabled_var = False  # Default = disabled
+    if hasattr(self, 'forced_truncation_seconds_var'):
+        self.forced_truncation_seconds_var = 3
+    if hasattr(self, 'mark_glossary_forced_truncation_complete_var'):
+        self.mark_glossary_forced_truncation_complete_var = False  # Default = disabled
 
     # Update enable/disable state
     self._toggle_anti_duplicate_controls()

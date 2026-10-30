@@ -17,7 +17,7 @@
 # (module-scope, conditional or lazy) is bundled unless excluded or GUI-tainted.
 modules = [
   "TransateKRtoEN", "extract_glossary_from_epub", "extract_glossary_from_txt", "epub_converter",
-  "scan_html_folder", "qa_scan_runtime", "GlossaryManager", "unified_glossary", "glossary_process_worker",
+  "scan_html_folder", "forced_truncation", "qa_scan_runtime", "GlossaryManager", "unified_glossary", "glossary_process_worker",
   "glossary_refinement", "glossary_compressor", "manga_translator", "ocr_manager", "bubble_detector",
   "local_inpainter", "image_translator", "txt_processor", "pdf_extractor", "pdf_workspace_compiler",
   "_pdf_worker", "pdf_generation_manager", "metadata_translation_worker", "metadata_batch_translator",

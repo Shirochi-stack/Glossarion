@@ -234,6 +234,44 @@ def test_ollamapull_settings_persist_native_options(ollama_qapp, monkeypatch):
     assert json.loads(os.environ["OLLAMA_SETTINGS_JSON"]) == saved
 
 
+def test_ollama_script_ban_switches_sync_with_other_settings(ollama_qapp, monkeypatch):
+    from PySide6.QtWidgets import QCheckBox
+    from ollama_settings_dialog import OllamaSettingsDialog
+
+    monkeypatch.setattr(OllamaSettingsDialog, "refresh_status", lambda self: None)
+    monkeypatch.setenv("OLLAMA_SETTINGS_JSON", "{}")
+    monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "0")
+    monkeypatch.setenv("SCRIPT_BAN_ALLOW_KAOMOJI", "1")
+    monkeypatch.setenv("SCRIPT_BAN_WHITELIST_SOURCE", "0")
+    translator = _ollama_test_translator()
+    # what Other Settings holds: its variables and open checkboxes
+    translator.block_other_scripts_var = False
+    translator.script_ban_allow_kaomoji_var = True
+    translator.block_other_scripts_checkbox = QCheckBox()
+    translator.script_ban_allow_kaomoji_checkbox = QCheckBox()
+    translator.script_ban_allow_kaomoji_checkbox.setChecked(True)
+
+    dialog = OllamaSettingsDialog(translator, "ollamapull/llama3.2")
+    assert not dialog.block_other_scripts_checkbox.isChecked()
+    assert dialog.script_ban_allow_kaomoji_checkbox.isChecked()
+    dialog.block_other_scripts_checkbox.setChecked(True)
+    dialog.script_ban_allow_kaomoji_checkbox.setChecked(False)
+    dialog.save_settings()
+
+    assert translator.config["block_other_scripts"] is True
+    assert translator.config["script_ban_allow_kaomoji"] is False
+    assert translator.block_other_scripts_var is True and translator.script_ban_allow_kaomoji_var is False
+    assert translator.block_other_scripts_checkbox.isChecked()
+    assert not translator.script_ban_allow_kaomoji_checkbox.isChecked()
+    assert os.environ["BLOCK_OTHER_SCRIPTS"] == "1" and os.environ["SCRIPT_BAN_ALLOW_KAOMOJI"] == "0"
+    assert translator.config["script_ban_whitelist_source"] is False  # the third switch saves the same way
+    # the next opening shows the setting, from the variable or (before Other Settings exists) the config
+    translator.block_other_scripts_var = False
+    assert not OllamaSettingsDialog(translator, "ollamapull/llama3.2").block_other_scripts_checkbox.isChecked()
+    del translator.block_other_scripts_var
+    assert OllamaSettingsDialog(translator, "ollamapull/llama3.2").block_other_scripts_checkbox.isChecked()
+
+
 def test_ollamapull_advanced_fields_validate_input(ollama_qapp, monkeypatch):
     from ollama_settings_dialog import OllamaSettingsDialog
 

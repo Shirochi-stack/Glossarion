@@ -73,6 +73,8 @@ CONTEXT_SLIDER = (2048, 16384, 1024)
 GPU_PRESETS_OFFERED_KEY = "local_gpu_presets_offered"
 #: config.json key of "Allow emoticons and symbols from other scripts (kaomoji)", shown under the script ban
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
+#: config.json key of "Whitelist source text", shown under it
+WHITELIST_SOURCE_KEY = "script_ban_whitelist_source"
 
 
 def _push(*controls: Any) -> None:
@@ -965,6 +967,16 @@ class LocalModelsPanel(OnDeviceFlow):
         }
         self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
+        self.forced_truncation_switch = ft.Switch(value=self.service.forced_truncation(), key="local-forced-truncation",
+                                                  on_change=lambda e: self.save_forced_truncation())
+        self.forced_truncation_seconds = ft.TextField(value=str(self.service.forced_truncation_seconds()), dense=True,
+                                                      label="Seconds", width=118, key="local-forced-truncation-seconds",
+                                                      keyboard_type=ft.KeyboardType.NUMBER,
+                                                      on_blur=lambda e: self.save_forced_truncation(),
+                                                      on_submit=lambda e: self.save_forced_truncation())
+        self.mark_glossary_complete_switch = ft.Switch(
+            value=self.service.mark_glossary_complete(), key="local-mark-glossary-complete",
+            on_change=lambda e: self.service.save_mark_glossary_complete(self.mark_glossary_complete_switch.value))
         self.block_cjk_switch = ft.Switch(value=self.service.block_cjk(),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
@@ -978,6 +990,12 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
                                   on_click=lambda e: self.reset_sampling())], spacing=4),
             self.sampling_error,
+            switch_row(self.forced_truncation_switch, "Forced Truncation"),
+            self.forced_truncation_seconds,
+            _small("When the model keeps repeating the same text for this many seconds, the answer stops and the "
+                   "chapter is marked truncated, so the run moves on. Text the source itself repeats is left alone."),
+            switch_row(self.mark_glossary_complete_switch, "Mark glossary forced truncation as complete"),
+            _small("A glossary request stopped this way counts as finished, with the entries it has."),
             switch_row(self.block_cjk_switch, "Block other scripts in translations (adaptive)"),
             _small("Stops small models from slipping into another writing system (Chinese, Japanese, Korean, "
                    "Hindi, Thai, Arabic, Cyrillic ...) while translating: only the target language's own "
@@ -987,10 +1005,10 @@ class LocalModelsPanel(OnDeviceFlow):
         ]
 
     def _kaomoji_rows(self) -> list:
-        """"Allow emoticons and symbols from other scripts (kaomoji)": the Settings tile of the shared config
-        key (``KAOMOJI_KEY``; also Settings › Anti-Duplicate Parameters › Logit Bias and the desktop), so
+        """"Allow emoticons and symbols from other scripts (kaomoji)" and "Whitelist source text": the Settings tiles of the shared config
+        keys (``KAOMOJI_KEY``, ``WHITELIST_SOURCE_KEY``; also Settings › Anti-Duplicate Parameters › Logit Bias and the desktop), so
         both places edit one value. Nothing without the Settings context (a screen built in a test)."""
-        self.kaomoji_tile = None
+        self.kaomoji_tile = self.whitelist_tile = None
         ctx = self.settings_ctx
         if ctx is None:
             from glossarion_mobile.ui.sheets.model_sheet import sheet_env
@@ -998,23 +1016,36 @@ class LocalModelsPanel(OnDeviceFlow):
             ctx = sheet_env().ctx
         if ctx is None:
             return []
-        try:
-            spec = ctx.schema.spec(KAOMOJI_KEY)
-            if spec is None:
-                return []
-            from glossarion_mobile.ui.settings.tiles import make_tile
-
-            tile = self.kaomoji_tile = make_tile(spec, ctx)
-        except Exception:
-            log.exception("building the %s tile failed", KAOMOJI_KEY)
-            return []
+        rows: list = []
+        observers: list = []
         observe = getattr(ctx.store, "observe", None)
-        if callable(observe):  # changed in Settings: the tile here follows
+        for key, attribute in ((KAOMOJI_KEY, "kaomoji_tile"), (WHITELIST_SOURCE_KEY, "whitelist_tile")):
+            try:
+                spec = ctx.schema.spec(key)
+                if spec is None:
+                    continue
+                from glossarion_mobile.ui.settings.tiles import make_tile
+
+                tile = make_tile(spec, ctx)
+            except Exception:
+                log.exception("building the %s tile failed", key)
+                continue
+            setattr(self, attribute, tile)
+            rows.append(tile.control)
+            if callable(observe):  # changed in Settings: the tile here follows
+                observers.append(observe(key, lambda _key, _value, t=tile: t.refresh()))
+        if observers:
             # kept apart from ``_unsubs``: did_show subscribes to downloads / the engine only while that list
             # is empty, so a build-time entry there left the On-device tab without progress updates
-            self._drop_kaomoji_observer()  # a rebuilt section replaces its tile
-            self._kaomoji_unsub = observe(KAOMOJI_KEY, lambda _key, _value: tile.refresh())
-        return [tile.control]
+            self._drop_kaomoji_observer()  # a rebuilt section replaces its tiles
+            self._kaomoji_unsub = lambda: [unsub() for unsub in observers if callable(unsub)]
+        return rows
+
+    def save_forced_truncation(self) -> tuple:
+        enabled, seconds = self.service.save_forced_truncation(self.forced_truncation_switch.value,
+                                                               self.forced_truncation_seconds.value)
+        self.forced_truncation_seconds.value = str(seconds)
+        return enabled, seconds
 
     def save_block_cjk(self) -> bool:
         value = self.service.save_block_cjk(self.block_cjk_switch.value)

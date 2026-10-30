@@ -12,18 +12,22 @@ desktop"). Two users:
   get ``openai_logit_bias`` (the provider caps the map, so it can only push down the most frequent
   tokens), an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM: ``/tokenize``)
   gets ``server_logit_bias`` built from its own token ids for ``server_probe_text``, and every route gets
-  the output guard ``foreign_script_leak``: a translation whose text has
-  characters of a banned script the source does not have is sent again, within the client's own retry
-  budget, with ``retry_instruction`` added.
+  the log warning of ``foreign_script_leak``: a translation whose text has characters of a banned script
+  the source does not have is kept, and the log says so (only a ban while sampling can prevent it).
 
 Decision (``banned_scripts``; ``wants_ban`` is its bool), owner 2026-10-19, widened 2026-10-28:
 
 * the setting is off -> no ban;
 * the request kind (``glossarion_task``, the key context ``unified_api_client`` labelled it with) is one of
-  ``BAN_TASKS`` -> ban, except ``translation`` while the single-pass auto glossary is on
-  (``glossarion_single_pass``: the translation answer carries the glossary's source-script names);
-  anything else (every glossary context, OCR / image scan, review, QA truncation checks, unknown) and a
-  request without a target -> no ban;
+  ``BAN_TASKS`` -> ban; ``translation`` while the single-pass auto glossary is on (``glossarion_single_pass``:
+  the answer carries the glossary's source-script names) bans with the source's characters let through
+  (``source_whitelisted``, owner 2026-10-30);
+  ``SOURCE_WHITELIST_TASKS`` (Extract Glossary, refinement, owner 2026-10-30) -> the same: ban, except the characters of the request's
+  own source text (``source_chars``), since its answer copies the raw names; a request with no source text
+  (an image's glossary) -> no ban, the caller checks; anything else (other glossary contexts, OCR / image
+  scan, review, QA truncation checks, unknown) and a request without a target -> no ban;
+* "Whitelist source text" (config ``script_ban_whitelist_source`` / env ``SCRIPT_BAN_WHITELIST_SOURCE``, off by
+  default, owner 2026-10-30): every other banned request lets its source's characters through as well;
 * what is banned: every script of ``SCRIPTS`` the target does not use (``target_scripts``: by name
   "Hindi", "Chinese (Traditional)", "Serbian", by code "hi", "zh-TW", "sr-Latn", or written in its own
   script "हिन्दी", "中文", "Русский"). English bans CJK, Devanagari, Thai, Arabic, Cyrillic, Hebrew and the
@@ -84,8 +88,8 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 __all__ = ["BAN_TASKS", "BANNED_RANGES", "CJK", "KAOMOJI_RANGES", "LEAK_MIN_CHARS", "LEAK_MIN_SHARE",
            "OPENAI_LOGIT_BIAS_LIMIT", "SCRIPTS", "banned_scripts", "banned_token_ids", "bias_token_ids",
            "foreign_script_leak", "is_banned_char", "is_cjk_target", "is_kaomoji_char", "kaomoji_source_chars",
-           "openai_encoding_name", "openai_logit_bias", "piece_bytes", "retry_instruction", "script_mask",
-           "script_of", "server_logit_bias", "server_probe_text", "source_keys", "target_scripts",
+           "openai_encoding_name", "openai_logit_bias", "piece_bytes", "script_mask",
+           "script_of", "SOURCE_WHITELIST_TASKS", "needs_met", "source_chars", "source_whitelisted", "server_logit_bias", "server_probe_text", "source_keys", "target_scripts",
            "token_is_banned", "token_masks", "token_requirements", "wants_ban"]
 
 CJK = "cjk"
@@ -170,6 +174,9 @@ BAN_TASKS = frozenset({
     "translation", "refinement", "book_title", "metadata", "batch_toc_translation", "batch_header_translation",
     "image_translation", "summary",
 })
+
+#: requests whose answer copies names from the source: banned, the source's own characters excepted
+SOURCE_WHITELIST_TASKS = frozenset({"glossary", "glossary_refinement", "refinement"})
 
 _CJK_WORDS = ("chinese", "mandarin", "cantonese", "japanese", "korean", "hanzi", "putonghua", "zhongwen")
 _CJK_CODES = re.compile(r"^(zh|ja|ko|jp|kr|cn|yue|cmn|jpn|kor|zho|chi)([-_].*)?$")
@@ -316,21 +323,27 @@ def _truthy(value: Any) -> bool:
 
 
 def banned_scripts(task: Any, target: Any, *, single_pass: Any = False, enabled: bool = True) -> Tuple[str, ...]:
-    """The ``SCRIPTS`` to ban for this request, () for none (see the module doc)."""
+    """The ``SCRIPTS`` to ban for this request, () for none (see the module doc). For a request
+    ``source_whitelisted`` says yes to, the caller must let the source's own characters through."""
     if not enabled:
         return ()
     target = str(target or "").strip()
     if not target:
         return ()
     kind = str(task or "").strip().lower()
-    if "glossary" in kind or kind not in BAN_TASKS:
-        return ()
-    if kind == "translation" and _truthy(single_pass):
+    if kind not in SOURCE_WHITELIST_TASKS and ("glossary" in kind or kind not in BAN_TASKS):
         return ()
     own = target_scripts(target)
     if own is None:
         return (CJK,)  # an unknown target: the original CJK-only ban
     return tuple(name for name in SCRIPTS if name not in own)
+
+
+def source_whitelisted(task: Any, *, single_pass: Any = False) -> bool:
+    """This request's answer copies names from its source, whatever "Whitelist source text" says: Extract
+    Glossary, refinement, a single-pass translation."""
+    kind = str(task or "").strip().lower()
+    return kind in SOURCE_WHITELIST_TASKS or (kind == "translation" and _truthy(single_pass))
 
 
 def wants_ban(task: Any, target: Any, *, single_pass: Any = False, enabled: bool = True) -> bool:
@@ -478,6 +491,20 @@ def _banned(chars: int, tail: int, mask: int) -> bool:
     return bool(chars & mask) or (bool(tail) and not tail & ~mask)
 
 
+def source_chars(text: Any, scripts: Iterable[str], *, allow_kaomoji: bool = False) -> FrozenSet[str]:
+    """The characters of banned ``scripts`` in a request's source text (``SOURCE_WHITELIST_TASKS``)."""
+    body = text if isinstance(text, str) else _source_text(text)
+    mask = script_mask(scripts)
+    if not body or not mask or body.isascii():
+        return frozenset()
+    return frozenset(ch for ch in set(body) if _char_bits(ord(ch), allow_kaomoji) & mask)
+
+
+def needs_met(needs: Iterable[Tuple[Any, int, bool]], keys: FrozenSet[Any], mask: int) -> bool:
+    """A token's ``token_requirements`` of the banned ``mask`` are all in ``keys`` (``source_keys``)."""
+    return all(key in keys or not (_banned(0, bits, mask) if tail else bits & mask) for key, bits, tail in needs)
+
+
 def token_is_banned(piece: bytes, scripts: Iterable[str] = (CJK,), *, allow_kaomoji: bool = False) -> bool:
     """See the module doc: a character of a banned script, or an incomplete tail that can only become one."""
     return _banned(*token_masks(piece, allow_kaomoji), script_mask(scripts))
@@ -492,16 +519,20 @@ def banned_token_ids(pieces: Iterable[bytes], scripts: Iterable[str] = (CJK,), *
 
 
 def bias_token_ids(pieces: Iterable[Tuple[int, bytes]], scripts: Iterable[str], limit: int, *,
-                   allow_kaomoji: bool = False) -> List[int]:
+                   allow_kaomoji: bool = False, exempt_chars: Iterable[str] = ()) -> List[int]:
     """The first ``limit`` banned ids of ``(id, raw bytes)`` pairs given lowest id first: in a BPE
     vocabulary a lower id is an earlier merge, so these are the most frequent banned tokens (the single
-    lead bytes such as 0xE4 come first and stop the byte-spelled rare characters)."""
+    lead bytes such as 0xE4 come first and stop the byte-spelled rare characters). ``exempt_chars``: tokens
+    that only need these characters (``source_chars``) are not banned."""
     mask = script_mask(scripts)
     found: List[int] = []
     if not mask or limit <= 0:
         return found
+    keys = source_keys(exempt_chars)
     for token, piece in pieces:
         if piece and _banned(*token_masks(piece, allow_kaomoji), mask):
+            if keys and needs_met(token_requirements(piece, allow_kaomoji), keys, mask):
+                continue
             found.append(int(token))
             if len(found) >= limit:
                 break
@@ -531,7 +562,7 @@ def openai_encoding_name(model: Any) -> Optional[str]:
 
 @functools.lru_cache(maxsize=32)
 def _openai_bias_ids(encoding_name: str, scripts: Tuple[str, ...], limit: int,
-                     allow_kaomoji: bool = False) -> Tuple[int, ...]:
+                     allow_kaomoji: bool = False, exempt_chars: FrozenSet[str] = frozenset()) -> Tuple[int, ...]:
     import tiktoken  # the token counter's tokenizer; its files are cached on first use
 
     encoding = tiktoken.get_encoding(encoding_name)
@@ -544,11 +575,11 @@ def _openai_bias_ids(encoding_name: str, scripts: Tuple[str, ...], limit: int,
             except Exception:
                 continue
 
-    return tuple(bias_token_ids(pieces(), scripts, limit, allow_kaomoji=allow_kaomoji))
+    return tuple(bias_token_ids(pieces(), scripts, limit, allow_kaomoji=allow_kaomoji, exempt_chars=exempt_chars))
 
 
 def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LOGIT_BIAS_LIMIT, *,
-                      allow_kaomoji: bool = False) -> Dict[str, int]:
+                      allow_kaomoji: bool = False, exempt_chars: Iterable[str] = ()) -> Dict[str, int]:
     """``{"<token id>": -100}`` for the most frequent tokens of ``scripts`` in ``model``'s tokenizer, {}
     when the model takes no logit bias, nothing is banned or tiktoken cannot load the encoding. A
     whole script does not fit in the provider's cap; the output guard (``foreign_script_leak``) covers
@@ -558,7 +589,7 @@ def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LO
     if not name or not wanted:
         return {}
     try:
-        ids = _openai_bias_ids(name, wanted, int(limit), bool(allow_kaomoji))
+        ids = _openai_bias_ids(name, wanted, int(limit), bool(allow_kaomoji), frozenset(exempt_chars))
     except Exception:
         return {}
     return {str(token): -100 for token in ids}
@@ -658,7 +689,8 @@ def piece_bytes(piece: Any, byte_level: bool = False) -> bytes:
 
 
 def server_logit_bias(tokens: Iterable[Tuple[Any, Any]], scripts: Iterable[str], *, allow_kaomoji: bool = False,
-                      limit: int = SERVER_LOGIT_BIAS_LIMIT, byte_level: Optional[bool] = None) -> Dict[str, int]:
+                      limit: int = SERVER_LOGIT_BIAS_LIMIT, byte_level: Optional[bool] = None,
+                      exempt_chars: Iterable[str] = ()) -> Dict[str, int]:
     """``{"<token id>": -100}`` for the ``(id, piece)`` pairs a server's ``/tokenize`` returned for
     ``server_probe_text`` whose piece is banned (``token_masks``, as on device), first ``limit``.
     ``byte_level`` None: told by the pieces themselves (``is_byte_level``)."""
@@ -666,6 +698,7 @@ def server_logit_bias(tokens: Iterable[Tuple[Any, Any]], scripts: Iterable[str],
     bias: Dict[str, int] = {}
     if not mask:
         return bias
+    keys = source_keys(exempt_chars)
     tokens = list(tokens)
     if byte_level is None:
         byte_level = is_byte_level(piece for _token, piece in tokens)
@@ -676,6 +709,8 @@ def server_logit_bias(tokens: Iterable[Tuple[Any, Any]], scripts: Iterable[str],
         except (TypeError, ValueError):
             continue
         if raw and key not in bias and _banned(*token_masks(raw, allow_kaomoji), mask):
+            if keys and needs_met(token_requirements(raw, allow_kaomoji), keys, mask):
+                continue
             bias[key] = -100
             if len(bias) >= limit:
                 break
@@ -692,7 +727,6 @@ LEAK_MIN_SHARE = 0.001  # of the response's non-space characters
 KEPT_RUN_MAX_CHARS = 12
 KEPT_MAX_SHARE = 0.2
 
-_SCRIPT_NAMES = {CJK: "Chinese, Japanese or Korean characters", "other": "other scripts"}
 
 
 def _source_text(source: Any) -> str:
@@ -891,16 +925,3 @@ def source_keys(chars: Iterable[str]) -> FrozenSet[Any]:
         if len(raw) > 1:
             keys.add(raw[:-1])
     return frozenset(keys)
-
-
-def retry_instruction(target: Any, scripts: Iterable[str] = ()) -> str:
-    """The line added to the request when a response leaked another script."""
-    names = []
-    for name in scripts or ():
-        label = _SCRIPT_NAMES.get(name, str(name).title() + " script")
-        if label not in names:
-            names.append(label)
-    shown = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
-    language = str(target or "").strip() or "the target language"
-    return (f"[Write the whole answer in {language} only. The previous answer contained text in another "
-            f"writing system ({shown}); do not use it, except for names kept exactly as in the source.]")

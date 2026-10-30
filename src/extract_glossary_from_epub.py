@@ -5576,11 +5576,31 @@ def _dedup_replacement_entry(existing_entry, new_entry):
     return replacement
 
 
+def _skip_identical_entries(glossary, dedup_log=None):
+    """"Skip identical entries (translated = raw)" (GLOSSARY_SKIP_IDENTICAL_ENTRIES) on a whole glossary: the parser
+    only sees a new response, so this also covers entries saved while the toggle was off. A book title entry stays:
+    a title can stay unchanged."""
+    if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') != '1':
+        return glossary
+    kept = []
+    for entry in glossary:
+        raw = str(entry.get('raw_name', '') or '').strip() if isinstance(entry, dict) else ''
+        trans = str(entry.get('translated_name', '') or '').strip() if isinstance(entry, dict) else ''
+        if raw and raw == trans and str(entry.get('type', '') or '').strip().lower() != 'book':
+            if dedup_log is not None:
+                dedup_log.append({"pass": 0, "action": "removed_identical", "kept": "", "dropped": raw,
+                                  "reason": "translated name equals raw name"})
+            continue
+        kept.append(entry)
+    return kept
+
+
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None, glossary_path=None,
                            gender_tracker=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
     
+    First, "Skip identical entries" removes entries whose translated name equals their raw name.
     Pass 1: Remove entries with similar raw names (fuzzy matching)
     Pass 2: Remove entries with identical translated names (exact matching)
     
@@ -5637,13 +5657,18 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None, glossary_pa
     else:
         print(f"[Dedup] Pass 2 (translated name deduplication): DISABLED")
     
+    source_entries = glossary
+    glossary = _skip_identical_entries(glossary, dedup_log)
+    if len(glossary) != original_count:
+        print(f"[Dedup] ⏭️ Skip identical entries: {original_count - len(glossary)} removed (translated = raw)")
+
     # PASS 1: Raw name deduplication
     print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
     pass1_stats = {"missing_raw_name_count": 0}
     pass1_results = _skip_raw_name_duplicates(
         glossary, fuzzy_threshold, use_rapidfuzz, dedup_log, pass1_stats
     )
-    pass1_removed = original_count - len(pass1_results)
+    pass1_removed = len(glossary) - len(pass1_results)
     missing_raw_name_count = int(pass1_stats.get("missing_raw_name_count", 0) or 0)
     pass1_duplicates_removed = max(0, pass1_removed - missing_raw_name_count)
     if missing_raw_name_count:
@@ -5675,7 +5700,7 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None, glossary_pa
     print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
     
     if dry_run:
-        return glossary, dedup_log
+        return source_entries, dedup_log
     
     return final_results
 

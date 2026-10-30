@@ -29,7 +29,10 @@
 * **Adaptive script ban** ("Block other scripts in translations", Prefs ``BLOCK_CJK_KEY``, on by default):
   a request that writes target-language text bans the tokens of every script the target does not use
   (English: Han / kana / Hangul, Devanagari, Thai, Arabic, Cyrillic ...; a CJK target keeps all three CJK
-  scripts); glossary requests and a single-pass auto glossary's translations keep the default logits. The
+  scripts); Extract Glossary, refinement and a single-pass auto glossary's translations ban them too, except
+  the tokens of their source text's characters (``params["ban_source_whitelist"]``, owner 2026-10-30; an image
+  has no text and is not banned), and "Whitelist source text" (config ``script_ban_whitelist_source``, body
+  field ``glossarion_whitelist_source``) does that for every banned request. The
   request kind and target come from the body fields ``unified_api_client`` adds for this endpoint only
   (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.banned_scripts``
   decides and the engine gets ``params["ban_scripts"]``. The opt-in "Allow emoticons and symbols from
@@ -102,6 +105,11 @@ SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
 #: a bool, on when unset; named from when it banned CJK only, kept so the saved choice stays): see
 #: ``script_ban``
 BLOCK_CJK_KEY = "local_llm_block_cjk"
+#: "Forced Truncation" of the on-device engine (on by default) and its seconds (``forced_truncation``)
+FORCED_TRUNCATION_KEY = "local_llm_forced_truncation"
+FORCED_TRUNCATION_SECONDS_KEY = "local_llm_forced_truncation_seconds"
+#: "Mark glossary forced truncation as complete" of the on-device engine (on by default)
+MARK_GLOSSARY_COMPLETE_KEY = "local_llm_mark_glossary_complete"
 #: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
 GPU_KEY = "local_llm_gpu"
 #: Prefs key of the GPU fallback: ``{"stem", "reason"}`` (that model runs on the CPU until the setting or
@@ -595,6 +603,39 @@ class LocalEngineService:
             raw = None
         return raw is None or bool(raw)
 
+    def forced_truncation(self) -> bool:
+        """"Forced Truncation": on unless switched off."""
+        raw = self._pref(FORCED_TRUNCATION_KEY)
+        return raw is None or bool(raw)
+
+    def forced_truncation_seconds(self) -> int:
+        try:
+            return max(1, min(600, int(self._pref(FORCED_TRUNCATION_SECONDS_KEY))))
+        except (TypeError, ValueError):
+            return 3
+
+    def mark_glossary_complete(self) -> bool:
+        """"Mark glossary forced truncation as complete": on unless switched off."""
+        raw = self._pref(MARK_GLOSSARY_COMPLETE_KEY)
+        return raw is None or bool(raw)
+
+    def save_mark_glossary_complete(self, enabled: Any) -> bool:
+        value = bool(enabled)
+        if self.prefs is not None:
+            self.prefs.set(MARK_GLOSSARY_COMPLETE_KEY, value)
+        return value
+
+    def save_forced_truncation(self, enabled: Any, seconds: Any = None) -> tuple:
+        """Save the switch and, when given, its seconds; the values now in force."""
+        if self.prefs is not None:
+            self.prefs.set(FORCED_TRUNCATION_KEY, bool(enabled))
+            if seconds is not None:
+                try:
+                    self.prefs.set(FORCED_TRUNCATION_SECONDS_KEY, max(1, min(600, int(float(seconds)))))
+                except (TypeError, ValueError):
+                    pass
+        return self.forced_truncation(), self.forced_truncation_seconds()
+
     def save_block_cjk(self, enabled: Any) -> bool:
         value = bool(enabled)
         if self.prefs is not None:
@@ -1039,10 +1080,25 @@ class LocalEngineService:
         if isinstance(stop, list) and stop:
             params["stop"] = [str(s) for s in stop][:8]
         params["enable_thinking"] = wants_thinking(body)
+        if self.forced_truncation():
+            params["forced_truncation_seconds"] = self.forced_truncation_seconds()
+            if self.mark_glossary_complete() and "glossary" in str(body.get("glossarion_task") or "").lower():
+                params["forced_truncation_finish"] = "stop"
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
+        always = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))
+        whitelist = always or script_ban._truthy(body.get("glossarion_whitelist_source"))
+        if whitelist and any(isinstance(m, dict) and isinstance(m.get("content"), list)
+                             and any(isinstance(p, dict) and p.get("type") != "text" for p in m["content"])
+                             for m in body.get("messages") or []):
+            # an image: no text to tell the source's characters by
+            whitelist = False
+            if always:
+                scripts = ()
         if scripts:
             params["ban_scripts"] = scripts
+            if whitelist:
+                params["ban_source_whitelist"] = True
             # "Allow emoticons and symbols from other scripts (kaomoji)": the shared config setting
             # script_ban_allow_kaomoji, sent by unified_api_client like the request kind and target
             if script_ban._truthy(body.get("glossarion_allow_kaomoji")):

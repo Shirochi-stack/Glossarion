@@ -387,6 +387,10 @@ SETTINGS_MAP_ORDER = ('model',
  'bias_repetitive_phrases',
  'block_other_scripts',
  'script_ban_allow_kaomoji',
+ 'script_ban_whitelist_source',
+ 'forced_truncation_enabled',
+ 'forced_truncation_seconds',
+ 'mark_glossary_forced_truncation_complete',
  'glossary_enable_anti_duplicate',
  'glossary_top_p',
  'glossary_min_p',
@@ -1287,6 +1291,13 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
  ('bias_repetitive_phrases', ('bias_repetitive_phrases_var',), ('value', False), ('bool',)),
  ('block_other_scripts', ('block_other_scripts_var',), ('value', False), ('bool',)),
  ('script_ban_allow_kaomoji', ('script_ban_allow_kaomoji_var',), ('value', False), ('bool',)),
+ ('script_ban_whitelist_source', ('script_ban_whitelist_source_var',), ('value', False), ('bool',)),
+ ('forced_truncation_enabled', ('forced_truncation_enabled_var',), ('value', False), ('bool',)),
+ ('forced_truncation_seconds', ('forced_truncation_seconds_var',), ('value', 3), ('int',)),
+ ('mark_glossary_forced_truncation_complete',
+  ('mark_glossary_forced_truncation_complete_var',),
+  ('value', False),
+  ('bool',)),
  ('glossary_enable_anti_duplicate',
   ('glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')),
   ('value', False),
@@ -2601,22 +2612,27 @@ SETTINGS = {
      'label': 'Block other scripts in translations (adaptive, all models)',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': False,
-     'tooltip': '⚠️ Can cause errors or retries: mixed-language books, kept original names, '
-                'targets it does not recognise.\n'
+     'tooltip': '⚠️ Mixed-language books, original names kept in their own script and targets it '
+                'does not recognise can suffer.\n'
                 'Translations may only use the scripts of the target language: English output '
                 'blocks Chinese,\n'
                 "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's "
                 'own script is\n'
-                'never blocked, and glossary and single-pass glossary requests are left alone.\n'
+                'never blocked. Extract Glossary, refinement and single-pass glossary translations '
+                'may also use the\n'
+                'characters of their own source text, for raw names (Whitelist source text: every '
+                'request).\n'
                 'Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most '
                 'common tokens of\n'
                 'those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp '
                 'server, vLLM) gets\n'
-                'a ban built from its own tokens. On every model, an answer with such text (or a '
-                'copy of the source)\n'
-                'is sent again with an instruction to write only in the target language (Max '
-                'Retries).\n'
-                'Works only while Enable Anti-Duplicate Parameters is on.',
+                'a ban built from its own tokens. Other models have no token ban: an answer with '
+                'such text is kept\n'
+                'and the log warns about it.\n'
+                'ollamapull/ gets a full token ban on the llama-server that comes with Ollama, and '
+                'its own dialog\n'
+                'has the same switch. Works only while Enable Anti-Duplicate Parameters is on, '
+                'except on ollamapull/.',
      'type': 'bool',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
@@ -2695,7 +2711,7 @@ SETTINGS = {
      'type': 'int',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
-     'ui_tab': 'Advanced',
+     'ui_tab': 'Core Parameters',
      'var_names': ('candidate_count_var',)},
     'chapter_number_offset': {'converter': ('safe_int', 0, None, None, ''),
      'default': 0,
@@ -3131,7 +3147,7 @@ SETTINGS = {
      'type': 'str',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
-     'ui_tab': 'Stop Sequences',
+     'ui_tab': 'Core Parameters',
      'var_names': ('custom_stop_sequences_var',)},
     'deduplicate_toc': {'converter': ('bool',),
      'default': False,
@@ -4446,6 +4462,42 @@ SETTINGS = {
      'env': (('FORCED_SOURCE_LANG', 'translation', 'Korean'),),
      'origins': ('env',),
      'type': 'str'},
+    'forced_truncation_enabled': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('FORCED_TRUNCATION', 'translation', False), ('FORCED_TRUNCATION', 'startup', False)),
+     'init_default': False,
+     'label': 'Forced Truncation',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': 'When a streamed answer keeps repeating the same text for this many seconds, it is '
+                'stopped and\n'
+                'ends with finish reason length, so the Progress Manager marks the chapter '
+                'truncated and the run\n'
+                'moves on. Text that the source itself repeats as often is left alone, like in the '
+                'QA scanner.\n'
+                'Works on ollamapull/ and OpenAI-compatible endpoints. On-device models have their '
+                'own switch.',
+     'type': 'bool',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('forced_truncation_enabled_var',)},
+    'forced_truncation_seconds': {'converter': ('int',),
+     'default': 3,
+     'default_source': 'init',
+     'dialog_default': 3,
+     'env': (('FORCED_TRUNCATION_SECONDS', 'translation', 3),
+             ('FORCED_TRUNCATION_SECONDS', 'startup', 3)),
+     'init_default': 3,
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': 3,
+     'type': 'int',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('forced_truncation_seconds_var',)},
     'frequency_penalty': {'converter': ('float',),
      'default': 0.0,
      'default_source': 'init',
@@ -7959,6 +8011,25 @@ SETTINGS = {
      'ui_sites': ('glossary.balanced_full',),
      'var_names': ('manual_temp_var',),
      'widget_sources': ('manual_temp_entry',)},
+    'mark_glossary_forced_truncation_complete': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE', 'translation', False),
+             ('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE', 'startup', False)),
+     'init_default': False,
+     'label': 'Mark glossary forced truncation as complete',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': 'A glossary request stopped by Forced Truncation counts as finished: its chapter '
+                'is marked complete\n'
+                'with the entries it has, instead of truncated, so it is not extracted again.\n'
+                'Entries after the point where the model began repeating are never extracted.',
+     'type': 'bool',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('mark_glossary_forced_truncation_complete_var',)},
     'max_image_dimension': {'default': 2048,
      'default_source': 'save',
      'env': (('MAX_IMAGE_DIMENSION', 'translation', 2048),
@@ -10557,7 +10628,7 @@ SETTINGS = {
      'type': 'float',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
-     'ui_tab': 'Advanced',
+     'ui_tab': 'Core Parameters',
      'var_names': ('repetition_penalty_var',)},
     'replicate_api_key': {'type': 'secret'},
     'request_merge_count': {'converter': ('safe_int', 3, None, None, ''),
@@ -11000,6 +11071,28 @@ SETTINGS = {
      'ui_sites': ('other.anti_duplicate',),
      'ui_tab': 'Logit Bias',
      'var_names': ('script_ban_allow_kaomoji_var',)},
+    'script_ban_whitelist_source': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('SCRIPT_BAN_WHITELIST_SOURCE', 'translation', False),
+             ('SCRIPT_BAN_WHITELIST_SOURCE', 'startup', False)),
+     'init_default': False,
+     'label': 'Whitelist source text',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': 'Every request blocked by Block other scripts may also use the characters of its '
+                'own source text,\n'
+                'so original names can be kept. Characters that are not in the source stay '
+                'blocked.\n'
+                'This also lets a model copy the source instead of translating it.\n'
+                "Applies to Block other scripts in translations and to the on-device engine's own "
+                'switch.',
+     'type': 'bool',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('script_ban_whitelist_source_var',)},
     'sdlxliff_one_column_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_one_row_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_two_column_layout': {'type': 'str', 'ui_sites': ('progress',)},

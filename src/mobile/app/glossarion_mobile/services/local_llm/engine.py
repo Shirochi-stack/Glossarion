@@ -420,11 +420,12 @@ class LlamaEngine(_Base):
                     log.debug("closing the model failed", exc_info=True)
                 del llm
 
-    def script_ban(self, scripts: Sequence[str], allow_kaomoji: bool = False, source: str = "") -> Any:
+    def script_ban(self, scripts: Sequence[str], allow_kaomoji: bool = False, source: str = "",
+                   whitelist: bool = False) -> Any:
         """The loaded model's logits processor banning ``scripts`` (``script_ban``): the vocabulary is
         decoded on the first call after a load, each set of scripts' processor on its first use; both are
         kept until the model is unloaded. ``allow_kaomoji``: emoticons allowed, with the emoticon
-        characters of ``source`` (the request's user text) let through."""
+        characters of ``source`` (the request's user text) let through; ``whitelist``: all its characters."""
         llm = self.llm
         if llm is None:
             raise EngineUnavailable("No model is loaded")
@@ -438,7 +439,7 @@ class LlamaEngine(_Base):
                 self._scripts = script_ban.VocabScripts(pieces)
                 log.info("on-device script ban: %d of %d tokens are non-Latin script, scanned in %.2f s",
                          len(self._scripts), n_vocab, time.monotonic() - started)
-            processor = self._scripts.processor(scripts, allow_kaomoji=allow_kaomoji, source=source)
+            processor = self._scripts.processor(scripts, allow_kaomoji=allow_kaomoji, source=source, whitelist=whitelist)
             log.debug("on-device script ban: %d tokens of %s%s (%.2f s)", len(processor), ",".join(scripts),
                       " (emoticons allowed)" if allow_kaomoji else "", time.monotonic() - started)
             return processor
@@ -496,8 +497,10 @@ class LlamaEngine(_Base):
             except Exception:  # a test's fake model: any list of processors works the same
                 processors = list
             allow = bool(params.get("ban_allow_kaomoji"))
-            source = "\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user") if allow else ""
-            kwargs["logits_processor"] = processors([self.script_ban(tuple(params["ban_scripts"]), allow, source)])
+            whitelist = bool(params.get("ban_source_whitelist"))
+            source = ("\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user")
+                      if allow or whitelist else "")
+            kwargs["logits_processor"] = processors([self.script_ban(tuple(params["ban_scripts"]), allow, source, whitelist)])
         self.last_finish = "stop"
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every
@@ -517,6 +520,12 @@ class LlamaEngine(_Base):
                 llm.chat_handler = text_handler
         else:
             chunks = llm.create_chat_completion(**kwargs)
+        repeat_watch = None
+        if params.get("forced_truncation_seconds"):
+            from forced_truncation import RepetitionWatch
+
+            repeat_watch = RepetitionWatch("\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user"),
+                                           params["forced_truncation_seconds"])
         try:
             for index, chunk in enumerate(chunks):
                 choice = (chunk.get("choices") or [{}])[0]
@@ -525,6 +534,11 @@ class LlamaEngine(_Base):
                 if text:
                     completion += 1
                     yield text
+                    if repeat_watch is not None and repeat_watch.feed(text):
+                        # Forced Truncation: closing the generator stops sampling; the client sees length, or
+                        # stop for a glossary request under "Mark glossary forced truncation as complete"
+                        self.last_finish = params.get("forced_truncation_finish") or "length"
+                        break
                 if choice.get("finish_reason"):
                     self.last_finish = choice["finish_reason"]
                 if index % STOP_CHECK_EVERY == 0 and should_stop():

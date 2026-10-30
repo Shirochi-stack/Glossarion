@@ -114,8 +114,7 @@ def test_unknown_targets_fall_back_to_the_original_cjk_only_ban():
         assert sb.target_scripts(target) is None
         assert sb.banned_scripts("translation", target) == (sb.CJK,)
     # the adaptive request rules are unchanged
-    assert sb.banned_scripts("glossary", "English") == ()
-    assert sb.banned_scripts("translation", "English", single_pass=True) == ()
+    assert sb.banned_scripts("review", "English") == ()
     assert sb.banned_scripts("translation", "English", enabled=False) == ()
     assert sb.banned_scripts("translation", "") == ()
     assert sb.banned_scripts("image_ocr", "English") == ()

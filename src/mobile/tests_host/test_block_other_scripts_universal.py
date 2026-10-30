@@ -42,7 +42,7 @@ def test_universal_setting_is_in_the_mobile_schema():
     from glossarion_mobile.ui.settings.model import help_line
 
     line = help_line(spec)
-    assert line.startswith("⚠️ Can cause errors or retries")
+    assert line.startswith("⚠️ Mixed-language books")
     assert not line.endswith("…")
 
 

@@ -92,11 +92,14 @@ def test_request_kinds():
     for task in ("translation", "refinement", "metadata", "book_title", "batch_header_translation",
                  "batch_toc_translation", "image_translation", "summary"):
         assert sb.wants_ban(task, "English"), task
-    for task in ("glossary", "glossary_refinement", "auto_glossary_(3/10)", "review", "image_ocr", "vision_ocr",
+    assert sb.wants_ban("glossary", "English")  # Extract Glossary: its source's characters are let through
+    assert sb.wants_ban("glossary_refinement", "English")
+    for task in ("auto_glossary_(3/10)", "review", "image_ocr", "vision_ocr",
                  "manga_ocr", "image_scan", "truncation", "qa_truncation", "other", "", None):
         assert not sb.wants_ban(task, "English"), task
     # the single-pass auto glossary's answer carries raw source names: its translations keep CJK
-    assert not sb.wants_ban("translation", "English", single_pass=True)
+    assert sb.wants_ban("translation", "English", single_pass=True)  # its source's characters are let through
+    assert sb.source_whitelisted("translation", single_pass=True) and not sb.source_whitelisted("translation")
     assert sb.wants_ban("metadata", "English", single_pass=True)
     assert not sb.wants_ban("translation", "English", enabled=False)
     assert not sb.wants_ban("translation", "")  # no target given: never guess
@@ -116,9 +119,22 @@ def test_service_routes_the_request_kind(tmp_path):
     base = {"temperature": 0.7, "max_tokens": 64, "target_language": "English"}
     assert service.block_cjk() is True  # on by default
     assert sb.CJK in service._params({**base, "glossarion_task": "translation"}, 4096)["ban_scripts"]
-    assert "ban_scripts" not in service._params({**base, "glossarion_task": "glossary"}, 4096)
-    assert "ban_scripts" not in service._params({**base, "glossarion_task": "translation",
-                                                 "glossarion_single_pass": True}, 4096)
+    glossary = service._params({**base, "glossarion_task": "glossary"}, 4096)
+    assert sb.CJK in glossary["ban_scripts"] and glossary["ban_source_whitelist"] is True
+    assert "ban_source_whitelist" not in service._params({**base, "glossarion_task": "translation"}, 4096)
+    image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
+    assert "ban_scripts" not in service._params({**base, "glossarion_task": "glossary", "messages": image}, 4096)
+    assert service._params({**base, "glossarion_task": "glossary_refinement"}, 4096)["ban_source_whitelist"] is True
+    assert service._params({**base, "glossarion_task": "refinement"}, 4096)["ban_source_whitelist"] is True
+    # "Whitelist source text": every banned request; its image keeps the plain ban
+    toggled = {**base, "glossarion_task": "translation", "glossarion_whitelist_source": True}
+    assert service._params(toggled, 4096)["ban_source_whitelist"] is True
+    plain_image = service._params({**toggled, "messages": image}, 4096)
+    assert sb.CJK in plain_image["ban_scripts"] and "ban_source_whitelist" not in plain_image
+    assert "ban_scripts" not in service._params({**base, "glossarion_task": "review",
+                                                 "glossarion_whitelist_source": True}, 4096)
+    single = service._params({**base, "glossarion_task": "translation", "glossarion_single_pass": True}, 4096)
+    assert sb.CJK in single["ban_scripts"] and single["ban_source_whitelist"] is True
     assert sb.CJK not in service._params({**base, "glossarion_task": "translation",
                                           "target_language": "Japanese"}, 4096)["ban_scripts"]
     assert "ban_scripts" not in service._params({"max_tokens": 64}, 4096)  # a plain OpenAI request (no fields)
@@ -134,7 +150,7 @@ def test_the_ban_reaches_the_engine_through_the_endpoint_path(tmp_path):
     list(run.deltas)
     run.close()
     assert sb.CJK in engine.calls[-1]["params"]["ban_scripts"]
-    run = service.chat(f"local/{STEM}", {**body, "glossarion_task": "glossary"}, lambda: False)
+    run = service.chat(f"local/{STEM}", {**body, "glossarion_task": "review"}, lambda: False)
     list(run.deltas)
     run.close()
     assert "ban_scripts" not in engine.calls[-1]["params"]
@@ -225,3 +241,37 @@ def test_engine_card_switch_turns_the_ban_off_and_on(tmp_path):
     panel.block_cjk_switch.value = True
     assert panel.save_block_cjk() is True and service.block_cjk() is True
     panel.dispose()
+
+
+def test_vocabulary_whitelist_keeps_only_the_tokens_of_the_source():
+    pieces = ["hello", "김민", "김金", "金", "민".encode()[:2], "金".encode()[:2], "안"]
+    vocab = sb.VocabScripts([p if isinstance(p, bytes) else p.encode() for p in pieces])
+    plain = vocab.processor(sb.banned_scripts("translation", "English"))
+    assert {1, 2, 3, 6} <= set(plain.ids if hasattr(plain, "ids") else vocab.ids(sb.banned_scripts("translation", "English")))
+    scripts = sb.banned_scripts("glossary", "English")
+    whitelisted = vocab.processor(scripts, source="김민준은 웃었다", whitelist=True)
+    assert vocab.source_ids(scripts, sb.source_chars("김민준은 웃었다", scripts), allow_kaomoji=False) == [1, 4] or \
+        sorted(vocab.source_ids(scripts, sb.source_chars("김민준은 웃었다", scripts), allow_kaomoji=False)) == [1, 4]
+    assert len(whitelisted) == len(plain) - 2
+    assert vocab.processor(scripts, source="김민준은 웃었다", whitelist=True) is whitelisted  # kept per source
+    assert vocab.processor(scripts, source="", whitelist=True) is plain
+
+
+def test_forced_truncation_is_on_by_default_on_device(tmp_path):
+    """Owner 2026-10-30: on by default on device, off elsewhere."""
+    service, _engine = _service(tmp_path)
+    base = {"temperature": 0.7, "max_tokens": 64, "target_language": "English"}
+    assert service.forced_truncation() is True and service.forced_truncation_seconds() == 3
+    assert service._params(base, 4096)["forced_truncation_seconds"] == 3
+    # a stopped glossary request is complete by default, the switch of this engine; other requests stay truncated
+    assert service.mark_glossary_complete() is True
+    assert service._params({**base, "glossarion_task": "glossary"}, 4096)["forced_truncation_finish"] == "stop"
+    assert "forced_truncation_finish" not in service._params({**base, "glossarion_task": "translation"}, 4096)
+    assert service.save_mark_glossary_complete(False) is False
+    assert "forced_truncation_finish" not in service._params({**base, "glossarion_task": "glossary"}, 4096)
+    service.save_mark_glossary_complete(True)
+    assert service.save_forced_truncation(True, "25") == (True, 25)
+    assert service._params(base, 4096)["forced_truncation_seconds"] == 25
+    assert service.save_forced_truncation(True, "nonsense") == (True, 25)
+    assert service.save_forced_truncation(False) == (False, 25)
+    assert "forced_truncation_seconds" not in service._params(base, 4096)
