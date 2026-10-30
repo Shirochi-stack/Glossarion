@@ -191,10 +191,11 @@ def test_a_real_length_finish_stays_truncated_with_the_toggle_on(monkeypatch):
     client = _stopped_client()
     client._get_thread_local_client()._forced_truncation = False
     assert client._trim_forced_truncation("A long answer cut off", "length", "glossary") == ("A long answer cut off", "length")
-    # on device the engine says only length: an answer ending in a repeat is the stopped one
+    # on device the engine chose the finish reason (its own switch): the client only takes the copies off
     client.model = "local/qwen"
     assert client._trim_forced_truncation("A long answer cut off", "length", "glossary") == ("A long answer cut off", "length")
-    assert client._trim_forced_truncation(LINE_A * 9, "length", "glossary") == (LINE_A, "stop")
+    assert client._trim_forced_truncation(LINE_A * 9, "length", "glossary") == (LINE_A, "length")
+    assert client._trim_forced_truncation(LINE_A * 9, "stop", "glossary") == (LINE_A, "stop")
 
 
 def test_glossary_runs_read_stop_as_complete():
@@ -216,13 +217,13 @@ def test_the_setting_is_wired_through_desktop_schema_and_specs():
     assert run_env.count("'FORCED_TRUNCATION'") == 3 and run_env.count("'FORCED_TRUNCATION_SECONDS'") == 3
     import settings_schema_data as data
     assert data.SETTINGS["forced_truncation_enabled"]["default"] is False
-    assert data.SETTINGS["forced_truncation_seconds"]["default"] == 10
+    assert data.SETTINGS["forced_truncation_seconds"]["default"] == 3
     for spec in SRC.glob("*.spec"):
         text = spec.read_text(encoding="utf-8")
         assert "('forced_truncation.py', '.')" in text and "'forced_truncation'," in text, spec.name
     assert '"forced_truncation"' in (SRC / "mobile" / "backend_manifest.toml").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("seconds, expected", [(0, 1.0), ("abc", 10.0), (None, 10.0), (15, 15.0)])
+@pytest.mark.parametrize("seconds, expected", [(0, 1.0), ("abc", 3.0), (None, 3.0), (15, 15.0)])
 def test_seconds_are_read_safely(seconds, expected):
     assert ft.RepetitionWatch("", seconds).seconds == expected

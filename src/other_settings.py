@@ -14001,7 +14001,7 @@ def _create_anti_duplicate_section(self, parent):
     # An answer stuck repeating itself is stopped and marked truncated (forced_truncation.py; on device: its own switch)
     from PySide6.QtWidgets import QDoubleSpinBox
     self.forced_truncation_enabled_var = self.config.get('forced_truncation_enabled', False)
-    self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 10)
+    self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 3)
     forced_row = QHBoxLayout()
     forced_row.setContentsMargins(0, 8, 0, 0)
     forced_cb = self._create_styled_checkbox("Forced Truncation")
@@ -14032,7 +14032,7 @@ def _create_anti_duplicate_section(self, parent):
     try:
         forced_spin.setValue(int(self.forced_truncation_seconds_var))
     except (TypeError, ValueError):
-        forced_spin.setValue(10)
+        forced_spin.setValue(3)
     def _on_forced_truncation_seconds(value):
         try:
             self.forced_truncation_seconds_var = int(value)
@@ -14278,7 +14278,7 @@ def _reset_anti_duplicate_defaults(self):
     if hasattr(self, 'forced_truncation_enabled_var'):
         self.forced_truncation_enabled_var = False  # Default = disabled
     if hasattr(self, 'forced_truncation_seconds_var'):
-        self.forced_truncation_seconds_var = 10
+        self.forced_truncation_seconds_var = 3
     if hasattr(self, 'mark_glossary_forced_truncation_complete_var'):
         self.mark_glossary_forced_truncation_complete_var = False  # Default = disabled
 

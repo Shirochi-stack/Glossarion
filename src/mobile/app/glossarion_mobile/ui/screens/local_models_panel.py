@@ -75,8 +75,6 @@ GPU_PRESETS_OFFERED_KEY = "local_gpu_presets_offered"
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
 #: config.json key of "Whitelist source text", shown under it
 WHITELIST_SOURCE_KEY = "script_ban_whitelist_source"
-#: config.json key of "Mark glossary forced truncation as complete", shown under it
-MARK_GLOSSARY_COMPLETE_KEY = "mark_glossary_forced_truncation_complete"
 
 
 def _push(*controls: Any) -> None:
@@ -976,6 +974,9 @@ class LocalModelsPanel(OnDeviceFlow):
                                                       keyboard_type=ft.KeyboardType.NUMBER,
                                                       on_blur=lambda e: self.save_forced_truncation(),
                                                       on_submit=lambda e: self.save_forced_truncation())
+        self.mark_glossary_complete_switch = ft.Switch(
+            value=self.service.mark_glossary_complete(), key="local-mark-glossary-complete",
+            on_change=lambda e: self.service.save_mark_glossary_complete(self.mark_glossary_complete_switch.value))
         self.block_cjk_switch = ft.Switch(value=self.service.block_cjk(),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
@@ -993,6 +994,8 @@ class LocalModelsPanel(OnDeviceFlow):
             self.forced_truncation_seconds,
             _small("When the model keeps repeating the same text for this many seconds, the answer stops and the "
                    "chapter is marked truncated, so the run moves on. Text the source itself repeats is left alone."),
+            switch_row(self.mark_glossary_complete_switch, "Mark glossary forced truncation as complete"),
+            _small("A glossary request stopped this way counts as finished, with the entries it has."),
             switch_row(self.block_cjk_switch, "Block other scripts in translations (adaptive)"),
             _small("Stops small models from slipping into another writing system (Chinese, Japanese, Korean, "
                    "Hindi, Thai, Arabic, Cyrillic ...) while translating: only the target language's own "
@@ -1005,7 +1008,7 @@ class LocalModelsPanel(OnDeviceFlow):
         """"Allow emoticons and symbols from other scripts (kaomoji)" and "Whitelist source text": the Settings tiles of the shared config
         keys (``KAOMOJI_KEY``, ``WHITELIST_SOURCE_KEY``; also Settings › Anti-Duplicate Parameters › Logit Bias and the desktop), so
         both places edit one value. Nothing without the Settings context (a screen built in a test)."""
-        self.kaomoji_tile = self.whitelist_tile = self.mark_complete_tile = None
+        self.kaomoji_tile = self.whitelist_tile = None
         ctx = self.settings_ctx
         if ctx is None:
             from glossarion_mobile.ui.sheets.model_sheet import sheet_env
@@ -1016,8 +1019,7 @@ class LocalModelsPanel(OnDeviceFlow):
         rows: list = []
         observers: list = []
         observe = getattr(ctx.store, "observe", None)
-        for key, attribute in ((KAOMOJI_KEY, "kaomoji_tile"), (WHITELIST_SOURCE_KEY, "whitelist_tile"),
-                               (MARK_GLOSSARY_COMPLETE_KEY, "mark_complete_tile")):
+        for key, attribute in ((KAOMOJI_KEY, "kaomoji_tile"), (WHITELIST_SOURCE_KEY, "whitelist_tile")):
             try:
                 spec = ctx.schema.spec(key)
                 if spec is None:

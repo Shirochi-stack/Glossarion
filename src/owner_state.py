@@ -867,7 +867,7 @@ Text to analyze:
         self.script_ban_allow_kaomoji_var = self.config.get('script_ban_allow_kaomoji', False)
         self.script_ban_whitelist_source_var = self.config.get('script_ban_whitelist_source', False)
         self.forced_truncation_enabled_var = self.config.get('forced_truncation_enabled', False)
-        self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 10)
+        self.forced_truncation_seconds_var = self.config.get('forced_truncation_seconds', 3)
         self.mark_glossary_forced_truncation_complete_var = self.config.get('mark_glossary_forced_truncation_complete', False)
 
         

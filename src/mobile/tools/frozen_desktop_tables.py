@@ -468,7 +468,7 @@ class FrozenDesktopTables:
             ('script_ban_allow_kaomoji', ['script_ban_allow_kaomoji_var'], False, bool),
             ('script_ban_whitelist_source', ['script_ban_whitelist_source_var'], False, bool),
             ('forced_truncation_enabled', ['forced_truncation_enabled_var'], False, bool),
-            ('forced_truncation_seconds', ['forced_truncation_seconds_var'], 10, int),
+            ('forced_truncation_seconds', ['forced_truncation_seconds_var'], 3, int),
             ('mark_glossary_forced_truncation_complete', ['mark_glossary_forced_truncation_complete_var'], False, bool),
 
             # Glossary anti-duplicate parameters (separate from translation)

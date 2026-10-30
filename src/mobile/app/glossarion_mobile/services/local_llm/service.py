@@ -108,6 +108,8 @@ BLOCK_CJK_KEY = "local_llm_block_cjk"
 #: "Forced Truncation" of the on-device engine (on by default) and its seconds (``forced_truncation``)
 FORCED_TRUNCATION_KEY = "local_llm_forced_truncation"
 FORCED_TRUNCATION_SECONDS_KEY = "local_llm_forced_truncation_seconds"
+#: "Mark glossary forced truncation as complete" of the on-device engine (on by default)
+MARK_GLOSSARY_COMPLETE_KEY = "local_llm_mark_glossary_complete"
 #: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
 GPU_KEY = "local_llm_gpu"
 #: Prefs key of the GPU fallback: ``{"stem", "reason"}`` (that model runs on the CPU until the setting or
@@ -610,7 +612,18 @@ class LocalEngineService:
         try:
             return max(1, min(600, int(self._pref(FORCED_TRUNCATION_SECONDS_KEY))))
         except (TypeError, ValueError):
-            return 10
+            return 3
+
+    def mark_glossary_complete(self) -> bool:
+        """"Mark glossary forced truncation as complete": on unless switched off."""
+        raw = self._pref(MARK_GLOSSARY_COMPLETE_KEY)
+        return raw is None or bool(raw)
+
+    def save_mark_glossary_complete(self, enabled: Any) -> bool:
+        value = bool(enabled)
+        if self.prefs is not None:
+            self.prefs.set(MARK_GLOSSARY_COMPLETE_KEY, value)
+        return value
 
     def save_forced_truncation(self, enabled: Any, seconds: Any = None) -> tuple:
         """Save the switch and, when given, its seconds; the values now in force."""
@@ -1069,6 +1082,8 @@ class LocalEngineService:
         params["enable_thinking"] = wants_thinking(body)
         if self.forced_truncation():
             params["forced_truncation_seconds"] = self.forced_truncation_seconds()
+            if self.mark_glossary_complete() and "glossary" in str(body.get("glossarion_task") or "").lower():
+                params["forced_truncation_finish"] = "stop"
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
         always = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))

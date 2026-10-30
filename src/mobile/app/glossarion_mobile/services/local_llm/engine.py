@@ -535,8 +535,9 @@ class LlamaEngine(_Base):
                     completion += 1
                     yield text
                     if repeat_watch is not None and repeat_watch.feed(text):
-                        # Forced Truncation: closing the generator stops sampling; the client sees length
-                        self.last_finish = "length"
+                        # Forced Truncation: closing the generator stops sampling; the client sees length, or
+                        # stop for a glossary request under "Mark glossary forced truncation as complete"
+                        self.last_finish = params.get("forced_truncation_finish") or "length"
                         break
                 if choice.get("finish_reason"):
                     self.last_finish = choice["finish_reason"]

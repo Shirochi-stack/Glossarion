@@ -1779,7 +1779,7 @@ class RunEnvMixin:
             'SCRIPT_BAN_ALLOW_KAOMOJI': '1' if getattr(self, 'script_ban_allow_kaomoji_var', False) else '0',
             'SCRIPT_BAN_WHITELIST_SOURCE': '1' if getattr(self, 'script_ban_whitelist_source_var', False) else '0',
             'FORCED_TRUNCATION': '1' if getattr(self, 'forced_truncation_enabled_var', False) else '0',
-            'FORCED_TRUNCATION_SECONDS': str(getattr(self, 'forced_truncation_seconds_var', 10)),
+            'FORCED_TRUNCATION_SECONDS': str(getattr(self, 'forced_truncation_seconds_var', 3)),
             'MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE': '1' if getattr(self, 'mark_glossary_forced_truncation_complete_var', False) else '0',
             'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
@@ -2870,7 +2870,7 @@ class RunEnvMixin:
                 ('SCRIPT_BAN_ALLOW_KAOMOJI', '1' if getattr(self, 'script_ban_allow_kaomoji_var', False) else '0'),
                 ('SCRIPT_BAN_WHITELIST_SOURCE', '1' if getattr(self, 'script_ban_whitelist_source_var', False) else '0'),
                 ('FORCED_TRUNCATION', '1' if getattr(self, 'forced_truncation_enabled_var', False) else '0'),
-                ('FORCED_TRUNCATION_SECONDS', str(getattr(self, 'forced_truncation_seconds_var', 10))),
+                ('FORCED_TRUNCATION_SECONDS', str(getattr(self, 'forced_truncation_seconds_var', 3))),
                 ('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE', '1' if getattr(self, 'mark_glossary_forced_truncation_complete_var', False) else '0'),
 
                 # Azure API version
