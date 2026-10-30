@@ -387,6 +387,7 @@ SETTINGS_MAP_ORDER = ('model',
  'bias_repetitive_phrases',
  'block_other_scripts',
  'script_ban_allow_kaomoji',
+ 'script_ban_whitelist_source',
  'glossary_enable_anti_duplicate',
  'glossary_top_p',
  'glossary_min_p',
@@ -1287,6 +1288,7 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
  ('bias_repetitive_phrases', ('bias_repetitive_phrases_var',), ('value', False), ('bool',)),
  ('block_other_scripts', ('block_other_scripts_var',), ('value', False), ('bool',)),
  ('script_ban_allow_kaomoji', ('script_ban_allow_kaomoji_var',), ('value', False), ('bool',)),
+ ('script_ban_whitelist_source', ('script_ban_whitelist_source_var',), ('value', False), ('bool',)),
  ('glossary_enable_anti_duplicate',
   ('glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')),
   ('value', False),
@@ -2607,9 +2609,10 @@ SETTINGS = {
                 'blocks Chinese,\n'
                 "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's "
                 'own script is\n'
-                'never blocked. Extract Glossary and single-pass glossary translations may also '
-                'use the characters of\n'
-                'their own source text, for raw names; glossary refinement is left alone.\n'
+                'never blocked. Extract Glossary, refinement and single-pass glossary translations '
+                'may also use the\n'
+                'characters of their own source text, for raw names (Whitelist source text: every '
+                'request).\n'
                 'Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most '
                 'common tokens of\n'
                 'those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp '
@@ -11004,6 +11007,28 @@ SETTINGS = {
      'ui_sites': ('other.anti_duplicate',),
      'ui_tab': 'Logit Bias',
      'var_names': ('script_ban_allow_kaomoji_var',)},
+    'script_ban_whitelist_source': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('SCRIPT_BAN_WHITELIST_SOURCE', 'translation', False),
+             ('SCRIPT_BAN_WHITELIST_SOURCE', 'startup', False)),
+     'init_default': False,
+     'label': 'Whitelist source text',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': 'Every request blocked by Block other scripts may also use the characters of its '
+                'own source text,\n'
+                'so original names can be kept. Characters that are not in the source stay '
+                'blocked.\n'
+                'This also lets a model copy the source instead of translating it.\n'
+                "Applies to Block other scripts in translations and to the on-device engine's own "
+                'switch.',
+     'type': 'bool',
+     'ui_group': '🎯 Anti-Duplicate Parameters',
+     'ui_sites': ('other.anti_duplicate',),
+     'ui_tab': 'Logit Bias',
+     'var_names': ('script_ban_whitelist_source_var',)},
     'sdlxliff_one_column_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_one_row_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_two_column_layout': {'type': 'str', 'ui_sites': ('progress',)},

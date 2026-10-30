@@ -1107,6 +1107,16 @@ class OllamaSettingsDialog(QDialog):
             "Lets kaomoji through the script ban; the same setting as in Other Settings."
         )
         form.addRow(self.script_ban_allow_kaomoji_checkbox)
+        self.script_ban_whitelist_source_checkbox = _styled_checkbox("Whitelist source text")
+        self.script_ban_whitelist_source_checkbox.setChecked(bool(
+            getattr(gui, "script_ban_whitelist_source_var", gui.config.get("script_ban_whitelist_source", False))
+        ))
+        self.script_ban_whitelist_source_checkbox.setToolTip(
+            "Every blocked request may also use the characters of its own source text, which also lets a model\n"
+            "copy the source. Extract Glossary, the single-pass auto glossary and refinement always do.\n"
+            "The same setting as in Other Settings."
+        )
+        form.addRow(self.script_ban_whitelist_source_checkbox)
 
     def _save_script_ban_toggles(self):
         """Save the two switches where the run (its environment), the config and Other Settings read them; an
@@ -1115,6 +1125,7 @@ class OllamaSettingsDialog(QDialog):
         pairs = (
             ("block_other_scripts", "BLOCK_OTHER_SCRIPTS", self.block_other_scripts_checkbox),
             ("script_ban_allow_kaomoji", "SCRIPT_BAN_ALLOW_KAOMOJI", self.script_ban_allow_kaomoji_checkbox),
+            ("script_ban_whitelist_source", "SCRIPT_BAN_WHITELIST_SOURCE", self.script_ban_whitelist_source_checkbox),
         )
         for key, env_name, checkbox in pairs:
             checked = checkbox.isChecked()

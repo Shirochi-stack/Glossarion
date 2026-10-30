@@ -466,6 +466,7 @@ class FrozenDesktopTables:
             ('bias_repetitive_phrases', ['bias_repetitive_phrases_var'], False, bool),
             ('block_other_scripts', ['block_other_scripts_var'], False, bool),
             ('script_ban_allow_kaomoji', ['script_ban_allow_kaomoji_var'], False, bool),
+            ('script_ban_whitelist_source', ['script_ban_whitelist_source_var'], False, bool),
 
             # Glossary anti-duplicate parameters (separate from translation)
             ('glossary_enable_anti_duplicate', ['glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')], False, bool),

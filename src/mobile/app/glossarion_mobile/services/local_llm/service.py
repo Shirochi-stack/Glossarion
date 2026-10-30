@@ -29,9 +29,10 @@
 * **Adaptive script ban** ("Block other scripts in translations", Prefs ``BLOCK_CJK_KEY``, on by default):
   a request that writes target-language text bans the tokens of every script the target does not use
   (English: Han / kana / Hangul, Devanagari, Thai, Arabic, Cyrillic ...; a CJK target keeps all three CJK
-  scripts); Extract Glossary and a single-pass auto glossary's translations ban them too, except the tokens
-  of their source text's characters (``params["ban_source_whitelist"]``, owner 2026-10-30; an image has no
-  text and is not banned); other glossary requests keep the default logits. The
+  scripts); Extract Glossary, refinement and a single-pass auto glossary's translations ban them too, except
+  the tokens of their source text's characters (``params["ban_source_whitelist"]``, owner 2026-10-30; an image
+  has no text and is not banned), and "Whitelist source text" (config ``script_ban_whitelist_source``, body
+  field ``glossarion_whitelist_source``) does that for every banned request. The
   request kind and target come from the body fields ``unified_api_client`` adds for this endpoint only
   (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.banned_scripts``
   decides and the engine gets ``params["ban_scripts"]``. The opt-in "Allow emoticons and symbols from
@@ -1043,11 +1044,15 @@ class LocalEngineService:
         params["enable_thinking"] = wants_thinking(body)
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
-        whitelist = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))
+        always = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))
+        whitelist = always or script_ban._truthy(body.get("glossarion_whitelist_source"))
         if whitelist and any(isinstance(m, dict) and isinstance(m.get("content"), list)
                              and any(isinstance(p, dict) and p.get("type") != "text" for p in m["content"])
                              for m in body.get("messages") or []):
-            scripts = ()  # an image: no text to tell the source's characters by
+            # an image: no text to tell the source's characters by
+            whitelist = False
+            if always:
+                scripts = ()
         if scripts:
             params["ban_scripts"] = scripts
             if whitelist:

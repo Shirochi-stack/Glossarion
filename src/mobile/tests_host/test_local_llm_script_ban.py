@@ -93,7 +93,8 @@ def test_request_kinds():
                  "batch_toc_translation", "image_translation", "summary"):
         assert sb.wants_ban(task, "English"), task
     assert sb.wants_ban("glossary", "English")  # Extract Glossary: its source's characters are let through
-    for task in ("glossary_refinement", "auto_glossary_(3/10)", "review", "image_ocr", "vision_ocr",
+    assert sb.wants_ban("glossary_refinement", "English")
+    for task in ("auto_glossary_(3/10)", "review", "image_ocr", "vision_ocr",
                  "manga_ocr", "image_scan", "truncation", "qa_truncation", "other", "", None):
         assert not sb.wants_ban(task, "English"), task
     # the single-pass auto glossary's answer carries raw source names: its translations keep CJK
@@ -123,7 +124,15 @@ def test_service_routes_the_request_kind(tmp_path):
     assert "ban_source_whitelist" not in service._params({**base, "glossarion_task": "translation"}, 4096)
     image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
     assert "ban_scripts" not in service._params({**base, "glossarion_task": "glossary", "messages": image}, 4096)
-    assert "ban_scripts" not in service._params({**base, "glossarion_task": "glossary_refinement"}, 4096)
+    assert service._params({**base, "glossarion_task": "glossary_refinement"}, 4096)["ban_source_whitelist"] is True
+    assert service._params({**base, "glossarion_task": "refinement"}, 4096)["ban_source_whitelist"] is True
+    # "Whitelist source text": every banned request; its image keeps the plain ban
+    toggled = {**base, "glossarion_task": "translation", "glossarion_whitelist_source": True}
+    assert service._params(toggled, 4096)["ban_source_whitelist"] is True
+    plain_image = service._params({**toggled, "messages": image}, 4096)
+    assert sb.CJK in plain_image["ban_scripts"] and "ban_source_whitelist" not in plain_image
+    assert "ban_scripts" not in service._params({**base, "glossarion_task": "review",
+                                                 "glossarion_whitelist_source": True}, 4096)
     single = service._params({**base, "glossarion_task": "translation", "glossarion_single_pass": True}, 4096)
     assert sb.CJK in single["ban_scripts"] and single["ban_source_whitelist"] is True
     assert sb.CJK not in service._params({**base, "glossarion_task": "translation",
@@ -141,7 +150,7 @@ def test_the_ban_reaches_the_engine_through_the_endpoint_path(tmp_path):
     list(run.deltas)
     run.close()
     assert sb.CJK in engine.calls[-1]["params"]["ban_scripts"]
-    run = service.chat(f"local/{STEM}", {**body, "glossarion_task": "glossary_refinement"}, lambda: False)
+    run = service.chat(f"local/{STEM}", {**body, "glossarion_task": "review"}, lambda: False)
     list(run.deltas)
     run.close()
     assert "ban_scripts" not in engine.calls[-1]["params"]

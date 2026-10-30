@@ -228,26 +228,30 @@ def _guarded(monkeypatch):
     monkeypatch.setenv("MAX_RETRIES", "3")
 
 
-def test_client_guard_retries_kaomoji_punctuation_while_off(client, monkeypatch):
+def test_client_warns_about_kaomoji_punctuation_while_off(client, monkeypatch, caplog):
+    caplog.set_level("INFO")
     _guarded(monkeypatch)
     seen = _scripted(monkeypatch, client, [FACE_ANSWER, "<p>He smiled.</p>"])
     content, _finish = client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000,
                                               context="translation", request_id="kaotest1")
-    assert len(seen) == 2 and content == "<p>He smiled.</p>"
+    assert len(seen) == 1 and content == FACE_ANSWER  # kept, never sent again
+    assert "characters of another script" in caplog.text
 
 
-def test_client_guard_accepts_kaomoji_punctuation_while_on(client, monkeypatch):
+def test_client_accepts_kaomoji_punctuation_while_on(client, monkeypatch, caplog):
+    caplog.set_level("INFO")
     _guarded(monkeypatch)
     monkeypatch.setenv("SCRIPT_BAN_ALLOW_KAOMOJI", "1")
     seen = _scripted(monkeypatch, client, [FACE_ANSWER, "<p>He smiled.</p>"])
     content, _finish = client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000,
                                               context="translation", request_id="kaotest1")
     assert len(seen) == 1 and content == FACE_ANSWER
+    assert "characters of another script" not in caplog.text
     # Chinese still is a leak with the option on
     seen = _scripted(monkeypatch, client, ["<p>He 笑了起来 smiled.</p>", "<p>He smiled.</p>"])
     client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
                           request_id="kaotest2")
-    assert len(seen) == 2
+    assert len(seen) == 1 and "characters of another script" in caplog.text
 
 
 def test_client_logit_bias_and_on_device_field_follow_the_setting(client, monkeypatch):

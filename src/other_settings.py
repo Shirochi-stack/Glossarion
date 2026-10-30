@@ -13914,8 +13914,8 @@ def _create_anti_duplicate_section(self, parent):
             "⚠️ Mixed-language books, original names kept in their own script and targets it does not recognise can suffer.\n"
             "Translations may only use the scripts of the target language: English output blocks Chinese,\n"
             "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's own script is\n"
-            "never blocked. Extract Glossary and single-pass glossary translations may also use the characters of\n"
-            "their own source text, for raw names; glossary refinement is left alone.\n"
+            "never blocked. Extract Glossary, refinement and single-pass glossary translations may also use the\n"
+            "characters of their own source text, for raw names (Whitelist source text: every request).\n"
             "Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most common tokens of\n"
             "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
             "a ban built from its own tokens. Other models have no token ban: an answer with such text is kept\n"
@@ -13972,6 +13972,31 @@ def _create_anti_duplicate_section(self, parent):
     self.script_ban_allow_kaomoji_checkbox = kaomoji_cb  # Ollama Settings saves the same switch
     kaomoji_cb.setContentsMargins(20, 0, 0, 0)
     bias_v.addWidget(kaomoji_cb)
+
+    # The ban lets the characters of a request's own source text through (script_ban_core.source_chars; also on device)
+    self.script_ban_whitelist_source_var = self.config.get('script_ban_whitelist_source', False)
+    whitelist_cb = self._create_styled_checkbox("Whitelist source text")
+    try:
+        whitelist_cb.setChecked(bool(self.script_ban_whitelist_source_var))
+        whitelist_cb.setToolTip(
+            "Every request blocked by Block other scripts may also use the characters of its own source text,\n"
+            "so original names can be kept. Characters that are not in the source stay blocked.\n"
+            "This also lets a model copy the source instead of translating it.\n"
+            "Applies to Block other scripts in translations and to the on-device engine's own switch."
+        )
+    except Exception:
+        pass
+    def _on_whitelist_toggle(checked):
+        try:
+            self.script_ban_whitelist_source_var = bool(checked)
+        except Exception:
+            pass
+    whitelist_cb.toggled.connect(_on_whitelist_toggle)
+    self.script_ban_whitelist_source_checkbox = whitelist_cb  # Ollama Settings saves the same switch
+    whitelist_cb.setContentsMargins(20, 0, 0, 0)
+    bias_v.addWidget(whitelist_cb)
+    _bias_note("Extract Glossary, the single-pass auto glossary and refinement always whitelist their source text "
+               "while Block other scripts is on.")
     bias_v.addStretch()
     
     # Provider compatibility info
@@ -14184,6 +14209,8 @@ def _reset_anti_duplicate_defaults(self):
 
     if hasattr(self, 'script_ban_allow_kaomoji_var'):
         self.script_ban_allow_kaomoji_var = False  # Default = disabled
+    if hasattr(self, 'script_ban_whitelist_source_var'):
+        self.script_ban_whitelist_source_var = False  # Default = disabled
 
     # Update enable/disable state
     self._toggle_anti_duplicate_controls()

@@ -3565,6 +3565,8 @@ class UnifiedClient:
             fields['target_language'] = target
         if UnifiedClient._script_ban_allow_kaomoji():
             fields['glossarion_allow_kaomoji'] = True
+        if UnifiedClient._script_ban_whitelist_source():
+            fields['glossarion_whitelist_source'] = True
         return fields
 
     @staticmethod
@@ -3572,6 +3574,12 @@ class UnifiedClient:
         """"Allow emoticons and symbols from other scripts (kaomoji)" (SCRIPT_BAN_ALLOW_KAOMOJI, off by
         default): the script ban lets kaomoji punctuation through (``script_ban_core.KAOMOJI_RANGES``)."""
         return (os.getenv('SCRIPT_BAN_ALLOW_KAOMOJI') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    @staticmethod
+    def _script_ban_whitelist_source() -> bool:
+        """"Whitelist source text" (SCRIPT_BAN_WHITELIST_SOURCE, off by default): every banned request may use the
+        characters of its own source text, not only the ones that always may (``source_whitelisted``)."""
+        return (os.getenv('SCRIPT_BAN_WHITELIST_SOURCE') or '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
     def _script_ban_scripts(self, context=None) -> tuple:
         """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
@@ -3601,20 +3609,22 @@ class UnifiedClient:
 
     def _script_ban_request(self, messages, context=None) -> tuple:
         """(banned scripts, the characters of them this request may still use) for one request. Extract
-        Glossary and a single-pass translation copy raw names: the characters of the user text are let
-        through, and without text (an image) there is nothing to tell them by, so nothing is banned."""
+        Glossary, refinement and a single-pass translation copy raw names: the characters of the user text
+        are let through, and without text (an image) there is nothing to tell them by, so nothing is banned.
+        "Whitelist source text" lets every other request's text through too; its image keeps the plain ban."""
         scripts = self._script_ban_scripts(context)
         if not scripts:
             return (), frozenset()
         import script_ban_core
         fields = self._on_device_task_fields()
         kind = str(context or '').strip().lower() or str(fields.get('glossarion_task') or '')
-        if not script_ban_core.source_whitelisted(kind, single_pass=fields.get('glossarion_single_pass')):
+        always = script_ban_core.source_whitelisted(kind, single_pass=fields.get('glossarion_single_pass'))
+        if not always and not self._script_ban_whitelist_source():
             return scripts, frozenset()
         users = [m for m in (messages or []) if isinstance(m, dict) and m.get('role') == 'user']
         if any(isinstance(m.get('content'), list) and any(isinstance(p, dict) and p.get('type') != 'text' for p in m['content'])
                for m in users):
-            return (), frozenset()
+            return ((), frozenset()) if always else (scripts, frozenset())
         return scripts, script_ban_core.source_chars(users, scripts, allow_kaomoji=self._script_ban_allow_kaomoji())
 
     @staticmethod
@@ -15527,6 +15537,7 @@ class UnifiedClient:
         ("TOP_P", 1.0), ("MIN_P", 0.0), ("TOP_K", 0), ("FREQUENCY_PENALTY", 0.0), ("PRESENCE_PENALTY", 0.0),
         ("REPETITION_PENALTY", 1.0), ("CANDIDATE_COUNT", 1), ("CUSTOM_STOP_SEQUENCES", ""),
         ("LOGIT_BIAS_ENABLED", "0"), ("BLOCK_OTHER_SCRIPTS", "0"), ("SCRIPT_BAN_ALLOW_KAOMOJI", "0"),
+        ("SCRIPT_BAN_WHITELIST_SOURCE", "0"),
     )
 
     def _anti_duplicate_snapshot(self, temperature=None):

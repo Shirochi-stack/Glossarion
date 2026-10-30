@@ -82,7 +82,8 @@ def test_every_listed_target_keeps_its_own_script():
 def test_unknown_targets_glossary_and_single_pass():
     assert sbc.banned_scripts("translation", "Klingon") == ("cjk",)
     assert sbc.banned_scripts("glossary", "English") == ENGLISH_BANS  # its source's characters are let through
-    assert sbc.banned_scripts("glossary_refinement", "English") == ()
+    assert sbc.banned_scripts("glossary_refinement", "English") == ENGLISH_BANS
+    assert sbc.source_whitelisted("glossary_refinement") and sbc.source_whitelisted("refinement")
     assert sbc.banned_scripts("translation", "English", single_pass=True) == ENGLISH_BANS  # whitelisted, as glossary
     assert sbc.source_whitelisted("translation", single_pass=True) and sbc.source_whitelisted("glossary")
     assert not sbc.source_whitelisted("translation") and not sbc.source_whitelisted("metadata", single_pass=True)
@@ -177,7 +178,7 @@ def test_client_bans_nothing_unless_both_switches_are_on(client, monkeypatch):
     monkeypatch.setenv("ENABLE_ANTI_DUPLICATE", "1")
     assert client._script_ban_scripts("translation") == ENGLISH_BANS
     assert client._script_ban_scripts("review") == ()
-    assert client._script_ban_scripts("glossary_refinement") == ()
+    assert client._script_ban_scripts("glossary_refinement") == ENGLISH_BANS
     assert client._script_ban_scripts("glossary") == ENGLISH_BANS  # Extract Glossary
 
 
@@ -346,6 +347,39 @@ def test_single_pass_translation_may_use_the_characters_of_its_source(client, mo
     scripts, exempt = client._script_ban_request(source, "translation")
     assert scripts == ENGLISH_BANS and "김" in exempt
     assert client._script_ban_request(source, "metadata") == (ENGLISH_BANS, frozenset())  # no names to copy
+
+
+def test_whitelist_source_text_toggle_covers_every_banned_request(client, monkeypatch):
+    """Owner 2026-10-30: a "Whitelist source text" toggle; Extract Glossary, single pass and refinement always do."""
+    _turn_on(monkeypatch)
+    source = [{"role": "user", "content": "김민준은 웃었다."}]
+    image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
+    assert client._script_ban_request(source, "translation")[1] == frozenset()
+    assert "glossarion_whitelist_source" not in client._on_device_task_fields()
+    for kind in ("glossary", "glossary_refinement", "refinement"):
+        assert "김" in client._script_ban_request(source, kind)[1], kind
+    monkeypatch.setenv("SCRIPT_BAN_WHITELIST_SOURCE", "1")
+    assert "김" in client._script_ban_request(source, "translation")[1]
+    assert client._on_device_task_fields()["glossarion_whitelist_source"] is True
+    assert client._script_ban_request(source, "review") == ((), frozenset())  # not banned at all: nothing to do
+    # an image has no text: its translation keeps the plain ban, its glossary has none
+    assert client._script_ban_request(image, "translation") == (ENGLISH_BANS, frozenset())
+    assert client._script_ban_request(image, "glossary") == ((), frozenset())
+
+
+def test_whitelist_source_text_is_wired_through_desktop_and_schema():
+    root = Path(__file__).resolve().parents[1] / "src"
+    other = (root / "other_settings.py").read_text(encoding="utf-8")
+    assert 'self._create_styled_checkbox("Whitelist source text")' in other
+    assert "Extract Glossary, the single-pass auto glossary and refinement always whitelist" in other
+    assert "self.script_ban_whitelist_source_var = False" in other
+    assert "self.script_ban_whitelist_source_var = self.config.get('script_ban_whitelist_source', False)" in \
+        (root / "owner_state.py").read_text(encoding="utf-8")
+    assert (root / "run_env.py").read_text(encoding="utf-8").count("SCRIPT_BAN_WHITELIST_SOURCE") == 3
+    import settings_schema_data as data
+    spec = data.SETTINGS["script_ban_whitelist_source"]
+    assert spec["default"] is False and spec["label"] == "Whitelist source text"
+    assert {env for env, _phase, _x in spec["env"]} == {"SCRIPT_BAN_WHITELIST_SOURCE"}
 
 
 def test_whitelisted_tokens_only_need_the_sources_characters():

@@ -22,10 +22,12 @@ Decision (``banned_scripts``; ``wants_ban`` is its bool), owner 2026-10-19, wide
   ``BAN_TASKS`` -> ban; ``translation`` while the single-pass auto glossary is on (``glossarion_single_pass``:
   the answer carries the glossary's source-script names) bans with the source's characters let through
   (``source_whitelisted``, owner 2026-10-30);
-  ``SOURCE_WHITELIST_TASKS`` (Extract Glossary, owner 2026-10-30) -> the same: ban, except the characters of the request's
+  ``SOURCE_WHITELIST_TASKS`` (Extract Glossary, refinement, owner 2026-10-30) -> the same: ban, except the characters of the request's
   own source text (``source_chars``), since its answer copies the raw names; a request with no source text
   (an image's glossary) -> no ban, the caller checks; anything else (other glossary contexts, OCR / image
   scan, review, QA truncation checks, unknown) and a request without a target -> no ban;
+* "Whitelist source text" (config ``script_ban_whitelist_source`` / env ``SCRIPT_BAN_WHITELIST_SOURCE``, off by
+  default, owner 2026-10-30): every other banned request lets its source's characters through as well;
 * what is banned: every script of ``SCRIPTS`` the target does not use (``target_scripts``: by name
   "Hindi", "Chinese (Traditional)", "Serbian", by code "hi", "zh-TW", "sr-Latn", or written in its own
   script "हिन्दी", "中文", "Русский"). English bans CJK, Devanagari, Thai, Arabic, Cyrillic, Hebrew and the
@@ -174,7 +176,7 @@ BAN_TASKS = frozenset({
 })
 
 #: requests whose answer copies names from the source: banned, the source's own characters excepted
-SOURCE_WHITELIST_TASKS = frozenset({"glossary"})
+SOURCE_WHITELIST_TASKS = frozenset({"glossary", "glossary_refinement", "refinement"})
 
 _CJK_WORDS = ("chinese", "mandarin", "cantonese", "japanese", "korean", "hanzi", "putonghua", "zhongwen")
 _CJK_CODES = re.compile(r"^(zh|ja|ko|jp|kr|cn|yue|cmn|jpn|kor|zho|chi)([-_].*)?$")
@@ -338,7 +340,8 @@ def banned_scripts(task: Any, target: Any, *, single_pass: Any = False, enabled:
 
 
 def source_whitelisted(task: Any, *, single_pass: Any = False) -> bool:
-    """This request's answer copies names from its source: Extract Glossary, a single-pass translation."""
+    """This request's answer copies names from its source, whatever "Whitelist source text" says: Extract
+    Glossary, refinement, a single-pass translation."""
     kind = str(task or "").strip().lower()
     return kind in SOURCE_WHITELIST_TASKS or (kind == "translation" and _truthy(single_pass))
 

@@ -4,10 +4,10 @@ On-device; Prefs key ``local_llm_block_cjk`` kept from when it banned CJK only).
 Small on-device models leak other writing systems into translations: Qwen3.5 0.8B slips Chinese
 characters in ("kanji bleed", Korean -> English), Qwen3.5 2B drifts into whole Hindi (Devanagari) lines
 (owner 2026-10-28). For a request that writes target-language text, every vocabulary token that produces
-a character of a script the target language does not use gets the logit -inf; Extract Glossary and a
-single-pass auto glossary's translation, whose answers copy raw names, keep the tokens made only of their
-source text's characters (owner 2026-10-30: ``processor(whitelist=True)``); other requests that must copy
-source text (OCR) are left alone.
+a character of a script the target language does not use gets the logit -inf; Extract Glossary, refinement
+and a single-pass auto glossary's translation, whose answers copy raw names, keep the tokens made only of their
+source text's characters (owner 2026-10-30: ``processor(whitelist=True)``), as does every banned request under
+"Whitelist source text"; other requests that must copy source text (OCR) are left alone.
 
 Which requests ban which scripts, the script table and which token bytes count as a banned script live in
 the shared desktop module ``script_ban_core`` (src/; the universal "Block other scripts in translations

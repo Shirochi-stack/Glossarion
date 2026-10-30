@@ -242,6 +242,7 @@ def test_ollama_script_ban_switches_sync_with_other_settings(ollama_qapp, monkey
     monkeypatch.setenv("OLLAMA_SETTINGS_JSON", "{}")
     monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "0")
     monkeypatch.setenv("SCRIPT_BAN_ALLOW_KAOMOJI", "1")
+    monkeypatch.setenv("SCRIPT_BAN_WHITELIST_SOURCE", "0")
     translator = _ollama_test_translator()
     # what Other Settings holds: its variables and open checkboxes
     translator.block_other_scripts_var = False
@@ -263,6 +264,7 @@ def test_ollama_script_ban_switches_sync_with_other_settings(ollama_qapp, monkey
     assert translator.block_other_scripts_checkbox.isChecked()
     assert not translator.script_ban_allow_kaomoji_checkbox.isChecked()
     assert os.environ["BLOCK_OTHER_SCRIPTS"] == "1" and os.environ["SCRIPT_BAN_ALLOW_KAOMOJI"] == "0"
+    assert translator.config["script_ban_whitelist_source"] is False  # the third switch saves the same way
     # the next opening shows the setting, from the variable or (before Other Settings exists) the config
     translator.block_other_scripts_var = False
     assert not OllamaSettingsDialog(translator, "ollamapull/llama3.2").block_other_scripts_checkbox.isChecked()
