@@ -974,8 +974,8 @@ def test_checkpoint_kill_recover_and_resume(tmp_path, monkeypatch):
     assert service3.wait_idle(TIMEOUT) and state_of(service3, new_id) is JobState.DONE
     assert service3.snapshot(new_id).spec == spec and backend2.owners[-1].calls[0][1] == [os.path.abspath(source)]
     assert service3.interrupted == () and not (killed / "jobs" / "interrupted.state").exists()
-    history = {s.id: s for s in service3.view().history}
-    assert history[job_id].resolution == "resumed"
+    # it carries on as its new job: not listed next to it, and a second Resume is refused
+    assert job_id not in {s.id for s in service3.view().history} and service3.resume(job_id) is None
     service2.close()
     service3.close()
 
