@@ -3725,7 +3725,7 @@ class UnifiedClient:
         get their most frequent ones (tiktoken knows the tokenizer: ``script_ban_core.openai_logit_bias``),
         an OpenAI-compatible server with ``/tokenize`` (llama.cpp server, vLLM) gets ids from its own
         tokenizer (``_server_script_ban_bias``); {} for every other route, which relies on the output
-        guard (``_script_leak_retry_messages``)."""
+        warning (``_warn_script_leak``)."""
         if use_responses_api:
             return {}
         scripts = self._script_ban_scripts(getattr(self, 'context', None))
@@ -3761,38 +3761,20 @@ class UnifiedClient:
             self._log_once(f"🎯 Logit bias: {len(presets)} preset tokens at {next(iter(presets.values()))} for {model}")
         return {"logit_bias": {**presets, **ban}}
 
-    def _script_leak_retry_messages(self, messages, content, context=None):
-        """The output guard of "Block other scripts": None while the answer keeps to the target's
-        scripts (``script_ban_core.foreign_script_leak``; runs also found in the request, such as kept
-        names, are ignored), else ``(messages with the write-only-in-the-target instruction added to
-        the last user message, the leak)``."""
+    def _warn_script_leak(self, messages, content, context=None) -> None:
+        """Say so in the log when an answer has text in a script the target does not use
+        (``script_ban_core.foreign_script_leak``; runs also found in the request, such as kept names, are
+        ignored). The answer is kept: only a ban while sampling can prevent this, and a route without one has
+        none to offer."""
         scripts = self._script_ban_scripts(context)
         if not scripts or not isinstance(content, str) or not content.strip():
-            return None
+            return
         import script_ban_core
-        if self._script_ban_allow_kaomoji():  # kaomoji punctuation is not a leak
-            leak = script_ban_core.foreign_script_leak(content, scripts, messages, allow_kaomoji=True)
-        else:
-            leak = script_ban_core.foreign_script_leak(content, scripts, messages)
-        if not leak:
-            return None
-        target = self._on_device_task_fields().get('target_language', '')
-        note = script_ban_core.retry_instruction(target, tuple(leak['scripts']))
-        updated = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
-        for message in reversed(updated):
-            if not isinstance(message, dict) or message.get('role') != 'user':
-                continue
-            body = message.get('content')
-            if isinstance(body, str):
-                if note not in body:
-                    message['content'] = f"{body}\n\n{note}"
-                return updated, leak
-            if isinstance(body, list):
-                if not any(isinstance(p, dict) and p.get('text') == note for p in body):
-                    message['content'] = list(body) + [{"type": "text", "text": note}]
-                return updated, leak
-        updated.append({"role": "user", "content": note})
-        return updated, leak
+        leak = script_ban_core.foreign_script_leak(content, scripts, messages, allow_kaomoji=self._script_ban_allow_kaomoji())
+        if leak:
+            shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
+            print(f"⚠️ Answer contains {leak['chars']} characters of another script ({shown}: {leak['sample']}); "
+                  f"this route has no token ban that could prevent it")
 
     def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
         """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
@@ -11558,23 +11540,7 @@ class UnifiedClient:
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
 
-                # "Block other scripts in translations (adaptive, all models)": an answer with text in a
-                # script the target language does not use is sent again with an instruction, on this
-                # loop's own retry budget (like the image-quality retry); the last attempt's answer is kept.
-                # A truncated answer counts too: a copied chapter usually ends at the token limit.
-                leak_retry = self._script_leak_retry_messages(messages, extracted_content, context)
-                if leak_retry is not None:
-                    retry_messages, leak = leak_retry
-                    shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
-                    if attempt < internal_retries - 1 and not self._should_abort_retry():
-                        print(f"🔤 Answer contains {leak['chars']} characters of another script ({shown}: "
-                              f"{leak['sample']}); retrying with a target-language-only instruction "
-                              f"(attempt {attempt + 1}/{internal_retries})")
-                        self._last_retry_error_type = 'foreign_script'
-                        messages = retry_messages
-                        continue
-                    print(f"⚠️ Answer still contains {leak['chars']} characters of another script ({shown}); "
-                          f"no retries left - keeping it")
+                self._warn_script_leak(messages, extracted_content, context)
 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)

@@ -12,9 +12,8 @@ desktop"). Two users:
   get ``openai_logit_bias`` (the provider caps the map, so it can only push down the most frequent
   tokens), an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM: ``/tokenize``)
   gets ``server_logit_bias`` built from its own token ids for ``server_probe_text``, and every route gets
-  the output guard ``foreign_script_leak``: a translation whose text has
-  characters of a banned script the source does not have is sent again, within the client's own retry
-  budget, with ``retry_instruction`` added.
+  the log warning of ``foreign_script_leak``: a translation whose text has characters of a banned script
+  the source does not have is kept, and the log says so (only a ban while sampling can prevent it).
 
 Decision (``banned_scripts``; ``wants_ban`` is its bool), owner 2026-10-19, widened 2026-10-28:
 
@@ -84,7 +83,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 __all__ = ["BAN_TASKS", "BANNED_RANGES", "CJK", "KAOMOJI_RANGES", "LEAK_MIN_CHARS", "LEAK_MIN_SHARE",
            "OPENAI_LOGIT_BIAS_LIMIT", "SCRIPTS", "banned_scripts", "banned_token_ids", "bias_token_ids",
            "foreign_script_leak", "is_banned_char", "is_cjk_target", "is_kaomoji_char", "kaomoji_source_chars",
-           "openai_encoding_name", "openai_logit_bias", "piece_bytes", "retry_instruction", "script_mask",
+           "openai_encoding_name", "openai_logit_bias", "piece_bytes", "script_mask",
            "script_of", "server_logit_bias", "server_probe_text", "source_keys", "target_scripts",
            "token_is_banned", "token_masks", "token_requirements", "wants_ban"]
 
@@ -692,7 +691,6 @@ LEAK_MIN_SHARE = 0.001  # of the response's non-space characters
 KEPT_RUN_MAX_CHARS = 12
 KEPT_MAX_SHARE = 0.2
 
-_SCRIPT_NAMES = {CJK: "Chinese, Japanese or Korean characters", "other": "other scripts"}
 
 
 def _source_text(source: Any) -> str:
@@ -891,16 +889,3 @@ def source_keys(chars: Iterable[str]) -> FrozenSet[Any]:
         if len(raw) > 1:
             keys.add(raw[:-1])
     return frozenset(keys)
-
-
-def retry_instruction(target: Any, scripts: Iterable[str] = ()) -> str:
-    """The line added to the request when a response leaked another script."""
-    names = []
-    for name in scripts or ():
-        label = _SCRIPT_NAMES.get(name, str(name).title() + " script")
-        if label not in names:
-            names.append(label)
-    shown = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
-    language = str(target or "").strip() or "the target language"
-    return (f"[Write the whole answer in {language} only. The previous answer contained text in another "
-            f"writing system ({shown}); do not use it, except for names kept exactly as in the source.]")

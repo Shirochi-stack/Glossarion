@@ -2601,8 +2601,8 @@ SETTINGS = {
      'label': 'Block other scripts in translations (adaptive, all models)',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': False,
-     'tooltip': '⚠️ Can cause errors or retries: mixed-language books, kept original names, '
-                'targets it does not recognise.\n'
+     'tooltip': '⚠️ Mixed-language books, original names kept in their own script and targets it '
+                'does not recognise can suffer.\n'
                 'Translations may only use the scripts of the target language: English output '
                 'blocks Chinese,\n'
                 "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's "
@@ -2612,10 +2612,9 @@ SETTINGS = {
                 'common tokens of\n'
                 'those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp '
                 'server, vLLM) gets\n'
-                'a ban built from its own tokens. On every model, an answer with such text (or a '
-                'copy of the source)\n'
-                'is sent again with an instruction to write only in the target language (Max '
-                'Retries).\n'
+                'a ban built from its own tokens. Other models have no token ban: an answer with '
+                'such text is kept\n'
+                'and the log warns about it.\n'
                 'ollamapull/ gets a full token ban on the llama-server that comes with Ollama, and '
                 'its own dialog\n'
                 'has the same switch. Works only while Enable Anti-Duplicate Parameters is on, '

@@ -13903,20 +13903,20 @@ def _create_anti_duplicate_section(self, parent):
     # Universal adaptive script ban (script_ban_core; the on-device engine has its own switch)
     _bias_heading("Script Ban (separate from Word Bias)", top=12)
     _bias_note("Does not need Enable word bias or Strength. Official OpenAI models, ollamapull/ and local servers "
-               "with a tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; every model gets an answer check.")
+               "with a tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; on other models the log only warns.")
     self.block_other_scripts_var = self.config.get('block_other_scripts', False)
     block_scripts_cb = self._create_styled_checkbox("Block other scripts in translations (adaptive, all models)")
     try:
         block_scripts_cb.setChecked(bool(self.block_other_scripts_var))
         block_scripts_cb.setToolTip(
-            "⚠️ Can cause errors or retries: mixed-language books, kept original names, targets it does not recognise.\n"
+            "⚠️ Mixed-language books, original names kept in their own script and targets it does not recognise can suffer.\n"
             "Translations may only use the scripts of the target language: English output blocks Chinese,\n"
             "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's own script is\n"
             "never blocked, and glossary and single-pass glossary requests are left alone.\n"
             "Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most common tokens of\n"
             "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
-            "a ban built from its own tokens. On every model, an answer with such text (or a copy of the source)\n"
-            "is sent again with an instruction to write only in the target language (Max Retries).\n"
+            "a ban built from its own tokens. Other models have no token ban: an answer with such text is kept\n"
+            "and the log warns about it.\n"
             "ollamapull/ gets a full token ban on the llama-server that comes with Ollama, and its own dialog\n"
             "has the same switch. Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/."
         )
@@ -13933,9 +13933,9 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(block_scripts_cb)
 
     block_scripts_warn = QLabel(
-        "⚠️ Think before enabling: it can cause errors or extra retries with mixed-language books, "
-        "original names kept in their own script, or a target language Glossarion does not recognise "
-        "(those block Chinese, Japanese and Korean only)."
+        "⚠️ Think before enabling: where the model has a token ban, it cannot write mixed-language text or "
+        "original names kept in their own script. A target language Glossarion does not recognise "
+        "blocks Chinese, Japanese and Korean only."
     )
     block_scripts_warn.setStyleSheet("color: #e0a040; font-size: 8pt;")
     block_scripts_warn.setWordWrap(True)

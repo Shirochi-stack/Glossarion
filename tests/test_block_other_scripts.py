@@ -4,8 +4,7 @@
 Covers the shared decision (the target's own script is never banned, unknown targets ban CJK only,
 glossary / single-pass never ban), the output guard (kept names from the request are ignored, small
 amounts are tolerated), the OpenAI logit bias (official chat models only, capped, safe ids), the
-UnifiedClient wiring (off by default and with Anti-Duplicate off; a leaking answer is sent again with
-the instruction on the client's own retry budget, the last answer is kept when the budget runs out) and
+UnifiedClient wiring (off by default and with Anti-Duplicate off; a leaking answer is kept and logged) and
 the settings plumbing (Other Settings checkbox with a warning, owner_state, run_env, schema).
 
 Run (repository root)::
@@ -124,11 +123,6 @@ def test_leak_threshold_tolerates_a_stray_character():
     long_text = "word " * 2000 + "你好吗"  # 3 chars but under 0.1 % of ~8000
     assert sbc.foreign_script_leak(long_text, ENGLISH_BANS) is None
     assert sbc.foreign_script_leak("He said 你好吗 and left.", ENGLISH_BANS)
-
-
-def test_retry_instruction_names_the_target_and_the_scripts():
-    note = sbc.retry_instruction("English", ("cjk",))
-    assert "English" in note and "Chinese, Japanese or Korean" in note
 
 
 # ----------------------------------------------------------------------------------- logit bias
@@ -317,27 +311,30 @@ MESSAGES = [{"role": "system", "content": "Translate to English."},
             {"role": "user", "content": "<p>그는 웃었다.</p>"}]
 
 
-def test_leaking_answer_is_sent_again_with_the_instruction(client, monkeypatch):
+def test_a_leaking_answer_is_kept_and_the_log_says_so(client, monkeypatch, caplog):
+    """Owner 2026-10-30: a retry with a language instruction only hides the problem; the request is never changed
+    or sent again."""
+    caplog.set_level("INFO")
     _turn_on(monkeypatch)
     monkeypatch.setenv("MAX_RETRIES", "3")
     seen = _scripted_responses(monkeypatch, client, ["<p>He 笑了起来 smiled.</p>", "<p>He smiled.</p>"])
     content, finish = client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
                                               request_id="sbtest01")
-    assert content == "<p>He smiled.</p>" and finish == "stop"
-    assert len(seen) == 2
-    assert "Write the whole answer in English only" in seen[1][-1]["content"]
-    assert "Write the whole answer" not in seen[0][-1]["content"]
+    assert content == "<p>He 笑了起来 smiled.</p>" and finish == "stop"
+    assert len(seen) == 1 and seen[0][-1]["content"] == MESSAGES[-1]["content"]
+    assert "characters of another script" in caplog.text
 
 
-def test_a_truncated_answer_with_a_leak_is_sent_again(client, monkeypatch):
-    """A copied chapter usually ends at the token limit (finish_reason "length"): the guard skipped it."""
+def test_a_truncated_answer_is_not_sent_again_for_a_leak(client, monkeypatch, caplog):
+    caplog.set_level("INFO")
     _turn_on(monkeypatch)
     monkeypatch.setenv("MAX_RETRIES", "2")
+    monkeypatch.setenv("RETRY_TRUNCATED", "0")
     seen = _scripted_responses(monkeypatch, client, ["<p>他笑了起来，然后转身离开了房间。</p>"], finish_reason="length")
     client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
                           request_id="sbtest01")
-    assert len(seen) == 2
-    assert "Write the whole answer in English only" in seen[1][-1]["content"]
+    assert len(seen) == 1
+    assert "characters of another script" in caplog.text
 
 
 def test_ollama_route_needs_only_the_block_switch(client, monkeypatch):
@@ -349,16 +346,6 @@ def test_ollama_route_needs_only_the_block_switch(client, monkeypatch):
     assert client._script_ban_scripts("translation") == ENGLISH_BANS
     monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "0")
     assert client._script_ban_scripts("translation") == ()
-
-
-def test_leak_guard_keeps_the_last_answer_when_the_budget_runs_out(client, monkeypatch):
-    _turn_on(monkeypatch)
-    monkeypatch.setenv("MAX_RETRIES", "2")
-    seen = _scripted_responses(monkeypatch, client, ["<p>He 笑了起来.</p>"])
-    content, _finish = client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
-                                              request_id="sbtest01")
-    assert content == "<p>He 笑了起来.</p>"
-    assert len(seen) == 2
 
 
 def test_guard_is_off_by_default(client, monkeypatch):
@@ -393,7 +380,7 @@ def test_setting_is_wired_through_desktop_and_schema():
     spec = data.SETTINGS["block_other_scripts"]
     assert spec["default"] is False and spec["type"] == "bool"
     assert spec["label"] == "Block other scripts in translations (adaptive, all models)"
-    assert spec["tooltip"].splitlines()[0].startswith("⚠️ Can cause errors or retries")
+    assert spec["tooltip"].splitlines()[0].startswith("⚠️ Mixed-language books")
     assert len(spec["tooltip"].splitlines()[0]) <= 140  # the mobile tile's help line shows it whole
     assert ("block_other_scripts", ("block_other_scripts_var",), ("value", False), ("bool",)) in \
         data.DESKTOP_SETTINGS_MAP
