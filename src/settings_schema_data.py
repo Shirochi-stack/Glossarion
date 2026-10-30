@@ -2616,9 +2616,10 @@ SETTINGS = {
                 'copy of the source)\n'
                 'is sent again with an instruction to write only in the target language (Max '
                 'Retries).\n'
-                'Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/ '
-                '(its own dialog\n'
-                'has the same switch, and Ollama gets the answer check only).',
+                'ollamapull/ gets a full token ban on the llama-server that comes with Ollama, and '
+                'its own dialog\n'
+                'has the same switch. Works only while Enable Anti-Duplicate Parameters is on, '
+                'except on ollamapull/.',
      'type': 'bool',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),

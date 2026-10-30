@@ -29597,7 +29597,8 @@ class UnifiedClient:
 
             result = chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                stream=use_streaming,
+                stream=use_streaming, ban_scripts=self._script_ban_scripts(request_context),
+                allow_kaomoji=self._script_ban_allow_kaomoji(),
                 log_stream=self._stream_logging_enabled(use_streaming),
                 log_thinking=self._stream_thinking_logging_enabled(),
                 progress=lambda message: logger.info("Ollama: %s", message),

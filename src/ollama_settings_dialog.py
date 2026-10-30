@@ -1091,10 +1091,10 @@ class OllamaSettingsDialog(QDialog):
             getattr(gui, "block_other_scripts_var", gui.config.get("block_other_scripts", False))
         ))
         self.block_other_scripts_checkbox.setToolTip(
-            "Ollama has no token ban: an answer with text in a script the target language does not use, or a\n"
-            "copy of the source, is sent again with an instruction to write only in the target language\n"
-            "(Max Retries). It is checked when the answer ends, so a stream can still show it first.\n"
-            "The same setting as in Other Settings; on Ollama it works without Enable Anti-Duplicate Parameters."
+            "Bans every token of the scripts the target language does not use while the model generates, like the\n"
+            "on-device engine on mobile: the request runs on the llama-server that comes with Ollama, on the same\n"
+            "model file, because Ollama's own API has no logit bias. It works without Enable Anti-Duplicate\n"
+            "Parameters. The same setting as in Other Settings."
         )
         form.addRow(self.block_other_scripts_checkbox)
         self.script_ban_allow_kaomoji_checkbox = _styled_checkbox(

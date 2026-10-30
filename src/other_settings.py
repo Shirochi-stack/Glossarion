@@ -13902,8 +13902,8 @@ def _create_anti_duplicate_section(self, parent):
 
     # Universal adaptive script ban (script_ban_core; the on-device engine has its own switch)
     _bias_heading("Script Ban (separate from Word Bias)", top=12)
-    _bias_note("Does not need Enable word bias or Strength. Official OpenAI models and local servers with a "
-               "tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; every model gets an answer check.")
+    _bias_note("Does not need Enable word bias or Strength. Official OpenAI models, ollamapull/ and local servers "
+               "with a tokenizer endpoint (llama.cpp server, vLLM) also get a token ban; every model gets an answer check.")
     self.block_other_scripts_var = self.config.get('block_other_scripts', False)
     block_scripts_cb = self._create_styled_checkbox("Block other scripts in translations (adaptive, all models)")
     try:
@@ -13917,8 +13917,8 @@ def _create_anti_duplicate_section(self, parent):
             "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
             "a ban built from its own tokens. On every model, an answer with such text (or a copy of the source)\n"
             "is sent again with an instruction to write only in the target language (Max Retries).\n"
-            "Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/ (its own dialog\n"
-            "has the same switch, and Ollama gets the answer check only)."
+            "ollamapull/ gets a full token ban on the llama-server that comes with Ollama, and its own dialog\n"
+            "has the same switch. Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/."
         )
     except Exception:
         pass

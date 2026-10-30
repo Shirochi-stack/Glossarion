@@ -6,11 +6,14 @@ platform installers; the model and chat paths use its native HTTP API.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import queue
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -589,6 +592,7 @@ def shutdown_ollama() -> bool:
     started by this module) is eligible. Returns whether a process was stopped.
     """
     global _managed_server_process
+    _stop_ban_server()
     with _lifecycle_lock:
         targets = []
         try:
@@ -867,14 +871,299 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return native
 
 
+# ---- token ban -----------------------------------------------------------------------------------------------
+# "Block other scripts" must stop banned tokens while sampling, like the on-device engine on mobile. Ollama's API
+# has no logit_bias (and ignores it), but it runs models with the llama-server it ships, which has one. So a banned
+# request goes to our own llama-server on the same model file, with the ban built from the file's vocabulary.
+
+#: Ollama options that are this request's sampling parameters, under the same names in llama-server's request.
+_LLAMA_REQUEST_OPTIONS = ("temperature", "top_k", "top_p", "min_p", "typical_p", "repeat_last_n", "repeat_penalty",
+                          "presence_penalty", "frequency_penalty", "seed", "stop", "mirostat", "mirostat_tau",
+                          "mirostat_eta", "tfs_z")
+#: Ollama options set when the model loads -> llama-server's flag.
+_LLAMA_LOAD_OPTIONS = {"num_gpu": "-ngl", "num_thread": "-t", "num_batch": "-b"}
+_LLAMA_FALLBACK_CONTEXT = 32768
+#: Frees the GPU like Ollama's keep-alive; the next request wakes it.
+_LLAMA_IDLE_SECONDS = 300
+_LLAMA_START_SECONDS = 300
+_ban_server_lock = threading.RLock()
+_ban_server: Optional[dict[str, Any]] = None  # {"process", "url", "key"}
+_ban_backends: dict[str, dict[str, str]] = {}  # llama-server path -> environment of its GPU backend
+_ban_contexts: dict[str, int] = {}  # model -> the context size Ollama chose for it
+_ban_bias_cache: dict[tuple, list] = {}  # (model file, scripts, kaomoji) -> llama-server's logit_bias
+
+
+def _llama_server_executable() -> Optional[str]:
+    """The llama-server inside this Ollama install, None when it has none (an older Ollama)."""
+    executable = _ollama_executable()
+    if not executable:
+        return None
+    folder = Path(executable).resolve().parent
+    name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+    for candidate in (folder / "lib" / "ollama" / name, folder.parent / "lib" / "ollama" / name, folder / name):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _llama_backend_env(server: str) -> dict[str, str]:
+    """The environment that gives ``server`` a GPU: Ollama keeps each backend in its own folder and loads the one
+    that works, the fastest first; none means the CPU."""
+    if server in _ban_backends:
+        return _ban_backends[server]
+    folder = Path(server).parent
+    chosen: dict[str, str] = {}
+    for variant in ("cuda_v13", "cuda_v12", "rocm_v7_1", "vulkan"):
+        libraries = sorted((folder / variant).glob("*ggml-*")) if (folder / variant).is_dir() else []
+        if not libraries:
+            continue
+        env = {"GGML_BACKEND_PATH": str(libraries[0]),
+               "PATH": os.pathsep.join((str(folder / variant), str(folder), os.environ.get("PATH", "")))}
+        try:
+            listed = subprocess.run([server, "--list-devices"], env={**os.environ, **env}, capture_output=True,
+                                    text=True, errors="replace", timeout=30, **_hidden_subprocess_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if re.search(r"^\s*\w+\d+:", (listed.stdout or "") + (listed.stderr or ""), re.MULTILINE):
+            chosen = env
+            break
+    _ban_backends[server] = chosen
+    return chosen
+
+
+def _gguf_tokens(path: str) -> list[str]:
+    """``tokenizer.ggml.tokens`` of a GGUF file (it is read from the header, the tensors are not touched)."""
+    sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    with open(path, "rb") as handle:
+        def number(layout: str) -> int:
+            return struct.unpack(layout, handle.read(struct.calcsize(layout)))[0]
+
+        def text() -> bytes:
+            return handle.read(number("<Q"))
+
+        def skip(kind: int) -> None:
+            if kind == 8:
+                handle.seek(number("<Q"), 1)
+            elif kind == 9:
+                inner, count = number("<I"), number("<Q")
+                for _ in range(count if inner in (8, 9) else 0):
+                    skip(inner)
+                if inner not in (8, 9):
+                    handle.seek(sizes[inner] * count, 1)
+            else:
+                handle.seek(sizes[kind], 1)
+
+        if handle.read(4) != b"GGUF":
+            raise OllamaPullError(f"{path} is not a GGUF model file.")
+        number("<I"), number("<Q")  # version, tensors
+        for _ in range(number("<Q")):
+            key, kind = text(), number("<I")
+            if key == b"tokenizer.ggml.tokens" and kind == 9:
+                number("<I")
+                return [text().decode("utf-8", "replace") for _ in range(number("<Q"))]
+            skip(kind)
+    raise OllamaPullError(f"{path} has no vocabulary.")
+
+
+def _token_ban_bias(model_file: str, scripts: tuple, allow_kaomoji: bool) -> list:
+    """llama-server's ``logit_bias`` that forbids every token of ``scripts`` (``[id, false]``), the same tokens
+    the on-device engine masks (``script_ban_core.banned_token_ids``)."""
+    key = (model_file, scripts, allow_kaomoji)
+    with _ban_server_lock:
+        if key not in _ban_bias_cache:
+            import script_ban_core
+
+            tokens = _gguf_tokens(model_file)
+            byte_level = script_ban_core.is_byte_level(tokens)
+            pieces = [script_ban_core.piece_bytes(token, byte_level) for token in tokens]
+            banned = script_ban_core.banned_token_ids(pieces, scripts, allow_kaomoji=allow_kaomoji)
+            _ban_bias_cache[key] = [[token, False] for token in banned]
+        return _ban_bias_cache[key]
+
+
+def _model_files(name: str) -> tuple[str, str]:
+    """(model file, vision projector or '') of a downloaded model, from Ollama's own record of it."""
+    shown = _api_post("/api/show", {"model": name}, timeout=30.0)
+    files = [line[5:].strip() for line in str(shown.get("modelfile") or "").splitlines() if line.startswith("FROM ")]
+    files = [path for path in files if Path(path).is_file()]
+    if not files:
+        raise OllamaPullError(f"Ollama does not list a model file for {name}.")
+    return files[0], (files[1] if len(files) > 1 else "")
+
+
+def _ollama_context(name: str) -> int:
+    """The context size Ollama loads ``name`` with (it picks by the GPU's memory): loaded once to ask it."""
+    if name not in _ban_contexts:
+        context = 0
+        try:
+            _api_post("/api/generate", {"model": name}, timeout=300.0)
+            for loaded in _api_get("/api/ps").get("models") or []:
+                if isinstance(loaded, dict) and loaded.get("name") == name:
+                    context = int(loaded.get("context_length") or 0)
+        except (OllamaPullError, requests.RequestException, TypeError, ValueError):
+            pass
+        _ban_contexts[name] = context or _LLAMA_FALLBACK_CONTEXT
+    return _ban_contexts[name]
+
+
+def _stop_ban_server() -> None:
+    """Stop our llama-server, if it runs."""
+    global _ban_server
+    with _ban_server_lock:
+        server, _ban_server = _ban_server, None
+    if server is None:
+        return
+    process = server["process"]
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+atexit.register(_stop_ban_server)
+
+
+def _start_ban_server(name: str, options: dict[str, Any], vision: bool,
+                      progress: Optional[Callable[[str], None]],
+                      should_stop: Optional[Callable[[], bool]]) -> tuple[str, str]:
+    """(llama-server's URL, model file): the one running with these load settings, else a new one. Ollama's copy
+    of the model is unloaded first, or the GPU would hold it twice."""
+    global _ban_server
+    executable = _llama_server_executable()
+    if not executable:
+        raise OllamaPullError("Block other scripts needs the llama-server of a current Ollama, and this install "
+                              "has none. Update Ollama, or turn the toggle off in Ollama Settings.")
+    model_file, projector = _model_files(name)
+    context = int(options.get("num_ctx") or 0) or _ollama_context(name)
+    args = ["-c", str(context)]
+    for option, flag in _LLAMA_LOAD_OPTIONS.items():
+        if options.get(option) is not None:
+            args += [flag, str(options[option])]
+    if vision and projector:
+        args += ["--mmproj", projector]
+    key = (model_file, tuple(args))
+    with _ban_server_lock:
+        if _ban_server is not None and _ban_server["key"] == key and _ban_server["process"].poll() is None:
+            return _ban_server["url"], model_file
+        _stop_ban_server()
+        try:
+            _api_post("/api/generate", {"model": name, "keep_alive": 0}, timeout=60.0)
+        except (OllamaPullError, requests.RequestException):
+            pass
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        _chat_status(progress, f"Starting llama-server for {name} (Block other scripts)...")
+        process = subprocess.Popen(
+            [executable, "--model", model_file, "--port", str(port), "--host", "127.0.0.1", "--no-webui", "--offline",
+             "-np", "1", "--sleep-idle-seconds", str(_LLAMA_IDLE_SECONDS), *args],
+            env={**os.environ, **_llama_backend_env(executable)},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **_hidden_subprocess_kwargs())
+        url = f"http://127.0.0.1:{port}"
+        _ban_server = {"process": process, "url": url, "key": key}
+        deadline = time.monotonic() + _LLAMA_START_SECONDS
+        while time.monotonic() < deadline:
+            _check_stop(should_stop)
+            if process.poll() is not None:
+                _ban_server = None
+                raise OllamaPullError(f"llama-server stopped while loading {name} (exit code {process.returncode}).")
+            try:
+                if requests.get(f"{url}/health", timeout=2).ok:
+                    return url, model_file
+            except requests.RequestException:
+                pass
+            time.sleep(0.25)
+        _stop_ban_server()
+        raise OllamaPullError(f"llama-server did not load {name} in {_LLAMA_START_SECONDS} seconds.")
+
+
+def _token_ban_request(name: str, messages: list[dict[str, Any]], payload: dict[str, Any], scripts: tuple,
+                       allow_kaomoji: bool, progress: Optional[Callable[[str], None]],
+                       should_stop: Optional[Callable[[], bool]]) -> tuple[str, dict[str, Any]]:
+    """(URL, body) of the banned request: the native ``payload`` as llama-server's chat request."""
+    options = payload.get("options") or {}
+    vision = any(isinstance(part, dict) and part.get("type") == "image_url"
+                 for message in messages if isinstance(message.get("content"), list) for part in message["content"])
+    url, model_file = _start_ban_server(name, options, vision, progress, should_stop)
+    body: dict[str, Any] = {"messages": messages, "stream": bool(payload.get("stream")),
+                            "logit_bias": _token_ban_bias(model_file, scripts, allow_kaomoji)}
+    if body["stream"]:
+        body["stream_options"] = {"include_usage": True}
+    body.update({key: options[key] for key in _LLAMA_REQUEST_OPTIONS if options.get(key) is not None})
+    if options.get("num_predict") is not None:
+        body["max_tokens"] = options["num_predict"]
+    # Off unless Ollama Settings asks for it: qwen3.5:2b spent every token (24000) thinking under the ban and never
+    # answered, in all three runs with the model's default; with thinking off all six runs were complete.
+    think = payload.get("think")
+    body["chat_template_kwargs"] = {"enable_thinking": think is not None and think is not False}
+    response_format = payload.get("format")
+    if isinstance(response_format, dict):
+        body["json_schema"] = response_format
+    elif response_format == "json":
+        body["response_format"] = {"type": "json_object"}
+    return f"{url}/v1/chat/completions", body
+
+
+def _llama_item(data: dict[str, Any], delta_key: str, done: bool = False) -> dict[str, Any]:
+    """A llama-server chat reply (or stream chunk) in the shape of Ollama's ``/api/chat``."""
+    choices = data.get("choices") or [{}]
+    delta = choices[0].get(delta_key) or {}
+    usage = data.get("usage") or {}
+    item: dict[str, Any] = {
+        "message": {"content": delta.get("content") or "", "thinking": delta.get("reasoning_content") or ""},
+        "done": done,
+        "done_reason": choices[0].get("finish_reason"),
+    }
+    if usage:
+        item["prompt_eval_count"] = usage.get("prompt_tokens")
+        item["eval_count"] = usage.get("completion_tokens")
+    return item
+
+
+def _iter_llama_stream(response: requests.Response, should_stop: Optional[Callable[[], bool]]):
+    """llama-server's chat stream as Ollama's stream items (``_iter_json_lines``)."""
+    final: dict[str, Any] = {"message": {}, "done": True, "done_reason": "stop"}
+    for line in response.iter_lines():
+        _check_stop(should_stop)
+        text = line.decode("utf-8", "replace").strip() if isinstance(line, bytes) else str(line or "").strip()
+        if not text.startswith("data:"):
+            continue
+        text = text[5:].strip()
+        if text == "[DONE]":
+            break
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise OllamaPullError(f"Invalid JSON from llama-server: {text[:150]!r}") from exc
+        if not isinstance(data, dict):
+            raise OllamaPullError("Unexpected llama-server stream item.")
+        if data.get("error"):
+            raise OllamaPullError(str(data["error"]))
+        item = _llama_item(data, "delta")
+        if item["done_reason"]:
+            final["done_reason"] = item["done_reason"]
+        for key in ("prompt_eval_count", "eval_count"):
+            if item.get(key) is not None:
+                final[key] = item[key]
+        if item["message"]["content"] or item["message"]["thinking"]:
+            yield item
+    _check_stop(should_stop)
+    yield final
+
+
 def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Optional[float] = None,
-         max_tokens: Optional[int] = None, stream: bool = True,
+         max_tokens: Optional[int] = None, stream: bool = True, ban_scripts: tuple = (), allow_kaomoji: bool = False,
          log_stream: bool = False, log_thinking: bool = False,
          progress: Optional[Callable[[str], None]] = None,
          should_stop: Optional[Callable[[], bool]] = None,
          on_response_open: Optional[Callable[[requests.Response], None]] = None,
          on_response_close: Optional[Callable[[requests.Response], None]] = None) -> dict[str, Any]:
-    """Send one native chat request and return text, finish reason, and usage."""
+    """Send one native chat request and return text, finish reason, and usage.
+
+    ``ban_scripts``: the ``script_ban_core.SCRIPTS`` the answer may not use: the request goes to llama-server with a
+    token ban (``_token_ban_request``). Only on this PC: a remote Ollama's model file is out of reach."""
     name = native_model_name(model_name)
     _check_stop(should_stop)
     settings = model_settings(name)
@@ -927,7 +1216,17 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                 _chat_status(progress, f"Still waiting for an Ollama response ({elapsed}s); model loading or prompt processing may be underway.")
         threading.Thread(target=report_wait, daemon=True).start()
     try:
-        response = requests.post(f"{base_url()}/api/chat", json=payload, stream=stream, timeout=(5, 600))
+        token_ban = bool(ban_scripts)
+        if token_ban and base_url() != BASE_URL:
+            token_ban = False
+            _chat_status(progress, "Block other scripts is not applied: the token ban needs Ollama on this device.")
+        chat_url = f"{base_url()}/api/chat"
+        if token_ban:
+            chat_url, payload = _token_ban_request(name, messages, payload, tuple(ban_scripts), allow_kaomoji,
+                                                   progress, should_stop)
+        else:
+            _stop_ban_server()  # its GPU memory is Ollama's again
+        response = requests.post(chat_url, json=payload, stream=stream, timeout=(5, 600))
         finished = _watch_stop(response, should_stop)
         if on_response_open:
             on_response_open(response)
@@ -940,7 +1239,8 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
             content_log_buffer = ""
             saw_thinking = False
             saw_content = False
-            for item in _iter_json_lines(response, should_stop):
+            stream_items = _iter_llama_stream if token_ban else _iter_json_lines
+            for item in stream_items(response, should_stop):
                 message = item.get("message")
                 content = message.get("content") if isinstance(message, dict) else None
                 thinking = message.get("thinking") if isinstance(message, dict) else None
@@ -983,6 +1283,8 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
             first_event.set()
             if not isinstance(final, dict):
                 raise OllamaPullError("Unexpected Ollama chat response.")
+            if token_ban:
+                final = _llama_item(final, "message", done=True)
             message = final.get("message") or {}
             if isinstance(message, dict):
                 chunks.append(str(message.get("content") or ""))
