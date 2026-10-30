@@ -13772,30 +13772,14 @@ def _create_anti_duplicate_section(self, parent):
     self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
     pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=2)
     
-    core_v.addStretch()
-    
-    # Tab 2: Advanced Parameters
-    advanced_frame = QWidget()
-    advanced_v = QVBoxLayout(advanced_frame)
-    advanced_v.setContentsMargins(10, 10, 10, 10)
-    self.anti_duplicate_notebook.addTab(advanced_frame, "Advanced")
-    
     # Repetition Penalty
     self.repetition_penalty_var = self.config.get('repetition_penalty', 1.0)
-    rep_slider, self.rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
-    
+    rep_slider, self.rep_penalty_value_label = _create_slider_row(core_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
+
     # Candidate Count (Gemini)
     self.candidate_count_var = self.config.get('candidate_count', 1)
-    candidate_slider, self.candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self, 'candidate_count_var', 1, 4, is_int=True)
-    
-    advanced_v.addStretch()
-    
-    # Tab 3: Stop Sequences
-    stop_frame = QWidget()
-    stop_v = QVBoxLayout(stop_frame)
-    stop_v.setContentsMargins(10, 10, 10, 10)
-    self.anti_duplicate_notebook.addTab(stop_frame, "Stop Sequences")
-    
+    candidate_slider, self.candidate_value_label = _create_slider_row(core_v, "Candidate Count (Gemini):", self, 'candidate_count_var', 1, 4, is_int=True)
+
     # Custom Stop Sequences
     stop_row = QWidget()
     stop_h = QHBoxLayout(stop_row)
@@ -13821,10 +13805,10 @@ def _create_anti_duplicate_section(self, parent):
     stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
     stop_h.addWidget(stop_tip)
     stop_h.addStretch()
-    stop_v.addWidget(stop_row)
-    stop_v.addStretch()
-    
-    # Tab 4: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
+    core_v.addWidget(stop_row)
+    core_v.addStretch()
+
+    # Tab 2: Logit Bias -- word bias (official OpenAI chat models) and the script ban (all models)
     bias_frame = QWidget()
     bias_v = QVBoxLayout(bias_frame)
     bias_v.setContentsMargins(10, 10, 10, 10)
@@ -13933,7 +13917,8 @@ def _create_anti_duplicate_section(self, parent):
             "those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM) gets\n"
             "a ban built from its own tokens. On every model, an answer with such text (or a copy of the source)\n"
             "is sent again with an instruction to write only in the target language (Max Retries).\n"
-            "Works only while Enable Anti-Duplicate Parameters is on."
+            "Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/ (its own dialog\n"
+            "has the same switch, and Ollama gets the answer check only)."
         )
     except Exception:
         pass
@@ -13943,6 +13928,7 @@ def _create_anti_duplicate_section(self, parent):
         except Exception:
             pass
     block_scripts_cb.toggled.connect(_on_block_scripts_toggle)
+    self.block_other_scripts_checkbox = block_scripts_cb  # Ollama Settings saves the same switch
     block_scripts_cb.setContentsMargins(0, 10, 0, 0)
     bias_v.addWidget(block_scripts_cb)
 
@@ -13980,6 +13966,7 @@ def _create_anti_duplicate_section(self, parent):
         except Exception:
             pass
     kaomoji_cb.toggled.connect(_on_kaomoji_toggle)
+    self.script_ban_allow_kaomoji_checkbox = kaomoji_cb  # Ollama Settings saves the same switch
     kaomoji_cb.setContentsMargins(20, 0, 0, 0)
     bias_v.addWidget(kaomoji_cb)
     bias_v.addStretch()
@@ -14015,7 +14002,7 @@ def _create_anti_duplicate_section(self, parent):
     section_v.addWidget(content_container)
     
     # Store all tab frames for enable/disable
-    self.anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
+    self.anti_duplicate_tabs = [core_frame, bias_frame]
     
     # Place the section at row 6, spanning both columns
     try:

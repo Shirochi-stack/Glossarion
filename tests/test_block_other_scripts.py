@@ -301,13 +301,13 @@ def test_word_bias_presets_reach_official_openai_merged_with_the_script_ban(clie
     assert client._preset_logit_bias("openai", "gpt-4o", "https://api.openai.com/v1") == {}
 
 
-def _scripted_responses(monkeypatch, client, answers):
+def _scripted_responses(monkeypatch, client, answers, finish_reason="stop"):
     import unified_api_client as api
     seen = []
 
     def fake_get_response(messages, *args, **kwargs):
         seen.append([dict(m) for m in messages])
-        return api.UnifiedResponse(content=answers[min(len(seen), len(answers)) - 1], finish_reason="stop")
+        return api.UnifiedResponse(content=answers[min(len(seen), len(answers)) - 1], finish_reason=finish_reason)
 
     monkeypatch.setattr(client, "_get_response", fake_get_response)
     return seen
@@ -327,6 +327,28 @@ def test_leaking_answer_is_sent_again_with_the_instruction(client, monkeypatch):
     assert len(seen) == 2
     assert "Write the whole answer in English only" in seen[1][-1]["content"]
     assert "Write the whole answer" not in seen[0][-1]["content"]
+
+
+def test_a_truncated_answer_with_a_leak_is_sent_again(client, monkeypatch):
+    """A copied chapter usually ends at the token limit (finish_reason "length"): the guard skipped it."""
+    _turn_on(monkeypatch)
+    monkeypatch.setenv("MAX_RETRIES", "2")
+    seen = _scripted_responses(monkeypatch, client, ["<p>他笑了起来，然后转身离开了房间。</p>"], finish_reason="length")
+    client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
+                          request_id="sbtest01")
+    assert len(seen) == 2
+    assert "Write the whole answer in English only" in seen[1][-1]["content"]
+
+
+def test_ollama_route_needs_only_the_block_switch(client, monkeypatch):
+    """Ollama Settings has the same switch, and the route sends no anti-duplicate parameter."""
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "1")
+    assert client._script_ban_scripts("translation") == ()
+    monkeypatch.setattr(client, "model", "ollamapull/qwen3.5:2b")
+    assert client._script_ban_scripts("translation") == ENGLISH_BANS
+    monkeypatch.setenv("BLOCK_OTHER_SCRIPTS", "0")
+    assert client._script_ban_scripts("translation") == ()
 
 
 def test_leak_guard_keeps_the_last_answer_when_the_budget_runs_out(client, monkeypatch):

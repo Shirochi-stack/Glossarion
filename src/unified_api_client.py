@@ -3575,12 +3575,14 @@ class UnifiedClient:
 
     def _script_ban_scripts(self, context=None) -> tuple:
         """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
-        this request (Other Settings › Anti-Duplicate Parameters › Logit Bias; BLOCK_OTHER_SCRIPTS, only
-        while ENABLE_ANTI_DUPLICATE is on), () for none. The same decision as the on-device engine's own
-        switch (``script_ban_core.banned_scripts`` with ``_on_device_task_fields``); a send whose own
-        context is not a target-language request (review, QA, OCR, glossary) never bans."""
+        this request (Other Settings › Anti-Duplicate Parameters › Logit Bias and Ollama Settings › Sampling;
+        BLOCK_OTHER_SCRIPTS, only while ENABLE_ANTI_DUPLICATE is on, except on ollamapull/, whose own dialog
+        has the switch and which sends no anti-duplicate parameter), () for none. The same decision as the
+        on-device engine's own switch (``script_ban_core.banned_scripts`` with ``_on_device_task_fields``); a
+        send whose own context is not a target-language request (review, QA, OCR, glossary) never bans."""
         try:
-            if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
+            if (self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1"
+                    and not str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')):
                 return ()
             if self._get_anti_duplicate_env("BLOCK_OTHER_SCRIPTS", "0") != "1":
                 return ()
@@ -11559,20 +11561,20 @@ class UnifiedClient:
                 # "Block other scripts in translations (adaptive, all models)": an answer with text in a
                 # script the target language does not use is sent again with an instruction, on this
                 # loop's own retry budget (like the image-quality retry); the last attempt's answer is kept.
-                if not self._is_truncation_finish_reason(self._normalize_finish_reason(finish_reason) or finish_reason):
-                    leak_retry = self._script_leak_retry_messages(messages, extracted_content, context)
-                    if leak_retry is not None:
-                        retry_messages, leak = leak_retry
-                        shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
-                        if attempt < internal_retries - 1 and not self._should_abort_retry():
-                            print(f"🔤 Answer contains {leak['chars']} characters of another script ({shown}: "
-                                  f"{leak['sample']}); retrying with a target-language-only instruction "
-                                  f"(attempt {attempt + 1}/{internal_retries})")
-                            self._last_retry_error_type = 'foreign_script'
-                            messages = retry_messages
-                            continue
-                        print(f"⚠️ Answer still contains {leak['chars']} characters of another script ({shown}); "
-                              f"no retries left - keeping it")
+                # A truncated answer counts too: a copied chapter usually ends at the token limit.
+                leak_retry = self._script_leak_retry_messages(messages, extracted_content, context)
+                if leak_retry is not None:
+                    retry_messages, leak = leak_retry
+                    shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
+                    if attempt < internal_retries - 1 and not self._should_abort_retry():
+                        print(f"🔤 Answer contains {leak['chars']} characters of another script ({shown}: "
+                              f"{leak['sample']}); retrying with a target-language-only instruction "
+                              f"(attempt {attempt + 1}/{internal_retries})")
+                        self._last_retry_error_type = 'foreign_script'
+                        messages = retry_messages
+                        continue
+                    print(f"⚠️ Answer still contains {leak['chars']} characters of another script ({shown}); "
+                          f"no retries left - keeping it")
 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)

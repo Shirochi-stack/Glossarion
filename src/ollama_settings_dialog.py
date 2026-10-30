@@ -769,6 +769,8 @@ class OllamaSettingsDialog(QDialog):
             tab = QWidget()
             form = QFormLayout(tab)
             form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            if group_name == "Sampling":
+                self._add_script_ban_rows(form)
             for key, label, kind in rows:
                 field = _OptionEditor(key, kind, options.get(key))
                 field.setObjectName(f"ollama_option_{key}")
@@ -1078,8 +1080,56 @@ class OllamaSettingsDialog(QDialog):
                 pass
         self.refresh_status()
 
+    def _add_script_ban_rows(self, form):
+        """The two script-ban switches of Other Settings › Anti-Duplicate Parameters › Logit Bias: the same
+        settings, so each dialog shows what the other saved (``_save_script_ban_toggles``)."""
+        gui = self.translator_gui
+        self.block_other_scripts_checkbox = _styled_checkbox(
+            "Block other scripts in translations (adaptive, all models)"
+        )
+        self.block_other_scripts_checkbox.setChecked(bool(
+            getattr(gui, "block_other_scripts_var", gui.config.get("block_other_scripts", False))
+        ))
+        self.block_other_scripts_checkbox.setToolTip(
+            "Ollama has no token ban: an answer with text in a script the target language does not use, or a\n"
+            "copy of the source, is sent again with an instruction to write only in the target language\n"
+            "(Max Retries). It is checked when the answer ends, so a stream can still show it first.\n"
+            "The same setting as in Other Settings; on Ollama it works without Enable Anti-Duplicate Parameters."
+        )
+        form.addRow(self.block_other_scripts_checkbox)
+        self.script_ban_allow_kaomoji_checkbox = _styled_checkbox(
+            "Allow emoticons and symbols from other scripts (kaomoji)"
+        )
+        self.script_ban_allow_kaomoji_checkbox.setChecked(bool(
+            getattr(gui, "script_ban_allow_kaomoji_var", gui.config.get("script_ban_allow_kaomoji", False))
+        ))
+        self.script_ban_allow_kaomoji_checkbox.setToolTip(
+            "Lets kaomoji through the script ban; the same setting as in Other Settings."
+        )
+        form.addRow(self.script_ban_allow_kaomoji_checkbox)
+
+    def _save_script_ban_toggles(self):
+        """Save the two switches where the run (its environment), the config and Other Settings read them; an
+        open Other Settings page's checkboxes follow."""
+        gui = self.translator_gui
+        pairs = (
+            ("block_other_scripts", "BLOCK_OTHER_SCRIPTS", self.block_other_scripts_checkbox),
+            ("script_ban_allow_kaomoji", "SCRIPT_BAN_ALLOW_KAOMOJI", self.script_ban_allow_kaomoji_checkbox),
+        )
+        for key, env_name, checkbox in pairs:
+            checked = checkbox.isChecked()
+            gui.config[key] = checked
+            setattr(gui, f"{key}_var", checked)
+            os.environ[env_name] = "1" if checked else "0"
+            other = getattr(gui, f"{key}_checkbox", None)
+            if other is not None:
+                try:
+                    other.setChecked(checked)
+                except RuntimeError:  # its page was closed
+                    pass
+
     def _collect_model_settings(self):
-        extra_options = _json_object(self.extra_options_edit.toPlainText(), "Additional options")
+        extra_options =_json_object(self.extra_options_edit.toPlainText(), "Additional options")
         duplicates = COMMON_OPTION_KEYS.intersection(extra_options)
         if duplicates:
             raise ValueError("Additional options duplicate a named field: " + ", ".join(sorted(duplicates)))
@@ -1145,6 +1195,7 @@ class OllamaSettingsDialog(QDialog):
             settings["models"][self.model_name] = model_settings
         self.translator_gui.config["ollama_settings"] = settings
         os.environ["OLLAMA_SETTINGS_JSON"] = ollama_settings_json(self.translator_gui.config)
+        self._save_script_ban_toggles()
         save = getattr(self.translator_gui, "save_config", None)
         if callable(save):
             saved = save(show_message=False)

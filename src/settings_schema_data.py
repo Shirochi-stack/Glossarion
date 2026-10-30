@@ -2616,7 +2616,9 @@ SETTINGS = {
                 'copy of the source)\n'
                 'is sent again with an instruction to write only in the target language (Max '
                 'Retries).\n'
-                'Works only while Enable Anti-Duplicate Parameters is on.',
+                'Works only while Enable Anti-Duplicate Parameters is on, except on ollamapull/ '
+                '(its own dialog\n'
+                'has the same switch, and Ollama gets the answer check only).',
      'type': 'bool',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
@@ -2695,7 +2697,7 @@ SETTINGS = {
      'type': 'int',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
-     'ui_tab': 'Advanced',
+     'ui_tab': 'Core Parameters',
      'var_names': ('candidate_count_var',)},
     'chapter_number_offset': {'converter': ('safe_int', 0, None, None, ''),
      'default': 0,
@@ -3131,7 +3133,7 @@ SETTINGS = {
      'type': 'str',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
-     'ui_tab': 'Stop Sequences',
+     'ui_tab': 'Core Parameters',
      'var_names': ('custom_stop_sequences_var',)},
     'deduplicate_toc': {'converter': ('bool',),
      'default': False,
@@ -10557,7 +10559,7 @@ SETTINGS = {
      'type': 'float',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
-     'ui_tab': 'Advanced',
+     'ui_tab': 'Core Parameters',
      'var_names': ('repetition_penalty_var',)},
     'replicate_api_key': {'type': 'secret'},
     'request_merge_count': {'converter': ('safe_int', 3, None, None, ''),

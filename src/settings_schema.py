@@ -255,8 +255,6 @@ SECTION_DEFS = (
     ("other.processing.extraction", "Chapter Extraction Settings", "other_settings", "Part of Processing Options."),
     ("other.image", "Image Translation & Vision API", "other_settings", ""),
     ("other.anti_duplicate.core", "Anti-Duplicate Parameters · Core Parameters", "other_settings", ""),
-    ("other.anti_duplicate.advanced", "Anti-Duplicate Parameters · Advanced", "other_settings", ""),
-    ("other.anti_duplicate.stop", "Anti-Duplicate Parameters · Stop Sequences", "other_settings", ""),
     ("other.anti_duplicate.logit_bias", "Anti-Duplicate Parameters · Logit Bias", "other_settings", ""),
     ("other.endpoints", "Custom API Endpoints", "other_settings", ""),
     ("other.debug", "Debug Controls", "other_settings", ""),
@@ -321,8 +319,6 @@ SITE_TO_SECTION = {
 }
 ANTI_DUPLICATE_TABS = {
     "Core Parameters": "other.anti_duplicate.core",
-    "Advanced": "other.anti_duplicate.advanced",
-    "Stop Sequences": "other.anti_duplicate.stop",
     "Logit Bias": "other.anti_duplicate.logit_bias",
 }
 GROUP_SECTIONS = {
