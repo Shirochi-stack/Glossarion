@@ -187,7 +187,7 @@ class JobsScreen(Screen):
         origin = self._origin_line(snap)
         if origin:
             lines.append(ft.Text(origin, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
-        detail = progress_line(snap)
+        detail = progress_line(snap, verb=True)
         if detail and section in ("running", "queued"):
             lines.append(ft.Text(detail, theme_style=ft.TextThemeStyle.BODY_SMALL))
         elif snap.error and snap.state is JobState.FAILED:

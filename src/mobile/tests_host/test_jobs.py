@@ -49,6 +49,7 @@ from glossarion_mobile.services.jobs import (  # noqa: E402
     JobState,
     Progress,
     format_duration,
+    notification_lines,
     notification_text,
     progress_line,
     strip_model_for,
@@ -917,7 +918,8 @@ def test_logs_go_to_buffer_and_file_and_feed_the_shared_request_stream(tmp_path,
     assert [s["label"] for s in service.request_segments(job_id)] == ["Chapter 1", "Chapter 2"]
     # drained on the job side while it ran, and completely when it ended (still on the job thread)
     assert stream.drains and stream.drains[-1] is True
-    assert made == [{"source_is_attachment": False, "request_number": None, "model": None}]
+    # a book's run names chapters in its request cards like a chat attachment (the job line reads them)
+    assert made == [{"source_is_attachment": True, "request_number": None, "model": None}]
     assert events == [("custom_event", {"value": 3})]
     service.close()
 
@@ -972,8 +974,8 @@ def test_checkpoint_kill_recover_and_resume(tmp_path, monkeypatch):
     assert service3.wait_idle(TIMEOUT) and state_of(service3, new_id) is JobState.DONE
     assert service3.snapshot(new_id).spec == spec and backend2.owners[-1].calls[0][1] == [os.path.abspath(source)]
     assert service3.interrupted == () and not (killed / "jobs" / "interrupted.state").exists()
-    history = {s.id: s for s in service3.view().history}
-    assert history[job_id].resolution == "resumed"
+    # it carries on as its new job: not listed next to it, and a second Resume is refused
+    assert job_id not in {s.id for s in service3.view().history} and service3.resume(job_id) is None
     service2.close()
     service3.close()
 
@@ -1169,7 +1171,8 @@ def test_strip_model_progress_line_and_notification_text():
     assert (failed.title, failed.state) == ("Failed · Book.epub", "failed")
     assert strip_model_for(_snap(state=JobState.CANCELLED)).title == "Stopped · Book.epub"
     assert strip_model_for(None) is None
-    assert notification_text(snap) == "Translating Book.epub: 12/80 chapters · 3 in flight"
+    assert notification_text(snap) == "Translating • 12/80 · 3 in flight — Book.epub"
+    assert notification_lines(snap) == ("Translating • 12/80 · 3 in flight", "Book.epub")
     assert format_duration(3723) == "1:02:03" and format_duration(None) == ""
     assert done_text(_snap(state=JobState.CANCELLED, progress=Progress(total=80, completed=12))) == (
         "Stopped: Book.epub (12/80)", "Tap to resume")
@@ -1323,7 +1326,7 @@ def test_android_background_service_lifecycle():
         jobs.snap = snap
         await background.on_transition(snap, JobState.QUEUED)
         start = [c for c in native.calls if c[0] == "start_job_service"][0]
-        assert start[1] == ("Glossarion", "Translating Book.epub")
+        assert start[1] == ("Translating", "Book.epub")
         assert start[2]["buttons"] == [{"id": "stop", "text": "Stop"}, {"id": "open", "text": "Open"}]
         assert background.service_running and background.wakelock.calls == []  # Android: FGS wake lock only
         running = _snap(progress=Progress(total=80, completed=1))
@@ -1332,7 +1335,7 @@ def test_android_background_service_lifecycle():
         clock.now += 0.6
         assert await background.job_progress(running)
         updates = [c for c in native.calls if c[0] == "update_job_service"]
-        assert updates[-1][2]["text"] == "Translating Book.epub: 1/80 chapters"
+        assert (updates[-1][2]["title"], updates[-1][2]["text"]) == ("Translating • 1/80", "Book.epub")
         # notification Stop -> request_stop (escalating, like a tap); Open -> the job route
         await background.on_foreground_event({"type": "button", "button_id": "stop"})
         await background.on_foreground_event({"type": "button", "button_id": "open"})
@@ -1499,7 +1502,7 @@ def test_jobs_screen_sections_actions_and_detail(tmp_path):
         detail.did_show()
         assert detail.state_chip.text == "Running" and detail.stop_button.visible
         assert detail.origin_button.visible and detail.origin_button.content == "Open Chat · Novel"
-        assert detail.progress_text.value.startswith("Ch 1/10")
+        assert detail.progress_text.value.startswith("Translating • 1/10")
         detail._on_stop()
         assert service.snapshot(running).state is JobState.STOPPING
         detail._apply(service.snapshot(running))
@@ -1984,7 +1987,9 @@ def _jobs_feature(tmp_path, *, dispatcher=None, native=None, runs=None, platform
 
 
 def _service_texts(native):
-    return [c[2].get("text") or "" for c in native.calls if c[0] == "update_job_service"]
+    # the notification's headline and, under it, the book's title (``notification_lines``)
+    return [" — ".join(filter(None, (c[2].get("title"), c[2].get("text"))))
+            for c in native.calls if c[0] == "update_job_service"]
 
 
 def _posted(native, channel=None):
@@ -2020,9 +2025,9 @@ def test_fgs_progress_updates_while_app_hidden(tmp_path):
             background.on_lifecycle("hide")
             assert background.ticker_running
             asker.go.set()
-            assert await _until(lambda: any("waiting for your glossary decision" in t for t in _service_texts(native)))
+            assert await _until(lambda: any("Waiting for your glossary decision" in t for t in _service_texts(native)))
             texts = _service_texts(native)
-            assert any(t.endswith("5/10 chapters") or "5/10 chapters ·" in t for t in texts), texts
+            assert any(t.startswith("Translating • 5/10") for t in texts), texts
             assert not page.app_visible  # all of it while the app was hidden
             note = _posted(native, "jobs.action")[-1]  # hidden: the glossary question notified
             assert note[1][1] == "Glossary ready: review needed" and note[2]["payload"] == "glossarion://app/chat/7"
@@ -2057,7 +2062,7 @@ def test_job_progress_sends_the_throttled_update_later():
         await asyncio.sleep(0.2)  # ticks while the (fake) clock stands still: still held back
         assert _service_texts(native) == []
         clock.now += 0.1
-        assert await _until(lambda: _service_texts(native) == ["Translating Book.epub: 1/80 chapters"])
+        assert await _until(lambda: _service_texts(native) == ["Translating • 1/80 — Book.epub"])
         assert await _until(lambda: not background.ticker_running)  # visible app: nothing left to send
         clock.now += 0.01
         assert not await background.job_progress(first)  # an unchanged text is never queued
@@ -2154,7 +2159,7 @@ def test_async_batch_question_gets_its_own_notification(tmp_path):
             await _settle()
             assert len(_posted(native)) == 2 and notes[-1][:2] == ("Answer needed: Split the batch?", "Answer")
             # the FGS text names the question kind (C1: notification_text per kind)
-            assert notification_text(snap).endswith("waiting for your answer")
+            assert notification_text(snap).startswith("Waiting for your answer")
         finally:
             feature.close()
 
@@ -2488,14 +2493,14 @@ def test_dismissed_fgs_notification_is_reposted_while_a_job_runs():
         assert await background.job_progress(running)
         sent = len(_service_texts(native))
         await background.on_foreground_event({"type": "dismissed"})
-        assert _service_texts(native)[sent:] == ["Translating Book.epub: 3/80 chapters"]  # the same text again
+        assert _service_texts(native)[sent:] == ["Translating • 3/80 — Book.epub"]  # the same text again
         await background.on_foreground_event({"type": "dismissed"})  # within a second: not at once ...
         assert len(_service_texts(native)) == sent + 1
         assert background._repost_wanted and background.ticker_running  # ... but the swipe is kept
         assert not await background.tick() and len(_service_texts(native)) == sent + 1  # still in the second
         clock.now += 1.0
         assert await background.tick()  # the ticker posts it once the second is over (the text is unchanged)
-        assert _service_texts(native)[sent + 1:] == ["Translating Book.epub: 3/80 chapters"]
+        assert _service_texts(native)[sent + 1:] == ["Translating • 3/80 — Book.epub"]
         assert not background._repost_wanted
         clock.now += 1.5
         await background.on_foreground_event({"type": "dismissed"})

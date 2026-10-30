@@ -225,7 +225,7 @@ def test_alerts_hidden_while_the_gate_glossary_is_refined():
     assert [e[0] for e in events] == ["event"]
     job.question = dict(question)
     job.refining = True
-    assert jobs_mod.notification_text(job.snapshot()).endswith(": refining the glossary")
+    assert jobs_mod.notification_text(job.snapshot()).startswith("Refining the glossary")
 
 
 # ---------------------------------------------------------------------------------------------------------

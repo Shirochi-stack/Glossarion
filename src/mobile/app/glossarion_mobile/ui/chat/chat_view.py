@@ -55,7 +55,7 @@ from typing import Any, Callable, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.services.background import IOS_BACKGROUND_NOTICE
-from glossarion_mobile.services.jobs import JobAlreadyActive, already_active_text
+from glossarion_mobile.services.jobs import JobAlreadyActive, already_active_text, position_line
 from glossarion_mobile.state.app_state import AppState, ChatContext, JobStripModel
 from glossarion_mobile.ui.chat.cards import (
     LIBRARY_WAIT_REASON,
@@ -208,8 +208,6 @@ GLOSSARY_REFINING_WAIT = "The glossary is being refined: ✓ Yes and ■ No come
 BLOCK_GLOSSARY_REFINING = BlockReason("glossary_refining", GLOSSARY_REFINING_LABEL)
 #: Hotfix 1 #4: Resume on a card whose run is not the chat's latest (it would resubmit the other turn's job)
 OLDER_RUN_RESUME = "Only the chat's latest run can be resumed from its card"
-#: a Result whose book another job translates now (``ChatView._book_job_elsewhere``): no Resume / Retry
-RESUMED_ELSEWHERE = "Resumed · translating in Jobs"
 
 
 # ---- job safety (hotfix 1 #5) ---------------------------------------------------------------------------------
@@ -488,6 +486,8 @@ class ChatView:
         # the turn's card is the running card from the tap on (``_job_control``), a second tap does nothing
         self._resuming: dict = {}
         self._handed_off: dict = {}  # (cid, turn index) -> the Library job a Result's Resume started
+        self._book_jobs: dict = {}  # (cid, turn index) -> the book's other job its Result card shows
+        self._book_seen: dict = {}  # job id -> (state, line) the Result cards last showed (``_on_job_snapshot``)
         self._stream_task: Any = None
         self._eta = EtaEstimator()
         self._applying_mode = False
@@ -1146,19 +1146,30 @@ class ChatView:
         report = self.env.chats.message_text(self.cid, item.report, "content") if item.report is not None else None
 
         failed = 0
+        snapshot = None
         if ended is not None:
             snapshot = last.last_snapshot if (last is not None and not last.live and self._run_turn(last) == item.index) \
                 else (runs.persisted_job(self.cid, item.index) if runs is not None else None)
             failed = progress_counts(snapshot).get("failed", 0) if snapshot is not None else 0
 
-        # hotfix 8 (owner 2026-10-30: "I clicked resume ... It still says resume. It already resumed"): the book
-        # runs in another job (its Resume went to the Library, or the Jobs page / Library resumed it)
-        elsewhere = self._book_job_elsewhere(item) if offers_resume(phase, status) else None
+        # owner 2026-10-30 ("We need the chat and the jobs menu in sync"): the book's newer job, started or resumed
+        # outside this turn (the Library, the Jobs page, its Resume handed to the Library), is what the card shows:
+        # its live line and Stop while it runs, how it ended (and Resume) after
+        elsewhere = self._book_job_elsewhere(item, snapshot)
+        self._book_jobs.pop((self.cid, item.index), None)
         if elsewhere is not None:
-            phase, status = CardPhase("done"), RESUMED_ELSEWHERE
+            self._book_jobs[(self.cid, item.index)] = str(elsewhere.id)
+            if elsewhere.is_active:
+                phase = CardPhase.for_turn(str(getattr(elsewhere.state, "value", elsewhere.state) or ""))
+                status = position_line(elsewhere)
+            else:
+                name, status = ended_card(ended_kind(elsewhere), elsewhere)
+                phase = CardPhase(name)
+            failed = progress_counts(elsewhere).get("failed", 0)
 
-        # the Plan chips a Result that offers Resume / Retry failed shows (their labels rebuild the card)
-        chip_state = self._chip_state() if offers_resume(phase, status) else None
+        # the Plan chips a Result that offers Resume / Retry failed shows (their labels rebuild the card); not for
+        # the book's other job, whose Resume runs it as it was
+        chip_state = self._chip_state() if offers_resume(phase, status) and elsewhere is None else None
 
         def build() -> JobCard:
             card = JobCard(attachment=record, phase=phase, on_action=lambda a, it=item: self._on_job_action(a, it),
@@ -1177,7 +1188,7 @@ class ChatView:
         card = slot.card
         # owner #5: a Result that offers Resume / Retry failed keeps the Plan card's Run options (the values the
         # job ran with), so they can be changed before resuming; the same panel object across renders
-        panel = self._resume_panel(item, ended_params) if card.offers_resume else None
+        panel = self._resume_panel(item, ended_params) if card.offers_resume and elsewhere is None else None
         control = panel.control if panel is not None else None
         shown = card.options_box.controls
         if (shown[0] if shown else None) is not control:
@@ -1508,11 +1519,8 @@ class ChatView:
             return
         self.refresh_send()
         self._track_tool_job(snapshot)
-        job_id = str(getattr(snapshot, "id", "") or "")
-        if job_id and (self.cid, job_id) in {(c, j) for (c, _i), j in self._handed_off.items()} \
-                and not getattr(snapshot, "is_active", True):
-            # the Library job a Result's Resume started ended: the card shows how its book stands again
-            self._handed_off = {k: v for k, v in self._handed_off.items() if v != job_id}
+        # a book's job a Result card shows (or may show) moved on: the card follows it
+        if self._book_job_changed(snapshot):
             self.render_transcript(follow=self.transcript.follow_tail)
         run = self.env.runs.live_run(self.cid) if self.env.runs is not None else None
         if run is not None and self.live_job_card is not None:
@@ -1522,6 +1530,31 @@ class ChatView:
         if run is not None and run.awaiting_glossary and card is not None and \
                 self._approval_key == ((run.question or {}).get("id") or "q"):
             self._sync_gate_refine(card, self._approval_key, run)  # JobSnapshot.refining went on / off
+
+    def _book_job_changed(self, snapshot: Any) -> bool:
+        """A translation job outside this chat's live run changed what a Result card shows: a job a card
+        shows now (its line or state), a Resume handed to the Library, or one not seen before (it may be a
+        book of this chat's). ``snapshot``: what ``JobsAdapter.subscribe`` delivers, None without a job."""
+        from glossarion_mobile.services.jobs import FAMILY_TRANSLATION, JOB_FAMILIES
+
+        if snapshot is None or JOB_FAMILIES.get(job_kind(snapshot)) != FAMILY_TRANSLATION:
+            return False
+        job_id = str(getattr(snapshot, "id", "") or "")
+        runs = self.env.runs
+        live = runs.live_run(self.cid) if runs is not None else None
+        if not job_id or (live is not None and str(getattr(live, "job_id", "") or "") == job_id):
+            return False
+        state = str(getattr(getattr(snapshot, "state", None), "value", "") or "")
+        seen = (state, position_line(snapshot))
+        if self._book_seen.get(job_id) == seen:
+            return False
+        known = job_id in self._book_seen
+        self._book_seen[job_id] = seen
+        handed = job_id in self._handed_off.values()
+        if handed and not getattr(snapshot, "is_active", True):
+            # the Library job a Result's Resume started ended: the card shows how its book stands again
+            self._handed_off = {k: v for k, v in self._handed_off.items() if v != job_id}
+        return handed or job_id in self._book_jobs.values() or not known
 
     def _track_tool_job(self, snapshot: Any) -> bool:
         """A chat's QA scan changed state: its "QA scan" card shows the new state, and once it ends the
@@ -2818,6 +2851,9 @@ class ChatView:
         self.refresh_send()
 
     def _on_job_action(self, action: str, item: Any = None) -> None:
+        book_job = self._book_jobs.get((self.cid, getattr(item, "index", None))) if item is not None else None
+        if book_job and self._book_job_action(action, book_job):
+            return
         if action == "start":
             self.start_plan()
         elif action == "start_async":
@@ -3004,28 +3040,71 @@ class ChatView:
         fn = getattr(self.env.runs, "turn_index", None) if self.env is not None else None
         return fn(self.cid, run) if callable(fn) else getattr(run, "user_index", None)
 
-    def _book_job_elsewhere(self, item: Any) -> Any:
-        """The active job that translates this Result's book outside the chat's own run (the Library job its
-        Resume started, or one the Jobs page / Library resumed), else None."""
+    def _book_job_elsewhere(self, item: Any, own: Any = None) -> Any:
+        """The job that stands for this Result's book outside the turn's own job (``own``, the snapshot the
+        card ended with): the Library job its Resume started, else the book's newest job (``latest_job_for``)
+        when it is active or started after ``own`` (the Library / Jobs page carried the book on). None when the
+        turn's own job is the book's latest, or it is this chat's live run."""
         jobs = self.env.jobs if self.env is not None else None
         if jobs is None:
             return None
         handed = self._handed_off.get((self.cid, getattr(item, "index", None)))
         if handed:
-            snap = jobs.snapshot(handed)
+            snap = jobs.snapshot_of(handed)
             if snap is not None and getattr(snap, "is_active", False):
                 return snap
-        finder = getattr(jobs, "active_job_for", None)
         source = self._turn_source(item)
-        if not callable(finder) or not source:
+        if not source:
             return None
         from glossarion_mobile.services.jobs import FAMILY_TRANSLATION
 
         try:
-            return finder(source, FAMILY_TRANSLATION)
+            found = jobs.latest_job_for(source, FAMILY_TRANSLATION)
         except Exception:
-            log.debug("looking up the book's active job failed", exc_info=True)
+            log.debug("looking up the book's job failed", exc_info=True)
             return None
+        if found is None or (own is not None and getattr(own, "id", None) == found.id):
+            return None
+        runs = self.env.runs
+        live = runs.live_run(self.cid) if runs is not None else None
+        if live is not None and str(getattr(live, "job_id", "") or "") == str(found.id):
+            return None  # this chat's own run: its live card shows it
+        if getattr(found, "is_active", False):
+            return found
+        if own is not None and (getattr(found, "created", 0) or 0) <= (getattr(own, "created", 0) or 0):
+            return None
+        if own is None and getattr(found, "spec", None) is not None:
+            origin = getattr(found.spec, "origin", None) or {}
+            if isinstance(origin, dict) and origin.get("type") == "chat" and str(origin.get("cid")) == str(self.cid):
+                return None  # an ended job of this chat (another turn's): that turn's card shows it
+        return found
+
+    def _book_job_action(self, action: str, job_id: str) -> bool:
+        """Stop / Force stop / Log / Resume on a Result card that shows its book's other job act on that job;
+        False for the actions the card handles as its own (Read, Compile, Progress, ...)."""
+        jobs = self.env.jobs if self.env is not None else None
+        if jobs is None:
+            return False
+        if action in ("stop", "force_stop", "cancel_queued"):
+            try:
+                jobs.request_stop(force=action == "force_stop", job_id=job_id)
+            except Exception:
+                log.exception("stopping the book's job failed")
+            return True
+        if action == "log":
+            self.navigate("jobs.detail", {"jid": job_id})
+            return True
+        if action in ("resume", "retry"):
+            try:
+                resumed = jobs.resume(job_id)
+            except Exception:
+                log.exception("resuming the book's job failed")
+                resumed = None
+            if not resumed:
+                self.notify("This job can't be resumed")
+            self.render_transcript(follow=self.transcript.follow_tail)
+            return True
+        return False
 
     def _turn_source(self, item: Any = None) -> str:
         """The attachment path of the job card's turn (default: the turn of the chat's run)."""

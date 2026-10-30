@@ -974,7 +974,7 @@ def _top_dialog(page: Any) -> Any:
 
 def _bar_on_screen(client: PhoneClient) -> bool:
     """The floating job bar ("Translating · <book>") is part of what the client shows on top."""
-    return bool(client.find(lambda n: n.get("_c") == "Text" and str(n.get("value") or "").startswith("Translating")))
+    return bool(client.find(lambda n: n.get("_c") == "Text" and str(n.get("value") or "").startswith("Translating ·")))
 
 
 async def _back_to_chat(phone: Phone) -> None:
@@ -1262,7 +1262,7 @@ def test_job_page_sheets_with_the_floating_job_bar(app_env, monkeypatch, tmp_pat
 
             async def open_job_page():
                 node, _chain = client.find(lambda n: n.get("_c") == "Text"
-                                           and str(n.get("value") or "").startswith("Translating"))[0]
+                                           and str(n.get("value") or "").startswith("Translating ·"))[0]
                 await client.tap(text=node["value"])  # the bar opens Jobs; its row opens the Job page
                 assert await client.until(lambda: app.shell.stack and client.top_route() == app.shell.current_route
                                           and app.shell.current_route in ("/jobs", f"/jobs/{jid}")), client.describe()

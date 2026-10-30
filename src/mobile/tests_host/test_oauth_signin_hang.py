@@ -449,7 +449,7 @@ def test_a_job_and_a_sign_in_share_the_foreground_service(mobile_auth):
         await asyncio.to_thread(_get, _port(session), _callback_path(session, "TWO"))
         assert (await asyncio.wait_for(task, TIMEOUT))["signed_in"]
         assert side.running, "the sign-in's end stopped the running job's service"
-        assert side.title == "Glossarion" and "Book.epub" in side.text  # the job's notification is back
+        assert side.title.startswith("Translating") and side.text == "Book.epub"  # the job's notification is back
         await background.job_finished(snap(JobState.DONE))
         assert not side.running and len(native.service_holds) == 0
 

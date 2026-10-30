@@ -403,10 +403,9 @@ def test_resume_turns_the_result_card_into_the_running_card(iso, offline):
         await _stop_sampling(ctx)
         assert resumed.state == "done" and resumed.error is None, (resumed.state, resumed.error)
         seen["checked"] = _assert_samples_live_since(probe, tap_i, resumed, probe.cid)
-        # one tap, one job: exactly one job was submitted for the Resume (the same run root)
+        # one tap, one job: the Resume submitted one job (the same run root), which carries the Stopped one on
         jobs = _chat_jobs(service, probe.cid)
-        assert jobs[:len(stopped["jobs"])] == stopped["jobs"] and len(jobs) == len(stopped["jobs"]) + 1, \
-            (stopped["jobs"], jobs)
+        assert len(jobs) == 1 and not set(jobs) & set(stopped["jobs"]), (stopped["jobs"], jobs)
         I12._check_result(probe, stopped["committed"], "done", f"Done · {CHAPTERS}/{CHAPTERS} chapters")
 
     with I12._server(0.08) as server:  # timing only: the holds decide when each step happens
@@ -485,7 +484,7 @@ def test_resume_queued_behind_another_chat_job(iso, offline):
         assert resumed.state == "done" and resumed.error is None, (resumed.state, resumed.error)
         seen["checked"] = _assert_samples_live_since(probe, tap_i, resumed, cid)
         jobs = _chat_jobs(service, cid)
-        assert len(jobs) == len(stopped["jobs"]) + 1, (stopped["jobs"], jobs)
+        assert len(jobs) == 1 and not set(jobs) & set(stopped["jobs"]), (stopped["jobs"], jobs)
         I12._check_result(probe, stopped["committed"], "done", f"Done · {CHAPTERS}/{CHAPTERS} chapters")
         other_run = app.chat_feature.runs.run_for(other_cid)
         assert await _until(lambda: not other_run.live, 60) and other_run.state == "done", other_run.state
@@ -678,7 +677,7 @@ def test_resume_after_a_relaunch_turns_the_card_into_the_running_card(iso, offli
         assert resumed.state == "done" and resumed.error is None, (resumed.state, resumed.error)
         seen["checked"] = _assert_samples_live_since(probe, tap_i, resumed, cid)
         jobs = _chat_jobs(service, cid)
-        assert jobs[:len(before)] == before and len(jobs) == len(before) + 1, (before, jobs)
+        assert len(jobs) == 1 and not set(jobs) & set(before), (before, jobs)
         I12._check_result(probe, first["committed"], "done", f"Done · {CHAPTERS}/{CHAPTERS} chapters")
 
     with I12._server(0.08) as server:

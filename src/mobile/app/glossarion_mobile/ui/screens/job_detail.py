@@ -403,7 +403,7 @@ class JobDetailScreen(Screen):
         fraction = snap.progress.fraction
         self.progress_bar.visible = snap.is_active or fraction is not None
         self.progress_bar.value = fraction if (fraction is not None or not snap.is_active) else None
-        line = progress_line(snap)
+        line = progress_line(snap, verb=True)
         if not line and snap.progress.total:
             line = f"Ch {snap.progress.completed}/{snap.progress.total}"
         self.progress_text.value = line

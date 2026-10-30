@@ -325,6 +325,12 @@ class JobsAdapter:
         except Exception:
             return None
 
+    def latest_job_for(self, path: Any, family: str) -> Any:
+        """``JobService.latest_job_for``: the job that stands for ``path``'s work now; None when none did
+        or the service cannot tell."""
+        fn = getattr(self.jobs, "latest_job_for", None) if self.jobs is not None else None
+        return fn(path, family) if callable(fn) else None
+
     def queue(self) -> list:
         sig = self._signal("queue")
         value = getattr(sig, "value", sig) if sig is not None else None
@@ -407,9 +413,12 @@ class JobsAdapter:
             result = await result
         return result
 
-    def request_stop(self, force: bool = False) -> Any:
+    def request_stop(self, force: bool = False, job_id: Any = None) -> Any:
+        """Stop the running job, or the job ``job_id`` (a book's job a Result card shows)."""
         if self.jobs is None:
             return None
+        if job_id is not None:
+            return self.jobs.request_stop(job_id, force=force)
         try:
             return self.jobs.request_stop(force=force)
         except TypeError:

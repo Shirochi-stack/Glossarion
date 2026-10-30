@@ -56,17 +56,17 @@ def _snap(**kwargs):
 def test_the_job_line_and_notification_show_the_position():
     line = progress_line(_snap(position="[5] Ch. 3 (1/4)"), now=7323.0)
     assert line.startswith("[5] Ch. 3 (1/4) · 1 in flight") and "Ch 8/9" not in line
-    assert notification_text(_snap(position="[5] Ch. 3 (1/4)")).endswith("Book.epub: [5] Ch. 3 (1/4) · 1 in flight")
-    # without a position (no chapter request yet): the counts, as before
+    assert notification_text(_snap(position="[5] Ch. 3 (1/4)")) == "Translating • [5] Ch. 3 (1/4) · 1 in flight — Book.epub"
+    # without a position (no chapter request yet): the counts
     assert progress_line(_snap(), now=10.0).startswith("Ch 8/9")
-    assert "8/9 chapters" in notification_text(_snap())
+    assert notification_text(_snap()).startswith("Translating • 8/9")
 
 
 def test_the_service_tracks_the_position_after_each_drain(tmp_path):
     segments = [_seg("Chapter 3 (chunk 1/4) · chapter0003.xhtml")]
     changed = []
     job = types.SimpleNamespace(stream=types.SimpleNamespace(segments=lambda drain=False: list(segments)),
-                                position="", spine={"chapter0003.xhtml": 5}, output_dir=str(tmp_path))
+                                position="", spine={"chapter0003.xhtml": 5}, spine_files=None, output_dir=str(tmp_path))
     service = types.SimpleNamespace(_lock=threading.RLock(), _changed=lambda: changed.append(1),
                                     _spine_position=lambda j, name: JobService._spine_position(j, name))
     JobService._track_position(service, job)
@@ -75,27 +75,26 @@ def test_the_service_tracks_the_position_after_each_drain(tmp_path):
     assert changed == [1]
     segments.append(_seg("Chapter 4 (chunk 2/2) · chapter0004.xhtml"))
     JobService._track_position(service, job)
-    # chapter0004.xhtml is not in a workspace OPF here: no spine number, remembered as unknown
-    assert job.position == "Ch. 4 (2/2)" and job.spine["chapter0004.xhtml"] == 0 and changed == [1, 1]
+    # no workspace OPF here: no spine number, looked up again on the next request (the OPF may come later)
+    assert job.position == "Ch. 4 (2/2)" and "chapter0004.xhtml" not in job.spine and changed == [1, 1]
 
 
 def test_a_result_whose_book_runs_in_another_job_stops_offering_resume():
     """Owner 2026-10-30: "I clicked resume, and the resume button worked, but the response card did not update
     ... It still says resume" - the Resume of a book that moved into the Library starts a Library job, which the
     chat's own run never sees."""
-    from glossarion_mobile.ui.chat.chat_view import RESUMED_ELSEWHERE, ChatView
-    from glossarion_mobile.ui.chat.job_binding import CardPhase
-    from glossarion_mobile.ui.chat.cards import offers_resume
+    from glossarion_mobile.ui.chat.chat_view import ChatView
 
     running = types.SimpleNamespace(id="lib1", is_active=True)
     asked = []
 
-    def active_job_for(path, family):
+    def latest_job_for(path, family):
         asked.append((path, family))
         return running if path == "/books/hero.epub" else None
 
-    jobs = types.SimpleNamespace(snapshot=lambda jid: running if jid == "lib1" else None, active_job_for=active_job_for)
-    view = types.SimpleNamespace(env=types.SimpleNamespace(jobs=jobs), cid="c1", _handed_off={},
+    jobs = types.SimpleNamespace(snapshot_of=lambda jid: running if jid == "lib1" else None,
+                                 latest_job_for=latest_job_for)
+    view = types.SimpleNamespace(env=types.SimpleNamespace(jobs=jobs, runs=None), cid="c1", _handed_off={},
                                  _turn_source=lambda item: item.source)
     item = types.SimpleNamespace(index=3, source="/books/hero.epub")
     assert ChatView._book_job_elsewhere(view, item) is running and asked == [("/books/hero.epub", "translation")]
@@ -106,8 +105,6 @@ def test_a_result_whose_book_runs_in_another_job_stops_offering_resume():
     assert ChatView._book_job_elsewhere(view, other) is running
     running.is_active = False
     assert ChatView._book_job_elsewhere(view, other) is None
-    # the card then shows a Result without Resume / Retry
-    assert not offers_resume(CardPhase("done"), RESUMED_ELSEWHERE)
 
 
 def test_on_device_models_think_when_the_request_asks_with_reasoning_effort():
