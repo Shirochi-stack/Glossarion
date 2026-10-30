@@ -14042,6 +14042,25 @@ def _create_anti_duplicate_section(self, parent):
     forced_row.addWidget(forced_spin)
     forced_row.addStretch()
     bias_v.addLayout(forced_row)
+
+    self.mark_glossary_forced_truncation_complete_var = self.config.get('mark_glossary_forced_truncation_complete', False)
+    mark_complete_cb = self._create_styled_checkbox("Mark glossary forced truncation as complete")
+    try:
+        mark_complete_cb.setChecked(bool(self.mark_glossary_forced_truncation_complete_var))
+        mark_complete_cb.setToolTip(
+            "A glossary request stopped by Forced Truncation counts as finished: its chapter is marked complete\n"
+            "with the entries it has, instead of truncated, so it is not extracted again.\n"
+            "Entries after the point where the model began repeating are never extracted."
+        )
+    except Exception:
+        pass
+    def _on_mark_complete_toggle(checked):
+        try:
+            self.mark_glossary_forced_truncation_complete_var = bool(checked)
+        except Exception:
+            pass
+    mark_complete_cb.toggled.connect(_on_mark_complete_toggle)
+    bias_v.addWidget(mark_complete_cb)
     bias_v.addStretch()
     
     # Provider compatibility info
@@ -14260,6 +14279,8 @@ def _reset_anti_duplicate_defaults(self):
         self.forced_truncation_enabled_var = False  # Default = disabled
     if hasattr(self, 'forced_truncation_seconds_var'):
         self.forced_truncation_seconds_var = 10
+    if hasattr(self, 'mark_glossary_forced_truncation_complete_var'):
+        self.mark_glossary_forced_truncation_complete_var = False  # Default = disabled
 
     # Update enable/disable state
     self._toggle_anti_duplicate_controls()

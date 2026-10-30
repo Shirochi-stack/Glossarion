@@ -164,6 +164,44 @@ def test_client_watches_only_when_the_toggle_is_on(monkeypatch):
     assert client._repeat_watch([], "http://127.0.0.1:1/v1") is None  # its engine watches itself
 
 
+def _stopped_client():
+    from unified_api_client import UnifiedClient
+
+    client = UnifiedClient.__new__(UnifiedClient)
+    client.model = "ollamapull/m"
+    client._get_thread_local_client = lambda tls=__import__("types").SimpleNamespace(_forced_truncation=True): tls
+    return client
+
+
+@pytest.mark.parametrize("env, context, finish", [
+    ("1", "glossary", "stop"),  # the toggle: a stopped glossary request is complete
+    ("1", "glossary_refinement", "stop"),
+    ("0", "glossary", "length"),  # off by default
+    ("1", "translation", "length"),  # only glossary requests
+])
+def test_mark_glossary_forced_truncation_as_complete(monkeypatch, env, context, finish):
+    monkeypatch.setenv("MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE", env)
+    answer = LINE_A + LINE_B * 9
+    content, reason = _stopped_client()._trim_forced_truncation(answer, "length", context)
+    assert reason == finish and content == LINE_A + LINE_B
+
+
+def test_a_real_length_finish_stays_truncated_with_the_toggle_on(monkeypatch):
+    monkeypatch.setenv("MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE", "1")
+    client = _stopped_client()
+    client._get_thread_local_client()._forced_truncation = False
+    assert client._trim_forced_truncation("A long answer cut off", "length", "glossary") == ("A long answer cut off", "length")
+    # on device the engine says only length: an answer ending in a repeat is the stopped one
+    client.model = "local/qwen"
+    assert client._trim_forced_truncation("A long answer cut off", "length", "glossary") == ("A long answer cut off", "length")
+    assert client._trim_forced_truncation(LINE_A * 9, "length", "glossary") == (LINE_A, "stop")
+
+
+def test_glossary_runs_read_stop_as_complete():
+    source = (SRC / "extract_glossary_from_epub.py").read_text(encoding="utf-8")
+    assert "def _glossary_issue_from_finish_reason" in source
+
+
 def test_a_length_finish_marks_the_chapter_truncated():
     """The Progress Manager's mark: this path is what the finish reason has to reach."""
     source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")

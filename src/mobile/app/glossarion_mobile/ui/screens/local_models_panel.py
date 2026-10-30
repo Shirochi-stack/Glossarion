@@ -75,6 +75,8 @@ GPU_PRESETS_OFFERED_KEY = "local_gpu_presets_offered"
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
 #: config.json key of "Whitelist source text", shown under it
 WHITELIST_SOURCE_KEY = "script_ban_whitelist_source"
+#: config.json key of "Mark glossary forced truncation as complete", shown under it
+MARK_GLOSSARY_COMPLETE_KEY = "mark_glossary_forced_truncation_complete"
 
 
 def _push(*controls: Any) -> None:
@@ -1003,7 +1005,7 @@ class LocalModelsPanel(OnDeviceFlow):
         """"Allow emoticons and symbols from other scripts (kaomoji)" and "Whitelist source text": the Settings tiles of the shared config
         keys (``KAOMOJI_KEY``, ``WHITELIST_SOURCE_KEY``; also Settings › Anti-Duplicate Parameters › Logit Bias and the desktop), so
         both places edit one value. Nothing without the Settings context (a screen built in a test)."""
-        self.kaomoji_tile = self.whitelist_tile = None
+        self.kaomoji_tile = self.whitelist_tile = self.mark_complete_tile = None
         ctx = self.settings_ctx
         if ctx is None:
             from glossarion_mobile.ui.sheets.model_sheet import sheet_env
@@ -1014,7 +1016,8 @@ class LocalModelsPanel(OnDeviceFlow):
         rows: list = []
         observers: list = []
         observe = getattr(ctx.store, "observe", None)
-        for key, attribute in ((KAOMOJI_KEY, "kaomoji_tile"), (WHITELIST_SOURCE_KEY, "whitelist_tile")):
+        for key, attribute in ((KAOMOJI_KEY, "kaomoji_tile"), (WHITELIST_SOURCE_KEY, "whitelist_tile"),
+                               (MARK_GLOSSARY_COMPLETE_KEY, "mark_complete_tile")):
             try:
                 spec = ctx.schema.spec(key)
                 if spec is None:

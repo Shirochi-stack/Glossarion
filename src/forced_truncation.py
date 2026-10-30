@@ -6,7 +6,8 @@ answer ends with finish reason ``length``, so the Progress Manager marks the cha
 
 Users: ``ollamapull`` and the OpenAI-compatible stream of ``unified_api_client`` (config ``forced_truncation_enabled``
 / ``forced_truncation_seconds``, env ``FORCED_TRUNCATION`` / ``FORCED_TRUNCATION_SECONDS``, off by default) and the
-on-device engine of Glossarion Mobile (its own switch, on by default).
+on-device engine of Glossarion Mobile (its own switch, on by default). "Mark glossary forced truncation as complete"
+(config ``mark_glossary_forced_truncation_complete``, off) lets a stopped glossary request end with ``stop`` instead.
 
 The source check follows the QA scanner's (``scan_html_folder.has_repeating_sentences``): repetition the source has
 as often is the author's. Its count of repeated sentences is language-independent; a run of a short unit ("ㅋㅋㅋ")

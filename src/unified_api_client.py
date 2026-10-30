@@ -3600,17 +3600,25 @@ class UnifiedClient:
               f"it ends here, marked truncated")
         self._get_thread_local_client()._forced_truncation = True
 
-    def _trim_forced_truncation(self, content, finish_reason):
-        """A stopped answer without the copies of its repeat. On-device models stop inside their engine, which
-        says only ``length``: their answer is checked by that."""
+    def _trim_forced_truncation(self, content, finish_reason, context=None) -> tuple:
+        """(the answer, its finish reason) after Forced Truncation: a stopped answer without the copies of its
+        repeat. On-device models stop inside their engine, which says only ``length``: an answer of theirs that
+        ends in a repeat counts as stopped. "Mark glossary forced truncation as complete"
+        (MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE): a stopped glossary request ends with ``stop``."""
         tls = self._get_thread_local_client()
         stopped, tls._forced_truncation = getattr(tls, '_forced_truncation', False), False
         on_device = str(getattr(self, 'model', '') or '').lower().startswith('local/')
         if not isinstance(content, str) or not (stopped or (on_device and self._is_truncation_finish_reason(
                 self._normalize_finish_reason(finish_reason) or finish_reason))):
-            return content
+            return content, finish_reason
         import forced_truncation
-        return forced_truncation.trim_repeats(content)
+        trimmed = forced_truncation.trim_repeats(content)
+        stopped = stopped or trimmed != content
+        if (stopped and 'glossary' in str(context or '').lower()
+                and (os.getenv('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE') or '0').strip().lower() in ('1', 'true', 'yes', 'on')):
+            print("✂️ Forced Truncation: this glossary request counts as complete")
+            finish_reason = 'stop'
+        return trimmed, finish_reason
 
     def _script_ban_scripts(self, context=None) -> tuple:
         """The scripts the universal "Block other scripts in translations (adaptive, all models)" bans for
@@ -11611,7 +11619,7 @@ class UnifiedClient:
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
 
-                extracted_content = self._trim_forced_truncation(extracted_content, finish_reason)
+                extracted_content, finish_reason = self._trim_forced_truncation(extracted_content, finish_reason, context)
                 self._warn_script_leak(messages, extracted_content, context)
 
                 # Track success
