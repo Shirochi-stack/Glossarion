@@ -2566,7 +2566,7 @@ SETTINGS = {
      'env': (('BIAS_COMMON_WORDS', 'translation', '<none>'),
              ('BIAS_COMMON_WORDS', 'startup', False)),
      'init_default': False,
-     'label': 'Bias against common words (the, and, said)',
+     'label': 'Common words (the, and, said)',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': False,
      'type': 'bool',
@@ -2581,9 +2581,11 @@ SETTINGS = {
      'env': (('BIAS_REPETITIVE_PHRASES', 'translation', '<none>'),
              ('BIAS_REPETITIVE_PHRASES', 'startup', False)),
      'init_default': False,
-     'label': 'Bias against repetitive phrases',
+     'label': 'Overused words (suddenly, instantly, slightly, faintly, …)',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': False,
+     'tooltip': 'suddenly, instantly, immediately, slightly, faintly, indeed, however, actually, '
+                'really, very',
      'type': 'bool',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
@@ -2606,12 +2608,14 @@ SETTINGS = {
                 "Japanese and Korean characters, Hindi, Thai, Cyrillic and the rest; the target's "
                 'own script is\n'
                 'never blocked, and glossary and single-pass glossary requests are left alone.\n'
-                'Official OpenAI chat models (GPT-4o / GPT-4.1) also get a logit bias against the '
-                'most common\n'
-                'tokens of those scripts. On every model, an answer with such text is sent again '
-                'with an\n'
-                'instruction to write only in the target language, using the normal retry budget '
-                '(Max Retries).\n'
+                'Official OpenAI chat models (GPT-4o / GPT-4.1) get a logit bias against the most '
+                'common tokens of\n'
+                'those scripts; an OpenAI-compatible server that exposes its tokenizer (llama.cpp '
+                'server, vLLM) gets\n'
+                'a ban built from its own tokens. On every model, an answer with such text (or a '
+                'copy of the source)\n'
+                'is sent again with an instruction to write only in the target language (Max '
+                'Retries).\n'
                 'Works only while Enable Anti-Duplicate Parameters is on.',
      'type': 'bool',
      'ui_group': '🎯 Anti-Duplicate Parameters',
@@ -6418,9 +6422,12 @@ SETTINGS = {
      'env': (('LOGIT_BIAS_ENABLED', 'translation', '<none>'),
              ('LOGIT_BIAS_ENABLED', 'startup', False)),
      'init_default': False,
-     'label': 'Enable Logit Bias (OpenAI only)',
+     'label': 'Enable word bias',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': False,
+     'tooltip': 'Makes the words ticked below less likely in the answer (OpenAI logit_bias).\n'
+                'Only official OpenAI chat models take it; Block other scripts below works on '
+                'every model.',
      'type': 'bool',
      'ui_group': '🎯 Anti-Duplicate Parameters',
      'ui_sites': ('other.anti_duplicate',),
@@ -6429,13 +6436,13 @@ SETTINGS = {
     'logit_bias_strength': {'converter': ('float',),
      'default': 1.0,
      'default_source': 'init',
-     'dialog_default': -0.5,
+     'dialog_default': 1.0,
      'discrepancies': ("defaults differ: env:startup:LOGIT_BIAS_STRENGTH='-0.5', "
                        'init:read/init:var/save=1.0',),
      'env': (('LOGIT_BIAS_STRENGTH', 'translation', '<none>'),
              ('LOGIT_BIAS_STRENGTH', 'startup', '-0.5')),
      'init_default': 1.0,
-     'label': 'Bias Strength:',
+     'label': 'Strength (0 = off):',
      'origins': ('settings_map', 'init', 'dialog', 'env'),
      'save_default': 1.0,
      'type': 'float',

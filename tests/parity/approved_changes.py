@@ -2136,6 +2136,18 @@ APPROVED = (
         },
         "values": {},
     },
+    {
+        "date": "2026-10-30",
+        "what": "Features a build leaves out say 'Not supported in this build' first (owner): the QA "
+                "scanner's greyed silent truncation line (the NoCuda build no longer bundles its deps)",
+        "source": {
+            "src/QA_Scanner_GUI.py": [
+                ('QLabel(f"⚠️ Missing dependencies: {missing_str}\\n"',
+                 'QLabel(f"⚠️ Not supported in this build. Missing dependencies: {missing_str}\\n"'),
+            ],
+        },
+        "values": {},
+    },
 )
 
 
