@@ -257,6 +257,8 @@ class BackgroundExecution:
         self.wakelock_on = False
         self._last_update = -1e9
         self._last_text: Optional[str] = None
+        #: what the ongoing notification shows: (large headline, the book's title cut to one line)
+        self._last_lines: tuple = ("Glossarion", "")
         self._pending: Any = None  # the snapshot the 1/s throttle held back (sent on the next tick)
         self._ticker: Optional[asyncio.Task] = None
         self._last_repost = -1e9
@@ -546,24 +548,25 @@ class BackgroundExecution:
                 await self.job_progress(snap, force=True)
 
     async def job_started(self, snap: Any) -> None:
-        from glossarion_mobile.services.jobs import notification_text
+        from glossarion_mobile.services.jobs import notification_lines, notification_text
 
         text = notification_text(snap)
+        headline, book = notification_lines(snap)
         if self.is_android:
             if self.notifications is not None:
                 await self.notifications.ensure_init()
             if self.service_running:
                 # The service stayed up for this queued job (Android does not allow starting a
                 # foreground service while the app is in the background).
-                await self._native("update_job_service", title="Glossarion", text=text)
+                await self._native("update_job_service", title=headline, text=book)
             else:
-                started = await self._native("start_job_service", "Glossarion", text, default=False,
+                started = await self._native("start_job_service", headline, book, default=False,
                                              buttons=[{"id": "stop", "text": "Stop"}, {"id": "open", "text": "Open"}])
                 self.service_running = bool(started)
             self.service_job = snap.id
             holds = service_holds(self.native)
             if holds is not None and self.service_running:
-                holds.hold(JOBS_HOLD, "Glossarion", text)
+                holds.hold(JOBS_HOLD, headline, book)
         elif self.is_ios and self.bg_task_id < 0:
             task_id = await self._native("begin_background_task", f"job-{snap.id}", default=-1,
                                          expiration_title="Glossarion paused",
@@ -582,6 +585,7 @@ class BackgroundExecution:
                 log.info("wakelock enable failed: %s", exc)
         self._last_update = self.clock()
         self._last_text = text
+        self._last_lines = (headline, book)
         self._pending = None
         self._browser_pages(True, snap)
         self._sync_ticker()  # a job that starts while the app is hidden
@@ -589,7 +593,7 @@ class BackgroundExecution:
     async def job_progress(self, snap: Any, *, force: bool = False) -> bool:
         """Throttled (1/s) progress to the FGS notification / iOS Live Activity; a change the throttle holds
         back is sent by the next tick (trailing edge)."""
-        from glossarion_mobile.services.jobs import notification_text
+        from glossarion_mobile.services.jobs import notification_lines, notification_text
 
         now = self.clock()
         text = notification_text(snap)
@@ -605,11 +609,12 @@ class BackgroundExecution:
         self._pending = None
         self._last_update = now
         self._last_text = text
+        headline, book = self._last_lines = notification_lines(snap)
         if self.is_android and self.service_running:
             holds = service_holds(self.native)
             if holds is not None:
-                holds.hold(JOBS_HOLD, "Glossarion", text)  # what to show again after a sign-in releases it
-            await self._native("update_job_service", title="Glossarion", text=text)
+                holds.hold(JOBS_HOLD, headline, book)  # what to show again after a sign-in releases it
+            await self._native("update_job_service", title=headline, text=book)
             return True
         if self.is_ios and self.continued_started:
             await self._native("update_continued_processing", int(progress.completed or 0),
@@ -627,6 +632,7 @@ class BackgroundExecution:
             if self.is_android and self.service_running:
                 await self._native("update_job_service", title="Glossarion", text="Starting the next job…")
                 self._last_text = "Starting the next job…"
+                self._last_lines = ("Glossarion", "Starting the next job…")
             return  # the next queued job inherits the service / background grant / wakelock (and the ticker)
         self._browser_pages(False)
         if self.is_android and (self.service_running or self.service_job == snap.id):
@@ -836,11 +842,11 @@ class BackgroundExecution:
         if snap is not None:
             self._last_text = None  # the dedupe must not skip the same text
             return await self.job_progress(snap, force=True)
-        text = self._last_text or "Glossarion"
+        headline, book = self._last_lines
         holds = service_holds(self.native)
         if holds is not None and JOBS_HOLD in holds:
-            holds.hold(JOBS_HOLD, "Glossarion", text)
-        await self._native("update_job_service", title="Glossarion", text=text)
+            holds.hold(JOBS_HOLD, headline, book)
+        await self._native("update_job_service", title=headline, text=book)
         return True
 
     async def on_background_task_event(self, event: Mapping[str, Any]) -> None:

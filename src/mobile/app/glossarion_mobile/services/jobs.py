@@ -128,7 +128,10 @@ __all__ = [
     "is_glossary_question",
     "issue_label",
     "job_target",
+    "notification_lines",
     "notification_text",
+    "position_line",
+    "short_title",
     "progress_line",
     "spec_key",
     "status_key",
@@ -842,6 +845,7 @@ class _Job:
     refining: bool = False  # issue 12: the gate's glossary is being refined (``refine_at_gate``)
     position: str = ""  # hotfix 8: the newest in-flight request, "[5] Ch. 3 (1/4)" (``request_position``)
     spine: dict = field(default_factory=dict)  # source file basename -> its 1-based spine position (or 0)
+    spine_files: Optional[list] = None  # the book's spine basenames (``_spine_position``), read once
     # hotfix 1 issue 5: what the job works on (``job_target``) and its request (``spec_key``), set at submit
     target: Optional[JobTarget] = None
     spec_key: str = ""
@@ -995,11 +999,13 @@ _POSITION_CHUNK = re.compile(r"\bchunk\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _POSITION_FILE = re.compile(r"([\w.-]+\.(?:x?html?|txt))\b", re.IGNORECASE)
 
 
-def request_position(segments: Sequence[Any], spine_of: Callable[[str], int] = lambda name: 0) -> str:
+def request_position(segments: Sequence[Any], spine_of: Callable[[str], int] = lambda name: 0,
+                     spine_total: Any = 0) -> str:
     """The newest in-flight request card of a job (``direct_text_stream`` segments, spine order) as
-    "[5] Ch. 3 (1/4)": its spine position (``spine_of(file)``, left out when unknown), chapter number
-    and chunk; "Sec. 2" for text sources. '' when no request
-    names a chapter."""
+    "[17/182] Ch. 13 (1/2)": its spine position (``spine_of(file)``) out of ``spine_total`` (an int, or a
+    callable asked after ``spine_of``, which may read the spine; the position alone without a total, both
+    left out when unknown), chapter number and chunk; "Sec. 2" for text sources. '' when no request names
+    a chapter."""
     for segment in reversed(list(segments or ())):
         if not isinstance(segment, Mapping) or segment.get("complete"):
             continue
@@ -1014,12 +1020,32 @@ def request_position(segments: Sequence[Any], spine_of: Callable[[str], int] = l
             text += f" ({chunk.group(1)}/{chunk.group(2)})"
         found = _POSITION_FILE.search(label)
         spine = spine_of(found.group(1)) if found else 0
-        return f"[{spine}] {text}" if spine else text
+        if not spine:
+            return text
+        total = int((spine_total() if callable(spine_total) else spine_total) or 0)
+        return f"[{spine}/{total}] {text}" if total >= spine else f"[{spine}] {text}"
     return ""
 
 
-def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
-    """"Ch 12/80 · 3 in flight · 12:41" (UI_SPEC §1.7 subtitle); the phase while the total is unknown."""
+def position_line(snap: Any) -> str:
+    """The job's one-line status (owner 2026-10-30), for the Jobs page, the job page, the Book page and the
+    notification: "Translating • [17/182] Ch. 13 (1/2)" from the newest in-flight request
+    (``request_position``); before the first request names a chapter, "Translating • 14/15"."""
+    verb = kind_verb(getattr(snap, "kind", "") or "")
+    position = str(getattr(snap, "position", "") or "")
+    if position and getattr(snap, "is_active", False):
+        return f"{verb} • {position}"
+    progress = getattr(snap, "progress", None)
+    total = int(getattr(progress, "total", 0) or 0)
+    if total:
+        return f"{verb} • {int(getattr(progress, 'completed', 0) or 0)}/{total}"
+    return verb
+
+
+def progress_line(snap: JobSnapshot, now: Optional[float] = None, *, verb: bool = False) -> str:
+    """"[17/182] Ch. 13 (1/2) · 3 in flight · 12:41" (UI_SPEC §1.7 subtitle; "Ch 12/80" before a request names
+    a chapter); the phase while the total is unknown. ``verb``: it starts "Translating • …" (``position_line``),
+    for the places that do not name the job's kind already (the Jobs page row, the job page)."""
     parts: list[str] = []
     if snap.question:
         question = snap.question if isinstance(snap.question, Mapping) else {}
@@ -1034,7 +1060,9 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     elif snap.state is JobState.FORCE_STOPPING:
         parts.append("Force stopping…")
     progress = snap.progress
-    if snap.position and snap.is_active:
+    if verb and ((snap.position and snap.is_active) or progress.total):
+        parts.append(position_line(snap))
+    elif snap.position and snap.is_active:
         parts.append(snap.position)
     elif progress.total:
         parts.append(f"Ch {progress.completed}/{progress.total}")
@@ -1055,17 +1083,22 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     return " · ".join(parts)
 
 
-def notification_text(snap: JobSnapshot) -> str:
-    """Ongoing FGS text: "Translating *Book*: 12/80 chapters · 3 in flight" (UI_SPEC §1.9); while the job
-    asks, "waiting for your glossary decision" (glossary gates) or "waiting for your answer" (other kinds,
-    e.g. Tools › Async batch)."""
-    text = f"{kind_verb(snap.kind)} {snap.title}"
-    progress = snap.progress
-    details: list[str] = []
-    if snap.position and snap.is_active:
-        details.append(snap.position)
-    elif progress.total:
-        details.append(f"{progress.completed}/{progress.total} chapters")
+#: the notification's second line, the book's title, is cut to this many characters (owner 2026-10-30)
+NOTIFICATION_TITLE_CHARS = 40
+
+
+def short_title(title: str, limit: int = NOTIFICATION_TITLE_CHARS) -> str:
+    """``title`` on one line, cut to ``limit`` characters with "…"."""
+    text = " ".join(str(title or "").split())
+    return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "…"
+
+
+def notification_lines(snap: JobSnapshot) -> tuple:
+    """The ongoing FGS notification as (headline, book): "Translating • [17/182] Ch. 13 (1/2)" in the
+    notification's large title line (``position_line``, then in flight / Request Queue / stopping), and the
+    book's title cut to one short line in the smaller text under it (owner 2026-10-30). While the job asks,
+    the headline is "Waiting for your glossary decision" (glossary gates) or "Waiting for your answer"."""
+    details: list[str] = [position_line(snap)]
     if snap.in_flight:
         details.append(f"{snap.in_flight} in flight")
     queue_note = _request_queue_note(snap)
@@ -1076,9 +1109,16 @@ def notification_text(snap: JobSnapshot) -> str:
     elif snap.state is JobState.FORCE_STOPPING:
         details.append("force stopping")
     if snap.question:
-        details = [("refining the glossary" if getattr(snap, "refining", False) else "waiting for your glossary decision")
-                   if is_glossary_question(_question_kind(snap.question)) else "waiting for your answer"]
-    return f"{text}: {' · '.join(details)}" if details else text
+        details = [("Refining the glossary" if getattr(snap, "refining", False) else "Waiting for your glossary decision")
+                   if is_glossary_question(_question_kind(snap.question)) else "Waiting for your answer"]
+    return " · ".join(details), short_title(snap.title)
+
+
+def notification_text(snap: JobSnapshot) -> str:
+    """``notification_lines`` on one line ("Translating • [17/182] Ch. 13 (1/2) — Book"), where only one fits
+    (the iOS continued-processing task, diagnostics)."""
+    headline, book = notification_lines(snap)
+    return f"{headline} — {book}" if book else headline
 
 
 def already_active_text(snap: Any) -> str:
@@ -1560,8 +1600,11 @@ def _make_request_stream(spec: JobSpec) -> Any:
     except (TypeError, ValueError):
         request_number = None
     model = params.get("model") or (params.get("config_overrides") or {}).get("model") or None
+    # a book's translation from the Library / Jobs page / Reader is a file run too: its request cards name the
+    # chapter and file ("Chapter 13 (chunk 1/2) · ch13.xhtml"), which the job line reads (``request_position``)
+    book_run = spec.kind in ("translate", "single_chapter")
     return direct_text_stream.make_stream(
-        source_is_attachment=bool(params.get("is_attachment")),
+        source_is_attachment=bool(params.get("is_attachment")) or book_run,
         request_number=request_number,
         model=str(model) if model else None,
     )
@@ -1625,6 +1668,8 @@ class JobService:
         # (a second Resume returns that job while it is active)
         self._resume_lock = threading.RLock()
         self._resumed_into: dict[str, str] = {}
+        self._ended_targets: dict = {}  # ended job id -> its ``job_target`` (``_ended_target``)
+        self._resumed_interrupted: set = set()  # Interrupted jobs resumed this session (a second Resume is refused)
         self.adopted_ids: list[str] = []  # interrupted jobs found at this launch (launch banner)
         #: ``spec -> params | None``: the params a Resume without its own runs with (the chat sets it:
         #: a chat job resumed from the Jobs page / banner uses the chat's model now, ``ChatRuns.with_current_model``)
@@ -1842,10 +1887,62 @@ class JobService:
         if existing is not None:
             log.info("job %s reused for %s %s (it is %s)", existing.id, spec.kind, spec.title, snap.state.value)
             return SubmitResult(existing.id, True, snap)
+        self._drop_superseded(target, job.id)
         log.info("job %s queued: %s %s", job.id, spec.kind, spec.title)
         self._post(self._deliver_transition, snap, None)
         job.announced.set()  # the worker starts it only now: listeners see QUEUED before STARTING
         return SubmitResult(job.id, False, snap)
+
+    def _ended_target(self, snap: JobSnapshot) -> Optional[JobTarget]:
+        """``job_target`` of an ended job's spec, resolved once per job."""
+        if snap.id not in self._ended_targets:
+            self._ended_targets[snap.id] = job_target(snap.spec)
+        return self._ended_targets[snap.id]
+
+    def _drop_superseded(self, target: Optional[JobTarget], new_id: str) -> None:
+        """Owner 2026-10-30 ("the chat and the jobs menu in sync"): a new job for a book carries on that book's
+        unfinished work, wherever it was started (the chat, the Library, the Jobs page). The book's Stopped,
+        Failed and Interrupted entries leave Finished / the Interrupted list, so a book has one job there; a
+        Done entry stays (it finished)."""
+        if target is None:
+            return
+        with self._lock:
+            ended = list(self._interrupted) + list(self._history)
+        superseded = {snap.id for snap in ended
+                      if snap.id != new_id and not (snap.state is JobState.DONE)
+                      and target.covers(self._ended_target(snap))}
+        if not superseded:
+            return
+        with self._lock:
+            interrupted = [s for s in self._interrupted if s.id not in superseded]
+            history = [s for s in self._history if s.id not in superseded]
+            if len(interrupted) != len(self._interrupted):
+                self._interrupted = interrupted
+                self._write_interrupted_locked()
+            if len(history) != len(self._history):
+                self._history = history
+                self._write_history_locked()
+        log.info("job %s carries on %d earlier job(s) of its book", new_id, len(superseded))
+        self._changed()
+
+    def latest_job_for(self, path: Any, family: str = FAMILY_TRANSLATION) -> Optional[JobSnapshot]:
+        """The job that stands for ``path``'s work now: the active one, else the newest ended or Interrupted
+        job whose target names it (of ``family``); None when no job worked on it. The chat's Result card of a
+        book shows it, so the chat and the Jobs page say the same thing."""
+        active = self.active_job_for(path, family)
+        if active is not None or not path:
+            return active
+        wanted = target_key(path)
+        with self._lock:
+            ended = list(self._interrupted) + list(self._history)
+        best = None
+        for snap in ended:
+            found = self._ended_target(snap)
+            if found is None or found.family != family or not found.names(wanted):
+                continue
+            if best is None or (snap.created or 0) > (best.created or 0):
+                best = snap
+        return best
 
     def _live_jobs_locked(self) -> list:
         """The jobs that have not ended: the running one (also while it starts, waits at a gate or stops),
@@ -1970,6 +2067,8 @@ class JobService:
                 live = self._find_live(job_id)
                 if live is not None and live.state not in TERMINAL_STATES:
                     return SubmitResult(live.id, True, live.snapshot())  # it is still active itself
+                if job_id in self._resumed_interrupted:
+                    return None  # an Interrupted entry resumed already: refused, as before
                 snap = next((s for s in self._interrupted if s.id == job_id), None)
                 from_interrupted = snap is not None
                 if snap is None:
@@ -1993,6 +2092,8 @@ class JobService:
             left_finished = False
             with self._lock:
                 self._resumed_into[job_id] = result.job_id
+                if from_interrupted:
+                    self._resumed_interrupted.add(job_id)
                 if not from_interrupted and result.job_id != job_id:
                     # owner 2026-10-29: a resumed Stopped / Failed job carries on under Running; its old entry
                     # leaves Finished (it was the same job shown twice). Its new run lands there when it ends.
@@ -2016,7 +2117,10 @@ class JobService:
             if snap is None:
                 return False
             self._interrupted.remove(snap)
-            self._append_history_locked(replace(snap, resolution=resolution))
+            if resolution != "resumed":
+                # a resumed one carries on as its new job (owner 2026-10-30: the same job was listed twice,
+                # Interrupted under Finished next to the run that resumed it)
+                self._append_history_locked(replace(snap, resolution=resolution))
             self._write_interrupted_locked()
         self._changed()
         return True
@@ -2509,7 +2613,8 @@ class JobService:
             segments = list(stream.segments(drain=False)) if stream is not None else []
         except Exception:
             return
-        position = request_position(segments, lambda name: self._spine_position(job, name))
+        position = request_position(segments, lambda name: self._spine_position(job, name),
+                                    lambda: len(job.spine_files or ()))
         if position == job.position:
             return
         with self._lock:
@@ -2519,17 +2624,22 @@ class JobService:
     @staticmethod
     def _spine_position(job: _Job, name: str) -> int:
         """``name``'s 1-based place in the book's spine (the workspace OPF, like the Progress manager's
-        "[005]"); 0 when unknown. Looked up once per file."""
+        "[005]"); 0 when unknown. The spine (``job.spine_files``, its length the "/182") is read once."""
         key = os.path.basename(str(name or "")).lower()
         if key not in job.spine:
-            position = 0
-            try:
-                from TransateKRtoEN import _single_pass_spine_ref_for_file
+            if not job.spine_files:
+                try:
+                    from TransateKRtoEN import _single_pass_spine_files
 
-                position = int(_single_pass_spine_ref_for_file(job.output_dir, key)[1] or 0)
-            except Exception:
-                log.debug("spine position of %s unavailable", key, exc_info=True)
-            job.spine[key] = position
+                    job.spine_files = [os.path.basename(str(f or "")).lower()
+                                       for f in _single_pass_spine_files(job.output_dir)]
+                except Exception:
+                    log.debug("the book's spine is unavailable", exc_info=True)
+                if not job.spine_files:
+                    return 0  # no OPF in the workspace yet: looked up again on the next request
+            stem = os.path.splitext(key)[0]
+            job.spine[key] = next((index + 1 for index, base in enumerate(job.spine_files)
+                                   if base == key or os.path.splitext(base)[0] == stem), 0)
         return job.spine[key]
 
     @contextlib.contextmanager

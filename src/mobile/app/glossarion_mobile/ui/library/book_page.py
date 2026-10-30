@@ -526,13 +526,10 @@ class BookPageScreen(Screen):
         self.strip_mode.content.value = pm.mode_label(view.mode if view is not None else "text")
         job = self.job
         if job is not None:
-            from glossarion_mobile.services.jobs import kind_verb
+            from glossarion_mobile.services.jobs import position_line
 
-            progress = getattr(job, "progress", None)
-            line = kind_verb(job.kind)
-            if progress is not None and getattr(progress, "total", None):
-                line += f" · {progress.completed}/{progress.total}"
-            elif getattr(job, "state", None) is not None and str(getattr(job.state, "value", "")) == "QUEUED":
+            line = position_line(job)  # "Translating • [17/182] Ch. 13 (1/2)"
+            if getattr(job, "state", None) is not None and str(getattr(job.state, "value", "")) == "QUEUED":
                 line += " · queued"
             from glossarion_mobile.ui.chat.cards import glossary_question
 

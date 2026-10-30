@@ -329,14 +329,14 @@ def test_notification_text_and_strip_subtitle_follow_the_question_kind():
     batch = _snap({"id": "q3", "kind": "async_batch_question", "data": {"title": "Start Async Processing"}})
     other = _snap({"id": "q4", "kind": "something_else", "data": {}})
     for snap in (glossary, library):
-        assert notification_text(snap).endswith(": waiting for your glossary decision")
+        assert notification_text(snap) == "Waiting for your glossary decision — Book.epub"
         assert progress_line(snap) == "Waiting for your glossary decision"
     for snap in (batch, other):
-        assert notification_text(snap).endswith(": waiting for your answer")
+        assert notification_text(snap) == "Waiting for your answer — Book.epub"
         assert "glossary" not in notification_text(snap)
     assert progress_line(batch) == "Waiting for your answer: Start Async Processing"
     assert progress_line(other) == "Waiting for your answer"
-    assert notification_text(_snap()) == "Translating Book.epub: 12/80 chapters"
+    assert notification_text(_snap()) == "Translating • 12/80 — Book.epub"
 
 
 def _old_run_controller_predicate(kind):

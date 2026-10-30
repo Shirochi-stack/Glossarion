@@ -250,22 +250,27 @@ class AndroidDevice:
     def _n_get_launch_notification(self, args: dict) -> None:
         return None
 
+    @staticmethod
+    def _line(args: dict) -> str:
+        """The job notification as one line: its headline, then the book's title under it."""
+        return " — ".join(str(v) for v in (args.get("title"), args.get("text")) if v)
+
     def _n_start_job_service(self, args: dict) -> bool:
         self.fgs = {"title": args.get("title"), "text": args.get("text"), "visible": True,
                     "buttons": [dict(b) for b in (args.get("buttons") or [])]}
-        self.fgs_log.append((time.monotonic(), "start", args.get("text"), self._visible(), self._ticks()))
+        self.fgs_log.append((time.monotonic(), "start", self._line(args), self._visible(), self._ticks()))
         return True
 
     def _n_update_job_service(self, args: dict) -> bool:
         if self.fgs is None:
-            self.fgs_log.append((time.monotonic(), "update-refused", args.get("text"), self._visible(), self._ticks()))
+            self.fgs_log.append((time.monotonic(), "update-refused", self._line(args), self._visible(), self._ticks()))
             return False
         if args.get("title") is not None:
             self.fgs["title"] = args.get("title")
         if args.get("text") is not None:
             self.fgs["text"] = args.get("text")
         self.fgs["visible"] = True  # updateService re-posts the service notification (buttons kept)
-        self.fgs_log.append((time.monotonic(), "update", args.get("text"), self._visible(), self._ticks()))
+        self.fgs_log.append((time.monotonic(), "update", self._line(args), self._visible(), self._ticks()))
         return True
 
     def _n_stop_job_service(self, args: dict) -> bool:
@@ -687,7 +692,7 @@ async def _scenario(h: Harness) -> None:
     assert snack and snack[0][2] == "Review", h.notes[run2.notes_mark:]
     await d.wait(text=GLOSSARY_READY, timeout=10)  # the real SnackBar
     assert app.shell.current_route == library_route
-    assert await _until(lambda: "waiting for your glossary decision" in str((device.fgs or {}).get("text")), 15), \
+    assert await _until(lambda: "Waiting for your glossary decision" in str((device.fgs or {}).get("title")), 15), \
         device.fgs
     # the notification's Accept answers the gate, through the chat's run controller (the card's ✓ Yes path)
     await h.press(note, "accept")
@@ -719,7 +724,7 @@ async def _scenario(h: Harness) -> None:
     note = await _until(lambda: device.shade.get(nid3), 30)
     assert note and note["title"] == GLOSSARY_READY and [a["id"] for a in note["actions"]] == ["accept", "open"], \
         device.action_notifications()
-    assert await _until(lambda: any("waiting for your glossary decision" in str(r[2])
+    assert await _until(lambda: any("Waiting for your glossary decision" in str(r[2])
                                     for r in device.updates_since(hidden_at)), 15), device.fgs_log[hidden_at:]
     assert all(not r[3] for r in device.updates_since(hidden_at)), "updates must come while hidden"
     assert not any(n[1] == GLOSSARY_READY for n in h.notes[notes_hidden:]), "no snackbar while hidden"
@@ -742,7 +747,7 @@ async def _scenario(h: Harness) -> None:
             break
         assert back, f"swipe {swipe}: the job notification did not come back within 3 s ({device.fgs_log[before:]})"
         assert [b["id"] for b in device.fgs["buttons"]] == ["stop", "open"]
-        assert "waiting for your glossary decision" in device.fgs["text"]
+        assert "Waiting for your glossary decision" in device.fgs["title"]
         updates = [r for r in device.fgs_log[before:] if r[1] in ("start", "update")]
         assert updates[0][1] == "update", updates  # update_job_service on the running service, not a new one
         if swipe < 3:
@@ -761,7 +766,7 @@ async def _scenario(h: Harness) -> None:
     snap = await run3.wait_done()
     assert snap.state.name == "DONE", run3._state()
     texts = [r[2] for r in device.updates_since(progress_at)]
-    counted = sorted({t.split(": ", 1)[1].split(" chapters")[0] for t in texts if " chapters" in str(t)})
+    counted = sorted({str(t).split(" — ", 1)[0] for t in texts if str(t).startswith("Translating •")})
     assert len(counted) >= 2, f"the job notification did not keep counting while hidden: {texts}"
     assert all(not r[3] for r in device.fgs_log[progress_at:]) and h.page.app_visible is False
     assert app.dispatcher.ticks == ticks, "the UI pump ran while the app was hidden"

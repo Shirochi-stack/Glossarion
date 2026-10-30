@@ -13885,57 +13885,39 @@ def _single_pass_progress_chapter_file(chapter=None, fallback=None):
             return name
     return _clean(fallback)
 
-def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
-    """Return (zero_based_index, one_based_position) for a source spine filename."""
-    target = os.path.basename(str(chapter_basename or "")).lower()
-    if not target:
-        return None, None
-    target_stem = os.path.splitext(target)[0]
+def _single_pass_spine_from_opf_text(opf_text):
+    """The OPF's spine as the basenames of its HTML items, in reading order."""
+    import xml.etree.ElementTree as _ET
+    root = _ET.fromstring(opf_text)
+    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+    if root.tag.startswith('{'):
+        ns = {'opf': root.tag[1:root.tag.index('}')]}
 
-    def _spine_from_opf_text(opf_text):
-        import xml.etree.ElementTree as _ET
-        root = _ET.fromstring(opf_text)
-        ns = {'opf': 'http://www.idpf.org/2007/opf'}
-        if root.tag.startswith('{'):
-            ns = {'opf': root.tag[1:root.tag.index('}')]}
+    manifest = {}
+    for item in root.findall('.//opf:manifest/opf:item', ns):
+        iid = item.get('id')
+        href = item.get('href')
+        mtype = item.get('media-type', '')
+        if iid and href and ('html' in mtype.lower() or href.lower().endswith(('.html', '.xhtml', '.htm'))):
+            manifest[iid] = os.path.basename(href)
 
-        manifest = {}
-        for item in root.findall('.//opf:manifest/opf:item', ns):
-            iid = item.get('id')
-            href = item.get('href')
-            mtype = item.get('media-type', '')
-            if iid and href and ('html' in mtype.lower() or href.lower().endswith(('.html', '.xhtml', '.htm'))):
-                manifest[iid] = os.path.basename(href)
+    spine = []
+    spine_el = root.find('.//opf:spine', ns)
+    if spine_el is not None:
+        for itemref in spine_el.findall('opf:itemref', ns):
+            idref = itemref.get('idref')
+            if idref and idref in manifest:
+                spine.append(manifest[idref])
+    return spine
 
-        spine = []
-        spine_el = root.find('.//opf:spine', ns)
-        if spine_el is not None:
-            for itemref in spine_el.findall('opf:itemref', ns):
-                idref = itemref.get('idref')
-                if idref and idref in manifest:
-                    spine.append(manifest[idref])
-        return spine
-
-    def _match(spine):
-        for idx, fname in enumerate(spine or []):
-            base = os.path.basename(str(fname or "")).lower()
-            stem = os.path.splitext(base)[0]
-            if base == target or stem == target_stem:
-                return idx, idx + 1
-        return None, None
-
-    opf_candidates = []
+def _single_pass_spines(output_dir):
+    """Yield the spines to look in: the workspace OPF's, then the source EPUB's (EPUB_PATH)."""
     if output_dir:
-        workspace_opf = find_opf_path(output_dir)
-        if workspace_opf:
-            opf_candidates.append(workspace_opf)
-    for opf_path in opf_candidates:
+        opf_path = find_opf_path(output_dir)
         try:
             if opf_path and os.path.exists(opf_path):
                 with open(opf_path, "r", encoding="utf-8") as f:
-                    idx, pos = _match(_spine_from_opf_text(f.read()))
-                    if idx is not None:
-                        return idx, pos
+                    yield _single_pass_spine_from_opf_text(f.read())
         except Exception:
             pass
 
@@ -13946,11 +13928,30 @@ def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
             with zipfile.ZipFile(epub_path, "r") as zf:
                 opf_member = find_epub_opf_member(zf)
                 if opf_member:
-                    idx, pos = _match(_spine_from_opf_text(zf.read(opf_member).decode("utf-8", errors="replace")))
-                    if idx is not None:
-                        return idx, pos
+                    yield _single_pass_spine_from_opf_text(zf.read(opf_member).decode("utf-8", errors="replace"))
     except Exception:
         pass
+
+def _single_pass_spine_files(output_dir):
+    """The book's spine (HTML basenames in reading order), or [] when no OPF is found."""
+    for spine in _single_pass_spines(output_dir):
+        if spine:
+            return spine
+    return []
+
+def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
+    """Return (zero_based_index, one_based_position) for a source spine filename."""
+    target = os.path.basename(str(chapter_basename or "")).lower()
+    if not target:
+        return None, None
+    target_stem = os.path.splitext(target)[0]
+
+    for spine in _single_pass_spines(output_dir):
+        for idx, fname in enumerate(spine or []):
+            base = os.path.basename(str(fname or "")).lower()
+            stem = os.path.splitext(base)[0]
+            if base == target or stem == target_stem:
+                return idx, idx + 1
 
     return None, None
 
