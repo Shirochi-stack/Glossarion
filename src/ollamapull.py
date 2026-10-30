@@ -165,16 +165,18 @@ def _chat_status(callback: Optional[Callable[[str], None]], message: str) -> Non
             pass
 
 
-_STREAM_LOG_BREAK = re.compile(r"\n|</(?:h[1-6]|p|div|li|ul|ol|table|tr|blockquote|head|body|html)>", re.IGNORECASE)
+#: after a new line or closing block tag, and before an opening <p> (models that never close their paragraphs)
+_STREAM_LOG_BREAK = re.compile(r"\n|</(?:h[1-6]|p|div|li|ul|ol|table|tr|blockquote|head|body|html)>|(?=<p[\s>])", re.IGNORECASE)
 
 
 def _stream_log_fragment(pending: str, fragment: str, *, prefix: str = "",
                          force: bool = False) -> str:
-    """Emit readable live log lines while retaining a short incomplete line: a line ends at a new line or after
-    a closing block tag, and a long one at its last space, never inside a word or tag."""
+    """Emit readable live log lines while retaining a short incomplete line: a line ends at a new line, after
+    a closing block tag or before an opening <p>, and a long one at its last space, never inside a word or tag."""
     pending += fragment
     while True:
-        found = _STREAM_LOG_BREAK.search(pending)
+        pending = pending.lstrip("\n")
+        found = _STREAM_LOG_BREAK.search(pending, 1)  # from 1: a line that starts with <p> is not an empty line
         if found is None:
             break
         line, pending = pending[:found.end()], pending[found.end():]

@@ -206,3 +206,11 @@ def test_stream_log_never_cuts_a_long_line_inside_a_word_or_tag(capsys):
     lines = _stream_log([" ".join(words[:50]) + " ", '<a href="x">', " ".join(words[50:])], capsys)
     assert len(lines) > 1 and all(len(line) <= 170 for line in lines)
     assert " ".join(lines).split() == (" ".join(words[:50]) + ' <a href="x">' + " ".join(words[50:])).split()
+
+
+def test_stream_log_breaks_before_an_opening_p_when_paragraphs_are_not_closed(capsys):
+    """Owner 2026-10-30 (qwen3.5:0.8b): <p>...<br/><br/><p>... with no </p> ran together."""
+    assert _stream_log(["<html><body><h1>Guild</h1>\n<p>One. <br/>", "<br/><", "p>Two. <br/><br/><p class=\"x\">Three.",
+                        "</p><p>Four.<pre>keep</pre>"], capsys) == [
+        "<html><body><h1>Guild</h1>", "<p>One. <br/><br/>", "<p>Two. <br/><br/>", '<p class="x">Three.</p>',
+        "<p>Four.<pre>keep</pre>"]
