@@ -145,3 +145,63 @@ def test_log_never_claims_what_was_not_sent(endpoint, monkeypatch, tmp_path, cap
     assert "top_k=40" in caplog.text.split("not sent on this route", 1)[1]
     assert "top_k" not in caplog.text.split("not sent on this route", 1)[0]
     assert client._get_anti_duplicate_endpoint_params("openai") == {}  # official OpenAI rejects top_k
+
+
+EVERY_SETTING = {"top_p": 0.9, "top_k": 40, "min_p": 0.05, "frequency_penalty": 0.2, "presence_penalty": 0.3,
+                 "repetition_penalty": 1.1, "repeat_penalty": 1.1}
+OFF = {"ENABLE_ANTI_DUPLICATE": "1", "TOP_P": "0.0", "TOP_K": "0", "MIN_P": "0.0", "FREQUENCY_PENALTY": "0.0",
+       "PRESENCE_PENALTY": "0.0", "REPETITION_PENALTY": "1.0"}
+
+
+def _prefix_route(endpoint, monkeypatch, prefix):
+    from unified_api_client import UnifiedClient
+
+    url = f"http://127.0.0.1:{endpoint.server_port}/v1"
+    monkeypatch.setitem(UnifiedClient._LOCAL_OPENAI_ROUTES, f"{prefix}/", (prefix, url))
+    monkeypatch.delenv(UnifiedClient._LOCAL_LLM_URL_ENV, raising=False)
+
+
+@pytest.mark.parametrize("prefix", ["lmstudio", "ollama", "local"])
+def test_a_local_model_prefix_sends_every_setting(endpoint, monkeypatch, tmp_path, prefix):
+    _prefix_route(endpoint, monkeypatch, prefix)
+    body = _send(endpoint, monkeypatch, tmp_path, "127.0.0.1", "translation",
+                 {**TRANSLATION, "USE_CUSTOM_OPENAI_ENDPOINT": "0"}, model=f"{prefix}/gemma-4-26b")
+    assert body["model"] == "gemma-4-26b"
+    assert {key: body.get(key) for key in EVERY_SETTING} == EVERY_SETTING
+
+
+def test_a_custom_endpoint_sends_every_setting(endpoint, monkeypatch, tmp_path):
+    body = _send(endpoint, monkeypatch, tmp_path, "127.0.0.1", "translation", TRANSLATION)
+    assert {key: body.get(key) for key in EVERY_SETTING} == EVERY_SETTING
+
+
+@pytest.mark.parametrize("env", [OFF, {**TRANSLATION, "ENABLE_ANTI_DUPLICATE": "0"}], ids=["sliders off", "toggle off"])
+def test_a_local_model_prefix_leaves_the_server_settings_alone_when_off(endpoint, monkeypatch, tmp_path, env):
+    _prefix_route(endpoint, monkeypatch, "lmstudio")
+    body = _send(endpoint, monkeypatch, tmp_path, "127.0.0.1", "translation",
+                 {**env, "USE_CUSTOM_OPENAI_ENDPOINT": "0"}, model="lmstudio/gemma-4-26b")
+    for key in EVERY_SETTING:
+        assert key not in body
+
+
+def test_the_route_decides_and_not_the_clients_provider_name(endpoint, monkeypatch, tmp_path):
+    from unified_api_client import UnifiedClient
+
+    for key, value in TRANSLATION.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("USE_CUSTOM_OPENAI_ENDPOINT", "0")
+    client = UnifiedClient(model="gemma-4-26b", api_key="sk-test", output_dir=str(tmp_path))
+    client.client_type = "mistral"  # not on the official list of top_p providers
+    assert client._get_anti_duplicate_params(0.8, log=False) == {}  # an official API keeps its list
+    assert client._get_anti_duplicate_endpoint_params("mistral") == {}
+    assert client._get_anti_duplicate_params(0.8, log=False, provider="mistral", is_local_endpoint=True) == {
+        "top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.3}
+
+
+def test_a_model_that_rejects_sampling_still_does_not_get_it_on_a_custom_endpoint(endpoint, monkeypatch, tmp_path):
+    from temperature_compatibility import claude_omits_sampling
+
+    model = next(name for name in ("claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5")
+                 if claude_omits_sampling(name))
+    body = _send(endpoint, monkeypatch, tmp_path, "127.0.0.1", "translation", TRANSLATION, model=model)
+    assert "top_p" not in body and "top_k" not in body

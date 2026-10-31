@@ -20962,8 +20962,9 @@ class UnifiedClient:
             return True
         return False
 
-    def _get_anti_duplicate_params(self, temperature, log_key=None, log=True):
-        """Get user-configured anti-duplicate parameters from GUI settings"""
+    def _get_anti_duplicate_params(self, temperature, log_key=None, log=True, provider=None, is_local_endpoint=False):
+        """Get user-configured anti-duplicate parameters from GUI settings. ``provider`` / ``is_local_endpoint``:
+        where this request really goes, which ``client_type`` alone does not say (``lmstudio/``, a custom URL)."""
         # Check if user enabled anti-duplicate
         if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
             return {}
@@ -20977,7 +20978,8 @@ class UnifiedClient:
         # Apply parameters based on provider capabilities
         params = {}
         
-        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'opencode', 'nvidia', 'authnd']:
+        if (self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'opencode', 'nvidia', 'authnd']
+                or self._anti_duplicate_own_server(provider, is_local_endpoint)):
             # OpenAI-compatible providers
             if frequency_penalty > 0:
                 params["frequency_penalty"] = frequency_penalty
@@ -21031,7 +21033,7 @@ class UnifiedClient:
                 return True
         except Exception:
             pass
-        if is_local_endpoint or self._anti_duplicate_custom_endpoint_active(provider):
+        if self._anti_duplicate_own_server(provider, is_local_endpoint):
             return True
         provider = str(provider or getattr(self, "client_type", "") or "").strip().lower()
         return provider in {
@@ -21055,13 +21057,19 @@ class UnifiedClient:
         custom_base_url = os.getenv("OPENAI_CUSTOM_BASE_URL", os.getenv("OPENAI_API_BASE", "")).strip().rstrip("/")
         return bool(custom_base_url) and custom_base_url != "https://api.openai.com/v1"
 
+    def _anti_duplicate_own_server(self, provider=None, is_local_endpoint=False):
+        """The request goes to a local or custom endpoint (by URL, a custom endpoint or an ``lmstudio/`` style
+        prefix) or OpenRouter, which take every sampling setting; only official APIs have their own lists."""
+        name = str(provider or getattr(self, "client_type", "") or "").strip().lower()
+        return bool(is_local_endpoint or name == "openrouter" or name in self._LOCAL_OPENAI_PROVIDERS
+                    or self._anti_duplicate_custom_endpoint_active(name))
+
     def _get_anti_duplicate_endpoint_params(self, provider=None, is_local_endpoint=False):
         """top_k, the repetition penalty and a top_p of 1 for local and custom endpoints and OpenRouter.
         Official APIs reject the first two; a local server would apply its own preset without top_p."""
         if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
             return {}
-        name = str(provider or getattr(self, "client_type", "") or "").strip().lower()
-        if not (is_local_endpoint or name == "openrouter" or self._anti_duplicate_custom_endpoint_active(name)):
+        if not self._anti_duplicate_own_server(provider, is_local_endpoint):
             return {}
         try:
             top_p = float(self._get_anti_duplicate_env("TOP_P", "1.0") or 1.0)
@@ -25588,7 +25596,8 @@ class UnifiedClient:
                     is_gemini_endpoint = provider == "gemini-openai" or effective_model.lower().startswith('gemini')
                     
                     # Get user-configured anti-duplicate parameters
-                    anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+                    anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False, provider=provider,
+                                                                       is_local_endpoint=is_local_endpoint)
                     anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params(
                         provider,
                         is_local_endpoint=is_local_endpoint,
@@ -27901,7 +27910,8 @@ class UnifiedClient:
                 elif self._get_openai_compatible_thinking_disabled(provider, effective_model):
                     data.setdefault("thinking", {"type": "disabled"})
             
-            anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+            anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False, provider=provider,
+                                                               is_local_endpoint=is_local_endpoint)
             if provider == 'openai' and use_responses_api:
                 effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
                 if effort:
