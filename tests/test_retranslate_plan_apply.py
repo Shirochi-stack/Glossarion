@@ -1073,9 +1073,16 @@ _GLOSSARY_CSV = (
 
 def test_manual_refinement_code_is_verbatim():
     funcs = _top_level(_source("glossary_progress_core"))
-    run_body = _legacy_lines(15100, 15196, 4, 0)
+    run_body = _apply_edits(_legacy_lines(15100, 15196, 4, 0), [  # 2026-10-31: the refinement key pool's limit
+        ("    effective_output_tokens = extractor._effective_glossary_output_limit(config, model)\n",
+         "    effective_output_tokens = extractor._refinement_pool_output_limit(\n"
+         "        config, extractor._effective_glossary_output_limit(config, model))\n", 1),
+    ])
     assert run_body in funcs["run_manual_glossary_refinement"]
     prepare = _apply_edits(_legacy_lines(18239, 18324, 8, 0), [
+        ("        effective_output_tokens = extractor._effective_glossary_output_limit(config, model)\n",
+         "        effective_output_tokens = extractor._refinement_pool_output_limit(\n"
+         "            config, extractor._effective_glossary_output_limit(config, model))\n", 1),
         ("        self._show_message(\n"
          "            'warning',\n"
          "            'Glossary Not Found',\n"

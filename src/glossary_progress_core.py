@@ -2986,7 +2986,8 @@ def prepare_manual_glossary_refinement(
             plan_refinement,
         )
         config = getattr(self, 'config', {}) or {}
-        effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
+        effective_output_tokens = extractor._refinement_pool_output_limit(
+            config, extractor._effective_glossary_output_limit(config, model))
         compression_factor = float(os.getenv(
             'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',
             os.getenv('COMPRESSION_FACTOR', str(config.get('compression_factor', 1.0))),
@@ -3164,7 +3165,8 @@ def run_manual_glossary_refinement(
         config,
         context='glossary_refinement',
     )
-    effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
+    effective_output_tokens = extractor._refinement_pool_output_limit(
+        config, extractor._effective_glossary_output_limit(config, model))
     compression_factor = float(os.getenv(
         'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',
         os.getenv('COMPRESSION_FACTOR', str(config.get('compression_factor', 1.0))),

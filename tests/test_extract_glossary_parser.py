@@ -242,9 +242,34 @@ def test_priority_keeps_original_order_when_everything_fits(monkeypatch):
     assert [row[0] for row in _priority_chunk_rows(plan)[0]] == [e['type'] for e in entries]
 
 
-def test_priority_rejects_individual_row_larger_than_budget(monkeypatch):
-    with pytest.raises(ValueError, match='entry exceeds the refinement chunk budget'):
-        _priority_plan(_priority_entries('character', 'surnames'), 5, monkeypatch)
+def test_priority_sends_a_row_larger_than_the_budget_alone(monkeypatch, capsys):
+    """Owner 2026-10-31: a row cannot be split, and that is no reason to fail the run."""
+    entries = _priority_entries('character', 'surnames')
+    plan = _priority_plan(entries, 5, monkeypatch)
+    rows = _priority_chunk_rows(plan)
+    assert plan.total_chunks == len(entries) and all(len(chunk) == 1 for chunk in rows)
+    assert 'as its own request' in capsys.readouterr().out
+
+
+def test_refinement_budget_follows_the_refinement_key_pool(monkeypatch):
+    """Owner 2026-10-31: 300,000 on the refinement key, yet the chunk budget came from the 8,192 global limit."""
+    from extract_glossary_from_epub import _refinement_pool_output_limit as limit
+
+    keys = [{"api_key": "x", "individual_output_token_limit": 300000}]
+    monkeypatch.setenv("USE_GLOSSARY_REFINEMENT_KEYS", "1")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_API_KEYS", json.dumps(keys))
+    assert limit({}, 8192) == 300000
+    # rotating keys: the smallest, and a key without its own limit counts as the global one
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_API_KEYS", json.dumps(keys + [{"api_key": "y"}]))
+    assert limit({}, 8192) == 8192
+    # a disabled key does not count; the pool switched off does not count
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_API_KEYS", json.dumps(keys + [{"api_key": "y", "enabled": False}]))
+    assert limit({}, 8192) == 300000
+    monkeypatch.setenv("USE_GLOSSARY_REFINEMENT_KEYS", "0")
+    assert limit({}, 8192) == 8192
+    monkeypatch.delenv("USE_GLOSSARY_REFINEMENT_KEYS")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_API_KEYS", "[]")
+    assert limit({"use_glossary_refinement_keys": True, "glossary_refinement_keys": keys}, 8192) == 300000
 
 
 def test_priority_preserves_quoted_csv_and_unit_separator_rows(monkeypatch):
