@@ -846,6 +846,7 @@ class _Job:
     position: str = ""  # hotfix 8: the newest in-flight request, "[5] Ch. 3 (1/4)" (``request_position``)
     spine: dict = field(default_factory=dict)  # source file basename -> its 1-based spine position (or 0)
     spine_files: Optional[list] = None  # the book's spine basenames (``_spine_position``), read once
+    chapter_spine: Optional[dict] = None  # chapter number -> its 1-based spine position (``_chapter_spine_position``)
     # hotfix 1 issue 5: what the job works on (``job_target``) and its request (``spec_key``), set at submit
     target: Optional[JobTarget] = None
     spec_key: str = ""
@@ -994,21 +995,30 @@ def _request_queue_note(snap: Any, now: Optional[float] = None) -> str:
     return f"⏳ waiting until {starts}" if starts else "⏳ waiting (Request Queue)"
 
 
-_POSITION_CHAPTER = re.compile(r"\b(chapter|section|merged)\s+(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+_POSITION_CHAPTER = re.compile(r"\b(chapter|section|merged)\s+(-?\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)?)", re.IGNORECASE)
 _POSITION_CHUNK = re.compile(r"\bchunk\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _POSITION_FILE = re.compile(r"([\w.-]+\.(?:x?html?|txt))\b", re.IGNORECASE)
 
 
+def _same_chapter(segment: Mapping, chapter: Any) -> bool:
+    """The request card ``segment`` names the chapter of the ``_POSITION_CHAPTER`` match ``chapter``."""
+    match = _POSITION_CHAPTER.search(str(segment.get("label") or ""))
+    return bool(match) and match.group(1).lower() == chapter.group(1).lower() and match.group(2) == chapter.group(2)
+
+
 def request_position(segments: Sequence[Any], spine_of: Callable[[str], int] = lambda name: 0,
-                     spine_total: Any = 0) -> str:
+                     spine_total: Any = 0, chapter_spine: Callable[[str], int] = lambda number: 0) -> str:
     """The newest in-flight request card of a job (``direct_text_stream`` segments, spine order) as
     "[17/182] Ch. 13 (1/2)": its spine position (``spine_of(file)``) out of ``spine_total`` (an int, or a
     callable asked after ``spine_of``, which may read the spine; the position alone without a total, both
-    left out when unknown), chapter number and chunk; "Sec. 2" for text sources. '' when no request names
-    a chapter."""
-    for segment in reversed(list(segments or ())):
-        if not isinstance(segment, Mapping) or segment.get("complete"):
-            continue
+    left out when unknown), chapter number and chunk; "Sec. 2" for text sources. Between two requests, or
+    while only a request that names no chapter runs, the newest finished card's: a sequential run (the
+    glossary stage, an on-device model) would blink back to no chapter after every answer. A card that names
+    no file (the client's own "Chapter 2 ... API call in progress" line) takes the file of a card of the same
+    chapter, else ``chapter_spine(number)``. '' when no request names a chapter."""
+    cards = [s for s in reversed(list(segments or ())) if isinstance(s, Mapping)]
+    cards = [s for s in cards if not s.get("complete")] + [s for s in cards if s.get("complete")]
+    for segment in cards:
         label = str(segment.get("label") or "")
         chapter = _POSITION_CHAPTER.search(label)
         if not chapter:
@@ -1016,15 +1026,27 @@ def request_position(segments: Sequence[Any], spine_of: Callable[[str], int] = l
         word = {"chapter": "Ch.", "section": "Sec.", "merged": "Merged"}[chapter.group(1).lower()]
         text = f"{word} {chapter.group(2)}"
         chunk = _POSITION_CHUNK.search(label)
-        if chunk:
+        if chunk and int(chunk.group(2)) > 1:  # a chapter that is not split has no chunk to name
             text += f" ({chunk.group(1)}/{chunk.group(2)})"
-        found = _POSITION_FILE.search(label)
-        spine = spine_of(found.group(1)) if found else 0
+        found = next(filter(None, (_POSITION_FILE.search(str(s.get("label") or "")) for s in cards
+                                   if _same_chapter(s, chapter))), None)
+        spine = spine_of(found.group(1)) if found else chapter_spine(chapter.group(2))
         if not spine:
             return text
         total = int((spine_total() if callable(spine_total) else spine_total) or 0)
         return f"[{spine}/{total}] {text}" if total >= spine else f"[{spine}] {text}"
     return ""
+
+
+def progress_view(snap: Any) -> str:
+    """Which view of the Progress window a job's Progress button opens, "glossary" or "chapters": a glossary
+    job's glossary, and a book job still in its glossary stage (its requests name chapters and no translation
+    progress exists yet); the chapters otherwise."""
+    if _spec_kind(getattr(snap, "spec", None)) in ("extract_glossary", "glossary_refine"):
+        return "glossary"
+    progress = getattr(snap, "progress", None)
+    staged = getattr(snap, "is_active", False) and getattr(snap, "position", "") and not getattr(progress, "total", 0)
+    return "glossary" if staged else "chapters"
 
 
 def position_line(snap: Any) -> str:
@@ -1353,6 +1375,11 @@ class JobBackend:
         back to the translation protocol above (it latches the owner's ``stop_requested``,
         which the glossary extractor's stop callback polls).
         """
+        if force or not graceful:  # the on-device engine's generation ends even if the flags are cleared soon
+            engine = sys.modules.get("glossarion_mobile.services.local_llm.service")
+            engine = engine.default_service() if engine is not None else None
+            if engine is not None:
+                engine.stop_generation()
         stop_control = self._module("stop_control")
         glossary_stop = getattr(stop_control, "request_glossary_stop", None) if kind == "glossary" else None
         if callable(glossary_stop):
@@ -1602,7 +1629,7 @@ def _make_request_stream(spec: JobSpec) -> Any:
     model = params.get("model") or (params.get("config_overrides") or {}).get("model") or None
     # a book's translation from the Library / Jobs page / Reader is a file run too: its request cards name the
     # chapter and file ("Chapter 13 (chunk 1/2) · ch13.xhtml"), which the job line reads (``request_position``)
-    book_run = spec.kind in ("translate", "single_chapter")
+    book_run = spec.kind in ("translate", "single_chapter", "extract_glossary")
     return direct_text_stream.make_stream(
         source_is_attachment=bool(params.get("is_attachment")) or book_run,
         request_number=request_number,
@@ -1621,7 +1648,22 @@ QuestionListener = Callable[[JobSnapshot, Mapping[str, Any]], Any]
 EventListener = Callable[[str, str, Mapping[str, Any]], Any]
 
 
+def _job_epub(job: Any) -> str:
+    """The EPUB a job works on (the file a chat attachment send names, else its inputs), '' without one."""
+    spec = getattr(job, "spec", None)
+    params = _spec_field(spec, "params") if spec is not None else None
+    explicit = params.get(JOB_TARGET_PARAM) if isinstance(params, Mapping) else None
+    if explicit:
+        paths = [explicit] if isinstance(explicit, (str, os.PathLike)) else list(explicit)
+    else:
+        paths = list(_spec_field(spec, "inputs") or ()) if spec is not None else []
+    return next((os.fspath(p) for p in paths if str(p).lower().endswith(".epub")), "")
+
+
 class JobService:
+    #: seconds between the repaints that keep a running job's elapsed time moving
+    elapsed_tick_interval = 1.0
+
     def __init__(
         self,
         *,
@@ -2614,7 +2656,8 @@ class JobService:
         except Exception:
             return
         position = request_position(segments, lambda name: self._spine_position(job, name),
-                                    lambda: len(job.spine_files or ()))
+                                    lambda: len(job.spine_files or ()),
+                                    lambda number: self._chapter_spine_position(job, number))
         if position == job.position:
             return
         with self._lock:
@@ -2624,23 +2667,51 @@ class JobService:
     @staticmethod
     def _spine_position(job: _Job, name: str) -> int:
         """``name``'s 1-based place in the book's spine (the workspace OPF, like the Progress manager's
-        "[005]"); 0 when unknown. The spine (``job.spine_files``, its length the "/182") is read once."""
+        "[005]", else the job's own EPUB: the glossary stage runs before the workspace exists); 0 when
+        unknown. The spine (``job.spine_files``, its length the "/182") is read once."""
         key = os.path.basename(str(name or "")).lower()
         if key not in job.spine:
-            if not job.spine_files:
-                try:
-                    from TransateKRtoEN import _single_pass_spine_files
-
-                    job.spine_files = [os.path.basename(str(f or "")).lower()
-                                       for f in _single_pass_spine_files(job.output_dir)]
-                except Exception:
-                    log.debug("the book's spine is unavailable", exc_info=True)
-                if not job.spine_files:
-                    return 0  # no OPF in the workspace yet: looked up again on the next request
+            if not JobService._read_spine(job):
+                return 0  # no OPF in the workspace yet: looked up again on the next request
             stem = os.path.splitext(key)[0]
             job.spine[key] = next((index + 1 for index, base in enumerate(job.spine_files)
                                    if base == key or os.path.splitext(base)[0] == stem), 0)
         return job.spine[key]
+
+    @staticmethod
+    def _read_spine(job: _Job) -> list:
+        """``job.spine_files``, read when it has none yet."""
+        if not job.spine_files:
+            try:
+                from TransateKRtoEN import _single_pass_spine_files
+
+                job.spine_files = [os.path.basename(str(f or "")).lower()
+                                   for f in _single_pass_spine_files(job.output_dir, _job_epub(job))]
+            except Exception:
+                log.debug("the book's spine is unavailable", exc_info=True)
+        return job.spine_files or []
+
+    @staticmethod
+    def _chapter_spine_position(job: _Job, number: str) -> int:
+        """The 1-based spine place of the file that the pipeline numbers as chapter ``number`` (a request card
+        that names no file; "1-99", a merged request's first), by the pipeline's own display numbering. 0 when
+        unknown, or when two spine files carry that number: no position beats a wrong one."""
+        if job.chapter_spine is None:
+            files = JobService._read_spine(job)
+            if not files:
+                return 0  # no OPF in the workspace yet: looked up again on the next request
+            try:
+                from TransateKRtoEN import _assign_translation_display_chapter_numbers, is_configured_special_filename
+
+                numbers = _assign_translation_display_chapter_numbers([{"filename": base} for base in files],
+                                                                      is_configured_special_filename)
+            except Exception:
+                log.debug("the book's chapter numbers are unavailable", exc_info=True)
+                return 0
+            job.chapter_spine = {value: index + 1 for index, value in enumerate(numbers)
+                                 if value > 0 and numbers.count(value) == 1}
+        first = re.match(r"\d+(?![\d.])", str(number or ""))
+        return job.chapter_spine.get(int(first.group(0)), 0) if first else 0
 
     @contextlib.contextmanager
     def _draining(self, job: _Job) -> Iterator[None]:
@@ -2657,6 +2728,7 @@ class JobService:
             return
         stop = threading.Event()
         interval = max(0.01, float(self.stream_drain_interval))
+        ticked = [self.clock()]
 
         def loop() -> None:
             while not stop.wait(interval):
@@ -2665,6 +2737,10 @@ class JobService:
                 except Exception:
                     log.debug("request stream drain failed", exc_info=True)
                 self._track_position(job)
+                # the job line's elapsed time: nothing else repaints while one long request runs
+                if self.clock() - ticked[0] >= self.elapsed_tick_interval:
+                    ticked[0] = self.clock()
+                    self._changed()
 
         thread = threading.Thread(target=loop, name="gl-job-stream", daemon=True)
         thread.start()
@@ -2708,7 +2784,7 @@ class JobService:
             config_taken = True
             lock = self.backend.job_lock
             with self.backend.scoped_process_state(capture_stdout=host.log, lock=lock), \
-                    no_sign_in_scope(job.spec.kind), local_context_scope():
+                    no_sign_in_scope(job.spec.kind), local_context_scope(), _env_scope("GLOSSARY_STREAM_CARDS", "1"):
                 # Held from the run reset to the owner latch: a stop protocol still running on
                 # gl-job-stop (the previous job's, or this job's own) never interleaves with them.
                 with self._stop_lock:

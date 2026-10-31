@@ -776,18 +776,25 @@ class GlossaryFeature:
             await asyncio.sleep(0.05)
         return None
 
-    def open_progress_for(self, row: Any) -> Optional[str]:
+    def open_progress_for(self, row: Any) -> Any:
+        """The Glossary Progress manager of ``row``'s book: the Library's row when the shelf has it, else (a book
+        that only has a glossary so far) a row over its glossary folder (``ChatFeature.open_progress``, the Job
+        screen's route). The route id, or the task that opens it; the SourcePicker without a Library."""
         book = self.service.book_for_glossary(row)
         library = getattr(self.app, "library", None)
         ctx = self.context()
-        if book is None or library is None:
+        if library is not None and book is not None:
+            bid = library.bid_for(book)
+            ctx.go("tools.progress.glossary", None, {"out": bid})
+            return bid
+        opener = getattr(getattr(self.app, "chat_feature", None), "open_progress", None)
+        folder = str(row.folder or os.path.dirname(row.path) or "")
+        if library is None or not folder or not callable(opener):
             ctx.go("tools.progress.glossary")
             return None
-        bid = library.bid_for(book)
-        ctx.go("tools.progress.glossary", None, {"out": bid})
-        return bid
+        return self.spawn(opener(folder, glossary=True))
 
-    def open_progress_for_path(self, path: Optional[str]) -> Optional[str]:
+    def open_progress_for_path(self, path: Optional[str]) -> Any:
         from glossarion_mobile.services.glossary import GlossaryFile
 
         if not path:

@@ -16,8 +16,9 @@ simulation starts back - "scrolls past the bottom".
 
 The fix keeps the page's height still while the job runs: the Job page's request cards sit in a box of fixed
 height (``JOB_REQUESTS_BOX_HEIGHT``) that scrolls itself to the newest card, like the chat card's Requests list
-(U12 item 3), so a new or growing card moves only the box's own content. A finished job's short list is a plain
-Column at its natural height again.
+(U12 item 3), so a new or growing card moves only the box's own content. Since the owner's 2026-10-31 report
+("empty space when there is less than 3 requests") that holds from the moment the cards fill the box: until
+then they are a plain Column at their natural height, as a finished job's short list is.
 
 ``PaintedPageList`` extends ``test_hotfix2_job_strip_scroll.PageListClient`` with the frame Flutter paints:
 the Log card's position on screen at layout, before the post-frame pin, with the offset NOT clamped (an offset
@@ -109,13 +110,21 @@ def test_job_page_never_paints_the_log_card_off_its_place_while_requests_start(a
             for n in range(2):  # a request or two before the reader goes down
                 await h.job_tick(n)
                 await client.frame()
+            # few cards are a plain Column with no empty area under it; the page stands still once they fill the box
+            assert screen.requests_box.height is None and screen.requests_box.content is screen.requests_short
+            first = 2
+            while screen.requests_box.height is None:
+                await h.job_tick(first)
+                await client.frame()
+                first += 1
+                assert first < 14, "the cards never filled the box"
             await client.user_scroll_to(client.max_extent)
             await client.frame()
             assert client.distance_from_end == 0.0
             log_top = _S.item_offset(screen.page_list, log_card) - client.pixels
             client.painted.clear()
             box = getattr(getattr(screen, "requests_box", None), "height", None)
-            for n in range(2, 14):  # a new request every other tick, the newest preview a line longer each tick
+            for n in range(first, 14):  # a new request every other tick, the newest preview a line longer each tick
                 await h.job_tick(n)
                 await client.frame()
             # a request card shrinks (its preview restarts short, the phase chip goes): content above the
@@ -140,8 +149,11 @@ def test_job_page_never_paints_the_log_card_off_its_place_while_requests_start(a
             del h.segments[1:]
             h.steps.finish()
             await asyncio.to_thread(_S._J.wait_for, lambda: h.service.snapshot(h.job_id).is_terminal)
-            for _ in range(4):
+            for _ in range(250):  # the end's transition reaches the screen through the event loop, in real time
                 await h.tick()
+                if screen.snap.is_terminal:
+                    break
+                await asyncio.sleep(0.02)
             assert screen.snap.is_terminal
             assert screen.requests_box.height is None and screen.requests_box.content is screen.requests_short
             assert len(screen.requests_short.controls) == 1 and not screen.requests_list.controls

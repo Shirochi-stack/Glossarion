@@ -2826,6 +2826,9 @@ class ChatView:
     async def _open_progress_async(self, item: Any = None) -> Optional[str]:
         opener = getattr(self.env, "open_progress", None) if self.env is not None else None
         folder, source = await self.env.run_io(self._reader_target, item) if self.env is not None else ("", "")
+        run = self.env.runs.run_for(self.cid) if self.env is not None and self.env.runs is not None else None
+        # the glossary stage runs before the workspace exists: its name and place find the glossary's progress
+        folder = folder or str(getattr(run, "output_dir", "") or "")
         if not folder or opener is None:
             self.notify("No output folder for this chat yet")
             return None

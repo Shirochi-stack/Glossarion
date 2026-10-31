@@ -47,17 +47,19 @@ def _event(value):
     return type("E", (), {"control": type("C", (), {"value": value})()})()
 
 
-def test_context_control_slider_steps_and_the_field_goes_past_16384():
+def test_context_control_slider_steps_and_the_field():
     from glossarion_mobile.ui.screens.local_models_panel import ContextControl
 
     seen = []
     control = ContextControl(8192, seen.append)
-    assert (control.slider.min, control.slider.max, control.slider.divisions) == (2048, 16384, 14)
+    assert (control.slider.min, control.slider.max, control.slider.divisions) == (2048, 262144, 254)
     assert control.slider.value == 8192 and control.field.value == "8192"
     control._from_slider(_event(12100.0))  # snaps to 1,024 steps
     assert seen[-1] == 12288 and control.field.value == "12288"
-    control._from_field(_event("32768"))  # the field goes beyond the slider, which stays at its end
-    assert seen[-1] == 32768 and control.slider.value == 16384
+    control._from_slider(_event(262144.0))  # the slider's end, what the models support (owner 2026-10-31)
+    assert seen[-1] == 262144 and control.field.value == "262144"
+    control._from_field(_event("65537"))  # the field takes exact values
+    assert seen[-1] == 65537 and control.slider.value == 65537
     count = len(seen)
     for bad in ("", "abc", "100", "999999"):  # not a number, below 512, above presets.MAX_CTX
         control._from_field(_event(bad))
@@ -176,9 +178,11 @@ def test_welcome_request_size_shows_the_context_for_an_on_device_model(tmp_path)
     service, _engine = _service(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     rows = _by_key(s._run_budget())
-    assert rows["welcome-ctx"].value == "2048" and rows["welcome-ctx-slider"].value == 2048
+    # owner 2026-10-31: Welcome starts every on-device model at 16,384 when no Context is saved
+    assert rows["welcome-ctx"].value == "16384" and rows["welcome-ctx-slider"].value == 16384
+    assert service.settings()["n_ctx"] == 16384
     # owner 2026-10-20: both editable; the output starts at half the context and never exceeds it
-    assert rows["welcome-max-tokens"].value == "1024" and not rows["welcome-max-tokens"].disabled
+    assert rows["welcome-max-tokens"].value == "8192" and not rows["welcome-max-tokens"].disabled
     assert not rows["welcome-max-tokens-slider"].disabled
     assert s.default_batch_size() == 1
     s.context_control._from_slider(_event(10240.0))
@@ -202,7 +206,7 @@ def test_welcome_finish_saves_the_request_size_it_showed(tmp_path):
     service, _engine = _service(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     updates = s.finish()
-    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 1024  # Heavy: 2,048 context
+    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 8192  # half of Welcome's 16,384
 
     s = _welcome(service, "gpt-6")
     updates = s.finish()

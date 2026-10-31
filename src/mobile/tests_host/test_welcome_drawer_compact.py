@@ -181,7 +181,10 @@ def test_page_one_fits_the_phone_without_scrolling(width, with_engine, tmp_path)
     # Skip/Back/Next row 48 and the body column's 2 x 10 spacing
     budget = HEIGHTS[width] - (24 + 56 + 48 + 32 + 8 + 48 + 20)
     height = _page_height(s, content_w)
-    assert height <= budget, (width, height, budget)
+    if with_engine and width < 412:  # 360 x 800: the Custom cells' row needs ~50 dp more than is left: it scrolls
+        assert s.page_area.content.scroll == ft.ScrollMode.AUTO
+    else:
+        assert height <= budget, (width, height, budget)
     # the cells are half the row: the longest short label fits its button (8 dp padding each side)
     cell = (content_w - 8) / 2
     for provider, label in SIGN_INS + KEYLESS:
@@ -285,12 +288,13 @@ def test_page_one_lists_the_users_own_on_device_presets(tmp_path):
     s = screen(**kwargs)
     rows = by_key(s.page_area.content)
     cells = rows["welcome-ondevice"].controls
-    assert len(cells) == 5 and all(c.col == {"xs": 3} for c in cells)  # the fifth wraps onto a second row
-    assert cells[-1] is rows["welcome-ondevice-gemma-e2b"]
-    assert cells[-1].content.controls[0].value == "Gemma E2B"
+    # the fifth wraps onto a second row, above the Custom cells
+    assert len(cells) == 9 and all(c.col == {"xs": 3} for c in cells)
+    assert cells[4] is rows["welcome-ondevice-gemma-e2b"]
+    assert cells[4].content.controls[0].value == "Gemma E2B"
     picked = []
     s.use_ondevice = lambda index: picked.append(index)
-    cells[-1].on_click(None)
+    cells[4].on_click(None)
     assert picked == [4] and lp.load_presets(kwargs["prefs"])[4]["name"] == "Gemma E2B"
 
 
@@ -312,36 +316,44 @@ def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_pa
     switch = rows["welcome-gpu"]
     assert switch.visible and switch.value is False and switch.label == "Use GPU (experimental)"
     assert "welcome-gpu-note" not in rows and "welcome-gpu-status" not in rows  # page 1 stays compact
-    assert not rows["welcome-gpu-presets"].visible
+    assert "welcome-gpu-presets" not in rows  # the Custom cells replace that button
     # the K-quant hint (test_local_llm_gpu) lives here too; hidden while no local/ model is in use
     assert not rows["welcome-gpu-swap"].visible
     switch.value = True
     switch.on_change(None)
     assert kwargs["prefs"].get(svc.GPU_KEY) is True and service.use_gpu()
-    names = [p["name"] for p in lp.load_presets(kwargs["prefs"])]
-    assert names[-len(lp.GPU_PRESETS):] == [p["name"] for p in lp.GPU_PRESETS]
-    # the page re-rendered: the new presets have cells and the switch still shows the saved setting
+    # the switch changes no preset: the same cells, and it still shows the saved setting
+    assert [p["name"] for p in lp.load_presets(kwargs["prefs"])] == [p["name"] for p in lp.DEFAULT_PRESETS]
     rows = by_key(s.page_area.content)
-    assert rows["welcome-gpu"].value is True and len(rows["welcome-ondevice"].controls) == len(names)
-    assert not rows["welcome-gpu-presets"].visible  # nothing missing: the fallback button stays hidden
+    assert rows["welcome-gpu"].value is True
+    assert len(rows["welcome-ondevice"].controls) == len(lp.DEFAULT_PRESETS) + len(lp.CUSTOM_FAMILIES)
 
 
 @pytest.mark.parametrize("width", PHONES)
-def test_page_one_fits_with_the_gpu_friendly_presets(width, tmp_path):
-    """Hotfix 6 (owner 2026-10-27): on Android (OpenCL) the Q4_0 presets show with the GPU off, so page 1 has
-    eight cells; their smaller "Garbage GPU" names fit a quarter row."""
+def test_page_one_fits_with_the_former_gpu_presets(width, tmp_path):
+    """A phone with the four former Q4_0 presets downloaded keeps them: page 1 then has twelve cells, and their
+    smaller "Garbage GPU" names fit a quarter row (three rows: the fit test below covers the first two)."""
     from glossarion_mobile.services.local_llm import presets as lp
     from glossarion_mobile.ui.screens import welcome
 
     kwargs, service, _engine = _engine_kwargs(tmp_path)
     service.gpu_backend = "OpenCL"
+    lp.save_presets(kwargs["prefs"], [*lp.DEFAULT_PRESETS, *lp.GPU_PRESETS])
+    import os
+
+    os.makedirs(service.registry.root, exist_ok=True)
+    for index, row in enumerate(lp.GPU_PRESETS):
+        with open(service.registry.file_path(f"old-{index}"), "wb") as handle:
+            handle.write(b"GGUF")
+        service.registry.add(f"old-{index}", {"repo": row["repo"], "file": row["file"], "revision": "r",
+                                              "sha256": "0" * 64, "size": 4, "downloaded_at": 1})
     s = screen(**kwargs)
     rows = by_key(s.page_area.content)
     assert rows["welcome-gpu"].value is False
     cells = rows["welcome-ondevice"].controls
-    assert len(cells) == len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS)
+    assert len(cells) == len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS) + len(lp.CUSTOM_FAMILIES)
     names = [cell.content.controls[0] for cell in cells]
-    gpu = names[len(lp.DEFAULT_PRESETS):]
+    gpu = names[len(lp.DEFAULT_PRESETS):len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS)]
     assert [n.value for n in gpu] == ["Garbage GPU", "Light GPU", "Medium GPU", "Heavy GPU"]
     assert all(n.size == welcome.ONDEVICE_GPU_NAME_SIZE for n in gpu) and all(n.size is None for n in names[:4])
     assert cells[len(lp.DEFAULT_PRESETS)].tooltip.startswith("Garbage · GPU (Q4_0)")
@@ -350,6 +362,24 @@ def test_page_one_fits_with_the_gpu_friendly_presets(width, tmp_path):
     for name in names:
         size = name.size or tokens.TYPE_SCALE["label_medium"].size
         assert text_width(name.value, size) <= quarter, (name.value, quarter)
+    assert s.page_area.content.scroll == ft.ScrollMode.AUTO  # a third row of cells scrolls
+
+
+@pytest.mark.parametrize("width", PHONES)
+def test_page_one_fits_with_the_custom_cells(width, tmp_path):
+    """Owner 2026-10-31: the four Custom cells replace the Q4_0 presets: eight cells with the GPU switch."""
+    from glossarion_mobile.services.local_llm import presets as lp
+
+    kwargs, service, _engine = _engine_kwargs(tmp_path)
+    service.gpu_backend = "OpenCL"
+    s = screen(**kwargs)
+    cells = by_key(s.page_area.content)["welcome-ondevice"].controls
+    assert len(cells) == len(lp.DEFAULT_PRESETS) + len(lp.CUSTOM_FAMILIES)
+    content_w = width - 32
+    quarter = (content_w - 3 * 6) / 4 - 12
+    for cell in cells:
+        name = cell.content.controls[0]
+        assert text_width(name.value.replace(" ⭐", ""), tokens.TYPE_SCALE["label_medium"].size) <= quarter, name.value
     budget = HEIGHTS[width] - (24 + 56 + 48 + 32 + 8 + 48 + 20)
     if width >= 412:  # the owner's phone class: page 1 still fits
         assert _page_height(s, content_w) <= budget, (width, budget)
@@ -379,7 +409,7 @@ def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path)
     kwargs, _service, _engine = _engine_kwargs(tmp_path / "small", total=2 * 1024 ** 3, available=1536 * 1024 ** 2)
     small = screen(**kwargs)
     names = [c.content.controls[0].value for c in by_key(small.page_area.content)["welcome-ondevice"].controls]
-    assert names == ["Garbage ⭐", "Light", "Medium", "Heavy"]
+    assert names == ["Garbage ⭐", "Light", "Medium", "Heavy", "Qwen 3.5", "Llama", "Gemma", "LFM2"]
 
 
 def test_page_one_on_device_without_an_engine_points_to_the_model_manager():

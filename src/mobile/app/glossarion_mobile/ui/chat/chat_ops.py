@@ -149,14 +149,19 @@ def workspace_outputs(folder: str) -> list:
     (``library_core.list_compiled_outputs``: EPUB / PDF / TXT / HTML, its priority order; the
     desktop attachment rule ``ChatStoreMixin._preferred_attachment_compiled_documents`` without the
     core), then the top-level ``*_translated.txt``, subtitle (SRT / ASS / VTT / LRC …) and SDLXLIFF
-    files and ``glossary.csv`` / ``glossary.json``."""
+    files and ``glossary.csv`` / ``glossary.json``. A run's raw stream copy (``STREAM_OUTPUT_NAME``) is never
+    listed, old chats' included: the list is read from the folder at every render."""
     if not folder or not os.path.isdir(folder):
         return []
+    from glossarion_mobile.job_kinds import STREAM_OUTPUT_NAME
+
     out: list = []
     seen: set = set()
 
     def add(path: str, kind: str) -> None:
         key = os.path.normcase(os.path.abspath(path))
+        if os.path.basename(path).lower() == STREAM_OUTPUT_NAME:
+            return
         if key not in seen and os.path.isfile(path) and len(out) < _OUTPUT_LIMIT:
             seen.add(key)
             out.append((path, kind))

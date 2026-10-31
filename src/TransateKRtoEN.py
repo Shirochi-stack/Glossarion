@@ -13910,8 +13910,8 @@ def _single_pass_spine_from_opf_text(opf_text):
                 spine.append(manifest[idref])
     return spine
 
-def _single_pass_spines(output_dir):
-    """Yield the spines to look in: the workspace OPF's, then the source EPUB's (EPUB_PATH)."""
+def _single_pass_spines(output_dir, epub_path=None):
+    """Yield the spines to look in: the workspace OPF's, then the source EPUB's (``epub_path``, else EPUB_PATH)."""
     if output_dir:
         opf_path = find_opf_path(output_dir)
         try:
@@ -13921,7 +13921,7 @@ def _single_pass_spines(output_dir):
         except Exception:
             pass
 
-    epub_path = os.getenv("EPUB_PATH", "")
+    epub_path = epub_path or os.getenv("EPUB_PATH", "")
     try:
         if epub_path and os.path.exists(epub_path):
             import zipfile
@@ -13932,9 +13932,9 @@ def _single_pass_spines(output_dir):
     except Exception:
         pass
 
-def _single_pass_spine_files(output_dir):
+def _single_pass_spine_files(output_dir, epub_path=None):
     """The book's spine (HTML basenames in reading order), or [] when no OPF is found."""
-    for spine in _single_pass_spines(output_dir):
+    for spine in _single_pass_spines(output_dir, epub_path):
         if spine:
             return spine
     return []

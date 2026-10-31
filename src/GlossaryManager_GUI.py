@@ -2502,6 +2502,11 @@ class GlossaryManagerMixin:
             "(English, Spanish, etc.) and the source is auto-detected as CJK."
         ))
         filter_combo_layout.addWidget(self.cjk_script_filter_checkbox)
+        # Remove Duplicates reads these two from the environment: they apply as soon as they are ticked
+        for _box, _env in ((self.skip_identical_entries_checkbox, 'GLOSSARY_SKIP_IDENTICAL_ENTRIES'),
+                           (self.cjk_script_filter_checkbox, 'GLOSSARY_CJK_SCRIPT_FILTER')):
+            os.environ[_env] = '1' if _box.isChecked() else '0'
+            _box.toggled.connect(lambda checked, env=_env: os.environ.__setitem__(env, '1' if checked else '0'))
         filter_combo_layout.addStretch()
 
         type_control_layout.addStretch()
@@ -5410,7 +5415,7 @@ Do not stop after the glossary."""
         self.glossary_anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
         
         # Top-P (Nucleus Sampling)
-        def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False):
+        def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False, off_value=None):
             """Helper to create a slider row with label and value display
             var_holder: object that holds the variable (typically self)
             var_name: string name of the attribute to set
@@ -5464,7 +5469,7 @@ Do not stop after the glossary."""
                     else:
                         actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
                         setattr(var_holder, var_name, actual_value)
-                        if off_at_zero and actual_value <= 0:
+                        if (off_at_zero and actual_value <= 0) or (off_value is not None and actual_value <= off_value):
                             value_lbl.setText("OFF")
                         elif decimals == 1:
                             value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
@@ -5481,7 +5486,7 @@ Do not stop after the glossary."""
             return slider, value_lbl
         
         self.glossary_top_p_var = self.config.get('glossary_top_p', 1.0)
-        top_p_slider, self.glossary_top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'glossary_top_p_var', 0.1, 1.0, decimals=2)
+        top_p_slider, self.glossary_top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'glossary_top_p_var', 0.0, 1.0, decimals=2, off_at_zero=True)
         
         # Min-P (Relative Probability Cutoff)
         self.glossary_min_p_var = self.config.get('glossary_min_p', 0.0)
@@ -5520,11 +5525,11 @@ Do not stop after the glossary."""
         
         # Frequency Penalty
         self.glossary_frequency_penalty_var = self.config.get('glossary_frequency_penalty', 0.0)
-        freq_slider, self.glossary_freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'glossary_frequency_penalty_var', 0.0, 2.0, decimals=2)
+        freq_slider, self.glossary_freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'glossary_frequency_penalty_var', 0.0, 2.0, decimals=2, off_at_zero=True)
         
         # Presence Penalty
         self.glossary_presence_penalty_var = self.config.get('glossary_presence_penalty', 0.0)
-        pres_slider, self.glossary_pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'glossary_presence_penalty_var', 0.0, 2.0, decimals=2)
+        pres_slider, self.glossary_pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'glossary_presence_penalty_var', 0.0, 2.0, decimals=2, off_at_zero=True)
         
         core_v.addStretch()
         
@@ -5536,7 +5541,7 @@ Do not stop after the glossary."""
         
         # Repetition Penalty
         self.glossary_repetition_penalty_var = self.config.get('glossary_repetition_penalty', 1.0)
-        rep_slider, self.glossary_rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'glossary_repetition_penalty_var', 1.0, 2.0, decimals=2)
+        rep_slider, self.glossary_rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'glossary_repetition_penalty_var', 1.0, 2.0, decimals=2, off_value=1.0)
         
         # Candidate Count (Gemini)
         self.glossary_candidate_count_var = self.config.get('glossary_candidate_count', 1)

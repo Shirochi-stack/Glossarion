@@ -15536,6 +15536,9 @@ class UnifiedClient:
                     cleaned_messages.append(cleaned_msg)
                 
                 # Write the payload (with cleaned messages)
+                anti_duplicate = self._anti_duplicate_snapshot((request_params or {}).get('temperature'))
+                if anti_duplicate.get('sent'):
+                    request_params = {**(request_params or {}), **anti_duplicate['sent']}
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump({
                         'model': getattr(self, 'model', None),
@@ -15547,8 +15550,7 @@ class UnifiedClient:
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
                         'request_params': request_params,
-                        'anti_duplicate': self._anti_duplicate_snapshot(
-                            (request_params or {}).get('temperature')),
+                        'anti_duplicate': anti_duplicate,
                         'key_identifier': getattr(self, 'key_identifier', None),
                         'retry_info': {
                             'reason': retry_reason,
@@ -15558,6 +15560,7 @@ class UnifiedClient:
                     }, f, indent=2, ensure_ascii=False)
                 try:
                     tls = self._get_thread_local_client()
+                    tls.last_payload_path = filepath
                     if hasattr(tls, 'last_system_to_user_merge'):
                         tls.last_system_to_user_merge = None
                 except Exception:
@@ -15603,11 +15606,35 @@ class UnifiedClient:
         snapshot["settings"] = settings
         try:
             sent = dict(self._get_anti_duplicate_params(temperature, log=False))
+            sent.update(self._get_anti_duplicate_endpoint_params(getattr(self, "client_type", None)) or {})
             sent.update(self._get_anti_duplicate_min_p_params(getattr(self, "client_type", None)) or {})
             snapshot["sent"] = sent
         except Exception:
             pass
         return snapshot
+
+    def _record_anti_duplicate_sent(self, sent):
+        """Correct this thread's saved payload to what the request really sends. It is saved before the
+        route is known (responses API, local endpoint), so its snapshot can only estimate that."""
+        try:
+            path = getattr(self._get_thread_local_client(), 'last_payload_path', None)
+            if not path or not os.path.exists(path):
+                return
+            with open(path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+            snapshot = payload.get('anti_duplicate')
+            if not isinstance(snapshot, dict) or not snapshot.get('enabled') or snapshot.get('sent') == sent:
+                return
+            params = {k: v for k, v in (payload.get('request_params') or {}).items()
+                      if k not in (snapshot.get('sent') or {})}
+            payload['request_params'] = {**params, **sent}
+            snapshot['sent'] = dict(sent)
+            temp_path = f"{path}.tmp"
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, path)
+        except Exception as e:
+            logger.debug(f"Could not update the payload's anti-duplicate parameters: {e}")
 
     def _record_logistics(self, payload_path, request_params, retry_reason=None):
         """One compact line per request in logs/Logistics.json (api_logistics; desktop only): API key,
@@ -16689,7 +16716,7 @@ class UnifiedClient:
                     top_p_raw = self._get_anti_duplicate_env("TOP_P", "")
                     if top_p_raw:
                         top_p = float(top_p_raw)
-                        if top_p < 1.0:
+                        if 0 < top_p < 1.0:
                             config_params["top_p"] = top_p
                     top_k_raw = self._get_anti_duplicate_env("TOP_K", "")
                     if top_k_raw:
@@ -20956,19 +20983,19 @@ class UnifiedClient:
                 params["frequency_penalty"] = frequency_penalty
             if presence_penalty > 0:
                 params["presence_penalty"] = presence_penalty
-            if top_p < 1.0:
+            if 0 < top_p < 1.0:  # the slider's OFF is 0: the server's own setting applies
                 params["top_p"] = top_p
                 
         elif self.client_type == 'gemini':
             # Gemini supports both top_p and top_k
-            if top_p < 1.0:
+            if 0 < top_p < 1.0:  # the slider's OFF is 0: the server's own setting applies
                 params["top_p"] = top_p
             if top_k > 0:
                 params["top_k"] = top_k
                 
         elif self.client_type == 'anthropic':
             # Claude supports top_p and top_k
-            if top_p < 1.0:
+            if 0 < top_p < 1.0:  # the slider's OFF is 0: the server's own setting applies
                 params["top_p"] = top_p
             if top_k > 0:
                 params["top_k"] = top_k
@@ -21004,7 +21031,7 @@ class UnifiedClient:
                 return True
         except Exception:
             pass
-        if is_local_endpoint:
+        if is_local_endpoint or self._anti_duplicate_custom_endpoint_active(provider):
             return True
         provider = str(provider or getattr(self, "client_type", "") or "").strip().lower()
         return provider in {
@@ -21018,9 +21045,47 @@ class UnifiedClient:
             "fireworks",
         }
 
+    def _anti_duplicate_custom_endpoint_active(self, provider=None):
+        """A request going to the user's own OpenAI-compatible URL; such requests still report provider 'openai'."""
+        provider = str(provider or getattr(self, "client_type", "") or "").strip().lower()
+        if provider == "custom_openai":
+            return True
+        if provider != "openai" or os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") != "1":
+            return False
+        custom_base_url = os.getenv("OPENAI_CUSTOM_BASE_URL", os.getenv("OPENAI_API_BASE", "")).strip().rstrip("/")
+        return bool(custom_base_url) and custom_base_url != "https://api.openai.com/v1"
+
+    def _get_anti_duplicate_endpoint_params(self, provider=None, is_local_endpoint=False):
+        """top_k, the repetition penalty and a top_p of 1 for local and custom endpoints and OpenRouter.
+        Official APIs reject the first two; a local server would apply its own preset without top_p."""
+        if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
+            return {}
+        name = str(provider or getattr(self, "client_type", "") or "").strip().lower()
+        if not (is_local_endpoint or name == "openrouter" or self._anti_duplicate_custom_endpoint_active(name)):
+            return {}
+        try:
+            top_p = float(self._get_anti_duplicate_env("TOP_P", "1.0") or 1.0)
+            top_k = int(float(self._get_anti_duplicate_env("TOP_K", "0") or 0))
+            repetition_penalty = float(self._get_anti_duplicate_env("REPETITION_PENALTY", "1.0") or 1.0)
+        except (TypeError, ValueError):
+            return {}
+        params = {}
+        if top_p >= 1.0:
+            params["top_p"] = 1.0
+        if top_k > 0:
+            params["top_k"] = top_k
+        if repetition_penalty != 1.0:
+            params["repetition_penalty"] = repetition_penalty
+            if is_local_endpoint:  # llama.cpp and LM Studio's name for it
+                params["repeat_penalty"] = repetition_penalty
+        omit_claude_sampling_parameters(params, self._get_active_request_model())
+        if uses_gemini_thinking_level(self._get_active_request_model()):
+            omit_gemini_legacy_parameters(params, self._get_active_request_model())
+        return params
+
     def _log_anti_duplicate_applied(self, params, log_key=None):
-        """Log anti-duplicate params once per request."""
-        if not params:
+        """Log what this request really sends, once per request, and what it leaves out."""
+        if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
             return
         should_log = True
         if log_key:
@@ -21035,16 +21100,23 @@ class UnifiedClient:
             except Exception:
                 pass
         if should_log:
-            if "min_p" not in params and float(self._get_anti_duplicate_env("MIN_P", "0.0") or 0) > 0:
-                params = {**params, "min_p": float(self._get_anti_duplicate_env("MIN_P", "0.0"))}
-            if "top_k" not in params and int(float(self._get_anti_duplicate_env("TOP_K", "0") or 0)) > 0:
-                params = {**params, "top_k": int(float(self._get_anti_duplicate_env("TOP_K", "0")))}
-            if "frequency_penalty" not in params and float(self._get_anti_duplicate_env("FREQUENCY_PENALTY", "0.0") or 0) > 0:
-                params = {**params, "frequency_penalty": float(self._get_anti_duplicate_env("FREQUENCY_PENALTY", "0.0"))}
-            if "presence_penalty" not in params and float(self._get_anti_duplicate_env("PRESENCE_PENALTY", "0.0") or 0) > 0:
-                params = {**params, "presence_penalty": float(self._get_anti_duplicate_env("PRESENCE_PENALTY", "0.0"))}
-            applied_kv = ", ".join([f"{k}={params[k]:g}" if isinstance(params[k], float) else f"{k}={params[k]}" for k in params.keys()])
-            logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
+            params = params or {}
+            if params:
+                applied_kv = ", ".join([f"{k}={params[k]:g}" if isinstance(params[k], float) else f"{k}={params[k]}" for k in params.keys()])
+                logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
+            left_out = []
+            for key, name, neutral in (("TOP_P", "top_p", 1.0), ("MIN_P", "min_p", 0.0), ("TOP_K", "top_k", 0.0),
+                                       ("FREQUENCY_PENALTY", "frequency_penalty", 0.0),
+                                       ("PRESENCE_PENALTY", "presence_penalty", 0.0),
+                                       ("REPETITION_PENALTY", "repetition_penalty", 1.0)):
+                try:
+                    value = float(self._get_anti_duplicate_env(key, neutral) or neutral)
+                except (TypeError, ValueError):
+                    continue
+                if value != neutral and name not in params and not (key == "TOP_P" and value <= 0):
+                    left_out.append(f"{name}={value:g}")
+            if left_out:
+                logger.info(f"🧩 Anti-duplicate not sent on this route: {', '.join(left_out)}")
 
     def _get_anti_duplicate_prefix(self) -> str:
         """Resolve which anti-duplicate namespace to use based on request context."""
@@ -25521,6 +25593,10 @@ class UnifiedClient:
                         provider,
                         is_local_endpoint=is_local_endpoint,
                     )
+                    anti_dupe_min_p_params = {
+                        **self._get_anti_duplicate_endpoint_params(provider, is_local_endpoint=is_local_endpoint),
+                        **anti_dupe_min_p_params,
+                    }
 
                     # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
                     req_temperature = temperature
@@ -25656,13 +25732,12 @@ class UnifiedClient:
                     extra_body = {}
                     if anti_dupe_min_p_params and not use_responses_api:
                         extra_body.update(anti_dupe_min_p_params)
-                    self._log_anti_duplicate_applied(
-                        {
-                            **(anti_dupe_params if not use_responses_api else {}),
-                            **(anti_dupe_min_p_params if not use_responses_api else {}),
-                        },
-                        response_name,
-                    )
+                    anti_dupe_sent = {
+                        **(anti_dupe_params if not use_responses_api else {}),
+                        **(anti_dupe_min_p_params if not use_responses_api else {}),
+                    }
+                    self._log_anti_duplicate_applied(anti_dupe_sent, response_name)
+                    self._record_anti_duplicate_sent(anti_dupe_sent)
                     enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
                     is_chutes_thinking_endpoint = str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1'
                     
@@ -27839,17 +27914,20 @@ class UnifiedClient:
                 provider,
                 is_local_endpoint=is_local_endpoint,
             )
+            anti_dupe_min_p_params = {
+                **self._get_anti_duplicate_endpoint_params(provider, is_local_endpoint=is_local_endpoint),
+                **anti_dupe_min_p_params,
+            }
             if not use_responses_api:
                 data.update(anti_dupe_params)
                 data.update(anti_dupe_min_p_params)
                 data.update(self._logit_bias_params(provider, effective_model, base_url, messages=messages))
-            self._log_anti_duplicate_applied(
-                {
-                    **(anti_dupe_params if not use_responses_api else {}),
-                    **(anti_dupe_min_p_params if not use_responses_api else {}),
-                },
-                response_name,
-            )
+            anti_dupe_sent = {
+                **(anti_dupe_params if not use_responses_api else {}),
+                **(anti_dupe_min_p_params if not use_responses_api else {}),
+            }
+            self._log_anti_duplicate_applied(anti_dupe_sent, response_name)
+            self._record_anti_duplicate_sent(anti_dupe_sent)
 
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)

@@ -659,7 +659,7 @@ def test_owner_issue13_scroll_for_earlier_messages_loads_earlier_cards(desktop_s
             slot = view.transcript.slot_for(key)
             assert slot is not None and slot.card.requests_tile.expanded
             labels = [row.content.controls[0].controls[0].value for row in slot.card.requests_column.controls]
-            assert any(label.startswith("Chapter 2 (chunk") for label in labels)
+            assert any(label.startswith("Chapter 2 ") for label in labels)
             assert scrolls and scrolls[-1].get("scroll_key").value == "job-24"
             # a text card the window had dropped
             await view.jump_to(3)

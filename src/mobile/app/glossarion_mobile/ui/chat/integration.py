@@ -236,10 +236,14 @@ def _has_translation_progress(workspace: str) -> bool:
 
 
 def _glossary_workspace(folder: str, source: str = "") -> str:
-    """The workspace folder of a chat run that has no ``translation_progress.json`` yet (blocking): the
-    run's ``<stem>`` folder under ``folder`` (its run root / output folder), else ``folder`` itself."""
-    if not folder or not os.path.isdir(folder):
+    """The workspace folder of a run that has no ``translation_progress.json`` yet (blocking): the run's
+    ``<stem>`` folder under ``folder`` (its run root / output folder), else ``folder`` itself. It need not
+    exist: the pipeline creates it after its glossary pass, and the glossary lookup only needs its name and
+    place. A book's glossary folder itself (a refinement job's output folder) names its workspace too."""
+    if not folder:
         return ""
+    if not os.path.isdir(folder):
+        return folder if os.path.isdir(os.path.dirname(os.path.abspath(folder))) else ""
     stem = os.path.splitext(os.path.basename(str(source or "")))[0]
     if stem:
         child = os.path.join(folder, stem)
@@ -247,7 +251,31 @@ def _glossary_workspace(folder: str, source: str = "") -> str:
             return child
         if os.path.basename(os.path.normpath(folder)).casefold() == stem.casefold():
             return folder
-    return folder
+        from glossarion_mobile.services.workspace_sync import book_glossary_dir
+
+        if os.path.isdir(book_glossary_dir(folder, stem)):
+            return child
+    return _workspace_of_glossary_folder(folder) or folder
+
+
+def _workspace_of_glossary_folder(folder: str) -> str:
+    """The workspace of a book's glossary folder: ``<root>/<book>`` for ``<root>/Glossary/<book>``, and
+    ``<workspace>`` for ``<workspace>/Glossary`` (``workspace_sync.stash_run_glossary``); '' for any other
+    folder (blocking)."""
+    suffix = "_glossary_progress.json"
+    try:
+        books = [name[:-len(suffix)] for name in os.listdir(folder) if name.lower().endswith(suffix)]
+    except OSError:
+        return ""
+    path = os.path.abspath(folder)
+    parent = os.path.dirname(path)
+    if not books:
+        return ""
+    if os.path.basename(path).casefold() == "glossary":
+        return parent
+    if os.path.basename(parent).casefold() == "glossary":
+        return os.path.join(os.path.dirname(parent), books[0])
+    return ""
 
 
 def _book_glossary_progress(library: Any, book: dict) -> str:
@@ -1081,10 +1109,12 @@ class ChatFeature:
         else:
             notify(already_active_text(snapshot))
 
-    async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None) -> Optional[str]:
+    async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None, *,
+                            glossary: bool = False) -> Optional[str]:
         """A chat workspace in the Progress manager (``/tools/progress?out=<bid>``, Chapters tab): the
         Book page over that output folder, where Retranslate / Resolve QA run (U7). Returns the route id.
-        ``select`` (U9 ``/retranslate <range>``): ``(start, end)`` chapters selected when the list loads."""
+        ``select`` (U9 ``/retranslate <range>``): ``(start, end)`` chapters selected when the list loads.
+        ``glossary``: a glossary job's Progress, its Glossary Progress even when the book has chapters."""
         app = self.app
         library = getattr(app, "library", None)
         navigate = getattr(app, "navigate_to", None)
@@ -1106,7 +1136,7 @@ class ChatFeature:
 
         def target() -> Optional[tuple]:
             workspace = _reader_workspace(str(folder or ""), str(source or ""))
-            if workspace and _has_translation_progress(workspace):
+            if workspace and not glossary and _has_translation_progress(workspace):
                 return make_book(workspace), False
             # Issue 11: no translation progress yet (only the glossary was extracted): the Glossary
             # Progress manager of that book instead of an empty Progress manager
@@ -1120,7 +1150,7 @@ class ChatFeature:
         found = await self._run_io(target)
         if found is None:
             if notify is not None:
-                notify("No translation progress in this chat's workspace yet")
+                notify("No progress to show yet: nothing has been translated or extracted for this book")
             return None
         book, glossary_only = found
         bid = library.bid_for(book)

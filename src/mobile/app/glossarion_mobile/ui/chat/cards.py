@@ -45,7 +45,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     format_attachment_size,
 )
 from glossarion_mobile.ui.chat.job_binding import CardPhase
-from glossarion_mobile.ui.chat.stream_bridge import segment_processing_label
+from glossarion_mobile.ui.chat.stream_bridge import request_label_text, segment_processing_label
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.screens.cloud_sync import NO_SERVICE_REASON, SHARE_LABEL, reason_detail, status_row
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
@@ -604,7 +604,7 @@ class RequestSheet:
         content = display_markdown(str(segment.get("content", "") or "")) or "*No translated output was emitted for this request.*"
         thinking = str(segment.get("thinking", "") or "")
         controls: list[ft.Control] = [
-            ft.Text(str(segment.get("label", "") or "Request"), theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
+            ft.Text(request_label_text(segment.get("label")) or "Request", theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
             ft.Text(segment_processing_label(segment), theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED),
         ]
         if thinking.strip():
@@ -647,8 +647,10 @@ def _row_signature(segment: dict) -> tuple:
             segment.get("index"), str(segment.get("status_label") or ""))
 
 
-#: U12 item 3: one request row (label line + one preview line) and the Requests box it scrolls in
+#: U12 item 3: one request row (label line + one preview line; a row with nothing streamed yet has only the
+#: label line) and the Requests box it scrolls in
 REQUEST_ROW_HEIGHT = 50
+REQUEST_ROW_SHORT_HEIGHT = 32
 REQUESTS_BOX_HEIGHT = 260
 
 #: owner #16: a Result lists at most OUTPUT_GROUP_LIMIT files of one kind; a longer group (per-chapter
@@ -668,7 +670,7 @@ def request_summary(segments: Sequence[dict]) -> str:
         parts.append(f"{len(active)} in flight")
         latest = active[-1]
         phase = {"thinking": "Thinking", "text": "Generating"}.get(str(latest.get("phase") or ""), "Processing")
-        parts.append(f"{latest.get('label') or 'Request'} · {phase}")
+        parts.append(f"{request_label_text(latest.get('label')) or 'Request'} · {phase}")
     return " · ".join(parts)
 
 
@@ -684,7 +686,7 @@ def _request_row(segment: dict, on_open: Optional[Callable[[dict], Any]]) -> ft.
             [
                 ft.Row(
                     [
-                        ft.Text(str(segment.get("label") or "Request"), theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
+                        ft.Text(request_label_text(segment.get("label")) or "Request", theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
                                 expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ft.Container(content=ft.Text(phase_label, theme_style=ft.TextThemeStyle.LABEL_SMALL),
                                      bgcolor=ft.Colors.SECONDARY_CONTAINER, border_radius=6,
@@ -1069,7 +1071,9 @@ class JobCard(ft.Container):
             cache.setdefault(signature, row)
             rows.append(row)
         self._row_cache = cache
-        long_list = len(rows) * REQUEST_ROW_HEIGHT > REQUESTS_BOX_HEIGHT
+        # the box only once its rows fill it (owner 2026-10-31: no empty area under the rows)
+        long_list = sum(REQUEST_ROW_HEIGHT if str(segment.get("content", "") or "").strip() else REQUEST_ROW_SHORT_HEIGHT
+                        for segment in shown) > REQUESTS_BOX_HEIGHT
         self.requests_column = self.requests_list if long_list else self.requests_short
         (self.requests_short if long_list else self.requests_list).controls = []
         self.requests_column.controls = rows

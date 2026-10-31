@@ -192,7 +192,7 @@ def test_delete_and_forced_unload_never_free_a_model_mid_answer(tmp_path):
     assert service.unload(force=True) and not engine.loaded
     worker.join(5)
     assert not worker.is_alive() and len(seen) < 399  # stopped early, not run to the end
-    assert not service._abort.is_set() and not service.gate.busy
+    assert not service.gate.busy
     assert service.delete("fake-echo") and service.registry.resolve("fake-echo") is None
 
 

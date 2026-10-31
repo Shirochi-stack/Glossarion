@@ -1942,3 +1942,28 @@ def test_dedup_applies_skip_identical_entries_to_old_entries(monkeypatch):
     assert [row["dropped"] for row in log if row["action"] == "removed_identical"] == ["노인", "명인"]
     monkeypatch.setenv("GLOSSARY_SKIP_IDENTICAL_ENTRIES", "0")
     assert len(skip_duplicate_entries([dict(e) for e in entries])) == 4
+
+
+def test_dedup_applies_the_cjk_filter_to_old_entries(monkeypatch):
+    """Owner 2026-10-31: entries saved while "Filter CJK script entries" was off go at the next deduplication."""
+    entries = [
+        {"type": "character", "raw_name": "'\u2026\ub124", "translated_name": "\ubb50.'", "gender": ""},
+        {"type": "character", "raw_name": "\uc774\ubca8", "translated_name": "Ibel", "gender": "Male"},
+        {"type": "character", "raw_name": "\uce7c\ub860", "translated_name": "Calon", "gender": "Male"},
+        {"type": "term", "raw_name": "\ub9c8\ub825\uc11d", "translated_name": "Mana stone", "gender": ""},
+        {"type": "character", "raw_name": "Latin Name", "translated_name": "Latin Name X", "gender": ""},
+        {"type": "book", "raw_name": "\ud788\uc5b4\ub85c", "translated_name": "\ud788\uc5b4\ub85c 2", "gender": ""},
+    ]
+    monkeypatch.setenv("GLOSSARY_SKIP_IDENTICAL_ENTRIES", "0")
+    monkeypatch.setenv("GLOSSARY_TARGET_LANGUAGE", "English")
+    monkeypatch.setenv("GLOSSARY_CJK_SCRIPT_FILTER", "1")
+    kept = [e["translated_name"] for e in skip_duplicate_entries([dict(e) for e in entries])]
+    assert kept == ["Ibel", "Calon", "Mana stone", "\ud788\uc5b4\ub85c 2"]
+    original, log = skip_duplicate_entries([dict(e) for e in entries], dry_run=True)
+    assert len(original) == 6  # a dry run leaves the list alone and reports the decision
+    assert {row["dropped"] for row in log if row["action"] == "removed_cjk_filter"} == {"'\u2026\ub124", "Latin Name"}
+    monkeypatch.setenv("GLOSSARY_TARGET_LANGUAGE", "Japanese")  # a CJK output language keeps them
+    assert len(skip_duplicate_entries([dict(e) for e in entries])) == 6
+    monkeypatch.setenv("GLOSSARY_TARGET_LANGUAGE", "English")
+    monkeypatch.setenv("GLOSSARY_CJK_SCRIPT_FILTER", "0")
+    assert len(skip_duplicate_entries([dict(e) for e in entries])) == 6

@@ -157,7 +157,7 @@ def test_on_device_rows_list_presets_and_added_files_with_size_vision_ram_and_st
     assert not sheet.search.visible and not sheet.chip_row.visible and not sheet.route_row.visible
     assert not sheet.chat_switch.visible
     texts = _texts(rows)
-    assert "Presets · 2" in texts and "Downloaded · 1" in texts
+    assert "Presets · 6" in texts and "Downloaded · 1" in texts  # two presets and the four Custom rows
     assert _find(rows, "ondevice-preset-0-facts").value == f"{dl.format_bytes(len(PAYLOAD))} · ✓ fits this phone"
     assert _find(rows, "ondevice-preset-0-vision") is not None  # the preset names its projector
     assert _find(rows, "ondevice-preset-0-action").content == "Download"
@@ -328,7 +328,7 @@ def test_hotfix6_q4_0_presets_show_with_the_gpu_off_and_use_loads_when_ram_is_ti
         sheet, selected = _sheet(service, prefs, tab="ondevice")
         assert not service.use_gpu()
         names = [p["name"] for p in presets.load_presets(prefs)]
-        assert names == [p["name"] for p in presets.DEFAULT_PRESETS + presets.GPU_PRESETS]
+        assert names == [p["name"] for p in presets.DEFAULT_PRESETS]
         for index in range(len(names)):
             assert _find(sheet.ondevice_list.controls, f"ondevice-preset-{index}-action") is not None
         memory["value"] = (8 * GIB, 256 * 1024 ** 2)  # 256 MB free: tight

@@ -253,7 +253,7 @@ def test_gpu_state_without_our_loader(monkeypatch):
 
 # ---- presets ----------------------------------------------------------------------------------------------
 
-def test_gpu_presets_are_q4_0_of_the_default_repos_and_opt_in():
+def test_former_gpu_presets_are_q4_0_of_the_default_repos():
     defaults = {p["repo"]: p for p in presets.DEFAULT_PRESETS}
     assert [p["file"] for p in presets.GPU_PRESETS] == [
         "Qwen3.5-0.8B-Q4_0.gguf", "Qwen3.5-2B-Q4_0.gguf", "Qwen3.5-4B-Q4_0.gguf", "Qwen3.5-9B-Q4_0.gguf"]
@@ -264,15 +264,6 @@ def test_gpu_presets_are_q4_0_of_the_default_repos_and_opt_in():
         assert row["mmproj_sha256"] == defaults[row["repo"]]["mmproj_sha256"] and "Q4_0" in row["name"]
     # the defaults (CPU, iOS) are unchanged and hold no Q4_0 file
     assert not any("Q4_0" in p["file"] for p in presets.DEFAULT_PRESETS)
-    prefs = fakes.FakePrefs()
-    rows, added = presets.add_gpu_presets(prefs)
-    assert added == [p["name"] for p in presets.GPU_PRESETS] and len(rows) == 8
-    assert rows[:4] == list(presets.DEFAULT_PRESETS)
-    assert presets.add_gpu_presets(prefs) == (rows, []) and presets.missing_gpu_presets(rows) == []
-    # a user preset already named like one keeps its name; the GPU row gets " 2"
-    prefs = fakes.FakePrefs({presets.PREF_KEY: [{"name": "Light · GPU (Q4_0)", "repo": "me/x", "file": "x.gguf"}]})
-    _rows, added = presets.add_gpu_presets(prefs)
-    assert "Light · GPU (Q4_0) 2" in added and len(added) == 4
 
 
 # ---- the engine card ---------------------------------------------------------------------------------------
@@ -288,7 +279,7 @@ needs_flet = pytest.mark.skipif(not (_has("flet") and _has("msgpack")), reason="
 
 
 @needs_flet
-def test_engine_card_gpu_switch_note_status_and_presets_button(tmp_path):
+def test_engine_card_gpu_switch_note_and_status(tmp_path):
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
 
     # no GPU backend: nothing to switch
@@ -296,7 +287,7 @@ def test_engine_card_gpu_switch_note_status_and_presets_button(tmp_path):
     service, _engine = make_service(tmp_path / "none", prefs=prefs)
     panel = LocalModelsPanel(service=service, prefs=prefs)
     panel.build()
-    assert not panel.gpu_switch.visible and not panel.gpu_note.visible and not panel.gpu_presets_button.visible
+    assert not panel.gpu_switch.visible and not panel.gpu_note.visible
     # Android arm64 (OpenCL): off by default
     prefs = fakes.FakePrefs()
     engine = eng.FakeEngine(gpu_error="no supported GPU: llama.cpp's OpenCL backend runs on Qualcomm Adreno GPUs only")
@@ -305,42 +296,35 @@ def test_engine_card_gpu_switch_note_status_and_presets_button(tmp_path):
     panel.build()
     assert panel.gpu_switch.visible and panel.gpu_switch.value is False and panel.gpu_switch.key == "local-gpu"
     assert panel.gpu_switch.label == "Use GPU (experimental)" and "Adreno" in panel.gpu_note.value
-    # hotfix 6: the missing Q4_0 presets are offered whatever the switch says
-    assert "Q4_0" in panel.gpu_note.value and panel.gpu_presets_button.visible
+    assert "Q4_0" in panel.gpu_note.value
     panel.gpu_switch.value = True
     assert panel.save_gpu() is True and prefs.get(svc.GPU_KEY) is True
-    # hotfix 3: switching it on adds the GPU-friendly presets at once; the button is only the fallback
-    assert [p["name"] for p in presets.load_presets(prefs)][-4:] == [p["name"] for p in presets.GPU_PRESETS]
-    assert not panel.gpu_presets_button.visible
+    # owner 2026-10-31: the switch adds no presets any more (the Custom rows replace them)
+    assert presets.load_presets(prefs) == list(presets.DEFAULT_PRESETS)
     # a GPU failure shows on the card, the device line says CPU
     _chat(service)
     panel.render_engine(service.snapshot(), push=False)
     assert panel.gpu_status.visible and panel.gpu_status.value.startswith("GPU unavailable for fake-echo: no supported GPU")
     assert "Runs on CPU" in panel.engine_detail.value
-    # the GPU-friendly presets are in the list once: the button adds nothing more and stays hidden
-    assert panel.add_gpu_presets() == [] and not panel.gpu_presets_button.visible
-    assert len(presets.load_presets(prefs)) == 8
-    # iOS (Metal): the switch, no Q4_0 button (Metal runs the default K-quants)
+    # iOS (Metal): the switch
     prefs = fakes.FakePrefs({svc.GPU_KEY: True})
     service, _engine = make_service(tmp_path / "ios", prefs=prefs, gpu_backend="Metal")
     panel = LocalModelsPanel(service=service, prefs=prefs)
     panel.build()
     assert panel.gpu_switch.visible and panel.gpu_switch.value is True and "Metal" in panel.gpu_note.value
-    assert not panel.gpu_presets_button.visible
 
 
 @needs_flet
 def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
     """owner 2026-10-22: a model downloaded before "Use GPU" was switched on (the defaults are K-quants)
     still runs on the Adreno GPU, maybe slower than the CPU, and nothing failed to make it fall back: the
-    engine card (and the Welcome page) say so and one tap gets the Q4_0 file of the same model."""
-    import asyncio
-
+    engine card (and the Welcome page) say so. Owner 2026-10-31: the tap opens the Custom menu at that family
+    and size with Q4_0 highlighted."""
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
 
     light = next(p for p in presets.DEFAULT_PRESETS if p["name"] == "Light")
-    light_gpu = presets.gpu_preset_for(light["repo"])
-    assert light_gpu["file"] == "Qwen3.5-2B-Q4_0.gguf" and presets.is_gpu_quant(light_gpu["file"])
+    q4_file = "Qwen3.5-2B-Q4_0.gguf"
+    assert presets.is_gpu_quant(q4_file)
     assert presets.file_quant(light["file"]) == "Q4_K_XL" and not presets.is_gpu_quant(light["file"])
 
     def downloaded(service, stem, file):
@@ -361,31 +345,21 @@ def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
     panel, prefs, service, current = panel_for("android")
     assert panel.gpu_swap_box.visible
     assert panel.gpu_swap_text.value.startswith("Light is Q4_K_XL, which can be slow on this GPU")
-    assert panel.gpu_swap_button.content == "Get Light · GPU (Q4_0) · " + __import__(
-        "glossarion_mobile.services.local_llm.downloads", fromlist=["x"]).format_bytes(presets.download_size(light_gpu))
-    # the tap: the Q4_0 preset joins the list (once) and its one-tap flow runs (download, load, use)
-    ran = []
-
-    async def get_preset(index):
-        ran.append(presets.load_presets(prefs)[index]["file"])
-        current["model"] = "local/light-q4"
-        downloaded(service, "light-q4", light_gpu["file"])
-        return current["model"]
-
-    panel.get_preset = get_preset
-    assert asyncio.run(panel.swap_to_gpu_quant()) == "local/light-q4" and ran == [light_gpu["file"]]
-    files = [p.get("file") for p in presets.load_presets(prefs)]
-    assert files.count(light_gpu["file"]) == 1
-    assert not panel.gpu_swap_box.visible  # the Q4_0 model is in use now
-    # already downloaded: the button switches instead of downloading
-    current["model"] = "local/light"
+    assert panel.gpu_swap_button.content == "Choose Q4_0 · Qwen 3.5 2B"
+    # the tap: the Custom menu at that family and size, Q4_0 highlighted; nothing joins the list yet
+    spawned = []
+    panel.spawn_fn = lambda coro: (spawned.append(coro), coro.close())
+    sheet = panel.open_gpu_swap()
+    assert sheet.family["id"] == "qwen35" and sheet.size["label"] == "2B" and sheet.highlight_gpu and len(spawned) == 1
+    assert presets.load_presets(prefs) == list(presets.DEFAULT_PRESETS)
+    # the Q4_0 model in use: the hint goes
+    downloaded(service, "light-q4", q4_file)
+    current["model"] = "local/light-q4"
     panel._render_gpu_swap(push=False)
-    assert panel.gpu_swap_button.content == "Switch to Light · GPU (Q4_0)"
-    asyncio.run(panel.swap_to_gpu_quant())
-    assert [p.get("file") for p in presets.load_presets(prefs)].count(light_gpu["file"]) == 1  # not added twice
+    assert not panel.gpu_swap_box.visible
     # no hint: GPU off, a Q4_0 model, iOS (Metal runs the K-quants), a non-local model
     assert not panel_for("off", gpu_on=False)[0].gpu_swap_box.visible
-    assert not panel_for("q4", file=light_gpu["file"])[0].gpu_swap_box.visible
+    assert not panel_for("q4", file=q4_file)[0].gpu_swap_box.visible
     assert not panel_for("ios", backend="Metal")[0].gpu_swap_box.visible
     panel, _prefs, _service, current = panel_for("remote")
     current["model"] = "authgpt/gpt-6-luna"

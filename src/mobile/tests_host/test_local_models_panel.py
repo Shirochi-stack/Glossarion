@@ -415,7 +415,8 @@ def test_engine_unavailable_is_said_not_crashed(tmp_path, monkeypatch):
     panel.build()
     assert panel.unavailable_text.visible and "llama-cpp-python is not installed" in panel.unavailable_text.value
     assert panel.engine_state.value == "Not loaded" and panel.unload_button.disabled
-    assert [r.key for r in panel.preset_column.controls] == [f"local-preset-{i}" for i in range(4)]
+    assert [r.key for r in panel.preset_column.controls] == [f"local-preset-{i}" for i in range(4)] + [
+        f"local-custom-{family['id']}" for family in presets.CUSTOM_FAMILIES]
 
 
 @pytest.mark.parametrize("width", [360, 320])

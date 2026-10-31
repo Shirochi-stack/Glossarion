@@ -12,11 +12,13 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   ``script_ban_allow_kaomoji``, off by default; the same value as in Settings and on the desktop).
   Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
   default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
-  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". On Android (OpenCL) the
-  ``presets.GPU_PRESETS`` (Q4_0) are in the list whatever the switch says (owner 2026-10-27): added once,
-  quietly, the first time the presets show (Model manager, Welcome page, model picker; ``offer_gpu_presets_once``),
-  and switching the GPU on adds any missing one; "Add GPU-friendly presets (Q4_0)" shows while one is
-  missing (removed, Restore defaults). iOS (Metal) runs the default K-quants: no Q4_0 presets there.
+  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". With the GPU on and a K-quant
+  model in use on Android (OpenCL), a hint opens the Custom menu at that model's size with Q4_0 highlighted.
+* **Custom** (``presets.CUSTOM_FAMILIES``, owner 2026-10-31; the same rows on the Welcome page and in the model
+  picker): Qwen 3.5, Llama, Gemma and LFM2, each with a Custom button. ``CustomModelSheet``: a parameter size,
+  then a quant out of the real files of that repository (size and RAM hint; "No quant" is its unquantized
+  file). The quant Android's GPU is fast for is marked with the uncropped Halgakos and "GPU-friendly". A chosen
+  quant becomes an ordinary preset row through the one-tap flow (``OnDeviceFlow.get_custom``).
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -50,14 +52,15 @@ from glossarion_mobile.services.local_llm import hf, presets
 from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
+from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.components.sheet import (bottom_sheet, fits_compact, page_width, scroll_column, sheet_frame,
                                                    text_height)
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 
-__all__ = ["CONTEXT_SLIDER", "ContextControl", "FileChooser", "LocalModelsPanel", "LocalPresetEditor", "OnDeviceFlow",
-           "RAM_HINTS"]
+__all__ = ["CONTEXT_SLIDER", "ContextControl", "CustomModelSheet", "FileChooser", "LocalModelsPanel", "LocalPresetEditor",
+           "OnDeviceFlow", "RAM_HINTS"]
 
 log = logging.getLogger("glossarion.models")
 
@@ -68,9 +71,12 @@ VISION_TEXT = "Reads images"
 RAM_HINTS = {"ok": ("✓", "fits this phone"), "confirm": ("⚠", "tight on free RAM"), "refuse": ("✕", "too big for this phone"),
              "unknown": ("", "")}
 #: Context slider range and step (tokens); the field takes 512 up to ``presets.MAX_CTX``
-CONTEXT_SLIDER = (2048, 16384, 1024)
-#: Prefs flag (mobile state, not config.json): the GPU-friendly Q4_0 presets were offered once.
-GPU_PRESETS_OFFERED_KEY = "local_gpu_presets_offered"
+CONTEXT_SLIDER = (2048, presets.MAX_CTX, 1024)
+#: The Context slider's colour by RAM verdict (``ContextControl``); "ok" keeps the theme's.
+CONTEXT_RAM_COLORS = {"confirm": ft.Colors.AMBER, "refuse": ft.Colors.ERROR}
+#: The mark of a GPU-friendly quant in the Custom menu: the whole chibi (never the head crop), big enough to read
+CUSTOM_GPU_ART = 40
+GPU_FRIENDLY_TEXT = "GPU-friendly"
 #: config.json key of "Allow emoticons and symbols from other scripts (kaomoji)", shown under the script ban
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
 #: config.json key of "Whitelist source text", shown under it
@@ -87,21 +93,31 @@ def _push(*controls: Any) -> None:
             pass
 
 
+def tapped_page(e: Any) -> Any:
+    """The page of a tap, else None: Flet raises for a control a re-render has replaced meanwhile."""
+    try:
+        return e.page
+    except (AttributeError, RuntimeError):
+        return None
+
+
 def _small(text: str, **kwargs: Any) -> ft.Text:
     kwargs.setdefault("color", ft.Colors.ON_SURFACE_VARIANT)
     return ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL, **kwargs)
 
 
 class ContextControl:
-    """The on-device Context: a 2,048-16,384 slider and a field for exact values and larger contexts.
+    """The on-device Context: a 2,048-262,144 slider and a field for exact values.
 
     ``on_change(tokens)`` runs for every valid value (slider steps of 1,024; the field 512 up to
-    ``presets.MAX_CTX``); ``set_value`` shows another one (a newly chosen model's own context)."""
+    ``presets.MAX_CTX``); ``set_value`` shows another one (a newly chosen model's own context). ``ram_level(tokens)``
+    ("ok", "confirm", "refuse": the RAM gate's verdict) colours the slider: yellow when tight, red over the RAM."""
 
     def __init__(self, value: int, on_change: Callable[[int], Any], *, key: str = "local-ctx",
-                 label: str = "Context (tokens)") -> None:
+                 label: str = "Context (tokens)", ram_level: Optional[Callable[[int], str]] = None) -> None:
         low, high, step = CONTEXT_SLIDER
         self.on_change = on_change
+        self.ram_level = ram_level
         self.value = int(value)
         self.field = ft.TextField(label=label, value=str(self.value), dense=True, width=150,
                                   keyboard_type=ft.KeyboardType.NUMBER, key=key, on_change=self._from_field)
@@ -109,6 +125,17 @@ class ContextControl:
                                 label="{value}", expand=True, key=f"{key}-slider", on_change=self._from_slider)
         self.control = ft.Row([self.slider, self.field], spacing=8, key=f"{key}-row",
                               vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        self._paint()
+
+    def _paint(self) -> None:
+        """The slider's colour for the current value (the theme's while it fits, or nothing can be told)."""
+        try:
+            level = self.ram_level(self.value) if self.ram_level is not None else "ok"
+        except Exception:
+            level = "ok"
+        color = CONTEXT_RAM_COLORS.get(level)
+        self.slider.active_color = color
+        self.slider.thumb_color = color
 
     @staticmethod
     def _clamp(value: int) -> int:
@@ -120,15 +147,17 @@ class ContextControl:
         value = max(low, int(round(float(e.control.value) / step)) * step)
         self.value = value
         self.field.value = str(value)
-        _push(self.field)
+        self._paint()
+        _push(self.field, self.slider)
         self.on_change(value)
 
     def _from_field(self, e: Any) -> None:
         text = str(e.control.value or "").strip()
         if not text.isdigit() or not 512 <= int(text) <= presets.MAX_CTX:
             return
-        self.value = int(text)  # may go beyond the slider's 16,384
+        self.value = int(text)
         self.slider.value = self._clamp(self.value)
+        self._paint()
         _push(self.slider)
         self.on_change(self.value)
 
@@ -136,6 +165,7 @@ class ContextControl:
         self.value = int(value)
         self.field.value = str(self.value)
         self.slider.value = self._clamp(self.value)
+        self._paint()
         _push(self.field, self.slider)
 
 
@@ -263,6 +293,180 @@ class FileChooser:
         page.show_dialog(self.dialog)
 
 
+class CustomModelSheet:
+    """The menu of a Custom row (``OnDeviceFlow.open_custom``: Welcome page, model picker, Model manager): the
+    family's parameter sizes, then the quants of the chosen size's repository, listed from Hugging Face when
+    that size is tapped. A failed listing says why and waits for the user's "Try again". Choosing a quant closes
+    the sheet and runs ``OnDeviceFlow.get_custom`` (the download question, download, load, use)."""
+
+    def __init__(self, flow: "OnDeviceFlow", family: dict, *, size: Optional[dict] = None, highlight_gpu: bool = False,
+                 on_used: Optional[Callable[[str], Any]] = None) -> None:
+        self.flow = flow
+        self.family = family
+        self.size = size
+        self.highlight_gpu = highlight_gpu
+        self.on_used = on_used
+        self.listings: dict = {}  # repo -> RepoFiles of this sheet (another size tapped and back: no new request)
+        self.loading = False
+        self.error = ""
+        self.closed = False
+        self._ticket = 0  # the newest listing asked for; an older answer is dropped
+        self._page: Any = None
+        self.size_row = ft.Row([], wrap=True, spacing=6, run_spacing=6, key="custom-sizes")
+        self.quant_box = ft.Column([], spacing=6, tight=True, key="custom-quants")
+        self.dialog = bottom_sheet(sheet_frame(scroll_column([
+            ft.Text(f"Custom · {family['name']}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600,
+                    max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, key="custom-title"),
+            ft.Text("Parameter size", weight=ft.FontWeight.W_600),
+            self.size_row,
+            ft.Text("Quant", weight=ft.FontWeight.W_600),
+            self.quant_box,
+        ], spacing=8)), key="custom-sheet")
+        self.dialog.on_dismiss = lambda e: self._dismissed()
+        self.render(push=False)
+
+    def show(self, page: Any) -> None:
+        self._page = page
+        page.show_dialog(self.dialog)
+
+    def close(self) -> None:
+        self._dismissed()
+        close_dialog(self._page, self.dialog)
+
+    def _dismissed(self) -> None:
+        self.closed = True
+        self._ticket += 1
+
+    def listing(self) -> Optional[hf.RepoFiles]:
+        return self.listings.get(self.size["repo"]) if self.size else None
+
+    def select_size(self, size: dict) -> None:
+        self.size = size
+        self.error = ""
+        if self.listing() is not None:
+            self._ticket += 1  # a listing still under way is for another size now
+            self.loading = False
+            self.render()
+            return
+        self.loading = True  # shown at once: the task starts on the next turn of the loop
+        self.render()
+        self.flow.spawn(self.load())
+
+    async def load(self) -> None:
+        """List the chosen size's repository: its answer shows, or its failure with "Try again"."""
+        size = self.size
+        if size is None:
+            return
+        self._ticket += 1
+        ticket = self._ticket
+        self.loading, self.error = True, ""
+        self.render()
+        error = ""
+        try:
+            self.listings[size["repo"]] = await self.flow.service.resolve(hf.HfRef(size["repo"]))
+        except hf.HfError as exc:
+            error = str(exc)
+        except Exception as exc:  # a spawned task: nothing else would end the "Looking up…" line
+            log.warning("listing %s failed: %s", size["repo"], exc)
+            error = f"Could not reach Hugging Face ({type(exc).__name__})"
+        if ticket != self._ticket:
+            return
+        self.loading, self.error = False, error
+        self.render()
+
+    def files(self) -> list:
+        """``[(file, label)]`` of the listing, smallest first; split GGUF sets are left out as in the Add from
+        Hugging Face chooser. A label two files share falls back to their file names."""
+        listing = self.listing()
+        runnable = sorted((f for f in (listing.files if listing else ()) if not f.split),
+                          key=lambda f: (f.size or 0, f.name.lower()))
+        labels = [presets.quant_label(f.name) for f in runnable]
+        return [(f, label if labels.count(label) == 1 else f.name) for f, label in zip(runnable, labels)]
+
+    def pick(self, file: hf.HfFile) -> None:
+        listing = self.listing()
+        row = presets.custom_row(self.size, file, hf.pick_projector(listing.projectors) if listing else None)
+        self.close()
+        self.flow.spawn(self._use(row))
+
+    async def _use(self, row: dict) -> Optional[str]:
+        model = await self.flow.get_custom(row)
+        if model and self.on_used is not None:
+            self.on_used(model)
+        return model
+
+    # ---- controls -----------------------------------------------------------------------------------
+
+    def render(self, push: bool = True) -> None:
+        self.size_row.controls = [self._size_button(i, size) for i, size in enumerate(self.family["sizes"])]
+        self.quant_box.controls = self._quant_controls()
+        if push and not self.closed:
+            _push(self.size_row, self.quant_box)
+
+    def _size_button(self, index: int, size: dict) -> ft.Control:
+        kind = ft.FilledButton if size is self.size else ft.OutlinedButton
+        return kind(content=size["label"], tooltip=size["name"], key=f"custom-size-{index}",
+                    on_click=lambda e, s=size: self.select_size(s))
+
+    def _retry(self) -> ft.Control:
+        return ft.FilledTonalButton(content="Try again", icon=ft.Icons.REFRESH, key="custom-retry",
+                                    on_click=lambda e: self.flow.spawn(self.load()))
+
+    def _quant_controls(self) -> list:
+        if self.size is None:
+            return [_small("Choose a parameter size to see its quants.", key="custom-pick-size")]
+        if self.loading:
+            return [ft.Row([ft.ProgressRing(width=18, height=18, stroke_width=2),
+                            ft.Container(content=_small("Looking up the files on Hugging Face…"), expand=True)],
+                           spacing=8, key="custom-loading")]
+        if self.error:
+            return [ft.Text(f"Could not list the files of {self.size['name']}: {self.error}", color=ft.Colors.ERROR,
+                            theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True, key="custom-error"), self._retry()]
+        listing = self.listing()
+        if listing is None:
+            return [self._retry()]
+        files = self.files()
+        if not files:
+            return [_small(f"{self.size['repo']} has no single-file GGUF model now.", key="custom-empty"), self._retry()]
+        controls: list = []
+        if hf.pick_projector(listing.projectors) is not None:
+            controls.append(_vision_line("custom-vision"))
+        controls.extend(self._quant_row(i, file, label) for i, (file, label) in enumerate(files))
+        return controls
+
+    def _quant_row(self, index: int, file: hf.HfFile, label: str) -> ft.Control:
+        flow = self.flow
+        stem = flow.service.registry.find(self.size["repo"], file.path)
+        verdict, mark, _words = flow.ram_hint({"name": f"{self.size['name']} · {label}", "size": file.size})
+        ram = f"{mark} {RAM_HINTS[verdict][1]}".strip() if verdict in RAM_HINTS else ""
+        too_big = verdict == "refuse" and not stem  # the RAM gate would refuse to load it after the download
+        facts = _small(" · ".join(x for x in (dl.format_bytes(file.size), ram) if x), max_lines=2,
+                       overflow=ft.TextOverflow.ELLIPSIS, key=f"custom-quant-facts-{index}")
+        if too_big:
+            facts.color = ft.Colors.ERROR
+        lines: list = [ft.Text(label, weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS), facts]
+        if presets.is_no_quant(file.name):
+            lines.append(_small("Not quantized: full precision, the largest file"))
+        if stem:
+            lines.append(_small("On this device", color=semantic("success"), key=f"custom-quant-here-{index}"))
+        gpu = presets.is_gpu_quant(file.name) and flow._gpu_backend() == "OpenCL"
+        row: list = []
+        if gpu:  # Android's Adreno kernels; iOS (Metal) runs every quant alike
+            lines.append(_small(GPU_FRIENDLY_TEXT, weight=ft.FontWeight.W_600, color=ft.Colors.PRIMARY,
+                                key=f"custom-quant-gpu-{index}"))
+            row.append(ft.Image(src=HALGAKOS_ASSET, width=CUSTOM_GPU_ART, height=CUSTOM_GPU_ART, fit=ft.BoxFit.CONTAIN,
+                                semantics_label="Halgakos", key=f"custom-quant-art-{index}"))
+        row.append(ft.Column(lines, spacing=0, tight=True, expand=True))
+        marked = self.highlight_gpu and gpu
+        return ft.Container(
+            content=ft.Row(row, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8), border_radius=12,
+            bgcolor=ft.Colors.SECONDARY_CONTAINER if marked else ft.Colors.SURFACE_CONTAINER,
+            border=ft.Border.all(2, ft.Colors.PRIMARY) if marked else None,
+            on_click=None if too_big else (lambda e, f=file: self.pick(f)), key=f"custom-quant-{index}",
+        )
+
+
 class OnDeviceFlow:
     """The one-tap on-device flow over ``service`` (the app's ``LocalEngineService``; downloads outlive any
     screen): presets, Hugging Face lookup, model + vision projector download, the RAM hint, load and use.
@@ -295,7 +499,17 @@ class OnDeviceFlow:
         self.editor: Optional[LocalPresetEditor] = None
         self.last_dialog: Any = None
         self.control: Optional[ft.Control] = None
-        self.gpu_presets_button: Optional[ft.TextButton] = None  # built by _gpu_section (Model manager, Welcome)
+        self.custom_used: Optional[Callable[[str], Any]] = None  # a screen's own step after a Custom pick is in use
+        self._retire_old_gpu_rows()
+
+    def _retire_old_gpu_rows(self) -> None:
+        """Rows of the former GPU presets stay while their model is on the phone or on its way; the others go."""
+        if self.prefs is not None:
+            presets.retire_old_gpu_rows(self.prefs, self._old_row_stays)
+
+    def _old_row_stays(self, row: dict) -> bool:
+        stem = self.stem_of_preset(row)
+        return bool(stem and (self.service.registry.resolve(stem) or self.active_download(stem)))
 
     def render(self, push: bool = True) -> None:
         if self.on_change is not None:
@@ -499,6 +713,8 @@ class OnDeviceFlow:
             self.say(message)
         available, reason = self.service.engine_status()
         if available:
+            if self.service.load_must_wait():
+                self.say("Waiting for the current answer to end, then switching the model…")
             ok, error = await self.service.load(stem)
             if not ok:
                 raise _Failed(error or "Could not load the model")
@@ -573,6 +789,13 @@ class OnDeviceFlow:
             return self.service.context_for(model[len("local/"):])
         return self.service.settings()["n_ctx"] or DEFAULT_CONTEXT_SMALL
 
+    def context_ram_level(self, tokens: int) -> str:
+        """The RAM gate's verdict for the current ``local/`` model at ``tokens`` of context ("ok" without one)."""
+        model = str(self.current_model() if self.current_model is not None else "") or ""
+        if not model.lower().startswith("local/"):
+            return "ok"
+        return self.service.ram_check(model[len("local/"):], int(tokens))[0]
+
     async def get_preset(self, index: int) -> Optional[str]:
         """The one-tap action: download if needed, load, use. Returns the model id or None."""
         rows = self.presets()
@@ -604,6 +827,39 @@ class OnDeviceFlow:
         finally:
             self.busy.discard(key)
             self.render()
+
+    def open_custom(self, family_id: str, *, size: Optional[dict] = None, highlight_gpu: bool = False,
+                    page: Any = None) -> Optional[CustomModelSheet]:
+        """A Custom row's tap: its menu, at ``size`` (listing it at once) when the caller knows one."""
+        family = presets.custom_family(family_id)
+        if family is None:
+            return None
+        self.page = page or self.page  # the download question later needs it too
+        sheet = CustomModelSheet(self, family, size=size, highlight_gpu=highlight_gpu, on_used=self.custom_used)
+        self.last_dialog = sheet
+        if self.page is not None:
+            sheet.show(self.page)
+        if size is not None:
+            self.spawn(sheet.load())
+        return sheet
+
+    async def get_custom(self, row: dict) -> Optional[str]:
+        """A quant chosen in the Custom menu: it joins the presets as an ordinary row and runs the one-tap flow.
+        A row this tap added goes again when nothing came of it (the download question declined, the download
+        cancelled); a failed or paused download keeps it, with its Retry or Resume."""
+        _rows, index, added = presets.add_row(self.prefs, row)
+        if index < 0:
+            self.say(f"Keep it to {presets.MAX_PRESETS} presets: remove one to add this model")
+            return None
+        model = await self.get_preset(index)
+        if model is None and added:
+            stem = self.stem_of_preset(row)
+            kept = self.preset_key(row) in self.errors or self.active_download(stem) is not None or \
+                bool(stem and self.service.registry.resolve(stem))
+            if not kept and presets.remove_row(self.prefs, row):
+                self.render()
+        self._render_gpu_swap()
+        return model
 
     def other_models(self, preset_rows: Optional[list] = None) -> tuple:
         """What no preset row shows: ``([(stem, registry entry)], [(key, running or paused DownloadState)])``
@@ -671,10 +927,8 @@ class OnDeviceFlow:
 
     def _gpu_section(self, key_prefix: str = "local") -> list:
         """"Use GPU (experimental)" (off by default; only where the build has a GPU backend), its note, the
-        fallback line ("GPU unavailable: … — using CPU") and, on Android, "Add GPU-friendly presets (Q4_0)"
-        (the fallback while one is missing: switching the GPU on adds them, ``save_gpu``). Shared by the
-        Model manager's engine card and the Welcome page ("Run on this phone"); *key_prefix* keeps their
-        control keys apart. Building it never changes the presets list."""
+        fallback line ("GPU unavailable: … — using CPU") and the Q4_0 hint. Shared by the Model manager's
+        engine card and the Welcome page ("Run on this phone"); *key_prefix* keeps their control keys apart."""
         backend = self._gpu_backend()
         use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
         self.gpu_switch = ft.Switch(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
@@ -689,43 +943,27 @@ class OnDeviceFlow:
         self.gpu_note = _small(text, key=f"{key_prefix}-gpu-note", visible=bool(backend))
         self.gpu_status = ft.Text("", color=semantic("warning"), visible=False, key=f"{key_prefix}-gpu-status",
                                   theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True)
-        self.gpu_presets_button = ft.TextButton(content="Add GPU-friendly presets (Q4_0)", icon=ft.Icons.ADD,
-                                                key=f"{key_prefix}-gpu-presets", on_click=lambda e: self.add_gpu_presets())
-        self._render_gpu_presets_button()
-        # the current model is a K-quant the Adreno kernels run slowly: one tap gets its Q4_0 preset
+        # the current model is a K-quant the Adreno kernels run slowly: one tap opens its size's Custom menu
         self.gpu_swap_text = _small("", key=f"{key_prefix}-gpu-swap-text")
         self.gpu_swap_button = ft.TextButton(content="", icon=ft.Icons.SWAP_HORIZ, key=f"{key_prefix}-gpu-swap-button",
-                                             on_click=lambda e: self.spawn(self.swap_to_gpu_quant()))
+                                             on_click=lambda e: self.open_gpu_swap(tapped_page(e)))
         self.gpu_swap_box = ft.Column([self.gpu_swap_text, self.gpu_swap_button], spacing=0, tight=True,
                                       key=f"{key_prefix}-gpu-swap")
         self._render_gpu_swap(push=False)
-        return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_swap_box, self.gpu_presets_button]
-
-    def _render_gpu_presets_button(self) -> None:
-        if self.gpu_presets_button is None:
-            return
-        missing = presets.missing_gpu_presets(self.presets())
-        self.gpu_presets_button.visible = self._gpu_backend() == "OpenCL" and bool(missing)
+        return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_swap_box]
 
     def save_gpu(self) -> bool:
-        """The switch. Turning it on with Android's OpenCL backend also adds the GPU-friendly Q4_0 presets
-        the list lacks (``add_gpu_presets``; owner 2026-10-26: no extra tap). Off keeps every preset and
-        file; iOS (Metal) runs the default K-quants, so it adds none there."""
-        was_on = bool(getattr(self.service, "use_gpu", lambda: False)())
+        """The switch; every preset and file stays as it is."""
         value = bool(self.service.save_gpu(self.gpu_switch.value))
         self.gpu_switch.value = value
-        if value and not was_on and self._gpu_backend() == "OpenCL":
-            # re-renders the list; on the Welcome page that rebuilds this section (self.gpu_* are the new ones)
-            self.add_gpu_presets(auto=True)
-        self._render_gpu_presets_button()
         self._render_gpu_swap(push=False)
-        _push(self.gpu_switch, self.gpu_presets_button, self.gpu_swap_box)
+        _push(self.gpu_switch, self.gpu_swap_box)
         return value
 
     def gpu_swap(self) -> Optional[tuple]:
-        """Android GPU on and the current ``local/`` model is not a Q4_0 file while its repository has a
-        Q4_0 preset (``presets.GPU_PRESETS``): ``(stem, label, quant, gpu preset)``, else None. The model
-        still runs (on the GPU, maybe slower than the CPU); only a failure falls back to the CPU."""
+        """Android GPU on and the current ``local/`` model is not a Q4_0 file while its repository is in the
+        Custom table (each has a Q4_0 file): ``(stem, label, quant, family, size)``, else None. The model still
+        runs (on the GPU, maybe slower than the CPU); only a failure falls back to the CPU."""
         if self._gpu_backend() != "OpenCL" or not self.service.use_gpu():
             return None
         model = str(self.current_model() if self.current_model is not None else "") or ""
@@ -736,11 +974,11 @@ class OnDeviceFlow:
         file = entry.get("file")
         if not file or presets.is_gpu_quant(file):
             return None
-        gpu_row = presets.gpu_preset_for(entry.get("repo"))
-        if gpu_row is None:
+        custom = presets.custom_size_for(entry.get("repo"))
+        if custom is None:
             return None
         label = str((self.service.preset_for(stem) or {}).get("name") or stem)
-        return stem, label, presets.file_quant(file) or "not Q4_0", gpu_row
+        return (stem, label, presets.file_quant(file) or "not Q4_0", *custom)
 
     def _render_gpu_swap(self, push: bool = True) -> None:
         box = getattr(self, "gpu_swap_box", None)
@@ -749,57 +987,20 @@ class OnDeviceFlow:
         swap = self.gpu_swap()
         box.visible = swap is not None
         if swap is not None:
-            _stem, label, quant, row = swap
+            _stem, label, quant, _family, size = swap
             self.gpu_swap_text.value = (f"{label} is {quant}, which can be slow on this GPU: its fast kernels "
                                         "are for Q4_0.")
-            if self.service.registry.find(row["repo"], row["file"]):
-                self.gpu_swap_button.content = f"Switch to {row['name']}"
-            else:
-                size = presets.download_size(row)
-                self.gpu_swap_button.content = f"Get {row['name']}" + (f" · {dl.format_bytes(size)}" if size else "")
+            self.gpu_swap_button.content = f"Choose Q4_0 · {size['name']}"
         if push:
             _push(box)
 
-    async def swap_to_gpu_quant(self) -> Optional[str]:
-        """The hint's tap: add the model's Q4_0 preset to the list (when missing) and run its one-tap flow
-        (confirm the download, load, use). The current model keeps working until the new one is in use."""
+    def open_gpu_swap(self, page: Any = None) -> Optional[CustomModelSheet]:
+        """The hint's tap: the Custom menu at the model's family and size, Q4_0 highlighted. The current model
+        keeps working until another one is in use."""
         swap = self.gpu_swap()
         if swap is None:
             return None
-        _rows, index = presets.add_gpu_preset(self.prefs, swap[3])
-        self.render()
-        model = await self.get_preset(index)
-        self._render_gpu_swap()
-        return model
-
-    def add_gpu_presets(self, *, auto: bool = False, quiet: bool = False) -> list:
-        """Append the Q4_0 presets (``presets.GPU_PRESETS``) the list does not have yet: the button, and
-        ``save_gpu`` when the GPU goes on (``auto``: silent when none was added; ``quiet``: silent)."""
-        rows, added = presets.add_gpu_presets(self.prefs)
-        if self.prefs is not None:
-            self.prefs.set(GPU_PRESETS_OFFERED_KEY, True)  # offered once: a preset removed later stays removed
-        self._render_gpu_presets_button()
-        _push(self.gpu_presets_button)
-        # said before the re-render: the Welcome page shows the note under its cells
-        if added and not quiet:
-            self.say(f"Added {len(added)} GPU-friendly preset{'s' if len(added) != 1 else ''} (Q4_0)")
-        elif not added and not auto:
-            self.say(f"Keep it to {presets.MAX_PRESETS} presets: remove one to add the GPU-friendly presets"
-                     if presets.missing_gpu_presets(rows) else "The GPU-friendly presets are already in the list")
-        if added or not auto:
-            self.render()
-        return added
-
-    def offer_gpu_presets_once(self) -> list:
-        """Owner 2026-10-27: on Android (OpenCL) the Q4_0 presets show whatever "Use GPU" says, so the
-        first time the presets show (Model manager, Welcome page, model picker) they are added, without a
-        note. After that (or after any add) the list is the user's: a Q4_0 preset removed later is not
-        added back (the button offers it)."""
-        if self.prefs is None or self.prefs.get(GPU_PRESETS_OFFERED_KEY, False):
-            return []
-        if self._gpu_backend() != "OpenCL":
-            return []
-        return self.add_gpu_presets(auto=True, quiet=True)
+        return self.open_custom(swap[3]["id"], size=swap[4], highlight_gpu=True, page=page)
 
 
 class LocalModelsPanel(OnDeviceFlow):
@@ -821,7 +1022,7 @@ class LocalModelsPanel(OnDeviceFlow):
         self.unload_button = ft.TextButton(content="Unload", icon=ft.Icons.EJECT, key="local-unload",
                                            on_click=lambda e: self.spawn(self.unload()))
         settings = self.service.settings()
-        self.context = ContextControl(self.current_context(), self.save_context)
+        self.context = ContextControl(self.current_context(), self.save_context, ram_level=self.context_ram_level)
         self.ctx_field = self.context.field
         self.threads_field = ft.TextField(value=str(settings["n_threads"] or ""), label="Threads", hint_text="auto",
                                           dense=True, expand=True, keyboard_type=ft.KeyboardType.NUMBER,
@@ -884,7 +1085,6 @@ class LocalModelsPanel(OnDeviceFlow):
     def did_show(self) -> None:
         self._subscribe()
         self.downloads.scan()
-        self.offer_gpu_presets_once()
         self.render()
         self.render_engine(self.service.snapshot())
 
@@ -1162,6 +1362,7 @@ class LocalModelsPanel(OnDeviceFlow):
             rows.append(_small("No presets. Add one, or restore the defaults.", key="local-presets-empty"))
         for index, preset in enumerate(preset_rows):
             rows.append(self._preset_row(index, preset, self.stem_of_preset(preset)))
+        rows.extend(self._custom_row(family) for family in presets.CUSTOM_FAMILIES)
         self.preset_column.controls = rows
         downloaded, pending = self.other_models(preset_rows)
         others: list = [self._other_row(stem, entry) for stem, entry in downloaded]
@@ -1223,6 +1424,23 @@ class LocalModelsPanel(OnDeviceFlow):
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
             content=ft.Column([*body, ft.Row(trailing, spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END)],
                               spacing=2, tight=True),
+        )
+
+    def _custom_row(self, family: dict) -> ft.Control:
+        """A Custom row: looks like a preset's, its one button opens the family's menu."""
+        family_id = family["id"]
+        open_menu = lambda e, f=family_id: self.open_custom(f, page=tapped_page(e))  # noqa: E731
+        return ft.Container(
+            key=f"local-custom-{family_id}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
+            padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
+            content=ft.Column([
+                ft.Text(f"Custom · {family['name']}", weight=ft.FontWeight.W_600, max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS),
+                _small(custom_note(family), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Row([ft.FilledTonalButton(content="Custom", icon=ft.Icons.TUNE, key=f"local-custom-action-{family_id}",
+                                             on_click=open_menu)],
+                       spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
+            ], spacing=2, tight=True),
         )
 
     def _action(self, index: int, state: str, stem: Optional[str], target: Optional[str] = None) -> ft.Control:
@@ -1364,6 +1582,11 @@ def _owner(key: str) -> str:
 
 def _download_status(state: dl.DownloadState) -> str:
     return f"Image support · {state.status}" if state.stem.endswith(dl.PROJECTOR_SUFFIX) else state.status
+
+
+def custom_note(family: dict) -> str:
+    """The text of a Custom row: what its menu offers."""
+    return "Choose a size and a quant: " + " · ".join(size["label"] for size in family["sizes"])
 
 
 def _vision_line(key: str) -> ft.Control:

@@ -10,7 +10,8 @@
    keyless routes; "Run on this phone (no account needed)": the on-device presets as one-tap buttons
    (size and a RAM hint for this phone from the engine's RAM gate, Light suggested, inline download
    progress; one tap downloads, loads and selects the model through the Model manager's
-   ``OnDeviceFlow``); then the Model field (ModelPicker, like the desktop's model dropdown) above your
+   ``OnDeviceFlow``) and the Custom cells (a family's menu of sizes and quants, ``CustomModelSheet``);
+   then the Model field (ModelPicker, like the desktop's model dropdown) above your
    own API key (the desktop main key field, ``api_key``) and a local Ollama / LM Studio host on your PC
    (Settings › Endpoints). Next
    moves on (without a sign-in or a model it counts as skipped).
@@ -103,8 +104,8 @@ ONDEVICE_CELLS = 4
 #: a cell's second line by ``OnDeviceFlow.row_state`` (short: a quarter of a 360 dp row)
 ONDEVICE_LABELS = {"checking": "Checking…", "paused": "Resume", "busy": "Starting…", "error": "Retry",
                    "in_use": "✓ In use", "use": "Tap to use"}
-#: the GPU-friendly (Q4_0) preset cells (owner 2026-10-27: shown on every Android phone, they must fit a
-#: quarter row): a smaller name, "Garbage GPU" for "Garbage · GPU (Q4_0)" (the full name is the tooltip)
+#: the cells of a chosen quant (they must fit a quarter row): a smaller name, on up to two lines, and "Garbage
+#: GPU" for a former preset "Garbage · GPU (Q4_0)" (the full name is the tooltip)
 ONDEVICE_GPU_NAME_SIZE = 10
 _GPU_NAME_SUFFIX = " · GPU (Q4_0)"
 
@@ -278,7 +279,7 @@ class WelcomeScreen(Screen):
             self.ondevice = OnDeviceFlow(service=service, prefs=self.prefs, page=self.page,
                                          use_model=self._use_local_model, current_model=self.current_model,
                                          notify=self._ondevice_note, on_change=self.render_ondevice)
-            self.ondevice.offer_gpu_presets_once()  # Android: the Q4_0 presets show whatever the GPU switch says
+            self.ondevice.custom_used = self._ondevice_used
             self._ondevice_unsub = service.downloads.subscribe(lambda state: self.render_ondevice())
         return self.ondevice
 
@@ -293,11 +294,14 @@ class WelcomeScreen(Screen):
                            ReasonChip(reason="Model manager › On-device")], wrap=True, key="welcome-ondevice")
         rows = flow.presets()
         suggested = self.suggested_ondevice(rows)
+        from glossarion_mobile.services.local_llm.presets import CUSTOM_FAMILIES
+
         cells = [self._ondevice_cell(flow, index, preset, preset.get("name") == suggested)
                  for index, preset in enumerate(rows)]
+        cells.extend(self._custom_cell(flow, family) for family in CUSTOM_FAMILIES)
         lines: list[ft.Control] = [ft.ResponsiveRow(cells, spacing=6, run_spacing=4, key="welcome-ondevice")]
         if flow._gpu_backend():
-            # the Model manager's "Use GPU (experimental)" switch and its Q4_0 presets button; the long
+            # the Model manager's "Use GPU (experimental)" switch and its Q4_0 hint; the long
             # note stays on the engine card (page 1 must still fit a 360 x 800 phone)
             lines.extend(control for control in flow._gpu_section(key_prefix="welcome")
                          if control is not flow.gpu_note and control is not flow.gpu_status)
@@ -340,14 +344,14 @@ class WelcomeScreen(Screen):
         else:
             detail = " ".join(x for x in (dl.format_bytes(lp.download_size(preset)) if lp.download_size(preset)
                                           else "", mark) if x)
-        gpu = lp.is_gpu_quant(preset.get("file"))
+        gpu = " · " in str(preset.get("name") or "")  # a chosen quant ("Qwen 3.5 2B · Q4_0"), a former GPU preset
         name = ondevice_cell_name(preset) + (" ⭐" if suggested else "")
         color = {"refuse": ft.Colors.ERROR, "confirm": ft.Colors.TERTIARY}.get(verdict) if state == "download" else None
         tooltip = " · ".join(x for x in (str(preset.get("name") or "") if gpu else "", str(preset.get("note") or ""),
                                          words if state == "download" else status) if x)
         lines: list[ft.Control] = [
-            ft.Text(name, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
-                    size=ONDEVICE_GPU_NAME_SIZE if gpu else None),
+            ft.Text(name, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=2 if gpu else 1,
+                    overflow=ft.TextOverflow.ELLIPSIS, size=ONDEVICE_GPU_NAME_SIZE if gpu else None),
             ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
                     color=color or ft.Colors.ON_SURFACE_VARIANT),
         ]
@@ -368,6 +372,41 @@ class WelcomeScreen(Screen):
             col={"xs": 12 // ONDEVICE_CELLS},
         )
 
+    def _custom_cell(self, flow: Any, family: dict) -> ft.Control:
+        """A Custom row as a cell: its family's name over "Custom"; a tap opens its menu of sizes and quants."""
+        return ft.Container(
+            content=ft.Column([
+                ft.Text(family["name"], theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text("Custom", theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS, color=ft.Colors.ON_SURFACE_VARIANT),
+            ], spacing=0, tight=True),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+            border_radius=10,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            tooltip=f"Custom · {family['name']}: choose a size and a quant",
+            on_click=lambda e, f=family["id"]: self._open_custom(f, e),
+            key=f"welcome-ondevice-custom-{family['id']}",
+            col={"xs": 12 // ONDEVICE_CELLS},
+        )
+
+    def _open_custom(self, family_id: str, e: Any = None) -> Any:
+        flow = self.ondevice_flow()
+        if flow is None:
+            return None
+        from glossarion_mobile.ui.screens.local_models_panel import tapped_page
+
+        self._find_flow_page(flow)
+        return flow.open_custom(family_id, page=tapped_page(e))
+
+    def _find_flow_page(self, flow: Any) -> None:
+        """The big-download / tight-RAM questions need the page (as open_sign_in finds it)."""
+        if flow.page is None:
+            try:
+                flow.page = self.page or (self.body.page if self.body is not None else None)
+            except Exception:
+                flow.page = None
+
     async def use_ondevice(self, index: int) -> Optional[str]:
         """One tap: download (with its image support), load and select the preset's model; the Welcome
         can then go on (it counts like a sign-in)."""
@@ -375,11 +414,7 @@ class WelcomeScreen(Screen):
         if flow is None:
             return None
         self.model_notes.pop("local", None)
-        if flow.page is None:  # the big-download / tight-RAM questions need the page (as open_sign_in finds it)
-            try:
-                flow.page = self.page or (self.body.page if self.body is not None else None)
-            except Exception:
-                flow.page = None
+        self._find_flow_page(flow)
         rows = flow.presets()
         if 0 <= index < len(rows):
             stem = flow.stem_of_preset(rows[index])
@@ -396,12 +431,16 @@ class WelcomeScreen(Screen):
                 return None
         model = await flow.get_preset(index)
         if model:
-            self.flow.signed_in = True
-            self.flow.skipped_sign_in = False
-            self.model_chosen(model)
-            self.model_notes["local"] = f"✓ Using {model} · runs on this phone"
-            self.render()
+            self._ondevice_used(model)
         return model
+
+    def _ondevice_used(self, model: str) -> None:
+        """An on-device model is in use: the Welcome can go on (it counts like a sign-in)."""
+        self.flow.signed_in = True
+        self.flow.skipped_sign_in = False
+        self.model_chosen(model)
+        self.model_notes["local"] = f"✓ Using {model} · runs on this phone"
+        self.render()
 
     def _use_local_model(self, model: str) -> None:
         if self.on_set_model is not None:
@@ -544,6 +583,15 @@ class WelcomeScreen(Screen):
             return None
         return self.ondevice_flow()
 
+    def apply_welcome_context(self) -> None:
+        """An on-device model with no saved Context starts at ``WELCOME_CONTEXT``, shown or skipped past alike."""
+        ondevice = self.local_context()
+        if ondevice is None or ondevice.service.settings()["n_ctx"]:
+            return
+        from glossarion_mobile.services.local_llm.service import WELCOME_CONTEXT
+
+        ondevice.service.save_context(WELCOME_CONTEXT)
+
     def shown_max_output_tokens(self) -> int:
         """The output-token limit Request size shows: the value set here, else (on-device) half the context or
         the saved one / 16,384; an on-device model's never exceeds its context (owner 2026-10-20)."""
@@ -565,6 +613,7 @@ class WelcomeScreen(Screen):
         With an on-device model: its Context (``ContextControl``, saved at once like Model manager's) above
         the budget, which is then half the context and read-only (jobs on ``local/`` use that; the saved
         budget stays for cloud models)."""
+        self.apply_welcome_context()
         ondevice = self.local_context()
         current = self.shown_max_output_tokens()
         low, high = TOKEN_SLIDER
@@ -591,7 +640,7 @@ class WelcomeScreen(Screen):
                         pass
 
             self.context_control = ContextControl(ondevice.current_context(), on_context, key="welcome-ctx",
-                                                  label="Context (tokens)")
+                                                  label="Context (tokens)", ram_level=ondevice.context_ram_level)
             context_rows = [self.context_control.control,
                             ft.Text("On-device model: the context holds the prompt and the answer, so the output limit "
                                     "can't exceed it (half of it by default); requests go one at a time.",
@@ -1012,6 +1061,7 @@ class WelcomeScreen(Screen):
                 pass
 
     def finish(self) -> dict:
+        self.apply_welcome_context()
         self.flow.default_mode_for_model(str(self.current_model() if self.current_model is not None else "") or "")
         # Save what Request size showed even when it was left untouched (owner 2026-10-18: an on-device
         # model shows batch size 1 and half the context, yet Run options kept 5 and 128,000).

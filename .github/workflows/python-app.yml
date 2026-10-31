@@ -71,6 +71,7 @@ jobs:
       run: |
         pip install --no-cache-dir pytest
         python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
+          tests/test_anti_duplicate_wire.py \
           tests/test_mobile_runtime.py \
           tests/test_safe_image.py \
           tests/test_cv2_decode_gate.py \
