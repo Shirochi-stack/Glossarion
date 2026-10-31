@@ -56,7 +56,7 @@ from glossarion_mobile.services import webview_bridge as wb  # noqa: E402
 from glossarion_mobile.services.dispatcher import UiDispatcher  # noqa: E402
 from glossarion_mobile.state.store import LoopGuard  # noqa: E402
 
-CHATGPT = "https://chatgpt.com/"
+CHATGPT = gpt.CHAT_URL
 NIM_URL = "https://build.nvidia.com/z-ai/glm-5.1"
 NO_LISTENER = ("TimeoutException after 0:00:10.000000: Timeout waiting for invoke method listener for "
                "WebView(7655).{}")

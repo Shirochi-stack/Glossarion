@@ -498,7 +498,7 @@ def test_authchatgpt_logged_out_runs_on_the_native_page(harness):
     thread.join(30)
     assert (box.get("result") or {}).get("content") == "Title", box.get("error")
     (page,) = h.fake.created
-    assert page.loads == [gpt.BASE_URL + "/"] and page.site.prompts == 1
+    assert page.loads == [gpt.CHAT_URL] and page.site.prompts == 1
     assert not any("again" in line for line in logs)
     assert _wait_for(lambda: not h.fake.pages)
 

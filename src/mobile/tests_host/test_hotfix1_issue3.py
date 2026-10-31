@@ -137,7 +137,7 @@ _assert_offline = _D12._assert_offline
 MODEL = "authchatgpt/auto"  # the mobile default model (setting_writes.MOBILE_DEFAULT_MODEL)
 CHAPTERS = 6
 EPUB_NAME = "background_novel.epub"
-CHATGPT = "https://chatgpt.com/"
+CHATGPT = "https://chatgpt.com/?oauth_return_surface=classic"  # authchatgpt_auth.CHAT_URL
 #: Flet's client waits this long for a WebView's method listener (10 s on a phone; shortened).
 LISTENER_TIMEOUT = 1.0
 #: Seconds a document takes to load in the fake WebView.

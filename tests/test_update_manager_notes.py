@@ -138,6 +138,34 @@ def test_failed_image_keeps_patch_notes_readable(app, monkeypatch):
     browser.deleteLater()
 
 
+def test_tag_like_text_stays_literal_and_keeps_the_notes_after_it(app):
+    """v9.15.8: Qt's Markdown importer took <time> in config.corrupt-<time>.json for an open tag
+    and dropped the text of every later bullet."""
+    browser = update_manager.ReleaseNotesBrowser()
+    browser.set_release_notes('### Fixes\n- kept as config.corrupt-<time>.json and restored\n  - a <br> and a <p> mention\n'
+                              '- next bullet &amp; a < b\n\n### Packages\n- [Download](https://example.com/a) '
+                              'or <https://example.com/auto>')
+    plain = browser.toPlainText()
+    assert 'kept as config.corrupt-<time>.json and restored' in plain
+    assert 'a <br> and a <p> mention' in plain
+    assert 'next bullet & a < b' in plain
+    assert 'Packages' in plain
+    assert 'https://example.com/a' in browser.toHtml() and 'https://example.com/auto' in browser.toHtml()
+    browser.close()
+
+
+def test_image_after_text_on_a_line_is_an_image_and_code_stays_code(app, image_response):
+    url = 'https://github.com/user-attachments/assets/inline'
+    browser = update_manager.ReleaseNotesBrowser()
+    browser.set_release_notes(f'- A note.<img width="849" height="851" alt="Shot" src="{url}" /> And more.\n\n'
+                              f'`<img src="{url}">` in code')
+    plain = browser.toPlainText()
+    assert len(image_formats(browser)) == 1 and image_formats(browser)[0].name() == url
+    assert 'A note.' in plain and 'And more.' in plain
+    assert f'<img src="{url}"> in code' in plain
+    browser.close()
+
+
 def test_update_manager_uses_two_columns_and_keeps_asset_selection(app, tmp_path):
     window = QMainWindow()
     window.config = {}

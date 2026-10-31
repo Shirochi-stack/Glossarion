@@ -57,6 +57,13 @@ def _windows_update_script(current_exe, update_file):
     return '\n'.join(lines), launch_path
 
 
+# Release notes are text: with HTML on, Qt's Markdown importer counts a mention like
+# config.corrupt-<time>.json as an open tag and drops everything after it.
+_RELEASE_MARKDOWN = (QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+                     | QTextDocument.MarkdownFeature.MarkdownNoHTML)
+_RELEASE_INLINE_IMAGE = re.compile(r'(?P<ticks>`+).*?(?P=ticks)|<img\b[^>]*>', re.IGNORECASE)
+
+
 class _ReleaseImageSignals(QObject):
     finished = Signal(str, QImage)
 
@@ -108,6 +115,24 @@ class ReleaseNotesBrowser(QTextBrowser):
             app._release_image_pool.setMaxThreadCount(3)
         self._image_pool = app._release_image_pool
 
+    def _release_image(self, tag):
+        """Markdown for a GitHub image tag, its declared size kept; None without a source."""
+        parser = _ReleaseImageTag()
+        parser.feed(tag)
+        attrs = getattr(parser, 'attrs', {})
+        source = attrs.get('src')
+        if not source:
+            return None
+        url = self.document().baseUrl().resolved(QUrl(source)).toString()
+        try:
+            width = max(0, float(attrs.get('width') or 0))
+            height = max(0, float(attrs.get('height') or 0))
+            self._declared_image_sizes[url] = (width, height)
+        except ValueError:
+            pass
+        alt = (attrs.get('alt') or '').replace('[', '\\[').replace(']', '\\]')
+        return f'![{alt}](<{source}>)'
+
     def set_release_notes(self, markdown):
         # Qt treats standalone raw HTML images as inline content, even after a
         # blank line. Convert GitHub's image tags to proper Markdown paragraphs.
@@ -128,24 +153,17 @@ class ReleaseNotesBrowser(QTextBrowser):
                 lines.append(line)
                 continue
             if fence is None and re.fullmatch(r'<img\b[^>]*>', stripped, re.IGNORECASE):
-                parser = _ReleaseImageTag()
-                parser.feed(stripped)
-                attrs = getattr(parser, 'attrs', {})
-                source = attrs.get('src')
-                if source:
-                    url = self.document().baseUrl().resolved(QUrl(source)).toString()
-                    try:
-                        width = max(0, float(attrs.get('width') or 0))
-                        height = max(0, float(attrs.get('height') or 0))
-                        self._declared_image_sizes[url] = (width, height)
-                    except ValueError:
-                        pass
-                    alt = (attrs.get('alt') or '').replace('[', '\\[').replace(']', '\\]')
-                    lines.extend(['', f'![{alt}](<{source}>)', ''])
+                image = self._release_image(stripped)
+                if image:
+                    lines.extend(['', image, ''])
                     continue
+            elif fence is None:  # an image after text on the same line
+                line = _RELEASE_INLINE_IMAGE.sub(
+                    lambda match: match.group() if match.group('ticks')
+                    else self._release_image(match.group()) or match.group(), line)
             lines.append(line if fence is not None or line.startswith(('    ', '\t'))
                          else _expand_release_emoji_aliases(line))
-        self.setMarkdown('\n'.join(lines))
+        self.document().setMarkdown('\n'.join(lines), _RELEASE_MARKDOWN)
         self._fit_images()
 
     def loadResource(self, resource_type, url):

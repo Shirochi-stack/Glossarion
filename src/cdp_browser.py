@@ -111,31 +111,37 @@ def serialized(gate, check, cancel_check=None):
 
 @contextmanager
 def launch(*, binary, profile, start_url, ready, page_factory, check, error, closed_message,
-           connect_message, visible=False, extra_args=(), cancel_check=None):
+           connect_message, visible=False, extra_args=(), cancel_check=None, spare_profiles=()):
     """Start ``binary`` on ``profile`` and yield its first tab once ``ready(page)`` is true.
 
     ``start_url`` is the address the first tab opens; the tab whose URL starts with it is used.
+    Chrome hands a second launch on a profile to the browser already running on it and exits
+    (another Glossarion window): ``spare_profiles`` are tried in turn then, for routes whose
+    profile holds no login.
     """
-    directory = Path(profile)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    port_file = directory / "DevToolsActivePort"
-    port_file.unlink(missing_ok=True)
-    args = [binary, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={directory}", "--no-first-run", "--no-default-browser-check",
-            *extra_args, start_url]
-    if not visible:
-        args.insert(1, "--headless=new")
     # The mobile backend collector needs the process-spawn gate in this function.
     if not mobile_runtime.subprocesses_available():
         raise error(closed_message, "config_error")
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    profiles = [profile, *spare_profiles]
+    proc = None
     page = None
     try:
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             check(cancel_check)
-            if proc.poll() is not None:
-                raise error(closed_message, "browser_error")
+            if proc is None or proc.poll() is not None:
+                if not profiles:
+                    raise error(closed_message, "browser_error")
+                directory = Path(profiles.pop(0))
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                port_file = directory / "DevToolsActivePort"
+                port_file.unlink(missing_ok=True)
+                args = [binary, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
+                        f"--user-data-dir={directory}", "--no-first-run", "--no-default-browser-check",
+                        *extra_args, start_url]
+                if not visible:
+                    args.insert(1, "--headless=new")
+                proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 port = int(port_file.read_text().splitlines()[0])
                 # Bypass global HTTP proxy settings for the local debugging connection.
@@ -159,14 +165,15 @@ def launch(*, binary, profile, start_url, ready, page_factory, check, error, clo
             except Exception:
                 pass
             page.ws.close()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
+        if proc:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
 
 class BrowserLeases:

@@ -178,6 +178,42 @@ def test_mobile_rejected_before_process_spawn(monkeypatch):
             pass
 
 
+@pytest.mark.parametrize("busy_profiles,spare_used", [(1, True), (8, False)])
+def test_profile_in_use_moves_to_a_spare_profile(monkeypatch, tmp_path, busy_profiles, spare_used):
+    """Chrome hands a second launch on a profile to the browser already running on it and exits
+    (another Glossarion window): "browser closed" comes only when every spare profile is busy too."""
+    import io
+    from pathlib import Path
+    from types import SimpleNamespace
+    started = []
+
+    def popen(arguments, **kwargs):
+        directory = next(a for a in arguments if a.startswith("--user-data-dir=")).split("=", 1)[1]
+        started.append(directory)
+        busy = len(started) <= busy_profiles
+        if not busy:
+            (Path(directory) / "DevToolsActivePort").write_text("12345\n/devtools/browser/test", encoding="utf-8")
+        return SimpleNamespace(poll=lambda: 0 if busy else None, wait=lambda **kwargs: None)
+
+    tabs = json.dumps([{"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://test"}]).encode()
+    monkeypatch.setenv("AUTHCHATGPT_PROFILE_DIR", str(tmp_path / "authchatgpt_browser"))
+    monkeypatch.setattr(gpt, "_browser_binary", lambda: "chrome")
+    monkeypatch.setattr(gpt.cdp_browser.subprocess, "Popen", popen)
+    monkeypatch.setattr(gpt.cdp_browser.urllib.request, "build_opener",
+                        lambda *a: SimpleNamespace(open=lambda url, **k: io.BytesIO(tabs)))
+    monkeypatch.setattr(gpt, "_Page", lambda *a: SimpleNamespace(
+        ws=SimpleNamespace(send=lambda message: None, close=lambda: None)))
+    if spare_used:
+        with gpt._launch_browser():
+            pass
+        assert [Path(p).name for p in started] == ["authchatgpt_browser", "authchatgpt_browser_2"]
+    else:
+        with pytest.raises(gpt.AuthChatGPTError, match="browser closed"):
+            with gpt._launch_browser():
+                pass
+        assert len(started) == busy_profiles
+
+
 def test_unified_routing_and_dispatch(monkeypatch):
     from types import SimpleNamespace
     from unified_api_client import UnifiedClient, UnifiedClientError
@@ -348,7 +384,7 @@ def test_mobile_logged_out_runs_the_app_as_the_page(monkeypatch):
     with gpt._open_tab({"token": None, "prompt": "p", "model": "auto", "temporary": False}) as tab:
         assert tab.evaluate("1") is True
     # the app cookie is set once, then the page is loaded again and hooked after it started
-    assert page.loaded == [gpt.BASE_URL + "/"] * 2
+    assert page.loaded == [gpt.CHAT_URL] * 2
     assert any("})(window)" in s and "__glossarionGPT = " in s for s in page.scripts) and page.closed
 
 
@@ -598,7 +634,7 @@ def test_mobile_reload_waits_for_the_new_document(monkeypatch, no_sleep):
     mobile_driver(monkeypatch, page)
     with gpt._open_tab({"token": None, "prompt": "p", "model": "auto", "temporary": False}):
         pass
-    assert page.loaded == [gpt.BASE_URL + "/"] * 2
+    assert page.loaded == [gpt.CHAT_URL] * 2
     assert page.hooked_doc == page.doc["id"] == 2 and page.closed
 
 
@@ -609,7 +645,7 @@ def test_mobile_logged_in_first_visit_frames_the_host_page(monkeypatch, no_sleep
 
     def run_js(script, js_timeout_ms=15000):
         if "oai-did=') >= 0" in script:
-            return page.doc["url"] == gpt.BASE_URL + "/" or page.doc["id"] > 2
+            return page.doc["url"] == gpt.CHAT_URL or page.doc["id"] > 2
         if "createElement('iframe')" in script:
             page.frame_doc = page.doc["id"]
         return real(script, js_timeout_ms)
@@ -617,7 +653,7 @@ def test_mobile_logged_in_first_visit_frames_the_host_page(monkeypatch, no_sleep
     mobile_driver(monkeypatch, page)
     with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
         pass
-    assert page.loaded == [gpt._HOST_URL, gpt.BASE_URL + "/", gpt._HOST_URL]
+    assert page.loaded == [gpt._HOST_URL, gpt.CHAT_URL, gpt._HOST_URL]
     assert page.frame_doc == 3 and page.inserted == 1
 
 

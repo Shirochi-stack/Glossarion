@@ -48,6 +48,9 @@ _APP_COOKIE = {"name": "__Secure-next-auth.session-token", "value": "glossarion"
 # ``var value = (<script>);`` (webview_bridge.page_script), so no statement lists.
 _APP_COOKIE_JS = ("(document.cookie = '__Secure-next-auth.session-token=glossarion; Secure; Path=/; "
                   "SameSite=Lax', true)")
+# The regular app's "/" sends a session it does not recognise to the login page; its OAuth return
+# address (chatgpt.com keeps it on the regular app) opens the same chat without that check.
+CHAT_URL = BASE_URL + "/?oauth_return_surface=classic"
 _PLANS = {"free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro", "team": "Team",
           "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "guest": "Guest"}
 _cancel = threading.Event()
@@ -79,6 +82,13 @@ def _check(cancel_check=None):
 def profile_dir():
     return Path(os.environ.get("AUTHCHATGPT_PROFILE_DIR") or
                 (Path.home() / ".glossarion" / "authchatgpt_browser"))
+
+
+def _spare_profiles():
+    """Profiles for when another Glossarion window's browser has this one. They hold only
+    chatgpt.com's cookies (the login is the authgpt/ token), so any of them will do."""
+    first = profile_dir()
+    return [first.with_name(f"{first.name}_{number}") for number in range(2, 9)]
 
 
 def resolve_model(model):
@@ -233,7 +243,7 @@ def _launch_browser(*, visible=False, cancel_check=None):
             closed_message="AuthChatGPT browser closed. Try again.",
             connect_message="AuthChatGPT could not connect to its browser.", visible=visible,
             extra_args=("--disable-blink-features=AutomationControlled", "--window-size=1400,1000"),
-            cancel_check=cancel_check) as page:
+            cancel_check=cancel_check, spare_profiles=_spare_profiles()) as page:
         yield page
 
 
@@ -319,7 +329,7 @@ def _tab_ready(page, cancel_check):
 
 _LEASES = cdp_browser.BrowserLeases(
     launch=lambda **kwargs: _launch_browser(**kwargs), page_factory=lambda url, check: _Page(url, check),
-    check=_check, url=BASE_URL + "/", ready=_tab_ready)
+    check=_check, url=CHAT_URL, ready=_tab_ready)
 
 
 def _prepare(config):
@@ -465,7 +475,7 @@ def _frame_script(config):
             " const frame = document.createElement('iframe');"
             f" frame.id = '{_FRAME_ID}';"
             " frame.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff';"
-            " frame.src = 'https://chatgpt.com/'; document.documentElement.appendChild(frame);"
+            f" frame.src = '{CHAT_URL}'; document.documentElement.appendChild(frame);"
             f" {_hook(config, 'frame.contentWindow')}; return true;}})()")
 
 
@@ -595,7 +605,7 @@ def _driver_frame(wrapped, config, cancel_check):
     _driver_load(wrapped, _HOST_URL, cancel_check)
     if not wrapped.evaluate("document.cookie.indexOf('oai-did=') >= 0"):
         # A first visit: chatgpt.com sets up its device cookies on a top-level page load.
-        _driver_load(wrapped, BASE_URL + "/", cancel_check)
+        _driver_load(wrapped, CHAT_URL, cancel_check)
         _driver_wait(wrapped, "document.cookie.indexOf('oai-did=') >= 0", cancel_check,
                      "chatgpt.com set no device cookie")
         _driver_load(wrapped, _HOST_URL, cancel_check)
@@ -649,17 +659,17 @@ def _driver_tab(config, cancel_check=None):
             else:
                 # Logged out, the app runs as the page itself (in the iframe chatgpt.com refuses a
                 # logged-out turn): the hook is added once it started, which logged-out chat allows.
-                _driver_load(wrapped, BASE_URL + "/", cancel_check)
+                _driver_load(wrapped, CHAT_URL, cancel_check)
                 if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
                     wrapped.evaluate(_APP_COOKIE_JS)
-                    _driver_load(wrapped, BASE_URL + "/", cancel_check)
+                    _driver_load(wrapped, CHAT_URL, cancel_check)
                 composer = "!!document.querySelector('#prompt-textarea')"
                 try:
                     _driver_wait(wrapped, composer, cancel_check, "the ChatGPT composer did not appear")
                 except AuthChatGPTError as exc:
                     if exc.error_type == "cancelled" or isinstance(exc, _PageLost):
                         raise
-                    _driver_load(wrapped, BASE_URL + "/", cancel_check)  # one reload before failing
+                    _driver_load(wrapped, CHAT_URL, cancel_check)  # one reload before failing
                     _driver_wait(wrapped, composer, cancel_check,
                                  "the ChatGPT composer did not appear after a reload")
                 wrapped.evaluate("(" + _hook(config) + ", true)")
