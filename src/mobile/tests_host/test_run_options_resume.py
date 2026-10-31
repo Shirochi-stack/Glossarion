@@ -103,10 +103,11 @@ async def _stop(chat):
 async def _resume(chat) -> dict:
     """Tap Resume on the card that shows the Run options; the config the resumed job starts with."""
     from glossarion_mobile.ui.chat.cards import JobCard
+    from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
 
     view, jobs = chat.view, chat.jobs
     panel = _resume_panel(view)
-    card = next(c for c in TC._cards(view, JobCard) if panel.control in c.options_box.controls)
+    card = next(c for c in TC._cards(view, JobCard) if closes_on_tap_away(panel.control) in c.options_box.controls)
     before = len(jobs.submitted)
     card.action_buttons["resume"].on_click(None)
     await _settle(chat.calls)

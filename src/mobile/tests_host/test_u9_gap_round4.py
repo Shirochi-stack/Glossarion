@@ -143,7 +143,7 @@ def test_chat_keeps_the_strip_for_its_own_cardless_jobs():
     fake = types.SimpleNamespace(state=types.SimpleNamespace(current_chat=types.SimpleNamespace(value="7")),
                                  job_strip=types.SimpleNamespace(set_model=shown.append))
     ChatView._apply_job_strip(fake, strip_model_for(_snap()))  # Extract glossary started from chat 7
-    assert shown[-1] is not None and shown[-1].title.startswith("Extracting glossary")
+    assert shown[-1] is not None and shown[-1].title.startswith("Indexing")
     ChatView._apply_job_strip(fake, strip_model_for(_snap({"chat_id": 7}, kind="direct_text")))
     assert shown[-1] is None  # the chat's own run: its Job card is the progress UI
 

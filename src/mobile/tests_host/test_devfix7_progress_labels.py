@@ -145,9 +145,9 @@ def test_issue7_every_surface_shows_the_spine_position_in_the_glossary_stage(iso
         found = shown.fullmatch(position)
         assert found, position
         assert int(found.group(1)) == int(found.group(2)) + 1  # the nav page comes first in the spine
-        assert position_line(snap) == f"Translating • {position}"
-        assert progress_line(snap, verb=True).startswith(f"Translating • {position}")
-        assert notification_lines(snap)[0].startswith(f"Translating • {position}")
+        assert position_line(snap) == f"Indexing • {position}"  # owner 2026-10-31: "Indexing", not "Translating"
+        assert progress_line(snap, verb=True).startswith(f"Indexing • {position}")
+        assert notification_lines(snap)[0].startswith(f"Indexing • {position}")
         assert strip_model_for(snap, 0, None).subtitle.startswith(position)
         assert card_line(snap).startswith(position)
         # the chapter never blinked away between two requests, and each position has its spine number

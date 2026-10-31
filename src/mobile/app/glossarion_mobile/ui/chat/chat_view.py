@@ -152,6 +152,7 @@ from glossarion_mobile.ui.chat.transcript_model import (
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
 from glossarion_mobile.ui.foreground import park_while_hidden
 from glossarion_mobile.ui.responsive import Layout, layout_for
 from glossarion_mobile.ui.sheets.plus_sheet import CAMERA_OFF_REASON, PlusSheet, camera_error_text
@@ -2328,7 +2329,7 @@ class ChatView:
             facts,
             conversion,
             ft.Row(chips, wrap=True, spacing=6, run_spacing=6),
-            panel.control,
+            closes_on_tap_away(panel.control),
             ft.Row(buttons, wrap=True, spacing=4),
         ]
         if self.env is not None and self.env.is_ios:

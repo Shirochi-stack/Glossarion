@@ -15,6 +15,6 @@ async def test_chat_epub_to_library(ui, device_files, fake_server):
     await flows.dismiss_welcome(ui, timeout=180, first_run=True)
     await flows.wait_home(ui)
     await flows.import_desktop_config(ui)
-    await flows.chat_translate_and_migrate(ui)
+    await flows.chat_translate_and_migrate(ui, tap_away=True)
     assert fake_server.requests, "the app never reached the fake model server"
     await flows.library_book_chapters(ui)

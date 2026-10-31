@@ -550,6 +550,7 @@ class BookPageScreen(Screen):
         self.job = job
         self._render_strip()
         self.chapters.sync_run_buttons(view)  # issue 7: Run translation / Run QA scan follow every job event
+        self.glossary_tab.sync_extract_button(view)
         self._maybe_review(job)
         if finished:
             self.ctx.spawn(self.reload_progress())

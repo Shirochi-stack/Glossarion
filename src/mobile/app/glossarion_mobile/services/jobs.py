@@ -87,6 +87,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
+from glossarion_mobile.job_kinds import INDEXING
 from glossarion_mobile.services.dispatcher import LogBuffer
 
 __all__ = [
@@ -980,6 +981,14 @@ def kind_verb(kind: str) -> str:
     return getattr(info, "verb", None) or str(kind).replace("_", " ").capitalize()
 
 
+def job_verb(snap: Any) -> str:
+    """The word a job's lines start with: its kind's verb, "Indexing" while a book job is in its glossary stage
+    (``job_kinds.translate.indexing_phase``)."""
+    if str(getattr(snap, "phase", "") or "") == INDEXING:
+        return INDEXING
+    return kind_verb(getattr(snap, "kind", "") or "")
+
+
 def kind_icon(kind: str) -> str:
     info = _kind_info(kind)
     return getattr(info, "icon", None) or "WORK_HISTORY"
@@ -1044,6 +1053,8 @@ def progress_view(snap: Any) -> str:
     progress exists yet); the chapters otherwise."""
     if _spec_kind(getattr(snap, "spec", None)) in ("extract_glossary", "glossary_refine"):
         return "glossary"
+    if getattr(snap, "is_active", False) and str(getattr(snap, "phase", "") or "") == INDEXING:
+        return "glossary"
     progress = getattr(snap, "progress", None)
     staged = getattr(snap, "is_active", False) and getattr(snap, "position", "") and not getattr(progress, "total", 0)
     return "glossary" if staged else "chapters"
@@ -1053,7 +1064,7 @@ def position_line(snap: Any) -> str:
     """The job's one-line status (owner 2026-10-30), for the Jobs page, the job page, the Book page and the
     notification: "Translating • [17/182] Ch. 13 (1/2)" from the newest in-flight request
     (``request_position``); before the first request names a chapter, "Translating • 14/15"."""
-    verb = kind_verb(getattr(snap, "kind", "") or "")
+    verb = job_verb(snap)
     position = str(getattr(snap, "position", "") or "")
     if position and getattr(snap, "is_active", False):
         return f"{verb} • {position}"
@@ -1191,7 +1202,7 @@ def strip_model_for(snap: Optional[JobSnapshot], queued: int = 0, now: Optional[
     else:
         state = "running"
     return JobStripModel(
-        title=f"{kind_verb(snap.kind)} · {snap.title}",
+        title=f"{job_verb(snap)} · {snap.title}",
         subtitle=progress_line(snap, now),
         progress=snap.progress.fraction,
         kind_icon=kind_icon(snap.kind),

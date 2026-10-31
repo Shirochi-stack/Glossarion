@@ -155,9 +155,25 @@ async def import_desktop_config(d: Any, name: str = CONFIG_NAME) -> None:
     await d.wait(contains="Imported ", timeout=60)
 
 
-async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: float = 900.0) -> None:
+async def run_options_close_on_a_tap_away(d: Any) -> None:
+    """The Plan card's Run options: a tap inside keeps them open, a tap on the card's plain text closes them.
+    A device only: the host tester has no Flutter hit test, so no ``TapAway`` to report the tap."""
+    inside = "plan-run-options-only"
+    await d.tap(text="Run options", timeout=30)
+    await d.wait(key=inside, timeout=30)
+    for _ in range(2):  # the "Only for this run" switch, back as it was
+        await d.tap(key=inside, timeout=30)
+        await d.pump(500)
+        await d.wait(key=inside, timeout=5)
+    await d.tap(text="Ready to translate", timeout=30)
+    await d.wait(key=inside, gone=True, timeout=30)
+
+
+async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: float = 900.0,
+                                     tap_away: bool = False) -> None:
     """A new chat, ＋ › Files with the EPUB, Send; the job card reaches Done; the book moves into the
-    Library by itself (silently: the job card's "Open in Library"; there is no Migrate step)."""
+    Library by itself (silently: the job card's "Open in Library"; there is no Migrate step).
+    ``tap_away``: on the way, ``run_options_close_on_a_tap_away``."""
     await go_home(d)
     await d.tap(tooltip="New chat")
     await d.tap(tooltip=ATTACH_TOOLTIP)
@@ -165,6 +181,8 @@ async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: flo
     await d.wait(contains=Path(epub).stem, timeout=60)  # the composer pill
     await d.tap(key="send-idle_ready", timeout=60)
     await d.wait(text="Ready to translate", timeout=60)  # the run plan card (model, glossary, output)
+    if tap_away:
+        await run_options_close_on_a_tap_away(d)
     await d.tap(text="Start")
     # First long job on Android: the battery-optimisation explanation (the system's own dialog
     # would follow "Continue"); "Not now" starts the job without it.

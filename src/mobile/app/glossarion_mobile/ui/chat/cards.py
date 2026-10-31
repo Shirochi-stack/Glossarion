@@ -47,6 +47,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
 from glossarion_mobile.ui.chat.job_binding import CardPhase
 from glossarion_mobile.ui.chat.stream_bridge import request_label_text, segment_processing_label
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
 from glossarion_mobile.ui.screens.cloud_sync import NO_SERVICE_REASON, SHARE_LABEL, reason_detail, status_row
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
@@ -848,9 +849,9 @@ class JobCard(ft.Container):
                 self.issue_chip,
                 self.failed_chip,
                 self.plan_box,
-                self.requests_tile,
-                self.ocr_tile,
-                self.report_tile,
+                closes_on_tap_away(self.requests_tile),
+                closes_on_tap_away(self.ocr_tile),
+                closes_on_tap_away(self.report_tile),
                 self.outputs_row,
                 self.u10_box,
                 self.resume_chips,
@@ -1029,7 +1030,7 @@ class JobCard(ft.Container):
     def set_run_options(self, control: Optional[ft.Control]) -> None:
         """Owner #5: the Run options panel (``plan_card.RunOptionsPanel.control``) shown above the buttons of a
         Result that offers Resume / Retry failed; None removes it."""
-        self.options_box.controls = [control] if control is not None else []
+        self.options_box.controls = [closes_on_tap_away(control)] if control is not None else []
         self.options_box.visible = control is not None and self.offers_resume
 
     def set_issue(self, label: str) -> None:

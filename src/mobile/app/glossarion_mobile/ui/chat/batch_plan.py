@@ -22,6 +22,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.cards import material_surface
 from glossarion_mobile.ui.chat.direct_text_rules import attachment_icon, format_attachment_size
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["BatchPlanCard", "MAX_CHIPS"]
@@ -101,7 +102,7 @@ class BatchPlanCard(ft.Container):
             ft.Row([self.glossary_chip, self.map_button], wrap=True, spacing=6),
         ]
         if run_options is not None:
-            controls.append(run_options.control)
+            controls.append(closes_on_tap_away(run_options.control))
         controls.append(ft.Row(buttons, wrap=True, spacing=8, run_spacing=4))
         # the Run options ExpansionTile's header needs a Material right above it (``cards.material_surface``)
         self.body = ft.Column(controls, spacing=6, tight=True)

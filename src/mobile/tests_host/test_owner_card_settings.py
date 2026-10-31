@@ -137,6 +137,7 @@ def _ended_run(state: str, params: dict):
 def test_stopped_card_shows_run_options_and_resume_uses_them(desktop_store_cls, isolated_env, state):
     from glossarion_mobile.ui.chat.cards import JobCard
     from glossarion_mobile.ui.chat.plan_card import RunOptionsPanel
+    from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
 
     async def scenario():
         chat = TC._chat_view(desktop_store_cls, isolated_env)
@@ -162,7 +163,7 @@ def test_stopped_card_shows_run_options_and_resume_uses_them(desktop_store_cls, 
             panels = [p for k, p in view.run_panels.items() if k[1] == "resume"]
             assert len(panels) == 1 and isinstance(panels[0], RunOptionsPanel)
             panel = panels[0]
-            assert card.options_box.controls == [panel.control]
+            assert card.options_box.controls == [closes_on_tap_away(panel.control)]
             # owner 2026-10-18: "Only for this run" starts off; switched on, the panel holds the job's values
             assert panel.only is False
             panel.switch.value = True
@@ -173,7 +174,7 @@ def test_stopped_card_shows_run_options_and_resume_uses_them(desktop_store_cls, 
             # a re-render keeps the same panel (its fields keep their state)
             view.render_transcript()
             again = next(c for c in TC._cards(view, JobCard) if c.title_text.value == "book.epub")
-            assert again.options_box.controls[0] is panel.control
+            assert again.options_box.controls[0] is closes_on_tap_away(panel.control)
             assert panel.tiles["batch_size"].apply(12)
             item = TC._job_item(adapter)
             view._on_job_action("resume" if state == "stopped" else "retry", item)

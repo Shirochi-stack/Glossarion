@@ -270,6 +270,7 @@ from chapter_chunk_progress import (
     chunk_entry_is_fully_completed,
     chunk_entry_needs_translation,
     chunk_failure_summary,
+    completed_plan_split,
     ensure_chunk_entry_schema,
     extract_marked_chunks,
     extract_marked_chunks_for_entry,
@@ -6417,15 +6418,15 @@ class ProgressManager:
                 _chunk_entry_for(entry, fallback_key)
             )
 
-        def _marked_multi_chunk_output(entry):
-            """Return an existing marked output when its active ledger is absent."""
+        def _output_chunk_totals(entry):
+            """Return an existing output and the plan sizes its chunk markers state."""
             entry = entry if isinstance(entry, dict) else {}
             existing_output = _existing_output_match(
                 entry.get("output_file"),
                 entry,
             )
             if not existing_output:
-                return None
+                return None, set()
             output_path = (
                 existing_output
                 if os.path.isabs(existing_output)
@@ -6440,11 +6441,16 @@ class ProgressManager:
                 ) as translated_file:
                     marked = extract_marked_chunks(translated_file.read())
             except OSError:
-                return None
-            if any(int(block.get("total") or 0) > 1 for block in marked.values()):
-                return existing_output
-            return None
-        
+                return None, set()
+            return existing_output, {
+                int(block.get("total") or 0) for block in marked.values()
+            }
+
+        def _marked_multi_chunk_output(entry):
+            """Return an existing marked output when its active ledger is absent."""
+            existing_output, totals = _output_chunk_totals(entry)
+            return existing_output if any(total > 1 for total in totals) else None
+
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
             chapter_info = self.prog["chapters"][chapter_key]
@@ -6486,6 +6492,18 @@ class ProgressManager:
                     self.prog["chapters"][chapter_key] = chapter_info
                     self.save()
                     return True, None, marked_output
+            else:
+                other_plan_output, output_totals = _output_chunk_totals(chapter_info)
+                if output_totals - {active_chunk_entry.get("total")}:
+                    # The file holds another split's chunks next to this plan's,
+                    # so the same text appears twice. The ledger's finished
+                    # results rebuild it without a request.
+                    chapter_info["status"] = "pending"
+                    chapter_info.pop("auto_restored_from_output", None)
+                    chapter_info["last_updated"] = time.time()
+                    self.prog["chapters"][chapter_key] = chapter_info
+                    self.save()
+                    return True, None, other_plan_output
             if chapter_obj and chapter_obj.get("subtitle_batch"):
                 final_subtitle = str(
                     chapter_info.get("subtitle_output_file") or ""
@@ -10432,15 +10450,9 @@ class BatchTranslationProcessor:
                 filename=chapter_filename,
             )
             total_chunks = len(chunks)
-            chunk_source_by_idx = {}
-            for chunk_source_html, chunk_source_idx, _chunk_source_total in chunks:
-                try:
-                    chunk_source_by_idx[int(chunk_source_idx)] = chunk_source_html
-                except Exception:
-                    pass
-            
+
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
-            
+
             cached_chunk_entry = None
             if self.progress_manager is not None:
                 with self.progress_lock:
@@ -10462,6 +10474,21 @@ class BatchTranslationProcessor:
                         f"🧹 Chapter {log_num}: invalidated cached chunks — "
                         f"{invalidation_reason}"
                     )
+
+            finished_plan = completed_plan_split(cached_chunk_entry, chunks)
+            if finished_plan is not chunks:
+                print(
+                    f"♻️ Chapter {log_num}: keeping its finished {len(finished_plan)}-chunk "
+                    f"translation (current limits would split it into {total_chunks})"
+                )
+                chunks = finished_plan
+                total_chunks = len(chunks)
+            chunk_source_by_idx = {}
+            for chunk_source_html, chunk_source_idx, _chunk_source_total in chunks:
+                try:
+                    chunk_source_by_idx[int(chunk_source_idx)] = chunk_source_html
+                except Exception:
+                    pass
 
             # Initialize shared structures for chunk processing (works for 1 or many chunks)
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
@@ -14813,6 +14840,21 @@ def set_direct_text_glossary_approval_callback(callback):
     """Install the GUI-owned Direct Text glossary approval gate."""
     global _direct_text_glossary_approval_callback
     _direct_text_glossary_approval_callback = callback
+
+
+_glossary_stage_callback = None
+
+
+def set_glossary_stage_callback(callback):
+    """Tell a host when the run's own glossary pass starts (True) and ends (False)."""
+    global _glossary_stage_callback
+    _glossary_stage_callback = callback
+
+
+def _report_glossary_stage(active):
+    callback = _glossary_stage_callback
+    if callback is not None:
+        callback(active)
 
 
 def _approve_direct_text_generated_glossary(glossary_path):
@@ -26990,6 +27032,7 @@ def main(log_callback=None, stop_callback=None):
                     return
             else:
                 print("📑 Starting automatic glossary generation...")
+                _report_glossary_stage(True)
                 try:
                     # Use the new process-safe glossary worker
                     from glossary_process_worker import generate_glossary_in_process
@@ -27563,6 +27606,8 @@ def main(log_callback=None, stop_callback=None):
                     
                 except Exception as e:
                     print(f"❌ Glossary generation failed: {e}")
+                finally:
+                    _report_glossary_stage(False)
         else:
             # Check if the new AUTO_GLOSSARY_MODE is balanced/full
             # (glossary was pre-extracted by the GUI before translation started)
@@ -31603,6 +31648,13 @@ def main(log_callback=None, stop_callback=None):
                     f"🧹 Chapter {log_num}: invalidated cached chunks — "
                     f"{invalidation_reason}"
                 )
+            finished_plan = completed_plan_split(cached_chunk_entry, chunks)
+            if finished_plan is not chunks:
+                print(
+                    f"♻️ Chapter {log_num}: keeping its finished {len(finished_plan)}-chunk "
+                    f"translation (current limits would split it into {len(chunks)})"
+                )
+                chunks = finished_plan
             cached_chunk_results = (
                 progress_manager.get_reusable_chapter_chunks(chapter_key_str)
                 if isinstance(cached_chunk_entry, dict)
@@ -31618,7 +31670,8 @@ def main(log_callback=None, stop_callback=None):
             translated_chunks = []
             chunk_abort = False  # Flag to abort chapter processing on QA failures
             chapter_truncated = False  # Track explicit truncation across all chunks
-            
+            finish_reason = None  # Stays None when every chunk comes from the cache
+
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 previous_chunk_html = chunks[chunk_idx_enumerate - 1][0] if chunk_idx_enumerate > 0 else ""
                 title_tag_only_request = bool(

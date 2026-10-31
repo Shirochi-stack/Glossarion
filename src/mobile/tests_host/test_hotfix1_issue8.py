@@ -426,7 +426,9 @@ def test_result_card_api_call_delay_reaches_the_resumed_run_only(iso, offline):
             panels = _panels(view, "resume")
             assert len(panels) == 1, view.run_panels
             panel = panels[0]
-            assert panel.control in ended.options_box.controls and ended.options_box.visible
+            from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
+
+            assert closes_on_tap_away(panel.control) in ended.options_box.controls and ended.options_box.visible
             assert probe.on_screen(panel.control) and panel.control.title == "Run options"
             await driver.tap(key=panel.control.key)  # expand
             assert panel.control.expanded

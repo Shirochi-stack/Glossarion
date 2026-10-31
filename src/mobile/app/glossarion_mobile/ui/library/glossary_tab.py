@@ -161,6 +161,7 @@ class GlossaryTab:
         self.extract_button = ft.FilledTonalButton(content="Extract glossary", icon=ft.Icons.AUTO_AWESOME,
                                                    on_click=lambda e: self.ctx.spawn(self.extract()),
                                                    disabled=not extract_ok, key="gp-extract")
+        self.sync_extract_button()
         hooks = self._hooks()  # U6 GlossaryFeature (LibraryService.glossary_hooks)
         tools: list = [
             ft.OutlinedButton(content="Open in editor", icon=ft.Icons.EDIT_NOTE, disabled=hooks is None,
@@ -248,6 +249,23 @@ class GlossaryTab:
 
     def _refine_ok(self) -> bool:
         return self._refine_reason() is None
+
+    def extract_wait_reason(self, view: Any = None) -> Optional[str]:
+        """Why Continue / Extract glossary waits: what Chapters › Run translation waits for."""
+        chapters = getattr(self.page, "chapters", None)
+        return chapters.run_wait_reason(view) if chapters is not None else None
+
+    def sync_extract_button(self, view: Any = None) -> Optional[str]:
+        """Disable Continue / Extract glossary (the reason as its tooltip) while it must wait. The Book page
+        calls this on every JobsView delivery, next to ``ChaptersTab.sync_run_buttons``."""
+        reason = self.extract_wait_reason(view)
+        disabled = reason is not None or not self.page.service.has_job_kind("extract_glossary")
+        button = self.extract_button
+        if button.disabled != disabled or button.tooltip != reason:
+            button.disabled = disabled
+            button.tooltip = reason
+            self.ctx.push(button)
+        return reason
 
     # ---- data -------------------------------------------------------------------------------------
 
@@ -700,6 +718,10 @@ class GlossaryTab:
         service = self.page.service
         if not service.has_job_kind("extract_glossary"):
             self.ctx.say("The job service is not running")
+            return None
+        reason = self.extract_wait_reason()
+        if reason is not None:
+            self.ctx.say(reason)
             return None
         from glossarion_mobile.services.jobs import JobSpec
 

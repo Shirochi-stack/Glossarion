@@ -42,6 +42,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 __all__ = ["KindInfo", "KIND_MODULES", "available_kinds", "compiled_outputs", "get_kind", "owner_method", "result_fields"]
 
+#: what the job's lines call a glossary extraction: an extraction job, and a book job in its glossary stage
+INDEXING = "Indexing"
+
 #: kind -> adapter module (inside this package)
 KIND_MODULES = {
     "translate": "translate",

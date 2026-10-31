@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 
@@ -22,3 +24,7 @@ def _restore_sheet_hook():
     yield
     ft.BottomSheet.before_update = original
     ft.TextField.before_update = original_field
+    # the phone app's start also finds the extension's ``TapAway`` (``ui.components.tap_away``)
+    tap_away = sys.modules.get("glossarion_mobile.ui.components.tap_away")
+    if tap_away is not None:
+        tap_away._region_class = None

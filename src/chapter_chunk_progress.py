@@ -252,6 +252,9 @@ def _chunk_record(entry, chunk_index, create=False):
     key = str(_positive_int(chunk_index))
     if key == "0":
         return None
+    total = _positive_int(entry.get("total"))
+    if total and int(key) > total:
+        return None
     record = records.get(key)
     if not isinstance(record, dict) and create:
         record = {"index": int(key), "status": "pending"}
@@ -289,12 +292,16 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
         if index:
             completed.add(index)
 
+    # A plan owns exactly its rows 1..total. A row above that belongs to another
+    # split of the chapter: no result can ever be recorded for it, so keeping it
+    # would leave the chapter pending forever.
     indexes = set(range(1, total + 1))
-    for mapping in (chunks, records):
-        for raw_index in mapping:
-            index = _positive_int(raw_index)
-            if index:
-                indexes.add(index)
+    if not total:
+        for mapping in (chunks, records):
+            for raw_index in mapping:
+                index = _positive_int(raw_index)
+                if index:
+                    indexes.add(index)
 
     normalized_records = {}
     normalized_chunks = {}
@@ -401,7 +408,7 @@ def chunk_entry_is_fully_completed(entry) -> bool:
         for index, result in chunks.items()
         if _positive_int(index) and isinstance(result, str)
     }
-    if total <= 1 or set(concrete_results) != expected:
+    if total <= 1 or not expected.issubset(concrete_results):
         return False
     records = entry.get("entries")
     records = records if isinstance(records, dict) else {}
@@ -424,6 +431,28 @@ def chunk_entry_is_fully_completed(entry) -> bool:
         ):
             return False
     return True
+
+
+def completed_plan_split(entry, chunks):
+    """Return the split a chapter runs: its finished plan when that differs.
+
+    ``chunks`` is the chapter's fresh ``(source, index, total)`` split. A finished
+    result set outlives a budget change, and its chunks only line up with the
+    split that produced them, so the chapter is rebuilt from that plan. A fresh
+    split of another size is returned untouched for an unfinished plan, which
+    the budget check has already invalidated.
+    """
+    total = _positive_int(entry.get("total")) if isinstance(entry, dict) else 0
+    if total == len(chunks) or not chunk_entry_is_fully_completed(entry):
+        return chunks
+    records = entry.get("entries")
+    records = records if isinstance(records, dict) else {}
+    split = []
+    for index in range(1, total + 1):
+        record = records.get(str(index))
+        source = record.get("source") if isinstance(record, dict) else None
+        split.append((source if isinstance(source, str) else "", index, total))
+    return split
 
 
 def record_chunk_result(

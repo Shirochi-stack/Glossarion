@@ -5,6 +5,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'draggable_sheet.dart';
 import 'native_service.dart';
+import 'tap_away.dart';
 
 class Extension extends FletExtension {
   @override
@@ -23,6 +24,8 @@ class Extension extends FletExtension {
     switch (control.type) {
       case "GlossarionDraggableSheet":
         return GlossarionDraggableSheetControl(key: key, control: control);
+      case "GlossarionTapAway":
+        return GlossarionTapAwayControl(key: key, control: control);
       default:
         return null;
     }

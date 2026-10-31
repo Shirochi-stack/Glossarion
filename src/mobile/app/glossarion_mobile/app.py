@@ -196,8 +196,10 @@ class GlossarionApp:
         page.title = "Glossarion"
         from glossarion_mobile.ui.components.keyboard_dismiss import install_tap_outside_dismiss
         from glossarion_mobile.ui.components.sheet import install_close_buttons
+        from glossarion_mobile.ui.components.tap_away import install_tap_away
 
         install_close_buttons()  # "Close Menu ✕" on every bottom sheet (owner 2026-10-21)
+        install_tap_away(page)  # a tap away closes the response card's dropdowns (owner 2026-10-31)
         if not self.native.is_stub:
             # hotfix 5: a tap outside a text field closes the keyboard (the desktop client keeps Flutter's
             # own mouse behaviour, which already does)

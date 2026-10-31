@@ -36,7 +36,7 @@ import contextlib
 import os
 from typing import Any, Callable, Iterator, Optional
 
-from glossarion_mobile.job_kinds import compiled_outputs, owner_method, result_fields
+from glossarion_mobile.job_kinds import INDEXING, compiled_outputs, owner_method, result_fields
 
 __all__ = ["GLOSSARY_REVIEW_QUESTION", "KINDS", "NOT_COMPLETED", "QA_SCAN_TRIGGER", "SUPPORTS_GLOSSARY_REVIEW",
            "app_owned_roots", "check_inputs", "follow_input_rename", "glossary_review_gate", "is_app_owned",
@@ -255,6 +255,40 @@ def post_translation_qa(ctx: Any, files: list, mapping: Optional[dict] = None, o
     return qa.run_scan_phase(ctx, sources, folder_for)
 
 
+@contextlib.contextmanager
+def indexing_phase(ctx: Any) -> Iterator[None]:
+    """While the worker runs, its glossary stage is the job's Indexing phase (``services.jobs.job_verb``): the
+    Balanced / Full pass the worker runs first (``run_glossary_extraction_direct``, wrapped on this job's owner)
+    and the backend's own Minimal pass (``TransateKRtoEN.set_glossary_stage_callback``)."""
+
+    def stage(active: bool) -> None:
+        ctx.phase(INDEXING if active else "Translating")
+
+    owner = ctx.owner
+    extract = getattr(owner, "run_glossary_extraction_direct", None)
+    if callable(extract):
+        def indexing(*args: Any, **kwargs: Any) -> Any:
+            stage(True)
+            try:
+                return extract(*args, **kwargs)
+            finally:
+                stage(False)
+
+        owner.run_glossary_extraction_direct = indexing
+    backend = None
+    if callable(getattr(owner, "_current_auto_glossary_mode", None)):
+        import TransateKRtoEN as backend
+
+        backend.set_glossary_stage_callback(stage)
+    try:
+        yield
+    finally:
+        if callable(extract):
+            del owner.run_glossary_extraction_direct
+        if backend is not None:
+            backend.set_glossary_stage_callback(None)
+
+
 def run_translation(ctx: Any, files: list) -> dict:
     """The shared prepare + worker pair; returns ``{"ok", "outputs", "error"}``.
 
@@ -281,7 +315,7 @@ def run_translation(ctx: Any, files: list) -> dict:
     if ctx.stop_requested():
         ctx.log("⏹️ Translation stopped before it started")
         return {"ok": None, "outputs": []}
-    with post_translation_qa_trigger(ctx) as qa_requests:
+    with indexing_phase(ctx), post_translation_qa_trigger(ctx) as qa_requests:
         outcome = worker(request)
     ok, outputs, error = result_fields(outcome)
     if ok is False and ctx.stop_requested():

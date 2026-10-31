@@ -37,6 +37,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
+from glossarion_mobile.job_kinds import INDEXING
+
 __all__ = [
     "ACTIVE_STATES",
     "CardPhase",
@@ -222,6 +224,8 @@ def running_label(snapshot: Any, *, waiting_for_glossary: bool = False, refining
         return "Waiting for your glossary decision"
     if state in ("QUEUED", "STARTING"):
         return STARTING_LABEL
+    if str(_get(snapshot, "phase", "") or "") == INDEXING:
+        return INDEXING
     last = str(_get(snapshot, "last_line", "") or "").lower()
     if "glossary" in last and ("extract" in last or "generat" in last):
         return "Generating glossary…"

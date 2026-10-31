@@ -36,7 +36,7 @@ import importlib
 import os
 from typing import Any, Optional
 
-from glossarion_mobile.job_kinds import owner_method
+from glossarion_mobile.job_kinds import INDEXING, owner_method
 from glossarion_mobile.job_kinds.translate import check_inputs, record_output_dirs, resolve_workspace_collisions
 
 __all__ = ["KINDS", "glossary_outputs", "progress_for_glossary", "run", "run_pair", "run_refine", "run_unified"]
@@ -307,7 +307,7 @@ def run_pair(ctx: Any) -> dict:
 
 
 KINDS = {
-    "extract_glossary": {"verb": "Extracting glossary", "icon": "SPELLCHECK", "stop_kind": "glossary", "run": run},
+    "extract_glossary": {"verb": INDEXING, "icon": "SPELLCHECK", "stop_kind": "glossary", "run": run},
     "glossary_refine": {"verb": "Refining glossary", "icon": "AUTO_FIX_HIGH", "stop_kind": "glossary",
                         "run": run_refine},
     "unified_glossary": {"verb": "Rebuilding unified glossary", "icon": "MERGE_TYPE", "stop_kind": "glossary",

@@ -16,7 +16,7 @@ from typing import Any
 from glossarion_mobile.services import native as native_mod
 from glossarion_mobile.ui.components.sheet import CLOSE_STRIP
 
-__all__ = ["NAV_INSET", "SHEET_TOP", "draggable_sheet_class", "height_fraction"]
+__all__ = ["NAV_INSET", "SHEET_TOP", "draggable_sheet_class", "height_fraction", "native_widget_class"]
 
 #: above a phone sheet's rows: the status bar and the "Close Menu" strip (dp)
 SHEET_TOP = 24.0 + CLOSE_STRIP
@@ -26,6 +26,11 @@ NAV_INSET = 48.0
 
 def draggable_sheet_class(page: Any) -> Any:
     """The extension's ``DraggableSheet`` when ``page``'s client has it (the built phone app), else None."""
+    return native_widget_class(page, "DraggableSheet")
+
+
+def native_widget_class(page: Any, name: str) -> Any:
+    """The extension's control ``name`` when ``page``'s client has it (the built phone app), else None."""
     if os.environ.get("GLOSSARION_FORCE_NATIVE_STUB") == "1":
         return None
     module = native_mod.load_extension()
@@ -37,7 +42,7 @@ def draggable_sheet_class(page: Any) -> Any:
             return None
     except Exception:
         return None
-    return getattr(module, "DraggableSheet", None)
+    return getattr(module, name, None)
 
 
 def height_fraction(page: Any, height: float, *, low: float = 0.1, high: float = 1.0) -> float:
