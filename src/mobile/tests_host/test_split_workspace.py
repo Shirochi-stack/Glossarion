@@ -113,6 +113,7 @@ def test_a_split_book_becomes_one_and_keeps_the_longer_translation(tmp_path, nam
         "s6": _row("in_progress", "chapter0006.xhtml", "response_6.html"),
     }, chunks={"other-5": {"total_chunks": 2, "chunks": {}}}, title="A Fallen Necromancer")
     (split / "chat_only.txt").write_text("kept", encoding="utf-8")
+    (split / "A Fallen Necromancer.epub").write_bytes(b"PK built from the few chapters here")
 
     assert ws.split_workspaces(root) == [(str(split), str(full), str(raw))]
     assert ws.join_workspace(str(split), str(full)) == "merged"
@@ -125,6 +126,9 @@ def test_a_split_book_becomes_one_and_keeps_the_longer_translation(tmp_path, nam
     assert by_source["chapter0004.xhtml"]["status"] == "completed"  # only started there
     assert by_source["chapter0005.xhtml"]["status"] == "completed"  # only here
     assert "chapter0006.xhtml" not in by_source  # an interrupted run's row: nothing is running it
+    # ... and its partial text: the pipeline would take a chapter file without a row for a finished chapter
+    assert not (full / "response_6.html").exists()
+    assert not (full / "A Fallen Necromancer.epub").exists()  # the book's outputs are its own
     assert _progress(full)["chapter_chunks"] == {"other-5": {"total_chunks": 2, "chunks": {}}}
     assert chapters["metadata"]["title"] == "Became a Succubus"
     assert json.loads((full / "metadata.json").read_text(encoding="utf-8"))["title"] == "Became a Succubus"

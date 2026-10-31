@@ -252,6 +252,31 @@ def _row_rank(entry: Any) -> int:
     return 0 if status in ("", "in_progress", "pending") else 1
 
 
+def _partial_outputs(progress: Any) -> list:
+    """The chapter files of the rows in ``progress`` that only started: partial text. The pipeline takes a chapter
+    file without a row for a finished chapter, so it must never arrive without its row."""
+    chapters = (progress.get("chapters") if isinstance(progress, dict) else None) or {}
+    files = {True: set(), False: set()}
+    for entry in chapters.values():
+        name = str(entry.get("output_file") or "") if isinstance(entry, dict) else ""
+        if name and not os.path.isabs(name):
+            files[bool(_row_rank(entry))].add(name)
+    return sorted(files[False] - files[True])
+
+
+def _compiled_documents(folder: str) -> list:
+    """The compiled EPUB / PDF files of a workspace (never its raw file): built from its own chapters."""
+    try:
+        from output_workspace import read_workspace_source_path
+
+        raw = read_workspace_source_path(folder)
+        names = [entry.name for entry in os.scandir(folder) if entry.is_file()]
+    except (ImportError, OSError):
+        return []
+    return [name for name in names if os.path.splitext(name)[1].lower() in (".epub", ".pdf")
+            and not (raw and _norm(os.path.join(folder, name)) == _norm(raw))]
+
+
 def merge_progress(own: Any, other: Any) -> tuple:
     """Two progress files of one book as one: ``(merged, rows taken from other)``. ``own`` stays as it is, but
     for the chapters ``other`` got further with (a row is matched by its source file, its key otherwise, since
@@ -296,9 +321,8 @@ def prepare_merge(folder: str, target: str) -> dict:
     replacing files of the same name. The partial text of a chapter the chat only started must not replace a
     chapter ``target`` holds (nothing is running it: the chat's workspace is idle). Returns what
     :func:`keep_book_state` puts back."""
-    for entry in ((read_progress(folder) or {}).get("chapters") or {}).values():
-        name = str(entry.get("output_file") or "") if isinstance(entry, dict) else ""
-        if name and not os.path.isabs(name) and not _row_rank(entry) and os.path.isfile(os.path.join(target, name)):
+    for name in _partial_outputs(read_progress(folder)):
+        if os.path.isfile(os.path.join(target, name)):
             try:
                 os.remove(os.path.join(folder, name))
             except OSError:
@@ -344,6 +368,11 @@ def join_workspace(folder: str, target: str) -> str:
         if (os.path.exists(theirs) and own is None) or (os.path.exists(mine) and other is None):
             log.warning("not joining %s and %s: a progress file cannot be read", folder, target)
             return ""
+        # what stays behind: an unfinished row's text (its row is dropped) and the outputs built from this folder
+        for name in _partial_outputs(other) + _compiled_documents(folder):
+            path = os.path.join(folder, name)
+            if os.path.isfile(path):
+                os.remove(path)
         merge_tree(folder, target, keep_existing=True)
         if own is not None and other is not None:
             merged, taken = merge_progress(own, other)
