@@ -1110,11 +1110,13 @@ class ChatFeature:
             notify(already_active_text(snapshot))
 
     async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None, *,
-                            glossary: bool = False) -> Optional[str]:
+                            glossary: bool = False, chapters: bool = False, bid: str = "") -> Optional[str]:
         """A chat workspace in the Progress manager (``/tools/progress?out=<bid>``, Chapters tab): the
         Book page over that output folder, where Retranslate / Resolve QA run (U7). Returns the route id.
         ``select`` (U9 ``/retranslate <range>``): ``(start, end)`` chapters selected when the list loads.
-        ``glossary``: a glossary job's Progress, its Glossary Progress even when the book has chapters."""
+        ``glossary``: a glossary job's Progress, its Glossary Progress even when the book has chapters.
+        ``chapters``: the Chapters tab whatever exists yet (Sent to the Library card › Progress); before the
+        run's first chapter it lists the EPUB's own chapters. ``bid``: that book's Library row, when it has one."""
         app = self.app
         library = getattr(app, "library", None)
         navigate = getattr(app, "navigate_to", None)
@@ -1123,6 +1125,11 @@ class ChatFeature:
             if notify is not None:
                 notify("The Progress manager is not available in this session")
             return None
+        # the card's quick jump: without the Tools hub below it, one Back returns to the chat
+        jump = {"alone": True} if chapters else {}
+        if chapters and bid:
+            navigate("tools.progress", None, {"out": bid}, **jump)
+            return bid
 
         def make_book(workspace: str) -> dict:
             name = os.path.basename(os.path.normpath(workspace))
@@ -1147,7 +1154,16 @@ class ChatFeature:
                     return book, True
             return (make_book(workspace), False) if workspace else None
 
-        found = await self._run_io(target)
+        def chapters_target() -> Optional[tuple]:
+            workspace = (_reader_workspace(str(folder or ""), str(source or ""))
+                         or _glossary_workspace(str(folder or ""), str(source or "")))
+            stem = os.path.splitext(os.path.basename(str(source or "")))[0]
+            roots = library.output_roots() if not workspace and stem and hasattr(library, "output_roots") else []
+            if roots:  # a job not started yet, or gone: where the run puts this book
+                workspace = os.path.join(str(roots[0]), stem)
+            return (make_book(workspace), False) if workspace else None
+
+        found = await self._run_io(chapters_target if chapters else target)
         if found is None:
             if notify is not None:
                 notify("No progress to show yet: nothing has been translated or extracted for this book")
@@ -1161,7 +1177,7 @@ class ChatFeature:
             from glossarion_mobile.ui.library.chapters_tab import request_range_selection
 
             request_range_selection(bid, *select)
-        navigate("tools.progress", None, {"out": bid})
+        navigate("tools.progress", None, {"out": bid}, **jump)
         return bid
 
     async def open_external(self, path: str) -> Any:

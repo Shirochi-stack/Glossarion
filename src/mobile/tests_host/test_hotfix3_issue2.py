@@ -948,3 +948,78 @@ def test_chat_save_to_library_job_library_button_running_and_finished(iso, offli
     with FakeLLMServer() as server, mirror.watching():
         asyncio.run(_session(iso, server, {CHAT_LIBRARY_BOOK: epub}, body))
     I12._assert_offline(offline)
+
+
+def test_sent_to_library_card_progress_opens_the_chapters_whatever_exists(iso, offline):
+    """The chat's "Sent to the Library" card › Progress (owner 2026-10-31): the book's Chapters in the Progress
+    manager, also with no translation progress yet (the job parked in its glossary stage, whose Glossary progress
+    the Job card's Progress would open instead), and again after the job ended Done."""
+    from glossarion_mobile.diagnostics import fixtures
+    from glossarion_mobile.diagnostics.fake_llm_server import FakeLLMServer
+    from glossarion_mobile.services.jobs import JobState
+
+    epub = fixtures.build_tiny_epub(iso.picks / CHAT_LIBRARY_BOOK, chapters=CHAPTERS)
+
+    def book_page(app):
+        top = app.shell.top_screen
+        return top if type(top).__name__ == "BookPageScreen" else None
+
+    async def open_progress(app, driver):
+        await driver.tap(key="libjob-progress", timeout=30)
+        assert await I12._until(lambda: book_page(app) is not None, 30), app.shell.current_route
+        page = book_page(app)
+        assert app.shell.current_route.startswith("/tools/progress"), app.shell.current_route
+        assert page.title == "Progress manager" and page.current_tab == "chapters"
+        assert await I12._until(lambda: list(page.chapters.visible), 60), "the Chapters tab listed nothing"
+        return page
+
+    async def body(ctx):
+        import flows
+
+        app, driver, server = ctx.app, ctx.driver, ctx.server
+        service = app.job_service
+        app.config_store.set_many({"auto_glossary_mode": "full", "extraction_workers": 1})
+        server.hold()  # the job's first request parks: its glossary stage, before any translation progress
+        before = _known(service)
+        await flows.go_home(driver)
+        await driver.tap(tooltip="New chat")
+        await driver.tap(tooltip=flows.ATTACH_TOOLTIP)
+        await driver.pick_file(CHAT_LIBRARY_BOOK, lambda: driver.tap(key="attach-files"))
+        await driver.wait(contains=Path(CHAT_LIBRARY_BOOK).stem, timeout=60)
+        await driver.tap(key="send-idle_ready", timeout=60)
+        await driver.wait(text="Ready to translate", timeout=60)
+        await driver.tap(key="plan-destination", timeout=30)
+        await driver.tap(key="dest-library", timeout=30)
+        await driver.wait(text="Save to: Library", timeout=30)
+        await driver.tap(text="Start")
+        jid = None
+        deadline = time.monotonic() + 60
+        while jid is None and time.monotonic() < deadline:
+            await _answer_dialogs(driver)
+            jid = _new_job(service, before, "translate")
+            await asyncio.sleep(0.05)
+        assert jid, "Start submitted no Library translate job"
+        ctx.jobs.append(jid)
+        assert await I12._until(lambda: I12._settled(server), RUN_TIMEOUT), (server.holding, server.parked)
+        snap = service.snapshot(jid)
+        assert snap.state is JobState.RUNNING and snap.phase == "Indexing", (snap.state, snap.phase)
+        assert not any(os.path.isfile(os.path.join(str(d), "translation_progress.json"))
+                       and os.path.getsize(os.path.join(str(d), "translation_progress.json")) > 200
+                       for d in (snap.output_dirs or {}).values()), "the job already has translation progress"
+
+        page = await open_progress(app, driver)
+        assert page.job is not None and page.job.id == jid  # the Book page follows the running job
+        await driver.back()
+        assert await I12._until(lambda: book_page(app) is None, 30), app.shell.current_route
+        assert app.shell.top_screen is None, type(app.shell.top_screen).__name__  # one Back: the chat, not Tools
+
+        server.release()
+        done = await _wait_terminal(app, jid)
+        assert done.state is JobState.DONE, (done.state, done.error)
+        page = await open_progress(app, driver)
+        chapters = [row for row in page.chapters.visible if row.kind == "chapter"]
+        assert chapters and all(row.status == "completed" for row in chapters), [r.status for r in chapters]
+
+    with FakeLLMServer() as server:
+        asyncio.run(_session(iso, server, {CHAT_LIBRARY_BOOK: epub}, body))
+    I12._assert_offline(offline)

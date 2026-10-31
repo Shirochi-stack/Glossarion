@@ -2556,16 +2556,19 @@ class ChatView:
         return job_id
 
     def _library_job_control(self, item: Any, messages: list, record: Optional[dict]) -> Any:
-        """A turn sent to the Library (Plan "Save to: Library"): where the run went, with Jobs / Library."""
+        """A turn sent to the Library (Plan "Save to: Library"): where the run went, with Job / Progress / Library."""
         message = messages[item.library] if 0 <= item.library < len(messages) else None
         storage = self._tool_storage(message)
         job_id = str(storage.get("library_job") or "")
         bid = str(storage.get("bid") or "")
         record = self._follow_library_rename(item.library, message, storage, job_id, record)
+        source = str((record or {}).get("path") or storage.get("source") or "")
 
         def build() -> JobCard:
             return self._tool_job_card(record, "Sent to the Library · translating as a book", [
                 ("Job", "WORK_HISTORY", "libjob-job", lambda: self._on_library_action("job", job_id), True),
+                ("Progress", "TIMELINE", "libjob-progress",
+                 lambda: self._spawn(self._open_library_progress(job_id, source, bid)), False),
                 ("Library", "LOCAL_LIBRARY", "libjob-library",
                  lambda: self._on_library_action("library", job_id, bid), False),
             ])
@@ -2636,6 +2639,18 @@ class ChatView:
         if isinstance(record, dict) and str(record.get("path") or "") == source:
             record = dict(record, path=new, name=os.path.basename(new))
         return record
+
+    async def _open_library_progress(self, job_id: str, source: str, bid: str) -> Optional[str]:
+        """Sent to the Library card › Progress: the book's Chapters in the Progress manager, whether or not the
+        run has written a progress file yet."""
+        opener = getattr(self.env, "open_progress", None) if self.env is not None else None
+        if opener is None:
+            self.notify("The Progress manager is not available in this session")
+            return None
+        snap = self.env.jobs.snapshot_of(job_id) if (job_id and self.env.jobs is not None) else None
+        dirs = getattr(snap, "output_dirs", None) or {}
+        folder = next(iter(dirs.values()), None) or getattr(snap, "output_dir", None) or ""
+        return await self._await(opener(str(folder), source, chapters=True, bid=bid))
 
     def _on_library_action(self, action: str, job_id: str = "", bid: str = "") -> None:
         if action == "job" and job_id:
