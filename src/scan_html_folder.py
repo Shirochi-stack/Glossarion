@@ -44,6 +44,8 @@ from typing import Dict, List, Tuple, Set, Optional
 import warnings
 from functools import lru_cache
 import concurrent.futures
+import contextlib
+import functools
 import multiprocessing
 from threading import Lock
 import mobile_runtime
@@ -106,6 +108,102 @@ def stop_scan():
     _stop_flag = True
     print("🛑 STOP SCAN CALLED - Global flag set to True")  # More visible debug
     return True  # Return True to confirm it was called
+
+
+class _ScanStopped(BaseException):
+    """Unwinds a stopped scan from wherever its thread is (``_raise_if_stopped``). A BaseException: the scan's
+    many ``except Exception`` blocks must not swallow it."""
+
+
+#: the stop check of the scan running on this thread (none on worker threads and outside a scan)
+_scan_thread = threading.local()
+
+
+def _raise_if_stopped():
+    """For the scan's long sequential work: ends the scan at once when a stop was requested."""
+    check = getattr(_scan_thread, 'should_stop', None)
+    if check is not None and check():
+        raise _ScanStopped()
+
+
+def _stops_at_once(scan):
+    """``scan_html_folder`` returns None as soon as ``_raise_if_stopped`` finds a stop, like its other stop paths."""
+    @functools.wraps(scan)
+    def wrapper(*args, **kwargs):
+        try:
+            return scan(*args, **kwargs)
+        except _ScanStopped:
+            return None
+        finally:
+            _scan_thread.should_stop = None
+    return wrapper
+
+
+def _abandon_pool(pool):
+    """Leave a pool without waiting for it: what is queued never starts and a process pool's workers are killed
+    (a thread worker cannot be, it sees the stop at its next file: ``_submit_worker``)."""
+    processes = list((getattr(pool, '_processes', None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _stoppable_pool(factory, should_stop, *args, **kwargs):
+    """``with factory(...) as pool``, except that leaving it after a stop does not wait (``_abandon_pool``)."""
+    pool = factory(*args, **kwargs)
+    try:
+        yield pool
+    finally:
+        if should_stop():
+            _abandon_pool(pool)
+        else:
+            pool.shutdown(wait=True)
+
+
+def _completed_until_stop(futures, should_stop, poll=0.1):
+    """``as_completed`` that notices a stop while it waits: it just ends."""
+    pending = set(futures)
+    while pending:
+        if should_stop():
+            return
+        done, pending = concurrent.futures.wait(pending, timeout=poll,
+                                                return_when=concurrent.futures.FIRST_COMPLETED)
+        yield from done
+
+
+def _submit_worker(pool, worker, args, should_stop):
+    """A thread worker gets the scan's stop check, for between its files. A process worker cannot see it, and does
+    not need to: its pool is killed."""
+    if isinstance(pool, concurrent.futures.ThreadPoolExecutor):
+        return pool.submit(worker, args, should_stop)
+    return pool.submit(worker, args)
+
+
+def _finish_api_calls_in_flight(pool, futures, should_stop, force_stopped, log, *, poll=0.1, force_grace=1.0):
+    """A stop during an API stage: the queued calls never start. A graceful stop lets the calls in flight finish;
+    a forced one (the second Stop) aborts them and does not wait for them beyond ``force_grace`` seconds. Polling
+    the stop check here is what notices that second Stop."""
+    pool.shutdown(wait=False, cancel_futures=True)
+    pending = {future for future in futures if not future.done()}
+    told = False
+    forced_at = None
+    while pending:
+        _done, pending = concurrent.futures.wait(pending, timeout=poll)
+        if not pending:
+            return
+        should_stop()
+        if forced_at is None and force_stopped():
+            forced_at = time.monotonic()
+        if forced_at is not None:
+            if time.monotonic() - forced_at >= force_grace:
+                return
+        elif not told:
+            told = True
+            log(f"   ⏳ Waiting for {len(pending)} API call(s) in flight to finish. Stop again to cancel them.")
 
 def _is_vision_output_mode(qa_settings=None):
     settings = qa_settings if isinstance(qa_settings, dict) else {}
@@ -1873,6 +1971,7 @@ def extract_epub_image_info(epub_path, log=print):
                 
                 extracted_count = 0
                 for spine_index, file_info in sorted(spine_files.items()):
+                    _raise_if_stopped()
                     try:
                         file_path = file_info['href']
                         
@@ -1925,6 +2024,7 @@ def extract_epub_image_info(epub_path, log=print):
                 html_files.sort()
                 
                 for idx, file_path in enumerate(html_files, start=1):
+                    _raise_if_stopped()
                     try:
                         content = zf.read(file_path).decode('utf-8', errors='ignore')
                         soup = BeautifulSoup(content, 'html.parser')
@@ -2154,6 +2254,7 @@ def extract_epub_punctuation_info(epub_path, log=print):
                 
                 extracted_count = 0
                 for spine_index, file_info in sorted(spine_files.items()):
+                    _raise_if_stopped()
                     try:
                         file_path = file_info['href']
                         
@@ -2216,6 +2317,7 @@ def extract_epub_punctuation_info(epub_path, log=print):
                 html_files.sort()
                 
                 for idx, file_path in enumerate(html_files, start=1):
+                    _raise_if_stopped()
                     try:
                         content = zf.read(file_path).decode('utf-8', errors='ignore')
                         soup = BeautifulSoup(content, 'html.parser')
@@ -2589,6 +2691,7 @@ def extract_epub_quotation_info(
                     base_dir += '/'
 
                 for spine_index, file_path in sorted(spine_files.items()):
+                    _raise_if_stopped()
                     content = None
                     for candidate in (file_path, base_dir + file_path, 'OEBPS/' + file_path, 'OPS/' + file_path):
                         try:
@@ -2618,6 +2721,7 @@ def extract_epub_quotation_info(
                     and 'cover' not in filename.lower()
                 ]
                 for index, file_path in enumerate(sorted(html_files), start=1):
+                    _raise_if_stopped()
                     try:
                         content = zf.read(file_path).decode('utf-8', errors='ignore')
                     except Exception:
@@ -3350,7 +3454,7 @@ def merge_duplicate_groups(duplicate_groups, filename1, filename2):
                 duplicate_groups[filename] = min_group
 
 
-def process_enhance_duplicate_batch(args):
+def process_enhance_duplicate_batch(args, should_stop=None):
     """Process a batch of enhanced duplicate detection - MUST BE AT MODULE LEVEL"""
     batch_type, batch_data, worker_data = args
     batch_results = []
@@ -3370,6 +3474,8 @@ def process_enhance_duplicate_batch(args):
         threshold = worker_data['similarity_threshold']
         
         for idx1, idx2, file1, file2, chapter_num in comparisons:
+            if should_stop is not None and should_stop():
+                break
             # Get text data
             data1 = text_data[idx1]
             data2 = text_data[idx2]
@@ -3523,6 +3629,7 @@ def _resolve_scan_max_workers_config(extra_sections=()):
 
 def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""
+    _stopped = should_stop or (lambda: False)
 
     log("🔍 Enhanced duplicate detection (different naming formats)...")
 
@@ -3639,20 +3746,19 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batch = chapter_comparisons[i:i + batch_size]
             batches.append(('chapter_comparison', batch, worker_data))
         
-        with _ExecCls(**_kw) as executor:
+        with _stoppable_pool(_ExecCls, _stopped, **_kw) as executor:
             futures = []
-            
+
             for batch_args in batches:
-                if should_stop and should_stop():
+                if _stopped():
                     log("⛔ Enhanced detection interrupted by user.")
-                    executor.shutdown(wait=True)
                     return duplicates_found
-                
-                future = executor.submit(process_enhance_duplicate_batch, batch_args)
+
+                future = _submit_worker(executor, process_enhance_duplicate_batch, batch_args, _stopped)
                 futures.append(future)
             
             # Collect results
-            for future in concurrent.futures.as_completed(futures):
+            for future in _completed_until_stop(futures, _stopped):
                 batch_results = future.result()
                 
                 # Process results
@@ -3733,21 +3839,20 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batch = preview_comparisons[i:i + batch_size]
             batches.append(('preview_comparison', batch, worker_data))
         
-        with _ExecCls(**_kw) as executor:
+        with _stoppable_pool(_ExecCls, _stopped, **_kw) as executor:
             futures = []
-            
+
             for batch_args in batches:
-                if should_stop and should_stop():
+                if _stopped():
                     log("⛔ Enhanced detection interrupted by user.")
-                    executor.shutdown(wait=True)
                     return duplicates_found
-                
-                future = executor.submit(process_enhance_duplicate_batch, batch_args)
+
+                future = _submit_worker(executor, process_enhance_duplicate_batch, batch_args, _stopped)
                 futures.append(future)
             
             # Collect results with progress
             completed = 0
-            for future in concurrent.futures.as_completed(futures):
+            for future in _completed_until_stop(futures, _stopped):
                 completed += 1
                 if completed % 10 == 0:
                     log(f"   📊 Preview comparison progress: {completed}/{len(futures)} batches")
@@ -4158,7 +4263,7 @@ def detect_duplicates(results, log, should_stop, config):
     
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
 
-def process_deep_similarity_batch(args):
+def process_deep_similarity_batch(args, should_stop=None):
     """Process a batch of deep similarity comparisons with enhanced error handling"""
     try:
         batch, data = args
@@ -4178,6 +4283,8 @@ def process_deep_similarity_batch(args):
         semantic_cache = {}
         
         for i, j, filename_i, filename_j in batch:
+            if should_stop is not None and should_stop():
+                break
             try:
                 # Get text samples
                 sample_i = text_samples.get(i)
@@ -4375,25 +4482,22 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
         
         try:
             # Process with ProcessPoolExecutor
-            with mobile_runtime.make_pool_executor(max_workers) as executor:
+            with _stoppable_pool(mobile_runtime.make_pool_executor, should_stop, max_workers) as executor:
                 # Submit all batches
                 futures = []
                 for args in batch_args:
                     if should_stop():
                         log("⛔ Deep similarity check interrupted by user.")
-                        executor.shutdown(wait=True)
                         return
-                    
-                    future = executor.submit(process_deep_similarity_batch, args)
+
+                    future = _submit_worker(executor, process_deep_similarity_batch, args, should_stop)
                     futures.append(future)
-                
+
                 # Process results as they complete
-                for completed_future in concurrent.futures.as_completed(futures):
+                for completed_future in _completed_until_stop(futures, should_stop):
                     if should_stop():
-                        log("⛔ Deep similarity check interrupted by user.")
-                        executor.shutdown(wait=True)
-                        return
-                    
+                        break
+
                     try:
                         # NO TIMEOUT - let it run as long as needed
                         batch_results = completed_future.result()
@@ -4473,6 +4577,10 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                         executor.shutdown(wait=False)
                         break
                 
+                if should_stop():
+                    log("⛔ Deep similarity check interrupted by user.")
+                    return
+
                 # If we completed successfully
                 if use_parallel:
                     # Final summary
@@ -6286,6 +6394,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                 
                 extracted_count = 0
                 for spine_index, file_info in sorted(spine_files.items()):
+                    _raise_if_stopped()
                     try:
                         file_path = file_info['href']
                         
@@ -6374,6 +6483,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                 html_files.sort()
                 
                 for idx, file_path in enumerate(html_files, start=1):
+                    _raise_if_stopped()
                     try:
                         content = zf.read(file_path).decode('utf-8', errors='ignore')
                         soup = BeautifulSoup(content, 'html.parser')
@@ -6503,6 +6613,7 @@ def extract_epub_html_content(epub_path, log=print):
         html_files.sort()
 
         for idx, file_path in enumerate(html_files, start=1):
+            _raise_if_stopped()
             try:
                 content = zf.read(file_path).decode('utf-8', errors='ignore')
                 fallback_contents[idx] = {
@@ -6554,6 +6665,7 @@ def extract_epub_html_content(epub_path, log=print):
 
             spine_index = 1
             for itemref in spine.find_all('itemref'):
+                _raise_if_stopped()
                 idref = itemref.get('idref')
                 if idref and idref in manifest_map:
                     href = manifest_map[idref]
@@ -9147,7 +9259,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         'reason': 'No matching chapter found in original'
     }
 
-def process_html_file_batch(args):
+def process_html_file_batch(args, should_stop=None):
     """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
     if len(args) >= 12:
         (
@@ -9207,6 +9319,8 @@ def process_html_file_batch(args):
     small_file_word_threshold = _get_small_file_word_threshold(qa_settings)
     
     for idx, filename in file_batch:
+        if should_stop is not None and should_stop():
+            break
         full_path = os.path.join(folder_path, filename)
         
         try:
@@ -10286,6 +10400,7 @@ def _init_worker_process():
         pass
 
 
+@_stops_at_once
 def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
@@ -10347,8 +10462,24 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 _stop_logged[0] = True
                 log("⛔ Graceful stop requested via GRACEFUL_STOP env var")
             return True
-        return False
-    
+        # a stop stays requested for this scan: the GUI clears the flags soon after it ended, while a worker it
+        # did not wait for may still be asking
+        return _stop_logged[0]
+
+    def force_stopped():
+        """A forced stop (the second Stop): what aborts API calls in flight. A graceful one lets them finish."""
+        if not should_stop():
+            return False
+        if os.environ.get('GRACEFUL_STOP') != '1':
+            return True
+        try:
+            from unified_api_client import UnifiedClient
+            return UnifiedClient.is_globally_cancelled()
+        except Exception:
+            return False
+
+    _scan_thread.should_stop = should_stop
+
     start_time = time.time()
     
     # Debug info
@@ -10449,6 +10580,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
                 if chunk_files:
                     for chunk_file in chunk_files:
+                        _raise_if_stopped()
                         chunk_path = os.path.join(word_count_folder, chunk_file)
                         try:
                             with open(chunk_path, 'r', encoding='utf-8') as f:
@@ -10513,6 +10645,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
                 if chunk_files:
                     for chunk_file in chunk_files:
+                        _raise_if_stopped()
                         chunk_path = os.path.join(word_count_folder, chunk_file)
                         try:
                             with open(chunk_path, 'r', encoding='utf-8') as f:
@@ -10595,6 +10728,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     if filename.lower().endswith(('.html', '.htm', '.xhtml', '.txt'))
                 ]
                 for chunk_file in chunk_files:
+                    _raise_if_stopped()
                     chunk_path = os.path.join(word_count_folder, chunk_file)
                     try:
                         with open(chunk_path, 'r', encoding='utf-8') as source_file:
@@ -10709,6 +10843,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log(f"🔍 Extracting source HTML content from word_count folder for source comparison")
                 chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
                 for chunk_file in chunk_files:
+                    _raise_if_stopped()
                     chunk_path = os.path.join(word_count_folder, chunk_file)
                     try:
                         with open(chunk_path, 'r', encoding='utf-8') as f:
@@ -10765,6 +10900,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             # Store as {filename: word_count} for easy lookup
                             original_word_counts = {}
                             for chunk_file in chunk_files:
+                                _raise_if_stopped()
                                 chunk_path = os.path.join(word_count_folder, chunk_file)
                                 with open(chunk_path, 'r', encoding='utf-8') as f:
                                     chunk_text = f.read()
@@ -11252,28 +11388,25 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     processed_count = 0
     broken_batches = []  # batches a broken process pool lost (a worker died): run again on threads below
     
-    with _ExecutorCls(**_exec_kwargs) as executor:
+    with _stoppable_pool(_ExecutorCls, should_stop, **_exec_kwargs) as executor:
         # Submit all batches
         futures = []
         future_args = {}
-        
+
         for args in worker_args:
             if should_stop():
                 log("⛔ QA scan interrupted before processing.")
-                executor.shutdown(wait=True)
                 return
-            
-            future = executor.submit(process_html_file_batch, args)
+
+            future = _submit_worker(executor, process_html_file_batch, args, should_stop)
             futures.append(future)
             future_args[future] = args
-        
+
         # Collect results as they complete
-        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):
+        for completed_idx, future in enumerate(_completed_until_stop(futures, should_stop)):
             if should_stop():
-                log("⛔ QA scan interrupted during processing.")
-                executor.shutdown(wait=True)
-                return
-            
+                break
+
             try:
                 batch_results = future.result()
                 
@@ -11344,18 +11477,26 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log(f"   ❌ Error processing batch: {e}")
                 import traceback
                 log(f"   Traceback: {traceback.format_exc()}")
-    
+
+        if should_stop():
+            log("⛔ QA scan interrupted during processing.")
+            return
+
     if broken_batches and not should_stop():
         log(f"   🧵 Scanning the {len(broken_batches)} batch(es) it left with threads instead "
             f"(its cause, if it crashed, is in crash.log in the logs folder)")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as thread_executor:
-            for batch_results in thread_executor.map(process_html_file_batch, broken_batches):
+        with _stoppable_pool(concurrent.futures.ThreadPoolExecutor, should_stop, max_workers=max_workers) as thread_executor:
+            thread_futures = [_submit_worker(thread_executor, process_html_file_batch, batch, should_stop)
+                              for batch in broken_batches]
+            for thread_future in _completed_until_stop(thread_futures, should_stop):
                 if should_stop():
-                    log("⛔ QA scan interrupted during processing.")
-                    thread_executor.shutdown(wait=True, cancel_futures=True)
-                    return
+                    break
+                batch_results = thread_future.result()
                 processed_count += len(batch_results)
                 results.extend(batch_results)
+            if should_stop():
+                log("⛔ QA scan interrupted during processing.")
+                return
         log(f"   ✅ {processed_count}/{len(html_files)} files scanned")
     
     # Clear the progress line (like original)
@@ -11437,6 +11578,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     )
     
     dup_time = time.time() - dup_start_time
+    if should_stop():
+        log("⛔ QA scan stopped during duplicate detection.")
+        return
     log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")
 
     artifact_results = []
@@ -11523,6 +11667,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         for source_info in original_html_content.values():
             if not isinstance(source_info, dict):
                 continue
+            _raise_if_stopped()
             source_filename = os.path.basename(str(source_info.get('filename', ''))).lower()
             source_basename = _strip_html_like_extensions(source_filename)
             if source_basename.startswith('response_'):
@@ -11544,7 +11689,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     for idx, result in enumerate(results):
         if should_stop():
             log("⛔ QA scan stopped during issue processing.")
-            break
+            return
         issues = result.get('issues', [])
 
         if result.get('translation_artifact_qa_only'):
@@ -11876,7 +12021,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # ---- Silent truncation detection (threadpooled) ----
     if check_truncation and original_html_content and not should_stop():
         import threading as _threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor
 
         src_lang = str(qa_settings.get('source_language', 'auto')).strip()
         tgt_lang = str(qa_settings.get('target_language', 'english')).strip()
@@ -11944,9 +12089,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         max_workers = min(4, len(results))
         log(f"\n🔍 Running silent truncation detection ({max_workers} threads)...")
 
-        with ThreadPoolExecutor(max_workers=max_workers) as trunc_pool:
+        with _stoppable_pool(ThreadPoolExecutor, should_stop, max_workers=max_workers) as trunc_pool:
             futures = {trunc_pool.submit(_check_one, r): r for r in results}
-            for future in as_completed(futures):
+            for future in _completed_until_stop(futures, should_stop):
                 if should_stop():
                     break
                 try:
@@ -11963,7 +12108,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # ---- AI Truncation Detection (uses API, threaded) ----
     if check_ai_truncation and original_html_content and not should_stop():
         import threading as _threading_ai
-        from concurrent.futures import ThreadPoolExecutor as _AIThreadPool, as_completed as _ai_as_completed
+        from concurrent.futures import ThreadPoolExecutor as _AIThreadPool
 
         _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))
         _ai_custom_prompt = qa_settings.get('ai_truncation_prompt', None)
@@ -12053,10 +12198,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
             _ai_client.context = 'qa_truncation'
-            # Wire QA scanner's stop flag into the client so in-flight API
-            # calls abort immediately when the user presses Stop.
-            # Force-stop only — no graceful stop needed for simple QA queries.
-            _ai_client._stop_callback = should_stop
+            # Wire QA scanner's force stop into the client so in-flight API calls
+            # abort immediately on it. A graceful stop lets them finish.
+            _ai_client._stop_callback = force_stopped
 
             _ai_uses_dedicated_qa_pool = bool(_ai_config.get('use_ai_truncation_detection_keys', False))
             _ai_worker_clients = _threading_ai.local()
@@ -12079,7 +12223,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         return None
                     worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
                     worker_client.context = 'qa_truncation'
-                    worker_client._stop_callback = should_stop
+                    worker_client._stop_callback = force_stopped
                     _ai_worker_clients.client = worker_client
                 return worker_client
         except Exception as _client_err:
@@ -12243,13 +12387,12 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             if _batch_enabled:
                 os.environ['BATCH_TRANSLATION'] = '1'
             _ai_pool = None
+            _ai_futures = {}
             try:
                 _ai_pool = _AIThreadPool(max_workers=_ai_max_workers)
                 _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
-                for _ai_future in _ai_as_completed(_ai_futures):
+                for _ai_future in _completed_until_stop(_ai_futures, should_stop):
                     if should_stop():
-                        for _pending in _ai_futures:
-                            _pending.cancel()
                         break
                     try:
                         _ai_pair = _ai_future.result()
@@ -12266,16 +12409,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         pass
             finally:
                 if _ai_pool is not None:
-                    try:
-                        # ALWAYS wait for threads to finish before returning.
-                        # cancel_futures=True kills QUEUED tasks instantly.
-                        # Running tasks hit stop checks in _ai_check_one/_setup_client
-                        # and exit quickly, so this won't block for long.
-                        # Using wait=False caused threads to outlive the scan function,
-                        # and _check_qa_stop_done would clear stop flags while threads
-                        # were still initializing clients.
-                        _ai_pool.shutdown(wait=True, cancel_futures=True)
-                    except TypeError:
+                    if should_stop():
+                        _finish_api_calls_in_flight(_ai_pool, _ai_futures, should_stop, force_stopped, log)
+                    else:
                         _ai_pool.shutdown(wait=True)
                 # Restore original BATCH_TRANSLATION env var
                 if _orig_batch_env is not None:
@@ -12285,8 +12421,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             if should_stop():
                 log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")
-            else:
-                log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
+                return
+            log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
 
     if qa_settings.get('check_glossary_names', False) and not should_stop():
         try:
@@ -12294,6 +12430,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                     progress_path=progress_path, should_stop=should_stop)
         except Exception as e:
             log(f"   ⚠️ Glossary name check failed: {e}")
+
+    if should_stop():
+        log("⛔ QA scan stopped before report generation.")
+        return
 
     _attach_chunk_results_to_scan(
         folder_path,
@@ -12312,10 +12452,6 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         result.pop('structural_sig', None)
         result.pop('normalized_text', None)
         result.pop('qa_header_text', None)
-    
-    if should_stop():
-        log("⛔ QA scan stopped before report generation.")
-        return
 
     # Generate reports
     generate_reports(results, folder_path, duplicate_confidence, log, qa_settings)
@@ -12693,7 +12829,7 @@ def test_stop_functionality():
 
 # ADD THIS AT MODULE LEVEL (outside any function/class)
 
-def process_comparison_batch_fast(args):
+def process_comparison_batch_fast(args, should_stop=None):
     """Process a batch of comparisons - MUST BE AT MODULE LEVEL FOR PICKLING"""
     batch, data = args
     batch_results = []
@@ -12710,6 +12846,8 @@ def process_comparison_batch_fast(args):
     # from scan_html_folder import calculate_semantic_similarity, calculate_structural_similarity
     
     for i, j in batch:
+        if should_stop is not None and should_stop():
+            break
         data_i = all_data[i]
         data_j = all_data[j]
         
@@ -12859,25 +12997,24 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     batch_args = [(batch, worker_data) for batch in batches]
     
     # Process with ProcessPoolExecutor
-    with mobile_runtime.make_pool_executor(max_workers, initializer=_init_worker_process) as executor:
+    with _stoppable_pool(mobile_runtime.make_pool_executor, should_stop, max_workers,
+                         initializer=_init_worker_process) as executor:
         # Submit all batches
         futures = []
         for args in batch_args:
             if should_stop():
                 log("⛔ AI Hunter interrupted by user.")
-                executor.shutdown(wait=True)
                 return comparisons_done
-            
-            future = executor.submit(process_comparison_batch_fast, args)
+
+            future = _submit_worker(executor, process_comparison_batch_fast, args, should_stop)
             futures.append(future)
-        
+
         # Process results as they complete
-        for completed_future in concurrent.futures.as_completed(futures):
+        for completed_future in _completed_until_stop(futures, should_stop):
             if should_stop():
                 log("⛔ AI Hunter interrupted by user.")
-                executor.shutdown(wait=True)
                 return comparisons_done
-            
+
             # Get results
             batch_results = completed_future.result()
             
@@ -12940,6 +13077,10 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
                 
                 last_progress = progress
     
+    if should_stop():
+        log("⛔ AI Hunter interrupted by user.")
+        return comparisons_done
+
     # Final summary
     elapsed = time.time() - start_time
     log(f"✅ AI Hunter complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")

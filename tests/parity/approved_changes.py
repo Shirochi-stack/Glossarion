@@ -1743,6 +1743,1118 @@ _MARK_GLOSSARY_COMPLETE_LEGACY = {'src/translator_gui.py': [("        self.force
 _MARK_GLOSSARY_COMPLETE_SCHEMA = {'src/settings_schema_data.py': [(" 'forced_truncation_seconds',\n 'glossary_enable_anti_duplicate',\n", " 'forced_truncation_seconds',\n 'mark_glossary_forced_truncation_complete',\n 'glossary_enable_anti_duplicate',\n"), (" ('forced_truncation_seconds', ('forced_truncation_seconds_var',), ('value', 3), ('int',)),\n", " ('forced_truncation_seconds', ('forced_truncation_seconds_var',), ('value', 3), ('int',)),\n ('mark_glossary_forced_truncation_complete',\n"), ("    'max_image_dimension': {'default': 2048,\n", "    'mark_glossary_forced_truncation_complete': {'converter': ('bool',),\n     'default': False,\n     'default_source': 'init',\n     'dialog_default': False,\n     'env': (('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE', 'translation', False),\n             ('MARK_GLOSSARY_FORCED_TRUNCATION_COMPLETE', 'startup', False)),\n     'init_default': False,\n     'label': 'Mark glossary forced truncation as complete',\n     'origins': ('settings_map', 'init', 'dialog', 'env'),\n     'save_default': False,\n     'tooltip': 'A glossary request stopped by Forced Truncation counts as finished: its chapter '\n                'is marked complete\\n'\n                'with the entries it has, instead of truncated, so it is not extracted again.\\n'\n                'Entries after the point where the model began repeating are never extracted.',\n     'type': 'bool',\n     'ui_group': '🎯 Anti-Duplicate Parameters',\n     'ui_sites': ('other.anti_duplicate',),\n     'ui_tab': 'Logit Bias',\n     'var_names': ('mark_glossary_forced_truncation_complete_var',)},\n    'max_image_dimension': {'default': 2048,\n")]}
 
 
+# 2026-11-01 the QA scanner stops at once (the real diff of scan_html_folder.py)
+_QA_STOP_SCANNER = [
+    (
+        'from functools import lru_cache\n'
+        'import concurrent.futures\n'
+        'import multiprocessing\n'
+        'from threading import Lock\n'
+    ,
+        'from functools import lru_cache\n'
+        'import concurrent.futures\n'
+        'import contextlib\n'
+        'import functools\n'
+        'import multiprocessing\n'
+        'from threading import Lock\n'
+    ),
+    (
+        '    print("🛑 STOP SCAN CALLED - Global flag set to True")  # More visible debug\n'
+        '    return True  # Return True to confirm it was called\n'
+        '\n'
+        'def _is_vision_output_mode(qa_settings=None):\n'
+    ,
+        '    print("🛑 STOP SCAN CALLED - Global flag set to True")  # More visible debug\n'
+        '    return True  # Return True to confirm it was called\n'
+        '\n'
+        '\n'
+        'class _ScanStopped(BaseException):\n'
+        '    """Unwinds a stopped scan from wherever its thread is (``_raise_if_stopped``). A BaseException: the scan\'s\n'
+        '    many ``except Exception`` blocks must not swallow it."""\n'
+        '\n'
+        '\n'
+        '#: the stop check of the scan running on this thread (none on worker threads and outside a scan)\n'
+        '_scan_thread = threading.local()\n'
+        '\n'
+        '\n'
+        'def _raise_if_stopped():\n'
+        '    """For the scan\'s long sequential work: ends the scan at once when a stop was requested."""\n'
+        "    check = getattr(_scan_thread, 'should_stop', None)\n"
+        '    if check is not None and check():\n'
+        '        raise _ScanStopped()\n'
+        '\n'
+        '\n'
+        'def _stops_at_once(scan):\n'
+        '    """``scan_html_folder`` returns None as soon as ``_raise_if_stopped`` finds a stop, like its other stop paths."""\n'
+        '    @functools.wraps(scan)\n'
+        '    def wrapper(*args, **kwargs):\n'
+        '        try:\n'
+        '            return scan(*args, **kwargs)\n'
+        '        except _ScanStopped:\n'
+        '            return None\n'
+        '        finally:\n'
+        '            _scan_thread.should_stop = None\n'
+        '    return wrapper\n'
+        '\n'
+        '\n'
+        'def _abandon_pool(pool):\n'
+        '    """Leave a pool without waiting for it: what is queued never starts and a process pool\'s workers are killed\n'
+        '    (a thread worker cannot be, it sees the stop at its next file: ``_submit_worker``)."""\n'
+        "    processes = list((getattr(pool, '_processes', None) or {}).values())\n"
+        '    pool.shutdown(wait=False, cancel_futures=True)\n'
+        '    for process in processes:\n'
+        '        try:\n'
+        '            process.kill()\n'
+        '        except Exception:\n'
+        '            pass\n'
+        '\n'
+        '\n'
+        '@contextlib.contextmanager\n'
+        'def _stoppable_pool(factory, should_stop, *args, **kwargs):\n'
+        '    """``with factory(...) as pool``, except that leaving it after a stop does not wait (``_abandon_pool``)."""\n'
+        '    pool = factory(*args, **kwargs)\n'
+        '    try:\n'
+        '        yield pool\n'
+        '    finally:\n'
+        '        if should_stop():\n'
+        '            _abandon_pool(pool)\n'
+        '        else:\n'
+        '            pool.shutdown(wait=True)\n'
+        '\n'
+        '\n'
+        'def _completed_until_stop(futures, should_stop, poll=0.1):\n'
+        '    """``as_completed`` that notices a stop while it waits: it just ends."""\n'
+        '    pending = set(futures)\n'
+        '    while pending:\n'
+        '        if should_stop():\n'
+        '            return\n'
+        '        done, pending = concurrent.futures.wait(pending, timeout=poll,\n'
+        '                                                return_when=concurrent.futures.FIRST_COMPLETED)\n'
+        '        yield from done\n'
+        '\n'
+        '\n'
+        'def _submit_worker(pool, worker, args, should_stop):\n'
+        '    """A thread worker gets the scan\'s stop check, for between its files. A process worker cannot see it, and does\n'
+        '    not need to: its pool is killed."""\n'
+        '    if isinstance(pool, concurrent.futures.ThreadPoolExecutor):\n'
+        '        return pool.submit(worker, args, should_stop)\n'
+        '    return pool.submit(worker, args)\n'
+        '\n'
+        '\n'
+        'def _finish_api_calls_in_flight(pool, futures, should_stop, force_stopped, log, *, poll=0.1, force_grace=1.0):\n'
+        '    """A stop during an API stage: the queued calls never start. A graceful stop lets the calls in flight finish;\n'
+        '    a forced one (the second Stop) aborts them and does not wait for them beyond ``force_grace`` seconds. Polling\n'
+        '    the stop check here is what notices that second Stop."""\n'
+        '    pool.shutdown(wait=False, cancel_futures=True)\n'
+        '    pending = {future for future in futures if not future.done()}\n'
+        '    told = False\n'
+        '    forced_at = None\n'
+        '    while pending:\n'
+        '        _done, pending = concurrent.futures.wait(pending, timeout=poll)\n'
+        '        if not pending:\n'
+        '            return\n'
+        '        should_stop()\n'
+        '        if forced_at is None and force_stopped():\n'
+        '            forced_at = time.monotonic()\n'
+        '        if forced_at is not None:\n'
+        '            if time.monotonic() - forced_at >= force_grace:\n'
+        '                return\n'
+        '        elif not told:\n'
+        '            told = True\n'
+        '            log(f"   ⏳ Waiting for {len(pending)} API call(s) in flight to finish. Stop again to cancel them.")\n'
+        '\n'
+        'def _is_vision_output_mode(qa_settings=None):\n'
+    ),
+    (
+        '            \n'
+        '            # Step 2: Process files in spine order\n'
+        '            if spine_files:\n'
+        '                # Determine the base directory from content.opf location\n'
+        "                base_dir = ''\n"
+        '                if content_opf_path:\n'
+        '                    # content.opf is often in OEBPS/ or similar\n'
+        '                    base_dir = os.path.dirname(content_opf_path)\n'
+        '                    if base_dir:\n'
+        "                        base_dir = base_dir + '/'\n"
+        '                \n'
+        '                extracted_count = 0\n'
+        '                for spine_index, file_info in sorted(spine_files.items()):\n'
+        '                    try:\n'
+        "                        file_path = file_info['href']\n"
+        '                        \n'
+        '                        # Try multiple path resolutions\n'
+        '                        possible_paths = [\n'
+        '                            file_path,                          # As-is from manifest\n'
+        '                            base_dir + file_path,               # Relative to content.opf\n'
+        "                            'OEBPS/' + file_path,               # Common EPUB structure\n"
+        "                            'OPS/' + file_path,                 # Alternative structure\n"
+        '                        ]\n'
+        '                        \n'
+        '                        content = None\n'
+        '                        for try_path in possible_paths:\n'
+    ,
+        '            \n'
+        '            # Step 2: Process files in spine order\n'
+        '            if spine_files:\n'
+        '                # Determine the base directory from content.opf location\n'
+        "                base_dir = ''\n"
+        '                if content_opf_path:\n'
+        '                    # content.opf is often in OEBPS/ or similar\n'
+        '                    base_dir = os.path.dirname(content_opf_path)\n'
+        '                    if base_dir:\n'
+        "                        base_dir = base_dir + '/'\n"
+        '                \n'
+        '                extracted_count = 0\n'
+        '                for spine_index, file_info in sorted(spine_files.items()):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        file_path = file_info['href']\n"
+        '                        \n'
+        '                        # Try multiple path resolutions\n'
+        '                        possible_paths = [\n'
+        '                            file_path,                          # As-is from manifest\n'
+        '                            base_dir + file_path,               # Relative to content.opf\n'
+        "                            'OEBPS/' + file_path,               # Common EPUB structure\n"
+        "                            'OPS/' + file_path,                 # Alternative structure\n"
+        '                        ]\n'
+        '                        \n'
+        '                        content = None\n'
+        '                        for try_path in possible_paths:\n'
+    ),
+    (
+        '                \n'
+        '                html_files.sort()\n'
+        '                \n'
+        '                for idx, file_path in enumerate(html_files, start=1):\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+        "                        soup = BeautifulSoup(content, 'html.parser')\n"
+        "                        images = soup.find_all('img')\n"
+    ,
+        '                \n'
+        '                html_files.sort()\n'
+        '                \n'
+        '                for idx, file_path in enumerate(html_files, start=1):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+        "                        soup = BeautifulSoup(content, 'html.parser')\n"
+        "                        images = soup.find_all('img')\n"
+    ),
+    (
+        '                    base_dir = os.path.dirname(content_opf_path)\n'
+        '                    if base_dir:\n'
+        "                        base_dir = base_dir + '/'\n"
+        '                \n'
+        '                extracted_count = 0\n'
+        '                for spine_index, file_info in sorted(spine_files.items()):\n'
+        '                    try:\n'
+        "                        file_path = file_info['href']\n"
+        '                        \n'
+        '                        # Try multiple path resolutions\n'
+        '                        possible_paths = [\n'
+        '                            file_path,\n'
+    ,
+        '                    base_dir = os.path.dirname(content_opf_path)\n'
+        '                    if base_dir:\n'
+        "                        base_dir = base_dir + '/'\n"
+        '                \n'
+        '                extracted_count = 0\n'
+        '                for spine_index, file_info in sorted(spine_files.items()):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        file_path = file_info['href']\n"
+        '                        \n'
+        '                        # Try multiple path resolutions\n'
+        '                        possible_paths = [\n'
+        '                            file_path,\n'
+    ),
+    (
+        '                \n'
+        '                html_files.sort()\n'
+        '                \n'
+        '                for idx, file_path in enumerate(html_files, start=1):\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+        "                        soup = BeautifulSoup(content, 'html.parser')\n"
+        '                        # Remove non-visible tags before extracting text\n'
+    ,
+        '                \n'
+        '                html_files.sort()\n'
+        '                \n'
+        '                for idx, file_path in enumerate(html_files, start=1):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+        "                        soup = BeautifulSoup(content, 'html.parser')\n"
+        '                        # Remove non-visible tags before extracting text\n'
+    ),
+    (
+        '\n'
+        '                for spine_index, file_path in sorted(spine_files.items()):\n'
+        '                    content = None\n'
+        "                    for candidate in (file_path, base_dir + file_path, 'OEBPS/' + file_path, 'OPS/' + file_path):\n"
+    ,
+        '\n'
+        '                for spine_index, file_path in sorted(spine_files.items()):\n'
+        '                    _raise_if_stopped()\n'
+        '                    content = None\n'
+        "                    for candidate in (file_path, base_dir + file_path, 'OEBPS/' + file_path, 'OPS/' + file_path):\n"
+    ),
+    (
+        '                ]\n'
+        '                for index, file_path in enumerate(sorted(html_files), start=1):\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+    ,
+        '                ]\n'
+        '                for index, file_path in enumerate(sorted(html_files), start=1):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+    ),
+    (
+        '\n'
+        '\n'
+        'def process_enhance_duplicate_batch(args):\n'
+        '    """Process a batch of enhanced duplicate detection - MUST BE AT MODULE LEVEL"""\n'
+        '    batch_type, batch_data, worker_data = args\n'
+    ,
+        '\n'
+        '\n'
+        'def process_enhance_duplicate_batch(args, should_stop=None):\n'
+        '    """Process a batch of enhanced duplicate detection - MUST BE AT MODULE LEVEL"""\n'
+        '    batch_type, batch_data, worker_data = args\n'
+    ),
+    (
+        '        \n'
+        '        for idx1, idx2, file1, file2, chapter_num in comparisons:\n'
+        '            # Get text data\n'
+        '            data1 = text_data[idx1]\n'
+    ,
+        '        \n'
+        '        for idx1, idx2, file1, file2, chapter_num in comparisons:\n'
+        '            if should_stop is not None and should_stop():\n'
+        '                break\n'
+        '            # Get text data\n'
+        '            data1 = text_data[idx1]\n'
+    ),
+    (
+        'def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):\n'
+        '    """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""\n'
+        '\n'
+        '    log("🔍 Enhanced duplicate detection (different naming formats)...")\n'
+    ,
+        'def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):\n'
+        '    """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""\n'
+        '    _stopped = should_stop or (lambda: False)\n'
+        '\n'
+        '    log("🔍 Enhanced duplicate detection (different naming formats)...")\n'
+    ),
+    (
+        "            batches.append(('chapter_comparison', batch, worker_data))\n"
+        '        \n'
+        '        with _ExecCls(**_kw) as executor:\n'
+        '            futures = []\n'
+        '            \n'
+        '            for batch_args in batches:\n'
+        '                if should_stop and should_stop():\n'
+        '                    log("⛔ Enhanced detection interrupted by user.")\n'
+        '                    executor.shutdown(wait=True)\n'
+        '                    return duplicates_found\n'
+        '                \n'
+        '                future = executor.submit(process_enhance_duplicate_batch, batch_args)\n'
+        '                futures.append(future)\n'
+        '            \n'
+        '            # Collect results\n'
+        '            for future in concurrent.futures.as_completed(futures):\n'
+        '                batch_results = future.result()\n'
+        '                \n'
+    ,
+        "            batches.append(('chapter_comparison', batch, worker_data))\n"
+        '        \n'
+        '        with _stoppable_pool(_ExecCls, _stopped, **_kw) as executor:\n'
+        '            futures = []\n'
+        '\n'
+        '            for batch_args in batches:\n'
+        '                if _stopped():\n'
+        '                    log("⛔ Enhanced detection interrupted by user.")\n'
+        '                    return duplicates_found\n'
+        '\n'
+        '                future = _submit_worker(executor, process_enhance_duplicate_batch, batch_args, _stopped)\n'
+        '                futures.append(future)\n'
+        '            \n'
+        '            # Collect results\n'
+        '            for future in _completed_until_stop(futures, _stopped):\n'
+        '                batch_results = future.result()\n'
+        '                \n'
+    ),
+    (
+        "            batches.append(('preview_comparison', batch, worker_data))\n"
+        '        \n'
+        '        with _ExecCls(**_kw) as executor:\n'
+        '            futures = []\n'
+        '            \n'
+        '            for batch_args in batches:\n'
+        '                if should_stop and should_stop():\n'
+        '                    log("⛔ Enhanced detection interrupted by user.")\n'
+        '                    executor.shutdown(wait=True)\n'
+        '                    return duplicates_found\n'
+        '                \n'
+        '                future = executor.submit(process_enhance_duplicate_batch, batch_args)\n'
+        '                futures.append(future)\n'
+        '            \n'
+        '            # Collect results with progress\n'
+        '            completed = 0\n'
+        '            for future in concurrent.futures.as_completed(futures):\n'
+        '                completed += 1\n'
+        '                if completed % 10 == 0:\n'
+    ,
+        "            batches.append(('preview_comparison', batch, worker_data))\n"
+        '        \n'
+        '        with _stoppable_pool(_ExecCls, _stopped, **_kw) as executor:\n'
+        '            futures = []\n'
+        '\n'
+        '            for batch_args in batches:\n'
+        '                if _stopped():\n'
+        '                    log("⛔ Enhanced detection interrupted by user.")\n'
+        '                    return duplicates_found\n'
+        '\n'
+        '                future = _submit_worker(executor, process_enhance_duplicate_batch, batch_args, _stopped)\n'
+        '                futures.append(future)\n'
+        '            \n'
+        '            # Collect results with progress\n'
+        '            completed = 0\n'
+        '            for future in _completed_until_stop(futures, _stopped):\n'
+        '                completed += 1\n'
+        '                if completed % 10 == 0:\n'
+    ),
+    (
+        '    return duplicate_groups, near_duplicate_groups, duplicate_confidence\n'
+        '\n'
+        'def process_deep_similarity_batch(args):\n'
+        '    """Process a batch of deep similarity comparisons with enhanced error handling"""\n'
+        '    try:\n'
+    ,
+        '    return duplicate_groups, near_duplicate_groups, duplicate_confidence\n'
+        '\n'
+        'def process_deep_similarity_batch(args, should_stop=None):\n'
+        '    """Process a batch of deep similarity comparisons with enhanced error handling"""\n'
+        '    try:\n'
+    ),
+    (
+        '        \n'
+        '        for i, j, filename_i, filename_j in batch:\n'
+        '            try:\n'
+        '                # Get text samples\n'
+    ,
+        '        \n'
+        '        for i, j, filename_i, filename_j in batch:\n'
+        '            if should_stop is not None and should_stop():\n'
+        '                break\n'
+        '            try:\n'
+        '                # Get text samples\n'
+    ),
+    (
+        '        try:\n'
+        '            # Process with ProcessPoolExecutor\n'
+        '            with mobile_runtime.make_pool_executor(max_workers) as executor:\n'
+        '                # Submit all batches\n'
+        '                futures = []\n'
+    ,
+        '        try:\n'
+        '            # Process with ProcessPoolExecutor\n'
+        '            with _stoppable_pool(mobile_runtime.make_pool_executor, should_stop, max_workers) as executor:\n'
+        '                # Submit all batches\n'
+        '                futures = []\n'
+    ),
+    (
+        '                    if should_stop():\n'
+        '                        log("⛔ Deep similarity check interrupted by user.")\n'
+        '                        executor.shutdown(wait=True)\n'
+        '                        return\n'
+        '                    \n'
+        '                    future = executor.submit(process_deep_similarity_batch, args)\n'
+        '                    futures.append(future)\n'
+        '                \n'
+        '                # Process results as they complete\n'
+        '                for completed_future in concurrent.futures.as_completed(futures):\n'
+        '                    if should_stop():\n'
+        '                        log("⛔ Deep similarity check interrupted by user.")\n'
+        '                        executor.shutdown(wait=True)\n'
+        '                        return\n'
+        '                    \n'
+        '                    try:\n'
+        '                        # NO TIMEOUT - let it run as long as needed\n'
+    ,
+        '                    if should_stop():\n'
+        '                        log("⛔ Deep similarity check interrupted by user.")\n'
+        '                        return\n'
+        '\n'
+        '                    future = _submit_worker(executor, process_deep_similarity_batch, args, should_stop)\n'
+        '                    futures.append(future)\n'
+        '\n'
+        '                # Process results as they complete\n'
+        '                for completed_future in _completed_until_stop(futures, should_stop):\n'
+        '                    if should_stop():\n'
+        '                        break\n'
+        '\n'
+        '                    try:\n'
+        '                        # NO TIMEOUT - let it run as long as needed\n'
+    ),
+    (
+        '                        break\n'
+        '                \n'
+        '                # If we completed successfully\n'
+        '                if use_parallel:\n'
+    ,
+        '                        break\n'
+        '                \n'
+        '                if should_stop():\n'
+        '                    log("⛔ Deep similarity check interrupted by user.")\n'
+        '                    return\n'
+        '\n'
+        '                # If we completed successfully\n'
+        '                if use_parallel:\n'
+    ),
+    (
+        '            \n'
+        '            # Step 2: Process files in spine order\n'
+        '            if spine_files:\n'
+        '                # Determine the base directory from content.opf location\n'
+        "                base_dir = ''\n"
+        '                if content_opf_path:\n'
+        '                    # content.opf is often in OEBPS/ or similar\n'
+        '                    base_dir = os.path.dirname(content_opf_path)\n'
+        '                    if base_dir:\n'
+        "                        base_dir = base_dir + '/'\n"
+        '                \n'
+        '                extracted_count = 0\n'
+        '                for spine_index, file_info in sorted(spine_files.items()):\n'
+        '                    try:\n'
+        "                        file_path = file_info['href']\n"
+        '                        \n'
+        '                        # Try multiple path resolutions\n'
+        '                        possible_paths = [\n'
+        '                            file_path,                          # As-is from manifest\n'
+        '                            base_dir + file_path,               # Relative to content.opf\n'
+        "                            'OEBPS/' + file_path,               # Common EPUB structure\n"
+        "                            'OPS/' + file_path,                 # Alternative structure\n"
+        '                        ]\n'
+        '                        \n'
+        '                        content = None\n'
+        '                        successful_path = None\n'
+    ,
+        '            \n'
+        '            # Step 2: Process files in spine order\n'
+        '            if spine_files:\n'
+        '                # Determine the base directory from content.opf location\n'
+        "                base_dir = ''\n"
+        '                if content_opf_path:\n'
+        '                    # content.opf is often in OEBPS/ or similar\n'
+        '                    base_dir = os.path.dirname(content_opf_path)\n'
+        '                    if base_dir:\n'
+        "                        base_dir = base_dir + '/'\n"
+        '                \n'
+        '                extracted_count = 0\n'
+        '                for spine_index, file_info in sorted(spine_files.items()):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        file_path = file_info['href']\n"
+        '                        \n'
+        '                        # Try multiple path resolutions\n'
+        '                        possible_paths = [\n'
+        '                            file_path,                          # As-is from manifest\n'
+        '                            base_dir + file_path,               # Relative to content.opf\n'
+        "                            'OEBPS/' + file_path,               # Common EPUB structure\n"
+        "                            'OPS/' + file_path,                 # Alternative structure\n"
+        '                        ]\n'
+        '                        \n'
+        '                        content = None\n'
+        '                        successful_path = None\n'
+    ),
+    (
+        '                \n'
+        '                html_files.sort()\n'
+        '                \n'
+        '                for idx, file_path in enumerate(html_files, start=1):\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+        "                        soup = BeautifulSoup(content, 'html.parser')\n"
+        '                        text = soup.get_text(strip=True)\n'
+    ,
+        '                \n'
+        '                html_files.sort()\n'
+        '                \n'
+        '                for idx, file_path in enumerate(html_files, start=1):\n'
+        '                    _raise_if_stopped()\n'
+        '                    try:\n'
+        "                        content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+        "                        soup = BeautifulSoup(content, 'html.parser')\n"
+        '                        text = soup.get_text(strip=True)\n'
+    ),
+    (
+        '\n'
+        '        for idx, file_path in enumerate(html_files, start=1):\n'
+        '            try:\n'
+        "                content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+    ,
+        '\n'
+        '        for idx, file_path in enumerate(html_files, start=1):\n'
+        '            _raise_if_stopped()\n'
+        '            try:\n'
+        "                content = zf.read(file_path).decode('utf-8', errors='ignore')\n"
+    ),
+    (
+        '            spine_index = 1\n'
+        "            for itemref in spine.find_all('itemref'):\n"
+        "                idref = itemref.get('idref')\n"
+        '                if idref and idref in manifest_map:\n'
+    ,
+        '            spine_index = 1\n'
+        "            for itemref in spine.find_all('itemref'):\n"
+        '                _raise_if_stopped()\n'
+        "                idref = itemref.get('idref')\n"
+        '                if idref and idref in manifest_map:\n'
+    ),
+    (
+        '    }\n'
+        '\n'
+        'def process_html_file_batch(args):\n'
+        '    """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""\n'
+        '    if len(args) >= 12:\n'
+    ,
+        '    }\n'
+        '\n'
+        'def process_html_file_batch(args, should_stop=None):\n'
+        '    """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""\n'
+        '    if len(args) >= 12:\n'
+    ),
+    (
+        '    \n'
+        '    for idx, filename in file_batch:\n'
+        '        full_path = os.path.join(folder_path, filename)\n'
+        '        \n'
+    ,
+        '    \n'
+        '    for idx, filename in file_batch:\n'
+        '        if should_stop is not None and should_stop():\n'
+        '            break\n'
+        '        full_path = os.path.join(folder_path, filename)\n'
+        '        \n'
+    ),
+    (
+        '\n'
+        '\n'
+        "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+        '    """\n'
+    ,
+        '\n'
+        '\n'
+        '@_stops_at_once\n'
+        "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+        '    """\n'
+    ),
+    (
+        '                log("⛔ Graceful stop requested via GRACEFUL_STOP env var")\n'
+        '            return True\n'
+        '        return False\n'
+        '    \n'
+        '    start_time = time.time()\n'
+        '    \n'
+    ,
+        '                log("⛔ Graceful stop requested via GRACEFUL_STOP env var")\n'
+        '            return True\n'
+        '        # a stop stays requested for this scan: the GUI clears the flags soon after it ended, while a worker it\n'
+        '        # did not wait for may still be asking\n'
+        '        return _stop_logged[0]\n'
+        '\n'
+        '    def force_stopped():\n'
+        '        """A forced stop (the second Stop): what aborts API calls in flight. A graceful one lets them finish."""\n'
+        '        if not should_stop():\n'
+        '            return False\n'
+        "        if os.environ.get('GRACEFUL_STOP') != '1':\n"
+        '            return True\n'
+        '        try:\n'
+        '            from unified_api_client import UnifiedClient\n'
+        '            return UnifiedClient.is_globally_cancelled()\n'
+        '        except Exception:\n'
+        '            return False\n'
+        '\n'
+        '    _scan_thread.should_stop = should_stop\n'
+        '\n'
+        '    start_time = time.time()\n'
+        '    \n'
+    ),
+    (
+        '                # Extract image counts from HTML files in word_count folder\n'
+        "                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]\n"
+        '                if chunk_files:\n'
+        '                    for chunk_file in chunk_files:\n'
+        '                        chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                        try:\n'
+        "                            with open(chunk_path, 'r', encoding='utf-8') as f:\n"
+        '                                chunk_html = f.read()\n'
+    ,
+        '                # Extract image counts from HTML files in word_count folder\n'
+        "                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]\n"
+        '                if chunk_files:\n'
+        '                    for chunk_file in chunk_files:\n'
+        '                        _raise_if_stopped()\n'
+        '                        chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                        try:\n'
+        "                            with open(chunk_path, 'r', encoding='utf-8') as f:\n"
+        '                                chunk_html = f.read()\n'
+    ),
+    (
+        '                log(f"❗ Extracting punctuation information from word_count folder")\n'
+        "                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]\n"
+        '                if chunk_files:\n'
+        '                    for chunk_file in chunk_files:\n'
+        '                        chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                        try:\n'
+        "                            with open(chunk_path, 'r', encoding='utf-8') as f:\n"
+        '                                chunk_html = f.read()\n'
+    ,
+        '                log(f"❗ Extracting punctuation information from word_count folder")\n'
+        "                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]\n"
+        '                if chunk_files:\n'
+        '                    for chunk_file in chunk_files:\n'
+        '                        _raise_if_stopped()\n'
+        '                        chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                        try:\n'
+        "                            with open(chunk_path, 'r', encoding='utf-8') as f:\n"
+        '                                chunk_html = f.read()\n'
+    ),
+    (
+        '                ]\n'
+        '                for chunk_file in chunk_files:\n'
+        '                    chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                    try:\n'
+    ,
+        '                ]\n'
+        '                for chunk_file in chunk_files:\n'
+        '                    _raise_if_stopped()\n'
+        '                    chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                    try:\n'
+    ),
+    (
+        "                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]\n"
+        '                for chunk_file in chunk_files:\n'
+        '                    chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                    try:\n'
+    ,
+        "                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]\n"
+        '                for chunk_file in chunk_files:\n'
+        '                    _raise_if_stopped()\n'
+        '                    chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        '                    try:\n'
+    ),
+    (
+        '                            original_word_counts = {}\n'
+        '                            for chunk_file in chunk_files:\n'
+        '                                chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        "                                with open(chunk_path, 'r', encoding='utf-8') as f:\n"
+    ,
+        '                            original_word_counts = {}\n'
+        '                            for chunk_file in chunk_files:\n'
+        '                                _raise_if_stopped()\n'
+        '                                chunk_path = os.path.join(word_count_folder, chunk_file)\n'
+        "                                with open(chunk_path, 'r', encoding='utf-8') as f:\n"
+    ),
+    (
+        '    broken_batches = []  # batches a broken process pool lost (a worker died): run again on threads below\n'
+        '    \n'
+        '    with _ExecutorCls(**_exec_kwargs) as executor:\n'
+        '        # Submit all batches\n'
+        '        futures = []\n'
+        '        future_args = {}\n'
+        '        \n'
+        '        for args in worker_args:\n'
+        '            if should_stop():\n'
+        '                log("⛔ QA scan interrupted before processing.")\n'
+        '                executor.shutdown(wait=True)\n'
+        '                return\n'
+        '            \n'
+        '            future = executor.submit(process_html_file_batch, args)\n'
+        '            futures.append(future)\n'
+        '            future_args[future] = args\n'
+        '        \n'
+        '        # Collect results as they complete\n'
+        '        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):\n'
+        '            if should_stop():\n'
+        '                log("⛔ QA scan interrupted during processing.")\n'
+        '                executor.shutdown(wait=True)\n'
+        '                return\n'
+        '            \n'
+        '            try:\n'
+        '                batch_results = future.result()\n'
+    ,
+        '    broken_batches = []  # batches a broken process pool lost (a worker died): run again on threads below\n'
+        '    \n'
+        '    with _stoppable_pool(_ExecutorCls, should_stop, **_exec_kwargs) as executor:\n'
+        '        # Submit all batches\n'
+        '        futures = []\n'
+        '        future_args = {}\n'
+        '\n'
+        '        for args in worker_args:\n'
+        '            if should_stop():\n'
+        '                log("⛔ QA scan interrupted before processing.")\n'
+        '                return\n'
+        '\n'
+        '            future = _submit_worker(executor, process_html_file_batch, args, should_stop)\n'
+        '            futures.append(future)\n'
+        '            future_args[future] = args\n'
+        '\n'
+        '        # Collect results as they complete\n'
+        '        for completed_idx, future in enumerate(_completed_until_stop(futures, should_stop)):\n'
+        '            if should_stop():\n'
+        '                break\n'
+        '\n'
+        '            try:\n'
+        '                batch_results = future.result()\n'
+    ),
+    (
+        '                import traceback\n'
+        '                log(f"   Traceback: {traceback.format_exc()}")\n'
+        '    \n'
+        '    if broken_batches and not should_stop():\n'
+        '        log(f"   🧵 Scanning the {len(broken_batches)} batch(es) it left with threads instead "\n'
+        '            f"(its cause, if it crashed, is in crash.log in the logs folder)")\n'
+        '        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as thread_executor:\n'
+        '            for batch_results in thread_executor.map(process_html_file_batch, broken_batches):\n'
+        '                if should_stop():\n'
+        '                    log("⛔ QA scan interrupted during processing.")\n'
+        '                    thread_executor.shutdown(wait=True, cancel_futures=True)\n'
+        '                    return\n'
+        '                processed_count += len(batch_results)\n'
+        '                results.extend(batch_results)\n'
+        '        log(f"   ✅ {processed_count}/{len(html_files)} files scanned")\n'
+        '    \n'
+    ,
+        '                import traceback\n'
+        '                log(f"   Traceback: {traceback.format_exc()}")\n'
+        '\n'
+        '        if should_stop():\n'
+        '            log("⛔ QA scan interrupted during processing.")\n'
+        '            return\n'
+        '\n'
+        '    if broken_batches and not should_stop():\n'
+        '        log(f"   🧵 Scanning the {len(broken_batches)} batch(es) it left with threads instead "\n'
+        '            f"(its cause, if it crashed, is in crash.log in the logs folder)")\n'
+        '        with _stoppable_pool(concurrent.futures.ThreadPoolExecutor, should_stop, max_workers=max_workers) as thread_executor:\n'
+        '            thread_futures = [_submit_worker(thread_executor, process_html_file_batch, batch, should_stop)\n'
+        '                              for batch in broken_batches]\n'
+        '            for thread_future in _completed_until_stop(thread_futures, should_stop):\n'
+        '                if should_stop():\n'
+        '                    break\n'
+        '                batch_results = thread_future.result()\n'
+        '                processed_count += len(batch_results)\n'
+        '                results.extend(batch_results)\n'
+        '            if should_stop():\n'
+        '                log("⛔ QA scan interrupted during processing.")\n'
+        '                return\n'
+        '        log(f"   ✅ {processed_count}/{len(html_files)} files scanned")\n'
+        '    \n'
+    ),
+    (
+        '    \n'
+        '    dup_time = time.time() - dup_start_time\n'
+        '    log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")\n'
+        '\n'
+    ,
+        '    \n'
+        '    dup_time = time.time() - dup_start_time\n'
+        '    if should_stop():\n'
+        '        log("⛔ QA scan stopped during duplicate detection.")\n'
+        '        return\n'
+        '    log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")\n'
+        '\n'
+    ),
+    (
+        '            if not isinstance(source_info, dict):\n'
+        '                continue\n'
+        "            source_filename = os.path.basename(str(source_info.get('filename', ''))).lower()\n"
+        '            source_basename = _strip_html_like_extensions(source_filename)\n'
+    ,
+        '            if not isinstance(source_info, dict):\n'
+        '                continue\n'
+        '            _raise_if_stopped()\n'
+        "            source_filename = os.path.basename(str(source_info.get('filename', ''))).lower()\n"
+        '            source_basename = _strip_html_like_extensions(source_filename)\n'
+    ),
+    (
+        '        if should_stop():\n'
+        '            log("⛔ QA scan stopped during issue processing.")\n'
+        '            break\n'
+        "        issues = result.get('issues', [])\n"
+        '\n'
+    ,
+        '        if should_stop():\n'
+        '            log("⛔ QA scan stopped during issue processing.")\n'
+        '            return\n'
+        "        issues = result.get('issues', [])\n"
+        '\n'
+    ),
+    (
+        '    if check_truncation and original_html_content and not should_stop():\n'
+        '        import threading as _threading\n'
+        '        from concurrent.futures import ThreadPoolExecutor, as_completed\n'
+        '\n'
+        "        src_lang = str(qa_settings.get('source_language', 'auto')).strip()\n"
+    ,
+        '    if check_truncation and original_html_content and not should_stop():\n'
+        '        import threading as _threading\n'
+        '        from concurrent.futures import ThreadPoolExecutor\n'
+        '\n'
+        "        src_lang = str(qa_settings.get('source_language', 'auto')).strip()\n"
+    ),
+    (
+        '        log(f"\\n🔍 Running silent truncation detection ({max_workers} threads)...")\n'
+        '\n'
+        '        with ThreadPoolExecutor(max_workers=max_workers) as trunc_pool:\n'
+        '            futures = {trunc_pool.submit(_check_one, r): r for r in results}\n'
+        '            for future in as_completed(futures):\n'
+        '                if should_stop():\n'
+        '                    break\n'
+    ,
+        '        log(f"\\n🔍 Running silent truncation detection ({max_workers} threads)...")\n'
+        '\n'
+        '        with _stoppable_pool(ThreadPoolExecutor, should_stop, max_workers=max_workers) as trunc_pool:\n'
+        '            futures = {trunc_pool.submit(_check_one, r): r for r in results}\n'
+        '            for future in _completed_until_stop(futures, should_stop):\n'
+        '                if should_stop():\n'
+        '                    break\n'
+    ),
+    (
+        '    if check_ai_truncation and original_html_content and not should_stop():\n'
+        '        import threading as _threading_ai\n'
+        '        from concurrent.futures import ThreadPoolExecutor as _AIThreadPool, as_completed as _ai_as_completed\n'
+        '\n'
+        "        _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))\n"
+    ,
+        '    if check_ai_truncation and original_html_content and not should_stop():\n'
+        '        import threading as _threading_ai\n'
+        '        from concurrent.futures import ThreadPoolExecutor as _AIThreadPool\n'
+        '\n'
+        "        _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))\n"
+    ),
+    (
+        '            _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)\n'
+        "            _ai_client.context = 'qa_truncation'\n"
+        "            # Wire QA scanner's stop flag into the client so in-flight API\n"
+        '            # calls abort immediately when the user presses Stop.\n'
+        '            # Force-stop only — no graceful stop needed for simple QA queries.\n'
+        '            _ai_client._stop_callback = should_stop\n'
+        '\n'
+        "            _ai_uses_dedicated_qa_pool = bool(_ai_config.get('use_ai_truncation_detection_keys', False))\n"
+    ,
+        '            _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)\n'
+        "            _ai_client.context = 'qa_truncation'\n"
+        "            # Wire QA scanner's force stop into the client so in-flight API calls\n"
+        '            # abort immediately on it. A graceful stop lets them finish.\n'
+        '            _ai_client._stop_callback = force_stopped\n'
+        '\n'
+        "            _ai_uses_dedicated_qa_pool = bool(_ai_config.get('use_ai_truncation_detection_keys', False))\n"
+    ),
+    (
+        '                    worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)\n'
+        "                    worker_client.context = 'qa_truncation'\n"
+        '                    worker_client._stop_callback = should_stop\n'
+        '                    _ai_worker_clients.client = worker_client\n'
+        '                return worker_client\n'
+    ,
+        '                    worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)\n'
+        "                    worker_client.context = 'qa_truncation'\n"
+        '                    worker_client._stop_callback = force_stopped\n'
+        '                    _ai_worker_clients.client = worker_client\n'
+        '                return worker_client\n'
+    ),
+    (
+        "                os.environ['BATCH_TRANSLATION'] = '1'\n"
+        '            _ai_pool = None\n'
+        '            try:\n'
+        '                _ai_pool = _AIThreadPool(max_workers=_ai_max_workers)\n'
+        '                _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}\n'
+        '                for _ai_future in _ai_as_completed(_ai_futures):\n'
+        '                    if should_stop():\n'
+        '                        for _pending in _ai_futures:\n'
+        '                            _pending.cancel()\n'
+        '                        break\n'
+        '                    try:\n'
+    ,
+        "                os.environ['BATCH_TRANSLATION'] = '1'\n"
+        '            _ai_pool = None\n'
+        '            _ai_futures = {}\n'
+        '            try:\n'
+        '                _ai_pool = _AIThreadPool(max_workers=_ai_max_workers)\n'
+        '                _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}\n'
+        '                for _ai_future in _completed_until_stop(_ai_futures, should_stop):\n'
+        '                    if should_stop():\n'
+        '                        break\n'
+        '                    try:\n'
+    ),
+    (
+        '            finally:\n'
+        '                if _ai_pool is not None:\n'
+        '                    try:\n'
+        '                        # ALWAYS wait for threads to finish before returning.\n'
+        '                        # cancel_futures=True kills QUEUED tasks instantly.\n'
+        '                        # Running tasks hit stop checks in _ai_check_one/_setup_client\n'
+        "                        # and exit quickly, so this won't block for long.\n"
+        '                        # Using wait=False caused threads to outlive the scan function,\n'
+        '                        # and _check_qa_stop_done would clear stop flags while threads\n'
+        '                        # were still initializing clients.\n'
+        '                        _ai_pool.shutdown(wait=True, cancel_futures=True)\n'
+        '                    except TypeError:\n'
+        '                        _ai_pool.shutdown(wait=True)\n'
+        '                # Restore original BATCH_TRANSLATION env var\n'
+    ,
+        '            finally:\n'
+        '                if _ai_pool is not None:\n'
+        '                    if should_stop():\n'
+        '                        _finish_api_calls_in_flight(_ai_pool, _ai_futures, should_stop, force_stopped, log)\n'
+        '                    else:\n'
+        '                        _ai_pool.shutdown(wait=True)\n'
+        '                # Restore original BATCH_TRANSLATION env var\n'
+    ),
+    (
+        '            if should_stop():\n'
+        '                log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")\n'
+        '            else:\n'
+        '                log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")\n'
+        '\n'
+        "    if qa_settings.get('check_glossary_names', False) and not should_stop():\n"
+    ,
+        '            if should_stop():\n'
+        '                log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")\n'
+        '                return\n'
+        '            log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")\n'
+        '\n'
+        "    if qa_settings.get('check_glossary_names', False) and not should_stop():\n"
+    ),
+    (
+        '        except Exception as e:\n'
+        '            log(f"   ⚠️ Glossary name check failed: {e}")\n'
+        '\n'
+        '    _attach_chunk_results_to_scan(\n'
+    ,
+        '        except Exception as e:\n'
+        '            log(f"   ⚠️ Glossary name check failed: {e}")\n'
+        '\n'
+        '    if should_stop():\n'
+        '        log("⛔ QA scan stopped before report generation.")\n'
+        '        return\n'
+        '\n'
+        '    _attach_chunk_results_to_scan(\n'
+    ),
+    (
+        "        result.pop('normalized_text', None)\n"
+        "        result.pop('qa_header_text', None)\n"
+        '    \n'
+        '    if should_stop():\n'
+        '        log("⛔ QA scan stopped before report generation.")\n'
+        '        return\n'
+        '\n'
+        '    # Generate reports\n'
+    ,
+        "        result.pop('normalized_text', None)\n"
+        "        result.pop('qa_header_text', None)\n"
+        '\n'
+        '    # Generate reports\n'
+    ),
+    (
+        '# ADD THIS AT MODULE LEVEL (outside any function/class)\n'
+        '\n'
+        'def process_comparison_batch_fast(args):\n'
+        '    """Process a batch of comparisons - MUST BE AT MODULE LEVEL FOR PICKLING"""\n'
+        '    batch, data = args\n'
+    ,
+        '# ADD THIS AT MODULE LEVEL (outside any function/class)\n'
+        '\n'
+        'def process_comparison_batch_fast(args, should_stop=None):\n'
+        '    """Process a batch of comparisons - MUST BE AT MODULE LEVEL FOR PICKLING"""\n'
+        '    batch, data = args\n'
+    ),
+    (
+        '    \n'
+        '    for i, j in batch:\n'
+        '        data_i = all_data[i]\n'
+        '        data_j = all_data[j]\n'
+    ,
+        '    \n'
+        '    for i, j in batch:\n'
+        '        if should_stop is not None and should_stop():\n'
+        '            break\n'
+        '        data_i = all_data[i]\n'
+        '        data_j = all_data[j]\n'
+    ),
+    (
+        '    \n'
+        '    # Process with ProcessPoolExecutor\n'
+        '    with mobile_runtime.make_pool_executor(max_workers, initializer=_init_worker_process) as executor:\n'
+        '        # Submit all batches\n'
+        '        futures = []\n'
+    ,
+        '    \n'
+        '    # Process with ProcessPoolExecutor\n'
+        '    with _stoppable_pool(mobile_runtime.make_pool_executor, should_stop, max_workers,\n'
+        '                         initializer=_init_worker_process) as executor:\n'
+        '        # Submit all batches\n'
+        '        futures = []\n'
+    ),
+    (
+        '            if should_stop():\n'
+        '                log("⛔ AI Hunter interrupted by user.")\n'
+        '                executor.shutdown(wait=True)\n'
+        '                return comparisons_done\n'
+        '            \n'
+        '            future = executor.submit(process_comparison_batch_fast, args)\n'
+        '            futures.append(future)\n'
+        '        \n'
+        '        # Process results as they complete\n'
+        '        for completed_future in concurrent.futures.as_completed(futures):\n'
+        '            if should_stop():\n'
+        '                log("⛔ AI Hunter interrupted by user.")\n'
+        '                executor.shutdown(wait=True)\n'
+        '                return comparisons_done\n'
+        '            \n'
+        '            # Get results\n'
+        '            batch_results = completed_future.result()\n'
+    ,
+        '            if should_stop():\n'
+        '                log("⛔ AI Hunter interrupted by user.")\n'
+        '                return comparisons_done\n'
+        '\n'
+        '            future = _submit_worker(executor, process_comparison_batch_fast, args, should_stop)\n'
+        '            futures.append(future)\n'
+        '\n'
+        '        # Process results as they complete\n'
+        '        for completed_future in _completed_until_stop(futures, should_stop):\n'
+        '            if should_stop():\n'
+        '                log("⛔ AI Hunter interrupted by user.")\n'
+        '                return comparisons_done\n'
+        '\n'
+        '            # Get results\n'
+        '            batch_results = completed_future.result()\n'
+    ),
+    (
+        '                last_progress = progress\n'
+        '    \n'
+        '    # Final summary\n'
+        '    elapsed = time.time() - start_time\n'
+    ,
+        '                last_progress = progress\n'
+        '    \n'
+        '    if should_stop():\n'
+        '        log("⛔ AI Hunter interrupted by user.")\n'
+        '        return comparisons_done\n'
+        '\n'
+        '    # Final summary\n'
+        '    elapsed = time.time() - start_time\n'
+    ),
+]
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -2195,6 +3307,15 @@ APPROVED = (
         "source": {
             **_MARK_GLOSSARY_COMPLETE_LEGACY,
             **_MARK_GLOSSARY_COMPLETE_SCHEMA,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-01",
+        "what": "The QA scanner stops at once when a stop flag is raised: a graceful stop too, unless API calls are "
+                "in flight (the AI truncation checker), which finish, and a forced stop aborts them",
+        "source": {
+            "src/scan_html_folder.py": _QA_STOP_SCANNER,
         },
         "values": {},
     },

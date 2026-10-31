@@ -24680,7 +24680,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     """)
                     self.qa_button.setEnabled(True)
                 
-                self.append_log("⏳ Graceful stop — waiting for in-flight QA scan API calls to complete...")
+                self.append_log("⏳ Graceful stop — the QA scan ends now, once any API calls in flight finish")
                 self.append_log("   💡 Click again to force immediate stop")
                 
                 # Start polling for completion
@@ -24689,7 +24689,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 gen = getattr(self, '_qa_stop_poll_current_gen', 0) + 1
                 self._qa_stop_poll_current_gen = gen
                 self._qa_stop_poll_generation = gen
-                QTimer.singleShot(1000, self._check_qa_stop_done)
+                QTimer.singleShot(100, self._check_qa_stop_done)
             else:
                 # Graceful stop disabled — go straight to force
                 self._qa_stop_phase = 'force'
@@ -24752,7 +24752,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         gen = getattr(self, '_qa_stop_poll_current_gen', 0) + 1
         self._qa_stop_poll_current_gen = gen
         self._qa_stop_poll_generation = gen
-        QTimer.singleShot(500, self._check_qa_stop_done)
+        QTimer.singleShot(100, self._check_qa_stop_done)
 
     def _check_qa_stop_done(self):
         """Poll until QA scan thread/future finishes, then reset button state."""
@@ -24774,7 +24774,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         if qa_still_running:
             # Still running — keep polling
-            QTimer.singleShot(500, self._check_qa_stop_done)
+            QTimer.singleShot(100, self._check_qa_stop_done)
         else:
             # Done (or timeout) — reset button state first
             self._qa_stop_phase = 'idle'

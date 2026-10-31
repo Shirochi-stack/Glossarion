@@ -1116,10 +1116,17 @@ def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None
         # the cores shared out between the checks (Auto keeps 4 each: the same tagger)
         import ner_names
         ner = ner.with_threads(ner_names.ner_threads(workers))
-    if workers > 1 and total > 1:
+    if stop is not None or (workers > 1 and total > 1):
+        # on a pool whatever the workers, so that a stop does not wait for the chapter being tagged
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(workers, total), thread_name_prefix="name-check") as pool:
-            checked = list(pool.map(check, names))
+        from scan_html_folder import _completed_until_stop, _stoppable_pool
+        stopped = stop if stop is not None else (lambda: False)
+        with _stoppable_pool(ThreadPoolExecutor, stopped, max_workers=max(1, min(workers, total)),
+                             thread_name_prefix="name-check") as pool:
+            futures = [pool.submit(check, name) for name in names]
+            for _finished in _completed_until_stop(futures, stopped):
+                pass
+        checked = [future.result() for future in futures if future.done() and not future.cancelled()]
     else:
         checked = []
         for name in names:

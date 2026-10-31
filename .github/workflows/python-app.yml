@@ -98,6 +98,7 @@ jobs:
           tests/test_progress_core.py \
           tests/test_progress_actions.py \
           tests/test_chunk_plan_change_e2e.py \
+          tests/test_qa_stop_instant.py \
           tests/test_glossary_progress_core.py \
           tests/test_glossary_document.py \
           tests/test_glossary_files.py \
