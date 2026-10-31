@@ -542,6 +542,9 @@ class JobDetailScreen(Screen):
     # ---- lifecycle -----------------------------------------------------------------------------
 
     def did_show(self) -> None:
+        refresh = getattr(self.service, "refresh_finished_progress", None)
+        if callable(refresh) and self.snap is not None and self.snap.is_terminal:
+            self._spawn(self._io(refresh, self.job_id))  # marks changed since it ended: "N QA failed" follows
         if self._unsubs or self.snap is None:
             return
         self._unsubs.append(self.service.subscribe(self._on_view))

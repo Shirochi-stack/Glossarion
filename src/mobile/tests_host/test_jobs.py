@@ -2514,3 +2514,70 @@ def test_dismissed_fgs_notification_is_reposted_while_a_job_runs():
         assert not await background.tick() and not background.ticker_running
 
     asyncio.run(scenario())
+
+
+def _write_marks(folder, failed: int, chapters: int = 6) -> None:
+    """A real ``translation_progress.json`` (with the output files the summary checks): ``failed`` chapters QA-failed."""
+    os.makedirs(folder, exist_ok=True)
+    rows = {}
+    for index in range(1, chapters + 1):
+        output = f"response_{index:03d}.html"
+        Path(folder, output).write_text("<p>done</p>", encoding="utf-8")
+        rows[str(index)] = {"actual_num": index, "output_file": output, "content_hash": f"h{index}",
+                            "status": "qa_failed" if index <= failed else "completed"}
+    Path(folder, "translation_progress.json").write_text(json.dumps({"chapters": rows, "chapter_chunks": {}}),
+                                                         encoding="utf-8")
+
+
+def test_a_finished_jobs_counts_follow_the_books_progress_file(tmp_path, monkeypatch):
+    """Owner 2026-10-31: the Job page stayed at "24 QA failed" after a QA scan left 9. Another job ending on the book
+    and opening the Job page both show the marks as they are now; the file's own summary is what the watcher reads."""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+    import job_runner
+
+    from glossarion_mobile.services.jobs import JobBackend, position_line, progress_line
+    from glossarion_mobile.ui.screens.job_detail import JobDetailScreen
+
+    service, backend = make_service(tmp_path)
+    backend.progress_summary = job_runner._default_summary_reader
+    source = epub(tmp_path)
+    folder = {}
+
+    def translate(owner, request):
+        folder["path"] = owner._resolve_translation_output_dir(request["files"][0])
+        _write_marks(folder["path"], failed=4)
+        owner.host.emit("progress", total=6, completed=2, in_progress=0, failed=4)
+
+    backend.behavior = translate
+    first = service.submit(JobSpec("translate", "Book.epub", (source,)))
+    assert service.wait_idle(TIMEOUT) and state_of(service, first) is JobState.DONE
+    assert service.snapshot(first).progress.failed == 4
+
+    # a later job on the same book resolves QA marks: the finished job's counts follow when it ends
+    backend.behavior = lambda owner, request: _write_marks(folder["path"], failed=1)
+    second = service.submit(JobSpec("translate", "Book.epub", (source,)))
+    assert service.wait_idle(TIMEOUT) and state_of(service, second) is JobState.DONE
+    assert wait_for(lambda: service.snapshot(first).progress.failed == 1), service.snapshot(first).progress
+    assert service.view().find(first).progress.failed == 1
+    snap = service.snapshot(first)
+    assert (snap.progress.completed, snap.progress.total) == (5, 6)
+    assert position_line(snap) == "Translating • 5/6" and "1 failed" in progress_line(snap, verb=True)
+    detail = JobDetailScreen(_match(f"/jobs/{first}"), service=service)
+    detail.get_body()
+    detail._apply(service.snapshot(first))
+    assert detail.qa_chip.label.value == "1 QA failed" and detail.qa_chip.visible
+
+    # marks changed with no job (Progress manager): opening the Job page reads them; a clean book hides the chip
+    _write_marks(folder["path"], failed=0)
+    assert service.refresh_finished_progress(first) is True
+    assert service.refresh_finished_progress(first) is False  # nothing new: no write, no view delivery
+    detail._apply(service.snapshot(first))
+    assert not detail.qa_chip.visible
+    saved = json.loads(Path(service.history_state_path).read_text(encoding="utf-8"))
+    assert next(j for j in saved["jobs"] if j["id"] == first)["progress"]["failed"] == 0  # survives a restart
+
+    # no progress file any more: the job keeps what it saved; so does a job over several books
+    Path(folder["path"], "translation_progress.json").unlink()
+    assert service.refresh_finished_progress(first) is False
+    assert service.snapshot(first).progress.completed == 6
+    assert JobBackend().progress_summary(str(tmp_path / "missing.json")) is None

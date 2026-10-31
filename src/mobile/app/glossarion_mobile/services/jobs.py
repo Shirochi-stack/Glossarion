@@ -976,6 +976,14 @@ def _kind_info(kind: str) -> Any:
         return None
 
 
+def _only_output_dir(snap: Any) -> Optional[str]:
+    """The one workspace of a finished job; None for a job over several books, whose saved counts are one book's."""
+    dirs = list((getattr(snap, "output_dirs", None) or {}).values())
+    if len(dirs) > 1:
+        return None
+    return dirs[0] if dirs else getattr(snap, "output_dir", None)
+
+
 def kind_verb(kind: str) -> str:
     info = _kind_info(kind)
     return getattr(info, "verb", None) or str(kind).replace("_", " ").capitalize()
@@ -1474,6 +1482,16 @@ class JobBackend:
             return None
         cls = getattr(job_runner, "ProgressWatcher", None)
         return cls(resolver, host, interval=interval) if cls is not None else None
+
+    def progress_summary(self, path: str) -> Optional[Mapping[str, Any]]:
+        """The counts ``ProgressWatcher`` reports for a progress file; None when it cannot be read."""
+        try:
+            import job_runner
+
+            return job_runner._default_summary_reader(path)
+        except Exception:
+            log.debug("reading the progress summary of %s failed", path, exc_info=True)
+            return None
 
     def restore_in_progress(self, *, input_files: Sequence[str], output_dirs: Mapping[str, str], config: dict,
                             app_dir: Optional[str]) -> None:
@@ -2881,6 +2899,46 @@ class JobService:
         self._job_log(job, f"■ {snap.state_label}: {job.spec.title}" + (f" — {snap.error}" if snap.error else ""), {})
         self._close_log(job)
         self._post(self._deliver_transition, snap, previous)
+        folder = _only_output_dir(snap)
+        if folder:
+            self.refresh_finished_progress(folder=folder)
+
+    def refresh_finished_progress(self, job_id: Optional[str] = None, *, folder: Optional[str] = None) -> bool:
+        """Blocking: finished jobs show how their book stands now. A QA scan, a retranslation or a Progress manager
+        edit changes the chapters' marks in the book's progress file, and the counts a job saved when it ended (its
+        page's "N QA failed", its progress line, its Jobs row) do not follow. ``job_id``: that job; ``folder``: the
+        jobs of that workspace. True when a count changed."""
+        reader = getattr(self.backend, "progress_summary", None)
+        if not callable(reader):
+            return False
+        wanted = _norm(folder) if folder else None
+        targets: dict = {}
+        with self._lock:
+            for snap in self._history:
+                own = _only_output_dir(snap)
+                if (own and snap.progress.total and (job_id is None or snap.id == job_id)
+                        and (wanted is None or _norm(own) == wanted)):
+                    targets[snap.id] = os.path.join(own, "translation_progress.json")
+        summaries = {path: reader(path) for path in set(targets.values())}
+        changed = False
+        with self._lock:
+            for index, snap in enumerate(self._history):
+                summary = summaries.get(targets.get(snap.id))
+                if not isinstance(summary, Mapping) or not summary.get("total"):
+                    continue
+                progress = Progress.from_dict({**snap.progress.to_dict(), **{
+                    key: summary[key] for key in ("total", "completed", "in_progress", "failed") if key in summary}})
+                if progress != snap.progress:
+                    self._history[index] = replace(snap, progress=progress)
+                    recent = next((job for job in self._recent if job.id == snap.id), None)
+                    if recent is not None:  # ``snapshot(job_id)`` answers from it
+                        recent.progress = progress
+                    changed = True
+            if changed:
+                self._write_history_locked()
+        if changed:
+            self._changed()
+        return changed
 
     # ---- events from the job (any thread) ------------------------------------------------------------------------
 
