@@ -855,7 +855,7 @@ def test_book_page_tabs_render_progress_glossary_and_overview(real_env):
         assert ctx.navigated[-1][0] == "reader" and ctx.navigated[-1][2]["mode"] == "original"
         glossary = screen.glossary_tab
         assert glossary.view is not None and glossary.visible_rows()[0].kind == "minimal"
-        assert glossary.title_text.value == "\U0001f4d6 Book" and glossary.file_chip.visible
+        assert glossary.file_chip.visible
         overview = screen.overview
         assert overview.title_text.value == "Raw Book" and overview.read_button.content == "\U0001f4d6  Read translated"
         assert overview.strip.visible and overview.strip.content.value.startswith("⏳  Translation in progress")

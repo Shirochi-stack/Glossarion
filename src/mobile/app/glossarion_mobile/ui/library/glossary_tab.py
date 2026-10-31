@@ -1,14 +1,15 @@
 """Book page › Glossary: Glossary Progress parity (UI_SPEC §3.8; Retranslation_GUI ``_build_gp_panel``).
 
-Header "📖 {book_title}" + the file chip "📁 <base>_glossary_progress.json"; the
+Laid out like the Chapters tab: the file chip "📁 <base>_glossary_progress.json"; the
 "⚠️ Progress file was deleted. Waiting for a new glossary progress file…" banner;
-the glossary file card (Open in editor · Extract / Continue (extraction) job ·
-⋯ Delete glossary files · Restore backup · Load as manual glossary - the U6 GlossaryFeature
-hooks, ``LibraryService.glossary_hooks``); the stats
-chips (Total · ✅ Completed · ⏭️ Skipped · 🔄 In Progress · ❌ Failed · 🔗 Merged ·
+Open in editor · Extract / Continue (extraction) job · ⋯ (the glossary file's name ·
+✨ Refinement · Select All · Files · ⟳ Refresh · Delete glossary files · Restore backup ·
+Load as manual glossary - the U6 GlossaryFeature hooks, ``LibraryService.glossary_hooks``);
+the stats chips (✅ Completed · ⏭️ Skipped · 🔄 In Progress · ❌ Failed · 🔗 Merged ·
 ⬜ Not Translated · ✨ Not Refined · 💀 Refine Failed; the last three and Merged are
-hidden at 0; tap filters, long-press jumps); the pinned Minimal Pass and Refinement
-rows above the chapter rows.
+hidden at 0; tap filters, long-press jumps); one line with the total and the glossary
+file's entry count, per-type breakdown and last modified; the pinned Minimal Pass and
+Refinement rows above the chapter rows.
 
 Row ⋯: 📝 Show footnote · ✅ Mark as completed · 🗑️ Remove <Ch.X> from progress ·
 ✨ Refine this (the refinement sheet → a ``glossary_refine`` job). Selection bar: Mark as
@@ -152,9 +153,8 @@ class GlossaryTab:
     # ---- build -----------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
-        self.title_text = ft.Text("\U0001f4d6", theme_style=ft.TextThemeStyle.TITLE_SMALL, key="gp-title")
-        self.file_chip = ft.Chip(label=ft.Text("\U0001f4c1 —"), on_click=lambda e: self.page.open_files(),
-                                 visible=False, key="gp-file")
+        self.file_chip = ft.Chip(label=ft.Text("\U0001f4c1 —", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                 on_click=lambda e: self.page.open_files(), visible=False, key="gp-file")
         self.banner = ft.Container(content=ft.Text(DELETED_BANNER), bgcolor=ft.Colors.TERTIARY_CONTAINER,
                                    border_radius=tokens.RADII["card"], padding=8, visible=False, key="gp-deleted")
         extract_ok = self.page.service.has_job_kind("extract_glossary")
@@ -163,46 +163,22 @@ class GlossaryTab:
                                                    disabled=not extract_ok, key="gp-extract")
         self.sync_extract_button()
         hooks = self._hooks()  # U6 GlossaryFeature (LibraryService.glossary_hooks)
+        self.more_menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", items=self._more_items(hooks),
+                                            key="gp-more-menu")
         tools: list = [
             ft.OutlinedButton(content="Open in editor", icon=ft.Icons.EDIT_NOTE, disabled=hooks is None,
                               tooltip=None if hooks is not None else GLOSSARY_TOOLS_REASON,
                               on_click=lambda e: self.ctx.spawn(self.open_editor()), key="gp-open-editor"),
             self.extract_button,
-            ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Glossary file", items=[
-                ft.PopupMenuItem(content="Delete glossary files", disabled=hooks is None,
-                                 on_click=lambda e: self.ctx.spawn(self.delete_glossary_files())),
-                ft.PopupMenuItem(content="Restore backup", disabled=hooks is None,
-                                 on_click=lambda e: self.ctx.spawn(self.restore_glossary_backup())),
-                ft.PopupMenuItem(content="Load as manual glossary", disabled=hooks is None,
-                                 on_click=lambda e: self.ctx.spawn(self.load_as_manual())),
-            ], key="gp-file-menu"),
         ]
         if hooks is None:
             tools.append(ReasonChip(reason="Glossary tools unavailable", detail=GLOSSARY_TOOLS_REASON))
-        self.file_card = ft.Container(
-            content=ft.Column([
-                ft.Text("", key="gp-file-name", theme_style=ft.TextThemeStyle.BODY_MEDIUM),
-                ft.Text("", key="gp-file-summary", theme_style=ft.TextThemeStyle.BODY_SMALL,
-                        color=ft.Colors.ON_SURFACE_VARIANT, visible=False),
-                ft.Row(tools, wrap=True, spacing=6, run_spacing=4),
-            ], spacing=4, tight=True),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, border_radius=tokens.RADII["card"], padding=10,
-            key="gp-file-card")
         self.stats_row = ft.Row(spacing=6, run_spacing=6, scroll=ft.ScrollMode.AUTO,
                                 wrap=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="gp-stats")
         self.total_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="gp-total")
-        self.path_row = ft.Row([
-            ft.TextButton(content="Select All", on_click=lambda e: self.select_all(), key="gp-select-all"),
-            ft.TextButton(content="✨ Refinement", disabled=not self._refine_ok(), tooltip=self._refine_reason(),
-                          on_click=lambda e: self.ctx.spawn(self.refine()), key="gp-refinement"),
-            ft.TextButton(content="Files", on_click=lambda e: self.page.open_files(), key="gp-files"),
-            ft.TextButton(content="✏️ Open Glossary", disabled=hooks is None,
-                          tooltip=None if hooks is not None else GLOSSARY_TOOLS_REASON,
-                          on_click=lambda e: self.ctx.spawn(self.open_editor()), key="gp-open-glossary"),
-            # desktop Glossary Progress "Refresh": reload and rebuild the panel from disk
-            ft.TextButton(content="⟳ Refresh", tooltip="Reload the glossary progress from disk",
-                          on_click=lambda e: self.ctx.spawn(self.page.full_refresh()), key="gp-refresh"),
-        ], wrap=True, spacing=0)
+        self.summary_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True, visible=False,
+                                    key="gp-file-summary")
         self.selection_bar = SelectionTopBar(on_close=self.exit_selection, on_select_all=self.select_all,
                                              key="gp-selection")
         self.loading = ft.ProgressBar(visible=True, key="gp-loading")
@@ -218,14 +194,15 @@ class GlossaryTab:
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="gp-bulk")
         self.root = ft.Column([
+            # as compact as Chapters (owner 2026-10-31): the folder chip, the buttons, the stats, one line of totals.
+            # ⋯ sits by the chip, whose long name gives way: next to the buttons it wrapped to a row of its own.
             ft.Container(content=ft.Column([
-                # Issue 13: the Total label sits next to the title
-                ft.Row([self.title_text, self.total_text, self.file_chip], wrap=True, spacing=8,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([ft.Container(content=self.file_chip, expand=True, alignment=ft.Alignment.CENTER_LEFT),
+                        self.more_menu], spacing=0),
                 self.banner,
-                self.file_card,
+                ft.Row(tools, wrap=True, spacing=8, run_spacing=4),
                 self.stats_row,
-                self.path_row,
+                ft.Row([self.total_text, self.summary_text], spacing=8),
                 self.selection_bar.control,
             ], spacing=6, tight=True), padding=ft.Padding.only(left=12, right=12, top=8)),
             self.loading,
@@ -235,6 +212,26 @@ class GlossaryTab:
         if self.page.glossary is not None:
             self.apply(self.page.glossary)
         return self.root
+
+    def _more_items(self, hooks: Any) -> list:
+        """⋯: the glossary file's name · ✨ Refinement · Select All · Files · ⟳ Refresh · the glossary file's tools."""
+        self.file_item = ft.PopupMenuItem(content="No glossary file yet", disabled=True, key="gp-file-name")
+        return [
+            self.file_item,
+            ft.PopupMenuItem(content="✨ Refinement", disabled=not self._refine_ok(), key="gp-refinement",
+                             on_click=lambda e: self.ctx.spawn(self.refine())),
+            ft.PopupMenuItem(content="Select All", on_click=lambda e: self.select_all(), key="gp-select-all"),
+            ft.PopupMenuItem(content="Files", on_click=lambda e: self.page.open_files(), key="gp-files"),
+            # desktop Glossary Progress "Refresh": reload and rebuild the panel from disk
+            ft.PopupMenuItem(content="⟳ Refresh", on_click=lambda e: self.ctx.spawn(self.page.full_refresh()),
+                             key="gp-refresh"),
+            ft.PopupMenuItem(content="Delete glossary files", disabled=hooks is None,
+                             on_click=lambda e: self.ctx.spawn(self.delete_glossary_files())),
+            ft.PopupMenuItem(content="Restore backup", disabled=hooks is None,
+                             on_click=lambda e: self.ctx.spawn(self.restore_glossary_backup())),
+            ft.PopupMenuItem(content="Load as manual glossary", disabled=hooks is None,
+                             on_click=lambda e: self.ctx.spawn(self.load_as_manual())),
+        ]
 
     def _hooks(self) -> Any:
         """The U6 GlossaryFeature (``LibraryService.glossary_hooks``), None before it is installed."""
@@ -275,14 +272,11 @@ class GlossaryTab:
         if getattr(self, "root", None) is None:
             return
         self.loading.visible = self.busy.active
-        title = view.book_title or str(self.page.book.get("name") or "")
-        self.title_text.value = f"\U0001f4d6 {title}"
         self.banner.visible = view.deleted
         name = os.path.basename(view.path) if view.path else ""
         self.file_chip.visible = bool(name)
-        self.file_chip.label = ft.Text(f"\U0001f4c1 {name}")
-        file_name = self.file_card.content.controls[0]
-        file_name.value = os.path.basename(view.glossary_file) if view.glossary_file else "No glossary file yet"
+        self.file_chip.label = ft.Text(f"\U0001f4c1 {name}", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        self.file_item.content = self._file_details()
         self.ctx.spawn(self.reload_file_summary(view.glossary_file or ""))
         # Issue 13: "Continue" (not "Continue extraction") so the ⋯ menu stays on the same row
         self.extract_button.content = "Continue" if view.path else "Extract glossary"
@@ -292,7 +286,7 @@ class GlossaryTab:
         self.ctx.push(self.root)
 
     async def reload_file_summary(self, path: str) -> dict:
-        """The file card's entry count, per-type breakdown and modification time, parsed on the io pool
+        """The glossary file's entry count, per-type breakdown and modification time, parsed on the io pool
         (again only when the file's mtime / size changed)."""
         def load() -> tuple:
             try:
@@ -310,13 +304,22 @@ class GlossaryTab:
             log.debug("glossary file summary failed", exc_info=True)
             return self.file_summary
         self._summary_key, self.file_summary = key, summary
-        label = self.file_card.content.controls[1] if getattr(self, "file_card", None) is not None else None
+        label = getattr(self, "summary_text", None)
         if label is not None:
             line = summary_line(summary) if path else ""
             label.value = line
             label.visible = bool(line)
-            self.ctx.push(label)
+            self.file_item.content = self._file_details()
+            self.ctx.push(label, self.more_menu)
         return summary
+
+    def _file_details(self) -> str:
+        """⋯'s first line: the glossary file's name and the whole summary, which the one line under the stats cuts."""
+        path = self.view.glossary_file if self.view is not None else None
+        if not path:
+            return "No glossary file yet"
+        line = summary_line(self.file_summary)
+        return f"{os.path.basename(path)}\n{line}" if line else os.path.basename(path)
 
     def _render_chips(self) -> None:
         view = self.view

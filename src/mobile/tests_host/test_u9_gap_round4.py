@@ -902,7 +902,7 @@ def test_glossary_progress_rows_are_windowed_and_replaced_in_place():
     tab.build()
     tab.apply(view)
     assert tab.renders == 1 and tab.rows_list.windowed and tab.rows_list.mounted_count <= 150
-    assert any(getattr(c, "key", "") == "gp-refresh" for c in tab.path_row.controls)
+    assert any(getattr(c, "key", "") == "gp-refresh" for c in tab.more_menu.items)
     changed = view.rows[:3] + (row(3, "failed"),) + view.rows[4:]
     tab.apply(pm.GlossaryView(rows=changed, path=view.path, book_title="Book"))
     assert tab.renders == 1  # a poll change replaced the row, no rebuild

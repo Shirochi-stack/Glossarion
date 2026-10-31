@@ -1424,14 +1424,11 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 
 ### 3.8 Glossary tab (Glossary Progress parity; `glossary_progress_core`)
 
-**Header**
-- "📖 {book_title}".
+**Header** (laid out like the Chapters tab, §3.7)
 - A file chip "📁 <base>_glossary_progress.json" (tap opens Files).
 - If the file disappears, a `Banner`: "⚠️ Progress file was deleted. Waiting for a new glossary progress file…".
-
-**Glossary file card**
-- File name, entry count, a per-type breakdown (characters, terms, …), and last modified.
-- Buttons: **Open in editor** · **Extract** / **Continue extraction** (job) · ⋯ (Delete glossary files · Restore backup · Load as manual glossary).
+- Buttons: **Open in editor** · **Extract** / **Continue** (job; waits like Chapters' Run translation) · ⋯ (the glossary file's name · ✨ Refinement · Select All · Files · ⟳ Refresh · Delete glossary files · Restore backup · Load as manual glossary).
+- Under the stats chips, one line: the total, then the glossary file's entry count, per-type breakdown (characters, terms, …) and last modified.
 
 **Stats chips.** Total · ✅ Completed · ⏭️ Skipped · 🔄 In Progress · ❌ Failed · 🔗 Merged · ⬜ Not Translated · ✨ Not Refined · 💀 Refine Failed. The last three and Merged are hidden at 0. Tap filters; long-press jumps (`GestureDetector` wrapper, as in §3.7).
 
