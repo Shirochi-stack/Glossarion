@@ -279,7 +279,7 @@ def test_ai_hunter_executor_gate(gate, scan_config, process_pools, monkeypatch):
 
     batches = []
 
-    def fake_batch(args):
+    def fake_batch(args, should_stop=None):
         batches.append(len(args[0]))
         # parallel_ai_hunter_check divides by the elapsed time when it logs
         # its speed; an instant stub can make that zero.
