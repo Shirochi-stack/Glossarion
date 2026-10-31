@@ -459,6 +459,17 @@ def _effective_glossary_output_limit(config, model_name=None):
 
     return effective
 
+def _refinement_pool_output_limit(config, fallback):
+    """The output limit of a refinement request: the refinement key pool's while it is on (the client sends each
+    key's own limit), else ``fallback``. A key without its own limit counts as ``fallback``."""
+    if _pool_switch_from_env_or_config("USE_GLOSSARY_REFINEMENT_KEYS", "use_glossary_refinement_keys", config):
+        keys = _load_key_pool_from_env_or_config("GLOSSARY_REFINEMENT_API_KEYS", "glossary_refinement_keys", config)
+        pool_limit = _pool_output_limit_override(keys, fallback)
+        if pool_limit is not None:
+            return pool_limit
+    return fallback
+
+
 def interruptible_sleep(duration, check_stop_fn, interval=0.1):
     """Sleep that can be interrupted by stop request or graceful stop"""
     elapsed = 0
@@ -8271,7 +8282,8 @@ def main(log_callback=None, stop_callback=None):
         "GLOSSARY_REFINEMENT_COMPRESSION_FACTOR",
         os.getenv("COMPRESSION_FACTOR", str(compression_factor)),
     ))
-    refinement_available_tokens = _compute_safe_input_tokens(effective_output_tokens, refinement_compression_factor)
+    refinement_output_tokens = _refinement_pool_output_limit(config, effective_output_tokens)
+    refinement_available_tokens = _compute_safe_input_tokens(refinement_output_tokens, refinement_compression_factor)
     refinement_splitter = ChapterSplitter(model_name=model, compression_factor=refinement_compression_factor)
 
     # Get temperature from environment or config
@@ -10667,14 +10679,14 @@ def main(log_callback=None, stop_callback=None):
     if refinement_allowed:
         print(
             f"📊 Glossary refinement chunk budget: {refinement_available_tokens:,} tokens "
-            f"(output limit {effective_output_tokens:,}, margin 500, compression {refinement_compression_factor})"
+            f"(output limit {refinement_output_tokens:,}, margin 500, compression {refinement_compression_factor})"
         )
         before_refinement_count = len(glossary)
         glossary = refine_glossary_entries(
             glossary,
             client=client,
             temp=temp,
-            mtoks=mtoks,
+            mtoks=refinement_output_tokens,
             check_stop=check_stop,
             chapter_splitter=refinement_splitter,
             available_tokens=refinement_available_tokens,

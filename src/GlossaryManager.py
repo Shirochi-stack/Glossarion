@@ -2630,7 +2630,10 @@ def _refine_csv_lines_if_enabled(csv_lines, output_dir, *, extraction_complete=T
         if hasattr(client, 'reset_cleanup_state'):
             client.reset_cleanup_state()
 
-        mtoks = int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "4096")))
+        from extract_glossary_from_epub import _refinement_pool_output_limit
+
+        mtoks = _refinement_pool_output_limit(
+            {}, int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "4096"))))
         temp = float(os.getenv("GLOSSARY_TEMPERATURE", os.getenv("TEMPERATURE", "0.3")))
         compression_factor = float(os.getenv(
             "GLOSSARY_REFINEMENT_COMPRESSION_FACTOR",

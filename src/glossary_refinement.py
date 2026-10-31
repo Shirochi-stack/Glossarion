@@ -235,10 +235,12 @@ def _partition_prioritized_types(
         if tokens(entries) <= budget:
             return [entries]
         if len(entries) == 1:
-            raise ValueError(
-                f"A {entries[0].get('type', 'glossary')} entry exceeds the refinement "
-                f"chunk budget of {budget:,} tokens. Increase the budget or shorten the entry."
+            # A row cannot be split, so it goes alone: the budget only sizes the chunks
+            print(
+                f"⚠️ Glossary refinement: {entries[0].get('raw_name', 'an entry')} is larger than the chunk budget "
+                f"of {budget:,} tokens; sending it as its own request."
             )
+            return [entries]
         middle = len(entries) // 2
         return fit_rows(entries[:middle]) + fit_rows(entries[middle:])
 
