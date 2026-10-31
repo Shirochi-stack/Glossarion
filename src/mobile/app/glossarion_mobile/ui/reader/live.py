@@ -33,7 +33,9 @@ __all__ = [
     "outcome_text",
     "retranslate_question",
     "return_delay",
+    "status_queued",
     "status_stopping",
+    "status_streaming",
     "status_waiting",
     "thinking_label",
 ]
@@ -50,6 +52,16 @@ def _live_stream() -> Any:
 def status_waiting(chapter_file: str) -> str:
     """``🛰️ Translating “f” — waiting for stream…`` (``live_stream.LIVE_WAITING_TEXT``)."""
     return _live_stream().LIVE_WAITING_TEXT.format(name=os.path.basename(str(chapter_file or "")))
+
+
+def status_streaming(chapter_file: str) -> str:
+    """``🛰️ Translating “f”``: the waiting line once the chapter's text streams."""
+    return status_waiting(chapter_file).split(" — ")[0]
+
+
+def status_queued(chapter_file: str) -> str:
+    """``🛰️ “f” — queued``: the job waits behind another one."""
+    return f"\U0001f6f0️ “{os.path.basename(str(chapter_file or ''))}” — queued"
 
 
 def status_stopping() -> str:

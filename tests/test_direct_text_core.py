@@ -1453,6 +1453,17 @@ RUN_ENV_KNOB_EDITS = (
 
 #: hotfix 5 (emulator repro of the owner's "translated, but no EPUB"): a link that spells the moved folder another
 #: way (Android /data/user/0/<pkg>, a link to /data/data/<pkg>; the migrate resolves its source) moves too
+#: _attachment_output_subfolder: the naming rule became ``direct_text_store.attachment_workspace_name``, so the mobile
+#: Library can tell a chat's spelling of a raw file's stem (mobile tests_host/test_split_workspace.py).
+ATTACHMENT_NAME_EDITS = (
+    ("        import re\n"
+     "\n"
+     "        source_stem = os.path.splitext(\n",
+     "        source_stem = os.path.splitext(\n"),
+    ("        safe_stem = re.sub(r'[<>:\"/\\\\|?*\\x00-\\x1f]', '_', source_stem)\n"
+     "        safe_stem = safe_stem.rstrip(\" .\")[:120] or \"Attachment\"\n",
+     "        safe_stem = attachment_workspace_name(source_stem)\n"),
+)
 RELOCATE_REALPATH_EDITS = (
     ('        """Keep response links valid after an attachment workspace is moved."""\n'
      "        source_folder = os.path.abspath(source_folder)\n"
@@ -1641,6 +1652,10 @@ def _expected_move(name, legacy_text):
         text = text.replace("_InputOutputDialog.", "ChatStoreMixin.")
     if name == "_effective_run_glossary_path":
         for old, new in RUN_ENV_KNOB_EDITS:
+            assert text.count(_dedent4(old)) == 1, old
+            text = text.replace(_dedent4(old), _dedent4(new))
+    if name == "_attachment_output_subfolder":
+        for old, new in ATTACHMENT_NAME_EDITS:
             assert text.count(_dedent4(old)) == 1, old
             text = text.replace(_dedent4(old), _dedent4(new))
     if name == "_relocate_session_attachment_paths":

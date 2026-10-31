@@ -1294,8 +1294,9 @@ class ChatFeature:
         return outcomes
 
     def sweep_blocking(self) -> list:
-        """Blocking: ``auto_migrate_blocking`` over every saved chat's attachment workspaces."""
-        outcomes: list = []
+        """Blocking: ``auto_migrate_blocking`` over every saved chat's attachment workspaces, after the Library
+        folders an earlier build moved under a chat's spelling (``join_split_books_blocking``)."""
+        outcomes: list = self.join_split_books_blocking()
         try:
             rows = list(self.chats.all() or [])
         except Exception:
@@ -1314,6 +1315,46 @@ class ChatFeature:
                 outcomes.append(outcome)
                 if outcome["status"] == MIGRATE_DEFERRED and outcome.get("jobs_running"):
                     return outcomes  # nothing else can move before the jobs end either
+        return outcomes
+
+    def join_split_books_blocking(self) -> list:
+        """Blocking: a Library folder an earlier build moved under a chat's spelling of its raw file's stem
+        becomes the folder the Library's runs of that book use (``workspace_sync.split_workspaces``), so one
+        book has one card, one Progress manager and one job again; nothing moves while a job runs (the sweep
+        when it ends does it). Outcomes as ``auto_migrate_blocking``."""
+        library = self.library_service()
+        roots = library.output_roots() if library is not None and hasattr(library, "output_roots") else []
+        if not roots:
+            return []
+        from glossarion_mobile.services.workspace_sync import join_workspace, split_workspaces
+
+        outcomes: list = []
+        with self._migrate_lock:
+            lock = self._job_lock()
+            if lock is not None and not lock.acquire(blocking=False):
+                return outcomes
+            try:
+                if self._active_job() is not None:
+                    return outcomes
+                for root in roots:
+                    for folder, target, raw in split_workspaces(root):
+                        status = join_workspace(folder, target)
+                        if not status:
+                            continue
+                        log.info("the book's workspace %s joined %s (%s)", folder, target, status)
+                        self.chats.relocate_workspace(folder, target)
+                        self._cloud_moved(folder, target, status == "merged")
+                        shares = getattr(self.app, "share_links", None)
+                        if shares is not None:
+                            try:
+                                shares.relocate_blocking(folder, target)
+                            except Exception:
+                                log.exception("moving the share links of a joined workspace failed")
+                        outcomes.append({"cid": None, "folder": folder, "status": MIGRATE_MOVED, "reason": status,
+                                         "target": target, "source": raw})
+            finally:
+                if lock is not None:
+                    lock.release()
         return outcomes
 
     def _job_lock(self) -> Any:
@@ -1353,8 +1394,9 @@ class ChatFeature:
                 workspace = ""
         if workspace:
             return _norm(workspace) == _norm(folder)
-        stem = os.path.splitext(os.path.basename(source))[0]
-        return bool(stem) and stem.casefold() == os.path.basename(os.path.normpath(folder)).casefold()
+        from glossarion_mobile.services.workspace_sync import named_after
+
+        return named_after(os.path.basename(os.path.normpath(folder)), os.path.splitext(os.path.basename(source))[0])
 
     @staticmethod
     def _same_book(target: str, folder: str, source: str) -> bool:
@@ -1501,16 +1543,29 @@ class ChatFeature:
                 # an existing Library folder of the same name is reused quietly: the workspace merges into
                 # it (owner 2026-10-19: no "A Library book named … already exists" snackbar)
                 moving = folder
-                twin = "" if os.path.exists(target) else self._library_twin(os.path.dirname(target), folder, source)
+                from glossarion_mobile.services.workspace_sync import chat_spelling, prepare_merge
+
+                exact = os.path.splitext(os.path.basename(source))[0]
+                name = os.path.basename(os.path.normpath(folder))
+                if exact != name and chat_spelling(exact) == name:
+                    # the chat's spelling of the raw file's stem: the Library runs this book in <root>/<stem>
+                    # (the pipeline's name for it), so the workspace goes there and not beside it
+                    renamed = self.chats.rename_attachment_workspace(cid, folder, exact)
+                    if renamed:
+                        moving, target = renamed, self.chats.migration_target(cid, renamed)
+                        outcome["target"] = target
+                twin = "" if os.path.exists(target) else self._library_twin(os.path.dirname(target), moving, source)
                 if twin:
-                    # the same book under another folder name (the chat's copy got "X (2).epub" or a stem cut
-                    # to 120 characters): the workspace takes the Library folder's name and merges into it
-                    renamed = self.chats.rename_attachment_workspace(cid, folder, os.path.basename(twin))
+                    # the same book under another folder name (the chat's copy got "X (2).epub"): the workspace
+                    # takes the Library folder's name and merges into it
+                    renamed = self.chats.rename_attachment_workspace(cid, moving, os.path.basename(twin))
                     if renamed:
                         moving, target = renamed, twin
                         outcome["target"] = target
                 merge = os.path.exists(target)
                 library_raw = self._library_raw_twin(target, source) if merge else ""
+                # the shared Migrate replaces files of the same name, the Library's progress file too
+                book_state = prepare_merge(moving, target) if merge else None
                 result = self.chats.migrate_attachment(cid, moving, (lambda _target: True) if merge else None)
             finally:
                 if lock is not None:
@@ -1521,7 +1576,10 @@ class ChatFeature:
                 return done(MIGRATE_FAILED, text)
             from glossarion_mobile.ui.chat.attachments import migrated_target
 
+            from glossarion_mobile.services.workspace_sync import keep_book_state
+
             target = migrated_target(result) or target
+            keep_book_state(target, book_state)
             self._merge_approved.discard(_norm(folder))
             # merged into a Library book whose own raw is the same file: it keeps pointing at that raw, and
             # the chat's copy is not recorded as a second raw input
@@ -1720,13 +1778,15 @@ class ChatFeature:
         if span:
             message = messages[user_index]
             if len(message) > 2 and str(message[0]) == "user_file":
-                stem = os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower()
+                from glossarion_mobile.services.workspace_sync import named_after
+
+                stem = os.path.splitext(os.path.basename(str(message[2] or "")))[0]
                 try:
                     folders = list(chats.attachment_folders(cid) or [])
                 except Exception:
                     folders = []
                 for candidate in folders:
-                    if stem and os.path.basename(os.path.normpath(candidate)).lower() == stem:
+                    if named_after(os.path.basename(os.path.normpath(candidate)), stem):
                         return str(candidate)
         return ""
 

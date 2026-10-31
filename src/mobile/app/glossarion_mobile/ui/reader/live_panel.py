@@ -8,6 +8,10 @@ holding the thinking text and the pipeline log (at the log size, ``theme.log_tex
 "⏹ Stop" and "✕ Hide" (the job keeps running; the Reader's 🌐 becomes
 "🛰️ Live view" and reopens this sheet). States: ``waiting`` · ``streaming`` ·
 ``finished`` · ``stopped`` · ``failed``.
+
+The chapter area and the sheet's full height wait for the first streamed text (owner 2026-10-31: no empty
+space while the model thinks), and ``sync_job`` keeps the status and the job line under it on what the
+progress strip and the Jobs page say about the same job.
 """
 
 from __future__ import annotations
@@ -18,7 +22,14 @@ import flet as ft
 
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.reader.live import LiveFeed, status_stopping, status_waiting, thinking_label
+from glossarion_mobile.ui.reader.live import (
+    LiveFeed,
+    status_queued,
+    status_stopping,
+    status_streaming,
+    status_waiting,
+    thinking_label,
+)
 from glossarion_mobile.ui.theme import log_text
 
 __all__ = ["LivePanel"]
@@ -56,9 +67,13 @@ class LivePanel:
         self._follow = True
         self._page: Any = None
         self.is_open = False
+        self.full_height = 440.0
+        self.waiting_text = status_waiting(chapter_file)
 
-        self.status = ft.Text(status_waiting(chapter_file), theme_style=ft.TextThemeStyle.LABEL_LARGE,
+        self.status = ft.Text(self.waiting_text, theme_style=ft.TextThemeStyle.LABEL_LARGE,
                               color=ft.Colors.TERTIARY, key="live-status")
+        self.job_line = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                visible=False, key="live-job")
         self.progress = ft.ProgressBar(height=2, visible=True)
         self.content_md = ft.Markdown("", selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                                       key="live-content")
@@ -75,23 +90,24 @@ class LivePanel:
         )
         self.stop_button = ft.FilledTonalButton(content="⏹ Stop", on_click=self._on_stop, key="live-stop")
         self.hide_button = ft.TextButton(content="✕ Hide", on_click=self._on_hide, key="live-hide")
-        body = ft.Container(
-            padding=ft.Padding.only(left=16, right=16, bottom=12),
-            content=ft.Column(
-                [
-                    ft.Row([ft.Container(self.status, expand=True), self.hide_button],
-                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    self.progress,
-                    ft.Container(content=self.content_column, expand=True, padding=ft.Padding.symmetric(vertical=4)),
-                    self.thinking_tile,
-                    ft.Row([self.stop_button], alignment=ft.MainAxisAlignment.END),
-                ],
-                spacing=6,
-                expand=True,
-            ),
+        self.content_box = ft.Container(content=self.content_column, expand=True, visible=False,
+                                        padding=ft.Padding.symmetric(vertical=4), key="live-content-box")
+        self.body_column = ft.Column(
+            [
+                ft.Row([ft.Container(ft.Column([self.status, self.job_line], spacing=2, tight=True), expand=True),
+                        self.hide_button],
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self.progress,
+                self.content_box,
+                self.thinking_tile,
+                ft.Row([self.stop_button], alignment=ft.MainAxisAlignment.END),
+            ],
+            spacing=6,
+            tight=True,
         )
+        body = ft.Container(padding=ft.Padding.only(left=16, right=16, bottom=12), content=self.body_column)
         self.sheet = ft.BottomSheet(
-            content=ft.Container(content=body, height=440),
+            content=ft.Container(content=body),
             draggable=True,
             show_drag_handle=True,
             dismissible=True,
@@ -107,7 +123,8 @@ class LivePanel:
             try:
                 from glossarion_mobile.ui.components.sheet import sheet_body
 
-                sheet_body(self.sheet).height = max(280.0, float(height) * 0.55)
+                self.full_height = max(280.0, float(height) * 0.55)
+                self._size_sheet(sheet_body(self.sheet))
             except Exception:
                 pass
         self.render(force=True)
@@ -130,10 +147,13 @@ class LivePanel:
     def _on_stop(self, e: Any = None) -> None:
         if self.state not in (WAITING, STREAMING):
             return
+        self._show_stopping()
+        call_handler(self.on_stop)
+
+    def _show_stopping(self) -> None:
         self.status.value = status_stopping()
         self.stop_button.disabled = True
         self._push(self.status, self.stop_button)
-        call_handler(self.on_stop)
 
     def _on_scroll(self, e: Any) -> None:
         try:
@@ -152,7 +172,33 @@ class LivePanel:
         grew = self.feed.feed(lines)
         if grew and self.state == WAITING:
             self.state = STREAMING
+            if not self.stop_button.disabled:  # not while it is stopping
+                self.status.value = status_streaming(self.chapter_file)
+                self._push(self.status)
         self.render()
+
+    def sync_job(self, snap: Any) -> None:
+        """The job changed (UI loop): the panel says what the strip and the Jobs page say about it - queued,
+        stopping (a Stop from there too), its progress line. The job's end is ``finish``."""
+        if self.state not in (WAITING, STREAMING) or getattr(snap, "is_terminal", False):
+            return
+        from glossarion_mobile.services.jobs import JobState, progress_line
+
+        state = getattr(snap, "state", None)
+        if state in (JobState.STOPPING, JobState.FORCE_STOPPING):
+            if not self.stop_button.disabled:
+                self._show_stopping()
+        elif state is JobState.QUEUED:
+            self.status.value = status_queued(self.chapter_file)
+            self._push(self.status)
+        elif self.state == WAITING and self.status.value != self.waiting_text:
+            self.status.value = self.waiting_text
+            self._push(self.status)
+        line = progress_line(snap, verb=True, elapsed=False)
+        if line != self.job_line.value:
+            self.job_line.value = line
+            self.job_line.visible = bool(line)
+            self._push(self.job_line)
 
     def render(self, *, force: bool = False) -> None:
         now = self._clock()
@@ -164,6 +210,8 @@ class LivePanel:
             self._rendered_version = self.feed.content_version
             self.content_md.value = self.feed.markdown()
             changed.append(self.content_md)
+            if self.content_md.value and not self.content_box.visible:
+                self._open_chapter_area()
         if self.feed.side_version != self._rendered_side:
             self._rendered_side = self.feed.side_version
             self.side_text.value = self.feed.side_text[-20000:]
@@ -173,6 +221,22 @@ class LivePanel:
             changed.append(self.thinking_tile)
         if changed:
             self._push(*changed)
+
+    def _size_sheet(self, holder: Any) -> None:
+        """The sheet's height: as much as the lines above need until there is text to show, then its share of
+        the screen with the chapter area filling it."""
+        holder.height = self.full_height if self.content_box.visible else None
+
+    def _open_chapter_area(self) -> None:
+        """The first streamed text arrived."""
+        from glossarion_mobile.ui.components.sheet import sheet_body
+
+        self.content_box.visible = True
+        self.body_column.expand = True
+        self.body_column.tight = False
+        holder = sheet_body(self.sheet)
+        self._size_sheet(holder)
+        self._push(holder)
 
     def finish(self, text: str, *, stopped: bool = False, completed: bool = False) -> None:
         self.render(force=True)

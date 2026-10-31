@@ -128,6 +128,24 @@ def moved_workspace(messages: Sequence[Any], indices: Iterable[Any], roots: Sequ
             candidate = os.path.join(str(root), stem)
             if root and os.path.isfile(os.path.join(candidate, "translation_progress.json")):
                 return candidate
+            candidate = _spelled_folder(str(root), stem) if root else ""
+            if candidate:
+                return candidate
+    return ""
+
+
+def _spelled_folder(root: str, stem: str) -> str:
+    """The folder of ``root`` that a chat spells ``stem`` (``<root>/X.`` for ``Attachments/X``), with its
+    ``translation_progress.json``; '' when there is none."""
+    from glossarion_mobile.services.workspace_sync import chat_spelling
+
+    try:
+        names = [entry.name for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return ""
+    for name in names:
+        if chat_spelling(name) == stem and os.path.isfile(os.path.join(root, name, "translation_progress.json")):
+            return os.path.join(root, name)
     return ""
 
 

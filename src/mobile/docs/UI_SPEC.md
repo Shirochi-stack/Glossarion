@@ -1558,10 +1558,11 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 **Live "Translate this chapter"** (🌐):
 1. If the chapter is completed, confirm "“{title}” is already translated…".
 2. `mark_chapter_pending_for_retranslation`, then a SINGLE_CHAPTER job.
-3. A native **LivePanel** opens: a half-height draggable sheet, *not* inside the WebView.
-   - Status line "🛰️ Translating “f” — waiting for stream…" (Streaming off: "🛰️ Translating “f” — Streaming is off: the chapter appears when it is done"; the job then does not force streaming, §4.15).
+3. A native **LivePanel** opens: a draggable sheet, *not* inside the WebView. It is only as tall as its lines until the first streamed text arrives, then half the screen: no empty space while the model thinks.
+   - Status line "🛰️ Translating “f” — waiting for stream…" (Streaming off: "🛰️ Translating “f” — Streaming is off: the chapter appears when it is done"; the job then does not force streaming, §4.15), "🛰️ Translating “f”" once text streams, "🛰️ “f” — queued" while the job waits, "⏹ Stopping…" for a Stop from here or from the Jobs page.
+   - Under it, the job's line as the Jobs page shows it ("Translating • 168/177 · 9 failed").
    - Content is a `Markdown` / `Text` column fed by `LiveLineClassifier` (90 ms drain).
-   - Buttons "🧠 Thinking (n)" (expands the thinking log, at the log size §6.2), "⏹ Stop", "✕ Hide" (the job continues; the 🌐 icon becomes "🛰️ Live view").
+   - Buttons "🧠 Thinking (n)" (expands the thinking log, at the log size §6.2), "⏹ Stop", "✕ Hide" (the job continues; the 🌐 icon becomes "🛰️ Live view"). A Reader opened on this book while its job runs has the same "🛰️ Live view", with what the job logged so far.
 4. The outcome uses the exact strings:
    - "✅ Translation finished — loading the translated chapter…"
    - "⏹ Translation stopped — incomplete output cleared."

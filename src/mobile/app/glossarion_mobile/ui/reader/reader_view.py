@@ -830,6 +830,10 @@ class ReaderScreen(Screen):
             self.offer_resume(offer)
         if session.plan.mode == MODE_OVERLAY:
             self._watch_jobs()
+        try:
+            self._rejoin_live()
+        except Exception:
+            log.exception("rejoining the live translate failed")
 
     async def _auto_hide_chrome(self) -> None:
         """The chrome is up while the book opens; it fades out once the reader has had a look."""
@@ -2155,6 +2159,8 @@ class ReaderScreen(Screen):
 
     def _on_jobs(self, view: Any) -> None:
         session = self.session
+        if not self.disposed:
+            self._sync_live(view)
         if self.disposed or session is None or session.plan.mode != MODE_OVERLAY:
             return
         from glossarion_mobile.ui.library.book_page import job_for_book
@@ -2167,6 +2173,18 @@ class ReaderScreen(Screen):
         elif self._poll_task is not None:
             self._cancel_poll()
             self._spawn(self.refresh_overlay())  # the chapters the job wrote last
+
+    def _sync_live(self, view: Any) -> None:
+        """The live panel follows its job as the strip and the Jobs page do."""
+        live = self.live
+        if live is None or not live.active:
+            return
+        active = getattr(view, "active", None)
+        jobs = [active] if active is not None else []
+        for snap in jobs + list(getattr(view, "queue", ()) or ()):
+            if getattr(snap, "id", None) == live.job_id:
+                live.panel.sync_job(snap)
+                return
 
     def _start_poll(self) -> None:
         if self._poll_task is not None or self.disposed:
@@ -2285,8 +2303,9 @@ class ReaderScreen(Screen):
         from glossarion_mobile.state.setting_writes import streaming_enabled
 
         if not streaming_enabled(self._config_snapshot()):  # devfix4 #14: nothing streams, so no "waiting for stream…"
-            panel.status.value = (f"🛰️ Translating “{os.path.basename(chapter_file)}” — Streaming is off: "
+            panel.waiting_text = (f"🛰️ Translating “{os.path.basename(chapter_file)}” — Streaming is off: "
                                   "the chapter appears when it is done")
+            panel.status.value = panel.waiting_text
         spec = JobSpec(
             kind="single_chapter",
             title=f"{session.plan.title or os.path.splitext(os.path.basename(epub))[0]} · {chapter_file}",
@@ -2308,6 +2327,46 @@ class ReaderScreen(Screen):
             log.exception("watching the live job failed")
         self._attach_live_log(live)
         panel.show(self.page, self._size()[1])
+        self._refresh_chrome()
+        self._watch_jobs()  # the panel follows its job (_sync_live); an overlay polls while a job runs
+        return live
+
+    def _rejoin_live(self) -> Optional[LiveRun]:
+        """The Reader was closed while this book's live translate ran, and the Jobs page still shows it: 🌐 is
+        "Live view" again, its panel with what the job logged so far (not "A translation is already running")."""
+        jobs = self.deps.jobs
+        session = self.session
+        view = jobs.view() if session is not None and hasattr(jobs, "view") else None
+        snap = getattr(view, "active", None)
+        spec = getattr(snap, "spec", None)
+        if self.live is not None or spec is None or spec.kind != "single_chapter" or not spec.inputs:
+            return None
+        from glossarion_mobile.services.jobs import target_key
+
+        chapter_file = str((spec.params or {}).get("chapter_file") or "")
+        row = session.filenames.index(chapter_file) if chapter_file in session.filenames else -1
+        epub, _name, reason = session.translate_target(row) if row >= 0 else ("", "", "none")
+        if reason or target_key(epub) != target_key(spec.inputs[0]):
+            return None
+        try:
+            feed = LiveFeed(chapter_file)
+        except Exception as exc:
+            log.info("live stream classifier unavailable: %s", exc)
+            return None
+        panel = LivePanel(chapter_file=chapter_file, feed=feed, on_stop=self._stop_live, on_hide=self._on_live_hidden,
+                          mono_family=self.deps.extras.get("mono_family", "monospace"))
+        live = LiveRun(job_id=snap.id, chapter_file=chapter_file, row=row, epub_path=epub, panel=panel, feed=feed)
+        self.live = live
+        try:
+            live.unsub_transition = jobs.on_transition(lambda s, previous: self._on_live_transition(live, s))
+        except Exception:
+            log.exception("watching the live job failed")
+        buffer = jobs.log_buffer(snap.id) if hasattr(jobs, "log_buffer") else None
+        if buffer is not None:
+            panel.add_lines(buffer.snapshot())
+        self._attach_live_log(live)
+        panel.sync_job(snap)
+        self._watch_jobs()
         self._refresh_chrome()
         return live
 

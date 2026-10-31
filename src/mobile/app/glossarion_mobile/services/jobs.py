@@ -1083,10 +1083,11 @@ def position_line(snap: Any) -> str:
     return verb
 
 
-def progress_line(snap: JobSnapshot, now: Optional[float] = None, *, verb: bool = False) -> str:
+def progress_line(snap: JobSnapshot, now: Optional[float] = None, *, verb: bool = False, elapsed: bool = True) -> str:
     """"[17/182] Ch. 13 (1/2) · 3 in flight · 12:41" (UI_SPEC §1.7 subtitle; "Ch 12/80" before a request names
     a chapter); the phase while the total is unknown. ``verb``: it starts "Translating • …" (``position_line``),
-    for the places that do not name the job's kind already (the Jobs page row, the job page)."""
+    for the places that do not name the job's kind already (the Jobs page row, the job page). ``elapsed`` False:
+    no time, for a place that only redraws when the job changes (the Reader's live panel)."""
     parts: list[str] = []
     if snap.question:
         question = snap.question if isinstance(snap.question, Mapping) else {}
@@ -1116,9 +1117,9 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None, *, verb: bool 
         parts.append(queue_note)
     if progress.failed:
         parts.append(f"{progress.failed} failed")
-    elapsed = snap.elapsed(now)
-    if elapsed is not None and snap.is_active:
-        parts.append(format_duration(elapsed))
+    seconds = snap.elapsed(now) if elapsed else None
+    if seconds is not None and snap.is_active:
+        parts.append(format_duration(seconds))
     if not parts and snap.state is JobState.QUEUED:
         parts.append("Queued")
     return " · ".join(parts)

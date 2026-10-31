@@ -5191,9 +5191,11 @@ class ChatView:
         moved = _moved_workspace(messages, indices, self._migration_roots())
         if moved:
             return moved, _in_attachments(moved)
-        stem = os.path.splitext(os.path.basename(self._turn_source(item)))[0].lower()
+        from glossarion_mobile.services.workspace_sync import named_after
+
+        stem = os.path.splitext(os.path.basename(self._turn_source(item)))[0]
         for folder in self.env.chats.attachment_folders(self.cid) if self.bound else []:
-            if os.path.basename(os.path.normpath(folder)).lower() == stem:
+            if named_after(os.path.basename(os.path.normpath(folder)), stem):
                 return folder, True
         return "", True
 
@@ -5256,12 +5258,9 @@ class ChatView:
 
         folder, source = max(candidates.values(), key=written)
         if not source:
-            stem = os.path.basename(os.path.normpath(folder)).lower()
-            for message in reversed(messages):
-                if message and str(message[0]) == "user_file" and len(message) > 2:
-                    if os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower() == stem:
-                        source = str(message[2] or "")
-                        break
+            from glossarion_mobile.ui.chat.attachments import attachment_source
+
+            source = attachment_source(messages, folder)
         return folder, source
 
     async def open_retranslate(self, chapters: Optional[tuple] = None) -> Optional[str]:

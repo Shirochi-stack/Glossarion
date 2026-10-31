@@ -96,10 +96,12 @@ def workspace_busy(runs: Any, jobs: Any, cid: Any, folder: str) -> bool:
 def attachment_source(messages: Any, folder: str) -> str:
     """The attachment a workspace came from: the newest ``user_file`` turn whose file has the
     workspace's name as its stem ('' when that turn is gone)."""
-    stem = os.path.basename(os.path.normpath(str(folder or ""))).lower()
+    from glossarion_mobile.services.workspace_sync import named_after
+
+    name = os.path.basename(os.path.normpath(str(folder or "")))
     for message in reversed(list(messages or [])):
         if message and str(message[0]) == "user_file" and len(message) > 2:
-            if os.path.splitext(os.path.basename(str(message[2] or "")))[0].lower() == stem:
+            if named_after(name, os.path.splitext(os.path.basename(str(message[2] or "")))[0]):
                 return str(message[2] or "")
     return ""
 

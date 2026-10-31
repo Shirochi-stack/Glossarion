@@ -1235,6 +1235,47 @@ def test_reader_live_panel_does_not_wait_for_a_stream_when_streaming_is_off(nove
 
 
 @needs_flet
+@needs_live
+def test_a_reader_opened_while_its_live_translate_runs_rejoins_it(novel):
+    """The Jobs page shows the book's live translate, so the Reader does too, not "A translation is already
+    running" (owner 2026-10-31: the live view is in sync with the Jobs page)."""
+    from glossarion_mobile.services.jobs import JobSnapshot, JobSpec, JobState, Progress
+
+    def view(raw, chapter):
+        spec = JobSpec(kind="single_chapter", title="Book", inputs=(raw,), params={"chapter_file": chapter})
+        snap = JobSnapshot(id="job7", spec=spec, state=JobState.RUNNING, created=1.0, started=1.0,
+                           progress=Progress(total=9, completed=2))
+        return types.SimpleNamespace(active=snap, queue=())
+
+    async def scenario():
+        first = _screen(novel)
+        await first.open()
+        raw = first.session.translate_target(1)[0]
+        first.dispose()
+
+        screen = _screen(novel)
+        screen.deps.jobs.view = lambda: view(raw, "chapter0002.xhtml")
+        screen.deps.jobs.buffers["job7"] = types.SimpleNamespace(snapshot=lambda: list(LIVE_LINES))
+        await screen.open()
+        live = screen.live
+        assert live is not None and live.job_id == "job7" and live.row == 1 and live.chapter_file == "chapter0002.xhtml"
+        assert live.panel.feed.markdown().startswith("# Chapter 3") and live.panel.content_box.visible
+        assert live.panel.job_line.value == "Translating • 2/9"
+        assert not screen.deps.jobs.submitted
+        assert len(screen.deps.jobs.transitions) == 1
+        screen.dispose()
+
+        for other in (view("/elsewhere/another.epub", "chapter0002.xhtml"), view(raw, "not_in_this_book.xhtml")):
+            screen = _screen(novel)
+            screen.deps.jobs.view = lambda: other
+            await screen.open()
+            assert screen.live is None
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 def test_completed_chapter_asks_before_retranslating(novel):
     async def scenario():
         screen = _screen(novel)

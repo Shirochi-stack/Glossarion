@@ -1700,6 +1700,23 @@ class ChatStoreAdapter:
         self._changed(cid)
         return target
 
+    def relocate_workspace(self, folder: str, target: str) -> None:
+        """Blocking: a Library book's workspace changed folder (``workspace_sync.join_workspace``): the stored
+        paths of every saved chat that names it follow (the shared ``_relocate_session_attachment_paths``)."""
+        changed = False
+        with self._lock:
+            sessions = list(self.sessions)
+        for session in sessions:
+            before = session.get("messages")
+            with self._store_lock(session.get("id")):
+                self.binding.relocate(session, folder, target)
+            if session.get("messages") != before:
+                changed = True
+                with self._lock:
+                    self._bodies = OrderedDict((k, v) for k, v in self._bodies.items() if k[0] != session.get("id"))
+        if changed:
+            self._changed(touch=False)
+
     def migration_target(self, cid: Any, folder: str) -> str:
         """The folder Migrate would create (exists -> the desktop "Attachment folder already exists" choice)."""
         session = self.session(cid)

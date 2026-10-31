@@ -141,6 +141,12 @@ def _atomic_text_write(filepath, text):
         raise
 
 
+def attachment_workspace_name(source_stem):
+    """The ``Attachments/<name>`` folder of an attached file with this stem."""
+    safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', str(source_stem or ""))
+    return safe_stem.rstrip(" .")[:120] or "Attachment"
+
+
 class ChatStoreMixin:
     """Direct Text chat persistence moved verbatim from ``_InputOutputDialog``."""
 
@@ -2036,13 +2042,10 @@ class ChatStoreMixin:
         """Return the run-style output folder for the current attachment."""
         if not self._run_source_is_attachment or not self._run_source_path:
             return ""
-        import re
-
         source_stem = os.path.splitext(
             os.path.basename(self._run_source_path)
         )[0]
-        safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', source_stem)
-        safe_stem = safe_stem.rstrip(" .")[:120] or "Attachment"
+        safe_stem = attachment_workspace_name(source_stem)
         # Keep run-style attachment trees in their own namespace so an
         # attachment can never become the destination for ``Direct Text N``
         # files created by ordinary composer-only messages.
