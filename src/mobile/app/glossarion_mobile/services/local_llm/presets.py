@@ -7,7 +7,8 @@ an image first needs it), ``mmproj_size`` and ``mmproj_sha256``. Without ``mmpro
 used when it has one (``hf.pick_projector``). ``file`` may be
 empty (the auto-pick of ``hf.pick_file`` applies), ``quant`` may name one (``Q5_K_M``), ``n_ctx`` 0
 means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a saved list (even an empty
-one) wins.
+one) wins. ``CUSTOM_FAMILIES`` are the fixed Custom rows beside the saved list: a family's parameter sizes,
+whose quants come from the repository's own files; a quant the user chooses becomes an ordinary saved row.
 """
 
 from __future__ import annotations
@@ -22,8 +23,10 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "PREF_KEY", "add_gpu_preset", "add_gpu_presets", "download_size",
-    "file_quant", "gpu_preset_for", "is_gpu_quant", "load_presets", "missing_gpu_presets", "restore_defaults", "save_presets", "validate_preset",
+    "CUSTOM_FAMILIES", "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "NO_QUANT", "PREF_KEY", "add_row", "custom_family",
+    "custom_row", "custom_size_for", "download_size", "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row",
+    "load_presets", "quant_label", "remove_row", "restore_defaults", "retire_old_gpu_rows", "save_presets",
+    "validate_preset",
 ]
 
 PREF_KEY = "local_model_presets"
@@ -57,12 +60,12 @@ DEFAULT_PRESETS: tuple = (
      "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
      "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
 )
-#: Optional GPU-friendly variants of the four defaults for Android's OpenCL backend (Qualcomm Adreno), whose
-#: fast kernels are for Q4_0 (Q6_K runs unoptimized, the other K-quants may be slow or fall back to the
-#: CPU). Not first-run data: switching "Use GPU" on (Model manager › On-device or the Welcome page,
-#: Android) appends them, and "Add GPU-friendly presets (Q4_0)" while one is missing (``add_gpu_presets``;
-#: switching it off keeps them). Unsloth's Q4_0 files keep a few tensors (e.g. the
-#: output) in higher quants, which run unoptimized. iOS (Metal) and the CPU keep the defaults above.
+#: The GPU-friendly variants of the four defaults that earlier versions added to the saved list on Android:
+#: kept only to recognise those rows (``is_old_gpu_row``). Nothing adds them any more (owner 2026-10-31: the
+#: Custom rows replace them); one whose file is on the phone stays an ordinary row, the others are dropped.
+#: Android's OpenCL backend (Qualcomm Adreno) has its fast kernels for Q4_0 (Q6_K runs unoptimized, the other
+#: K-quants may be slow or fall back to the CPU); Unsloth's Q4_0 files keep a few tensors (e.g. the output)
+#: in higher quants, which run unoptimized. iOS (Metal) and the CPU run every quant alike.
 #: Verified on Hugging Face 2026-10-20 (size and sha256 = the LFS oid); same repos, so same projectors.
 GPU_PRESETS: tuple = (
     {"name": "Garbage · GPU (Q4_0)", "repo": "unsloth/Qwen3.5-0.8B-GGUF", "file": "Qwen3.5-0.8B-Q4_0.gguf",
@@ -86,6 +89,41 @@ GPU_PRESETS: tuple = (
      "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
      "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
 )
+#: The Custom rows (owner 2026-10-31): family -> parameter sizes. Tapping one lists the real files of the
+#: chosen size's repository (``hf.list_repo``), so nothing here names a quant. Checked 2026-10-31 on
+#: https://huggingface.co/api/models/<repo>?blobs=true: every repo exists, is not gated (no Hugging Face
+#: login) and has a Q4_0 file. llama-cpp-python 0.3.32 vendors llama.cpp b3fed31b, whose llama-arch.cpp knows
+#: all four architectures (qwen35, llama, gemma3 and gemma4, lfm2) and whose libmtmd knows the Qwen3.5 and
+#: Gemma projectors. Gemma 3 4B and Gemma 4 ship an mmproj ("Reads images"); so does every Qwen 3.5 size.
+#: LFM2 is the lightweight family: 350M to 1.2B parameters, 219-696 MB at Q4_0, and it was trained for
+#: English, Arabic, Chinese, French, German, Japanese, Korean and Spanish (SmolLM2 is mostly English).
+CUSTOM_FAMILIES: tuple = (
+    {"id": "qwen35", "name": "Qwen 3.5", "sizes": (
+        {"label": "0.8B", "name": "Qwen 3.5 0.8B", "repo": "unsloth/Qwen3.5-0.8B-GGUF"},
+        {"label": "2B", "name": "Qwen 3.5 2B", "repo": "unsloth/Qwen3.5-2B-GGUF"},
+        {"label": "4B", "name": "Qwen 3.5 4B", "repo": "unsloth/Qwen3.5-4B-GGUF"},
+        {"label": "9B", "name": "Qwen 3.5 9B", "repo": "unsloth/Qwen3.5-9B-GGUF"},
+    )},
+    {"id": "llama", "name": "Llama", "sizes": (
+        {"label": "1B", "name": "Llama 3.2 1B", "repo": "unsloth/Llama-3.2-1B-Instruct-GGUF"},
+        {"label": "3B", "name": "Llama 3.2 3B", "repo": "unsloth/Llama-3.2-3B-Instruct-GGUF"},
+        {"label": "8B", "name": "Llama 3.1 8B", "repo": "unsloth/Llama-3.1-8B-Instruct-GGUF"},
+    )},
+    {"id": "gemma", "name": "Gemma", "sizes": (
+        {"label": "270M", "name": "Gemma 3 270M", "repo": "unsloth/gemma-3-270m-it-GGUF"},
+        {"label": "1B", "name": "Gemma 3 1B", "repo": "unsloth/gemma-3-1b-it-GGUF"},
+        {"label": "E2B", "name": "Gemma 4 E2B", "repo": "unsloth/gemma-4-E2B-it-GGUF"},
+        {"label": "4B", "name": "Gemma 3 4B", "repo": "unsloth/gemma-3-4b-it-GGUF"},
+        {"label": "E4B", "name": "Gemma 4 E4B", "repo": "unsloth/gemma-4-E4B-it-GGUF"},
+    )},
+    {"id": "lfm2", "name": "LFM2", "sizes": (
+        {"label": "350M", "name": "LFM2 350M", "repo": "unsloth/LFM2-350M-GGUF"},
+        {"label": "700M", "name": "LFM2 700M", "repo": "unsloth/LFM2-700M-GGUF"},
+        {"label": "1.2B", "name": "LFM2.5 1.2B", "repo": "unsloth/LFM2.5-1.2B-Instruct-GGUF"},
+    )},
+)
+#: The unquantized GGUF kinds: what "No quant" in the Custom menu stands for
+NO_QUANT = ("F16", "BF16", "F32")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -163,10 +201,23 @@ def restore_defaults(prefs: Any) -> list:
     return save_presets(prefs, _defaults())
 
 
-def missing_gpu_presets(rows: Sequence[dict]) -> list:
-    """The ``GPU_PRESETS`` rows whose file no row of ``rows`` already names (same repo and file)."""
-    have = {(str(r.get("repo") or "").casefold(), str(r.get("file") or "")) for r in rows}
-    return [copy.deepcopy(p) for p in GPU_PRESETS if (p["repo"].casefold(), p["file"]) not in have]
+def is_old_gpu_row(row: dict) -> bool:
+    """A row an earlier version added from ``GPU_PRESETS``: its repo and file, under its stock name (a taken
+    name got " 2"). A renamed row is the user's own, and a Custom pick of the same file has another name."""
+    repo, file = str(row.get("repo") or "").casefold(), row.get("file")
+    name = str(row.get("name") or "").casefold()
+    return any(p["repo"].casefold() == repo and p["file"] == file and name.startswith(p["name"].casefold())
+               for p in GPU_PRESETS)
+
+
+def retire_old_gpu_rows(prefs: Any, stays: Any) -> list:
+    """Drop the saved ``is_old_gpu_row`` rows that ``stays(row)`` does not keep (the model is not on the phone);
+    the rest of the list, and its order, stay. Returns the names dropped; nothing is saved without one."""
+    rows = load_presets(prefs)
+    dropped = [row for row in rows if is_old_gpu_row(row) and not stays(row)]
+    if dropped:
+        save_presets(prefs, [row for row in rows if not any(row is d for d in dropped)])
+    return [row["name"] for row in dropped]
 
 
 def is_gpu_quant(file: Any) -> bool:
@@ -180,46 +231,79 @@ def file_quant(file: Any) -> str:
     return match.group(1).upper() if match else ""
 
 
-def gpu_preset_for(repo: Any) -> Optional[dict]:
-    """The ``GPU_PRESETS`` row (Q4_0) of the same repository as a downloaded model, else None."""
+def is_no_quant(file: Any) -> bool:
+    """An unquantized GGUF (F16, BF16 or F32): the full-precision weights."""
+    return file_quant(file) in NO_QUANT
+
+
+def quant_label(file: Any) -> str:
+    """What the Custom menu calls a file: its quant, "No quant (BF16)", else the file name."""
+    quant = file_quant(file)
+    if quant in NO_QUANT:
+        return f"No quant ({quant})"
+    return quant or str(file or "").rsplit("/", 1)[-1]
+
+
+def custom_family(family_id: Any) -> Optional[dict]:
+    """The ``CUSTOM_FAMILIES`` entry called ``family_id``, else None."""
+    return next((family for family in CUSTOM_FAMILIES if family["id"] == family_id), None)
+
+
+def custom_size_for(repo: Any) -> Optional[tuple]:
+    """``(family, size)`` of the Custom table entry for a repository, else None."""
     repo_cf = str(repo or "").casefold()
-    for row in GPU_PRESETS:
-        if row["repo"].casefold() == repo_cf:
-            return copy.deepcopy(row)
+    for family in CUSTOM_FAMILIES:
+        for size in family["sizes"]:
+            if size["repo"].casefold() == repo_cf:
+                return family, size
     return None
 
 
-def _append_gpu_row(rows: list, row: dict) -> str:
-    """Append ``row`` to ``rows`` under a free name (a taken one gets " 2") and return that name."""
+def custom_row(size: dict, file: Any, projector: Any = None) -> dict:
+    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile``."""
+    label = quant_label(file.path)
+    row = {"name": f"{size['name']} · {label}", "repo": size["repo"], "file": file.path, "quant": "",
+           "note": f"Custom · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0)}
+    if file.sha256:
+        row["sha256"] = file.sha256
+    if projector is not None:
+        row["mmproj"], row["mmproj_size"] = projector.path, int(projector.size or 0)
+        if projector.sha256:
+            row["mmproj_sha256"] = projector.sha256
+    return row
+
+
+def _same_file(row: dict, other: dict) -> bool:
+    return str(row.get("repo") or "").casefold() == str(other.get("repo") or "").casefold() \
+        and row.get("file") == other.get("file")
+
+
+def add_row(prefs: Any, row: dict) -> tuple:
+    """Make sure the presets list has ``row`` (same repo and file): ``(presets, index of that row, added)``,
+    appending it under a free name (a taken one gets " 2") when missing. A full list gets nothing and answers
+    the index -1."""
+    rows = load_presets(prefs)
+    for index, other in enumerate(rows):
+        if _same_file(other, row):
+            return rows, index, False
+    if len(rows) >= MAX_PRESETS:
+        return rows, -1, False
     taken = {str(r.get("name") or "").casefold() for r in rows}
     name, n = row["name"], 2
     while name.casefold() in taken:
         name, n = f"{row['name'][:56]} {n}", n + 1
-    row["name"] = name
-    rows.append(row)
-    return name
+    rows = save_presets(prefs, [*rows, {**row, "name": name}])
+    return rows, len(rows) - 1, True
 
 
-def add_gpu_preset(prefs: Any, gpu_row: dict) -> tuple:
-    """Make sure the presets list has ``gpu_row`` (a ``GPU_PRESETS`` row; same repo and file): ``(presets,
-    index of that row)``, appending it when missing."""
+def remove_row(prefs: Any, row: dict) -> bool:
+    """Remove the saved row of the same repo and file; True when there was one."""
     rows = load_presets(prefs)
-    for index, row in enumerate(rows):
-        if str(row.get("repo") or "").casefold() == gpu_row["repo"].casefold() and row.get("file") == gpu_row["file"]:
-            return rows, index
-    _append_gpu_row(rows, copy.deepcopy(gpu_row))
-    rows = save_presets(prefs, rows)
-    return rows, len(rows) - 1
-
-
-def add_gpu_presets(prefs: Any) -> tuple:
-    """Append the missing ``GPU_PRESETS`` to the saved presets (a name already taken gets " 2"):
-    ``(presets, added names)``. The defaults and the user's rows stay as they are; a list near
-    ``MAX_PRESETS`` gets only what fits (the smaller models first), a full one nothing."""
-    rows = load_presets(prefs)
-    room = max(0, MAX_PRESETS - len(rows))
-    added = [_append_gpu_row(rows, row) for row in missing_gpu_presets(rows)[:room]]
-    return (save_presets(prefs, rows) if added else rows), added
+    kept = [other for other in rows if not _same_file(other, row)]
+    if len(kept) == len(rows):
+        return False
+    save_presets(prefs, kept)
+    return True
 
 
 def validate_preset(row: dict, presets: Sequence[dict], index: Optional[int] = None) -> tuple:

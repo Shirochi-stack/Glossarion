@@ -177,9 +177,13 @@ class EtaEstimator:
 
 
 def progress_line(snapshot: Any, *, eta: Optional[EtaEstimator] = None, now: Optional[float] = None) -> str:
-    """"Chapter 12/48 · 3 in flight · ETA 14 min · 12:41" (parts appear when known)."""
+    """"[17/182] Ch. 13 (1/2) · Chapter 12/48 · 3 in flight · ETA 14 min · 12:41" (parts appear when known; the
+    position is the job's own, ``services.jobs.request_position``, as the Jobs page and the notification show it)."""
     counts = progress_counts(snapshot)
     parts = []
+    position = str(_get(snapshot, "position", "") or "")
+    if position and _get(snapshot, "is_active", False):
+        parts.append(position)
     if counts["total"]:
         parts.append(f"Chapter {counts['completed']}/{counts['total']}")
         if eta is not None:

@@ -14,9 +14,9 @@
 * Requests (N): request cards from the shared ``direct_text_stream`` request
   model fed by the job log (``JobService.request_segments``), in its order
   (spine order for attachments). A placeholder line until the build has it.
-  While the job is queued or running the cards sit in a box of ``JOB_REQUESTS_BOX_HEIGHT`` that follows
-  its newest card itself, so the page never grows above the Log card (v9.15.7 batch, see
-  ``JobDetailScreen._show_requests``); a finished job's short list is a plain Column.
+  Cards that fit ``JOB_REQUESTS_BOX_HEIGHT`` are a plain Column at their natural height; more sit in a box of
+  that height that follows its newest card itself, so from then on the page never grows above the Log card
+  (v9.15.7 batch and owner 2026-10-31, see ``JobDetailScreen._show_requests``).
 * Log: ``LogConsole`` over the job's ``LogBuffer`` (live), or the tail of
   ``<logs>/jobs/<id>.log`` for older jobs; Copy and Share log.
 * Outputs: one chip per output file -> Share / Save to… / Save to Downloads /
@@ -46,9 +46,11 @@ from glossarion_mobile.services.jobs import (
     job_target,
     kind_icon,
     progress_line,
+    progress_view,
     status_key,
 )
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.chat.stream_bridge import request_label_text
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT, LogConsole
@@ -66,10 +68,13 @@ log = logging.getLogger("glossarion.jobs")
 MAX_REQUEST_CARDS = 60
 PREVIEW_CHARS = 280
 REQUEST_REFRESH_S = 1.0
-#: height (dp) of the box the request cards scroll in while the job runs (``_show_requests``); a finished
-#: job's list takes it once its cards (about ``JOB_REQUEST_CARD_HEIGHT`` each) would not fit
+#: height (dp) of the box the request cards scroll in once they would not fit it (``_show_requests``,
+#: measured with ``request_card_height``)
 JOB_REQUESTS_BOX_HEIGHT = 320
-JOB_REQUEST_CARD_HEIGHT = 96
+REQUEST_CARDS_SPACING = 6
+#: roughly how many characters fit one line of a card's label / preview on a phone
+LABEL_LINE_CHARS = 32
+PREVIEW_LINE_CHARS = 45
 #: Library button (hotfix 3 issue 2): a finished chat book that did not reach the Library (``ChatFeature.
 #: library_translate``'s wording; a name clash waits for "Merge into Library…").
 NOT_IN_LIBRARY = "This book is not in the Library yet"
@@ -135,7 +140,7 @@ def _field(segment: Any, *names: str) -> Any:
 
 
 def request_card_data(segment: Any, index: int) -> RequestCardData:
-    label = _field(segment, "label", "title", "request_label", "name") or f"Request {index + 1}"
+    label = request_label_text(_field(segment, "label", "title", "request_label", "name")) or f"Request {index + 1}"
     phase = _field(segment, "phase", "status", "state") or ""
     text = _field(segment, "preview", "text", "content", "output") or ""
     text = str(text)
@@ -147,6 +152,18 @@ def request_card_data(segment: Any, index: int) -> RequestCardData:
             parts.append(f"{int(value):,}{suffix}")
     key = str(_field(segment, "id", "key", "request_id") or index)
     return RequestCardData(str(label), str(phase), " · ".join(parts), preview, key)
+
+
+def request_card_height(card: RequestCardData) -> int:
+    """About how tall ``JobDetailScreen._request_card`` lays ``card`` out (dp): its padding, the label line(s)
+    or the phase chip next to them, the token line and up to 3 preview lines."""
+    label_lines = 2 if len(card.label) > LABEL_LINE_CHARS else 1
+    height = 20 + max(40 if card.phase else 0, 20 * label_lines)
+    if card.tokens:
+        height += 20
+    if card.preview:
+        height += 4 + 16 * min(3, 1 + (len(card.preview) - 1) // PREVIEW_LINE_CHARS)
+    return height
 
 
 class JobDetailScreen(Screen):
@@ -275,8 +292,8 @@ class JobDetailScreen(Screen):
         # the chat card's Requests pattern (U12 item 3): a list in a box of fixed height that follows its newest
         # card (auto_scroll set once, every card laid out: v9.15.7 hotfix 1), or a plain Column at its natural
         # height; ``requests_column`` is the shown one (_show_requests)
-        self.requests_short = ft.Column([], spacing=6, tight=True, key="job-requests-short")
-        self.requests_list = ft.ListView([], spacing=6, auto_scroll=True,
+        self.requests_short = ft.Column([], spacing=REQUEST_CARDS_SPACING, tight=True, key="job-requests-short")
+        self.requests_list = ft.ListView([], spacing=REQUEST_CARDS_SPACING, auto_scroll=True,
                                          auto_scroll_animation=ft.Animation(0, ft.AnimationCurve.LINEAR),
                                          cache_extent=LAYOUT_ALL_EXTENT, key="job-requests-list")
         self.requests_column: Any = self.requests_short
@@ -474,25 +491,32 @@ class JobDetailScreen(Screen):
                     else "Request cards appear here when the shared request classifier is in this build; "
                          "the log below shows every request.")
             self._show_requests([ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL,
-                                         color=ft.Colors.ON_SURFACE_VARIANT)], cards=0)
+                                         color=ft.Colors.ON_SURFACE_VARIANT)], cards=[])
             self.requests_title.value = "Requests"
             return
         cards = [request_card_data(seg, i) for i, seg in enumerate(segments)][-MAX_REQUEST_CARDS:]
         self.requests_title.value = f"Requests ({len(segments)})"
-        self._show_requests([self._request_card(card) for card in cards], cards=len(cards))
+        self._show_requests([self._request_card(card) for card in cards], cards=cards)
 
-    def _show_requests(self, rows: list, *, cards: int) -> None:
-        """The rows in the box of ``JOB_REQUESTS_BOX_HEIGHT`` while the job is queued or running (and for a
-        finished job whose cards would not fit), else in the plain Column.
+    def _show_requests(self, rows: list, *, cards: Sequence[RequestCardData]) -> None:
+        """The rows in the box of ``JOB_REQUESTS_BOX_HEIGHT`` once their cards would not fit it, else in the
+        plain Column at its natural height (owner 2026-10-31: the box left an empty area under fewer cards;
+        Flet 1.0.3 has no maximum height, so which of the two shows is decided here, from
+        ``request_card_height``). The switch happens about when the Column has reached the box's height, so
+        the card hardly changes size then.
 
         v9.15.7 batch (owner: the log "scrolls past the bottom making it look like I'm passing scroll down";
         emulator: one frame with the Log card 100-300 dp lower each time a request started): a card added
         or grown above the Log grew the page, Flutter keeps the offset at layout and Flet's auto_scroll pin
         is a post-frame jump, so that frame was painted with the Log card pushed down (a shrink: past the
-        page's end) before the pin. In the box only the box's own list moves; the page keeps its height."""
+        page's end) before the pin. In the box only the box's own list moves; the page keeps its height, so
+        a running job's box stays a box while its list does not get shorter. The few cards before the box
+        fills can still move the Log card that way."""
         snap = self.snap
         running = snap is not None and not snap.is_terminal
-        boxed = running or cards * JOB_REQUEST_CARD_HEIGHT > JOB_REQUESTS_BOX_HEIGHT
+        height = sum(request_card_height(card) for card in cards) + REQUEST_CARDS_SPACING * max(0, len(cards) - 1)
+        stays_boxed = running and self.requests_box.height is not None and len(cards) >= len(self.requests_list.controls)
+        boxed = height > JOB_REQUESTS_BOX_HEIGHT or stays_boxed
         shown = self.requests_list if boxed else self.requests_short
         (self.requests_short if boxed else self.requests_list).controls = []
         shown.controls = rows
@@ -672,20 +696,22 @@ class JobDetailScreen(Screen):
 
     def _on_progress(self, failed: bool = False) -> Any:
         """Progress / "N QA failed": a Library book opens Book › Chapters (filtered on failures for the
-        chip, QA report's link), any other workspace the Progress manager over the output folder."""
+        chip, QA report's link), any other workspace the Progress manager over the output folder; a
+        glossary job, or a job still in its glossary stage, its Glossary Progress (``progress_view``)."""
         snap = self.snap
         if snap is None:
             return None
         bid = self._library_bid(snap)
+        glossary = not failed and progress_view(snap) == "glossary"
         if bid is not None and self.navigate is not None:
-            query = {"tab": "chapters", "filter": "failed"} if failed else {"tab": "chapters"}
+            query = {"tab": "chapters", "filter": "failed"} if failed else {"tab": "glossary" if glossary else "chapters"}
             try:
                 return self.navigate("library.book", {"bid": bid}, query)
             except TypeError:
                 return self.navigate("library.book", {"bid": bid})
         folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
         if folder and self.open_progress is not None:
-            return self.open_progress(str(folder))
+            return self.open_progress(str(folder), glossary=True) if glossary else self.open_progress(str(folder))
         self._notify("No output folder for this job")
         return None
 

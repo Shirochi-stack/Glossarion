@@ -75,7 +75,7 @@ def test_the_service_reads_the_spine_once_and_counts_it(tmp_path, monkeypatch):
     reads = []
     spine = [f"chapter{n:04d}.xhtml" for n in range(182)]
 
-    def files(output_dir):
+    def files(output_dir, epub_path=None):
         reads.append(output_dir)
         return spine
 

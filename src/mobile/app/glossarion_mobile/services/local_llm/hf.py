@@ -8,8 +8,9 @@ Accepted (``parse_ref``):
 * ``https://huggingface.co/user/repo``, ``…/tree/<rev>``, ``…/blob/<rev>/<file>.gguf``,
   ``…/resolve/<rev>/<file>.gguf``.
 
-``list_repo`` lists a repository's runnable GGUF files and, apart, its vision projectors
-(``mmproj-*.gguf``); ``pick_projector`` chooses the one downloaded with a model (F16 first).
+``list_repo`` lists a repository's runnable GGUF files (not the ``mtp-*`` assistant heads Gemma 4 repos carry
+beside the models) and, apart, its vision projectors (``mmproj-*.gguf``); ``pick_projector`` chooses the one
+downloaded with a model (F16 first).
 
 The API base is ``HF_ENDPOINT`` (env ``HF_ENDPOINT``, default ``https://huggingface.co``) so tests and
 mirrors can point it elsewhere. Downloads always use the resolved commit, so a resumed transfer fetches
@@ -191,7 +192,7 @@ def _is_candidate(path: str) -> bool:
     name = path.rsplit("/", 1)[-1].lower()
     if not name.endswith(".gguf"):
         return False
-    return not (name.startswith("mmproj") or "imatrix" in name)
+    return not (name.startswith(("mmproj", "mtp-")) or "imatrix" in name)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -25,7 +25,12 @@
   The endpoint's ``base_url`` never changes while the process lives (``LocalLLMServer`` rebinds its port).
 * **Stop:** a queued request gives up on the client closing its connection or any job Stop
   (``process_stop_state``: graceful or immediate); the answer being generated stops within a few tokens
-  on an immediate Stop, a disconnect or a forced unload, and runs to its end on a graceful one.
+  on an immediate Stop, a disconnect or a forced unload, and runs to its end on a graceful one. An
+  immediate Stop reaches a prompt being evaluated too (between two decodes, ``engine.GenerationStopped``)
+  and stays in force for the requests that had arrived (``stop_generation``), also after the next run
+  clears the client's stop flags or when a socket closed under a blocked read never tells the endpoint.
+  Native code is never interrupted or freed under: a switch (``load_blocking``) right after a Stop waits
+  for that generation to end and then loads by itself; only a running job's live answer refuses it.
 * **Adaptive script ban** ("Block other scripts in translations", Prefs ``BLOCK_CJK_KEY``, on by default):
   a request that writes target-language text bans the tokens of every script the target does not use
   (English: Han / kana / Hangul, Devanagari, Thai, Arabic, Cyrillic ...; a CJK target keeps all three CJK
@@ -202,6 +207,8 @@ def process_stop_state() -> Optional[str]:
 #: on-device models on task.
 DEFAULT_CONTEXT_SMALL = 4096
 DEFAULT_CONTEXT_LARGE = 2048  # models of 4 GiB or more
+#: What the Welcome screen saves for every on-device model when no Context is saved yet (owner 2026-10-31).
+WELCOME_CONTEXT = 16384
 
 
 def default_context(size: int) -> int:
@@ -315,23 +322,19 @@ class _Gate:
             self._busy = False
             self._cond.notify_all()
 
-    def take_over(self, abort: threading.Event, timeout: float) -> bool:
-        """Forced unload / delete: set ``abort`` (the running generation's stop check sees it), wait up
-        to ``timeout`` s for the holder to let go and take the gate ahead of the waiters. False when the
-        holder did not let go (the caller must then leave the engine alone)."""
-        abort.set()
+    def take_over(self, timeout: float) -> bool:
+        """Forced unload / delete of a generation already told to stop: wait up to ``timeout`` s for the
+        holder to let go and take the gate ahead of the waiters. False when the holder did not let go
+        (the caller must then leave the engine alone; the holder stays stopped and lets go later)."""
         deadline = time.monotonic() + timeout
-        try:
-            with self._cond:
-                while self._busy:
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        return False
-                    self._cond.wait(min(left, 0.25))
-                self._busy = True
-                return True
-        finally:
-            abort.clear()
+        with self._cond:
+            while self._busy:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._cond.wait(min(left, 0.25))
+            self._busy = True
+            return True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -390,7 +393,9 @@ class LocalEngineService:
         self._watch = watch
         self._watcher: Optional[threading.Thread] = None
         self._stop_watch = threading.Event()
-        self._abort = threading.Event()  # a forced unload / delete stops the running generation
+        # immediate Stops so far: a request that arrived before the latest one is stopped for good
+        self._stops = 0
+        self._holder_stops: Optional[int] = None  # ``_stops`` when the generation holding the gate arrived
         self._unload_when_idle = False  # the selection moved off the loaded model while it answered
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
 
@@ -879,11 +884,35 @@ class LocalEngineService:
         self._clear_gpu_attempt()  # unloaded normally: the GPU did not take the app down
         self._set("idle", None)
 
+    def stop_generation(self) -> None:
+        """An immediate Stop (``JobBackend.request_stop``): every request that has arrived so far ends,
+        whatever happens to the client's stop flags and connections from here on. The one generating lets
+        go at its next stop check; nothing here touches the engine."""
+        with self._lock:
+            self._stops += 1
+
+    def stopping(self) -> bool:
+        """A generation that was told to stop, or one under any job Stop, still holds the engine."""
+        holder = self._holder_stops
+        return self.gate.busy and ((holder is not None and holder != self._stops) or bool(self.stop_state()))
+
+    def load_must_wait(self) -> bool:
+        """``load_blocking`` would wait for the engine: something holds it, and it is not the live answer of
+        a running job on an on-device model (that one refuses)."""
+        return bool(self.gate.busy or self.gate.waiting()) and (self._pinned_stem() is None or self.stopping())
+
     def load_blocking(self, stem: str) -> tuple:
-        """Explicit Load (Model manager): ``(True, None)`` or ``(False, message)``; never waits for a
-        running generation."""
+        """Explicit Load (Model manager, Welcome): ``(True, None)`` or ``(False, message)``. Refused during
+        a running job's live answer; an answer that was stopped or has no job behind it is waited for (it
+        cannot be cut off under native code), then the model loads by itself."""
         if not self.gate.try_acquire():
-            return False, "The on-device model is busy; try again when the current answer is done"
+            if not self.load_must_wait():
+                return False, "The on-device model is busy; try again when the current answer is done"
+            log.info("on-device model %s: waiting for the current answer to end", stem)
+            try:
+                self.gate.acquire(on_wait=self._notify)
+            except LocalLLMError as exc:
+                return False, exc.message
         try:
             self._ensure_loaded(stem)
             return True, None
@@ -902,7 +931,10 @@ class LocalEngineService:
         if self.engine is None or not self.engine.loaded:
             return False
         if not self.gate.try_acquire():
-            if not force or not self.gate.take_over(self._abort, FORCE_UNLOAD_WAIT):
+            if not force:
+                return False
+            self.stop_generation()
+            if not self.gate.take_over(FORCE_UNLOAD_WAIT):
                 return False
         try:
             self._unload_locked()
@@ -959,7 +991,8 @@ class LocalEngineService:
         return out
 
     def _pinned_stem(self) -> Optional[str]:
-        if self.active_job_model is None:
+        # a job being force stopped keeps nothing loaded: its requests are over, the switch may go ahead
+        if self.active_job_model is None or self.stop_state() == "force":
             return None
         try:
             model = self.active_job_model()
@@ -1003,18 +1036,20 @@ class LocalEngineService:
         if pinned and pinned.casefold() != stem.casefold():
             raise LocalLLMError(409, "engine_busy", f"The on-device engine is busy with {pinned} for a running job")
         stop_state = self.stop_state
+        arrived = self._stops
 
         def stop_waiting() -> bool:
             # a queued request gives up on any Stop (graceful lets only the answer being generated finish)
-            return bool(should_stop() or stop_state())
+            return bool(self._stops != arrived or should_stop() or stop_state())
 
         def stop_generating() -> bool:
-            return bool(self._abort.is_set() or should_stop() or stop_state() == "force")
+            return bool(self._stops != arrived or should_stop() or stop_state() == "force")
 
         if stop_waiting():
             raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)")
         if not self.gate.acquire(stop_waiting, on_wait=self._notify):
             raise LocalLLMError(499, "client_closed", "The request was cancelled while waiting")
+        self._holder_stops = arrived
         released = [False]
 
         def release() -> None:
@@ -1026,6 +1061,7 @@ class LocalEngineService:
                 self._clear_gpu_attempt()  # the GPU's first answer ended without taking the app down
             if self._state == "generating":
                 self._set("ready", self._stem)
+            self._holder_stops = None
             self.gate.release()
             self._notify()
             if self._unload_when_idle:
@@ -1033,6 +1069,8 @@ class LocalEngineService:
 
         try:
             self._ensure_loaded(stem, vision=bool(images))
+            if stop_generating():  # a Stop during the load (native, it ran to its end): no prompt evaluation
+                raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)")
             engine = self.engine
             n_ctx = int(engine.n_ctx or self.context_for(stem))
             prompt_tokens = int(engine.count_prompt(messages))
@@ -1206,6 +1244,9 @@ def _primed(deltas: Any, n_ctx: int) -> Any:
         first = next(deltas)
     except StopIteration:
         return iter(())
+    except eng.GenerationStopped as exc:
+        deltas.close()
+        raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)") from exc
     except eng.ContextOverflow as exc:
         deltas.close()
         raise LocalLLMError(400, "context_length_exceeded",

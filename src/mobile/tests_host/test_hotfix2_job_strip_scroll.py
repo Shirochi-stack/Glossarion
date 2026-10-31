@@ -668,6 +668,12 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
             for n in range(3):  # a few requests and log lines before the reader goes down
                 await h.job_tick(n)
                 await client.frame()
+            first = 3
+            while screen.requests_box.height is None:  # the page's height is still once the cards fill their box
+                await h.job_tick(first)
+                await client.frame()
+                first += 1
+                assert first < 15, "the cards never filled their box"
             await client.user_scroll_to(client.max_extent)
             await client.frame()
             assert client.distance_from_end == 0.0
@@ -676,7 +682,7 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
             footer = h.footer_height()
             heights = [client.content_height()]
             strip_texts = [h.app.shell.global_strip.subtitle_text.value]
-            for n in range(3, 15):
+            for n in range(first, 15):
                 await h.job_tick(n)
                 await client.frame()
                 heights.append(client.content_height())

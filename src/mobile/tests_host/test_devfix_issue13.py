@@ -379,7 +379,7 @@ def test_book_chats_show_every_book_and_tap_to_the_first_card(desktop_store_cls,
                 job.earlier_requests_button.on_click(None)
             assert len(job.requests_column.controls) == total
             labels = _row_labels(job)
-            assert labels[0].startswith("Glossary") and labels[-1].startswith(f"Chapter {total - 1} (chunk")
+            assert labels[0].startswith("Glossary") and labels[-1].startswith(f"Chapter {total - 1} ")
         else:
             assert len(hidden) > 2 and all(a > b for a, b in zip(hidden, hidden[1:]))
 
@@ -543,7 +543,7 @@ def test_jump_to_sheet_and_search_reach_the_first_cards(desktop_store_cls, isola
         slot = view.transcript.slot_for(view._scroll_key_for(chapter_3))
         assert slot is not None and isinstance(slot.card, JobCard) and slot.slot_key == f"job-{first_book}"
         assert slot.card.title_text.value == "book01.epub" and slot.card.requests_tile.expanded
-        assert any(label.startswith("Chapter 3 (chunk") for label in _row_labels(slot.card))
+        assert any(label.startswith("Chapter 3 ") for label in _row_labels(slot.card))
         assert scrolls[-1]["scroll_key"].value == f"job-{first_book}"
         await _rerender_everything(view)
         # the book's own file card, too
@@ -979,7 +979,7 @@ def test_the_owners_book_chat_through_the_real_pipeline(tmp_path):
     # jump-to: the first card, and chapter 3's request row inside the book's JobCard
     assert r["jump_first"] == {"window_start": 0, "slot": "UserBubble", "kept": True}
     jump = r["jump_chapter"]
-    assert jump["slot"] == "job-60" and jump["expanded"] and jump["row"].startswith("Chapter 3 (chunk")
+    assert jump["slot"] == "job-60" and jump["expanded"] and jump["row"].startswith("Chapter 3 ")
     assert r["writes_outside"] == [], "the run wrote outside its sandbox"
 
 
@@ -1179,7 +1179,7 @@ async def _live_child_scenario(tmp_root: Path) -> dict:
         out["jump_chapter"] = {"slot": getattr(slot, "slot_key", None),
                                "expanded": bool(slot is not None and getattr(slot.card, "requests_tile", None)
                                                 and slot.card.requests_tile.expanded),
-                               "row": next((r for r in rows if str(r).startswith("Chapter 3 (chunk")), "")}
+                               "row": next((r for r in rows if str(r).startswith("Chapter 3 ")), "")}
         out["job_titles_seen"] = titles
     finally:
         try:

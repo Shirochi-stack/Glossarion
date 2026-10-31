@@ -13655,7 +13655,7 @@ def _create_anti_duplicate_section(self, parent):
     self.anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
     
     # Top-P (Nucleus Sampling)
-    def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False):
+    def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False, off_value=None):
         """Helper to create a slider row with label and value display
         var_holder: object that holds the variable (typically self)
         var_name: string name of the attribute to set
@@ -13709,7 +13709,7 @@ def _create_anti_duplicate_section(self, parent):
                 else:
                     actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
                     setattr(var_holder, var_name, actual_value)
-                    if off_at_zero and actual_value <= 0:
+                    if (off_at_zero and actual_value <= 0) or (off_value is not None and actual_value <= off_value):
                         value_lbl.setText("OFF")
                     elif decimals == 1:
                         value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
@@ -13726,7 +13726,7 @@ def _create_anti_duplicate_section(self, parent):
         return slider, value_lbl
     
     self.top_p_var = self.config.get('top_p', 1.0)
-    top_p_slider, self.top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'top_p_var', 0.1, 1.0, decimals=2)
+    top_p_slider, self.top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'top_p_var', 0.0, 1.0, decimals=2, off_at_zero=True)
     
     # Min-P (Relative Probability Cutoff)
     self.min_p_var = self.config.get('min_p', 0.0)
@@ -13765,15 +13765,15 @@ def _create_anti_duplicate_section(self, parent):
     
     # Frequency Penalty
     self.frequency_penalty_var = self.config.get('frequency_penalty', 0.0)
-    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'frequency_penalty_var', 0.0, 2.0, decimals=2)
+    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'frequency_penalty_var', 0.0, 2.0, decimals=2, off_at_zero=True)
     
     # Presence Penalty
     self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
-    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=2)
+    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=2, off_at_zero=True)
     
     # Repetition Penalty
     self.repetition_penalty_var = self.config.get('repetition_penalty', 1.0)
-    rep_slider, self.rep_penalty_value_label = _create_slider_row(core_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
+    rep_slider, self.rep_penalty_value_label = _create_slider_row(core_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2, off_value=1.0)
 
     # Candidate Count (Gemini)
     self.candidate_count_var = self.config.get('candidate_count', 1)

@@ -863,7 +863,6 @@ class ModelSheet:
                                          use_model=self._use_local_model,
                                          current_model=lambda: str(self.current.get("model") or ""),
                                          notify=self._note, spawn=self.env.spawn, on_change=self.render_ondevice)
-            self.ondevice.offer_gpu_presets_once()  # Android: the Q4_0 presets show whatever the GPU switch says
             try:
                 service.downloads.scan()  # paused parts of an earlier run (Resume)
             except Exception:
@@ -901,9 +900,9 @@ class ModelSheet:
         return spawn(coro) if spawn is not None else asyncio.ensure_future(coro)
 
     def ondevice_rows(self) -> list:
-        """The On-device tab: every preset (Prefs) and every other downloaded ``local/`` model (user-added
-        Hugging Face files) with size, "Reads images", the RAM hint and one state button, then the link to
-        Model manager › On-device."""
+        """The On-device tab: every preset (Prefs), the Custom rows and every other downloaded ``local/`` model
+        (user-added Hugging Face files) with size, "Reads images", the RAM hint and one state button, then the
+        link to Model manager › On-device."""
         flow = self.ondevice_flow()
         if flow is None:
             return [ft.Container(content=ft.Text("On-device models need the app's on-device engine.",
@@ -919,8 +918,10 @@ class ModelSheet:
                 content=ft.Text(reason or "The on-device engine is not available in this build.", color=ft.Colors.ERROR,
                                 theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
                 padding=ft.Padding.only(left=12, right=12, top=4), key="ondevice-unavailable"))
+        from glossarion_mobile.services.local_llm.presets import CUSTOM_FAMILIES
+
         preset_rows = flow.presets()
-        rows.append(self._section_header("Presets", count=len(preset_rows)))
+        rows.append(self._section_header("Presets", count=len(preset_rows) + len(CUSTOM_FAMILIES)))
         if not preset_rows:
             rows.append(ft.Container(content=ft.Text("No presets. Add one in Model manager › On-device.",
                                                      color=ft.Colors.ON_SURFACE_VARIANT,
@@ -928,6 +929,7 @@ class ModelSheet:
                                      padding=ft.Padding.only(left=12, top=4), key="ondevice-presets-empty"))
         for index, preset in enumerate(preset_rows):
             rows.append(self._ondevice_preset_row(flow, index, preset))
+        rows.extend(self._ondevice_custom_row(flow, family) for family in CUSTOM_FAMILIES)
         downloaded, pending = flow.other_models(preset_rows)
         if downloaded or pending:
             rows.append(self._section_header("Downloaded", count=len(downloaded) + len(pending)))
@@ -1040,6 +1042,17 @@ class ModelSheet:
         return self._ondevice_card(key, str(preset.get("name") or stem or "Model"), lines, buttons,
                                    selected=state == "in_use", on_click=on_click, progress=progress,
                                    progress_key=f"{key}-progress" if state in ("downloading", "paused") else None)
+
+    def _ondevice_custom_row(self, flow: Any, family: dict) -> ft.Control:
+        """A Custom row: its button opens the family's menu of sizes and quants (``CustomModelSheet``)."""
+        from glossarion_mobile.ui.screens.local_models_panel import custom_note, tapped_page
+
+        key = f"ondevice-custom-{family['id']}"
+        open_menu = lambda e, f=family["id"]: flow.open_custom(f, page=tapped_page(e) or self._page)  # noqa: E731
+        lines = [ft.Text(custom_note(family), theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
+                         overflow=ft.TextOverflow.ELLIPSIS, color=ft.Colors.ON_SURFACE_VARIANT, key=f"{key}-facts")]
+        buttons = [ft.FilledTonalButton(content="Custom", key=f"{key}-action", on_click=open_menu)]
+        return self._ondevice_card(key, f"Custom · {family['name']}", lines, buttons, on_click=open_menu)
 
     @staticmethod
     def _file_ram(flow: Any, stem: str) -> str:

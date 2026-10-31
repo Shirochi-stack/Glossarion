@@ -42,10 +42,11 @@ def test_the_newest_in_flight_request_names_spine_chapter_and_chunk():
     assert request_position(segments + [_seg("Metadata translation")], lambda name: spine.get(name, 0)) == \
         "[5] Ch. 3 (1/4)"
     assert request_position([_seg("Metadata translation")]) == ""
-    assert request_position([_seg("Chapter 3 (chunk 1/4)", complete=True)]) == ""
+    # owner 2026-10-31: between two requests the line keeps the newest finished chapter
+    assert request_position([_seg("Chapter 3 (chunk 1/4)", complete=True)]) == "Ch. 3 (1/4)"
     # no file (or one the OPF does not list): no spine number; a text source's sections
     assert request_position([_seg("Chapter 12 (chunk 2/2)")]) == "Ch. 12 (2/2)"
-    assert request_position([_seg("Section 4 (chunk 1/1) · Section_4.txt")], lambda name: 0) == "Sec. 4 (1/1)"
+    assert request_position([_seg("Section 4 (chunk 1/1) · Section_4.txt")], lambda name: 0) == "Sec. 4"
 
 
 def _snap(**kwargs):

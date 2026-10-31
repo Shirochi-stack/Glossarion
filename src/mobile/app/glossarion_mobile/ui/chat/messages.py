@@ -36,7 +36,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     split_long_output,
     timestamp_label,
 )
-from glossarion_mobile.ui.chat.stream_bridge import segment_processing_label
+from glossarion_mobile.ui.chat.stream_bridge import request_label_text, segment_processing_label
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_AVATAR
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
@@ -310,7 +310,7 @@ class AssistantMessage(ft.Column):
     def _header(self) -> str:
         parts = ["GLOSSARION"]
         if self.request_label:
-            parts.append(self.request_label)
+            parts.append(request_label_text(self.request_label))
         stamp = timestamp_label(self.created_at)
         if stamp:
             parts.append(stamp)

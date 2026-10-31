@@ -50,8 +50,8 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 log = logging.getLogger("glossarion.local_llm")
 
-__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GpuUnavailable", "LlamaEngine",
-           "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
+__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
+           "GpuUnavailable", "LlamaEngine", "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
 ENGINE_VERSION = "0.3.32"
@@ -68,6 +68,10 @@ _VISION: list = []  # cached vision_status() result
 
 class EngineUnavailable(RuntimeError):
     pass
+
+
+class GenerationStopped(RuntimeError):
+    """A Stop arrived while the prompt was being evaluated: no token was generated."""
 
 
 class GpuUnavailable(RuntimeError):
@@ -504,49 +508,55 @@ class LlamaEngine(_Base):
         self.last_finish = "stop"
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every
-        # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop.
-        if handler is not None:
-            # the MTMD handler evaluates the prompt (text and image chunks) in this call and returns the
-            # lazy token stream; the text handler is back in place for the next request right after
-            text_handler = llm.chat_handler
-            llm.chat_handler = handler
-            try:
-                chunks = llm.create_chat_completion(**kwargs)
-            except ValueError as exc:
-                if "n_ctx" in str(exc):
-                    raise ContextOverflow(str(exc)) from exc
-                raise
-            finally:
-                llm.chat_handler = text_handler
-        else:
-            chunks = llm.create_chat_completion(**kwargs)
-        repeat_watch = None
-        if params.get("forced_truncation_seconds"):
-            from forced_truncation import RepetitionWatch
-
-            repeat_watch = RepetitionWatch("\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user"),
-                                           params["forced_truncation_seconds"])
+        # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop; until the first
+        # chunk (the prompt, which can take minutes on a phone) a Stop is seen between two decodes.
+        prompt_done = _stop_between_decodes(llm, should_stop)
         try:
-            for index, chunk in enumerate(chunks):
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                text = delta.get("content")
-                if text:
-                    completion += 1
-                    yield text
-                    if repeat_watch is not None and repeat_watch.feed(text):
-                        # Forced Truncation: closing the generator stops sampling; the client sees length, or
-                        # stop for a glossary request under "Mark glossary forced truncation as complete"
-                        self.last_finish = params.get("forced_truncation_finish") or "length"
+            if handler is not None:
+                # the MTMD handler evaluates the prompt (text and image chunks) in this call and returns the
+                # lazy token stream; the text handler is back in place for the next request right after
+                text_handler = llm.chat_handler
+                llm.chat_handler = handler
+                try:
+                    chunks = llm.create_chat_completion(**kwargs)
+                except ValueError as exc:
+                    if "n_ctx" in str(exc):
+                        raise ContextOverflow(str(exc)) from exc
+                    raise
+                finally:
+                    llm.chat_handler = text_handler
+            else:
+                chunks = llm.create_chat_completion(**kwargs)
+            repeat_watch = None
+            if params.get("forced_truncation_seconds"):
+                from forced_truncation import RepetitionWatch
+
+                repeat_watch = RepetitionWatch("\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user"),
+                                               params["forced_truncation_seconds"])
+            try:
+                for index, chunk in enumerate(chunks):
+                    prompt_done()
+                    choice = (chunk.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        completion += 1
+                        yield text
+                        if repeat_watch is not None and repeat_watch.feed(text):
+                            # Forced Truncation: closing the generator stops sampling; the client sees length, or
+                            # stop for a glossary request under "Mark glossary forced truncation as complete"
+                            self.last_finish = params.get("forced_truncation_finish") or "length"
+                            break
+                    if choice.get("finish_reason"):
+                        self.last_finish = choice["finish_reason"]
+                    if index % STOP_CHECK_EVERY == 0 and should_stop():
                         break
-                if choice.get("finish_reason"):
-                    self.last_finish = choice["finish_reason"]
-                if index % STOP_CHECK_EVERY == 0 and should_stop():
-                    break
+            finally:
+                close = getattr(chunks, "close", None)
+                if close is not None:
+                    close()
         finally:
-            close = getattr(chunks, "close", None)
-            if close is not None:
-                close()
+            prompt_done()
         prompt = 0
         try:
             prompt = self.count_prompt(messages)
@@ -558,6 +568,31 @@ class LlamaEngine(_Base):
 
 class ContextOverflow(ValueError):
     """The prompt with its images does not fit ``n_ctx`` (libmtmd's own count, after the estimate)."""
+
+
+def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable[[], None]:
+    """While a prompt is evaluated ``Llama.eval`` runs one native ``llama_decode`` per ``n_batch`` tokens
+    with no stop check: raise ``GenerationStopped`` before the next one on a Stop (``Llama.eval`` keeps its
+    token count and the context's memory consistent for the next request). The decode running then ends
+    first: native code is never interrupted. Returns the function that ends the checks (safe to call again).
+    The MTMD handler's image chunks do not go through here."""
+    context = getattr(llm, "_ctx", None)
+    decode = getattr(context, "decode", None)
+    if decode is None:
+        return lambda: None
+
+    def checked(batch: Any) -> Any:
+        if should_stop():
+            raise GenerationStopped("A Stop arrived while the prompt was being evaluated")
+        return decode(batch)
+
+    context.decode = checked
+
+    def done() -> None:
+        if vars(context).get("decode") is checked:
+            del context.decode  # the class's own method again
+
+    return done
 
 
 def _close(llm: Any) -> None:

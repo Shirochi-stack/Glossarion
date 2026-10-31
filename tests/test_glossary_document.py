@@ -619,12 +619,15 @@ REWIRE_SPANS = (
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1810, 3),
     # U9 gap closures: Entry Type Configuration / Custom Fields call the glossary_document rules
-    (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3155, 3158, 4),
+    (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3093, 3093, 6), (3155, 3158, 4),
     (3168, 3171, 4),
     # U9 gap closures (round 3): the Balanced/Full Compression Factor + Auto closure calls the
     # settings_rules glossary compression rule (tests/parity/test_u9_gap_round3.py)
     (3979, 3992, 7), (3998, 3998, 1), (4000, 4008, 2),
-    (4144, 4149, 2), (4151, 4156, 2), (5802, 5809, 1), (5854, 5859, 1),
+    (4144, 4149, 2), (4151, 4156, 2),
+    (5802, 5809, 1), (5854, 5859, 1),
+    # the Anti-Duplicate sliders can be set to OFF (not sent: the server's own setting applies)
+    (6036, 6036, 1), (6090, 6090, 1), (6107, 6107, 1), (6146, 6146, 1), (6150, 6150, 1), (6162, 6162, 1),
     # the editor's "Glossary File:" ◀ combo ▶ row is qt_widget_helpers.NavComboRow (shared with the QA
     # scanner's glossary name review); its ◀/▶ and arrow-visibility helpers are the row's
     (7601, 7632, 9),

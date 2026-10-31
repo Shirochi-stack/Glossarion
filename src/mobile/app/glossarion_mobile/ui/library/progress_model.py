@@ -362,11 +362,12 @@ def spine_rows(model: Any, *, show_raw_title: bool = False) -> tuple:
 
 
 def _source_for(service: Any, book: Mapping[str, Any]) -> str:
-    """The raw source, else a path named like the workspace (never created, never linked)."""
+    """The raw source, else a path named like the workspace (never created, never linked; a run's workspace
+    that does not exist yet, in its glossary stage, still names the book)."""
     source = service.raw_source(book)
     if source:
         return source
-    folder = book_workspace(service, book)
+    folder = book_workspace(service, book) or str(book.get("output_folder") or "")
     kind = str(book.get("workspace_kind") or "epub").lower()
     ext = {"txt": ".txt", "pdf": ".pdf", "html": ".html"}.get(kind, ".epub")
     return os.path.join(folder, os.path.basename(os.path.normpath(folder)) + ext) if folder else ""
@@ -1079,7 +1080,7 @@ def workspace_root_owner(service: Any, book: Mapping[str, Any]) -> Any:
     beside its workspace instead: ``<run root>/Glossary/<book>/`` while the run is live, and
     ``Attachments/<book>/Glossary/`` once the run finished (``workspace_sync.stash_run_glossary``), so the
     workspace's own parent is searched as the last root."""
-    folder = book_workspace(service, book)
+    folder = book_workspace(service, book) or str(book.get("output_folder") or "")
     if not folder:
         return None
     parent = os.path.dirname(os.path.abspath(folder))

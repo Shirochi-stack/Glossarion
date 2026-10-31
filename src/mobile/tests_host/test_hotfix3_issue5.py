@@ -14,22 +14,21 @@ the "Use GPU" switch through the session the way Flutter sends it (``host_tester
 ``change``). Only llama.cpp itself is missing on the host: ``engine.engine_status`` says it is there, as in
 the APK. Nothing loads or downloads, and the E2E network guard refuses every non-loopback connection.
 
-Hotfix 6 (owner 2026-10-27: "gpu friendly presets are always shown regardless of toggle state"): opening the
-Model manager already lists the Q4_0 presets with the GPU off (added once, without a note); the switch only
-turns the GPU on and off.
+Owner 2026-10-31: the Custom rows (``presets.CUSTOM_FAMILIES``) replace the Q4_0 presets; they show whatever the
+switch says, and the switch only turns the GPU on and off.
 
-``test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model``:
+``test_use_gpu_switch_keeps_the_list_and_every_model``:
 
-1. Before the switch: the four defaults, the owner's own preset (downloaded) and the four Q4_0 rows are
+1. Before the switch: the four defaults, the owner's own preset (downloaded) and the four Custom rows are
    listed, in the Python tree and in the patches the client received. A Hugging Face file no preset names
    sits under "Other downloads". No "Add GPU-friendly presets" button and no note.
 2. ONE tap on the switch, no other event: the GPU goes on, the list stays as it is, no note.
-3. Off: every row stays (the Q4_0 ones too), the owner's preset is still "On this device", the other file is
-   still listed, and both files and registry entries are untouched.
+3. Off: every row stays, the owner's preset is still "On this device", the other file is still listed, and
+   both files and registry entries are untouched.
 4. Repeated toggles (three on/off cycles, a three-tap burst, and a repeated "change true" while it is on):
-   each Q4_0 file is in the list exactly once. There is never a second note or an "already in the list" one.
+   no Q4_0 row joins the list, and there is never a note.
 5. The Model manager closed and opened again rebuilds the panel without duplicates, with the switch on. The
-   model picker's On-device tab (chat › model) lists the same nine presets, each Q4_0 one once.
+   model picker's On-device tab (chat › model) lists the same rows.
 
 Real data stays untouched: the app runs on temp FLET_APP_STORAGE_* dirs (HOME, OUTPUT_DIRECTORY,
 GLOSSARION_LIBRARY_DIR, GLOSSARION_DATA_DIR, GLOSSARION_MODELS_DIR and CONFIG_FILE there; asserted).
@@ -87,7 +86,7 @@ from glossarion_mobile.services.local_llm import presets  # noqa: E402
 from glossarion_mobile.services.local_llm import service as svc  # noqa: E402
 
 DEFAULT_NAMES = [p["name"] for p in presets.DEFAULT_PRESETS]
-GPU_NAMES = [p["name"] for p in presets.GPU_PRESETS]
+CUSTOM_NAMES = [f"Custom · {family['name']}" for family in presets.CUSTOM_FAMILIES]
 GPU_FILES = [(p["repo"], p["file"]) for p in presets.GPU_PRESETS]
 BUTTON = "Add GPU-friendly presets (Q4_0)"
 
@@ -96,7 +95,7 @@ MINE = {"name": "My Gemma", "repo": "owner/My-Gemma-GGUF", "file": "My-Gemma-Q8_
 MINE_STEM = "My-Gemma-Q8_0"
 OTHER = ("someone/Other-GGUF", "Other-Q5_K_M.gguf")
 OTHER_STEM = "Other-Q5_K_M"
-EXPECTED = DEFAULT_NAMES + [MINE["name"]] + GPU_NAMES
+EXPECTED = DEFAULT_NAMES + [MINE["name"]]
 
 
 @pytest.fixture
@@ -223,9 +222,9 @@ async def _assert_list(tester, panel, prefs, *, gpu_on: bool) -> None:
     """The saved presets and what the page shows: every preset once, the owner's models intact."""
     assert [p["name"] for p in presets.load_presets(prefs)] == EXPECTED
     saved = [(p["repo"], p["file"]) for p in presets.load_presets(prefs)]
-    assert all(saved.count(pair) == 1 for pair in GPU_FILES), saved
-    assert _row_names(panel) == EXPECTED
-    for name in EXPECTED:
+    assert not any(pair in saved for pair in GPU_FILES), saved
+    assert _row_names(panel) == EXPECTED + CUSTOM_NAMES
+    for name in EXPECTED + CUSTOM_NAMES:
         assert await _count(tester, text=name) == 1, name  # one visible row each, none duplicated
     assert await _count(tester, key="local-gpu-presets") == 0  # the extra button never shows
     assert await _count(tester, text=BUTTON) == 0
@@ -277,7 +276,7 @@ async def _tap_switch(tester) -> None:
 # ---- the scenario ------------------------------------------------------------------------------------------
 
 
-def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, offline):
+def test_use_gpu_switch_keeps_the_list_and_every_model(phone, offline):
     from host_tester import PyTester
 
     from glossarion_mobile.services import model_catalog as mc
@@ -306,14 +305,14 @@ def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, 
             _seed_own_models(engine)
             prefs = app.prefs
 
-            # 1. Model manager › On-device with the GPU off: every preset, the Q4_0 ones too (hotfix 6), no button
+            # 1. Model manager › On-device with the GPU off: every preset and the Custom rows, no button
             start = len(conn.raw_sent)
             screen, panel = await _open_on_device_tab(session, app, tester)
             assert not engine.use_gpu()
             await _assert_list(tester, panel, prefs, gpu_on=False)
-            # the phone got them: the patches sent for the open carry every Q4_0 row
-            assert await _until(lambda: set(GPU_NAMES) <= set(_sent_strings(conn, start))), \
-                [s for s in _sent_strings(conn, start) if "GPU" in s or "Q4_0" in s]
+            # the phone got them: the patches sent for the open carry every Custom row
+            assert await _until(lambda: set(CUSTOM_NAMES) <= set(_sent_strings(conn, start))), \
+                [s for s in _sent_strings(conn, start) if "Custom" in s]
             assert await _count(tester, text="Use GPU (experimental)") == 1
             assert panel.other_card.visible and said == []  # added without a note
 
@@ -360,12 +359,13 @@ def test_use_gpu_on_shows_the_q4_0_presets_at_once_and_keeps_every_model(phone, 
             assert screen2 is not screen and panel2 is not panel
             await _assert_list(tester, panel2, prefs, gpu_on=True)
             assert said == []
-            # the model picker's On-device tab (chat › model) shows the same nine presets
+            # the model picker's On-device tab (chat › model) shows the same rows
             sheet = ms.ModelSheet(current_model=str(app.config_store.get("model", "") or ""), env=ms.sheet_env(),
                                   tab="ondevice")
             texts = [t for row in sheet.ondevice_list.controls for t in _texts_of(row)]
-            assert f"Presets · {len(EXPECTED)}" in texts, [t for t in texts if t.startswith("Presets")]
-            for name in GPU_NAMES:
+            count = len(EXPECTED) + len(CUSTOM_NAMES)
+            assert f"Presets · {count}" in texts, [t for t in texts if t.startswith("Presets")]
+            for name in CUSTOM_NAMES:
                 assert texts.count(name) == 1, (name, texts.count(name))
             assert MINE["name"] in texts
         finally:

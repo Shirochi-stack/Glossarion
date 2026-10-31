@@ -91,6 +91,12 @@ def segment_request_number(segment: dict) -> int:
         return 0
 
 
+def request_label_text(label: Any) -> str:
+    """A request's title as shown: "(chunk 1/1)" says nothing, so only a split chapter names its chunk. The stored
+    label keeps it (the shared stream matches cards on it)."""
+    return re.sub(r"\s*\(chunk\s+1\s*/\s*1\)", "", str(label or ""), flags=re.IGNORECASE)
+
+
 def segment_processing_label(segment: dict) -> str:
     """The card's disclosure label: "Thinking (1,234 tokens)", "Generating Text (56 tokens)",
     "Token summary  ·  Thinking …  ·  Text …", the NVIDIA queue status or "Processing"."""

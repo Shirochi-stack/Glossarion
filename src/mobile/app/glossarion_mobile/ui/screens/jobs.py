@@ -558,7 +558,7 @@ class JobsFeature:
             else:
                 navigate(name, params)
 
-    def _open_progress_folder(self, folder: str) -> Any:
+    def _open_progress_folder(self, folder: str, **options: Any) -> Any:
         """Job detail › Progress: the output folder in the Progress manager (the chat's workspace
         opener: ``ChatFeature.open_progress`` builds the Library row and its route id)."""
         chat_feature = getattr(self.app, "chat_feature", None)
@@ -566,7 +566,7 @@ class JobsFeature:
         if not callable(opener):
             self._notify("The Progress manager is not available in this session")
             return None
-        return self.spawn(opener(folder))
+        return self.spawn(opener(folder, **options))
 
     def _navigate_route(self, route: str) -> None:
         navigate = getattr(self.app, "navigate", None)

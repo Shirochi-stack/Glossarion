@@ -259,8 +259,10 @@ def _emit_direct_text_glossary_stream_start(label, source_thread=""):
     response has no reasoning block. Without an explicit request boundary the
     GUI treats those otherwise-unlabelled lines as application logs and only
     sees the authoritative response payload at completion.
+    ``GLOSSARY_STREAM_CARDS``: a host that lists a run's requests outside Direct
+    Text (the mobile job page) gets the same boundary, with the chapter's file.
     """
-    if os.getenv("DIRECT_TEXT_ACTIVE", "0") != "1":
+    if os.getenv("DIRECT_TEXT_ACTIVE", "0") != "1" and os.getenv("GLOSSARY_STREAM_CARDS", "0") != "1":
         return
     payload = json.dumps(
         {
@@ -5595,12 +5597,39 @@ def _skip_identical_entries(glossary, dedup_log=None):
     return kept
 
 
+def _filter_cjk_script_entries(glossary, dedup_log=None):
+    """"Filter CJK script entries" (GLOSSARY_CJK_SCRIPT_FILTER) on a whole glossary, with the parser's two rules: the
+    parser only sees a new response, so this also covers entries saved while the toggle was off. A book title entry
+    stays: a title can stay unchanged."""
+    if not _glossary_cjk_filter_active():
+        return glossary
+    cjk_source = _is_cjk_source_detected([str(e.get('raw_name', '') or '') for e in glossary if isinstance(e, dict)])
+    kept = []
+    for entry in glossary:
+        raw = str(entry.get('raw_name', '') or '').strip() if isinstance(entry, dict) else ''
+        trans = str(entry.get('translated_name', '') or '').strip() if isinstance(entry, dict) else ''
+        is_book = isinstance(entry, dict) and str(entry.get('type', '') or '').strip().lower() == 'book'
+        reason = ""
+        if not is_book and trans and _contains_cjk(trans):
+            reason = "CJK in translated name"
+        elif not is_book and raw and cjk_source and not _contains_cjk(raw):
+            reason = "no CJK in raw name"
+        if reason:
+            if dedup_log is not None:
+                dedup_log.append({"pass": 0, "action": "removed_cjk_filter", "kept": "", "dropped": raw,
+                                  "reason": reason})
+            continue
+        kept.append(entry)
+    return kept
+
+
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None, glossary_path=None,
                            gender_tracker=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
     
-    First, "Skip identical entries" removes entries whose translated name equals their raw name.
+    First, "Skip identical entries" removes entries whose translated name equals their raw name, and
+    "Filter CJK script entries" removes the entries its rules reject.
     Pass 1: Remove entries with similar raw names (fuzzy matching)
     Pass 2: Remove entries with identical translated names (exact matching)
     
@@ -5661,6 +5690,10 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None, glossary_pa
     glossary = _skip_identical_entries(glossary, dedup_log)
     if len(glossary) != original_count:
         print(f"[Dedup] ⏭️ Skip identical entries: {original_count - len(glossary)} removed (translated = raw)")
+    before_cjk_filter = len(glossary)
+    glossary = _filter_cjk_script_entries(glossary, dedup_log)
+    if len(glossary) != before_cjk_filter:
+        print(f"[Dedup] 🚫 CJK Filter: {before_cjk_filter - len(glossary)} removed")
 
     # PASS 1: Raw name deduplication
     print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
