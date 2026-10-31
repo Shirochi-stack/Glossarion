@@ -1491,11 +1491,13 @@ hiddenimports = list(set(hiddenimports))
 # EXCLUSIONS (Packages to exclude to reduce size)
 # ============================================================================
 
+# websocket-client: cdp_browser (authchatgpt, authds) and opera_aria import it inside functions
+hiddenimports.append('websocket')
+
 excludes = [
-    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    # POE (no longer needed; imports guarded by try/except)
     'poe_api_wrapper', 'poe_api_wrapper.*',
     'ballyregan', 'ballyregan.*',
-    'websocket', 'websocket.*',
 
     # Testing frameworks (but NOT unittest - needed by PyTorch)
     'pytest', 'nose',

@@ -1273,11 +1273,13 @@ hiddenimports.extend(encoding_modules)
 # Remove duplicates
 hiddenimports = sorted(set(hiddenimports))
 
+# websocket-client: cdp_browser (authchatgpt, authds) and opera_aria import it inside functions
+hiddenimports.append('websocket')
+
 excludes = [
-    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    # POE (no longer needed; imports guarded by try/except)
     'poe_api_wrapper', 'poe_api_wrapper.*',
     'ballyregan', 'ballyregan.*',
-    'websocket', 'websocket.*',
 
     # CUDA-specific distributions (retain CPU torch and its Python CUDA stubs).
     'nvidia', 'nvidia.*',
