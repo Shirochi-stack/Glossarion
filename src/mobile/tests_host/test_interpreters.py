@@ -1950,6 +1950,32 @@ def test_the_memory_rule_counts_only_children_that_are_new(monkeypatch):
 
 
 @needs_interpreters
+def test_interpreters_are_created_one_at_a_time(tmp_path, monkeypatch):
+    """Created at the same moment, one failed now and then on Python 3.13 (CI): and that decides for as long as the app runs."""
+    real = interpreters._create
+    state = {"now": 0, "most": 0}
+    guard = threading.Lock()
+
+    def counted():
+        with guard:
+            state["now"] += 1
+            state["most"] = max(state["most"], state["now"])
+        time.sleep(0.1)
+        try:
+            return real()
+        finally:
+            with guard:
+                state["now"] -= 1
+
+    monkeypatch.setattr(interpreters, "_create", counted)
+    with interpreters.InterpreterPool(3, work_dir=str(tmp_path)) as made:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as outside:
+            assert sorted(outside.map(lambda n: made.call(WORKERS, "sleep_then", (0.3, n)), range(3))) == [0, 1, 2]
+        assert made.started == 3
+    assert state["most"] == 1
+
+
+@needs_interpreters
 def test_a_child_that_failed_means_threads_for_the_rest_of_this_run_of_the_app(plenty_of_memory, monkeypatch):
     """No second try at something that failed, and a failing child costs its memory for good: each job would leak another."""
     attempts: list = []

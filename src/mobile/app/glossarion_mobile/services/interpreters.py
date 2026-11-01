@@ -128,6 +128,10 @@ def _low_level() -> Any:
 _api = _low_level()
 #: (module, function) every new child runs, ``set_child_setup``
 _child_setup: Optional[tuple] = None
+#: One interpreter is created or destroyed at a time. At the same moment, creating one failed now and then ("interpreter
+#: creation failed", Linux CI, Python 3.13.18, 1 in a full run of these tests), and a failure decides for as long as the
+#: app runs.
+_lifecycle_lock = threading.Lock()
 
 
 def available() -> bool:
@@ -318,7 +322,8 @@ class _Child:
             del job, work, done
         if self.handle is not None:
             try:
-                _api.destroy(self.handle)
+                with _lifecycle_lock:
+                    _api.destroy(self.handle)
             except Exception:
                 log.debug("a child interpreter could not be destroyed", exc_info=True)
             if self.on_destroyed is not None:
@@ -595,7 +600,8 @@ class InterpreterPool:
     def _prepare(self, child: _Child) -> None:
         """On the child's thread."""
         try:
-            child.handle = _create()
+            with _lifecycle_lock:
+                child.handle = _create()
         except InterpreterUnavailable:
             raise
         except Exception as exc:
