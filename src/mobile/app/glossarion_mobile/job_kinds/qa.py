@@ -29,6 +29,16 @@ pickers, mismatch question - happen on the QA screen before the job is queued):
   desktop default stays ``qa_scan_runtime``'s 1000). It is applied inside the per-folder
   settings loader, so every folder of a bulk scan gets it; a saved value always wins and the
   config is never written here;
+* the workers (owner 2026-11-01: "just assign half of all cores"): config.json
+  ``ai_hunter_config.ai_hunter_max_workers`` up to the device's cores; none saved, or the desktop's
+  0 ("all cores"), scans with half the cores (``scan_workers``, ``qa_scan_runtime.mobile_qa_max_workers``);
+* the UI while it scans (``_scan_runtime``, owner 2026-11-01: "the mobile GUI was lagging a lot"): the workers
+  are threads in the interpreter that runs the Flet loop, so each one takes its share of the GIL from it. Measured
+  on the host (``tools/qa_scan_bench.py``): 1, 2, 4 and 8 workers scan about equally fast, a burst of work on the
+  loop takes (workers + 1) times as long, and log lines and repaints are about 1 % of the loop's time. So while a
+  scan runs its CPU workers take turns between their files or comparisons (``_WorkerTurns``: one holds the GIL
+  against the loop, not all of them) and the GIL switch interval is ``SCAN_SWITCH_INTERVAL``. Findings do not change;
+* the API pools of the scan (AI / silent truncation) do not take turns: they wait on the network, not on the GIL;
 * Stop follows the desktop QA escalation (``next_qa_stop_phase``): the first Stop sets the
   graceful flags (``apply_qa_graceful_stop_flags``: scan loop stop, ``GRACEFUL_STOP``,
   ``TRANSLATION_CANCELLED``), a force stop (graceful stop off, or the second Stop) the force
@@ -57,13 +67,21 @@ fills the one key the saved settings lack.
 
 from __future__ import annotations
 
+import collections
+import concurrent.futures
+import contextlib
 import os
+import sys
+import threading
+import time
 import traceback
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 __all__ = ["KINDS", "MOBILE_QUICK_SAMPLE_SIZE", "MODES", "QUICK_SAMPLE_KEY", "REPORT_FILE",
-           "SCAN_PHASE_SOURCE_EXTENSIONS", "normalize_targets", "report_path_for", "run", "run_scan_phase",
-           "saved_quick_sample_size", "scan", "scan_phase_mode", "with_mobile_qa_defaults"]
+           "SCAN_PHASE_SOURCE_EXTENSIONS", "SCAN_SWITCH_INTERVAL", "SCAN_WORKER_TURNS", "WORKERS_KEY",
+           "default_scan_workers",
+           "normalize_targets", "report_path_for", "run", "run_scan_phase", "saved_quick_sample_size",
+           "saved_scan_workers", "scan", "scan_phase_mode", "scan_workers", "with_mobile_qa_defaults"]
 
 MODES = ("quick-scan", "aggressive", "ai-hunter", "custom")
 REPORT_FILE = "validation_results.html"
@@ -75,6 +93,21 @@ QUICK_SAMPLE_KEY = ("qa_scanner_settings", "quick_scan_sample_size")
 #: Glossarion Mobile's value when config.json has none (owner 2026-10-08: the duplicate check is
 #: off by default on phones; the desktop default stays ``qa_scan_runtime``'s 1000)
 MOBILE_QUICK_SAMPLE_SIZE = 0
+#: config.json path of the desktop's "Maximum parallel workers:" (env ``AI_HUNTER_MAX_WORKERS``)
+WORKERS_KEY = ("ai_hunter_config", "ai_hunter_max_workers")
+#: the GIL switch interval (s) while a scan runs. Python's default is 5 ms: on the host 1 ms costs no scan time and
+#: cuts the median wait of the loop's timers to about 1.5 ms. 0.5 ms made a 4-worker scan 6 times slower on Windows.
+SCAN_SWITCH_INTERVAL = 0.001
+#: A scan's CPU workers run one at a time (``_WorkerTurns``). False lets all of them run: at most 10 % less scan time
+#: on the host, and with 4 workers bursts of work on the loop up to 2.5 times as slow in Aggressive's all-pairs stage.
+SCAN_WORKER_TURNS = True
+#: how long (s) a worker keeps its turn over short items (comparisons) before it hands over
+TURN_SLICE = 0.02
+
+
+def default_scan_workers() -> int:
+    """Half the device's cores, at least 1 (``qa_scan_runtime.mobile_qa_max_workers`` without a setting)."""
+    return max(1, (os.cpu_count() or 4) // 2)
 
 
 def report_path_for(folder: str) -> str:
@@ -98,6 +131,117 @@ def with_mobile_qa_defaults(settings: Mapping[str, Any], config: Optional[Mappin
     if saved_quick_sample_size(config) is None:
         out[QUICK_SAMPLE_KEY[1]] = MOBILE_QUICK_SAMPLE_SIZE
     return out
+
+
+def saved_scan_workers(config: Optional[Mapping[str, Any]]) -> Any:
+    """``ai_hunter_config.ai_hunter_max_workers`` saved in config.json (None when there is none)."""
+    settings = (config or {}).get(WORKERS_KEY[0]) if isinstance(config, Mapping) else None
+    return settings.get(WORKERS_KEY[1]) if isinstance(settings, Mapping) else None
+
+
+def scan_workers(config: Optional[Mapping[str, Any]], qa: Any = None) -> int:
+    """The workers a mobile scan uses with this config (the QA screen shows the same number)."""
+    qa = qa if qa is not None else _qa_runtime()
+    saved = saved_scan_workers(config)
+    return qa.mobile_qa_max_workers(0 if saved is None else saved)
+
+
+class _WorkerTurns:
+    """The scan's CPU workers, one at a time and in order. They call ``take`` between their items, and ``leave``
+    when their batch ends. Threads inside the GIL gain no speed from running together (measured), but each one
+    running takes a share of the GIL from the UI loop."""
+
+    def __init__(self, turn: float = TURN_SLICE) -> None:
+        self._turn = turn
+        self._changed = threading.Condition()
+        self._holder: Optional[int] = None
+        self._since = 0.0
+        self._waiting: collections.deque = collections.deque()
+
+    def take(self, stopped: Callable[[], Any]) -> None:
+        """Returns when this thread has the turn, or at once after a stop."""
+        me = threading.get_ident()
+        with self._changed:
+            if self._holder == me:
+                if not self._waiting or time.monotonic() - self._since < self._turn:
+                    return
+                self._hand_over()
+            elif self._holder is None and not self._waiting:
+                self._holder, self._since = me, time.monotonic()
+                return
+            self._waiting.append(me)
+            while self._holder != me:
+                if stopped():
+                    self._waiting.remove(me)
+                    return
+                self._changed.wait(0.05)
+
+    def leave(self) -> None:
+        me = threading.get_ident()
+        with self._changed:
+            if self._holder == me:
+                self._hand_over()
+            elif me in self._waiting:
+                self._waiting.remove(me)
+
+    def _hand_over(self) -> None:
+        self._holder = self._waiting.popleft() if self._waiting else None
+        self._since = time.monotonic()
+        self._changed.notify_all()
+
+
+def _taking_turns(submit: Callable[..., Any]) -> Callable[..., Any]:
+    """``scan_html_folder._submit_worker`` (every CPU batch of a scan, and nothing else) with ``_WorkerTurns``."""
+    turns = _WorkerTurns()
+
+    def submit_taking_turns(pool: Any, worker: Callable[..., Any], args: Any, should_stop: Callable[[], Any]) -> Any:
+        if not isinstance(pool, concurrent.futures.ThreadPoolExecutor):
+            return submit(pool, worker, args, should_stop)
+
+        def batch(batch_args: Any, _check: Any) -> Any:
+            try:
+                turns.take(should_stop)  # a batch's own set-up, and batches without a check between their items
+                return worker(batch_args, check)
+            finally:
+                turns.leave()
+
+        def check() -> Any:
+            turns.take(should_stop)
+            return should_stop()
+
+        return submit(pool, batch, args, check)
+
+    return submit_taking_turns
+
+
+@contextlib.contextmanager
+def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None]:
+    """A running scan: the saved workers in ``AI_HUNTER_MAX_WORKERS`` (this job's config snapshot, not a mirror an
+    earlier run left in the env), the workers taking turns and the short GIL switch interval. All restored after."""
+    previous_workers = os.environ.get("AI_HUNTER_MAX_WORKERS")
+    previous_interval = sys.getswitchinterval()
+    scanner: Any = None
+    if callable(getattr(qa, "mobile_qa_max_workers", None)):
+        os.environ["AI_HUNTER_MAX_WORKERS"] = str(scan_workers(config, qa))
+        if SCAN_WORKER_TURNS:
+            try:
+                import scan_html_folder as scanner
+            except Exception:  # pragma: no cover - the scan itself reports a build without the scanner
+                scanner = None
+    submit = getattr(scanner, "_submit_worker", None)
+    if callable(submit):
+        scanner._submit_worker = _taking_turns(submit)
+    sys.setswitchinterval(min(previous_interval, SCAN_SWITCH_INTERVAL))
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(previous_interval)
+        if callable(submit):
+            scanner._submit_worker = submit
+        if previous_workers is None:
+            os.environ.pop("AI_HUNTER_MAX_WORKERS", None)
+        else:
+            os.environ["AI_HUNTER_MAX_WORKERS"] = previous_workers
 
 
 def normalize_targets(params: Mapping[str, Any], inputs: Sequence[str], *, with_flags: bool = False) -> list:
@@ -253,22 +397,23 @@ def scan(ctx: Any, targets: Sequence[tuple], mode: str, *, disable_word_count: b
     # only a chat-submitted Direct Text workspace opts out of run_qa_scan_path's Direct Text guard
     opt_in: dict = {"allow_direct_text": True} if chat_scan else {}
     try:
-        successful, _failed = qa.run_bulk_qa_scan(
-            folders,
-            mode=mode,
-            epub_path=allowed[0][1] if total == 1 else None,
-            qa_settings=qa_settings,
-            load_settings=load_settings,
-            selected_mode_value=mode,
-            disable_word_count_for_run=bool(disable_word_count),
-            epub_basename_map=epub_basename_map,
-            global_selected_files=None,
-            log=scan_log,
-            stop_flag=stop_flag,
-            owner=ctx.owner,
-            on_report=on_report,
-            **opt_in,
-        )
+        with _scan_runtime(config, qa):
+            successful, _failed = qa.run_bulk_qa_scan(
+                folders,
+                mode=mode,
+                epub_path=allowed[0][1] if total == 1 else None,
+                qa_settings=qa_settings,
+                load_settings=load_settings,
+                selected_mode_value=mode,
+                disable_word_count_for_run=bool(disable_word_count),
+                epub_basename_map=epub_basename_map,
+                global_selected_files=None,
+                log=scan_log,
+                stop_flag=stop_flag,
+                owner=ctx.owner,
+                on_report=on_report,
+                **opt_in,
+            )
     finally:
         if stop_state["phase"] != "idle":
             qa.clear_qa_stop_flags()

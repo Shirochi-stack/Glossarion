@@ -1006,7 +1006,8 @@ def test_resolve_qa_prefers_the_llm_token_repair_like_the_desktop_menu(tmp_path)
     spec = pm.resolve_qa_spec(service, {"name": "Book"}, plan)
     assert spec.kind == "resolve_qa" and spec.inputs == (str(tmp_path / "Book.epub"),)
     assert spec.params["display_info"] == {"progress_key": "2", "output_file": "response_ch002.html"}
-    assert spec.params["label"] == "response_ch002.html" and spec.title == "Book · response_ch002.html"
+    # the job's label is the book, never a chapter file (mobile batch 9.15.11); the params keep the file
+    assert spec.params["label"] == "response_ch002.html" and spec.title == "Book"
     assert spec.params["request"]["actual_num"] == 2
     # neither an LLM-token issue nor a Partial.b request (source gone, issue cleared): refused
     pa.build_partial_b_request = lambda data, info: None

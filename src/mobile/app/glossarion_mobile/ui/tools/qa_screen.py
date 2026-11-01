@@ -6,6 +6,8 @@
   output" (``qa_scanner_settings.quick_scan_sample_size`` / ``qa_auto_search_output``,
   saved like the desktop dialog saves them). On mobile the sample size shows 0 (duplicate
   check off) when none is saved (owner 2026-10-08); the chat's scans use the same value.
+  "Maximum parallel workers:" (``ai_hunter_config.ai_hunter_max_workers``, owner 2026-11-01): half
+  the device's cores when none is saved, up to its cores.
 * **Source**: the SourcePicker (multi-select = bulk scan). Library rows carry the output
   folder and the raw source; Browse finds a picked file's folder with the auto-search.
   Direct Text workspaces are listed but not picked here (desktop rule); a chat scans its own
@@ -52,7 +54,8 @@ log = logging.getLogger("glossarion.tools.qa")
 
 EMBEDDINGS_REASON = ("The embeddings method of silent truncation needs sentence-transformers (torch), which "
                      "cannot run on Android/iOS. The heuristic method always works.")
-THREADS_REASON = "Android and iOS have no process pools: QA scans always use threads (at most 2 workers)."
+THREADS_REASON = ("Android and iOS have no process pools: QA scans always use threads. How many: Maximum parallel "
+                  "workers under Scan options (default: half of this device's cores).")
 
 
 def qa_eligibility(target: tg.ToolTarget) -> Optional[str]:
@@ -135,9 +138,14 @@ class QaScannerScreen(Screen):
             ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(sample), dense=True, keyboard_type=number_keyboard(),
                          helper=qm.QUICK_SAMPLE_HINT, key="qa-sample"),
             lambda _text: self._on_sample(), current=lambda: self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None))
+        self.workers_field = commit_on_blur(
+            ft.TextField(label=qm.WORKERS_LABEL, value=str(qm.workers_shown(self.ctx.config_snapshot())), dense=True,
+                         keyboard_type=number_keyboard(), helper=qm.workers_hint(), key="qa-workers"),
+            lambda _text: self._on_workers(), current=lambda: self.ctx.cfg(qm.WORKERS_KEY, None))
         self.auto_search = ft.Switch(label="Auto-search output", value=bool(self.ctx.cfg("qa_auto_search_output", True)),
                                      on_change=self._on_auto_search, key="qa-auto-search")
-        fields = card("Scan options", [self.sample_field, self.auto_search], icon="TUNE", key="qa-fields")
+        fields = card("Scan options", [self.sample_field, self.workers_field, self.auto_search], icon="TUNE",
+                      key="qa-fields")
         self.targets_column = ft.Column(spacing=4, key="qa-targets")
         self.choose_button = ft.FilledTonalButton(content="Choose…", icon=ft.Icons.FOLDER_OPEN,
                                                   on_click=lambda e: self.open_picker(), key="qa-choose")
@@ -371,6 +379,27 @@ class QaScannerScreen(Screen):
         self.ctx.set_cfg(qm.QUICK_SAMPLE_KEY, value)
         return True
 
+    def _on_workers(self, e: Any = None) -> bool:
+        """Persist the workers field (blur / submit, and at Start like the sample size). False when the text
+        is not a whole number from 1 to the device's cores."""
+        low, high = qm.workers_range()
+        try:
+            value = int(str(self.workers_field.value or "").strip())
+        except ValueError:
+            value = 0
+        if not low <= value <= high:
+            self.workers_field.error = f"Whole number from {low} to {high}"
+            self.ctx.push(self.workers_field)
+            return False
+        self.workers_field.error = None
+        self.ctx.push(self.workers_field)
+        # the number the scan already uses stays unsaved: the untouched default, or a saved number above this
+        # device's cores (a desktop import), which the scan lowers for the run
+        if value == qm.workers_shown(self.ctx.config_snapshot()):
+            return True
+        self.ctx.set_cfg(qm.WORKERS_KEY, value)
+        return True
+
     def _on_auto_search(self, e: Any = None) -> None:
         self.ctx.set_cfg("qa_auto_search_output", bool(self.auto_search.value))
 
@@ -449,6 +478,9 @@ class QaScannerScreen(Screen):
             return None
         if not self._on_sample():  # the value typed last, even when the field still has focus
             self.ctx.say("Fix the Quick Scan sample size first")
+            return None
+        if not self._on_workers():
+            self.ctx.say("Fix the maximum parallel workers first")
             return None
         if self.mode == "custom" and not self.ctx.cfg(("qa_scanner_settings", "custom_mode_settings"), None):
             # Desktop: Custom always goes through its dialog; nothing saved yet means "Save" first.

@@ -15,6 +15,9 @@ module only shapes it for the screen:
 * the Quick Scan duplicate-check sample size on mobile (owner 2026-10-08): 0 (duplicate check
   off) when config.json has none (``job_kinds.qa.MOBILE_QUICK_SAMPLE_SIZE``; the desktop keeps
   1000), editable in Tools › QA Scanner and Settings › QA Scanner Settings;
+* the workers of a scan (owner 2026-11-01): half the device's cores when none is saved
+  (``job_kinds.qa.scan_workers``), editable up to the device's cores in Tools › QA Scanner and
+  Settings › AI Hunter;
 * chat QA (owner 2026-10-08): ``chat_qa_job`` is the ``qa_scan`` job a chat submits for its own
   workspace - Quick Scan with the same sample size as Tools › QA Scanner, the Direct Text
   workspace flagged so the shared scan path's opt-in lets it through;
@@ -39,8 +42,11 @@ from glossarion_mobile.job_kinds.qa import (
     QUICK_SAMPLE_KEY,
     REPORT_FILE,
     SOURCE_DEPENDENT_CHECKS,
+    WORKERS_KEY,
+    default_scan_workers,
     report_path_for,
     saved_quick_sample_size,
+    scan_workers,
     with_mobile_qa_defaults,
 )
 
@@ -64,6 +70,8 @@ __all__ = [
     "ReportEntry",
     "ReportRow",
     "ReportSummary",
+    "WORKERS_KEY",
+    "WORKERS_LABEL",
     "annotate_report_html",
     "chat_qa_job",
     "chat_qa_summary_line",
@@ -83,6 +91,9 @@ __all__ = [
     "report_folder",
     "report_path_for",
     "sample_size_text",
+    "workers_hint",
+    "workers_range",
+    "workers_shown",
 ]
 
 #: The Book page Chapters filter a QA report's "Open in Chapters" selects: the Failed chip
@@ -124,6 +135,8 @@ MODES_BY_VALUE = {card.value: card for card in MODE_CARDS}
 
 QUICK_SAMPLE_LABEL = "Quick Scan duplicate check sample size (characters):"
 QUICK_SAMPLE_HINT = "Used only for duplicate detection; -1 = all text, 0 = disable check"
+#: the desktop QA Scanner settings' label of ``ai_hunter_config.ai_hunter_max_workers``
+WORKERS_LABEL = "Maximum parallel workers:"
 
 #: Custom dialog "Detection Thresholds (%)" rows: key, label, description (desktop wording).
 CUSTOM_THRESHOLDS = (
@@ -182,6 +195,25 @@ def sample_size_text(value: Any) -> str:
     if text == "-1":
         return "duplicate check on the full text (sample size -1)"
     return f"duplicate check sample size {text}"
+
+
+def workers_range() -> tuple:
+    """The values the workers field takes: 1 up to the device's cores."""
+    return 1, os.cpu_count() or 4
+
+
+def workers_shown(config: Optional[Mapping[str, Any]]) -> int:
+    """The workers a scan uses with this config (the field shows them; ``job_kinds.qa.scan_workers``)."""
+    runtime = _runtime()
+    if not callable(getattr(runtime, "mobile_qa_max_workers", None)):
+        return default_scan_workers()
+    return scan_workers(config, runtime)
+
+
+def workers_hint() -> str:
+    low, high = workers_range()
+    return (f"{low} to {high} (this device's cores); default {default_scan_workers()}, half of them. "
+            "Python runs them one at a time, so more workers do not scan faster.")
 
 
 def needs_source(settings: Mapping[str, Any]) -> bool:

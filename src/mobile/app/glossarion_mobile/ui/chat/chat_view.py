@@ -517,6 +517,7 @@ class ChatView:
         self._next_cards: dict = {}
         self.library_picker: Any = None
         self._tool_states: dict = {}  # chat QA job id -> last state seen (its card re-renders on a change)
+        self._counted_ends: set = set()  # jobs whose end dropped the cached failed counts (``_drop_failed_counts``)
         self._library_starting: set = set()  # Plan "created" stamps whose Library start is under way
         # (path, task) of the Library lookup of the file just attached (``_match_library_book``): Send waits for it
         self._library_lookup: Optional[tuple] = None
@@ -1520,8 +1521,9 @@ class ChatView:
             return
         self.refresh_send()
         self._track_tool_job(snapshot)
+        stale_counts = self._drop_failed_counts(snapshot)
         # a book's job a Result card shows (or may show) moved on: the card follows it
-        if self._book_job_changed(snapshot):
+        if self._book_job_changed(snapshot) or stale_counts:
             self.render_transcript(follow=self.transcript.follow_tail)
         run = self.env.runs.live_run(self.cid) if self.env.runs is not None else None
         if run is not None and self.live_job_card is not None:
@@ -1556,6 +1558,19 @@ class ChatView:
             # the Library job a Result's Resume started ended: the card shows how its book stands again
             self._handed_off = {k: v for k, v in self._handed_off.items() if v != job_id}
         return handed or job_id in self._book_jobs.values() or not known
+
+    def _drop_failed_counts(self, snapshot: Any) -> bool:
+        """A job ended, wherever it started (the Library, the Reader, Tools): it may have moved a book's marks, and a
+        Result card's cached "N QA failed" has a key such a job does not change (owner 2026-11-01). True: a cached
+        count must be read again."""
+        job_id = str(getattr(snapshot, "id", "") or "")
+        if not job_id or state_name(snapshot) not in _TERMINAL_JOB_STATES or job_id in self._counted_ends:
+            return False
+        self._counted_ends.add(job_id)
+        keys = [key for key in self._extras if key[0] == "failed"]
+        for key in keys:
+            self._extras.pop(key, None)
+        return bool(keys)
 
     def _track_tool_job(self, snapshot: Any) -> bool:
         """A chat's QA scan changed state: its "QA scan" card shows the new state, and once it ends the

@@ -1805,8 +1805,9 @@ scan (desktop environment against mobile environment).
   That is true on Glossarion Mobile and whenever GLOSSARION_NO_PROCESSES is set. In that case
   `prepare_qa_scan_settings` sets `use_thread_executor = True`, and
   `apply_qa_scan_env_from_settings` adds two variables through `mobile_qa_env_overrides()`:
-  `QA_USE_THREAD_EXECUTOR=1` and `AI_HUNTER_MAX_WORKERS`. The worker value is
-  `MOBILE_QA_MAX_WORKERS` (2), or a smaller positive value already in the environment.
+  `QA_USE_THREAD_EXECUTOR=1` and `AI_HUNTER_MAX_WORKERS`. The worker value is the one already in
+  the environment up to the device's cores; none, or the desktop's 0, means half the cores
+  (owner 2026-11-01, `mobile_qa_max_workers`). `job_kinds.qa` sets it from the job's config.
   `restore_env` restores both with the other QA_* variables.
 - Every caller of `run_qa_scan_path` gets the forcing: the QA tool job, the post-translation scan
   and the Multipass "Failed" scan.

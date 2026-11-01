@@ -1116,7 +1116,9 @@ class ChatFeature:
         ``select`` (U9 ``/retranslate <range>``): ``(start, end)`` chapters selected when the list loads.
         ``glossary``: a glossary job's Progress, its Glossary Progress even when the book has chapters.
         ``chapters``: the Chapters tab whatever exists yet (Sent to the Library card › Progress); before the
-        run's first chapter it lists the EPUB's own chapters. ``bid``: that book's Library row, when it has one."""
+        run's first chapter it lists the EPUB's own chapters. ``bid``: that book's Library row when the card has
+        one, which stands only while it still leads to the book's workspace: the id keeps the path it was made for
+        and an old card outlives moves (``library_target``)."""
         app = self.app
         library = getattr(app, "library", None)
         navigate = getattr(app, "navigate_to", None)
@@ -1127,9 +1129,10 @@ class ChatFeature:
             return None
         # the card's quick jump: without the Tools hub below it, one Back returns to the chat
         jump = {"alone": True} if chapters else {}
-        if chapters and bid:
-            navigate("tools.progress", None, {"out": bid}, **jump)
-            return bid
+
+        def moved(path: str) -> str:
+            finder = getattr(library, "moved_workspace", None)
+            return str(finder(path) or "") if path and callable(finder) else ""
 
         def make_book(workspace: str) -> dict:
             name = os.path.basename(os.path.normpath(workspace))
@@ -1152,18 +1155,55 @@ class ChatFeature:
                 book = make_book(candidate)
                 if _book_glossary_progress(library, book):
                     return book, True
-            return (make_book(workspace), False) if workspace else None
+            if workspace:
+                return make_book(workspace), False
+            elsewhere = moved(str(folder or ""))  # the card's folder went in a move that did not rewrite the card
+            if not elsewhere:
+                return None
+            book = make_book(elsewhere)
+            return book, bool(glossary and _book_glossary_progress(library, book))
 
         def chapters_target() -> Optional[tuple]:
             workspace = (_reader_workspace(str(folder or ""), str(source or ""))
                          or _glossary_workspace(str(folder or ""), str(source or "")))
             stem = os.path.splitext(os.path.basename(str(source or "")))[0]
-            roots = library.output_roots() if not workspace and stem and hasattr(library, "output_roots") else []
-            if roots:  # a job not started yet, or gone: where the run puts this book
-                workspace = os.path.join(str(roots[0]), stem)
+            roots = library.output_roots() if stem and hasattr(library, "output_roots") else []
+            planned = os.path.join(str(roots[0]), stem) if roots else ""  # where the run puts this book
+            for path in (workspace, planned):
+                if path and os.path.isdir(path):
+                    return make_book(path), False
+            for path in (workspace, planned):  # not there: a job not started yet, or a move its record did not follow
+                elsewhere = moved(path)
+                if elsewhere:
+                    return make_book(elsewhere), False
+            workspace = workspace or planned
             return (make_book(workspace), False) if workspace else None
 
-        found = await self._run_io(chapters_target if chapters else target)
+        def library_target() -> tuple:
+            """``(the card's own id, None)`` while that opens the book, else ``("", chapters_target())``: a row with
+            a workspace, or nothing on disk to open instead (the book's EPUB before its run's first chapter; the
+            page says "Book not found" when even that is gone)."""
+            row = library.book_for_bid(bid)
+            if row and library.workspace_for(row):
+                return bid, None
+            elsewhere = chapters_target()
+            on_disk = elsewhere is not None and os.path.isdir(elsewhere[0]["output_folder"])
+            if not on_disk:
+                # this run's row still names the old path of a book moved since it was read
+                followed = moved(str(library.identity_for_bid(bid) or ""))
+                if followed:
+                    return "", (make_book(followed), False)
+            if not on_disk and (row or elsewhere is None or not elsewhere[0].get("raw_source_path")):
+                return bid, None
+            return "", elsewhere
+
+        if chapters and bid and hasattr(library, "book_for_bid"):
+            own, found = await self._run_io(library_target)
+            if own:
+                navigate("tools.progress", None, {"out": own}, **jump)
+                return own
+        else:
+            found = await self._run_io(chapters_target if chapters else target)
         if found is None:
             if notify is not None:
                 notify("No progress to show yet: nothing has been translated or extracted for this book")

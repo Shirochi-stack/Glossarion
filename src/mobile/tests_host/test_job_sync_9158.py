@@ -2,8 +2,9 @@
 
 1. "The mobile version of glossarion still shows dupe jobs if one job started in the chat and one was resumed in
    the jobs menu. We need the chat and the jobs menu in sync." A book has one entry under Finished / Interrupted:
-   a new job for it carries its Stopped / Failed / Interrupted work on (``JobService._drop_superseded``), a
-   resumed Interrupted job is not listed again, and the chat's Result card of that book follows the book's
+   a new job for it carries its Stopped / Failed / Interrupted work on (``JobService._drop_superseded``; since
+   mobile batch 9.15.11 its Done entries too, ``test_m11_job_book_entries``), a resumed Interrupted job is not
+   listed again, and the chat's Result card of that book follows the book's
    newer job (``ChatView._book_job_elsewhere`` over ``JobService.latest_job_for``).
 2. "The translating chapters label also is still wrong ... it's 182 spines in mobile, so then log really should
    have been Translating • [17/182] Ch. 13 ... (1/2)" in the Jobs page and the notification. A job started from
@@ -179,8 +180,8 @@ def test_a_new_job_for_a_book_carries_on_its_unfinished_entries(tmp_path):
     backend.behavior = gate
     job_id = service.submit(JobSpec("translate", "Book", (book,), origin={"type": "library"}))
     assert gate.entered.wait(TIMEOUT)
-    # the Stopped and Interrupted entries of the book leave; its Done entry and the other book's stay
-    assert [s.id for s in service.view().history] == ["done1", "other1"]
+    # the book's Stopped, Done and Interrupted entries leave (owner 2026-11-01); the other book's stays
+    assert [s.id for s in service.view().history] == ["other1"]
     assert service.interrupted == ()
     assert service.latest_job_for(book).id == job_id
     gate.release.set()

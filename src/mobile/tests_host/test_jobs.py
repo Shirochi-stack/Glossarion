@@ -2574,7 +2574,8 @@ def test_a_finished_jobs_counts_follow_the_books_progress_file(tmp_path, monkeyp
     detail._apply(service.snapshot(first))
     assert not detail.qa_chip.visible
     saved = json.loads(Path(service.history_state_path).read_text(encoding="utf-8"))
-    assert next(j for j in saved["jobs"] if j["id"] == first)["progress"]["failed"] == 0  # survives a restart
+    # survives a restart (the second job replaced it under Finished; it is still read by its id)
+    assert next(j for j in saved["carried_on"] if j["id"] == first)["progress"]["failed"] == 0
 
     # no progress file any more: the job keeps what it saved; so does a job over several books
     Path(folder["path"], "translation_progress.json").unlink()

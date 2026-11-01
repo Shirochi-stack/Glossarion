@@ -274,7 +274,7 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 - **Running:** at most one; exclusive per D3.
 - **Queued:** a `ReorderableListView` with drag handles.
 - **Interrupted:** jobs recovered from `jobs/active.state`. Actions: **Resume** and **Discard**.
-- **Finished:** the last 50 jobs from `jobs/history.state`.
+- **Finished:** the last 50 jobs from `jobs/history.state`. A book's entries leave while a new job for that book is queued or running; a chat turn or a chat card's Job button still reads them by id.
 
 **One job per target** (hotfix 1 #5). `JobService.submit` reuses an ACTIVE job (queued, starting, running, waiting at the glossary gate, refining, stopping) that already does the same work instead of queueing a second one: the very same request of any kind (kind + normalised inputs + params), and within a family a job whose target covers the new one (translation: `translate` and attachment sends that name their file; glossary: `extract_glossary` / `glossary_refine`; QA: `qa_scan`; chapter: `single_chapter`, per chapter). The check and the insert run under the service lock, so concurrent taps, two chats with one file, the Library and the chat give one job. The caller gets the existing job's id (`submit_job(spec).reused`, `active_job_for(spec_or_path, family)`); chats bind to their own job, and the UI says "Translating “Book.epub” is already running (Chat · Novel)" · Open for someone else's. Typed-text sends and vision attachments are never merged. Gate answers are idempotent (the first answer wins). Jobs still run one at a time. A chat Send / Plan card Start refused that way records nothing: the Plan card stays (Start can be tapped again), a Send without a Plan card puts its text and attachment back into the composer; a Resume the app's model preflight refuses shows only the preflight's notice ("… · Choose model").
 
@@ -1666,6 +1666,7 @@ Each tool picks its input through the **SourcePicker** sheet, with segments: Rec
 
 - The same `ChaptersPane` component as Book › Chapters.
 - It is used for chat attachment workspaces, non-Library outputs, subtitle ZIPs, image folders and the parallel-pair context.
+- A card's Progress opens it whenever the book's output folder exists: a stored book id keeps the path it was made for, so a book that moved since (the startup join of a split book, a chat book moved into the Library, another output folder, a new iOS container) is found by its folder name under today's output folders (`LibraryService.moved_workspace`). "Book not found" means the folder is really gone.
 - Header:
   - an output `Dropdown` when there are several outputs;
   - the output-folder chip "📁 <folder>" (tap → Files);
@@ -1677,6 +1678,7 @@ Each tool picks its input through the **SourcePicker** sheet, with segments: Rec
 - **Mode cards** (`RadioGroup` of 4 tonal cards with descriptions): **Quick Scan** (Recommended badge) · **Aggressive** · **AI Hunter** · **Custom** (opens the Custom Mode Settings sheet).
 - **Fields:** "Quick Scan duplicate sample size" (-1 = all text, 0 = duplicate check off; on mobile 0 when nothing is saved, a saved value wins; Settings › QA shows the same default, `schema_access.MOBILE_DISPLAY_DEFAULTS`); switch "Auto-search output".
 - **Source:** the SourcePicker (multi-select gives a bulk scan). A name mismatch triggers a warning dialog. Direct Text workspaces are listed but not picked here; a chat scans its own workspace (§2.12.4).
+- **Maximum parallel workers** (`ai_hunter_config.ai_hunter_max_workers`, owner 2026-11-01): half the device's cores when nothing is saved, editable from 1 to the device's cores here and in Settings › AI Hunter. A scan's workers take turns (threads inside one Python interpreter: more of them do not scan faster and would slow the UI; `job_kinds.qa`).
 - **Run:** a QA_SCAN job (JobCard in Jobs; also posted into the chat when started from chat: Quick Scan, same sample size).
 - **Reports** list. It opens the **QA report viewer** (`/tools/qa/report/<rid>`, an `HtmlView`):
   - on Android and iOS, the HTML report in `flet_webview.WebView`, with per-issue "Open in Chapters" (deep link with filter);

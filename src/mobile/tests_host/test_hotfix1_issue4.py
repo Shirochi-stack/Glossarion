@@ -550,7 +550,8 @@ def test_retry_failed_turns_the_result_card_into_the_running_card(iso, offline):
         assert retried.state == "done" and retried.error is None, (retried.state, retried.error)
         seen["checked"] = _assert_samples_live_since(probe, tap_i, retried, probe.cid)
         jobs = _chat_jobs(service, probe.cid)
-        assert len(jobs) == len(before) + 1, (before, jobs)  # one tap, one job
+        # one tap, one job; it replaces the book's earlier entry under Finished (mobile batch 9.15.11)
+        assert len(jobs) == 1 and jobs[0] not in before, (before, jobs)
         I12._check_result(probe, committed, "done", f"Done · {total}/{total} chapters")
         seen["resent"] = _chapter_requests(server.records("translation", since=mark))
 

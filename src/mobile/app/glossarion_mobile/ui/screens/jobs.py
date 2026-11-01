@@ -4,7 +4,8 @@ Jobs page
   One list with sections **Running** (at most one) · **Queued**
   (``ReorderableListView`` with drag handles; ✕ Cancel asks "Cancel job / Keep
   job") · **Interrupted** (recovered from ``jobs/active.state``: Resume ·
-  Discard) · **Finished** (last 50: Open · Retry). Rows: kind icon, title,
+  Discard) · **Finished** (last 50: Open · Retry; a book's entries leave while a new job for it is queued or
+  running, ``JobService._drop_superseded``). Rows: kind icon, title,
   origin line, progress bar (running), state chip. App bar ⋯: Pause / Resume
   queue · Cancel all queued · Clear finished. Extended FAB "Pause queue" /
   "Resume queue" while jobs are queued. Empty state "No jobs yet".
@@ -300,6 +301,23 @@ class JobsScreen(Screen):
     def did_show(self) -> None:
         if not self._unsubs:
             self._unsubs.append(self.service.subscribe(self._on_view))
+        self._refresh_finished()
+
+    def _refresh_finished(self) -> None:
+        """Marks changed with no job running (a Progress manager edit): the finished rows follow when the page shows,
+        off the UI loop; a changed count arrives through ``subscribe``."""
+        refresh = getattr(self.service, "refresh_finished_progress", None)
+        if not callable(refresh):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # a screen built outside the app
+        dispatcher = self.dispatcher
+        if dispatcher is not None and getattr(dispatcher, "bound", False):
+            dispatcher.spawn(dispatcher.run_in_thread(refresh, name="gl-files"))
+        else:
+            loop.run_in_executor(None, refresh)
 
     def dispose(self) -> None:
         for unsub in self._unsubs:
