@@ -353,17 +353,20 @@ class TranslateSheet:
 
 async def submit_translation(ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str], *,
                              review_glossary: bool = False,
-                             config_overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+                             config_overrides: Optional[Mapping[str, Any]] = None,
+                             chat_cid: Optional[str] = None) -> Optional[str]:
     """``LibraryService.translate_spec`` -> ``submit`` (the job service's own preflight, e.g. a missing
     sign-in, says why when it queues nothing): the sheet's Start and :func:`resume_translation`."""
     service = ctx.service
+    tied = {"chat_cid": str(chat_cid)} if chat_cid else {}
     spec = service.translate_spec(list(books), review_glossary=review_glossary, sources=list(sources),
-                                  config_overrides=dict(config_overrides or {}))
+                                  config_overrides=dict(config_overrides or {}), **tied)
     return await service.submit(spec)
 
 
 async def resume_translation(ctx: Any, book: Mapping[str, Any],
-                             config_overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+                             config_overrides: Optional[Mapping[str, Any]] = None,
+                             chat_cid: Optional[str] = None) -> Optional[str]:
     """Resume / Retry failed of a chat book that moved into the Library (issue 4 of the 9.15.7 batch: "clicking
     resume opens a popup instead of just resuming"): the book's translation run starts at once with the
     settings handed over (``config_overrides``: the chat's model / profile / language and the card's Run
@@ -395,7 +398,7 @@ async def resume_translation(ctx: Any, book: Mapping[str, Any],
     if not await confirm_output_root(ctx, [book]):
         return None
     try:
-        job_id = await submit_translation(ctx, [book], [source], config_overrides=overrides)
+        job_id = await submit_translation(ctx, [book], [source], config_overrides=overrides, chat_cid=chat_cid)
     except Exception as exc:
         ctx.say(f"Could not resume: {exc}")
         return None

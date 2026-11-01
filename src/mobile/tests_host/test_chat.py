@@ -1585,10 +1585,53 @@ def test_resume_runs_with_the_chats_model_now(desktop_store_cls, tmp_path):
     assert sent["config_overrides"]["model"] == "gpt-welcome"  # the stored spec is not changed
     spec = JobSpec(DIRECT_TEXT_JOB_KIND, "Chat", (), sent, {"type": "chat", "cid": "5"})
     assert jobs.resume_params(spec)["config_overrides"]["model"] == "gpt-chat"
-    assert jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "library"})) is None
+    # a translation run: the model it was queued with is not kept (owner: Run translation still used GLM 4.6)
+    book = jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "library"}))
+    assert "model" not in book and book["config_overrides"] == {"active_profile": "P"}  # the global model
+    assert sent["config_overrides"]["model"] == "gpt-welcome"
+    own = jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "chat", "cid": "5"}))
+    assert own["config_overrides"]["model"] == "gpt-chat"
+    tied = jobs.resume_params(JobSpec("translate", "Book", (), {**sent, "model_chat": "5"}, {"type": "library"}))
+    assert tied["config_overrides"]["model"] == "gpt-chat"  # started from the chat, for a Library book
+    gone = jobs.resume_params(JobSpec("translate", "Book", (), {**sent, "model_chat": "nope"}, {"type": "library"}))
+    assert "model" not in gone["config_overrides"]  # its chat was deleted: the global model
+    assert jobs.resume_params(JobSpec("translate", "Book", (), {"review_glossary": True}, {"type": "library"})) is None
+    assert jobs.resume_params(JobSpec("manga", "Pages", (), sent, {"type": "library"})) is None  # chose its own model
     runs.detach()
     assert jobs.resume_params is None
     adapter.close()
+
+
+def test_qa_card_run_translation_uses_the_chats_model():
+    """QA card › Run translation (owner: the drawer said GLM 5.3, the run used 4.6): the drawer's chip shows the open
+    chat's model, so the run takes it with the chat's other choices, not only the global model."""
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    calls = []
+
+    async def runner(folder, source, overrides, chat_cid=None):
+        calls.append((folder, source, overrides, chat_cid))
+        return "job1"
+
+    chat_overrides = {"model": "authnan/z-ai/glm-5.3", "target_language": "Korean"}
+    meta = {"qa_multipass": True, "qa_multipass_mode": "fast"}
+    env = types.SimpleNamespace(run_translation=runner, chats=types.SimpleNamespace(meta=lambda cid: meta))
+
+    async def wait(result):
+        return await result
+
+    view = types.SimpleNamespace(env=env, bound=True, cid="7", run_overrides=lambda cid: chat_overrides,
+                                 notify=lambda *a, **k: None, _await=wait)
+    assert asyncio.run(ChatView._qa_run_translation(view, "/w", "/w.epub")) == "job1"
+    folder, source, overrides, cid = calls[-1]
+    assert (folder, source, cid) == ("/w", "/w.epub", "7")
+    assert overrides["model"] == "authnan/z-ai/glm-5.3" and overrides["multipass_mode"] is True
+    assert overrides["output_language"] == "Korean"
+
+    chat_overrides = {}  # the chat has no model of its own: the run inherits the global one
+    view.run_overrides = lambda cid: chat_overrides
+    asyncio.run(ChatView._qa_run_translation(view, "/w", "/w.epub"))
+    assert "model" not in calls[-1][2]
 
 
 def test_resume_rechecks_a_send_time_profile_that_no_longer_exists(desktop_store_cls, tmp_path):

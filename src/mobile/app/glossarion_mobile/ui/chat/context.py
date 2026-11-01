@@ -59,7 +59,7 @@ class ChatEnv(SettingsContext):
     library_translate: Optional[Callable[..., Any]] = None
     profiles: Callable[[], list] = field(default=lambda: [])
     languages: tuple = ()
-    # U13 item 3: QA card "Run translation": (folder, source, config_overrides) -> job id (ChatFeature)
+    # U13 item 3: QA card "Run translation": (folder, source, config_overrides, chat_cid=) -> job id (ChatFeature)
     run_translation: Any = None
     mono: str = "monospace"
     is_android: bool = False
