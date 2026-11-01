@@ -857,6 +857,53 @@ def test_active_sdk_path_preflight_and_corrected_retry(monkeypatch, tmp_path, st
         assert calls[-1]["max_completion_tokens"] == 128000
 
 
+def test_nanogpt_context_error_retries_with_the_output_that_fits(monkeypatch, tmp_path):
+    message = (
+        "Error code: 400 - {'error': {'message': \"Your prompt exceeds the model's context length. Please shorten "
+        "the input and/or reduce max_tokens. Estimated input tokens: 8745. Requested output tokens: 128000. Max "
+        "context tokens: 131072.\", 'status': 400, 'type': 'invalid_request_error', 'code': "
+        "'context_length_exceeded', 'input_tokens': 8745, 'output_tokens': 128000, 'max_context_tokens': 131072}}"
+    )
+    sent = []
+
+    def create(**kwargs):
+        sent.append(kwargs.get("max_tokens", kwargs.get("max_completion_tokens")))
+        if len(sent) == 1:
+            raise RuntimeError(message)
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="OK"), finish_reason="stop",
+        )], usage=None)
+
+    fake_sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)), close=lambda: None)
+    monkeypatch.setattr(api.openai, "OpenAI", lambda **kwargs: fake_sdk)
+    monkeypatch.setattr(api, "httpx", None)
+    monkeypatch.setenv("USE_CUSTOM_OPENAI_ENDPOINT", "0")
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+    monkeypatch.setattr(UnifiedClient, "_model_token_limits", {})
+    client = UnifiedClient("test-key", "authnan/glm-5.3", str(tmp_path))
+    monkeypatch.setattr(client, "_get_max_retries", lambda: 1)
+    monkeypatch.setattr(client, "_get_send_interval", lambda: 0)
+    monkeypatch.setattr(client, "_streaming_enabled", lambda: False)
+    monkeypatch.setattr(client, "_is_stop_requested", lambda: False)
+    monkeypatch.setattr(client, "_save_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_should_show_api_lifecycle_logs", lambda: False)
+
+    def send():
+        return client._send_openai_compatible(
+            [{"role": "user", "content": "Reply OK."}], 0.5, 128000,
+            "https://nano-gpt.com/api/subscription/v1", "context-test", provider="nanogpt",
+            model_override="glm-5.3", api_key_override="test-key", allow_endpoint_override=False,
+        )
+
+    assert send().content == "OK"
+    assert sent == [128000, 122327]
+    assert UnifiedClient._model_token_limits["glm-5.3"] == 122327
+
+    # The next request for this model starts at the cached limit.
+    assert send().content == "OK"
+    assert sent == [128000, 122327, 122327]
+
+
 @pytest.mark.parametrize("pass_all", ["0", "1"])
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_native_gpt6_effort_does_not_require_pass_all(monkeypatch, pass_all, effort):
