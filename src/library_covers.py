@@ -36,6 +36,7 @@ import hashlib
 import io
 import logging
 import os
+from urllib.parse import unquote
 import platform
 import re
 import struct
@@ -504,7 +505,7 @@ def _extract_cover(epub_path: str) -> str | None:
                     # Build manifest lookup
                     for item_el in opf_tree.findall(".//{http://www.idpf.org/2007/opf}item"):
                         item_id = item_el.get("id", "")
-                        item_href = item_el.get("href", "")
+                        item_href = unquote(item_el.get("href", ""))
                         item_media = item_el.get("media-type", "")
                         item_props = item_el.get("properties", "")
                         full_href = posixpath.normpath(posixpath.join(opf_dir, item_href)) if item_href else ""

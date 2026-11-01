@@ -10,6 +10,7 @@ GUI-free; must stay importable on Python 3.10 without Qt.
 
 import json
 import os
+from urllib.parse import unquote
 
 from epub_package import find_epub_opf_member, find_opf_path
 
@@ -259,7 +260,7 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
         opf_names = {}  # core_name  → original extension (e.g. '.xhtml')
         manifest_xpath = './/opf:manifest/opf:item' if ns else './/{http://www.idpf.org/2007/opf}manifest/{http://www.idpf.org/2007/opf}item'
         for item in root.findall(manifest_xpath, ns if ns else None):
-            href = item.get('href', '')
+            href = unquote(item.get('href', ''))
             media = item.get('media-type', '')
             if not href:
                 continue

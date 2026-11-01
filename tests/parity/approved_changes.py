@@ -3381,6 +3381,24 @@ APPROVED = (
         },
         "values": {},
     },
+    {
+        "date": "2026-11-02",
+        "what": "An OPF manifest href is a URL: 'part%20001.xhtml' is the file 'part 001.xhtml', chapter 1. "
+                "It is decoded where it is read",
+        "source": {
+            "src/scan_html_folder.py": [
+                ("import os\nimport hashlib\n", "import os\nfrom urllib.parse import unquote\nimport hashlib\n"),
+                ("href = item.get('href')", "href = unquote(item.get('href') or '')"),
+                ('item.get("id"): os.path.basename(item.get("href") or "")',
+                 'item.get("id"): os.path.basename(unquote(item.get("href") or ""))'),
+            ],
+            "src/async_api_processor.py": [
+                ("import os\nimport sys\nimport re\n", "import os\nfrom urllib.parse import unquote\nimport sys\nimport re\n"),
+                ('href = item.get("href")', 'href = unquote(item.get("href") or "")'),
+            ],
+        },
+        "values": {},
+    },
 )
 
 

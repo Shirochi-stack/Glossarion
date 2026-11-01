@@ -6,6 +6,7 @@ and sends a single API call to generate a review/summary.
 """
 
 import os
+from urllib.parse import unquote
 import sys
 import platform
 import json
@@ -200,7 +201,7 @@ def _get_spine_ordered_html_files(epub_path: str, log_fn: Callable = print) -> L
             manifest = {}
             for item in soup.find_all('item'):
                 item_id = item.get('id', '')
-                href = item.get('href', '')
+                href = unquote(item.get('href', ''))
                 if item_id and href:
                     manifest[item_id] = href
 

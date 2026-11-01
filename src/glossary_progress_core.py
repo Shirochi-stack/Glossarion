@@ -27,6 +27,7 @@ import copy
 import html as html_lib
 import json
 import os
+from urllib.parse import unquote
 import re
 import tempfile
 import threading
@@ -1642,7 +1643,7 @@ def make_glossary_progress_model(
                 for manifest_idx, item in enumerate(opf_xml.findall('.//opf:manifest/opf:item', opf_ns)):
                     mid = item.get('id', '')
                     mtype = item.get('media-type', '')
-                    href = item.get('href', '')
+                    href = unquote(item.get('href', ''))
                     if mtype in html_types:
                         id_to_href[mid] = href
                     if manifest_idx and manifest_idx % 200 == 0:

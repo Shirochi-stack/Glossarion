@@ -25,6 +25,7 @@ Python 3.10 compatible; never imports PySide6, translator_gui or dpi_setup.
 """
 
 import os
+from urllib.parse import unquote
 import sys
 import re
 from bs4 import BeautifulSoup
@@ -1814,7 +1815,7 @@ class AsyncBatchJobMixin:
             manifest = {}
             for item in root.findall(".//opf:manifest/opf:item", ns):
                 item_id = item.get("id")
-                href = item.get("href")
+                href = unquote(item.get("href") or "")
                 if item_id and href:
                     manifest[item_id] = href
 

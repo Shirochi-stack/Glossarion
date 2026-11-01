@@ -601,6 +601,9 @@ def test_library_core_is_moved_verbatim_and_reexported():
     later_edits = {
         # 3646b1a3 "image reference": the image-reference sidecar is a progress sidecar too
         "_PROGRESS_SIDECAR_FILENAMES": ("'image_rename_map.json'})", "'image_rename_map.json', 'image_reference_map.json'})"),
+        # 2026-11-02: an OPF href is a URL, decoded when read
+        "_count_epub_spine_items": ("href = item.get('href', '')", "href = unquote(item.get('href', ''))"),
+        "_parse_epub_details": ("os.path.basename(href)", "os.path.basename(unquote(href))"),
     }
     moved = {name: text for name, text in defined.items() if name in legacy_defs}
     assert set(moved) <= set(library_core.__all__)

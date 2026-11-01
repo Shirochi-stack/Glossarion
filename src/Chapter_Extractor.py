@@ -355,7 +355,7 @@ def _unmapped_workspace_image_filenames(zf, output_dir):
             namespace = root.tag[1:root.tag.index('}')]
         prefix = f'{{{namespace}}}' if namespace else ''
         manifest = {
-            item.get('id'): item.get('href')
+            item.get('id'): urllib.parse.unquote(item.get('href'))
             for item in root.findall(f'.//{prefix}manifest/{prefix}item')
             if item.get('id') and item.get('href')
             and (
@@ -1897,7 +1897,7 @@ def _sort_by_opf_spine(chapters, opf_path):
         manifest = {}
         for item in root.findall('.//opf:manifest/opf:item', ns):
             item_id = item.get('id')
-            href = item.get('href')
+            href = urllib.parse.unquote(item.get('href') or '')
             if item_id and href:
                 manifest[item_id] = href
         
@@ -2033,7 +2033,7 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
         manifest = {}
         for item in root.findall('.//opf:manifest/opf:item', ns):
             item_id = item.get('id')
-            href = item.get('href')
+            href = urllib.parse.unquote(item.get('href') or '')
             media_type = item.get('media-type', '')
             
             if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):

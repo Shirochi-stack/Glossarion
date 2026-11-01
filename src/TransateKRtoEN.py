@@ -12,6 +12,7 @@ import copy
 import inspect
 import html
 import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
+from urllib.parse import unquote
 import builtins
 import ebooklib
 from ebooklib import epub
@@ -13930,7 +13931,7 @@ def _single_pass_spine_from_opf_text(opf_text):
     manifest = {}
     for item in root.findall('.//opf:manifest/opf:item', ns):
         iid = item.get('id')
-        href = item.get('href')
+        href = unquote(item.get('href') or '')
         mtype = item.get('media-type', '')
         if iid and href and ('html' in mtype.lower() or href.lower().endswith(('.html', '.xhtml', '.htm'))):
             manifest[iid] = os.path.basename(href)
@@ -28174,7 +28175,7 @@ def main(log_callback=None, stop_callback=None):
                 _manifest = {}
                 for _item in _opf_root.findall('.//opf:manifest/opf:item', _ns):
                     _iid = _item.get('id')
-                    _href = _item.get('href')
+                    _href = unquote(_item.get('href') or '')
                     _mtype = _item.get('media-type', '')
                     if _iid and _href and (
                         'html' in _mtype.lower() or

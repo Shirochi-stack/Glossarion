@@ -5,6 +5,7 @@ Complete implementation - no truncation
 """
 
 import os
+from urllib.parse import unquote
 import json
 import ast
 
@@ -4329,7 +4330,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     
                     for item in root.findall('.//opf:manifest/opf:item', ns):
                         item_id = item.get('id')
-                        href = item.get('href')
+                        href = unquote(item.get('href') or '')
                         media_type = item.get('media-type', '')
                         
                         if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):

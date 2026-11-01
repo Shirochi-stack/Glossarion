@@ -315,6 +315,9 @@ def test_every_old_module_name_still_imports():
                     names.add(sub.name)
                 elif isinstance(sub, ast.Assign):
                     names |= {t.id for t in sub.targets if isinstance(t, ast.Name)}
+    # 2026-11-02: the approved OPF href edit adds this import to the frozen text, where the method
+    # was; the method lives in async_batch_core now, so the live module has no use for it.
+    names.discard("unquote")
     optional = {"genai": core.HAS_GEMINI, "anthropic": core.HAS_ANTHROPIC, "openai": core.HAS_OPENAI}
     for name in sorted(names):
         if name in optional and not optional[name]:

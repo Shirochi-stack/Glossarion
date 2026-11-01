@@ -44,6 +44,7 @@ import copy
 import hashlib
 import logging
 import os
+from urllib.parse import unquote
 import platform
 import re
 import shutil
@@ -1657,7 +1658,7 @@ def _count_epub_spine_items(epub_path: str, exclude_special: bool = False,
                     manifest: dict[str, str] = {}
                     for item in tree.findall(f".//{{{OPF}}}item"):
                         item_id = item.get("id", "")
-                        href = item.get("href", "")
+                        href = unquote(item.get("href", ""))
                         if item_id and href:
                             manifest[item_id] = href
                     spine = tree.find(f".//{{{OPF}}}spine")
@@ -3321,14 +3322,14 @@ def _parse_epub_details(epub_path: str, parse_chapter_titles: bool = True) -> di
                 media_type = manifest.get(idref, ("", ""))[1]
                 if media_type and ("html" not in media_type.lower() and "xhtml" not in media_type.lower()):
                     # Non-text spine item — still include so index matches.
-                    chapters.append({"href": href, "filename": os.path.basename(href),
-                                     "title": os.path.splitext(os.path.basename(href))[0]})
+                    chapters.append({"href": href, "filename": os.path.basename(unquote(href)),
+                                     "title": os.path.splitext(os.path.basename(unquote(href)))[0]})
                     continue
                 title = titles_by_href.get(href, "")
                 if not title:
-                    title = os.path.splitext(os.path.basename(href))[0]
+                    title = os.path.splitext(os.path.basename(unquote(href)))[0]
                     title = title.replace("_", " ").replace("-", " ").strip() or title
-                chapters.append({"href": href, "filename": os.path.basename(href), "title": title})
+                chapters.append({"href": href, "filename": os.path.basename(unquote(href)), "title": title})
             details["chapters"] = chapters
     except Exception:
         logger.debug("EPUB details parse failed: %s", traceback.format_exc())

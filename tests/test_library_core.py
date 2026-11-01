@@ -74,8 +74,8 @@ REAL_DEFAULT_OUTPUT_ROOT = library_core._default_output_root
 
 #: Moved functions whose bodies carry a documented U5 edit (seam / Qt replacement).
 ADAPTED_FUNCTIONS = {
-    "library_core": {"_default_output_root"},
-    "library_covers": {"_cover_cache_dir", "_download_remote_cover_image"},
+    "library_core": {"_default_output_root", "_count_epub_spine_items", "_parse_epub_details"},
+    "library_covers": {"_cover_cache_dir", "_download_remote_cover_image", "_extract_cover"},
     "reader_doc": {"_epub_cache_dir", "_reader_image_is_sizeable"},
 }
 
@@ -553,6 +553,13 @@ def test_adapted_functions_carry_only_the_documented_edits(legacy_tree):
     old = legacy_defs["_default_output_root"]
     assert [ast.dump(s) for s in new.body[2:]] == [ast.dump(s) for s in old.body[1:]]
     assert "_LIBRARY_ENV" in ast.unparse(new.body[1])
+    # 2026-11-02: an OPF href is a URL, decoded when read; nothing else changed
+    assert ast.unparse(core["_count_epub_spine_items"]).replace(
+        "unquote(item.get('href', ''))", "item.get('href', '')") == ast.unparse(legacy_defs["_count_epub_spine_items"])
+    assert ast.unparse(core["_parse_epub_details"]).replace(
+        "os.path.basename(unquote(href))", "os.path.basename(href)") == ast.unparse(legacy_defs["_parse_epub_details"])
+    assert ast.unparse(covers["_extract_cover"]).replace(
+        "unquote(item_el.get('href', ''))", "item_el.get('href', '')") == ast.unparse(legacy_defs["_extract_cover"])
     # cache folders: the override seam only
     assert ast.unparse(covers["_cover_cache_dir"]).replace(
         "_COVER_CACHE_DIR_OVERRIDE or ", "") == ast.unparse(legacy_defs["_cover_cache_dir"])

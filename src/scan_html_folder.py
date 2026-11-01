@@ -22,6 +22,7 @@ OPTIMIZATION TIPS:
 
 
 import os
+from urllib.parse import unquote
 import hashlib
 import json
 import zipfile
@@ -1941,7 +1942,7 @@ def extract_epub_image_info(epub_path, log=print):
                     if manifest:
                         for item in manifest.find_all('item'):
                             item_id = item.get('id')
-                            href = item.get('href')
+                            href = unquote(item.get('href') or '')
                             if item_id and href:
                                 manifest_map[item_id] = href
                     
@@ -2225,7 +2226,7 @@ def extract_epub_punctuation_info(epub_path, log=print):
                     if manifest:
                         for item in manifest.find_all('item'):
                             item_id = item.get('id')
-                            href = item.get('href')
+                            href = unquote(item.get('href') or '')
                             if item_id and href:
                                 manifest_map[item_id] = href
                     
@@ -2675,7 +2676,7 @@ def extract_epub_quotation_info(
                     if manifest:
                         for item in manifest.find_all('item'):
                             item_id = item.get('id')
-                            href = item.get('href')
+                            href = unquote(item.get('href') or '')
                             if item_id and href:
                                 manifest_map[item_id] = href
 
@@ -5598,7 +5599,7 @@ def _spine_display_numbers(folder_path):
         ns = {"opf": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
         prefix = "opf:" if ns else ""
         manifest = {
-            item.get("id"): os.path.basename(item.get("href") or "")
+            item.get("id"): os.path.basename(unquote(item.get("href") or ""))
             for item in root.iter(("{%s}item" % ns["opf"]) if ns else "item")
         }
         spine = root.find(f".//{prefix}spine", ns)
@@ -6364,7 +6365,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                     if manifest:
                         for item in manifest.find_all('item'):
                             item_id = item.get('id')
-                            href = item.get('href')
+                            href = unquote(item.get('href') or '')
                             if item_id and href:
                                 manifest_map[item_id] = href
                     
@@ -6653,7 +6654,7 @@ def extract_epub_html_content(epub_path, log=print):
             if manifest:
                 for item in manifest.find_all('item'):
                     item_id = item.get('id')
-                    href = item.get('href')
+                    href = unquote(item.get('href') or '')
                     if item_id and href:
                         manifest_map[item_id] = href
 
@@ -8535,7 +8536,7 @@ def _sample_text_from_epub(epub_path: str, max_spine_items: int = 3, max_chars: 
             if manifest:
                 for item in manifest.find_all('item'):
                     item_id = item.get('id')
-                    href = item.get('href')
+                    href = unquote(item.get('href') or '')
                     if item_id and href:
                         manifest_map[item_id] = href
 

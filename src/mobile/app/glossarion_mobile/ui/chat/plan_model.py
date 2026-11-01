@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import os
+from urllib.parse import unquote
 import zipfile
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -308,7 +309,7 @@ def _epub_chapters(path: str) -> tuple:
             ns = {"opf": root.tag[1:root.tag.index("}")]} if root.tag.startswith("{") else {"opf": ""}
             manifest = {}
             for item in root.findall(".//opf:manifest/opf:item", ns):
-                href = item.get("href") or ""
+                href = unquote(item.get("href") or "")
                 if "html" in (item.get("media-type") or "").lower() or href.endswith((".html", ".xhtml", ".htm")):
                     manifest[item.get("id")] = href
             spine = [manifest[ref.get("idref")] for ref in root.findall(".//opf:spine/opf:itemref", ns)

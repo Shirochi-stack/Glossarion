@@ -119,6 +119,8 @@ BLOCKS = [
     (23524, 23574, 8, 0, []),
     (23575, 24546, 8, 0, [("(_d or gp_data).get('chapter_numbers', {})",
                            "(_d or _current_gp_data()).get('chapter_numbers', {})"),
+                          # 2026-11-02: an OPF href is a URL, decoded when read
+                          ("href = item.get('href', '')", "href = unquote(item.get('href', ''))"),
                           # owner fix 2026-10-18: a removed Minimal pass goes back to Not Translated
                           ("            if not _gp_minimal_pass_toggle_enabled():\n                return None\n",
                            "            # Removed from progress by the user lands here too: the row goes\n"

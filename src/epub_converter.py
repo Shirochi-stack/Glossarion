@@ -6,6 +6,7 @@ Supports extraction of translated titles from chapter content
 
 from safe_image import open_image
 import os
+from urllib.parse import unquote
 import sys
 import io
 import json
@@ -4249,7 +4250,7 @@ class EPUBCompiler:
             manifest = {}
             for item in root.findall('.//opf:manifest/opf:item', ns):
                 item_id = item.get('id')
-                href = item.get('href')
+                href = unquote(item.get('href') or '')
                 media_type = item.get('media-type', '')
                 
                 # Only include HTML/XHTML files
@@ -7045,7 +7046,7 @@ img {
             xpath = './/opf:manifest/opf:item' if ns else \
                     './/{http://www.idpf.org/2007/opf}manifest/{http://www.idpf.org/2007/opf}item'
             for item in root.findall(xpath, ns if ns else None):
-                href = item.get('href', '')
+                href = unquote(item.get('href', ''))
                 media = item.get('media-type', '')
                 if not href:
                     continue

@@ -1,5 +1,6 @@
 # extract_glossary_from_epub.py
 import os
+from urllib.parse import unquote
 import json
 import contextlib
 import hashlib
@@ -8433,7 +8434,7 @@ def main(log_callback=None, stop_callback=None):
                     _manifest2 = {}
                     for _item in _opf_root2.findall('.//opf:manifest/opf:item', _ns2):
                         _iid = _item.get('id')
-                        _href = _item.get('href')
+                        _href = unquote(_item.get('href') or '')
                         _mtype = _item.get('media-type', '')
                         if _iid and _href and ('html' in _mtype.lower() or _href.endswith(('.html', '.xhtml', '.htm'))):
                             _manifest2[_iid] = os.path.basename(_href)

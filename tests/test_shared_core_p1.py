@@ -330,7 +330,10 @@ def test_output_naming_functions_are_verbatim_and_reexported(name):
         assert home_library in ast.unparse(legacy)
         assert ast.unparse(current) == ast.unparse(legacy).replace(home_library, "_library_dir()")
     else:
-        assert dump(current) == dump(legacy)
+        # 2026-11-02: an OPF href is a URL, decoded when read; nothing else changed.
+        old_href = "href = item.get('href', '')"
+        assert old_href in ast.unparse(legacy)
+        assert ast.unparse(current) == ast.unparse(legacy).replace(old_href, "href = unquote(item.get('href', ''))")
     reexports = [n for n in current_tree("other_settings").body
                  if isinstance(n, ast.ImportFrom) and n.module == "output_naming"]
     assert len(reexports) == 1 and name in {a.name for a in reexports[0].names}

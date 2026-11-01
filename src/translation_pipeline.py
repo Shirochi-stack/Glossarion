@@ -72,6 +72,7 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 
 import json
 import os
+from urllib.parse import unquote
 import re
 import sys
 import threading
@@ -373,7 +374,7 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
                 manifest = {}
                 for item in root.findall('.//opf:manifest/opf:item', ns):
                     item_id = item.get('id')
-                    href = item.get('href')
+                    href = unquote(item.get('href') or '')
                     media_type = item.get('media-type', '')
                     if item_id and href and (
                         'html' in media_type.lower() or
@@ -560,7 +561,7 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
                 manifest = {}
                 for item in root.findall('.//opf:manifest/opf:item', ns):
                     item_id = item.get('id')
-                    href = item.get('href')
+                    href = unquote(item.get('href') or '')
                     
                     if item_id and href:
                         filename = os.path.basename(href)

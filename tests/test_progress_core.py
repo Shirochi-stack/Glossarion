@@ -254,7 +254,9 @@ def test_split_build_method_holds_the_frozen_blocks():
     _assert_block_in(source, 20809, 20826, strip=8, add=8)
     _assert_block_in(source, 20828, 20842, strip=8, add=8, edits=[
         ("                return None", "                return False")])
-    _assert_block_in(source, 21041, 21146, strip=8, add=8)
+    # 2026-11-02: an OPF href is a URL, decoded when read
+    _assert_block_in(source, 21041, 21146, strip=8, add=8, edits=[
+        ("href = item.get('href')", "href = unquote(item.get('href') or '')")])
     _assert_block_in(source, 20844, 20863, strip=8, add=8, edits=[(
         "        _persist_progress_manager_source_link(file_path, output_dir)\n",
         "        _persist_progress_manager_source_link(\n"
@@ -1091,3 +1093,39 @@ def test_build_book_progress_creates_and_links_a_workspace(tmp_path, monkeypatch
     assert book.rows[0].kind == "metadata" and book.rows[0].status == "pending"
     assert book.rows[-1].title == "Ch.001 · chapter0001.xhtml"
     assert book.rows[-1].status == "not_translated"
+
+
+def test_percent_encoded_opf_hrefs_match_their_chapters(tmp_path):
+    """OPF hrefs are URLs: ``part%20001.xhtml`` is the file ``part 001.xhtml``, chapter 1."""
+    import zipfile
+
+    source = tmp_path / "book.epub"
+    with zipfile.ZipFile(source, "w") as zf:
+        zf.writestr("META-INF/container.xml", (
+            '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+            '</rootfiles></container>'))
+        zf.writestr("OEBPS/content.opf", (
+            '<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest>'
+            '<item id="a" href="Text/part%20001.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="b" href="Text/part%20002.xhtml" media-type="application/xhtml+xml"/>'
+            '</manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>'))
+        zf.writestr("OEBPS/Text/part 001.xhtml", "<html><body><p>one</p></body></html>")
+        zf.writestr("OEBPS/Text/part 002.xhtml", "<html><body><p>two</p></body></html>")
+
+    out = tmp_path / "out" / "book"
+    out.mkdir(parents=True)
+    (out / "response_part 001.html").write_text("<html><body><p>one</p></body></html>", encoding="utf-8")
+    (out / "translation_progress.json").write_text(json.dumps({"version": "2.1", "chapter_chunks": {}, "chapters": {
+        "1": {"actual_num": 1, "status": "completed", "original_basename": "part 001.xhtml",
+              "output_file": "response_part 001.html"},
+    }}), encoding="utf-8")
+
+    book = pc.build_book_progress(str(source), {"output_directory": str(tmp_path / "out")})
+
+    chapters = [row for row in book.rows if "part" in row.title]
+    assert [(row.title, row.status) for row in chapters] == [
+        ("Ch.001 · part 001.xhtml", "completed"),
+        ("Ch.002 · part 002.xhtml", "not_translated"),
+    ]
+    assert book.stats.completed == 1

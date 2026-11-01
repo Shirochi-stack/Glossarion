@@ -108,6 +108,9 @@ NEW_METHODS = ("_prepare_translation_run", "_translation_worker")
 
 #: The documented edits per moved method: (old text, new text, occurrences).
 EDITS = {
+    # 2026-11-02: an OPF href is a URL, decoded when read
+    "_get_spine_filenames_for_preview": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
+    "_get_opf_file_order": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
     "_filter_translation_qa_failures_to_current_range": [
         ("TranslatorGUI._live_chapter_range_settings(self)", "RunEnvMixin._live_chapter_range_settings(self)", 1),
         ("TranslatorGUI._chapter_scope_filename_key(", "TranslationPipelineMixin._chapter_scope_filename_key(", 2),
