@@ -1528,7 +1528,7 @@ class RunEnvMixin:
             'RESPECT_RETRY_AFTER': '1' if getattr(self, 'respect_retry_after_var', True) else '0',
             'REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE': '1' if getattr(self, 'remove_excessive_empty_tags_on_device_var', True) else '0',
             'REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS': '1' if getattr(self, 'remove_excessive_empty_tags_all_models_var', False) else '0',
-            'FIX_MISSING_TAG_BRACKET': '1' if getattr(self, 'fix_missing_tag_bracket_var', False) else '0',
+            'FIX_MISSING_TAG_BRACKET': '1' if getattr(self, 'fix_missing_tag_bracket_var', True) else '0',
             # Scanning/QA settings
             'SCAN_PHASE_ENABLED': '1' if getattr(self, 'scan_phase_enabled_var', self.config.get('scan_phase_enabled', False)) else '0',
             'SCAN_PHASE_MODE': self._get_scan_phase_mode(),
@@ -2610,7 +2610,7 @@ class RunEnvMixin:
                 ('RESPECT_RETRY_AFTER', '1' if getattr(self, 'respect_retry_after_var', True) else '0'),
                 ('REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE', '1' if getattr(self, 'remove_excessive_empty_tags_on_device_var', True) else '0'),
                 ('REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS', '1' if getattr(self, 'remove_excessive_empty_tags_all_models_var', False) else '0'),
-                ('FIX_MISSING_TAG_BRACKET', '1' if getattr(self, 'fix_missing_tag_bracket_var', False) else '0'),
+                ('FIX_MISSING_TAG_BRACKET', '1' if getattr(self, 'fix_missing_tag_bracket_var', True) else '0'),
 
                 # Post-translation scanning phase
                 ('SCAN_PHASE_ENABLED', '1' if getattr(self, 'scan_phase_enabled_var', False) else '0'),

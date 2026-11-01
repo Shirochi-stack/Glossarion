@@ -801,7 +801,7 @@ Text to analyze:
         )
         self.fix_empty_attr_tags_bs_var = self.fix_empty_attr_tags_extract_var
         self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
-        self.fix_missing_tag_bracket_var = self.config.get('fix_missing_tag_bracket', False)
+        self.fix_missing_tag_bracket_var = self.config.get('fix_missing_tag_bracket', True)
         self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
         self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
         self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)

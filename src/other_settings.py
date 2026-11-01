@@ -9717,7 +9717,7 @@ def _create_processing_options_section(self, parent):
     missing_bracket_cb = self._create_styled_checkbox("Fix Missing Tag Bracket - LLM Token Fix")
     try:
         if not hasattr(self, 'fix_missing_tag_bracket_var'):
-            self.fix_missing_tag_bracket_var = self.config.get('fix_missing_tag_bracket', False)
+            self.fix_missing_tag_bracket_var = self.config.get('fix_missing_tag_bracket', True)
         missing_bracket_cb.setChecked(bool(self.fix_missing_tag_bracket_var))
     except Exception:
         pass

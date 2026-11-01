@@ -12024,7 +12024,7 @@ class BatchTranslationProcessor:
                 result = convert_enhanced_text_to_html(result, chapter)
             
             # Restore a dropped tag bracket before anything parses the response.
-            if os.getenv('FIX_MISSING_TAG_BRACKET', '0') == '1':
+            if os.getenv('FIX_MISSING_TAG_BRACKET', '1') == '1':
                 result = _fix_missing_tag_bracket(result)
 
             # Emergency Image Restoration (if enabled)
@@ -12994,7 +12994,7 @@ class BatchTranslationProcessor:
                 
                 # Clean the merged response
                 cleaned = merged_response
-                if os.getenv('FIX_MISSING_TAG_BRACKET', '0') == '1':
+                if os.getenv('FIX_MISSING_TAG_BRACKET', '1') == '1':
                     cleaned = _fix_missing_tag_bracket(cleaned)
                 if self.config.REMOVE_AI_ARTIFACTS != "off":
                     cleaned = ContentProcessor.clean_ai_artifacts(cleaned, self.config.REMOVE_AI_ARTIFACTS)
@@ -32478,7 +32478,7 @@ def main(log_callback=None, stop_callback=None):
                 # Restore a dropped tag bracket before anything parses the response.
                 if (
                     not _is_structured_translation_batch(c)
-                    and os.getenv('FIX_MISSING_TAG_BRACKET', '0') == '1'
+                    and os.getenv('FIX_MISSING_TAG_BRACKET', '1') == '1'
                 ):
                     result = _fix_missing_tag_bracket(result)
 
