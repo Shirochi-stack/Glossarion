@@ -1484,10 +1484,10 @@ class LibraryService:
 
     def translate_spec(self, books: Sequence[Mapping[str, Any]], *, review_glossary: bool = False,
                        sources: Optional[Sequence[str]] = None,
-                       config_overrides: Optional[Mapping[str, Any]] = None) -> Any:
+                       config_overrides: Optional[Mapping[str, Any]] = None, chat_cid: Optional[str] = None) -> Any:
         """A ``translate`` job over the raw sources (desktop "Load for translation" + Run).
         ``config_overrides``: the TranslateSheet's "Only for this run" options (merged over the config
-        snapshot at job start)."""
+        snapshot at job start). ``chat_cid``: the chat that started it, whose model a later Resume follows."""
         from glossarion_mobile.services.jobs import JobSpec
 
         resolved = list(sources) if sources is not None else [self.raw_source(b) for b in books]
@@ -1501,6 +1501,10 @@ class LibraryService:
         params: dict = {"review_glossary": True} if review_glossary else {}
         if config_overrides:
             params["config_overrides"] = dict(config_overrides)
+        if chat_cid:
+            from glossarion_mobile.services.jobs import MODEL_CHAT_PARAM
+
+            params[MODEL_CHAT_PARAM] = str(chat_cid)
         origin = self.origin_for(first) if len(books) == 1 else {"type": "library", "label": "Library"}
         return JobSpec(kind="translate", title=title, inputs=inputs, params=params, origin=origin)
 

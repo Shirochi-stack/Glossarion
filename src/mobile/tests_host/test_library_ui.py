@@ -949,6 +949,140 @@ def test_translate_sheet_submits_a_library_translate_job(tmp_path):
     asyncio.run(scenario())
 
 
+def test_translate_sheet_changes_its_settings_and_fits_its_content(tmp_path):
+    """The sheet (owner: "It even won't let me change the default model, output language and profiles from its pop
+    up, which also takes up more screen space than it should"): each chip opens the picker on its tab, the pick shows
+    at once and Start follows it, an excluded route still blocks Start; the body takes its measured height."""
+    from glossarion_mobile.ui.library.translate_sheet import TranslateSheet
+
+    raw = tmp_path / "Raw" / "Book.epub"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"PK")
+    submitted = []
+
+    class Jobs:
+        def has_kind(self, kind):
+            return kind == "translate"
+
+        async def submit(self, spec):
+            submitted.append(spec)
+            return "job1"
+
+    config = {"model": "authnan/GLM-4.6-Derestricted-v5", "output_language": "English", "active_profile": "Korean"}
+    service = LibraryService(core=SharedCore({"library_core": types.ModuleType("library_core")}),
+                             prefs=FakePrefs(), jobs=Jobs(), config=config)
+    book = _book("not_started", name="Book", raw_source_path=str(raw))
+    opened = []
+
+    def choose(tab, on_picked):
+        opened.append(tab)
+        key = {"model": "model", "profile": "active_profile", "language": "output_language"}[tab]
+        config[key] = picks[tab]
+        on_picked(tab, picks[tab])
+        return "sheet"
+
+    picks = {"model": "authnan/z-ai/glm-5.3", "profile": "Japanese", "language": "Korean"}
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        session.page.width, session.page.height = 400, 800
+        ctx = _ctx(session.page, service)
+        ctx.choose_setting = choose
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        sheet.show(session.page)
+        for tab, chip in sheet.setting_chips.items():
+            assert chip.on_click is not None  # a chip without one draws disabled
+            assert chip.on_click(None) == "sheet"
+        assert opened == ["model", "profile", "language"]
+        texts = _texts(sheet.sheet.content)
+        assert {"Model: authnan/z-ai/glm-5.3", "Profile: Japanese", "→ Korean"} <= set(texts)
+        assert await sheet.start() == "job1"
+        assert "model" not in (submitted[-1].params.get("config_overrides") or {})  # the config has it now
+
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        sheet.show(session.page)
+        assert sheet.start_reason is None
+        picks["model"] = "ocz/some-model"
+        sheet.setting_chips["model"].on_click(None)
+        assert sheet.start_reason and sheet.start_button.disabled and sheet.start_reason_text.visible
+        assert sheet.model_block_chip in sheet.facts_row.controls
+        picks["model"] = "authnan/z-ai/glm-5.3"
+        sheet.setting_chips["model"].on_click(None)
+        assert sheet.start_reason is None and not sheet.start_button.disabled and not sheet.start_reason_text.visible
+        assert sheet.model_block_chip is None and len(sheet.facts_row.controls) == len(sheet.fact_chips)
+
+        ctx.choose_setting = None
+        notes = []
+        ctx.say = lambda *a, **k: notes.append(a[0])
+        assert sheet.choose_setting("model") is None and notes  # no picker in this session: says so
+
+    asyncio.run(scenario())
+
+
+def test_fitted_column_takes_its_measured_height(monkeypatch):
+    import flet as ft
+    from glossarion_mobile.ui.components import sheet as sheet_module
+
+    box = sheet_module.fitted_column([ft.Text("a")], estimate=360)
+    content = box.content.controls[0]
+    assert box.height == 360 and box.content.scroll is not None and content.on_size_change is not None
+    measure = lambda height: content.on_size_change(types.SimpleNamespace(height=height, width=300))
+    monkeypatch.setattr(sheet_module, "_page_size", lambda page: (400.0, 800.0))
+    monkeypatch.setattr(ft.Container, "page", types.SimpleNamespace(), raising=False)
+    measure(402.5)
+    assert box.height == 402.5  # as tall as its content
+    measure(800)
+    assert box.height is None  # past the screen: the full sheet, scrolling
+    measure(300)
+    assert box.height == 300  # Run options closed again
+    measure(None)
+    assert box.height == 300
+
+
+def test_translate_sheet_runs_with_the_model_picked_last(tmp_path):
+    """Progress manager › Run translation (owner: GLM 5.3 was picked, the run used GLM 4.6): the sheet shows and runs
+    the model picked last; the All-chats model only while nothing else was picked; Run options still come along."""
+    from glossarion_mobile.ui.library.translate_sheet import TranslateSheet
+
+    raw = tmp_path / "Raw" / "Book.epub"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"PK")
+    submitted = []
+
+    class Jobs:
+        def has_kind(self, kind):
+            return kind == "translate"
+
+        async def submit(self, spec):
+            submitted.append(spec)
+            return "job1"
+
+    service = LibraryService(core=SharedCore({"library_core": types.ModuleType("library_core")}),
+                             prefs=FakePrefs(), jobs=Jobs(), config={"model": "authnan/GLM-4.6-Derestricted-v5",
+                                                                     "output_language": "English"})
+    book = _book("not_started", name="Book", raw_source_path=str(raw))
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, service)
+        ctx.picked_model = lambda: "authnan/z-ai/glm-5.3"
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        sheet.show(session.page)
+        texts = _texts(sheet.sheet.content)
+        assert "Model: authnan/z-ai/glm-5.3" in texts and "Model: authnan/GLM-4.6-Derestricted-v5" not in texts
+        assert await sheet.start() == "job1"
+        assert submitted[-1].params["config_overrides"]["model"] == "authnan/z-ai/glm-5.3"
+
+        ctx.picked_model = lambda: ""
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        sheet.show(session.page)
+        assert "Model: authnan/GLM-4.6-Derestricted-v5" in _texts(sheet.sheet.content)
+        assert await sheet.start() == "job1"
+        assert "model" not in (submitted[-1].params.get("config_overrides") or {})  # it inherits the All-chats model
+
+    asyncio.run(scenario())
+
+
 # ==========================================================================
 # The running app (real shell; Integrate adds the install call to app.py)
 # ==========================================================================

@@ -1011,6 +1011,19 @@ class ChatStoreAdapter:
             if values.get(key) and own.get(key) is None:
                 self.set_override(cid, key, values[key])
 
+    def last_picked_model(self) -> str:
+        """The model picked last when it is not the All-chats one (what a new chat starts on, ``new_chat_seed``);
+        "" when the All-chats model stands. A Library translation run uses it: the drawer shows it, not the
+        All-chats model."""
+        seed = self.new_chat_seed
+        if seed is None or self.sidecar is None:
+            return ""
+        try:
+            return str((seed(self.last_used()) or {}).get("model") or "")
+        except Exception:
+            log.exception("reading the model picked last failed")
+            return ""
+
     def last_used(self) -> dict:
         """``{"model" / "profile": {"value", "global"}}`` (see ``LAST_USED_KEY``)."""
         with self._lock:

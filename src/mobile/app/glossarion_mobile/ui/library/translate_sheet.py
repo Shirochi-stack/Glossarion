@@ -37,6 +37,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
+from glossarion_mobile.ui.components.sheet import fitted_column, sheet_frame
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.library.models import size_text
 
@@ -163,19 +164,14 @@ class TranslateSheet:
                                         subtitle=reason_subtitle(ReasonChip(reason="missing raw",
                                                                             detail=MISSING_RAW_REASON)),
                                         dense=True, key=f"translate-book-{index}"))
-        model = str(cfg("model", "") or "")
-        profile = str(cfg("active_profile", "") or "")
-        target = str(cfg("output_language", "") or "English")
-        facts = [f"Model: {model}" if model else "Model: (not set)", f"Profile: {profile}" if profile else "",
-                 f"→ {target}"]
-        self.fact_chips = [ft.Chip(label=ft.Text(f), key=f"fact-{i}") for i, f in enumerate(facts) if f]
-        # U9 preflight: a model route excluded on mobile cannot start (chat Send's rule and reason)
-        from glossarion_mobile.services.model_catalog import model_block
-
-        self.model_block = model_block(model) if model else None
-        if self.model_block is not None:
-            self.fact_chips.insert(1, ReasonChip(reason=self.model_block[0], detail=self.model_block[1],
-                                                 key="fact-model-excluded"))
+        # a tap changes the global value (the chat's ModelSheet); Start reads the model picked last
+        self.setting_chips = {tab: ft.Chip(label=ft.Text(""), on_click=lambda e, t=tab: self.choose_setting(t),
+                                           key=f"fact-{i}") for i, tab in enumerate(("model", "profile", "language"))}
+        self.fact_chips: list = list(self.setting_chips.values())
+        self.model_block_chip: Any = None
+        self.model_block: Any = None
+        self.picked_model = ""
+        self._read_settings()
         self.glossary_chip = ft.Chip(label=ft.Text(_glossary_label(cfg)), leading=ft.Icon(ft.Icons.MENU_BOOK, size=16),
                                      on_click=lambda e: self.open_glossary(), key="fact-glossary")
         self.fact_chips.append(self.glossary_chip)
@@ -211,10 +207,9 @@ class TranslateSheet:
                                       theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                       key="review-glossary-hint"))
         jobs_ok = service.jobs is not None and service.has_job_kind("translate")
-        self.start_reason = None if jobs_ok and ready else (
+        self.base_reason = None if jobs_ok and ready else (
             "The job service is not running" if not jobs_ok else "No raw source file resolves for the selection")
-        if self.start_reason is None and self.model_block is not None:
-            self.start_reason = self.model_block[0]
+        self.start_reason = self.base_reason or (self.model_block[0] if self.model_block is not None else None)
         self.start_button = ft.FilledButton(content="Start", icon=ft.Icons.PLAY_ARROW, on_click=self._on_start,
                                             disabled=self.start_reason is not None, key="start")
         chat_handler = self._chat_handler()
@@ -228,23 +223,66 @@ class TranslateSheet:
                                          tooltip=self.chat_reason, key="open-in-chat")
         title = (f"Load {len(self.books)} for translation" if len(self.books) > 1
                  else f"Translate “{self.books[0].get('name') or ''}”" if self.books else "Translate")
-        content = ft.Column([
+        self.facts_row = ft.Row(self.fact_chips, wrap=True, spacing=6, run_spacing=6)
+        self.start_reason_text = ft.Text(self.start_reason or "", color=ft.Colors.ERROR, visible=bool(self.start_reason),
+                                         theme_style=ft.TextThemeStyle.BODY_SMALL, key="start-reason")
+        scale = float(getattr(ctx, "text_scale", 1.0) or 1.0)
+        content = fitted_column([
             ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600, key="title"),
             *rows,
-            ft.Row(self.fact_chips, wrap=True, spacing=6, run_spacing=6),
+            self.facts_row,
             *run_controls,
             ft.Row(review_row, wrap=True),
-            ft.Text(self.start_reason or "", color=ft.Colors.ERROR, visible=bool(self.start_reason),
-                    theme_style=ft.TextThemeStyle.BODY_SMALL, key="start-reason"),
+            self.start_reason_text,
             ft.Row([self.chat_button, self.start_button], alignment=ft.MainAxisAlignment.END, wrap=True),
-        ], tight=True, spacing=tokens.SPACING["sm"], scroll=ft.ScrollMode.AUTO)
+        ], spacing=tokens.SPACING["sm"], estimate=(360 + 56 * len(rows)) * scale)
         self.sheet = ft.BottomSheet(
-            content=ft.Container(content=content, padding=tokens.SPACING["sheet_padding"]),
+            content=sheet_frame(content, padding=tokens.SPACING["sheet_padding"]),
             show_drag_handle=True,
             scrollable=True,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         )
         self._page: Any = None
+
+    def _read_settings(self) -> str:
+        """The setting chips from the config now, with the excluded-route preflight of the model (U9, chat Send's
+        rule and reason). The model: picked last (what the drawer shows and a new chat starts on), else All-chats."""
+        cfg = self.ctx.service.cfg
+        picked = getattr(self.ctx, "picked_model", None)
+        self.picked_model = str(picked() or "") if callable(picked) else ""
+        model = self.picked_model or str(cfg("model", "") or "")
+        profile = str(cfg("active_profile", "") or "")
+        target = str(cfg("output_language", "") or "English")
+        self.setting_chips["model"].label = ft.Text(f"Model: {model}" if model else "Model: (not set)")
+        self.setting_chips["profile"].label = ft.Text(f"Profile: {profile}" if profile else "Profile: (not set)")
+        self.setting_chips["language"].label = ft.Text(f"→ {target}")
+        from glossarion_mobile.services.model_catalog import model_block
+
+        self.model_block = model_block(model) if model else None
+        if self.model_block_chip in self.fact_chips:
+            self.fact_chips.remove(self.model_block_chip)
+        self.model_block_chip = None
+        if self.model_block is not None:
+            self.model_block_chip = ReasonChip(reason=self.model_block[0], detail=self.model_block[1],
+                                               key="fact-model-excluded")
+            self.fact_chips.insert(1, self.model_block_chip)
+        return model
+
+    def choose_setting(self, tab: str) -> Any:
+        """A setting chip: the chat's ModelSheet on that tab; the pick is the global value, and shows here."""
+        opener = getattr(self.ctx, "choose_setting", None)
+        sheet = opener(tab, lambda field_name, value: self._settings_changed()) if callable(opener) else None
+        if sheet is None:
+            self.ctx.say("These settings can't be changed here in this session")
+        return sheet
+
+    def _settings_changed(self) -> None:
+        self._read_settings()
+        self.start_reason = self.base_reason or (self.model_block[0] if self.model_block is not None else None)
+        self.start_button.disabled = self.start_reason is not None
+        self.start_reason_text.value = self.start_reason or ""
+        self.start_reason_text.visible = bool(self.start_reason)
+        self.ctx.push(self.facts_row, self.start_button, self.start_reason_text)
 
     def _chat_handler(self) -> Any:
         intents = getattr(self.ctx, "intents", None)
@@ -273,6 +311,8 @@ class TranslateSheet:
         if self.run_panel is not None:
             self.run_panel.commit()  # a number typed and not yet submitted when Start is tapped
         overrides = self.run_panel.config_overrides() if self.run_panel is not None else {}
+        if self.picked_model:
+            overrides = {"model": self.picked_model, **overrides}
         job_id = await submit_translation(self.ctx, self.ready_books, self.ready_sources,
                                           review_glossary=bool(self.review_switch.value), config_overrides=overrides)
         self.started_job = job_id
@@ -353,17 +393,20 @@ class TranslateSheet:
 
 async def submit_translation(ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str], *,
                              review_glossary: bool = False,
-                             config_overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+                             config_overrides: Optional[Mapping[str, Any]] = None,
+                             chat_cid: Optional[str] = None) -> Optional[str]:
     """``LibraryService.translate_spec`` -> ``submit`` (the job service's own preflight, e.g. a missing
     sign-in, says why when it queues nothing): the sheet's Start and :func:`resume_translation`."""
     service = ctx.service
+    tied = {"chat_cid": str(chat_cid)} if chat_cid else {}
     spec = service.translate_spec(list(books), review_glossary=review_glossary, sources=list(sources),
-                                  config_overrides=dict(config_overrides or {}))
+                                  config_overrides=dict(config_overrides or {}), **tied)
     return await service.submit(spec)
 
 
 async def resume_translation(ctx: Any, book: Mapping[str, Any],
-                             config_overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+                             config_overrides: Optional[Mapping[str, Any]] = None,
+                             chat_cid: Optional[str] = None) -> Optional[str]:
     """Resume / Retry failed of a chat book that moved into the Library (issue 4 of the 9.15.7 batch: "clicking
     resume opens a popup instead of just resuming"): the book's translation run starts at once with the
     settings handed over (``config_overrides``: the chat's model / profile / language and the card's Run
@@ -395,7 +438,7 @@ async def resume_translation(ctx: Any, book: Mapping[str, Any],
     if not await confirm_output_root(ctx, [book]):
         return None
     try:
-        job_id = await submit_translation(ctx, [book], [source], config_overrides=overrides)
+        job_id = await submit_translation(ctx, [book], [source], config_overrides=overrides, chat_cid=chat_cid)
     except Exception as exc:
         ctx.say(f"Could not resume: {exc}")
         return None

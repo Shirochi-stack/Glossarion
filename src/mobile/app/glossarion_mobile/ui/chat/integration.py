@@ -1041,10 +1041,11 @@ class ChatFeature:
             return reader.open_book(found["book"])
         return reader.open_book(path=found["path"])
 
-    async def run_translation_for(self, folder: str, source: str = "",
-                                  config_overrides: Optional[dict] = None) -> Optional[str]:
+    async def run_translation_for(self, folder: str, source: str = "", config_overrides: Optional[dict] = None,
+                                  chat_cid: Optional[str] = None) -> Optional[str]:
         """U13 item 3, a QA card's "Run translation": the desktop Run Translation over the scanned workspace
-        (its pending / failed / QA-failed chapters), with the card's options as this run's overrides."""
+        (its pending / failed / QA-failed chapters), with the card's options as this run's overrides. ``chat_cid``:
+        the chat it was started from, whose model a later Resume on the Jobs page follows."""
         app = self.app
         library = getattr(app, "library", None)
         notify = getattr(app, "notify", None) or (lambda *a, **k: None)
@@ -1070,7 +1071,8 @@ class ChatFeature:
             return None
         book, raw = found
         try:
-            spec = library.translate_spec([book], sources=[raw], config_overrides=dict(config_overrides or {}))
+            tied = {"chat_cid": str(chat_cid)} if chat_cid else {}
+            spec = library.translate_spec([book], sources=[raw], config_overrides=dict(config_overrides or {}), **tied)
             active = self._active_job_for(spec)
             job_id = await library.submit(spec)
         except Exception as exc:
@@ -1759,12 +1761,13 @@ class ChatFeature:
             log.debug("refreshing the Library failed", exc_info=True)
 
     async def library_translate(self, folder: str, source: str = "", run_config: Optional[dict] = None,
-                                chat_overrides: Optional[dict] = None) -> Any:
+                                chat_overrides: Optional[dict] = None, chat_cid: Optional[str] = None) -> Any:
         """Resume / Retry failed of a chat book that moved into the Library: its translation run starts at
         once (``translate_sheet.resume_translation``, no sheet: 9.15.7 batch issue 4) and continues from the
         moved workspace's progress file. ``run_config``: the Result card's "Only for this run" values;
         ``chat_overrides``: the chat's run overrides now (``ChatView.run_overrides``: model, profile, target
-        language, glossary prompts), which win over them as at a chat Resume (``run_request.with_chat_overrides``)."""
+        language, glossary prompts), which win over them as at a chat Resume (``run_request.with_chat_overrides``);
+        ``chat_cid``: that chat, whose model a later Resume on the Jobs page follows."""
         notify = getattr(self.app, "notify", None)
         library = self.library_service()
         feature = getattr(self.app, "library_feature", None)
@@ -1780,7 +1783,8 @@ class ChatFeature:
         from glossarion_mobile.ui.library.translate_sheet import resume_translation
 
         overrides = with_chat_overrides(run_config or {}, chat_overrides or {})
-        return await resume_translation(feature.context(), book, config_overrides=overrides)
+        tied = {"chat_cid": str(chat_cid)} if chat_cid else {}
+        return await resume_translation(feature.context(), book, config_overrides=overrides, **tied)
 
     def job_workspace(self, snap: Any) -> str:
         """A chat job's persisted ``Direct Text/<chat>/Attachments/<stem>`` workspace (Jobs › job › Files): the

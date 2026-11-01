@@ -2799,17 +2799,25 @@ class ChatView:
             self.render_transcript()
 
     async def _qa_run_translation(self, folder: str, source: str) -> Optional[str]:
-        """QA card › Run translation (desktop Run Translation): the scanned book again, with the card's
-        multipass choice for this run only."""
+        """QA card › Run translation (desktop Run Translation): the scanned book again, with the chat's model /
+        profile / language as at Send and the card's multipass choice for this run only."""
         runner = getattr(self.env, "run_translation", None) if self.env is not None else None
         if runner is None:
             self.notify("Translation runs are not available in this session")
             return None
         meta = self.env.chats.meta(self.cid) if self.bound else {}
-        overrides: dict = {"multipass_mode": bool(meta.get("qa_multipass", False))}
+        from glossarion_mobile.ui.chat.run_request import config_overrides as chat_config_overrides
+
+        overrides: dict = {}
+        if self.bound:
+            try:
+                overrides.update(chat_config_overrides(self.run_overrides(self.cid)))
+            except Exception:
+                log.debug("chat overrides unavailable", exc_info=True)
+        overrides["multipass_mode"] = bool(meta.get("qa_multipass", False))
         if overrides["multipass_mode"]:
             overrides["multipass_refinement_mode"] = str(meta.get("qa_multipass_mode") or QA_MULTIPASS_DEFAULT_MODE)
-        return await self._await(runner(folder, source, overrides))
+        return await self._await(runner(folder, source, overrides, chat_cid=self.cid if self.bound else None))
 
     async def open_qa_report(self, folder: str, job_id: str = "") -> Optional[str]:
         """QA card › Report: the scan's ``validation_results.html`` in the QA report viewer."""
@@ -3040,7 +3048,7 @@ class ChatView:
                 extra: dict = {"run_config": run_config} if run_config else {}
                 chat = self.run_overrides(cid) if self.env is not None and self.env.chats is not None else {}
                 if chat:
-                    extra["chat_overrides"] = chat
+                    extra.update(chat_overrides=chat, chat_cid=cid)
                 job_id = await self._await(hand_off(folder, self._turn_source(item), **extra))
                 if job_id and item is not None:
                     self._handed_off[(cid, getattr(item, "index", None))] = str(job_id)

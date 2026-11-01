@@ -433,6 +433,9 @@ FAMILY_GLOSSARY = "glossary"
 FAMILY_QA = "qa"
 FAMILY_CHAPTER = "chapter"
 
+#: ``params`` key of a translation run a chat started for a Library book (its origin is the Library): the chat whose
+#: model a later Resume on the Jobs page follows (``ChatRuns._resume_params``)
+MODEL_CHAT_PARAM = "model_chat"
 #: kind -> job family. An active job of the same family whose target covers a submission's target already
 #: does its work (``JobService.submit`` reuses it): the translation family is a book's translation run, its
 #: glossary phase included (Library / Progress Manager / QA card "Run translation", the chat's "Save to:
