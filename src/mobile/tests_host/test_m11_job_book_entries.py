@@ -87,6 +87,9 @@ def _ids(service):
     # Resolve QA of a chapter row: its output file was the label
     (f"{TITLE} · response_0004.html", "resolve_qa", ("/b/raw.epub",), {}, TITLE),
     ("response_0004.html", "resolve_qa", ("/b/raw.epub",), {}, "raw"),
+    # a TXT book's chapter output
+    (f"{TITLE} · response_section_12.txt", "resolve_qa", ("/b/raw.txt",), {}, TITLE),
+    ("response_section_12.txt", "resolve_qa", ("/b/raw.txt",), {}, "raw"),
     # other labels stay
     (f"{TITLE} · Table of contents", "resolve_qa", ("/b/raw.epub",), {}, f"{TITLE} · Table of contents"),
     (f"{TITLE} · 3 selected", "retranslate", (), {}, f"{TITLE} · 3 selected"),
@@ -157,7 +160,8 @@ def test_the_owners_three_finished_jobs_leave_when_a_new_job_is_queued(tmp_path)
     assert _ids(service) == ["other1"]  # queued is enough; another book's entry stays
     saved = json.loads(Path(service.history_state_path).read_text(encoding="utf-8"))
     assert [j["id"] for j in saved["jobs"]] == ["other1"]
-    service.cancel_queued(job_id)
+    service.resume_queue()
+    assert service.wait_idle(TIMEOUT)
     service.close()
 
     service, backend = make_service(tmp_path)  # stays gone after a restart
@@ -213,8 +217,8 @@ def test_a_chat_attachments_entry_and_the_librarys_are_one_book(tmp_path):
     service.pause_queue()
     first = service.submit(_library(source))
     assert _ids(service) == []
-    service.cancel_queued(first)  # now its Cancelled entry is the book's one entry
-    assert _ids(service) == [first]
+    service.cancel_queued(first)  # it never ran: the book's entry returns, next to its Cancelled one
+    assert _ids(service) == [first, "chat1"]
     second = service.submit(chat)
     assert _ids(service) == []
     service.cancel_queued(second)
@@ -289,7 +293,8 @@ def test_an_entry_that_left_stays_readable_by_its_id_after_a_restart(tmp_path):
     new = service.submit(_library(source))
     assert service.snapshot("old").spec.title == TITLE and service.view().find("old") is not None
     assert service.resume("old") == new  # a stale Resume reaches the job that carries it on
-    service.cancel_queued(new)
+    service.resume_queue()
+    assert service.wait_idle(TIMEOUT)
     service.close()
 
     service, _ = make_service(tmp_path)

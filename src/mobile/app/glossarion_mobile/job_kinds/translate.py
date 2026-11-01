@@ -315,7 +315,9 @@ def run_translation(ctx: Any, files: list) -> dict:
     if ctx.stop_requested():
         ctx.log("⏹️ Translation stopped before it started")
         return {"ok": None, "outputs": []}
-    with indexing_phase(ctx), post_translation_qa_trigger(ctx) as qa_requests:
+    from glossarion_mobile.job_kinds.qa import multipass_scan_turns
+
+    with indexing_phase(ctx), post_translation_qa_trigger(ctx) as qa_requests, multipass_scan_turns():
         outcome = worker(request)
     ok, outputs, error = result_fields(outcome)
     if ok is False and ctx.stop_requested():

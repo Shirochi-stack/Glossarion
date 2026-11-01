@@ -129,13 +129,9 @@ class QaScannerScreen(Screen):
     def build_body(self) -> ft.Control:
         self.mode_row = ft.ResponsiveRow(spacing=8, run_spacing=8, key="qa-modes")
         self._render_modes()
-        # owner 2026-10-08: nothing saved shows the mobile default 0 (duplicate check off) - the value
-        # the job scans with
-        sample = self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None)
-        if sample is None:
-            sample = qm.MOBILE_QUICK_SAMPLE_SIZE
         self.sample_field = commit_on_blur(
-            ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(sample), dense=True, keyboard_type=number_keyboard(),
+            ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(self._saved_sample()), dense=True,
+                         keyboard_type=number_keyboard(),
                          helper=qm.QUICK_SAMPLE_HINT, key="qa-sample"),
             lambda _text: self._on_sample(), current=lambda: self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None))
         self.workers_field = commit_on_blur(
@@ -305,6 +301,22 @@ class QaScannerScreen(Screen):
             self.ctx.spawn(self.preselect_book(out))
         self.ctx.spawn(self.load_reports())
         self._render_name_fix()
+        self._show_saved_fields()
+
+    def _saved_sample(self) -> Any:
+        # owner 2026-10-08: nothing saved shows the mobile default 0 (duplicate check off) - the value
+        # the job scans with
+        sample = self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None)
+        return qm.MOBILE_QUICK_SAMPLE_SIZE if sample is None else sample
+
+    def _show_saved_fields(self) -> None:
+        """Back on top after Settings saved these values (the buttons on this screen): Start must not write back the
+        numbers this screen was built with. A text the field refused stays for the owner to fix."""
+        for field, saved in ((self.sample_field, self._saved_sample()),
+                             (self.workers_field, qm.workers_shown(self.ctx.config_snapshot()))):
+            if not field.error and field.value != str(saved):
+                field.value = str(saved)
+                self.ctx.push(field)
 
     def dispose(self) -> None:
         self.watch.stop()

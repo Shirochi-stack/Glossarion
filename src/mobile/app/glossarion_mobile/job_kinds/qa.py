@@ -37,7 +37,8 @@ pickers, mismatch question - happen on the QA screen before the job is queued):
   on the host (``tools/qa_scan_bench.py``): 1, 2, 4 and 8 workers scan about equally fast, a burst of work on the
   loop takes (workers + 1) times as long, and log lines and repaints are about 1 % of the loop's time. So while a
   scan runs its CPU workers take turns between their files or comparisons (``_WorkerTurns``: one holds the GIL
-  against the loop, not all of them) and the GIL switch interval is ``SCAN_SWITCH_INTERVAL``. Findings do not change;
+  against the loop, not all of them) and the GIL switch interval is ``SCAN_SWITCH_INTERVAL``, also in the scan a
+  translation's Multipass refinement runs (``multipass_scan_turns``). Findings do not change;
 * the API pools of the scan (AI / silent truncation) do not take turns: they wait on the network, not on the GIL;
 * Stop follows the desktop QA escalation (``next_qa_stop_phase``): the first Stop sets the
   graceful flags (``apply_qa_graceful_stop_flags``: scan loop stop, ``GRACEFUL_STOP``,
@@ -79,7 +80,7 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 __all__ = ["KINDS", "MOBILE_QUICK_SAMPLE_SIZE", "MODES", "QUICK_SAMPLE_KEY", "REPORT_FILE",
            "SCAN_PHASE_SOURCE_EXTENSIONS", "SCAN_SWITCH_INTERVAL", "SCAN_WORKER_TURNS", "WORKERS_KEY",
-           "default_scan_workers",
+           "default_scan_workers", "multipass_scan_turns",
            "normalize_targets", "report_path_for", "run", "run_scan_phase", "saved_quick_sample_size",
            "saved_scan_workers", "scan", "scan_phase_mode", "scan_workers", "with_mobile_qa_defaults"]
 
@@ -215,19 +216,15 @@ def _taking_turns(submit: Callable[..., Any]) -> Callable[..., Any]:
 
 
 @contextlib.contextmanager
-def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None]:
-    """A running scan: the saved workers in ``AI_HUNTER_MAX_WORKERS`` (this job's config snapshot, not a mirror an
-    earlier run left in the env), the workers taking turns and the short GIL switch interval. All restored after."""
-    previous_workers = os.environ.get("AI_HUNTER_MAX_WORKERS")
+def _scan_turns(turns: bool = True) -> Iterator[None]:
+    """The workers taking turns (``SCAN_WORKER_TURNS``) and the short GIL switch interval, restored after."""
     previous_interval = sys.getswitchinterval()
     scanner: Any = None
-    if callable(getattr(qa, "mobile_qa_max_workers", None)):
-        os.environ["AI_HUNTER_MAX_WORKERS"] = str(scan_workers(config, qa))
-        if SCAN_WORKER_TURNS:
-            try:
-                import scan_html_folder as scanner
-            except Exception:  # pragma: no cover - the scan itself reports a build without the scanner
-                scanner = None
+    if turns and SCAN_WORKER_TURNS:
+        try:
+            import scan_html_folder as scanner
+        except Exception:  # pragma: no cover - the scan itself reports a build without the scanner
+            scanner = None
     submit = getattr(scanner, "_submit_worker", None)
     if callable(submit):
         scanner._submit_worker = _taking_turns(submit)
@@ -238,10 +235,48 @@ def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None
         sys.setswitchinterval(previous_interval)
         if callable(submit):
             scanner._submit_worker = submit
+
+
+@contextlib.contextmanager
+def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None]:
+    """A running scan: the saved workers in ``AI_HUNTER_MAX_WORKERS`` (this job's config snapshot, not a mirror an
+    earlier run left in the env) and ``_scan_turns``. All restored after."""
+    previous_workers = os.environ.get("AI_HUNTER_MAX_WORKERS")
+    known = callable(getattr(qa, "mobile_qa_max_workers", None))
+    if known:
+        os.environ["AI_HUNTER_MAX_WORKERS"] = str(scan_workers(config, qa))
+    try:
+        with _scan_turns(known):
+            yield
+    finally:
         if previous_workers is None:
             os.environ.pop("AI_HUNTER_MAX_WORKERS", None)
         else:
             os.environ["AI_HUNTER_MAX_WORKERS"] = previous_workers
+
+
+@contextlib.contextmanager
+def multipass_scan_turns() -> Iterator[None]:
+    """A translation job: the QA scan its Multipass refinement runs on its own (``run_qa_scan_path`` in the backend,
+    with the workers of ``mobile_qa_env_overrides``) goes through ``_scan_turns`` too, like a QA scan job."""
+    try:
+        import TransateKRtoEN as backend
+    except Exception:  # pragma: no cover - the translation itself reports a build without the backend
+        backend = None
+    original = getattr(backend, "_run_multipass_refinement_qa_scan", None)
+    if not callable(original):
+        yield
+        return
+
+    def scan_taking_turns(*args: Any, **kwargs: Any) -> Any:
+        with _scan_turns():
+            return original(*args, **kwargs)
+
+    backend._run_multipass_refinement_qa_scan = scan_taking_turns
+    try:
+        yield
+    finally:
+        backend._run_multipass_refinement_qa_scan = original
 
 
 def normalize_targets(params: Mapping[str, Any], inputs: Sequence[str], *, with_flags: bool = False) -> list:
