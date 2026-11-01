@@ -927,7 +927,8 @@ class ChatRuns:
 
     def _chat_jobs(self, cid: str) -> list:
         """``[(snapshot, interrupted)]``: this chat's direct_text jobs JobService remembers (the
-        Interrupted list and the history), newest first. Survives a relaunch, unlike ``runs``."""
+        Interrupted list, the history and the entries a newer job of their book took out of it), newest
+        first. Survives a relaunch, unlike ``runs``."""
         view = getattr(self.jobs.jobs, "view", None) if self.jobs.jobs is not None else None
         if not callable(view):
             return []
@@ -935,6 +936,7 @@ class ChatRuns:
             jobs_view = view()
             entries = [(snap, True) for snap in (getattr(jobs_view, "interrupted", ()) or ())]
             entries += [(snap, False) for snap in (getattr(jobs_view, "history", ()) or ())]
+            entries += [(snap, False) for snap in (getattr(jobs_view, "carried_on", ()) or ())]
         except Exception:
             return []
         entries = [(snap, interrupted) for snap, interrupted in entries

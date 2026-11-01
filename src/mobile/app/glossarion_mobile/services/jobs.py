@@ -369,6 +369,9 @@ _STATUS_KEYS = {
     JobState.INTERRUPTED: "interrupted",
 }
 
+#: ``JobSnapshot.resolution`` of an ended entry a newer job of its book replaced
+RESOLUTION_CARRIED_ON = "carried_on"
+
 STOP_GRACEFUL = "graceful"
 STOP_IMMEDIATE = "immediate"
 STOP_FORCE = "force"
@@ -508,6 +511,61 @@ def job_target(spec: Any) -> Optional[JobTarget]:
     return JobTarget(family, frozenset(keys)) if keys else None
 
 
+#: Kinds whose job works on books (``job_books``): one of them queued or running replaces its books' ended entries.
+BOOK_JOB_KINDS = frozenset(JOB_FAMILIES) | {
+    "retranslate", "resolve_qa", "compile_epub", "compile_pdf", "metadata", "translate_headers", "validate_epub",
+    "rename_outputs", "md_txt_sidecars", "br_to_paragraphs",
+}
+
+
+def job_books(spec: Any, output_dirs: Optional[Mapping[str, str]] = None, output_dir: Any = None) -> tuple:
+    """The books a job works on, each as the set of keys that name that book: its source file (``job_target``, a QA
+    scan's ``targets``), its workspace folder (the params, the output folders once known) and, for a job of one
+    book, its Library id. Never the title: two books can share one, and one book has several (owner 2026-11-01:
+    Library, QA card and Reader jobs of one book). () for a job on no book. Pure: no disk access beyond resolving
+    the paths."""
+    kind = _spec_kind(spec)
+    if kind not in BOOK_JOB_KINDS:
+        return ()
+    params = _spec_field(spec, "params") or {}
+    params = params if isinstance(params, Mapping) else {}
+    targets = params.get("targets")
+    books: list = []
+    if targets and isinstance(targets, (list, tuple)):
+        books = [{target_key(t[name]) for name in ("folder", "source") if t.get(name)}
+                 for t in targets if isinstance(t, Mapping)]
+    else:
+        target = job_target(spec)
+        if target is not None:
+            paths = {key.split("::", 1)[0] for key in target.keys}
+        elif kind == "direct_text":
+            return ()  # a typed-text chat: its input is a file of its own run root
+        else:
+            paths = {target_key(p) for p in (_spec_field(spec, "inputs") or ()) if p and str(p).strip()}
+        books = [{path} for path in sorted(paths)]
+    dirs = dict(output_dirs or {})
+    if len(books) > 1:  # each output folder to its own book; the params and the origin do not say which
+        for source, folder in dirs.items():
+            key = target_key(source)
+            for book in books:
+                if key in book:
+                    book.add(target_key(folder))
+        return tuple(frozenset(book) for book in books)
+    keys = set(books[0]) if books else set()
+    keys.update(target_key(params[name]) for name in ("folder", "output_dir", "source_path") if params.get(name))
+    keys.update(target_key(folder) for folder in (*dirs.values(), output_dir) if folder)
+    origin = _spec_field(spec, "origin") or {}
+    if isinstance(origin, Mapping) and origin.get("bid"):
+        keys.add(f"bid:{origin['bid']}")
+    return (frozenset(keys),) if keys else ()
+
+
+def same_books(ended: Sequence[frozenset], live: Sequence[frozenset]) -> bool:
+    """Every book of ``ended`` is one of ``live``'s (a key in common): a job over two books is not replaced by a
+    job over one of them."""
+    return bool(ended) and all(any(book & other for other in live) for book in ended)
+
+
 def spec_key(spec: Any) -> str:
     """What makes two submissions the very same request, for any kind: the kind, the inputs and the params
     (not the title or the origin, which only say where it was tapped). '' when it cannot be told."""
@@ -527,7 +585,23 @@ def spec_key(spec: Any) -> str:
 
 
 #: a job title with one of these endings is still its source file's name (``_take_translated_title``)
-FILE_TITLE_EXTENSIONS = (".epub", ".txt", ".pdf", ".md", ".html", ".htm", ".docx", ".odt", ".rtf")
+FILE_TITLE_EXTENSIONS = (".epub", ".txt", ".pdf", ".md", ".html", ".xhtml", ".htm", ".docx", ".odt", ".rtf")
+
+#: job kinds that work on one chapter of a book, and what its file is called (``book_job_title``)
+CHAPTER_JOB_KINDS = frozenset({"single_chapter", "resolve_qa"})
+CHAPTER_FILE_EXTENSIONS = (".xhtml", ".html", ".htm", ".txt")  # .txt: a TXT book's response_section_N.txt
+
+
+def book_job_title(kind: str, title: str, inputs: Sequence[str]) -> str:
+    """Owner 2026-11-01 ("using the title of the html file instead of the book title"): a chapter's job is labelled
+    with its book. "Book · chapter0004.xhtml" (the Reader, the Book page's rows, Resolve QA, entries an older build
+    stored) is "Book"; with no book name, the source file's name."""
+    if kind not in CHAPTER_JOB_KINDS:
+        return title
+    head, _separator, name = str(title or "").rpartition("·")
+    if os.path.splitext(name.strip())[1].lower() not in CHAPTER_FILE_EXTENSIONS:
+        return title
+    return head.strip() or (os.path.splitext(os.path.basename(str(inputs[0])))[0] if inputs else "") or title
 
 
 def translated_book_title(path: str) -> str:
@@ -559,6 +633,7 @@ class JobSpec:
         kind = self.kind.value if isinstance(self.kind, enum.Enum) else str(self.kind)
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "inputs", tuple(os.fspath(p) for p in (self.inputs or ())))
+        object.__setattr__(self, "title", book_job_title(kind, self.title, self.inputs))
         object.__setattr__(self, "params", dict(self.params or {}))
         object.__setattr__(self, "origin", dict(self.origin or {}))
 
@@ -646,7 +721,7 @@ class JobSnapshot:
     log_path: Optional[str] = None
     question: Optional[Mapping[str, Any]] = None
     recovered: bool = False
-    resolution: Optional[str] = None  # interrupted jobs: "resumed" | "discarded"
+    resolution: Optional[str] = None  # interrupted jobs: "resumed" | "discarded"; RESOLUTION_CARRIED_ON
     restore_pending: bool = False  # recovered; its progress rows are not restored yet
     result: Mapping[str, Any] = field(default_factory=dict)  # what the kind adapter recorded (JobContext.set_result)
     # U9: the request wait the API client last logged (rate limit / key cooldown / network):
@@ -772,6 +847,9 @@ class JobsView:
     interrupted: tuple = ()
     history: tuple = ()
     paused: bool = False
+    # ended entries a newer job of their book replaced (``JobService._drop_superseded``): not listed; what refers to
+    # them by id (a chat's Result and QA cards, an open-job link, a notification) still reads them
+    carried_on: tuple = ()
 
     @property
     def running_count(self) -> int:
@@ -784,7 +862,7 @@ class JobsView:
     def find(self, job_id: str) -> Optional[JobSnapshot]:
         for snap in ((self.active,) if self.active is not None else ()) + tuple(self.queue) + tuple(
             self.interrupted
-        ) + tuple(self.history):
+        ) + tuple(self.history) + tuple(self.carried_on):
             if snap is not None and snap.id == job_id:
                 return snap
         return None
@@ -1729,6 +1807,12 @@ class JobService:
         self._active: Optional[_Job] = None
         self._recent: list[_Job] = []  # finished jobs whose buffers are kept
         self._history: list[JobSnapshot] = []
+        self._carried_on: list[JobSnapshot] = []  # ended entries a newer job of their book replaced (``carried_on``)
+        self._carried_by: dict = {}  # such an entry's id -> {"job": what replaced it, "covers": it does that work}
+        self._folder_keys: dict = {}  # a workspace path -> its ``target_key`` (``_folder_key``)
+        self._counts_unsaved = False  # ``_follow_progress`` changed counts the state file does not have yet
+        self._counts_saved_at = 0.0
+        self._summaries_seen: dict = {}  # progress file -> (mtime, size) the Jobs page's refresh last read
         self._interrupted: list[JobSnapshot] = []
         self._paused = False
         self._closed = False
@@ -1741,6 +1825,7 @@ class JobService:
         self._resume_lock = threading.RLock()
         self._resumed_into: dict[str, str] = {}
         self._ended_targets: dict = {}  # ended job id -> its ``job_target`` (``_ended_target``)
+        self._ended_books: dict = {}  # ended job id -> its ``job_books``
         self._resumed_interrupted: set = set()  # Interrupted jobs resumed this session (a second Resume is refused)
         self.adopted_ids: list[str] = []  # interrupted jobs found at this launch (launch banner)
         #: ``spec -> params | None``: the params a Resume without its own runs with (the chat sets it:
@@ -1767,6 +1852,8 @@ class JobService:
         os.makedirs(self.jobs_dir, exist_ok=True)
         self._load_history()
         self._adopt_leftovers()
+        with self._lock:
+            self._bring_back_locked()  # the jobs that replaced them died with the last launch
 
     # ---- paths ----------------------------------------------------------------------------
 
@@ -1886,6 +1973,7 @@ class JobService:
                 interrupted=tuple(self._interrupted),
                 history=tuple(self._history),
                 paused=self._paused,
+                carried_on=tuple(self._carried_on),
             )
 
     def snapshot(self, job_id: Optional[str] = None) -> Optional[JobSnapshot]:
@@ -1893,6 +1981,9 @@ class JobService:
         with self._lock:
             if job_id is None:
                 return self._active.snapshot() if self._active is not None else None
+            carried = next((s for s in self._carried_on if s.id == job_id), None)
+            if carried is not None:
+                return carried
             job = self._find_live(job_id)
             if job is not None:
                 return job.snapshot()
@@ -1971,31 +2062,87 @@ class JobService:
             self._ended_targets[snap.id] = job_target(snap.spec)
         return self._ended_targets[snap.id]
 
-    def _drop_superseded(self, target: Optional[JobTarget], new_id: str) -> None:
-        """Owner 2026-10-30 ("the chat and the jobs menu in sync"): a new job for a book carries on that book's
-        unfinished work, wherever it was started (the chat, the Library, the Jobs page). The book's Stopped,
-        Failed and Interrupted entries leave Finished / the Interrupted list, so a book has one job there; a
-        Done entry stays (it finished)."""
-        if target is None:
+    def _books_of_ended(self, snap: JobSnapshot) -> tuple:
+        """``job_books`` of an ended job, resolved once per job."""
+        if snap.id not in self._ended_books:
+            self._ended_books[snap.id] = job_books(snap.spec, snap.output_dirs, snap.output_dir)
+        return self._ended_books[snap.id]
+
+    def _drop_superseded(self, target: Optional[JobTarget] = None, new_id: str = "") -> None:
+        """Owner 2026-10-30 ("the chat and the jobs menu in sync") and 2026-11-01 ("I somehow have 3 separate finished
+        jobs"): a book has one job on the Jobs page, wherever it was started (the chat, the Library, the Reader, the
+        Jobs page). While a job for a book is queued or running none of the book's ended entries is under Finished
+        (``job_books``; ``_carry_on_locked`` keeps them readable by id). A new job (``target``, ``new_id``) also
+        carries on the Interrupted entries its target covers. Blocking only on resolving the paths."""
+        with self._lock:
+            interrupted = list(self._interrupted)
+            history = list(self._history)
+            live = [(job.id, job.spec, dict(job.output_dirs), job.output_dir) for job in self._live_jobs_locked()]
+        resumed = {snap.id for snap in interrupted
+                   if snap.id != new_id and target is not None and target.covers(self._ended_target(snap))}
+        carried: dict = {}
+        for job_id, spec, dirs, folder in live:
+            books = job_books(spec, dirs, folder)
+            target_now = job_target(spec)
+            for snap in history:
+                if snap.id != job_id and snap.id not in carried and same_books(self._books_of_ended(snap), books):
+                    carried[snap.id] = (job_id, target_now is not None and target_now.covers(self._ended_target(snap)))
+        if not resumed and not carried:
             return
         with self._lock:
-            ended = list(self._interrupted) + list(self._history)
-        superseded = {snap.id for snap in ended
-                      if snap.id != new_id and not (snap.state is JobState.DONE)
-                      and target.covers(self._ended_target(snap))}
-        if not superseded:
-            return
-        with self._lock:
-            interrupted = [s for s in self._interrupted if s.id not in superseded]
-            history = [s for s in self._history if s.id not in superseded]
-            if len(interrupted) != len(self._interrupted):
-                self._interrupted = interrupted
+            if resumed:
+                self._interrupted = [s for s in self._interrupted if s.id not in resumed]
                 self._write_interrupted_locked()
-            if len(history) != len(self._history):
-                self._history = history
-                self._write_history_locked()
-        log.info("job %s carries on %d earlier job(s) of its book", new_id, len(superseded))
+            if carried:
+                self._carry_on_locked(carried)
+        log.info("%d earlier job(s) of the running books left the Jobs page", len(resumed) + len(carried))
         self._changed()
+
+    def _carry_on_locked(self, carried: Mapping[str, str]) -> None:
+        """``carried``: ended entry id -> (the job that replaces it, whether that job does the entry's work). The
+        entries leave Finished, persisted (``_bring_back_locked`` says when one returns)."""
+        moved = [s for s in self._history if s.id in carried]
+        self._history = [s for s in self._history if s.id not in carried]
+        self._carried_on[:0] = [replace(s, resolution=s.resolution or RESOLUTION_CARRIED_ON) for s in moved]
+        del self._carried_on[self.history_limit:]
+        for job_id, (into, covers) in carried.items():
+            self._carried_by[job_id] = {"job": into, "covers": bool(covers)}
+        kept = {s.id for s in self._carried_on}
+        self._carried_by = {job_id: who for job_id, who in self._carried_by.items() if job_id in kept}
+        self._write_history_locked()
+
+    def _bring_back_locked(self, job_id: Optional[str] = None, *, never_ran: bool = False) -> None:
+        """Job ``job_id`` ended (None: every job, at launch nothing is running any more). What it replaced stays out
+        of Finished when it carried that work on. Two kinds of entry return: all of them when it never ran (cancelled
+        while queued: the book's real result is still its result), and the unfinished entries of work it did not take
+        over (a QA scan or a compile of a half-done book): their Resume row. ``_drop_superseded`` then takes out
+        whatever another live job of the book replaces."""
+        back = []
+        for snap in self._carried_on:
+            who = self._carried_by.get(snap.id)
+            if not who or (job_id is not None and who.get("job") != job_id):
+                continue
+            unfinished = snap.state is not JobState.DONE and snap.resolution == RESOLUTION_CARRIED_ON
+            if never_ran or (unfinished and not who.get("covers")):
+                back.append(snap)
+        if not back:
+            return
+        ids = {snap.id for snap in back}
+        self._carried_on = [s for s in self._carried_on if s.id not in ids]
+        for snap in back:
+            self._carried_by.pop(snap.id, None)
+            snap = replace(snap, resolution=None if snap.resolution == RESOLUTION_CARRIED_ON else snap.resolution)
+            at = next((i for i, s in enumerate(self._history) if (s.finished or 0) <= (snap.finished or 0)),
+                      len(self._history))
+            self._history.insert(at, snap)
+        del self._history[self.history_limit:]
+        self._write_history_locked()
+
+    def _carrier_live_locked(self, job_id: str) -> bool:
+        """The job that replaced ended entry ``job_id`` has not ended."""
+        who = self._carried_by.get(job_id)
+        into = who.get("job") if who else None
+        return any(job.id == into for job in self._live_jobs_locked())
 
     def latest_job_for(self, path: Any, family: str = FAMILY_TRANSLATION) -> Optional[JobSnapshot]:
         """The job that stands for ``path``'s work now: the active one, else the newest ended or Interrupted
@@ -2006,7 +2153,8 @@ class JobService:
             return active
         wanted = target_key(path)
         with self._lock:
-            ended = list(self._interrupted) + list(self._history)
+            # the entries out of Finished too: a QA scan of the book does not make its last translation not have run
+            ended = list(self._interrupted) + list(self._history) + list(self._carried_on)
         best = None
         for snap in ended:
             found = self._ended_target(snap)
@@ -2068,9 +2216,11 @@ class JobService:
             job.state = JobState.CANCELLED
             job.finished = self.clock()
             snap = job.snapshot()
+            self._bring_back_locked(job.id, never_ran=True)
             self._append_history_locked(snap)
             self._write_active_locked()
         self._post(self._deliver_transition, snap, JobState.QUEUED)
+        self._drop_superseded()
         return True
 
     def cancel_all_queued(self) -> int:
@@ -2108,6 +2258,8 @@ class JobService:
     def clear_finished(self) -> None:
         with self._lock:
             self._history = []
+            self._carried_on = []
+            self._carried_by = {}
             self._write_history_locked()
         self._changed()
 
@@ -2147,6 +2299,10 @@ class JobService:
                     snap = next((s for s in self._history if s.id == job_id), None)
                     if snap is not None and snap.resolution == "resumed":
                         return None  # an Interrupted entry resumed already: refused, as before
+                if snap is None and self._carrier_live_locked(job_id):
+                    # out of Finished for a job still at work: submitting reuses it when it does this work, and
+                    # queues the Resume behind it when it does not (a QA scan of the half-done book)
+                    snap = next((s for s in self._carried_on if s.id == job_id), None)
                 into = self._resumed_into.get(job_id)
                 current = self._find_live(into) if into else None
                 if current is not None and current.state not in TERMINAL_STATES:
@@ -2169,11 +2325,12 @@ class JobService:
                 if not from_interrupted and result.job_id != job_id:
                     # owner 2026-10-29: a resumed Stopped / Failed job carries on under Running; its old entry
                     # leaves Finished (it was the same job shown twice). Its new run lands there when it ends.
-                    kept = [s for s in self._history if s.id != job_id]
-                    if len(kept) != len(self._history):
-                        self._history = kept
-                        self._write_history_locked()
+                    if any(s.id == job_id for s in self._history):
+                        self._carry_on_locked({job_id: (result.job_id, True)})
                         left_finished = True
+                    elif job_id in self._carried_by:
+                        self._carried_by[job_id] = {"job": result.job_id, "covers": True}
+                        self._write_history_locked()
             if from_interrupted:
                 self._resolve_interrupted(job_id, "resumed")
             if left_finished:
@@ -2192,6 +2349,7 @@ class JobService:
             if resolution != "resumed":
                 # a resumed one carries on as its new job (owner 2026-10-30: the same job was listed twice,
                 # Interrupted under Finished next to the run that resumed it)
+                self._bring_back_locked(job_id, never_ran=snap.started is None)
                 self._append_history_locked(replace(snap, resolution=resolution))
             self._write_interrupted_locked()
         self._changed()
@@ -2892,6 +3050,7 @@ class JobService:
             job.question = None
             job.warning = False
             snap = job.snapshot()
+            self._bring_back_locked(job.id)
             self._append_history_locked(snap)
             self._recent.insert(0, job)
             del self._recent[JOB_BUFFERS_KEPT:]
@@ -2900,46 +3059,107 @@ class JobService:
         self._job_log(job, f"■ {snap.state_label}: {job.spec.title}" + (f" — {snap.error}" if snap.error else ""), {})
         self._close_log(job)
         self._post(self._deliver_transition, snap, previous)
-        folder = _only_output_dir(snap)
+        self._drop_superseded()
+        # a job that only names its workspace (Retranslate Selected) changed the book's marks too
+        params = snap.spec.params if isinstance(snap.spec.params, Mapping) else {}
+        folder = _only_output_dir(snap) or params.get("output_dir")
         if folder:
-            self.refresh_finished_progress(folder=folder)
+            self.refresh_finished_progress(folder=str(folder))
 
     def refresh_finished_progress(self, job_id: Optional[str] = None, *, folder: Optional[str] = None) -> bool:
         """Blocking: finished jobs show how their book stands now. A QA scan, a retranslation or a Progress manager
         edit changes the chapters' marks in the book's progress file, and the counts a job saved when it ended (its
         page's "N QA failed", its progress line, its Jobs row) do not follow. ``job_id``: that job; ``folder``: the
-        jobs of that workspace. True when a count changed."""
+        jobs of that workspace; neither (the Jobs page shows): every job whose progress file changed since the last
+        such read. True when a count changed."""
         reader = getattr(self.backend, "progress_summary", None)
         if not callable(reader):
             return False
-        wanted = _norm(folder) if folder else None
+        wanted = self._folder_key(folder) if folder else None
         targets: dict = {}
         with self._lock:
-            for snap in self._history:
+            for snap in self._history + self._carried_on:
                 own = _only_output_dir(snap)
                 if (own and snap.progress.total and (job_id is None or snap.id == job_id)
-                        and (wanted is None or _norm(own) == wanted)):
+                        and (wanted is None or self._folder_key(own) == wanted)):
                     targets[snap.id] = os.path.join(own, "translation_progress.json")
-        summaries = {path: reader(path) for path in set(targets.values())}
-        changed = False
+        paths = set(targets.values())
+        if job_id is None and wanted is None:
+            paths = {path for path in paths if self._summary_file_changed(path)}
+        summaries = {path: reader(path) for path in paths}
+
+        def counts_of(snap: JobSnapshot) -> Optional[Mapping[str, Any]]:
+            summary = summaries.get(targets.get(snap.id))
+            return summary if isinstance(summary, Mapping) and summary.get("total") else None
+
         with self._lock:
-            for index, snap in enumerate(self._history):
-                summary = summaries.get(targets.get(snap.id))
-                if not isinstance(summary, Mapping) or not summary.get("total"):
+            changed = self._update_counts_locked(counts_of)
+            if changed or self._counts_unsaved:
+                self._write_counts_locked()
+        if changed:
+            self._changed()
+        return changed
+
+    def _folder_key(self, path: Any) -> str:
+        """``target_key``, once per path: Android names one folder /data/user/0/... and /data/data/..., and a progress
+        event compares it for every ended entry, under the lock."""
+        key = self._folder_keys.get(path)
+        if key is None:
+            key = self._folder_keys[path] = target_key(path)
+        return key
+
+    def _summary_file_changed(self, path: str) -> bool:
+        try:
+            stat = os.stat(path)
+            seen = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            seen = None
+        changed = self._summaries_seen.get(path) != seen
+        self._summaries_seen[path] = seen
+        return changed and seen is not None
+
+    def _update_counts_locked(self, counts_of: Callable[[JobSnapshot], Optional[Mapping[str, Any]]]) -> bool:
+        """The ended entries take the counts ``counts_of`` gives them; True when one changed."""
+        changed = False
+        for entries in (self._history, self._carried_on):
+            for index, snap in enumerate(entries):
+                counts = counts_of(snap)
+                if not counts:
                     continue
                 progress = Progress.from_dict({**snap.progress.to_dict(), **{
-                    key: summary[key] for key in ("total", "completed", "in_progress", "failed") if key in summary}})
+                    key: counts[key] for key in ("total", "completed", "in_progress", "failed") if key in counts}})
                 if progress != snap.progress:
-                    self._history[index] = replace(snap, progress=progress)
+                    entries[index] = replace(snap, progress=progress)
                     recent = next((job for job in self._recent if job.id == snap.id), None)
                     if recent is not None:  # ``snapshot(job_id)`` answers from it
                         recent.progress = progress
                     changed = True
-            if changed:
-                self._write_history_locked()
-        if changed:
-            self._changed()
         return changed
+
+    def _write_counts_locked(self) -> None:
+        self._counts_unsaved = False
+        self._counts_saved_at = self.clock()
+        self._write_history_locked()
+
+    def _follow_progress(self, data: Mapping[str, Any]) -> None:
+        """Owner 2026-11-01 ("The QA failed labels in jobs doesn't update when said failed chapters are in progress"):
+        a running job's progress event is the summary of its book's progress file, so the book's ended entries take
+        the same counts at once: a chapter the job took up is in progress, not QA failed. Saved at the checkpoint
+        rate; the job's end saves the last ones (``refresh_finished_progress``)."""
+        path = data.get("path")
+        if not path or not data.get("total"):
+            return  # not a progress file's summary (a manga run's image counts), or one with no chapters yet
+        wanted = self._folder_key(os.path.dirname(os.fspath(path)))
+
+        def counts_of(snap: JobSnapshot) -> Optional[Mapping[str, Any]]:
+            own = _only_output_dir(snap)
+            return data if own and snap.progress.total and self._folder_key(own) == wanted else None
+
+        with self._lock:
+            if self._update_counts_locked(counts_of):
+                self._counts_unsaved = True
+            if self._counts_unsaved and self.clock() - self._counts_saved_at >= self.checkpoint_interval:
+                self._write_counts_locked()
 
     # ---- events from the job (any thread) ------------------------------------------------------------------------
 
@@ -3150,6 +3370,10 @@ class JobService:
                 self.clock() - job.last_checkpoint >= self.checkpoint_interval or kind == "output_dirs")
         if kind in ("progress", "output_dirs", "output_dir") and self._take_translated_title(job):
             checkpoint_due = True
+        if kind == "progress":
+            self._follow_progress(data)
+        elif kind in ("output_dirs", "output_dir"):
+            self._drop_superseded()  # the job now names its workspace: entries known only by that folder
         if checkpoint_due:
             self._checkpoint(job)
         if not consumed:
@@ -3281,7 +3505,9 @@ class JobService:
     def _write_history_locked(self) -> None:
         try:
             _write_json(self.history_state_path, {"version": STATE_VERSION,
-                                                   "jobs": [s.to_dict() for s in self._history]})
+                                                   "jobs": [s.to_dict() for s in self._history],
+                                                   "carried_on": [s.to_dict() for s in self._carried_on],
+                                                   "carried_by": self._carried_by})
         except Exception:
             log.exception("writing %s failed", self.history_state_path)
 
@@ -3297,9 +3523,9 @@ class JobService:
             log.exception("writing %s failed", path)
 
     def _load_history(self) -> None:
-        def load(path: str) -> list[JobSnapshot]:
+        def load(path: str, key: str = "jobs") -> list[JobSnapshot]:
             data = _read_json(path)
-            jobs = data.get("jobs") if isinstance(data, dict) else None
+            jobs = data.get(key) if isinstance(data, dict) else None
             out = []
             for entry in jobs or ():
                 if isinstance(entry, dict):
@@ -3311,6 +3537,11 @@ class JobService:
 
         with self._lock:
             self._history = load(self.history_state_path)[: self.history_limit]
+            self._carried_on = load(self.history_state_path, "carried_on")[: self.history_limit]
+            data = _read_json(self.history_state_path)
+            by = data.get("carried_by") if isinstance(data, dict) else None
+            self._carried_by = {job_id: who for job_id, who in by.items() if isinstance(who, dict)} if isinstance(
+                by, dict) else {}
             self._interrupted = load(self.interrupted_state_path)
 
     # ---- recovery -----------------------------------------------------------------------------------------------------

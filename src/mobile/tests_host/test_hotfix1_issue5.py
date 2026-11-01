@@ -786,7 +786,9 @@ def test_library_run_translation_progress_manager_qa_and_a_chat_share_one_job(is
             _describe_calls(calls)
         assert await _until(driver, lambda: service.snapshot(qa_id).is_terminal, RUN_TIMEOUT), service.snapshot(qa_id)
         assert service.snapshot(qa_id).state.value == "DONE", service.snapshot(qa_id)
-        assert [s.id for s in subs.jobs()] == [job_id, qa_id], [(s.id, s.spec.kind) for s in subs.jobs()]
+        # the scan replaced the book's translation under Finished (mobile batch 9.15.11); it is still read by its id
+        assert [s.id for s in subs.jobs()] == [qa_id], [(s.id, s.spec.kind) for s in subs.jobs()]
+        assert service.snapshot(job_id).spec.kind == "translate" and subs.created == [job_id, qa_id]
         assert server.count("translation", status=None) == translations, "the QA scan sent requests"
         assert not _duplicate_requests(server), _duplicate_requests(server)
         assert not [s.message for s in snacks if s.message.startswith("Could not")], [s.message for s in snacks]

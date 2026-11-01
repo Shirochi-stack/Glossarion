@@ -3338,6 +3338,49 @@ APPROVED = (
         },
         "values": {},
     },
+    {
+        "date": "2026-11-01",
+        "what": "Glossarion Mobile only: a QA scan's workers are the setting up to the device's cores, half the "
+                "cores when none is set (the cap of 2 is gone); the functions run only where process pools are "
+                "unavailable, the desktop never calls them",
+        "source": {
+            "src/qa_scan_runtime.py": [(
+                "#: Glossarion Mobile runs QA scans on a thread pool (Android / iOS have no process pools) with at\n"
+                "#: most this many workers (``AI_HUNTER_MAX_WORKERS``). The desktop never applies either.\n"
+                "MOBILE_QA_MAX_WORKERS = 2\n"
+                "\n"
+                "\n"
+                "def mobile_qa_forcing_active():\n",
+                "# Glossarion Mobile runs QA scans on a thread pool (Android / iOS have no process pools) with\n"
+                "# ``mobile_qa_max_workers`` workers (``AI_HUNTER_MAX_WORKERS``). The desktop never applies either.\n"
+                "def mobile_qa_forcing_active():\n",
+            ), (
+                "def mobile_qa_max_workers():\n"
+                '    """Worker cap of a mobile scan: a smaller positive ``AI_HUNTER_MAX_WORKERS`` wins."""\n'
+                "    try:\n"
+                '        configured = int(str(os.getenv("AI_HUNTER_MAX_WORKERS", "") or "").strip() or 0)\n'
+                "    except (TypeError, ValueError):\n"
+                "        configured = 0\n"
+                "    if 0 < configured < MOBILE_QA_MAX_WORKERS:\n"
+                "        return configured\n"
+                "    return MOBILE_QA_MAX_WORKERS\n",
+                "def mobile_qa_max_workers(configured=None):\n"
+                '    """Workers of a mobile scan: the setting (``AI_HUNTER_MAX_WORKERS`` unless given) up to the device\'s\n'
+                '    cores. No setting, or the desktop\'s 0 ("all cores"), means half the cores."""\n'
+                "    if configured is None:\n"
+                '        configured = os.getenv("AI_HUNTER_MAX_WORKERS", "")\n'
+                "    cores = os.cpu_count() or 4\n"
+                "    try:\n"
+                '        configured = int(str(configured or "").strip() or 0)\n'
+                "    except (TypeError, ValueError):\n"
+                "        configured = 0\n"
+                "    if configured > 0:\n"
+                "        return min(configured, cores)\n"
+                "    return max(1, cores // 2)\n",
+            )],
+        },
+        "values": {},
+    },
 )
 
 

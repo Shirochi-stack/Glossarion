@@ -433,7 +433,10 @@ class OverviewTab:
         view = self.page.job_view
         if view is None:
             return None
-        for snap in list(getattr(view, "history", ()) or ()):
+        # also an entry a newer job of the book took out of Finished (a chat's QA scan names no Library id)
+        ended = list(getattr(view, "history", ()) or ()) + list(getattr(view, "carried_on", ()) or ())
+        ended.sort(key=lambda snap: getattr(snap, "created", 0) or 0, reverse=True)
+        for snap in ended:
             origin = getattr(getattr(snap, "spec", None), "origin", {}) or {}
             if origin.get("bid") == self.page.bid:
                 return snap

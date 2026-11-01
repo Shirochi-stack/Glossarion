@@ -46,7 +46,7 @@ from glossarion_mobile.ui.settings.model import (
     spec_attr,
     virtual_writes,
 )
-from glossarion_mobile.job_kinds.qa import MOBILE_QUICK_SAMPLE_SIZE, QUICK_SAMPLE_KEY
+from glossarion_mobile.job_kinds.qa import MOBILE_QUICK_SAMPLE_SIZE, QUICK_SAMPLE_KEY, WORKERS_KEY, default_scan_workers
 from glossarion_mobile.state.setting_writes import MOBILE_STREAMING_DEFAULT, STREAMING_KEYS
 
 __all__ = ["MOBILE_DISPLAY_DEFAULTS", "SchemaAccess", "SearchHit", "SectionInfo", "UNAVAILABLE_REASON",
@@ -55,8 +55,10 @@ __all__ = ["MOBILE_DISPLAY_DEFAULTS", "SchemaAccess", "SearchHit", "SectionInfo"
 #: Display defaults that differ on Glossarion Mobile (owner 2026-10-08); the QA job applies the same
 #: value when config.json has none, so Settings › QA shows what the scans use ("Reset" means 0). The
 #: streaming toggles are ON when absent: every job's config snapshot gets the same default
-#: (``setting_writes.with_mobile_streaming_defaults``), the Streaming switch shows it.
+#: (``setting_writes.with_mobile_streaming_defaults``), the Streaming switch shows it. A QA scan with no
+#: workers saved uses half the cores (owner 2026-11-01), so Settings › AI Hunter shows that number.
 MOBILE_DISPLAY_DEFAULTS = {".".join(QUICK_SAMPLE_KEY): MOBILE_QUICK_SAMPLE_SIZE,
+                           ".".join(WORKERS_KEY): default_scan_workers(),
                            **{key: MOBILE_STREAMING_DEFAULT for key in STREAMING_KEYS}}
 
 log = logging.getLogger("glossarion.settings")

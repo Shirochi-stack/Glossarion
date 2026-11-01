@@ -242,25 +242,26 @@ def _json_list_from_env(name):
         return []
 
 
-#: Glossarion Mobile runs QA scans on a thread pool (Android / iOS have no process pools) with at
-#: most this many workers (``AI_HUNTER_MAX_WORKERS``). The desktop never applies either.
-MOBILE_QA_MAX_WORKERS = 2
-
-
+# Glossarion Mobile runs QA scans on a thread pool (Android / iOS have no process pools) with
+# ``mobile_qa_max_workers`` workers (``AI_HUNTER_MAX_WORKERS``). The desktop never applies either.
 def mobile_qa_forcing_active():
     """True on Glossarion Mobile (wherever ``mobile_runtime`` reports no process pools)."""
     return not mobile_runtime.processes_available()
 
 
-def mobile_qa_max_workers():
-    """Worker cap of a mobile scan: a smaller positive ``AI_HUNTER_MAX_WORKERS`` wins."""
+def mobile_qa_max_workers(configured=None):
+    """Workers of a mobile scan: the setting (``AI_HUNTER_MAX_WORKERS`` unless given) up to the device's
+    cores. No setting, or the desktop's 0 ("all cores"), means half the cores."""
+    if configured is None:
+        configured = os.getenv("AI_HUNTER_MAX_WORKERS", "")
+    cores = os.cpu_count() or 4
     try:
-        configured = int(str(os.getenv("AI_HUNTER_MAX_WORKERS", "") or "").strip() or 0)
+        configured = int(str(configured or "").strip() or 0)
     except (TypeError, ValueError):
         configured = 0
-    if 0 < configured < MOBILE_QA_MAX_WORKERS:
-        return configured
-    return MOBILE_QA_MAX_WORKERS
+    if configured > 0:
+        return min(configured, cores)
+    return max(1, cores // 2)
 
 
 def mobile_qa_env_overrides():

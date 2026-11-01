@@ -104,6 +104,9 @@ LIBRARY_CONFIG_KEYS = {
 SCAN_RAW_KEYS = ("epub_library_scan_raw_mode", "epub_library_scan_raw_threshold", "epub_library_scan_raw_folder",
                  "epub_library_scan_raw_auto", "epub_library_scan_raw_exts")
 
+#: A raw book file's extensions (``library_core.RAW_IMPORT_EXTENSIONS``, which wins when present).
+RAW_EXTENSIONS = (".epub", ".txt", ".pdf", ".html", ".htm")
+
 #: Desktop delete keywords (``EpubLibraryDialog._DELETE_KEYWORDS``); the shared tuple wins when present.
 DELETE_KEYWORDS = ("halgakos", "delete")
 
@@ -734,14 +737,60 @@ class LibraryService:
         identity = self.identity_for_bid(bid)
         if not identity:
             return None
-        for candidate in self._snapshot.all_books():
-            if _norm(book_identity(candidate)) == _norm(identity):
-                self._by_bid[str(bid)] = dict(candidate)
-                return dict(candidate)
-        book = self._synthesise(identity)
+        book = self._row_for_identity(identity)
+        if book is None:
+            # a route id keeps the path it was made for (a chat card stores it for good), while the book may have
+            # moved since: only a new run finds that out, the old one still holds the row in ``_by_bid``
+            moved = self.moved_workspace(identity)
+            book = self._row_for_identity(moved) if moved else None
         if book is not None:
             self._by_bid[str(bid)] = dict(book)
         return book
+
+    def _row_for_identity(self, identity: str) -> Optional[dict]:
+        """The last scan's row of this path, else one synthesised from what is on disk; None: nothing is there."""
+        for candidate in self._snapshot.all_books():
+            if _norm(book_identity(candidate)) == _norm(identity):
+                return dict(candidate)
+        return self._synthesise(identity)
+
+    def moved_workspace(self, path: Any) -> str:
+        """The output folder of the book a gone ``path`` named (a workspace, or a raw file by its stem), "" when
+        there is none. A book's folder is found by its name (``workspace_sync.named_after``, both ways round: the
+        startup sweep joins a chat's spelling into the pipeline's) under today's output folders and the path's own
+        parent, so a joined book, a chat book moved into the Library, another output folder and a new iOS container
+        all find it. Only a folder holding ``translation_progress.json`` counts."""
+        name = os.path.basename(os.path.normpath(str(path))) if path else ""
+        if not name:
+            return ""
+        from glossarion_mobile.services.workspace_sync import named_after
+
+        names = [name]
+        stem, extension = os.path.splitext(name)
+        if stem and extension.lower() in self.core.value("library_core", "RAW_IMPORT_EXTENSIONS", default=RAW_EXTENSIONS):
+            names.append(stem)
+
+        def holds_book(folder: str) -> bool:
+            return os.path.isfile(os.path.join(folder, "translation_progress.json"))
+
+        roots: list = []
+        for root in [*self.output_roots(), os.path.dirname(os.path.abspath(str(path)))]:
+            if _norm(root) not in {_norm(known) for known in roots}:
+                roots.append(root)
+        for root in roots:
+            for wanted in names:
+                if holds_book(os.path.join(root, wanted)):
+                    return os.path.join(root, wanted)
+        for root in roots:
+            try:
+                folders = sorted(e.name for e in os.scandir(root) if e.is_dir(follow_symlinks=False))
+            except OSError:
+                continue
+            for folder in folders:
+                if (any(named_after(folder, wanted) or named_after(wanted, folder) for wanted in names)
+                        and holds_book(os.path.join(root, folder))):
+                    return os.path.join(root, folder)
+        return ""
 
     @staticmethod
     def _synthesise(identity: str) -> Optional[dict]:

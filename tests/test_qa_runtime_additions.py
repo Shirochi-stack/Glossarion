@@ -94,7 +94,7 @@ MOVED_HELPERS = (
 GUI_REEXPORTS = MOVED_HELPERS + ("find_latest_qa_report", "DEFAULT_AI_TRUNCATION_PROMPT",
                                  "DEFAULT_CUSTOM_MODE_SETTINGS")
 #: new top-level names of qa_scan_runtime (besides the moved helpers)
-RUNTIME_NEW_NAMES = {"MOBILE_QA_MAX_WORKERS", "mobile_qa_forcing_active", "mobile_qa_max_workers",
+RUNTIME_NEW_NAMES = {"mobile_qa_forcing_active", "mobile_qa_max_workers",
                      "mobile_qa_env_overrides", "find_latest_qa_report", "DEFAULT_AI_TRUNCATION_PROMPT",
                      "DEFAULT_CUSTOM_MODE_SETTINGS"}
 #: U7 additions (QA_Scanner_GUI's bulk loop / loader / reset and translator_gui's QA stop flags;
@@ -971,9 +971,11 @@ def test_apply_env_desktop_is_legacy_and_mobile_adds_the_forcing(legacy_runtime,
         assert new_after == {**old_after, "QA_USE_THREAD_EXECUTOR": "1", "AI_HUNTER_MAX_WORKERS": expected_workers}
 
 
-def test_mobile_worker_cap(monkeypatch):
+def test_mobile_worker_count(monkeypatch):
     monkeypatch.setenv("GLOSSARION_MOBILE", "1")
-    cases = {None: 2, "": 2, "0": 2, "1": 1, " 1 ": 1, "2": 2, "8": 2, "-3": 2, "x": 2, "1.5": 2}
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    # half the cores without a setting, the setting up to the cores (owner 2026-11-01)
+    cases = {None: 4, "": 4, "0": 4, "1": 1, " 1 ": 1, "2": 2, "8": 8, "16": 8, "-3": 4, "x": 4, "1.5": 4}
     for raw, expected in cases.items():
         if raw is None:
             monkeypatch.delenv("AI_HUNTER_MAX_WORKERS", raising=False)
@@ -1241,7 +1243,8 @@ def test_quick_scan_report_desktop_path_equals_mobile_path(e2e_workspace, tmp_pa
     assert desktop["seen"]["use_thread_executor"] in (False, None)
     assert desktop["seen"]["env"]["QA_USE_THREAD_EXECUTOR"] == "0"
     assert not any("Using ThreadPoolExecutor" in line for line in desktop["log"])
-    assert mobile["seen"] == {"env": {"QA_USE_THREAD_EXECUTOR": "1", "AI_HUNTER_MAX_WORKERS": "2"},
+    assert mobile["seen"] == {"env": {"QA_USE_THREAD_EXECUTOR": "1",
+                                      "AI_HUNTER_MAX_WORKERS": str(max(1, (os.cpu_count() or 4) // 2))},
                               "use_thread_executor": True}
     assert any("Using ThreadPoolExecutor" in line for line in mobile["log"])
     assert mobile["qt"] == []
