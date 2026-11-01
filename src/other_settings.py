@@ -9675,7 +9675,7 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(empty_attr_epub_cb)
     
-    empty_attr_epub_desc = QLabel("During EPUB conversion, converts hallucinated empty-attribute tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>to visible text &lt;tag attr&gt;.")
+    empty_attr_epub_desc = QLabel("During EPUB conversion, converts hallucinated empty-attribute tags<br>like &lt;tag attr=\"\"&gt;&lt;/tag&gt; to visible text &lt;tag attr&gt;.")
     empty_attr_epub_desc.setStyleSheet("color: gray; font-size: 10pt;")
     empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
@@ -9707,7 +9707,7 @@ def _create_processing_options_section(self, parent):
     empty_attr_extract_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(empty_attr_extract_cb)
 
-    empty_attr_extract_desc = QLabel("During extraction cleanup, converts hallucinated empty-attribute tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>to visible text &lt;tag attr&gt;.")
+    empty_attr_extract_desc = QLabel("During extraction cleanup, converts hallucinated empty-attribute tags<br>like &lt;tag attr=\"\"&gt;&lt;/tag&gt; to visible text &lt;tag attr&gt;.")
     empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 10pt;")
     empty_attr_extract_desc.setContentsMargins(20, 0, 0, 5)
     empty_attr_extract_desc.setTextFormat(Qt.RichText)
@@ -9788,8 +9788,9 @@ def _create_processing_options_section(self, parent):
     empty_tags_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(empty_tags_cb)
 
-    empty_tags_desc = QLabel("Chapter text sent to the model keeps at most 2 line breaks per run of empty "
-                             "paragraphs / &lt;br&gt; tags<br>(empty &lt;p&gt; tags are removed). Source files are unchanged.")
+    empty_tags_desc = QLabel("Chapter text sent to the model keeps at most 2 line breaks per run of<br>"
+                             "empty paragraphs / &lt;br&gt; tags (empty &lt;p&gt; tags are removed).<br>"
+                             "Source files are unchanged.")
     empty_tags_desc.setStyleSheet("color: gray; font-size: 10pt;")
     empty_tags_desc.setContentsMargins(20, 0, 0, 5)
     empty_tags_desc.setTextFormat(Qt.RichText)
@@ -10216,7 +10217,8 @@ def _create_processing_options_section(self, parent):
     
     right_v.addStretch()
     columns_h.addWidget(right_column)
-    
+    columns_h.addStretch(1)
+
     section_v.addWidget(columns_container)
     
     # === CHAPTER EXTRACTION SETTINGS ===
