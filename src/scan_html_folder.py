@@ -28,7 +28,12 @@ import zipfile
 import csv
 from bs4 import BeautifulSoup, Comment, NavigableString
 from bs4.element import CData, RubyTextString, RubyParenthesisString
-from _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags
+from _empty_attr_fix import (
+    count_empty_attr_tags,
+    count_missing_tag_brackets,
+    find_empty_attr_tags,
+    find_missing_tag_brackets,
+)
 from langdetect import detect, LangDetectException
 from difflib import SequenceMatcher
 from collections import Counter, defaultdict
@@ -9408,11 +9413,21 @@ def process_html_file_batch(args, should_stop=None):
         
         # Detect translation artifacts
         artifacts = []
+        # Checked in RAW HTML under its own toggle: these tags are not visible text.
+        if raw_file_content and qa_settings.get('check_missing_tag_bracket', True):
+            missing_bracket_count = count_missing_tag_brackets(raw_file_content)
+            if missing_bracket_count:
+                artifacts.append({
+                    'type': 'empty_attribute_tags',
+                    'count': missing_bracket_count,
+                    'examples': find_missing_tag_brackets(raw_file_content, limit=10),
+                    'severity': 'medium'
+                })
         check_translation_artifacts = qa_settings.get('check_translation_artifacts', False)
         check_ai_artifacts = qa_settings.get('check_ai_artifacts', False)
         # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)
         if check_translation_artifacts:
-            artifacts = detect_translation_artifacts(raw_text)
+            artifacts.extend(detect_translation_artifacts(raw_text))
             
             # Check for "LLM Token Fix"-style empty-attribute tag hallucinations
             # in RAW HTML content (these are tags, so stripped from ``raw_text``).
@@ -10517,6 +10532,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'sdlxliff_tag_surplus_tolerance': 0.05,
             'sdlxliff_min_source_paragraph_tags': 20,
             'check_invalid_nesting': False,
+            'check_missing_tag_bracket': True,
             'check_silent_truncation': False,
             'check_potential_truncation': False,
             'check_ai_truncation_detection': False,
@@ -11189,6 +11205,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             f"{min_source_paragraphs}"
         )
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
+    log(f"   ✓ Missing tag bracket check: {'ENABLED' if qa_settings.get('check_missing_tag_bracket', True) else 'DISABLED'}")
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
     log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")
     log(f"   ✓ AI truncation detection: {'ENABLED' if qa_settings.get('check_ai_truncation_detection', False) else 'DISABLED'}")

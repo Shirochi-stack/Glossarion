@@ -90,6 +90,7 @@ class FrozenDesktopTables:
             ('skip_title_tag_translation', ['skip_title_tag_translation_var'], True, bool),
             ('remove_excessive_empty_tags_on_device', ['remove_excessive_empty_tags_on_device_var'], True, bool),
             ('remove_excessive_empty_tags_all_models', ['remove_excessive_empty_tags_all_models_var'], False, bool),
+            ('fix_missing_tag_bracket', ['fix_missing_tag_bracket_var'], False, bool),
             ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
             ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
             ('emergency_glossary_compliance', ['emergency_glossary_compliance_var'], False, bool),
@@ -562,6 +563,7 @@ class FrozenDesktopTables:
             ('respect_retry_after_var', 'respect_retry_after', True),
             ('remove_excessive_empty_tags_on_device_var', 'remove_excessive_empty_tags_on_device', True),
             ('remove_excessive_empty_tags_all_models_var', 'remove_excessive_empty_tags_all_models', False),
+            ('fix_missing_tag_bracket_var', 'fix_missing_tag_bracket', False),
             # Keep existing variables intact
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),

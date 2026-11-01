@@ -513,6 +513,64 @@ def _repair_empty_attribute_qa_file(file_path):
         }
 
 
+def _repair_missing_tag_bracket_qa_file(file_path):
+    """Restore dropped tag brackets, then apply the empty-attribute repair."""
+    from _empty_attr_fix import count_missing_tag_brackets, fix_missing_tag_bracket
+
+    path = os.path.abspath(os.path.normpath(str(file_path or "").strip() or "."))
+    repairs = []
+    before = 0
+    try:
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8', errors='replace', newline='') as handle:
+                original = handle.read()
+            before = count_missing_tag_brackets(original)
+            if before:
+                repaired_content = fix_missing_tag_bracket(
+                    original,
+                    repair_log=repairs,
+                    repair_log_limit=20,
+                )
+                remaining = count_missing_tag_brackets(repaired_content)
+                if remaining:
+                    return {
+                        'resolved': False,
+                        'changed': False,
+                        'repaired': before - remaining,
+                        'remaining': remaining,
+                        'repairs': repairs,
+                        'error': f"{remaining} tag(s) with a missing bracket remain after repair.",
+                    }
+                temporary = (
+                    f"{path}.{os.getpid()}.{threading.get_ident()}.llm-token-fix.tmp"
+                )
+                try:
+                    with open(temporary, 'w', encoding='utf-8', newline='') as handle:
+                        handle.write(repaired_content)
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.isfile(temporary):
+                        try:
+                            os.remove(temporary)
+                        except OSError:
+                            pass
+    except Exception as exc:
+        return {
+            'resolved': False,
+            'changed': False,
+            'repaired': 0,
+            'remaining': 0,
+            'repairs': [],
+            'error': str(exc),
+        }
+
+    result = _repair_empty_attribute_qa_file(file_path)
+    result['repaired'] = int(result.get('repaired') or 0) + before
+    result['repairs'] = (repairs + list(result.get('repairs') or []))[:20]
+    result['changed'] = bool(result.get('changed') or before)
+    return result
+
+
 def _bulk_retranslation_sidecar_updates(
     paths,
     *,
@@ -1248,7 +1306,7 @@ def resolve_llm_token_qa(progress_file, display_info, output_path):
     'remaining_other_qa', 'error'}``; ``error`` is set when the progress file could not
     be updated after a successful repair.
     """
-    result = _repair_empty_attribute_qa_file(output_path)
+    result = _repair_missing_tag_bracket_qa_file(output_path)
     outcome = {
         'repair': result,
         'progress_changed': False,

@@ -801,6 +801,7 @@ Text to analyze:
         )
         self.fix_empty_attr_tags_bs_var = self.fix_empty_attr_tags_extract_var
         self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
+        self.fix_missing_tag_bracket_var = self.config.get('fix_missing_tag_bracket', False)
         self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
         self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
         self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
@@ -814,6 +815,7 @@ Text to analyze:
         os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
+        os.environ['FIX_MISSING_TAG_BRACKET'] = '1' if self.fix_missing_tag_bracket_var else '0'
         os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.fix_stray_p_gt_epub_var else '0'
         os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.fix_stray_p_gt_bs_var else '0'
         os.environ['OUTPUT_SDLXLIFF'] = '1' if self.output_sdlxliff_var else '0'

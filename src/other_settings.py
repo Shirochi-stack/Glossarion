@@ -9713,6 +9713,31 @@ def _create_processing_options_section(self, parent):
     empty_attr_extract_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_extract_desc)
 
+    # Fix Missing Tag Bracket - restores <p>" before the parser scrambles the sentence
+    missing_bracket_cb = self._create_styled_checkbox("Fix Missing Tag Bracket - LLM Token Fix")
+    try:
+        if not hasattr(self, 'fix_missing_tag_bracket_var'):
+            self.fix_missing_tag_bracket_var = self.config.get('fix_missing_tag_bracket', False)
+        missing_bracket_cb.setChecked(bool(self.fix_missing_tag_bracket_var))
+    except Exception:
+        pass
+    def _on_missing_bracket_toggle(checked):
+        try:
+            self.fix_missing_tag_bracket_var = bool(checked)
+            self.config['fix_missing_tag_bracket'] = self.fix_missing_tag_bracket_var
+            os.environ['FIX_MISSING_TAG_BRACKET'] = '1' if checked else '0'
+        except Exception:
+            pass
+    missing_bracket_cb.toggled.connect(_on_missing_bracket_toggle)
+    missing_bracket_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(missing_bracket_cb)
+
+    missing_bracket_desc = QLabel("During translation, restores a dropped tag bracket like &lt;p\"Hello\"&lt;/p&gt;<br>to &lt;p&gt;\"Hello\"&lt;/p&gt; before the text is parsed.")
+    missing_bracket_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    missing_bracket_desc.setContentsMargins(20, 0, 0, 5)
+    missing_bracket_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(missing_bracket_desc)
+
     # Fix stray p&gt; text artifacts (EPUB)
     stray_p_gt_epub_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (EPUB) - Gemma Token Fix by TK")
     try:

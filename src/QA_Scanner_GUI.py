@@ -672,6 +672,7 @@ class QAScannerMixin:
                     'sdlxliff_tag_surplus_tolerance': 0.05,
                     'sdlxliff_min_source_paragraph_tags': 20,
                     'check_invalid_nesting': False,
+                    'check_missing_tag_bracket': True,
                     'cache_enabled': True,
                     'cache_auto_size': False,
                     'cache_show_stats': False,
@@ -4484,6 +4485,11 @@ class QAScannerMixin:
             check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
             additional_layout.addWidget(check_invalid_nesting_checkbox)
 
+            # Missing tag bracket check (LLM token issue, separate toggle)
+            check_missing_tag_bracket_checkbox = self._create_styled_checkbox("Check for missing tag brackets (<p\"Hello\"</p>)")
+            check_missing_tag_bracket_checkbox.setChecked(qa_settings.get('check_missing_tag_bracket', True))
+            additional_layout.addWidget(check_missing_tag_bracket_checkbox)
+
             # Silent truncation detection (optional, requires heavy deps)
             check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")
             additional_layout.addWidget(check_truncation_checkbox)
@@ -5638,6 +5644,7 @@ class QAScannerMixin:
                         'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
                         'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),
                         'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
+                        'check_missing_tag_bracket': (check_missing_tag_bracket_checkbox, lambda x: x.isChecked()),
                         'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
                         'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),
                         'truncation_borderline_score': (truncation_borderline_slider, lambda x: x.value()),
@@ -6037,6 +6044,7 @@ class QAScannerMixin:
                     ('check_all_text_in_header', check_all_text_in_header_checkbox, True),
                     ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),
                     ('check_invalid_nesting', check_invalid_nesting_checkbox, False),
+                    ('check_missing_tag_bracket', check_missing_tag_bracket_checkbox, True),
                     ('check_silent_truncation', check_truncation_checkbox, False),
                     ('truncation_cheap_threshold', truncation_cheap_slider, 12),
                     ('truncation_borderline_score', truncation_borderline_slider, 40),
@@ -6268,6 +6276,7 @@ class QAScannerMixin:
                     check_all_text_in_header_checkbox.setChecked(True)
                     check_invalid_tag_mismatch_checkbox.setChecked(False)
                     check_invalid_nesting_checkbox.setChecked(False)
+                    check_missing_tag_bracket_checkbox.setChecked(True)
                     check_truncation_checkbox.setChecked(False)
                     truncation_cheap_slider.setValue(12)
                     truncation_borderline_slider.setValue(40)

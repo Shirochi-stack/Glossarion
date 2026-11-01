@@ -292,6 +292,7 @@ from txt_processor import TextFileProcessor, build_source_structure_metadata
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
+from _empty_attr_fix import fix_missing_tag_bracket as _fix_missing_tag_bracket
 from html_duplicate_cleanup import prepare_html_for_model, remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import (
     VALID_ENTITY_TAGS as _VALID_ENTITY_HTML_TAGS,
@@ -12022,6 +12023,10 @@ class BatchTranslationProcessor:
                 print(f"🔄 Converting translated markdown back to HTML...")
                 result = convert_enhanced_text_to_html(result, chapter)
             
+            # Restore a dropped tag bracket before anything parses the response.
+            if os.getenv('FIX_MISSING_TAG_BRACKET', '0') == '1':
+                result = _fix_missing_tag_bracket(result)
+
             # Emergency Image Restoration (if enabled)
             if result and self.config.EMERGENCY_IMAGE_RESTORE:
                 # Use original HTML if available (for enhanced extraction), otherwise use chapter_body
@@ -12989,6 +12994,8 @@ class BatchTranslationProcessor:
                 
                 # Clean the merged response
                 cleaned = merged_response
+                if os.getenv('FIX_MISSING_TAG_BRACKET', '0') == '1':
+                    cleaned = _fix_missing_tag_bracket(cleaned)
                 if self.config.REMOVE_AI_ARTIFACTS != "off":
                     cleaned = ContentProcessor.clean_ai_artifacts(cleaned, self.config.REMOVE_AI_ARTIFACTS)
                 cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
@@ -32467,6 +32474,13 @@ def main(log_callback=None, stop_callback=None):
                 # If truncation retries were exhausted, skip further processing
                 if chunk_abort:
                     break
+
+                # Restore a dropped tag bracket before anything parses the response.
+                if (
+                    not _is_structured_translation_batch(c)
+                    and os.getenv('FIX_MISSING_TAG_BRACKET', '0') == '1'
+                ):
+                    result = _fix_missing_tag_bracket(result)
 
                 if (
                     not _is_structured_translation_batch(c)

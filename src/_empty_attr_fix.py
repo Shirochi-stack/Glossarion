@@ -278,3 +278,118 @@ def find_empty_attr_tags(text: str, limit: int = 20) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+# ---------------------------------------------------------------------------
+# Missing tag bracket
+# ---------------------------------------------------------------------------
+# Some local LLMs drop the ``>`` of an opening tag right before dialogue:
+#
+#     <p"Well, it's just a part."</p>      should be  <p>"Well, it's just a part."</p>
+#
+# html.parser then reads ``p"well,`` as a tag name and the other words as
+# empty attributes, which lowercases them and sorts them alphabetically:
+#
+#     <p"well, a="" it's="" just="" p="" part."<="">
+#
+# A valid tag never has a quote right after its name, so the raw form is
+# restored exactly. The parsed form has already lost its word order, so its
+# repair can only bring the words back as visible text.
+_BRACKET_TAG_NAME = r'(?:p|h[1-6]|li|div|blockquote)'
+_BRACKET_QUOTES = '"\'\u201c\u2018\u300c\u300e'
+_MISSING_BRACKET_RE = re.compile(
+    r'<(' + _BRACKET_TAG_NAME + r')(?=[' + _BRACKET_QUOTES + r'])',
+    re.IGNORECASE,
+)
+_PARSED_BRACKET_RE = re.compile(
+    r'<(' + _BRACKET_TAG_NAME + r')'
+    r'([' + _BRACKET_QUOTES + r'](?:(?!&gt;)[^>])*?=(?:""|\'\')(?:(?!&gt;)[^>])*)'
+    r'(?:>|&gt;)',
+    re.IGNORECASE,
+)
+_PARSED_BRACKET_CLOSE_RE = re.compile(
+    r'</' + _BRACKET_TAG_NAME + r'[' + _BRACKET_QUOTES + r'][^>]*>',
+    re.IGNORECASE,
+)
+_PARSED_BREAK_RE = re.compile(r'<br=(?:""|\'\')\s*/?>', re.IGNORECASE)
+_PARSED_CLOSE_MARK_RE = re.compile(r'(?:<|&lt;).*$', re.DOTALL)
+
+
+def _rebuild_parsed_bracket(tag: str, inner: str) -> str:
+    """Turn a parsed ``<p"word a="" b="">`` back into a visible paragraph."""
+    words: list[str] = []
+    last_word = ''
+    for token in inner.split():
+        word = re.sub(r'=(?:""|\'\')$', '', token)
+        marked = _PARSED_CLOSE_MARK_RE.search(word)
+        if marked:
+            # ``part."<`` held the closing tag, so it ended the sentence.
+            word = word[:marked.start()]
+            last_word = word or last_word
+        elif word.lower() != tag.lower() and word:
+            words.append(word)
+    if last_word:
+        words.append(last_word)
+    body = ' '.join(words)
+    for index, char in enumerate(body):
+        if char.isalpha():
+            body = body[:index] + char.upper() + body[index + 1:]
+            break
+    return f'<{tag}>{body}</{tag}>'
+
+
+def fix_missing_tag_bracket(
+    text: str,
+    *,
+    repair_log: list[dict[str, str]] | None = None,
+    repair_log_limit: int = 20,
+) -> str:
+    """Restore the ``>`` an LLM dropped between a tag name and a quote."""
+    if not isinstance(text, str) or not text:
+        return text
+    if not _MISSING_BRACKET_RE.search(text):
+        return text
+
+    def _record_repair(before: str, after: str) -> None:
+        if repair_log is None or len(repair_log) >= max(0, repair_log_limit):
+            return
+        repair_log.append({"before": before, "after": after})
+
+    def _repl_parsed(m: re.Match) -> str:
+        replacement = _rebuild_parsed_bracket(m.group(1), m.group(2))
+        _record_repair(m.group(0), replacement)
+        return replacement
+
+    def _repl_raw(m: re.Match) -> str:
+        line_end = text_now.find('\n', m.end())
+        end = line_end if line_end != -1 else len(text_now)
+        before = text_now[m.start():min(end, m.end() + 80)]
+        replacement = f'<{m.group(1)}>'
+        _record_repair(before, replacement + before[len(m.group(0)):])
+        return replacement
+
+    text_now = _PARSED_BRACKET_RE.sub(_repl_parsed, text)
+    text_now = _PARSED_BRACKET_CLOSE_RE.sub('', text_now)
+    text_now = _PARSED_BREAK_RE.sub('<br/>', text_now)
+    return _MISSING_BRACKET_RE.sub(_repl_raw, text_now)
+
+
+def count_missing_tag_brackets(text: str) -> int:
+    """Return how many opening tags :func:`fix_missing_tag_bracket` would repair."""
+    if not isinstance(text, str) or not text:
+        return 0
+    return sum(1 for _ in _MISSING_BRACKET_RE.finditer(text))
+
+
+def find_missing_tag_brackets(text: str, limit: int = 20) -> list[str]:
+    """Return up to ``limit`` previews of the tags counted above."""
+    if not isinstance(text, str) or not text:
+        return []
+    out: list[str] = []
+    for m in _MISSING_BRACKET_RE.finditer(text):
+        close = re.compile(r'>|&gt;').search(text, m.end())
+        end = close.end() if close else min(len(text), m.end() + 80)
+        out.append(text[m.start():end])
+        if len(out) >= limit:
+            break
+    return out
