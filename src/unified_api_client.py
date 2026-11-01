@@ -1751,7 +1751,7 @@ _CONTEXT_ERROR_MARKERS = (
     "exceeds the context window", "exceeds the maximum number of tokens allowed",
 )
 _CONTEXT_MAX_RES = (
-    re.compile(r"max(?:imum)?[_ ]context(?:[_ ]length)?(?:\s+is)?\s*[=:]?\s*([\d,]+)", re.IGNORECASE),
+    re.compile(r"max(?:imum)?[_ ]context(?:[_ ](?:length|tokens))?(?:\s+is)?['\"]?\s*[=:]?\s*([\d,]+)", re.IGNORECASE),
     re.compile(r"maximum number of tokens allowed\s*\(([\d,]+)\)", re.IGNORECASE),
     re.compile(r">\s*([\d,]+)\s+maximum", re.IGNORECASE),
 )
@@ -1762,6 +1762,7 @@ _CONTEXT_INPUT_RES = (
     re.compile(r"prompt is too long:\s*([\d,]+)", re.IGNORECASE),
     re.compile(r"input token count\s*\(([\d,]+)\)", re.IGNORECASE),
     re.compile(r"request\s+has\s+([\d,]+)\s+input\s+tokens?", re.IGNORECASE),
+    re.compile(r"\binput[_ ]tokens?['\"]?\s*[:=]\s*([\d,]+)", re.IGNORECASE),
 )
 _KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {}
 _KNOWN_CONTEXT_WINDOWS_LOCK = threading.Lock()
@@ -26192,16 +26193,19 @@ class UnifiedClient:
                                 details={"provider": provider, "source": "openai_compatible_sdk"},
                             )
                         context_auto_adjust_succeeded = False
-                        if (not context_retry_done) and ("maximum context length" in err_l or "max context length" in err_l):
+                        context_info = context_length_error_info(sdk_err)
+                        if (not context_retry_done) and context_info is not None:
                             try:
                                 import re
 
-                                m_ctx = re.search(r"maximum context length is\s+(\d+)\s+tokens", err_str, re.IGNORECASE)
+                                max_ctx = context_info["max_context"]
                                 # Try a few common variants for the input token count
                                 m_in = (
                                     re.search(r"\((\d+)\s+of\s+(?:text\s+)?input", err_str, re.IGNORECASE)
                                     or re.search(r"\((\d+)\s+in\s+the\s+messages", err_str, re.IGNORECASE)
                                     or re.search(r"\((\d+)\s+in\s+the\s+prompt", err_str, re.IGNORECASE)
+                                    # NanoGPT: "Estimated input tokens: 8745" / 'input_tokens': 8745
+                                    or re.search(r"\binput[_ ]tokens?['\"]?\s*[:=]\s*([\d,]+)", err_str, re.IGNORECASE)
                                 )
 
                                 # Fallback for providers (e.g. SambaNova) that only report total tokens
@@ -26209,14 +26213,13 @@ class UnifiedClient:
                                 #   "your messages resulted in 164545 tokens"
                                 #   "requested about 72559 tokens"
                                 in_tokens_fallback = None
-                                if m_ctx and not m_in:
+                                if max_ctx and not m_in:
                                     m_total = (
                                         re.search(r"resulted\s+in\s+(\d+)\s+tokens", err_str, re.IGNORECASE)
                                         or re.search(r"requested\s+(?:about\s+)?(\d+)\s+tokens", err_str, re.IGNORECASE)
                                     )
                                     if m_total:
                                         total_requested = int(m_total.group(1))
-                                        max_ctx_val = int(m_ctx.group(1))
                                         # Infer input tokens: total_requested - current output limit
                                         # If no output limit was set, the entire overage is from input
                                         current_out = None
@@ -26245,9 +26248,8 @@ class UnifiedClient:
                                             # alone exceed the context window. Use total as input estimate.
                                             in_tokens_fallback = total_requested
 
-                                if m_ctx and (m_in or in_tokens_fallback is not None):
-                                    max_ctx = int(m_ctx.group(1))
-                                    in_tokens = int(m_in.group(1)) if m_in else in_tokens_fallback
+                                if max_ctx and (m_in or in_tokens_fallback is not None):
+                                    in_tokens = _positive_token_count(m_in.group(1)) if m_in else in_tokens_fallback
 
                                     # Determine which token parameter we are using
                                     token_key = None

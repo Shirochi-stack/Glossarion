@@ -37,6 +37,10 @@ def clean_env(monkeypatch):
     ("prompt is too long: 210,000 tokens > 200,000 maximum", (200000, 210000)),
     ("The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).", (1048576, 1200000)),
     ("context_length_exceeded", (None, None)),
+    ("Error code: 400 - {'error': {'message': \"Your prompt exceeds the model's context length. Please shorten the "
+     "input and/or reduce max_tokens. Estimated input tokens: 8745. Requested output tokens: 128000. Max context "
+     "tokens: 131072.\", 'status': 400, 'type': 'invalid_request_error', 'code': 'context_length_exceeded', "
+     "'input_tokens': 8745, 'output_tokens': 128000, 'max_context_tokens': 131072}}", (131072, 8745)),
 ])
 def test_context_length_errors_are_recognised_with_their_sizes(message, expected):
     info = uac.context_length_error_info(RuntimeError(message))
