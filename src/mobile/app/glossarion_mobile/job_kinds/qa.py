@@ -37,7 +37,8 @@ pickers, mismatch question - happen on the QA screen before the job is queued):
   scan a translation's Multipass refinement runs (``multipass_scan_turns``). Measured on the emulator (4 vCPU, real
   chapters, same findings), 4 workers on threads taking turns against interpreters: Quick 100 chapters 13.4 to 6.9 s,
   Aggressive 80 chapters 63.2 to 25 s, memory +160 to +200 MB at the peak, about 40 MB a worker. They are started when
-  the first batch comes, reused by all the scan's pools and released when the scan ends;
+  the first batch comes, reused by all the scan's pools and kept for the next job until the app ends: a destroyed one
+  leaves about 17 MB in the process for good (``services.interpreters``);
 * where a child cannot start (``_ScanChildren``: not enough free memory, or a device where it fails; iOS is untested)
   the scan says so once in its log and runs on threads, with the same findings. Those are in the interpreter that
   runs the Flet loop, so each one takes its share of the GIL from it. Measured on the host (``tools/qa_scan_bench.py``):
@@ -268,7 +269,7 @@ class _ScanChildren:
         return self._turns.run(worker, args, should_stop)
 
     def close(self) -> None:
-        """The scan ended: the children are released (one a Stop left in a batch, when that batch ends)."""
+        """The scan ended: the children stay for the next job (one a Stop left in a batch is free when that batch ends)."""
         self._job.close()
 
 

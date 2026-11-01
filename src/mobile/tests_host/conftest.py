@@ -28,3 +28,7 @@ def _restore_sheet_hook():
     tap_away = sys.modules.get("glossarion_mobile.ui.components.tap_away")
     if tap_away is not None:
         tap_away._region_class = None
+    # the app's child interpreters stay for its next job: a test's end is the end of that app
+    interpreters = sys.modules.get("glossarion_mobile.services.interpreters")
+    if interpreters is not None:
+        interpreters.drop_kept_pool()

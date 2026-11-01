@@ -4,10 +4,10 @@ Android and iOS have no process pools, and threads share one GIL with the UI loo
 (PEP 684, ``_interpreters`` on Python 3.13, ``_xxsubinterpreters`` on 3.12) has its own GIL, so a batch in one neither
 waits for the loop nor makes the loop wait.
 
-    pool = InterpreterPool(4, preload=("scan_html_folder",))
-    future = pool.submit("scan_html_folder", "process_html_file_batch", args, should_stop=stop)
-    value = pool.call(...)   # the same, waiting here; a thread pool of the caller's own decides the order
-    pool.close()
+    job = JobChildren(log, "Scanning", preload=("scan_html_folder",))   # what a job uses: the app's kept children
+    pool = job.pool(4)                                                  # None: run this work on a thread
+    value = pool.call("scan_html_folder", "process_html_file_batch", args, should_stop=stop)
+    job.close()
 
 Each child lives on one thread of its own, from its creation to its destruction. On Python 3.12 destroying a child
 from another thread than the one it ran on hung once that thread had ended (host, ``_xxsubinterpreters.destroy``).
@@ -23,7 +23,7 @@ What a batch needs to know (a child shares no Python object with this interprete
   child's own: what a worker reads must be in its arguments or the environment;
 * a Stop: ``should_stop`` is polled here (``STOP_POLL``) and a child sees it through a file, at most ``CHILD_POLL``
   old, in the check it gets as the worker's second argument. A child cannot be killed: leaving a batch behind
-  after a Stop is fine, it ends at its next item and its interpreter is released then;
+  after a Stop is fine, it ends at its next item and that child is free again then;
 * what a batch prints is written to this interpreter's ``sys.stdout`` when it ends (a job's log tees that); with
   ``live_output`` while it runs, at most ``OUTPUT_POLL`` late, for a call that takes minutes;
 * an exception in a worker is raised by ``call`` / the future like it was raised here, with the child's traceback
@@ -39,10 +39,19 @@ loads, but its C++ is refused and it silently takes its pure Python, 20 times sl
 raises ``FeatureNotFound`` for 'lxml'. Daemon threads are refused in a child, so a child cannot run this pool itself. A
 worker whose ``try: import`` falls back when a module is refused would silently do something else in a child: check that
 before moving a worker here. Work that only waits on the network stays on threads: it holds no GIL while it waits.
+This interpreter must have imported a module before a child does: a single-phase native module a child loads first is
+refused there, and can corrupt the heap when this interpreter loads it later (host 3.12, ``_decimal``: 0xc0000374). Every
+job imports its worker's module here first, except ``services.glossary_child``, which imports only what ``GlossaryManager``
+already did here. Nothing enforces that: it is for whoever moves the next worker.
 
-Memory: about 40 MB per interpreter on the device at a scan's peak (emulator, Python 3.13: 4 of them +157 to +203 MB,
-12 of them +409 MB), so one pool is reused for all the batches of a job and closed after it; 60 to 150 MB of the peak
-stays in the allocator for a while after it closes. ``size_for_memory`` is the rule for how many.
+Memory: about 40 MB per interpreter on the device at a scan's peak (emulator, Python 3.13: 4 of them +157 to +203 MB, 12 of
+them +409 MB). A destroyed child does not give that back: about 17 MB of each stayed in the process for good, whatever work
+it did (4.5 MB bare, 17.8 MB with the scanner imported; 9 scans at 4 workers took the app from 489 to 1178 MB, flat on
+threads), and destroying 4 gave back 18 of their 90 MB. So nothing here destroys a child that works: every job uses the
+same ones (``kept_pool``, at most the most workers a job asked for, and they cost no CPU between jobs), and they end with
+the app. A child that failed goes, and then the app stays on threads until it restarts: no second try, and no job
+leaves another 17 MB behind. ``size_for_memory`` is the rule for how many new ones may start; children that exist cost
+nothing more, and their number is at most the workers a job asked for, so a phone's kept memory has a limit.
 
 Python 3.10 compatible to import (``available()`` says False below 3.12).
 """
@@ -62,12 +71,13 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import weakref
 from typing import Any, Callable, Optional, Sequence
 
 __all__ = ["CHILD_MB", "HEADROOM_MB", "InterpreterPool", "InterpreterUnavailable", "JobChildren", "WorkerError",
-           "available", "importable", "last_line", "memory_now", "set_child_setup", "size_for_memory",
-           "unavailable_reason"]
+           "available", "drop_kept_pool", "importable", "kept_pool", "last_line", "memory_now", "set_child_setup",
+           "size_for_memory", "unavailable_reason"]
 
 log = logging.getLogger("glossarion.interpreters")
 
@@ -86,6 +96,8 @@ HEADROOM_MB = 300
 UNKNOWN_FREE_SHARE = 0.25
 #: how long (s) ``close`` waits for an idle child's interpreter to be destroyed (milliseconds on the host)
 RELEASE_WAIT = 10.0
+#: a private folder this old (s) that no pool of this process made was left by an app that got killed
+LEFTOVER_AGE = 3600.0
 
 
 class InterpreterUnavailable(RuntimeError):
@@ -130,9 +142,11 @@ def unavailable_reason() -> Optional[str]:
 
 
 def set_child_setup(setup: Optional[tuple]) -> None:
-    """A ``(module, function)`` each child started from now on runs first (the E2E's tripwires); None for none."""
+    """A ``(module, function)`` each child started from now on runs first (the E2E's tripwires); None for none. The kept
+    children have not run it, so they go."""
     global _child_setup
     _child_setup = tuple(setup) if setup else None
+    drop_kept_pool()
 
 
 def importable(function: Any) -> bool:
@@ -153,6 +167,17 @@ def size_for_memory(wanted: int, available_bytes: Optional[int] = None, total_by
     if not free:
         return wanted
     return max(0, min(wanted, (int(free / (1024 * 1024)) - HEADROOM_MB) // CHILD_MB))
+
+
+def _environment() -> dict:
+    """``os.environ`` now. ``dict(os.environ)`` raises ``KeyError`` when another thread takes a key out while it reads
+    (``remote_routes`` from the UI during a scan: 113 times in 296,362 calls, a key deleted 10 times a second)."""
+    current = {}
+    for key in list(os.environ):
+        value = os.environ.get(key)
+        if value is not None:
+            current[key] = value
+    return current
 
 
 def _create() -> Any:
@@ -207,18 +232,17 @@ def _gl_function(module, name):
 
 
 def _gl_prepare():
-    env, setup, preload, after = _gl_pickle.loads(globals().pop("_gl_request"))
+    env, setup, preload = _gl_pickle.loads(globals().pop("_gl_request"))
     _gl_os.environ.clear()
     _gl_os.environ.update(env)
     if setup is not None:
         _gl_function(*setup)()
     for module in preload:
         _gl_importlib.import_module(module)
-    globals()["_gl_after"] = _gl_function(*after) if after else None
 
 
 def _gl_call():
-    changed, gone, module, name, args, stop_path, poll, reply_path, output_path = _gl_pickle.loads(globals().pop("_gl_request"))
+    changed, gone, module, name, args, stop_path, poll, reply_path, output_path, after = _gl_pickle.loads(globals().pop("_gl_request"))
     _gl_os.environ.update(changed)
     for key in gone:
         _gl_os.environ.pop(key, None)
@@ -248,9 +272,9 @@ def _gl_call():
     del reply
     with open(reply_path, "wb") as handle:
         handle.write(data)
-    if _gl_after is not None:
+    if after is not None:
         try:
-            _gl_after()
+            _gl_function(*after)()
         except Exception:  # the result is out; a cache that did not clear is no reason to lose this child
             pass
 """
@@ -270,11 +294,12 @@ class _Child:
     """An interpreter and the one thread that touches it. ``do`` runs something on that thread and waits; ``finish``
     ends the thread, which destroys the interpreter (and says so through ``on_destroyed``)."""
 
-    __slots__ = ("handle", "env", "on_destroyed", "_jobs", "_thread")
+    __slots__ = ("handle", "env", "loaded", "on_destroyed", "_jobs", "_thread")
 
     def __init__(self) -> None:
         self.handle: Any = None
         self.env: dict = {}
+        self.loaded: set = set()  # what its jobs had it import
         self.on_destroyed: Optional[Callable[[], None]] = None
         self._jobs: queue.SimpleQueue = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._loop, name="glossarion-interpreter", daemon=True)
@@ -325,6 +350,7 @@ class _Watched:
         self.is_set = False
 
 
+_FOLDER_PREFIX = "glossarion-interp-"
 _open_pools: "weakref.WeakSet" = weakref.WeakSet()
 
 
@@ -338,9 +364,11 @@ def _close_open_pools() -> None:
 class InterpreterPool:
     """Up to ``size`` child interpreters, started when work needs them, reused until ``close``.
 
-    ``preload``: modules each child imports when it starts (their cost then falls on the first batch of each child,
-    and a child that cannot load them is found out before any work is given to it).
+    ``preload``: modules a child imports before a call (their cost then falls on the first batch of each child, and a
+    child that cannot load them is found out before any work is given to it).
     ``after_call``: a ``(module, function)`` a child calls after each result left it (a worker's caches).
+    Both can be given to a ``call`` instead, for a pool that different jobs use. ``refused_for`` says why a child did not
+    work, once one did not: whoever decides between this and a thread reads it (``JobChildren``).
     """
 
     def __init__(self, size: int, *, preload: Sequence[str] = (), after_call: Optional[tuple] = None,
@@ -356,6 +384,10 @@ class InterpreterPool:
         self._starting = 0
         self._busy = 0
         self._closed = False
+        self._stop_all = False  # ``close`` told every call to stop
+        self._cap: Optional[int] = None  # a child failed to start with this many there: no more than that
+        self.refused: Optional[str] = None
+        self._refused_loads: dict = {}
         self._counter = itertools.count(1)
         self._watched: dict = {}
         self._watcher: Optional[threading.Thread] = None
@@ -379,24 +411,38 @@ class InterpreterPool:
         return self._executor.submit(self.call, module, function, args, should_stop=should_stop)
 
     def call(self, module: str, function: str, args: Any = None, *, should_stop: Optional[Callable[[], Any]] = None,
-             live_output: bool = False) -> Any:
+             live_output: bool = False, preload: Optional[Sequence[str]] = None, after_call: Optional[tuple] = None,
+             on_child: Optional[Callable[[], Any]] = None) -> Any:
         """``module.function(args)`` in a free child on this thread; with ``should_stop``,
         ``module.function(args, check)``. Waits for a free one, starting it when there is room. ``live_output``: what it
         prints reaches this interpreter's ``sys.stdout`` from this thread while it runs (it passes through a file in the
-        pool's private folder, so only for work that prints no secrets)."""
-        child = self._acquire()
+        pool's private folder, so only for work that prints no secrets). ``on_child`` is called when a child is ready
+        for this call."""
+        child = self._acquire(self._preload if preload is None else tuple(preload))
         healthy = False
-        watched = self._watch(should_stop) if should_stop is not None else None
-        call_number = next(self._counter)
-        reply_path = os.path.join(self._folder(), f"{call_number}.reply")
-        output_path = os.path.join(self._folder(), f"{call_number}.out") if live_output else None
+        watched = reply_path = output_path = None
+        failed = None
         try:
-            current = dict(os.environ)
+            try:
+                watched = self._watch(should_stop) if should_stop is not None else None
+                call_number = next(self._counter)
+                reply_path = os.path.join(self._folder(), f"{call_number}.reply")
+                output_path = os.path.join(self._folder(), f"{call_number}.out") if live_output else None
+            except OSError as exc:
+                healthy = True  # nothing happened to the child
+                raise InterpreterUnavailable(f"no room for the files of {function} ({exc})") from exc
+            if on_child is not None:
+                healthy = True  # nothing happened to the child
+                on_child()
+                healthy = False
+            current = _environment()
             changed = {key: value for key, value in current.items() if child.env.get(key) != value}
             gone = [key for key in child.env if key not in current]
             try:
                 request = pickle.dumps((changed, gone, module, function, args, watched.path if watched else None,
-                                        CHILD_POLL, reply_path, output_path), protocol=pickle.HIGHEST_PROTOCOL)
+                                        CHILD_POLL, reply_path, output_path,
+                                        self._after if after_call is None else tuple(after_call)),
+                                       protocol=pickle.HIGHEST_PROTOCOL)
             except Exception as exc:
                 healthy = True  # nothing happened to the child
                 raise InterpreterUnavailable(f"the arguments of {function} cannot cross ({exc})") from exc
@@ -405,25 +451,29 @@ class InterpreterPool:
             failure = self._wait_passing_output(running, output_path)
             del request
             if failure is not None:
-                raise InterpreterUnavailable(f"a child could not run {function}: {failure}")
+                failed = f"a child could not run {function}: {failure}"
+                raise InterpreterUnavailable(failed)
             try:
                 with open(reply_path, "rb") as handle:
                     data = handle.read()
             except OSError as exc:
-                raise InterpreterUnavailable(f"{function} left no result ({exc})") from exc
+                failed = f"{function} left no result ({exc})"
+                raise InterpreterUnavailable(failed) from exc
             healthy = True
             with self._lock:
                 self.calls += 1
         finally:
             if watched is not None:
                 self._unwatch(watched)
+            if failed is not None:
+                self.refused = failed
             self._release(child, healthy)
-        for path in (reply_path, output_path):
-            try:
-                if path:
-                    os.remove(path)
-            except OSError:
-                pass
+            for path in (reply_path, output_path):
+                try:
+                    if path:
+                        os.remove(path)
+                except OSError:
+                    pass
         return self._unpack(pickle.loads(data))
 
     @staticmethod
@@ -455,27 +505,56 @@ class InterpreterPool:
             raise WorkerError(f"{value}\n{details}")
         raise value from _ChildTraceback(details)
 
-    def stop(self) -> None:
-        """Tell every child's check, whatever its ``should_stop`` says."""
+    def stop(self, functions: Optional[Sequence[Callable[[], Any]]] = None) -> None:
+        """Tell every child's check, whatever its ``should_stop`` says; of these ``should_stop``s only, with ``functions``."""
         with self._lock:
-            watched = list(self._watched.values())
+            watched = [entry for function, entry in self._watched.items() if functions is None or function in functions]
         for entry in watched:
             self._set(entry)
 
     # ---- the children ---------------------------------------------------------------------------------------
 
-    def _acquire(self) -> _Child:
+    def _acquire(self, preload: Sequence[str] = ()) -> _Child:
+        child = None
         with self._lock:
-            while True:
+            while child is None:
                 if self._closed:
                     raise InterpreterUnavailable("the interpreter pool is closed")
                 if self._idle:
                     self._busy += 1
-                    return self._idle.pop()  # the one used last: its memory is warm
-                if self._live + self._starting < self.size:
+                    child = self._take_idle(preload)
+                elif self.refused:  # no second try, and nobody waits for one
+                    raise InterpreterUnavailable(self.refused)
+                elif self._live + self._starting < self.size:
                     self._starting += 1
                     break
-                self._lock.wait(0.5)
+                else:
+                    self._lock.wait(0.5)
+        if child is None:
+            child = self._start_counted(preload)
+            if child is None:  # the ones that did start do the work (a phone that ran out of room for one more)
+                return self._acquire(preload)
+        missing = [module for module in preload if module not in child.loaded]
+        if missing:
+            try:
+                child.do(lambda: self._load(child, missing))
+            except InterpreterUnavailable as exc:  # the import failed, the child is as it was: work that needs no such module
+                self._refused_loads[tuple(preload)] = str(exc)
+                self._release(child, True)
+                raise
+            except BaseException:
+                self._release(child, False)
+                raise
+        return child
+
+    def _take_idle(self, preload: Sequence[str]) -> _Child:
+        """One that already has what this job needs, else the one used last: its memory is warm."""
+        for index in range(len(self._idle) - 1, -1, -1):
+            if self._idle[index].loaded.issuperset(preload):
+                return self._idle.pop(index)
+        return self._idle.pop()
+
+    def _start_counted(self, preload: Sequence[str]) -> Optional[_Child]:
         try:
             child = self._start_child()
         except BaseException as exc:
@@ -484,11 +563,11 @@ class InterpreterPool:
                 others = self._live + self._starting
                 self._lock.notify_all()
                 if not others or not isinstance(exc, InterpreterUnavailable):
+                    self.refused = str(exc)
                     raise
-                # the ones that did start do the work (a phone that ran out of room for one more)
-                self.size = others
+                self.size = self._cap = others
                 log.info("interpreter pool stays at %d: %s", others, exc)
-            return self._acquire()
+            return None
         with self._lock:
             self._starting -= 1
             self._live += 1
@@ -521,16 +600,36 @@ class InterpreterPool:
             raise
         except Exception as exc:
             raise InterpreterUnavailable(f"no child interpreter: {type(exc).__name__}: {exc}") from exc
-        child.env = dict(os.environ)
         try:
             failure = _run(child.handle, _child_source())
-            if failure is None:
-                request = pickle.dumps((child.env, _child_setup, self._preload, self._after))
-                failure = _run(child.handle, "_gl_prepare()", {"_gl_request": request})
         except Exception as exc:
             failure = f"{type(exc).__name__}: {exc}"
         if failure is not None:
             raise InterpreterUnavailable(f"a child interpreter could not be prepared: {failure}")
+        self._load(child, (), _child_setup)
+
+    def _load(self, child: _Child, modules: Sequence[str], setup: Optional[tuple] = None) -> None:
+        """On the child's thread. They import under the caller's environment."""
+        child.env = _environment()
+        try:
+            request = pickle.dumps((child.env, setup, tuple(modules)))
+            failure = _run(child.handle, "_gl_prepare()", {"_gl_request": request})
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+        if failure is not None:
+            raise InterpreterUnavailable(f"a child interpreter could not be prepared: {failure}")
+        child.loaded.update(modules)
+
+    def refused_for(self, preload: Sequence[str]) -> Optional[str]:
+        """Why work that needs these modules does not go to a child, once that was found out."""
+        return self.refused or self._refused_loads.get(tuple(preload))
+
+    def allow(self, size: int) -> None:
+        """A job may use this many: how many children may exist from now on, never fewer than do."""
+        with self._lock:
+            size = max(int(size), self._live + self._starting)
+            self.size = size if self._cap is None else min(size, self._cap)
+            self._lock.notify_all()
 
     def _release(self, child: _Child, healthy: bool) -> None:
         with self._lock:
@@ -564,6 +663,7 @@ class InterpreterPool:
             self.stop()
         with self._lock:
             self._closed = True
+            self._stop_all = self._stop_all or stop_running
             idle, self._idle = self._idle, []
             executor, self._executor = self._executor, None
             finished = not self._busy and not self._starting
@@ -588,21 +688,40 @@ class InterpreterPool:
     def _watch(self, should_stop: Callable[[], Any]) -> _Watched:
         with self._lock:
             entry = self._watched.get(should_stop)
-            if entry is None:
+            first = entry is None
+            if first:
                 entry = _Watched(should_stop, os.path.join(self._folder(), f"{next(self._counter)}.stop"))
                 self._watched[should_stop] = entry
             entry.calls += 1
-            if self._closed:
+            if self._stop_all:
                 self._set(entry)
             elif self._watcher is None:
                 self._watcher = threading.Thread(target=self._watch_loop, name="glossarion-interpreter-stop", daemon=True)
                 self._watcher.start()
             self._lock.notify_all()
+        if first:  # a check that already says stop is not asked a poll later: this batch would start
+            try:
+                if should_stop():
+                    self._set(entry)
+            except Exception:
+                log.debug("a stop check raised", exc_info=True)
         return entry
 
     def _unwatch(self, entry: _Watched) -> None:
+        """A job's check is not kept, nor its file: a kept pool sees many jobs."""
+        path = None
         with self._lock:
             entry.calls -= 1
+            if not entry.calls:
+                if self._watched.get(entry.function) is entry:
+                    del self._watched[entry.function]
+                path = entry.path
+            self._lock.notify_all()
+        if path:
+            try:
+                os.remove(path)
+            except OSError:  # none: nobody told it to stop
+                pass
 
     def _watch_loop(self) -> None:
         """Asks only while a call that uses the answer runs: nothing wakes while the pool is idle."""
@@ -611,13 +730,12 @@ class InterpreterPool:
 
         while True:
             with self._lock:
-                while not self._closed and not asked():
+                while not asked():
+                    if self._closed:
+                        self._watcher = None
+                        return
                     self._lock.wait()
-                if not self._closed:
-                    self._lock.wait(STOP_POLL)
-                if self._closed:
-                    self._watcher = None
-                    return
+                self._lock.wait(STOP_POLL)
                 entries = asked()
             for entry in entries:
                 try:
@@ -627,19 +745,25 @@ class InterpreterPool:
                     log.debug("a stop check raised", exc_info=True)
 
     def _set(self, entry: _Watched) -> None:
-        entry.is_set = True
-        try:
-            with open(entry.path, "wb"):
-                pass
-        except OSError:  # the folder went with a closed pool: nothing is left to tell
-            log.debug("the stop file could not be written", exc_info=True)
+        with self._lock:
+            entry.is_set = True
+            if not entry.calls:  # its last call just ended: a file now would stay
+                return
+            try:
+                with open(entry.path, "wb"):
+                    pass
+            except OSError:  # the folder went with a closed pool: nothing is left to tell
+                log.debug("the stop file could not be written", exc_info=True)
 
     # ---- the private folder ---------------------------------------------------------------------------------
 
     def _folder(self) -> str:
         with self._lock:
             if self._dir is None:
-                self._dir = tempfile.mkdtemp(prefix="glossarion-interp-", dir=self._parent_dir)
+                _remove_leftovers(self._parent_dir)
+                self._dir = tempfile.mkdtemp(prefix=_FOLDER_PREFIX, dir=self._parent_dir)
+            elif not os.path.isdir(self._dir):  # a phone clears cache and temp folders when it wants to, children stay
+                os.makedirs(self._dir, mode=0o700, exist_ok=True)
             return self._dir
 
     def _remove_folder(self) -> None:
@@ -647,6 +771,23 @@ class InterpreterPool:
             folder, self._dir = self._dir, None
         if folder:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def _remove_leftovers(parent: Optional[str]) -> None:
+    """The private folders of an app that got killed: nothing else ever removes them, and they hold a batch's results."""
+    parent = parent or tempfile.gettempdir()
+    try:
+        names = [name for name in os.listdir(parent) if name.startswith(_FOLDER_PREFIX)]
+    except OSError:
+        return
+    in_use = {pool._dir for pool in list(_open_pools)}
+    for name in names:
+        path = os.path.join(parent, name)
+        try:
+            if path not in in_use and time.time() - os.path.getmtime(path) > LEFTOVER_AGE:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def _pass_output(path: str, offset: int, *, everything: bool = False) -> int:
@@ -672,11 +813,69 @@ def last_line(text: Any, limit: int = 160) -> str:
     return line if len(line) <= limit else line[:limit - 1] + "…"
 
 
+_kept: Optional[InterpreterPool] = None
+_kept_lock = threading.Lock()
+
+
+def kept_pool() -> InterpreterPool:
+    """The children of every job, for as long as the app runs (the module's docstring says why)."""
+    global _kept
+    with _kept_lock:
+        if _kept is None:
+            _kept = InterpreterPool(1)
+        return _kept
+
+
+def drop_kept_pool() -> None:
+    """The kept children go (a new ``set_child_setup``, a test); the next job starts new ones."""
+    global _kept
+    with _kept_lock:
+        pool, _kept = _kept, None
+    if pool is not None:
+        pool.close()
+
+
+class _JobUse:
+    """What ``JobChildren.pool`` gives: ``call`` on the kept children, with this job's ``preload`` and ``after_call``.
+    When it ends, its batches that still run are told to stop, unless they still count."""
+
+    def __init__(self, pool: InterpreterPool, size: int, preload: Sequence[str], after_call: Optional[tuple],
+                 on_child: Callable[[], Any]) -> None:
+        self.pool = pool
+        self.size = size
+        self._preload = tuple(preload)
+        self._after = after_call
+        self._on_child = on_child
+        self._stops: set = set()
+        self._ended = False
+
+    def call(self, module: str, function: str, args: Any = None, *, should_stop: Optional[Callable[[], Any]] = None,
+             live_output: bool = False) -> Any:
+        if self._ended:
+            raise InterpreterUnavailable("this job's use of the children ended")
+        if should_stop is not None:
+            self._stops.add(should_stop)
+        return self.pool.call(module, function, args, should_stop=should_stop, live_output=live_output,
+                              preload=self._preload, after_call=self._after, on_child=self._child_is_there)
+
+    def _child_is_there(self) -> None:
+        """This call may have waited for a child: the next job's work is not to wait behind a batch of one that ended."""
+        if self._ended:
+            raise InterpreterUnavailable("this job's use of the children ended")
+        self._on_child()
+
+    def end(self, stop_running: bool = True) -> None:
+        self._ended = True
+        if stop_running:
+            self.pool.stop(list(self._stops))
+
+
 class JobChildren:
-    """The children of one job's work, decided once: ``pool`` makes them when work first asks (work that never comes
-    costs nothing), by the memory rule. When there is not enough free memory, or a child cannot start or do its work
-    (``fall_back``), the job says so once and ``pool`` gives None from then on: the caller runs that work on a thread and
-    all the next too. No second try at something that failed.
+    """The children of one job's work, decided once: ``pool`` gives the kept children when work first asks (work that never
+    comes costs nothing), by the memory rule for any new one. When there is not enough free memory, or a child cannot start
+    or do its work (``fall_back``), the job says so once and ``pool`` gives None from then on: the caller runs that work
+    on a thread and all the next too. No second try at something that failed: once a child failed (``refused_for``), the
+    next jobs go to threads as well, until the app restarts.
 
     ``what`` names the work in its two log lines ("Scanning"). ``preload`` and ``after_call`` are the pool's."""
 
@@ -687,35 +886,45 @@ class JobChildren:
         self._preload = tuple(preload)
         self._after = after_call
         self._lock = threading.Lock()
-        self._pool: Optional[InterpreterPool] = None
+        self._pool: Optional[_JobUse] = None
         self._said = False
         self.gone = False  # on threads for the rest of this job
 
-    def pool(self, workers: int) -> Optional[InterpreterPool]:
-        """The pool (the first call makes it); None on the thread path."""
+    def pool(self, workers: int) -> Optional[_JobUse]:
+        """The children for this job (the first call decides); None on the thread path."""
         with self._lock:
             if self.gone or self._pool is not None:
                 return self._pool
             reason = unavailable_reason()
-            total, free = memory_now()
-            size = size_for_memory(workers, free, total)
-            if reason is None and size < 1:
-                reason = f"only {int((free or total) / (1024 * 1024))} MB of memory is free"
             if reason is None:
-                self._pool = InterpreterPool(size, preload=self._preload, after_call=self._after)
-                if not self._said:
-                    self._said = True
-                    self._say(f"   ⚡ {self._what} in {size} separate Python interpreter{'s' if size != 1 else ''}")
+                kept = kept_pool()
+                reason = kept.refused_for(self._preload)
+            if reason is None:
+                total, free = memory_now()
+                live = kept.live()  # they cost nothing more
+                size = min(workers, live) + size_for_memory(max(0, workers - live), free, total)
+                if size < 1:
+                    reason = f"only {int((free or total) / (1024 * 1024))} MB of memory is free"
+            if reason is None:
+                kept.allow(size)
+                self._pool = _JobUse(kept, size, self._preload, self._after, lambda: self._ready(size))
                 return self._pool
         self.fall_back(reason)
         return None
 
+    def _ready(self, size: int) -> None:
+        """A child is there: true only now, one may not start."""
+        with self._lock:
+            said, self._said = self._said, True
+        if not said:
+            self._say(f"   ⚡ {self._what} in {size} separate Python interpreter{'s' if size != 1 else ''}")
+
     def fall_back(self, reason: str) -> None:
         with self._lock:
             told, self.gone = self.gone, True
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.close(stop_running=False)  # the batches in the other children are good: their results count
+            use, self._pool = self._pool, None
+        if use is not None:
+            use.end(stop_running=False)  # the batches in the other children are good: their results count
         if not told:
             self._say(f"   🧵 {self._what} on threads: separate interpreters are not available here ({last_line(reason)})")
 
@@ -726,27 +935,42 @@ class JobChildren:
             pass
 
     def release(self) -> None:
-        """The children go now, and the next work starts new ones (work with long gaps between its calls)."""
+        """This job leaves the children for now: its next work asks ``pool`` again (work with long gaps between its calls)."""
         with self._lock:
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.close()
+            use, self._pool = self._pool, None
+        if use is not None:
+            use.end()
 
     def close(self) -> None:
-        """The job ended: the children are released (one a Stop left in a batch, when that batch ends)."""
+        """The job ended: the children stay for the next job (one a Stop left in a batch, free when that batch ends)."""
         with self._lock:
-            pool, self._pool = self._pool, None
+            use, self._pool = self._pool, None
             self.gone = True
-        if pool is not None:
-            pool.close()
+        if use is not None:
+            use.end()
 
 
 def memory_now() -> tuple:
-    """``(total, available)`` bytes, as the on-device model's admission reads them."""
+    """``(total, available)`` bytes, as the on-device model's admission reads them, and where that has no number (iOS)
+    what the system says this app may still use before it is stopped."""
     try:
         from glossarion_mobile.services.local_llm.service import memory_info
 
-        return memory_info()
+        total, free = memory_info()
     except Exception:
         log.debug("memory_info is not available", exc_info=True)
-        return 0, None
+        total, free = 0, None
+    return total, free if free is not None else _room_before_jetsam()
+
+
+def _room_before_jetsam() -> Optional[int]:
+    """``os_proc_available_memory``, iOS 13 on. None where there is no such call or it says nothing (0: a simulator)."""
+    try:
+        import ctypes
+
+        call = ctypes.CDLL(None).os_proc_available_memory
+        call.restype = ctypes.c_size_t
+        call.argtypes = []
+        return int(call()) or None
+    except Exception:  # Linux, Windows: no such call
+        return None

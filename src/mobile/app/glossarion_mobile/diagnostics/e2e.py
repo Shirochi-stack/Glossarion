@@ -621,6 +621,24 @@ def _chapter_requests(records: list) -> list:
     return [r.chapters[0] for r in records if r.kind == "translation" and len(r.chapters) == 1]
 
 
+def _why_sent_twice(records: list, log_path: str) -> str:
+    """What a failing check needs when a chapter went to the model twice: how each request of it ended and what the job's
+    log says about it (a job's log is gone with the runner's sandbox)."""
+    chapters = _chapter_requests(records)
+    twice = {chapter for chapter in chapters if chapters.count(chapter) > 1}
+    if not twice:
+        return ""
+    sent = [(r.chapters[0], r.status, round(r.started, 2), r.finished and round(r.finished, 2), r.reply_chars)
+            for r in records if r.kind == "translation" and len(r.chapters) == 1 and r.chapters[0] in twice]
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as handle:
+            lines = [line.strip()[:200] for line in handle if any(word in line.lower() for word in (
+                "retry", "retrying", "cancelled", "timed out", "duplicate", "truncat", "error"))]
+    except OSError as exc:
+        lines = [str(exc)]
+    return f"; sent {sent}; the job's log: {lines[-12:]}"
+
+
 # ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
@@ -1514,9 +1532,11 @@ class E2ESession:
         resumed = self._outcome("resume after kill", new_id, snap, t0, before)
         _check(resumed.state == "DONE", f"resumed job ended {resumed.state}: {resumed.error}")
         _check(not relaunched.interrupted, "the resumed job is still listed as Interrupted")
-        again = _chapter_requests(server.records(since=mark))
+        records = server.records(since=mark)
+        again = _chapter_requests(records)
         _check(sorted(again) == sorted(remaining),
-               f"Resume translated chapters {sorted(again)}; the missing ones were {sorted(remaining)}")
+               f"Resume translated chapters {sorted(again)}; the missing ones were {sorted(remaining)}"
+               + _why_sent_twice(records, relaunched.job_log_path(new_id)))
         book = self._expect_complete_book(output_dir, "resume after kill")
         return {"stop_secs": round(stop_secs, 1), "parked_at_stop": taps.get("parked"), "parked_after": still_parked,
                 "saved_before_resume": sorted(done), "resumed": sorted(again), "book": book}

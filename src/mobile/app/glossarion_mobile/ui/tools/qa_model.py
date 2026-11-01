@@ -213,7 +213,8 @@ def workers_shown(config: Optional[Mapping[str, Any]]) -> int:
 def workers_hint() -> str:
     low, high = workers_range()
     return (f"{low} to {high} (this device's cores); default {default_scan_workers()}, half of them. "
-            "More scan faster and use about 40 MB of memory each. If this device cannot run them separately "
+            "More scan faster and use about 40 MB of memory each, until the app closes. If this device cannot run them "
+            "separately "
             "(the scan's log says so), they take turns and more do not scan faster.")
 
 

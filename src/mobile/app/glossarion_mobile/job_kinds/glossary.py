@@ -64,8 +64,9 @@ _FILTER_CHILD = "glossarion_mobile.services.glossary_child"
 def filter_in_child(log: Callable[[Any], Any] = print) -> Iterator[None]:
     """A job that may reach ``_filter_text_for_glossary`` (a translation's automatic glossary, Extract Glossary's minimal
     pass): the whole function runs in a child with its own GIL, so none of its sentences compete with the loop, and it
-    finishes sooner because each of its checks for a Stop no longer asks the file system. A child is started for each
-    filter and released right after: a translation runs for hours after it. Its log lines come as they are printed.
+    finishes sooner because each of its checks for a Stop no longer asks the file system. It uses one of the app's kept
+    children (``services.interpreters``) and that goes back right after: a translation runs for hours after it, and the
+    filter of the next book gets it again. Its log lines come as they are printed.
 
     The result is the shared function's in both places; where a child cannot start, or compares names differently
     (``name_comparison.comparison_modules``), it runs here on the job's thread and says so once. A Stop reaches the child

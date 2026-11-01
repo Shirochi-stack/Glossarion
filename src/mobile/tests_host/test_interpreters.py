@@ -21,6 +21,7 @@ import os
 import shutil
 import statistics
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -95,6 +96,7 @@ def phone(tmp_path, monkeypatch):
     yield tmp_path
     for name in stop_flags:  # a stopped scan leaves them for the next run's reset: not for the next test
         os.environ.pop(name, None)
+    interpreters.drop_kept_pool()
     deadline = time.monotonic() + 60  # children a stopped scan left in a batch end at their next item
     while interpreters._api is not None and _alive() > 1 and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -551,7 +553,7 @@ def test_changed_settings_reach_interpreters_that_are_reused(phone, monkeypatch)
 
 @needs_interpreters
 @needs_backend
-def test_all_the_pools_of_a_scan_share_the_children_and_they_are_released(phone, monkeypatch):
+def test_all_the_pools_of_a_scan_share_the_children_and_they_stay(phone, monkeypatch):
     spy = _PoolSpy(monkeypatch)
     before = _alive()
     book = _book(phone / "out" / "Book")
@@ -564,7 +566,7 @@ def test_all_the_pools_of_a_scan_share_the_children_and_they_are_released(phone,
     pools = sum("Split into" in line or "Processing" in line for line in lines)
     assert pools >= 2, lines
     assert 1 <= made.started <= workers and made.calls > workers, (made.started, made.calls)
-    assert made.live() == 0 and made.destroyed == made.started and _alive() == before
+    assert made.live() == made.started and made.destroyed == 0 and _alive() == before + made.started
 
 
 @needs_interpreters
@@ -665,7 +667,7 @@ def test_a_qa_scan_job_runs_in_children_by_default_and_finds_what_threads_find(p
     ctx = _Ctx(_job_config())
     assert qa_kind.scan(ctx, [(book, None, False)], "quick-scan", disable_word_count=True)["ok"] is True
     assert _went_to_children(ctx.lines) and not _fell_back(ctx.lines), ctx.lines
-    assert _alive() == before
+    assert _alive() == before + interpreters.kept_pool().started and interpreters.kept_pool().destroyed == 0
     found = _report_rows(book)
     monkeypatch.setattr(qa_kind, "SCAN_INTERPRETERS", False)
     book = _book(phone / "out" / "threads" / "Book")
@@ -711,8 +713,10 @@ def test_a_stopped_job_ends_like_a_stopped_job(phone, monkeypatch, interpreted):
     book = bench.make_book(phone / "out" / "Book", chapters=120, words=2500)
     marks: dict = {}
 
+    reached = "separate Python interpreter" if interpreted else "batches of"  # the line of a child is there first
+
     def stop_when(lines) -> bool:
-        if "first" not in marks and any("batches of" in line for line in lines):
+        if "first" not in marks and any(reached in line for line in lines):
             marks["first"] = time.monotonic()
         return "first" in marks and time.monotonic() - marks["first"] > 0.4
 
@@ -744,8 +748,8 @@ def _stopped_scan(phone, name: str, interpreted: bool, monkeypatch) -> tuple:
     def stop_soon() -> None:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            if any("batches of" in line for line in lines):  # its batches are in the pool
-                break
+            if any("batches of" in line for line in lines) and (not interpreted or _went_to_children(lines)):
+                break  # its batches are in the pool
             time.sleep(0.01)
         time.sleep(0.4)
         stop.set()
@@ -781,12 +785,13 @@ def test_stop_ends_a_scan_at_once_and_writes_no_report_like_on_threads(phone, mo
         assert _went_to_children(lines) is interpreted
     for name, outcome in outcomes.items():
         assert outcome["result"] is None and outcome["report"] is False and outcome["stop_line"], (name, outcome)
-    # the children left in a batch end at their next item and are released, without the scan waiting for them
+    # the children left in a batch end at their next item and are free again, without the scan waiting for them
     made = spy.made[0]
     deadline = time.monotonic() + 60
-    while made.live() and time.monotonic() < deadline:
+    while made._busy and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert made.live() == 0 and _alive() == before
+    assert not made._busy and made.destroyed == 0 and _alive() == before + made.live()
+    assert made._watched == {} and os.listdir(made._dir) == []
 
 
 @needs_interpreters
@@ -920,7 +925,7 @@ def test_falling_back_does_not_cut_short_the_batches_running_in_other_children(p
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         long_batch = pool.submit(children._batch, interp_workers.items, (200, 0.02, None), stop, 2)
         deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and not (children._job._pool and children._job._pool.calls == 0 and children._job._pool._busy):
+        while time.monotonic() < deadline and not (children._job._pool and children._job._pool.pool.calls == 0 and children._job._pool.pool._busy):
             time.sleep(0.01)
         time.sleep(0.4)
         # the worker exists here too, for the thread path this batch ends up on
@@ -1094,7 +1099,8 @@ def test_the_workers_hint_says_what_more_workers_do(monkeypatch):
     monkeypatch.setattr(os, "cpu_count", lambda: 8)
     hint = qm.workers_hint()
     assert "1 to 8" in hint and "default 4" in hint
-    assert "More scan faster" in hint and "40 MB" in hint and "more do not scan faster" in hint
+    assert "More scan faster" in hint and "40 MB" in hint and "until the app closes" in hint
+    assert "more do not scan faster" in hint
 
 
 # ---- the self-test --------------------------------------------------------------------------------------------------
@@ -1336,17 +1342,21 @@ def test_a_line_is_not_passed_on_in_pieces(tmp_path, capsys):
 
 
 @needs_interpreters
-def test_job_children_decide_once_and_release_when_asked(tmp_path, monkeypatch):
+def test_job_children_decide_once_and_leave_when_asked(tmp_path, monkeypatch):
     lines = _Lines()
     monkeypatch.setattr(interpreters, "memory_now", lambda: (8 * 1024 ** 3, 4 * 1024 ** 3))
     job = interpreters.JobChildren(lines, "Working")
     first = job.pool(3)
     assert job.pool(3) is first and first.size == 3
+    assert lines == [], "no child is there yet"
+    assert first.call(WORKERS, "echo", 1) == 1
     assert lines == ["   ⚡ Working in 3 separate Python interpreters"]
     job.release()
     second = job.pool(1)
     assert second is not first and second.size == 1 and not job.gone
-    assert len(lines) == 1, "the job says so once, however many times it starts children"
+    assert second.call(WORKERS, "echo", 2) == 2
+    assert len(lines) == 1, "the job says so once, however many times it asks for children"
+    assert second.pool is first.pool and second.pool.started == 1 and second.pool.destroyed == 0
     job.close()
     assert job.pool(3) is None and job.gone and len(lines) == 1, "a closed job starts nothing and has nothing to say"
 
@@ -1436,7 +1446,7 @@ def test_the_filter_gives_the_same_text_and_terms_in_a_child(glossary_phone, mon
     assert in_child[0] == on_thread[0] and in_child[0]
     assert in_child[1] == on_thread[1] and len(in_child[1]) >= len(_NAMES)
     assert "FILTERING COMPLETE" in capsys.readouterr().out, "its log reaches the job's stdout"
-    assert _alive() == 1, "no child stays behind"
+    assert not interpreters.kept_pool()._busy and interpreters.kept_pool().live() == 1, "one child, free again"
 
 
 @needs_interpreters
@@ -1478,8 +1488,8 @@ def test_a_short_text_never_starts_a_child(glossary_phone):
 
 @needs_interpreters
 @needs_backend
-def test_the_child_goes_when_the_filter_ends_not_when_the_job_ends(glossary_phone, capsys):
-    """A translation runs for hours after its glossary's filter: its memory must not wait for that."""
+def test_a_filter_uses_one_kept_child_however_many_books_a_job_has(glossary_phone, capsys):
+    """A translation runs for hours after its glossary's filter, and a destroyed child leaves its memory behind."""
     from glossarion_mobile.job_kinds.glossary import filter_in_child
 
     backend = _gm()
@@ -1487,10 +1497,11 @@ def test_the_child_goes_when_the_filter_ends_not_when_the_job_ends(glossary_phon
     lines: list = []
     with filter_in_child(lines.append):
         assert backend._filter_text_for_glossary(text, 2, 200)[0]
-        assert _alive() == 1
-        assert backend._filter_text_for_glossary(text, 2, 200)[0], "the next book's filter gets a new one"
-        assert _alive() == 1
+        assert _alive() == 2 and not interpreters.kept_pool()._busy, "it stays, and nothing runs in it now"
+        assert backend._filter_text_for_glossary(text, 2, 200)[0], "the next book's filter gets the same one"
+        assert _alive() == 2
     assert _child_ran(lines) and len(lines) == 1, lines
+    assert interpreters.kept_pool().started == 1 and interpreters.kept_pool().destroyed == 0
 
 
 @needs_interpreters
@@ -1610,7 +1621,7 @@ def test_where_a_child_does_not_work_the_filter_runs_here_with_the_same_result(g
     assert _filtered(text, child=True, lines=lines) == expected
     back = [line for line in lines if "on threads" in line]
     assert len(back) == 1, lines
-    assert _alive() == 1
+    assert _alive() == (2 if how == "compares_differently" else 1)  # that one works: it stays for the next job
 
 
 @needs_interpreters
@@ -1755,7 +1766,7 @@ def test_sidecars_are_the_same_files_in_children(phone, capfd, make):
     assert any("separate Python interpreter" in line for line in lines), lines
     assert not any("⚠" in line or "on threads" in line for line in lines), lines
     assert "Enhanced extraction failed" not in capfd.readouterr().out
-    assert _alive() == 1
+    assert not interpreters.kept_pool()._busy and interpreters.kept_pool().destroyed == 0
 
 
 @needs_interpreters
@@ -1808,7 +1819,7 @@ def test_stop_between_sidecars_as_on_the_threads(phone):
     assert total == 40 and done < 40 and not failed
     assert any("Stop requested" in line for line in lines), lines
     assert writer._write_html_md_txt_sidecars.__name__ == "_write_html_md_txt_sidecars", "the writer is put back"
-    assert _alive() == 1
+    assert interpreters.kept_pool().destroyed == 0
 
 
 @needs_interpreters
@@ -1871,3 +1882,494 @@ def test_the_smoke_check_covers_the_glossary_filter_and_the_sidecars(tmp_path, g
     detail = interpreter_check.check_scan_in_child(tmp_path / "work", "android")
     assert detail["result"] == "pass"
     assert detail["filter"] == "pass" and detail["sidecars"] == "pass", detail
+
+
+# ---- kept children: a destroyed one does not give its memory back -------------------------------------------------
+
+
+def _job(lines=None, what="Working", **options):
+    return interpreters.JobChildren(lines if lines is not None else _Lines(), what, **options)
+
+
+@pytest.fixture
+def plenty_of_memory(monkeypatch):
+    monkeypatch.setattr(interpreters, "memory_now", lambda: (8 * 1024 ** 3, 4 * 1024 ** 3))
+
+
+@needs_interpreters
+def test_a_job_keeps_its_children_for_the_next_job_and_destroys_none(plenty_of_memory):
+    """Emulator, Python 3.13: each destroyed child left about 17 MB in the process for good, 9 scans at 4 workers took the
+    app from 489 to 1178 MB. 4 children reused for 12 rounds stayed flat."""
+    before = _alive()
+    seen = set()
+    for _job_number in range(5):
+        job = _job()
+        pool = job.pool(1)
+        seen.add(pool.call(WORKERS, "where"))
+        job.close()
+    kept = interpreters.kept_pool()
+    assert len(seen) == 1 and kept.started == 1 and kept.destroyed == 0
+    assert _alive() == before + 1 and kept.live() == 1
+
+
+@needs_interpreters
+def test_the_kept_children_never_outgrow_what_a_job_asks(plenty_of_memory):
+    for wanted in (3, 1, 2, 3):
+        job = _job()
+        pool = job.pool(wanted)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=wanted) as outside:
+            assert sorted(outside.map(lambda n: pool.call(WORKERS, "echo", n), range(wanted * 4))) == list(range(wanted * 4))
+        job.close()
+    kept = interpreters.kept_pool()
+    assert kept.started <= 3 and kept.destroyed == 0
+
+
+@needs_interpreters
+def test_the_memory_rule_counts_only_children_that_are_new(monkeypatch):
+    free = [4 * 1024 ** 3]
+    monkeypatch.setattr(interpreters, "memory_now", lambda: (8 * 1024 ** 3, free[0]))
+    job = _job()
+    pool = job.pool(2)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as outside:
+        list(outside.map(lambda n: pool.call(WORKERS, "sleep_then", (0.2, n)), range(4)))
+    job.close()
+    kept = interpreters.kept_pool()
+    assert kept.live() == 2
+    free[0] = 100 * 1024 ** 2  # no room for one more: the two that exist cost nothing more
+    job = _job()
+    pool = job.pool(4)
+    assert pool is not None and not job.gone and pool.size == 2
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as outside:
+        list(outside.map(lambda n: pool.call(WORKERS, "echo", n), range(8)))
+    job.close()
+    assert kept.started == 2 and kept.size == 2
+    free[0] = 2 * 1024 ** 3  # room again: a later job may have more
+    job = _job()
+    assert job.pool(4).size == 4
+    job.close()
+
+
+@needs_interpreters
+def test_a_child_that_failed_means_threads_for_the_rest_of_this_run_of_the_app(plenty_of_memory, monkeypatch):
+    """No second try at something that failed, and a failing child costs its memory for good: each job would leak another."""
+    attempts: list = []
+    real = interpreters._create
+
+    def no_child():
+        attempts.append(1)
+        raise RuntimeError("no room")
+
+    monkeypatch.setattr(interpreters, "_create", no_child)
+    for _job_number in range(3):
+        lines = _Lines()
+        job = _job(lines)
+        pool = job.pool(4)
+        if pool is not None:
+            with pytest.raises(interpreters.InterpreterUnavailable):
+                pool.call(WORKERS, "echo", 1)
+            job.fall_back("no room")
+        assert job.pool(4) is None and sum("on threads" in line for line in lines) == 1, lines
+        job.close()
+    assert len(attempts) == 1
+    monkeypatch.setattr(interpreters, "_create", real)
+    assert _job().pool(1) is None, "a later job does not try again"
+
+
+@needs_interpreters
+def test_a_child_that_dies_in_a_call_is_not_replaced(plenty_of_memory, monkeypatch):
+    real_run = interpreters._run
+    monkeypatch.setattr(interpreters, "_run", lambda child, code, shared=None: (
+        "SystemError: the call failed" if code == "_gl_call()" else real_run(child, code, shared)))
+    job = _job()
+    with pytest.raises(interpreters.InterpreterUnavailable):
+        job.pool(1).call(WORKERS, "echo", 1)
+    job.close()
+    assert _job().pool(1) is None
+    assert interpreters.kept_pool().started == 1
+
+
+@needs_interpreters
+def test_arguments_that_cannot_cross_do_not_end_the_children_for_later_jobs(plenty_of_memory):
+    job = _job()
+    with pytest.raises(interpreters.InterpreterUnavailable):
+        job.pool(1).call(WORKERS, "echo", threading.Lock())
+    job.close()
+    job = _job()
+    assert job.pool(1).call(WORKERS, "echo", 1) == 1
+    job.close()
+    assert interpreters.kept_pool().destroyed == 0
+
+
+@needs_interpreters
+def test_the_interpreters_line_comes_only_when_a_child_is_there(plenty_of_memory, monkeypatch):
+    """The emulator's forced fallback logged "Scanning in 4 separate Python interpreters" and then that it could not."""
+    monkeypatch.setattr(interpreters, "_create", lambda: (_ for _ in ()).throw(RuntimeError("no room")))
+    lines = _Lines()
+    job = _job(lines, "Scanning")
+    pool = job.pool(4)
+    if pool is not None:
+        with pytest.raises(interpreters.InterpreterUnavailable):
+            pool.call(WORKERS, "echo", 1)
+    assert not any("separate Python interpreter" in line for line in lines), lines
+    job.close()
+
+
+@needs_interpreters
+def test_a_job_that_ended_is_not_called_and_stops_only_its_own_batches(plenty_of_memory):
+    first, second = _job(), _job()
+    one, two = first.pool(2), second.pool(2)
+    stop_one, stop_two = (lambda: False), (lambda: False)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as outside:
+        running_one = outside.submit(one.call, WORKERS, "items", (400, 0.01, None), should_stop=stop_one)
+        running_two = outside.submit(two.call, WORKERS, "items", (40, 0.01, None), should_stop=stop_two)
+        time.sleep(0.4)
+        first.close()
+        assert running_two.result(timeout=60) == {"stopped_at": None, "done": 40}, "the other job's batch was cut short"
+        assert running_one.result(timeout=60)["stopped_at"] is not None, "the ended job's batch was not told"
+    with pytest.raises(interpreters.InterpreterUnavailable):
+        one.call(WORKERS, "echo", 1)
+    second.close()
+
+
+@needs_interpreters
+def test_nothing_of_a_finished_job_stays_in_the_kept_pool(plenty_of_memory):
+    job = _job()
+    pool = job.pool(1)
+    assert pool.call(WORKERS, "echo_checked", "x", should_stop=lambda: False) == "x"
+    job.close()
+    kept = interpreters.kept_pool()
+    assert kept._watched == {}, "each job's stop check would stay, and be asked"
+    assert os.listdir(kept._dir) == [], "a job's files stay behind"
+
+
+@needs_interpreters
+def test_after_call_and_preload_belong_to_the_job_not_to_the_child(plenty_of_memory):
+    first = _job(after_call=(WORKERS, "clear_marker"))
+    first.pool(1).call(WORKERS, "echo", 1)
+    first.close()
+    assert interpreters.kept_pool().call(WORKERS, "get_env", ["INTERP_AFTER_CALL"]) == {"INTERP_AFTER_CALL": "1"}
+    second = _job(preload=("colorsys",))
+    assert second.pool(1).call(WORKERS, "loaded", ["colorsys"]) == {"colorsys": True}
+    second.close()
+
+
+@needs_interpreters
+def test_a_module_a_child_cannot_load_sends_that_work_to_threads_and_keeps_the_child(plenty_of_memory):
+    """A failed import leaves the interpreter as it was. One kind of job the device cannot do in a child does not take
+    the children from the others, and it is not tried again."""
+    missing = ("no_such_module_anywhere",)
+    job = _job(preload=missing)
+    pool = job.pool(1)
+    with pytest.raises(interpreters.InterpreterUnavailable, match="no_such_module_anywhere"):
+        pool.call(WORKERS, "echo", 1)
+    job.fall_back("no")
+    job.close()
+    kept = interpreters.kept_pool()
+    assert kept.started == 1 and kept.destroyed == 0 and kept._busy == 0
+    assert _job(preload=missing).pool(1) is None, "not tried again"
+    other = _job()
+    assert other.pool(1).call(WORKERS, "echo", 2) == 2, "other work keeps its child"
+    other.close()
+    assert kept.started == 1
+
+
+@needs_interpreters
+def test_a_call_of_a_job_that_ended_while_it_waited_does_not_run(plenty_of_memory):
+    """The next job should not wait behind a batch of a job that is over."""
+    job = _job()
+    use = job.pool(1)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as outside:
+        first = outside.submit(use.call, WORKERS, "sleep_then", (0.6, "first"))
+        time.sleep(0.2)
+        waiting = outside.submit(use.call, WORKERS, "echo", "second")
+        time.sleep(0.1)
+        job.close()
+        assert first.result(timeout=30) == "first"
+        with pytest.raises(interpreters.InterpreterUnavailable):
+            waiting.result(timeout=30)
+    assert interpreters.kept_pool()._busy == 0 and interpreters.kept_pool().destroyed == 0
+
+
+@needs_interpreters
+def test_a_new_child_setup_does_not_reach_kept_children_so_they_go(plenty_of_memory, tmp_path, monkeypatch):
+    """An E2E run's tripwires are in each child that starts: one kept from before the run would have none."""
+    job = _job()
+    job.pool(1).call(WORKERS, "echo", 1)
+    job.close()
+    old = interpreters.kept_pool()
+    interpreters.set_child_setup((WORKERS, "clear_marker"))
+    try:
+        assert interpreters.kept_pool() is not old and old.live() == 0
+        job = _job()
+        job.pool(1).call(WORKERS, "echo", 1)
+        job.close()
+    finally:
+        interpreters.set_child_setup(None)
+    assert interpreters.kept_pool().live() == 0
+
+
+@needs_interpreters
+def test_the_folder_comes_back_when_the_system_cleared_it(plenty_of_memory):
+    """A phone clears an app's cache and temp folders when it wants to, and children are kept for long."""
+    job = _job()
+    pool = job.pool(1)
+    assert pool.call(WORKERS, "echo_checked", "x", should_stop=lambda: False) == "x"
+    shutil.rmtree(interpreters.kept_pool()._dir)
+    assert pool.call(WORKERS, "echo_checked", "y", should_stop=lambda: False) == "y"
+    job.close()
+    assert interpreters.kept_pool().destroyed == 0
+
+
+def test_a_folder_a_killed_app_left_behind_goes_at_the_next_start(tmp_path, monkeypatch):
+    old, new, other = tmp_path / "glossarion-interp-old", tmp_path / "glossarion-interp-new", tmp_path / "other-old"
+    for folder in (old, new, other):
+        folder.mkdir()
+    (old / "7.reply").write_bytes(b"a chapter's result")
+    long_ago = time.time() - 2 * interpreters.LEFTOVER_AGE
+    for folder in (old, other):
+        os.utime(folder, (long_ago, long_ago))
+    interpreters._remove_leftovers(str(tmp_path))
+    assert not old.exists() and new.exists() and other.exists()
+
+
+# ---- what a review of the children found --------------------------------------------------------------------------
+
+
+@needs_interpreters
+@pytest.mark.parametrize("should_stop", [None, lambda: False])
+def test_no_room_for_the_pools_files_is_unavailable_and_frees_the_child(tmp_path, monkeypatch, should_stop):
+    """It raised OSError past the code that frees the child: the next batches then waited for it, until a Stop."""
+    made = interpreters.InterpreterPool(1, work_dir=str(tmp_path))
+    real = tempfile.mkdtemp
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda **_kw: (_ for _ in ()).throw(OSError(28, "No space left on device")))
+    try:
+        for _attempt in range(2):
+            with pytest.raises(interpreters.InterpreterUnavailable, match="No space left"):
+                made.call(WORKERS, "echo", 1, should_stop=should_stop)
+            assert made._busy == 0
+        monkeypatch.setattr(tempfile, "mkdtemp", real)
+        assert made.call(WORKERS, "echo", 2) == 2
+        assert made.started == 1 and made.destroyed == 0
+    finally:
+        made.close()
+
+
+class _EnvironThatChanges(dict):
+    """``os.environ`` while another thread takes a key out of it (``remote_routes`` from the UI, during a scan)."""
+
+    def __iter__(self):
+        return iter(list(self.keys()) + ["GONE_WHILE_READING"])
+
+    def keys(self):
+        return list(super().keys()) + ["GONE_WHILE_READING"]
+
+
+@needs_interpreters
+def test_a_key_that_goes_while_the_environment_is_read_is_not_an_error(pool, monkeypatch):
+    """``dict(os.environ)`` raised KeyError 113 times in 296,362 calls with a thread deleting a key 10 times a second."""
+    monkeypatch.setenv("INTERP_KEEP", "one")
+    environ = _EnvironThatChanges(os.environ)
+    monkeypatch.setattr(interpreters.os, "environ", environ)
+    assert pool.call(WORKERS, "get_env", ["INTERP_KEEP", "GONE_WHILE_READING"]) == {"INTERP_KEEP": "one", "GONE_WHILE_READING": None}
+
+
+@needs_interpreters
+def test_a_batch_a_closed_pool_let_finish_still_hears_a_stop(tmp_path):
+    """``_watch_loop`` ended when the pool closed: 4.84 s past the Stop in the review's probe, to the batch's end."""
+    made = interpreters.InterpreterPool(1, work_dir=str(tmp_path))
+    told = threading.Event()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as outside:
+        running = outside.submit(made.call, WORKERS, "items", (500, 0.01, None), should_stop=told.is_set)
+        time.sleep(0.5)
+        made.close(stop_running=False)
+        told.set()
+        assert running.result(timeout=60)["stopped_at"] is not None
+
+
+@needs_interpreters
+def test_a_batch_that_starts_as_the_pool_closes_is_not_cut_short(tmp_path, monkeypatch):
+    """``close(stop_running=False)``: this batch's result counts. ``_watch`` told each call of a closed pool to stop, and
+    its partial result looks like a finished one."""
+    made = interpreters.InterpreterPool(1, work_dir=str(tmp_path))
+    real_watch = made._watch
+
+    def closed_first(should_stop):
+        made.close(stop_running=False)
+        return real_watch(should_stop)
+
+    monkeypatch.setattr(made, "_watch", closed_first)
+    assert made.call(WORKERS, "items", (20, 0.01, None), should_stop=lambda: False) == {"stopped_at": None, "done": 20}
+
+
+def test_the_smoke_check_imports_the_scanner_here_before_a_child_does():
+    """A single-phase native module a child loads first is refused there and can corrupt the heap when this interpreter
+    loads it later (host 3.12, ``_decimal``: 0xc0000374 in ``create_module``)."""
+    source = (APP_DIR / "glossarion_mobile" / "diagnostics" / "interpreter_check.py").read_text(encoding="utf-8")
+    assert source.index("import scan_html_folder") < source.index("interpreters.InterpreterPool(")
+
+
+@needs_backend
+def test_no_module_the_scanner_loads_needs_what_a_child_refuses():
+    """``test_nothing_a_scan_worker_reaches_changes_in_a_child`` reads ``scan_html_folder.py``: this reads the modules of
+    this repo it imports when it loads, and what those import when they load."""
+    refused = {"lxml", "regex", "numpy", "charset_normalizer", "pydantic_core", "cryptography", "tiktoken", "PIL", "cv2",
+               "onnxruntime", "fitz", "pymupdf", "grpc", "llama_cpp", "ebooklib"}
+
+    def at_load(tree):
+        """Imports that run when the module loads: not those in a function."""
+        stack = list(tree.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.Import):
+                yield from (alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                yield node.module.split(".")[0]
+            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack.extend(ast.iter_child_nodes(node))
+
+    seen, todo, found = set(), ["scan_html_folder"], {}
+    while todo:
+        name = todo.pop()
+        path = SRC_DIR / f"{name}.py"
+        if name in seen or not path.exists():
+            continue
+        seen.add(name)
+        for module in at_load(ast.parse(path.read_text(encoding="utf-8-sig"))):
+            todo.append(module)
+            if module in refused:
+                found.setdefault(name, set()).add(module)
+    assert len(seen) >= 2
+    assert not found, found
+
+
+# ---- kept children: the real work -----------------------------------------------------------------------------------
+
+
+@needs_interpreters
+@needs_backend
+def test_changed_settings_reach_the_kept_children_of_the_next_job(phone, monkeypatch):
+    """Each scan its own job, as on the phone: the children stay, with what the scan before read and imported. The
+    settings change through the arguments and the env, and the scan finds what threads find."""
+    import scan_html_folder as shf
+
+    from glossarion_mobile.job_kinds import qa as qa_kind
+
+    def rounds(name: str, interpreted: bool) -> list:
+        monkeypatch.setattr(qa_kind, "SCAN_INTERPRETERS", interpreted)
+        out = []
+        for index, (settings, env) in enumerate((
+                (_settings("quick-scan"), {"SKIP_TITLE_TAG_TRANSLATION": "1"}),
+                (_settings("quick-scan", check_translation_artifacts=False, check_ai_artifacts=False,
+                           foreign_char_threshold=10_000, check_missing_tag_bracket=False),
+                 {"SKIP_TITLE_TAG_TRANSLATION": "0", "QA_MIN_DUPLICATE_WORD_COUNT": "100000"}),
+                (_settings("quick-scan"), {"SKIP_TITLE_TAG_TRANSLATION": "1", "QA_MIN_DUPLICATE_WORD_COUNT": None}))):
+            for key, value in env.items():
+                if value is None:
+                    monkeypatch.delenv(key, raising=False)
+                else:
+                    monkeypatch.setenv(key, value)
+            book = _book(phone / "out" / name / str(index) / "Book", seed=9151)
+            first = os.path.join(book, "response_0002_ch0002.html")
+            with open(first, encoding="utf-8") as handle:
+                text = handle.read()
+            with open(first, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text.replace("<title>", "<title>안녕하세요 안녕하세요 ", 1))
+            lines = _Lines()
+            with qa_kind._scan_turns(True, lines):
+                shf.clear_qa_caches()
+                shf.scan_html_folder(book, log=lines, mode="quick-scan", qa_settings=settings)
+            assert _went_to_children(lines) is interpreted, lines[:8]
+            out.append(_report_rows(book))
+        return out
+
+    on_threads = rounds("threads", False)
+    in_children = rounds("children", True)
+    assert on_threads[0] != on_threads[1] and on_threads[0] == on_threads[2], "the change changed nothing: this proves nothing"
+    assert in_children == on_threads
+    kept = interpreters.kept_pool()
+    assert kept.destroyed == 0 and 1 <= kept.started <= 4
+
+
+@needs_interpreters
+@needs_backend
+def test_a_stopped_scan_leaves_the_next_one_whole_on_the_kept_children(phone, monkeypatch):
+    """A batch a Stop left behind ends at its next item and that child does the next scan: nothing of the Stop stays."""
+    _left, lines, _stopped_book, _result = _stopped_scan(phone, "first", True, monkeypatch)
+    assert _went_to_children(lines), lines[:8]
+    for name in ("GRACEFUL_STOP", "TRANSLATION_CANCELLED"):  # a new run's reset
+        os.environ.pop(name, None)
+    book = _book(phone / "out" / "threads" / "Book")
+    _scan(book, "quick-scan", _settings("quick-scan"), interpreted=False, monkeypatch=monkeypatch)
+    expected = _report_rows(book)
+    book = _book(phone / "out" / "again" / "Book")
+    lines = _scan(book, "quick-scan", _settings("quick-scan"), interpreted=True, monkeypatch=monkeypatch)
+    assert _went_to_children(lines) and not _fell_back(lines), lines
+    assert _report_rows(book) == expected
+    assert interpreters.kept_pool().destroyed == 0
+
+
+@needs_interpreters
+@needs_backend
+@pytest.mark.parametrize("filter_first", [False, True])
+def test_one_child_does_a_scan_a_filter_and_sidecars_with_the_results_of_threads(glossary_phone, monkeypatch, capsys, filter_first):
+    """The children every job shares: a filter's child has blocked the API client, a scan's has the scanner's caches
+    emptied, and none of that changes what the next kind of job gets."""
+    from glossarion_mobile.job_kinds import compile as compile_kind
+
+    phone = glossary_phone
+    monkeypatch.setenv("AI_HUNTER_MAX_WORKERS", "1")
+
+    def scan(name: str, interpreted: bool) -> list:
+        book = _book(phone / "out" / name / "Book")
+        _scan(book, "quick-scan", _settings("quick-scan"), interpreted=interpreted, monkeypatch=monkeypatch)
+        return _report_rows(book)
+
+    def sidecars(name: str, children: bool) -> dict:
+        folder = phone / "out" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        _english_outputs(folder)
+        return {"done": _generate(folder, children=children)[0], "tree": _tree(folder)}
+
+    text = _korean_book(800)
+    expected = (scan("threads", False), _filtered(text, child=False), sidecars("side_threads", False))
+    if filter_first:  # what it blocked (the API client) is then blocked for all the work after it
+        assert _filtered(text, child=True) == expected[1]
+    assert scan("child_1", True) == expected[0]
+    kept = interpreters.kept_pool()
+    assert kept.started >= 1
+    started = kept.started
+    assert _filtered(text, child=True) == expected[1]
+    assert sidecars("side_child", True)["tree"] == expected[2]["tree"]
+    assert _filtered(text, child=True) == expected[1]
+    assert scan("child_2", True) == expected[0]
+    assert kept.destroyed == 0
+    assert kept.started <= max(started, compile_kind.SIDECAR_WORKERS)
+
+
+@needs_interpreters
+@needs_backend
+def test_ios_has_a_number_for_free_memory_where_the_system_gives_one(monkeypatch):
+    from glossarion_mobile.services.local_llm import service
+
+    monkeypatch.setattr(service, "memory_info", lambda: (8 * 1024 ** 3, None))
+    monkeypatch.setattr(interpreters, "_room_before_jetsam", lambda: 500 * 1024 ** 2)
+    assert interpreters.memory_now() == (8 * 1024 ** 3, 500 * 1024 ** 2)
+    assert interpreters.size_for_memory(4, *reversed(interpreters.memory_now())) == 4
+    monkeypatch.setattr(interpreters, "_room_before_jetsam", lambda: 320 * 1024 ** 2)
+    assert interpreters.size_for_memory(4, *reversed(interpreters.memory_now())) == 0
+    monkeypatch.setattr(interpreters, "_room_before_jetsam", lambda: None)  # a quarter of the RAM, with a limit in the workers
+    assert interpreters.memory_now() == (8 * 1024 ** 3, None)
+    assert interpreters.size_for_memory(4, *reversed(interpreters.memory_now())) == 4
+
+
+def test_room_before_jetsam_is_none_where_there_is_no_such_call():
+    assert sys.platform in ("ios", "darwin") or interpreters._room_before_jetsam() is None
+
+
+@needs_interpreters
+@needs_backend
+def test_the_smoke_check_says_how_many_children_stayed(tmp_path, phone):
+    from glossarion_mobile.diagnostics.interpreter_check import check_scan_in_child
+
+    detail = check_scan_in_child(tmp_path, sys.platform)
+    assert detail["result"] == "pass" and detail["kept"] >= 1 and detail["kept_destroyed"] == 0, detail

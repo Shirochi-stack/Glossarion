@@ -33,6 +33,12 @@ def echo_checked(args, _should_stop):
     return args
 
 
+def sleep_then(args):
+    seconds, value = args
+    time.sleep(seconds)
+    return value
+
+
 def similarity_cache_sizes(_args=None):
     import scan_html_folder
 

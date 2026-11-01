@@ -4,7 +4,7 @@ Starts a child through ``services.interpreters``, imports the scanner in it and 
 translated folder (broken tag, untranslated Korean), then runs the same batch on this thread: the findings must match.
 
 The glossary's smart filter and Generate MD / TXT go the same way through their real wiring (``"filter"``, ``"sidecars"``
-in the detail): the same result as on this thread, or why not.
+in the detail): the same result as on this thread, or why not. ``"kept"`` is how many children stayed for the next job.
 
 What CI reads is the ``GLOSSARION_INTERPRETERS {json}`` line ``check`` prints: ``"result": "pass"`` or
 ``"result": "fallback"`` with the reason, on Android and iOS alike. A device where a child cannot start scans on threads
@@ -101,6 +101,8 @@ def _check_sidecars(work: Path, platform: str) -> str:
 
 def check_scan_in_child(work: Path, platform: str) -> dict:
     """The detail of the check. Raises only for what must fail the smoke (see the module's docstring)."""
+    import scan_html_folder  # here first: see ``services.interpreters`` on a module a child loads first
+
     from glossarion_mobile.services import interpreters
 
     folder = Path(work) / "Book"
@@ -126,8 +128,6 @@ def check_scan_in_child(work: Path, platform: str) -> dict:
         if platform == "android":
             raise AssertionError(f"a child interpreter does not work on Android any more: {detail['reason']}")
         return detail
-    import scan_html_folder
-
     here, there = _findings(scan_html_folder.process_html_file_batch(args)), _findings(rows)
     if here != there:
         raise AssertionError(f"a batch finds other things in a child interpreter: {there} against {here}")
@@ -136,4 +136,8 @@ def check_scan_in_child(work: Path, platform: str) -> dict:
     detail.update(result="pass", files=len(there), issues=sum(len(issues) for _name, issues in there))
     detail["filter"] = _check_filter(work, platform)
     detail["sidecars"] = _check_sidecars(work, platform)
+    kept = interpreters.kept_pool()
+    _total, free = interpreters.memory_now()
+    detail.update(kept=kept.live(), kept_started=kept.started, kept_destroyed=kept.destroyed,
+                  free_mb=int(free / (1024 * 1024)) if free else None)
     return detail
