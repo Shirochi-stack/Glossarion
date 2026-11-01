@@ -179,7 +179,7 @@ def test_result_card_resume_of_a_moved_book_hands_the_chats_overrides(desktop_st
             view.env.run_io = state
             view.run_overrides = lambda cid: {"model": "authds/flash"}
             await view._resume_turn(item)
-            assert handed[-1] == (moved, {"chat_overrides": {"model": "authds/flash"}, "chat_cid": chat.cid})
+            assert handed[-1] == (moved, {"chat_overrides": {"model": "authds/flash"}, "chat_cid": view.cid})
             assert chat.jobs.submitted == []  # the Library runs the book, not the chat's run root
         finally:
             TC._close(chat)
