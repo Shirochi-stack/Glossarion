@@ -58,6 +58,7 @@ class LibraryContext:
     copy_text: Optional[Callable[[str], Any]] = None
     reader: Optional[Callable[[], Any]] = None  # -> the ReaderFeature (``open_book``), when installed
     glossary: Optional[Callable[[], Any]] = None  # -> the GlossaryFeature (TranslateSheet glossary chip, U9)
+    picked_model: Optional[Callable[[], str]] = None  # -> ChatStoreAdapter.last_picked_model (TranslateSheet)
     push_overlay: Optional[Callable[[Any], Any]] = None
     pop_overlay: Optional[Callable[[], Any]] = None
     foreground: Callable[[], bool] = lambda: True

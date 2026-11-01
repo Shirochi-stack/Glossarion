@@ -1596,9 +1596,42 @@ def test_resume_runs_with_the_chats_model_now(desktop_store_cls, tmp_path):
     gone = jobs.resume_params(JobSpec("translate", "Book", (), {**sent, "model_chat": "nope"}, {"type": "library"}))
     assert "model" not in gone["config_overrides"]  # its chat was deleted: the global model
     assert jobs.resume_params(JobSpec("translate", "Book", (), {"review_glossary": True}, {"type": "library"})) is None
+    # the model picked last counts for a book with no chat, while the All-chats model has not changed since
+    adapter.new_chat_seed = lambda last_used: {"model": (last_used.get("model") or {}).get("value", "")}
+    adapter.remember_last_used("model", "gpt-picked", "gpt-drawer")
+    book = jobs.resume_params(JobSpec("translate", "Book", (), {"review_glossary": True}, {"type": "library"}))
+    assert book["config_overrides"]["model"] == "gpt-picked" and book["model"] == "gpt-picked"
+    book = jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "library"}))
+    assert book["config_overrides"]["model"] == "gpt-picked"
+    adapter.new_chat_seed = lambda last_used: {}  # the All-chats model changed after that pick: it wins
+    book = jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "library"}))
+    assert "model" not in book["config_overrides"]
     assert jobs.resume_params(JobSpec("manga", "Pages", (), sent, {"type": "library"})) is None  # chose its own model
     runs.detach()
     assert jobs.resume_params is None
+    adapter.close()
+
+
+def test_last_picked_model_follows_the_new_chat_rule(desktop_store_cls, tmp_path):
+    """``ChatStoreAdapter.last_picked_model``: what a new chat would start on, through the real ``new_chat_seed``. A pick
+    in a chat counts while the All-chats model is what it was at the pick; a later All-chats change wins."""
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    jobs = FakeJobService()
+    adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
+    config = {"model": "authnan/GLM-4.6-Derestricted-v5"}
+    env = types.SimpleNamespace(config_get=lambda key, default="": config.get(key, default), chats=adapter)
+    view = types.SimpleNamespace(env=env, _profile_listing=lambda: None, _profiles=lambda: [])
+    assert adapter.last_picked_model() == ""  # no seed installed yet
+    adapter.new_chat_seed = lambda last_used: ChatView.new_chat_seed(view, last_used)
+    assert adapter.last_picked_model() == ""  # nothing picked
+    adapter.remember_last_used("model", "authnan/z-ai/glm-5.3", config["model"])
+    assert adapter.last_picked_model() == "authnan/z-ai/glm-5.3"
+    config["model"] = "authnan/z-ai/glm-5.3"
+    assert adapter.last_picked_model() == ""  # the All-chats model is the pick: nothing to add
+    config["model"] = "authgpt/gpt-6-luna"
+    assert adapter.last_picked_model() == ""  # a later All-chats change wins, no stale pick comes back
+    runs.detach()
     adapter.close()
 
 

@@ -248,6 +248,12 @@ class LibraryFeature:
         platform = getattr(getattr(self.page, "platform", None), "value", None)
         return str(platform or "desktop")
 
+    def _picked_model(self) -> str:
+        """``ChatStoreAdapter.last_picked_model`` (the Translate sheet's model); "" without the chat feature."""
+        env = getattr(getattr(self.app, "chat_view", None), "env", None)
+        picker = getattr(getattr(env, "chats", None), "last_picked_model", None)
+        return str(picker() or "") if callable(picker) else ""
+
     def _dark(self) -> bool:
         try:
             from glossarion_mobile.ui.theme import is_dark
@@ -298,6 +304,7 @@ class LibraryFeature:
             copy_text=getattr(app, "_copy_text", None),
             reader=lambda: getattr(app, "reader", None),
             glossary=lambda: getattr(app, "glossary_feature", None),
+            picked_model=self._picked_model,
             push_overlay=self._push_overlay,
             pop_overlay=self._pop_overlay,
             foreground=self.foreground,

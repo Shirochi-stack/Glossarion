@@ -949,6 +949,50 @@ def test_translate_sheet_submits_a_library_translate_job(tmp_path):
     asyncio.run(scenario())
 
 
+def test_translate_sheet_runs_with_the_model_picked_last(tmp_path):
+    """Progress manager › Run translation (owner: GLM 5.3 was picked, the run used GLM 4.6): the sheet shows and runs
+    the model picked last; the All-chats model only while nothing else was picked; Run options still come along."""
+    from glossarion_mobile.ui.library.translate_sheet import TranslateSheet
+
+    raw = tmp_path / "Raw" / "Book.epub"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"PK")
+    submitted = []
+
+    class Jobs:
+        def has_kind(self, kind):
+            return kind == "translate"
+
+        async def submit(self, spec):
+            submitted.append(spec)
+            return "job1"
+
+    service = LibraryService(core=SharedCore({"library_core": types.ModuleType("library_core")}),
+                             prefs=FakePrefs(), jobs=Jobs(), config={"model": "authnan/GLM-4.6-Derestricted-v5",
+                                                                     "output_language": "English"})
+    book = _book("not_started", name="Book", raw_source_path=str(raw))
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, service)
+        ctx.picked_model = lambda: "authnan/z-ai/glm-5.3"
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        sheet.show(session.page)
+        texts = _texts(sheet.sheet.content)
+        assert "Model: authnan/z-ai/glm-5.3" in texts and "Model: authnan/GLM-4.6-Derestricted-v5" not in texts
+        assert await sheet.start() == "job1"
+        assert submitted[-1].params["config_overrides"]["model"] == "authnan/z-ai/glm-5.3"
+
+        ctx.picked_model = lambda: ""
+        sheet = TranslateSheet(ctx, [book], [str(raw)])
+        sheet.show(session.page)
+        assert "Model: authnan/GLM-4.6-Derestricted-v5" in _texts(sheet.sheet.content)
+        assert await sheet.start() == "job1"
+        assert "model" not in (submitted[-1].params.get("config_overrides") or {})  # it inherits the All-chats model
+
+    asyncio.run(scenario())
+
+
 # ==========================================================================
 # The running app (real shell; Integrate adds the install call to app.py)
 # ==========================================================================

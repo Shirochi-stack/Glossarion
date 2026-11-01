@@ -387,7 +387,8 @@ class ChatRuns:
         """``JobService.resume_params``: a chat job resumed outside the chat runs with the chat's model now and
         with the Run options its stopped card shows by default ("Only for this run" off: the settings now, never
         the Send-time values the Jobs page cannot show). A translation run follows the model now as well: the
-        chat's that started it, else the global one, never a model pinned when it was queued."""
+        chat's that started it, else the one picked last, else the global one, never a model pinned when it was
+        queued."""
         origin = getattr(spec, "origin", None) or {}
         kind = getattr(spec, "kind", None)
         params = dict(getattr(spec, "params", None) or {})
@@ -398,10 +399,15 @@ class ChatRuns:
             if cid is not None and self.store.session(cid) is not None:
                 return self.with_current_model(cid, params)
             overrides = dict(params.get("config_overrides") or {})
-            if "model" not in overrides and "model" not in params:
+            picker = getattr(self.store, "last_picked_model", None)
+            picked = picker() if callable(picker) else ""
+            if not picked and "model" not in overrides and "model" not in params:
                 return None
             overrides.pop("model", None)
             params.pop("model", None)
+            if picked:
+                overrides["model"] = picked
+                params["model"] = picked
             params["config_overrides"] = overrides
             return params
         cid = origin.get("cid") if origin.get("type") == "chat" else None

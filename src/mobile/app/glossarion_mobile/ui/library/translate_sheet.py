@@ -163,7 +163,10 @@ class TranslateSheet:
                                         subtitle=reason_subtitle(ReasonChip(reason="missing raw",
                                                                             detail=MISSING_RAW_REASON)),
                                         dense=True, key=f"translate-book-{index}"))
-        model = str(cfg("model", "") or "")
+        # the model picked last (what the drawer shows and a new chat starts on), else the All-chats one
+        picked = getattr(ctx, "picked_model", None)
+        self.picked_model = str(picked() or "") if callable(picked) else ""
+        model = self.picked_model or str(cfg("model", "") or "")
         profile = str(cfg("active_profile", "") or "")
         target = str(cfg("output_language", "") or "English")
         facts = [f"Model: {model}" if model else "Model: (not set)", f"Profile: {profile}" if profile else "",
@@ -273,6 +276,8 @@ class TranslateSheet:
         if self.run_panel is not None:
             self.run_panel.commit()  # a number typed and not yet submitted when Start is tapped
         overrides = self.run_panel.config_overrides() if self.run_panel is not None else {}
+        if self.picked_model:
+            overrides = {"model": self.picked_model, **overrides}
         job_id = await submit_translation(self.ctx, self.ready_books, self.ready_sources,
                                           review_glossary=bool(self.review_switch.value), config_overrides=overrides)
         self.started_job = job_id
