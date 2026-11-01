@@ -11,7 +11,8 @@ Flet 1.0.3 lays a scrolling Column out at least as tall as its bounded parent
 (``scrollable_control.dart`` ``_InnerConstraintsEnforcer``), so a sheet with a scrolling body
 opens at full height. Sheets that are often short (``ActionSheet``, ``InfoSheet``) estimate their
 height at 200 % text and keep a compact, non-scrolling body only when it surely fits
-(``fits_compact``).
+(``fits_compact``). ``fitted_column`` is for a body that grows while it is open (an expanding row): it
+measures its content and stays as tall as that, scrolling once that passes the screen.
 
 Flutter's modal sheet wraps the content in ``SafeArea(bottom: false)``, so with Android 15
 edge-to-edge and 3-button navigation the last row sat under the navigation bar: ``sheet_frame``
@@ -42,6 +43,7 @@ __all__ = [
     "no_drag_dismiss",
     "with_close_button",
     "fits_compact",
+    "fitted_column",
     "page_width",
     "scroll_column",
     "scroll_sheet",
@@ -82,6 +84,34 @@ def scroll_column(
     column.expand = True
     column.tight = False
     return ft.Column([column, *footer], spacing=spacing)
+
+
+def fitted_column(controls: Sequence[ft.Control], *, spacing: float = 10, estimate: Optional[float] = None) -> ft.Container:
+    """A sheet body as tall as its content, measured, also as it grows or shrinks; past the screen it takes the
+    sheet's full height and scrolls. ``estimate``: its height (dp) until the first measure."""
+    content = ft.Column(list(controls), spacing=spacing, tight=True)
+    box = ft.Container(content=ft.Column([content], spacing=0, tight=True, scroll=ft.ScrollMode.AUTO), height=estimate)
+
+    def measured(e: Any) -> None:
+        try:
+            height = float(e.height)
+        except (TypeError, ValueError, AttributeError):
+            return
+        try:
+            _width, screen = _page_size(box.page)  # Flet raises when the control is not on a page
+        except Exception:
+            screen = 0.0
+        wanted = height if not screen or height + SHEET_CHROME <= screen else None
+        if wanted == box.height:
+            return
+        box.height = wanted
+        try:
+            box.update()
+        except Exception:  # the sheet closed
+            pass
+
+    content.on_size_change = measured
+    return box
 
 
 # ---- "Close Menu ✕" on every sheet -------------------------------------------------------------

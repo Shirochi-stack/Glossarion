@@ -254,6 +254,11 @@ class LibraryFeature:
         picker = getattr(getattr(env, "chats", None), "last_picked_model", None)
         return str(picker() or "") if callable(picker) else ""
 
+    def _choose_setting(self, tab: str, on_picked: Any) -> Any:
+        """The chat's ModelSheet on its ``tab`` (model / profile / language), for the global value; None without it."""
+        opener = getattr(getattr(self.app, "chat_view", None), "open_model_sheet", None)
+        return opener(tab, global_scope=True, on_picked=on_picked) if callable(opener) else None
+
     def _dark(self) -> bool:
         try:
             from glossarion_mobile.ui.theme import is_dark
@@ -305,6 +310,7 @@ class LibraryFeature:
             reader=lambda: getattr(app, "reader", None),
             glossary=lambda: getattr(app, "glossary_feature", None),
             picked_model=self._picked_model,
+            choose_setting=self._choose_setting,
             push_overlay=self._push_overlay,
             pop_overlay=self._pop_overlay,
             foreground=self.foreground,
