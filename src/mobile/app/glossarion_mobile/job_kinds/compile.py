@@ -30,13 +30,14 @@ translation writes the same folder and their backend prints land in the job log:
 
 from __future__ import annotations
 
+import contextlib
 import os
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from glossarion_mobile.job_kinds import compiled_outputs, owner_method, result_fields
 
-__all__ = ["KINDS", "rename_message", "resolve_folder", "resolve_folders", "run_epub", "run_pdf", "run_rename",
-           "run_validate"]
+__all__ = ["KINDS", "SIDECARS_CHILD_MIN_FILES", "SIDECARS_IN_CHILDREN", "SIDECAR_LXML_LIMIT", "rename_message", "resolve_folder",
+           "resolve_folders", "run_epub", "run_pdf", "run_rename", "run_validate", "sidecars_in_children"]
 
 
 def resolve_folder(ctx: Any) -> str:
@@ -170,23 +171,86 @@ def md_txt_message(kind: str, ok: int, fail: int) -> str:
     return f"✅ {ok} done" if not fail else f"✅ {ok} / ⚠️ {fail}"
 
 
+#: Generate MD / TXT converts in child interpreters. False: on the writer's threads, like a device where a child cannot
+#: start.
+SIDECARS_IN_CHILDREN = True
+#: From this many files in a folder. Measured on the emulator (6 vCPU, 150 real chapters, the same 300 files): 4 workers on
+#: threads 4.1 s and the loop's lateness p95 46 ms, in children 1.47 s and 2 ms, +99 MB; 2 workers 4.2 and 2.15 s, +52 MB.
+#: That is 27 ms a file on threads and 8 ms in 4 children, which also take about 0.25 s to start: even at 13 files.
+SIDECARS_CHILD_MIN_FILES = 20
+#: how many children at most (the job's ``max_workers``)
+SIDECAR_WORKERS = 4
+#: After this many chapters that need lxml the rest of the folder stays on the threads: a book in Korean would ask a child
+#: for each of them first. It costs that book the children's start once (emulator, 40 chapters: 0.27 s on threads, 0.70 s).
+SIDECAR_LXML_LIMIT = 5
+
+
+@contextlib.contextmanager
+def sidecars_in_children(log: Callable[[Any], Any], files: int) -> Iterator[None]:
+    """The writer's threads (``generate_md_txt_for_output_dir``) stay: they read each file, keep the order of the log and
+    ask for a Stop before each file. Only the conversion of one file goes to a free child.
+
+    A chapter in Korean, Japanese or Chinese stays on the thread: the extractor asks BeautifulSoup for lxml for those,
+    which a child cannot load, and html.parser gives other text. The child finds that out before anything is written
+    (``sidecar_child.NEEDS_LXML``). A file that fails for its own reason fails as on a thread. Where a child cannot
+    start, or the folder is small, all of it runs on the threads."""
+    import md_txt_sidecar_writer as writer
+
+    real = writer._write_html_md_txt_sidecars
+    if not SIDECARS_IN_CHILDREN or files < SIDECARS_CHILD_MIN_FILES:
+        yield
+        return
+    from glossarion_mobile.services import interpreters, sidecar_child
+
+    child = sidecar_child.__name__
+    job = interpreters.JobChildren(log, "Converting", preload=(child,))
+
+    needed_lxml: list = []
+
+    def in_child(output_dir: Any, output_filename: Any, target_html: Any, **options: Any) -> Any:
+        pool = None if len(needed_lxml) >= SIDECAR_LXML_LIMIT else job.pool(SIDECAR_WORKERS)
+        if pool is None:
+            return real(output_dir, output_filename, target_html, **options)
+        try:
+            written = pool.call(child, "write", (output_dir, output_filename, target_html, options))
+        except interpreters.InterpreterUnavailable as exc:
+            if len(needed_lxml) < SIDECAR_LXML_LIMIT:  # else the pool below was closed on purpose
+                job.fall_back(str(exc))
+            return real(output_dir, output_filename, target_html, **options)
+        if written != sidecar_child.NEEDS_LXML:
+            return written
+        needed_lxml.append(output_filename)
+        if len(needed_lxml) >= SIDECAR_LXML_LIMIT:
+            job.release()
+        return real(output_dir, output_filename, target_html, **options)
+
+    writer._write_html_md_txt_sidecars = in_child
+    try:
+        yield
+    finally:
+        writer._write_html_md_txt_sidecars = real
+        job.close()
+
+
 def run_md_txt(ctx: Any) -> dict:
     """Generate MD / Generate TXT (desktop Other Settings retroactive buttons): every root HTML file of the
     output folder through ``md_txt_sidecar_writer.generate_md_txt_for_output_dir`` (thread pool,
-    existing sidecars overwritten), with the desktop log lines."""
+    existing sidecars overwritten), with the desktop log lines. The conversion runs in child interpreters
+    (``sidecars_in_children``)."""
     folders = resolve_folders(ctx)
     kind = str(ctx.params.get("format") or "md").lower()
     if kind not in ("md", "txt"):
         kind = "md"
     ctx.phase(f"Generating {kind.upper()}")
-    from md_txt_sidecar_writer import generate_md_txt_for_output_dir
+    from md_txt_sidecar_writer import _list_root_html_files, generate_md_txt_for_output_dir
 
     ok = fail = total = 0
     for folder in folders:
         ctx.log(f"📝 [{kind.upper()}] {folder}")
-        r_ok, r_fail, r_total = generate_md_txt_for_output_dir(
-            folder, do_md=kind == "md", do_txt=kind == "txt", max_workers=4, log=ctx.log,
-            should_stop=ctx.stop_requested)
+        with sidecars_in_children(ctx.log, len(_list_root_html_files(folder))):
+            r_ok, r_fail, r_total = generate_md_txt_for_output_dir(
+                folder, do_md=kind == "md", do_txt=kind == "txt", max_workers=SIDECAR_WORKERS, log=ctx.log,
+                should_stop=ctx.stop_requested)
         ok += r_ok
         fail += r_fail
         total += r_total

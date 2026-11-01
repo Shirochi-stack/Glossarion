@@ -563,7 +563,7 @@ FRESH_INSTALL_NOTES = {
 # desktop discrepancies; the value itself is untouched).
 MOBILE_NOTES = {
     "ai_hunter_config.ai_hunter_max_workers": (
-        "mobile: QA scans run on this many threads, up to the device's cores; 0 or nothing saved means half "
+        "mobile: QA scans run this many workers, up to the device's cores; 0 or nothing saved means half "
         "the cores (qa_scan_runtime.mobile_qa_max_workers), not all of them"),
     "allow_authgpt_batch_stream_logs": (
         "mobile: applies to AuthGPT / AuthGrok / AuthGem / AuthCD; AuthZA, Arena, Antigravity and OcAgy "

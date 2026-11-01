@@ -6,8 +6,8 @@ emulator smoke) or the "Run self-test" button; on the host by
 
 Suites: ``smoke`` (packages, env contract, offline assets, the native in-app browser pages
 surviving screen changes on devices, the Library / Book page / Chapters tab / Reader on a
-translated workspace of the self-test EPUB, and the Glossary Manager's document + a QA quick
-scan on scratch files; seconds) and ``e2e``
+translated workspace of the self-test EPUB, the Glossary Manager's document + a QA quick
+scan on scratch files, and a scan batch in a child interpreter; seconds) and ``e2e``
 (``diagnostics.e2e``: real chat / translate / stop / resume jobs against the fake
 OpenAI server on 127.0.0.1; minutes), run on device by
 ``glossarion://app/__selftest__?suite=e2e`` or the "Run end-to-end test" button, on the
@@ -27,6 +27,10 @@ results on one more line, ``GLOSSARION_WHEELS {"suite":"smoke",...,"checks":[...
 CI asserts the self-built cryptography (and its OpenSSL) and Pillow wheels from it with
 ``ci/wheels/wheels.py assert-selftest`` (on Android from logcat, since release-mode APKs
 do not allow ``run-as``; on the iOS simulator from ``selftest-smoke.json``).
+
+A suite that runs the ``scan_interpreters`` check (smoke) prints its result on a line of its own,
+``GLOSSARION_INTERPRETERS {"result":"pass"|"fallback",...}`` (``diagnostics.interpreter_check``): how
+CI shows which of the two a platform got. It does not fail a device that falls back, except on Android.
 
 In strict mode (default on Android/iOS) a missing package is a failure; on the
 host (non-strict) checks whose packages are missing are reported as skipped.
@@ -673,6 +677,31 @@ def check_glossary_qa(ctx: Context) -> dict[str, Any]:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def check_scan_interpreters(ctx: Context) -> dict[str, Any]:
+    """A QA scan batch in a child interpreter, or why this device scans on threads (``diagnostics.interpreter_check``);
+    the line CI reads is printed here, whichever it was."""
+    ctx.need("bs4")
+    import shutil
+
+    from glossarion_mobile.diagnostics import interpreter_check
+
+    paths = ctx.paths
+    platform = paths.platform if paths is not None else rb.detect_platform()
+    work = fixtures.scratch_dir(paths.temp if paths is not None else None) / f"interpreters-{os.getpid()}-{threading.get_ident()}"
+    try:
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        detail = interpreter_check.check_scan_in_child(work, platform)
+    except BaseException as exc:
+        rb.emit_marker(interpreter_check.MARKER, {"result": "fail", "platform": platform,
+                                                  "error": _short(f"{type(exc).__name__}: {exc}", 300)})
+        raise
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    rb.emit_marker(interpreter_check.MARKER, detail)
+    return detail
+
+
 # --------------------------------------------------------------------------
 # e2e suite (diagnostics.e2e; one session shared by the checks of one run)
 # --------------------------------------------------------------------------
@@ -730,6 +759,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("native_webview", check_native_webview),
         ("library_reader", check_library_reader),
         ("glossary_qa", check_glossary_qa),
+        ("scan_interpreters", check_scan_interpreters),
         ("share_link_crypto", check_share_link_crypto),
         ("llama_engine", check_llama_engine),
     ),

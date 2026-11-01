@@ -32,14 +32,20 @@ pickers, mismatch question - happen on the QA screen before the job is queued):
 * the workers (owner 2026-11-01: "just assign half of all cores"): config.json
   ``ai_hunter_config.ai_hunter_max_workers`` up to the device's cores; none saved, or the desktop's
   0 ("all cores"), scans with half the cores (``scan_workers``, ``qa_scan_runtime.mobile_qa_max_workers``);
-* the UI while it scans (``_scan_runtime``, owner 2026-11-01: "the mobile GUI was lagging a lot"): the workers
-  are threads in the interpreter that runs the Flet loop, so each one takes its share of the GIL from it. Measured
-  on the host (``tools/qa_scan_bench.py``): 1, 2, 4 and 8 workers scan about equally fast, a burst of work on the
-  loop takes (workers + 1) times as long, and log lines and repaints are about 1 % of the loop's time. So while a
-  scan runs its CPU workers take turns between their files or comparisons (``_WorkerTurns``: one holds the GIL
-  against the loop, not all of them) and the GIL switch interval is ``SCAN_SWITCH_INTERVAL``, also in the scan a
-  translation's Multipass refinement runs (``multipass_scan_turns``). Findings do not change;
-* the API pools of the scan (AI / silent truncation) do not take turns: they wait on the network, not on the GIL;
+* the UI while it scans (``_scan_runtime``, owner 2026-11-01: "the mobile GUI was lagging a lot"): every CPU batch of
+  a scan runs in a child interpreter with its own GIL (``_ScanChildren``, ``services.interpreters``), also in the
+  scan a translation's Multipass refinement runs (``multipass_scan_turns``). Measured on the emulator (4 vCPU, real
+  chapters, same findings), 4 workers on threads taking turns against interpreters: Quick 100 chapters 13.4 to 6.9 s,
+  Aggressive 80 chapters 63.2 to 25 s, memory +160 to +200 MB at the peak, about 40 MB a worker. They are started when
+  the first batch comes, reused by all the scan's pools and released when the scan ends;
+* where a child cannot start (``_ScanChildren``: not enough free memory, or a device where it fails; iOS is untested)
+  the scan says so once in its log and runs on threads, with the same findings. Those are in the interpreter that
+  runs the Flet loop, so each one takes its share of the GIL from it. Measured on the host (``tools/qa_scan_bench.py``):
+  1, 2, 4 and 8 workers scan about equally fast, a burst of work on the loop takes (workers + 1) times as long, and log
+  lines and repaints are about 1 % of the loop's time. So they take turns between their files or comparisons
+  (``_WorkerTurns``: one holds the GIL against the loop, not all of them). On both paths the GIL switch interval is
+  ``SCAN_SWITCH_INTERVAL``: the scan's own thread still runs its sequential stages next to the loop;
+* the API pools of the scan (AI / silent truncation) stay on threads: they wait on the network, not on a GIL;
 * Stop follows the desktop QA escalation (``next_qa_stop_phase``): the first Stop sets the
   graceful flags (``apply_qa_graceful_stop_flags``: scan loop stop, ``GRACEFUL_STOP``,
   ``TRANSLATION_CANCELLED``), a force stop (graceful stop off, or the second Stop) the force
@@ -79,7 +85,7 @@ import traceback
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 __all__ = ["KINDS", "MOBILE_QUICK_SAMPLE_SIZE", "MODES", "QUICK_SAMPLE_KEY", "REPORT_FILE",
-           "SCAN_PHASE_SOURCE_EXTENSIONS", "SCAN_SWITCH_INTERVAL", "SCAN_WORKER_TURNS", "WORKERS_KEY",
+           "SCAN_INTERPRETERS", "SCAN_PHASE_SOURCE_EXTENSIONS", "SCAN_SWITCH_INTERVAL", "SCAN_WORKER_TURNS", "WORKERS_KEY",
            "default_scan_workers", "multipass_scan_turns",
            "normalize_targets", "report_path_for", "run", "run_scan_phase", "saved_quick_sample_size",
            "saved_scan_workers", "scan", "scan_phase_mode", "scan_workers", "with_mobile_qa_defaults"]
@@ -98,9 +104,16 @@ MOBILE_QUICK_SAMPLE_SIZE = 0
 WORKERS_KEY = ("ai_hunter_config", "ai_hunter_max_workers")
 #: the GIL switch interval (s) while a scan runs. Python's default is 5 ms: on the host 1 ms costs no scan time and
 #: cuts the median wait of the loop's timers to about 1.5 ms. 0.5 ms made a 4-worker scan 6 times slower on Windows.
+#: In interpreters too (emulator, Aggressive 80 chapters, 4 workers, 3 runs each): the scan's own thread still competes
+#: with the loop (reading the source, language detection, the reports). 25.0 s at 1 ms, 25 s at 5 ms; the loop's lateness
+#: p95 8 to 9 ms at 1 ms, 13 to 38 ms at 5 ms.
 SCAN_SWITCH_INTERVAL = 0.001
-#: A scan's CPU workers run one at a time (``_WorkerTurns``). False lets all of them run: at most 10 % less scan time
-#: on the host, and with 4 workers bursts of work on the loop up to 2.5 times as slow in Aggressive's all-pairs stage.
+#: A scan's CPU workers run in child interpreters (``_ScanChildren``). False: on threads, like a device where a child
+#: cannot start.
+SCAN_INTERPRETERS = True
+#: On threads a scan's CPU workers run one at a time (``_WorkerTurns``). False lets all of them run: at most 10 % less
+#: scan time on the host, and with 4 workers bursts of work on the loop up to 2.5 times as slow in Aggressive's all-pairs
+#: stage. False also leaves the interpreters out: the scanner's ``_submit_worker`` as it is.
 SCAN_WORKER_TURNS = True
 #: how long (s) a worker keeps its turn over short items (comparisons) before it hands over
 TURN_SLICE = 0.02
@@ -177,6 +190,18 @@ class _WorkerTurns:
                     return
                 self._changed.wait(0.05)
 
+    def run(self, worker: Callable[..., Any], args: Any, should_stop: Callable[[], Any]) -> Any:
+        """``worker(args, check)`` with a turn: ``check`` waits for the next one between its items."""
+        def check() -> Any:
+            self.take(should_stop)
+            return should_stop()
+
+        try:
+            self.take(should_stop)  # a batch's own set-up, and batches without a check between their items
+            return worker(args, check)
+        finally:
+            self.leave()
+
     def leave(self) -> None:
         me = threading.get_ident()
         with self._changed:
@@ -191,33 +216,66 @@ class _WorkerTurns:
         self._changed.notify_all()
 
 
-def _taking_turns(submit: Callable[..., Any]) -> Callable[..., Any]:
+def _taking_turns(submit: Callable[..., Any], turns: Optional[_WorkerTurns] = None) -> Callable[..., Any]:
     """``scan_html_folder._submit_worker`` (every CPU batch of a scan, and nothing else) with ``_WorkerTurns``."""
-    turns = _WorkerTurns()
+    turns = turns if turns is not None else _WorkerTurns()
 
     def submit_taking_turns(pool: Any, worker: Callable[..., Any], args: Any, should_stop: Callable[[], Any]) -> Any:
         if not isinstance(pool, concurrent.futures.ThreadPoolExecutor):
             return submit(pool, worker, args, should_stop)
-
-        def batch(batch_args: Any, _check: Any) -> Any:
-            try:
-                turns.take(should_stop)  # a batch's own set-up, and batches without a check between their items
-                return worker(batch_args, check)
-            finally:
-                turns.leave()
-
-        def check() -> Any:
-            turns.take(should_stop)
-            return should_stop()
-
-        return submit(pool, batch, args, check)
+        return submit(pool, lambda batch_args, _check: turns.run(worker, batch_args, should_stop), args, should_stop)
 
     return submit_taking_turns
 
 
+class _ScanChildren:
+    """``scan_html_folder._submit_worker`` in child interpreters: a batch stays a job of the scanner's own pool (its
+    ``_stoppable_pool`` drops what is queued and leaves what runs, as on threads), and that pool's thread runs it in a
+    free child. No turns here: a child holds no GIL against the loop.
+
+    The first batch starts them, so a scan that never reaches one costs nothing. When there is not enough free memory,
+    or a child cannot start or do a batch, the scan says so once and that batch and all the next run on threads
+    (``threads``, ``turns``): no second try at something that failed. A worker a child cannot find (not at the top level
+    of its module) runs on a thread too. An exception from a worker is the worker's, not a reason to change path: it
+    is raised from the batch's future as on threads."""
+
+    def __init__(self, threads: Callable[..., Any], turns: _WorkerTurns, log: Callable[[Any], Any]) -> None:
+        from glossarion_mobile.services import interpreters
+
+        self._threads = threads
+        self._turns = turns
+        self._job = interpreters.JobChildren(log, "Scanning", preload=("scan_html_folder",),
+                                             after_call=("glossarion_mobile.services.scan_child", "forget_caches"))
+
+    def submit(self, pool: Any, worker: Callable[..., Any], args: Any, should_stop: Callable[[], Any]) -> Any:
+        if self._job.gone or not isinstance(pool, concurrent.futures.ThreadPoolExecutor):
+            return self._threads(pool, worker, args, should_stop)
+        from glossarion_mobile.services import interpreters
+
+        if not interpreters.importable(worker):
+            return self._threads(pool, worker, args, should_stop)
+        return pool.submit(self._batch, worker, args, should_stop, getattr(pool, "_max_workers", default_scan_workers()))
+
+    def _batch(self, worker: Callable[..., Any], args: Any, should_stop: Callable[[], Any], workers: int) -> Any:
+        from glossarion_mobile.services import interpreters
+
+        children = self._job.pool(workers)
+        if children is not None:
+            try:
+                return children.call(worker.__module__, worker.__name__, args, should_stop=should_stop)
+            except interpreters.InterpreterUnavailable as exc:
+                self._job.fall_back(str(exc))
+        return self._turns.run(worker, args, should_stop)
+
+    def close(self) -> None:
+        """The scan ended: the children are released (one a Stop left in a batch, when that batch ends)."""
+        self._job.close()
+
+
 @contextlib.contextmanager
-def _scan_turns(turns: bool = True) -> Iterator[None]:
-    """The workers taking turns (``SCAN_WORKER_TURNS``) and the short GIL switch interval, restored after."""
+def _scan_turns(turns: bool = True, log: Callable[[Any], Any] = print) -> Iterator[None]:
+    """The workers in child interpreters (``_ScanChildren``), else taking turns (``SCAN_WORKER_TURNS``), and the short
+    GIL switch interval, restored after."""
     previous_interval = sys.getswitchinterval()
     scanner: Any = None
     if turns and SCAN_WORKER_TURNS:
@@ -226,8 +284,14 @@ def _scan_turns(turns: bool = True) -> Iterator[None]:
         except Exception:  # pragma: no cover - the scan itself reports a build without the scanner
             scanner = None
     submit = getattr(scanner, "_submit_worker", None)
+    children: Optional[_ScanChildren] = None
     if callable(submit):
-        scanner._submit_worker = _taking_turns(submit)
+        worker_turns = _WorkerTurns()
+        on_threads = _taking_turns(submit, worker_turns)
+        scanner._submit_worker = on_threads
+        if SCAN_INTERPRETERS:
+            children = _ScanChildren(on_threads, worker_turns, log)
+            scanner._submit_worker = children.submit
     sys.setswitchinterval(min(previous_interval, SCAN_SWITCH_INTERVAL))
     try:
         yield
@@ -235,10 +299,12 @@ def _scan_turns(turns: bool = True) -> Iterator[None]:
         sys.setswitchinterval(previous_interval)
         if callable(submit):
             scanner._submit_worker = submit
+        if children is not None:
+            children.close()
 
 
 @contextlib.contextmanager
-def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None]:
+def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any, log: Callable[[Any], Any] = print) -> Iterator[None]:
     """A running scan: the saved workers in ``AI_HUNTER_MAX_WORKERS`` (this job's config snapshot, not a mirror an
     earlier run left in the env) and ``_scan_turns``. All restored after."""
     previous_workers = os.environ.get("AI_HUNTER_MAX_WORKERS")
@@ -246,7 +312,7 @@ def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None
     if known:
         os.environ["AI_HUNTER_MAX_WORKERS"] = str(scan_workers(config, qa))
     try:
-        with _scan_turns(known):
+        with _scan_turns(known, log):
             yield
     finally:
         if previous_workers is None:
@@ -258,7 +324,8 @@ def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any) -> Iterator[None
 @contextlib.contextmanager
 def multipass_scan_turns() -> Iterator[None]:
     """A translation job: the QA scan its Multipass refinement runs on its own (``run_qa_scan_path`` in the backend,
-    with the workers of ``mobile_qa_env_overrides``) goes through ``_scan_turns`` too, like a QA scan job."""
+    with the workers of ``mobile_qa_env_overrides``) goes through ``_scan_turns`` too, like a QA scan job. Its lines
+    reach the job's log through ``print`` (``job_runner`` tees it), like the lines around that call."""
     try:
         import TransateKRtoEN as backend
     except Exception:  # pragma: no cover - the translation itself reports a build without the backend
@@ -432,7 +499,7 @@ def scan(ctx: Any, targets: Sequence[tuple], mode: str, *, disable_word_count: b
     # only a chat-submitted Direct Text workspace opts out of run_qa_scan_path's Direct Text guard
     opt_in: dict = {"allow_direct_text": True} if chat_scan else {}
     try:
-        with _scan_runtime(config, qa):
+        with _scan_runtime(config, qa, log):
             successful, _failed = qa.run_bulk_qa_scan(
                 folders,
                 mode=mode,

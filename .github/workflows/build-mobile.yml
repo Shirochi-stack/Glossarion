@@ -1363,6 +1363,27 @@ jobs:
           fi
           grep -a -h -o -E 'GLOSSARION_[A-Z_]+( (PASS|FAIL))?' "$logs"/*.txt "$logs"/console.log 2>/dev/null | sort | uniq -c > "$logs/markers.txt" || true
 
+      - name: QA scan in a child interpreter on the simulator (pass or fallback, never fails the build)
+        if: always()
+        run: |
+          # GLOSSARION_INTERPRETERS {json}, the smoke suite's scan_interpreters check. A fallback means the app's
+          # QA scans run on threads here: same findings, slower. Different findings fail that check itself.
+          line="$(grep -a -h -E '(^|[^A-Z_])GLOSSARION_INTERPRETERS ' mobile-smoke-logs/console_pty.txt mobile-smoke-logs/oslog_stream.txt mobile-smoke-logs/console.log 2>/dev/null | tail -n 1 | sed -E 's/^.*GLOSSARION_INTERPRETERS //' | cut -c1-500 || true)"
+          case "$line" in
+            *'"result":"pass"'*) title="child interpreters: pass" ;;
+            *'"result":"fallback"'*) title="child interpreters: FALLBACK to threads" ;;
+            *'"result":"fail"'*) title="child interpreters: failed" ;;
+            *) title="child interpreters: no result (the check did not run)" ;;
+          esac
+          echo "::notice title=iOS QA scan, ${title}::${line:-none}"
+          {
+            echo "## iOS simulator, QA scan: ${title}"
+            echo
+            echo '```'
+            echo "${line:-no GLOSSARION_INTERPRETERS line in the logs}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Self-built wheels on the simulator (cryptography + OpenSSL, Pillow)
         run: |
           # The smoke report from the app container (selftest-smoke.json; e2e overwrites
