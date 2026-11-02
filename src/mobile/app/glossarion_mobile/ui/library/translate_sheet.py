@@ -150,6 +150,8 @@ class TranslateSheet:
         for index, (book, source) in enumerate(zip(self.books, self.sources)):
             name = str(book.get("name") or os.path.basename(source or ""))
             if source:
+                if len(self.books) == 1:  # the title names the one book
+                    continue
                 try:
                     meta = f"{os.path.splitext(source)[1].lstrip('.').upper()} · {size_text(os.path.getsize(source))}"
                 except OSError:
@@ -187,6 +189,7 @@ class TranslateSheet:
                                              only_this_run=bool(run_config),
                                              on_change=lambda values, only: self._refresh_range(),
                                              key="lib-run-options")
+            self.run_panel.summary_text.max_lines = 1  # the tile opens to show it all
             self.range_chip = ft.Chip(label=ft.Text(self.run_panel.range_chip_label()),
                                       leading=ft.Icon(ft.Icons.FORMAT_LIST_NUMBERED, size=16),
                                       on_click=lambda e: self.open_choose_chapters(),
@@ -194,7 +197,8 @@ class TranslateSheet:
             self.fact_chips.append(self.range_chip)
             run_controls.append(self.run_panel.control)
         supported = review_gate_supported()
-        self.review_switch = ft.Switch(value=False,
+        self.review_hint: Optional[ft.Text] = None
+        self.review_switch = ft.Switch(value=False, on_change=self._review_changed,
                                        disabled=not supported, key="review-glossary")
         review_row: list[ft.Control] = [switch_row(self.review_switch, "Review glossary before translating")]
         if not supported:
@@ -203,9 +207,10 @@ class TranslateSheet:
                                                 "in this build; book translations run without the gate, as on "
                                                 "desktop."))
         else:  # U9: the job pauses after its glossary phase; the Book page asks Edit · Yes · No
-            review_row.append(ft.Text("Pauses after the glossary is generated: Edit · Yes · No on the Book page.",
-                                      theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
-                                      key="review-glossary-hint"))
+            self.review_hint = ft.Text("Pauses after the glossary is generated: Edit · Yes · No on the Book page.",
+                                       theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                       visible=False, key="review-glossary-hint")
+            review_row.append(self.review_hint)
         jobs_ok = service.jobs is not None and service.has_job_kind("translate")
         self.base_reason = None if jobs_ok and ready else (
             "The job service is not running" if not jobs_ok else "No raw source file resolves for the selection")
@@ -283,6 +288,11 @@ class TranslateSheet:
         self.start_reason_text.value = self.start_reason or ""
         self.start_reason_text.visible = bool(self.start_reason)
         self.ctx.push(self.facts_row, self.start_button, self.start_reason_text)
+
+    def _review_changed(self, e: Any = None) -> None:
+        if self.review_hint is not None:
+            self.review_hint.visible = bool(self.review_switch.value)
+            self.ctx.push(self.review_hint)
 
     def _chat_handler(self) -> Any:
         intents = getattr(self.ctx, "intents", None)

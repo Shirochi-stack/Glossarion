@@ -1489,7 +1489,9 @@ The TranslateSheet is the same `PlanCard` component, presented as a `BottomSheet
 - **"Review glossary before translating"** switch. It defaults to off, because desktop has no gate for book-origin jobs. When it is on, the run pauses after glossary generation exactly like a chat run:
   - a `jobs.action` notification "Glossary ready: review needed" (Accept / Review) unless the Book page is on screen (§1.9);
   - an approval sheet over the Book page, built from the `GlossaryApprovalCard` content: ✏️ Edit / ✓ Yes / ■ No.
+  - The line saying so shows only while the switch is on.
 - "Open in chat instead": creates a chat with the attachment and a plan.
+- One book with a raw file has no book row (the title names it), and the Run options summary stays on one line. Several books, or a missing raw, keep their rows.
 - **Start**: when a book's workspace lies under a different output root than the current one, the desktop question "Output Folder Mismatch" comes first (Cancel / Yes; the shared `LibraryShelf.output_root_mismatch` prompt). Yes switches the process output root (`OUTPUT_DIRECTORY`; config.json `output_directory` is not written, so it lasts for the session). The check runs only while no job holds the process environment. The chat's Library attach asks the same question before Start (`translate_sheet.confirm_output_root`).
 
 The job has origin = book. Progress shows on the Book page summary strip, the JobStrip and Jobs.

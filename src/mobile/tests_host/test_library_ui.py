@@ -940,6 +940,20 @@ def test_translate_sheet_submits_a_library_translate_job(tmp_path):
         assert "Model: authgpt/gpt-6-luna" in texts and "→ English" in texts
         # U9: the translate job honours "Review glossary before translating" (job_kinds.translate gate)
         assert not sheet.review_switch.disabled and sheet.start_reason is None
+        # Owner: the sheet took more of the screen than it should. One book: the title names it, no row repeats it;
+        # the summary stays on one line, and the review hint shows only with its switch on.
+        assert not any("Book.epub" in text for text in texts)
+        assert sheet.run_panel is None or sheet.run_panel.summary_text.max_lines == 1
+        assert sheet.review_hint.visible is False
+        sheet.review_switch.value = True
+        sheet.review_switch.on_change(None)
+        assert sheet.review_hint.visible is True
+        sheet.review_switch.value = False
+        sheet.review_switch.on_change(None)
+        assert sheet.review_hint.visible is False
+        several = TranslateSheet(ctx, [book, book], [str(raw), str(raw)])
+        assert sum("Book.epub" in text for text in _texts(several.sheet.content)) == 2
+        assert any("missing raw" in text for text in _texts(TranslateSheet(ctx, [book], [""]).sheet.content))
         job = await sheet.start()
         assert job == "job1" and submitted[0].kind == "translate" and submitted[0].inputs == (str(raw),)
         assert submitted[0].origin["type"] == "library" and len(submitted[0].origin["bid"]) == 12
