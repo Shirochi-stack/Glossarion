@@ -1182,6 +1182,19 @@ def test_probe_preserves_two_keys_with_stale_environment(monkeypatch, tmp_path, 
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             received.append((self.headers.get('Authorization'), payload))
+            if payload.get('stream'):  # NanoGPT chat always streams
+                chunk = {'id': 'key-test', 'object': 'chat.completion.chunk', 'created': 0, 'model': payload['model'],
+                         'choices': [{'index': 0, 'delta': {'content': 'API test successful'},
+                                      'finish_reason': 'stop'}]}
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.end_headers()
+                self.wfile.write(f'data: {json.dumps(chunk)}
+
+data: [DONE]
+
+'.encode())
+                return
             body = json.dumps({
                 'id': 'key-test', 'object': 'chat.completion', 'created': 0,
                 'model': payload['model'],

@@ -17,6 +17,12 @@ MESSAGES = [{'role': 'user', 'content': 'Reply OK.'}]
 
 
 @pytest.fixture(autouse=True)
+def _fake_sdk_replies_are_not_streams(monkeypatch):
+    """These fakes answer with one reply; tests/test_nanogpt_quiet_stream.py covers the stream itself."""
+    monkeypatch.setattr(api.UnifiedClient, "_must_stream_to_stay_connected", lambda self, provider: False)
+
+
+@pytest.fixture(autouse=True)
 def isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, '_DEFAULT_TOKEN_DIR', str(tmp_path))
     monkeypatch.setattr(auth, '_DEFAULT_TOKEN_FILE', str(tmp_path / 'authnan_tokens.json'))

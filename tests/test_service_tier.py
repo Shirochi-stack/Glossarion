@@ -13,6 +13,12 @@ from request_parameters import (
 from unified_api_client import UnifiedClient
 
 
+@pytest.fixture(autouse=True)
+def _fake_sdk_replies_are_not_streams(monkeypatch):
+    """These fakes answer with one reply; tests/test_nanogpt_quiet_stream.py covers the stream itself."""
+    monkeypatch.setattr(UnifiedClient, "_must_stream_to_stay_connected", lambda self, provider: False)
+
+
 @pytest.mark.parametrize('choice,openai,gemini,nanogpt,openrouter', [
     ('off', None, None, None, None),
     ('standard', 'default', 'standard', 'default', 'default'),

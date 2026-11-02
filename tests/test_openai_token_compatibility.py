@@ -17,6 +17,12 @@ from reasoning_compatibility import (
 # other provider parameter compatibility tests.
 
 
+@pytest.fixture(autouse=True)
+def _fake_sdk_replies_are_not_streams(monkeypatch):
+    """These fakes answer with one reply; tests/test_nanogpt_quiet_stream.py covers the stream itself."""
+    monkeypatch.setattr(UnifiedClient, "_must_stream_to_stay_connected", lambda self, provider: False)
+
+
 def test_ollamapull_shutdown_targets_only_verified_local_ollama(monkeypatch):
     import ollamapull
     import psutil
