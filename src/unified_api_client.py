@@ -7634,32 +7634,19 @@ class UnifiedClient:
         logger.info(f"[{thread_name}] Cleanup complete")
     
     def __del__(self):
-        """Destructor — only performs aggressive cleanup when a stop flag is active.
+        """Destructor — closes this client's own HTTP clients when a stop flag is active.
 
-        During normal parallel operation, GC can fire at any time on any thread.
-        Closing class-level _active_streams / shared clients here would kill
-        sibling threads' active sockets (WinError 10038).  Only do it when the
-        user actually requested a stop.
+        GC can fire at any time on any thread, long after the stop: a stopped
+        run's client can be freed in the middle of the next run. Closing the
+        class-level _active_streams here would kill that run's sockets
+        (WinError 10038, Errno 9); the stop itself closes them (hard_cancel_all).
         """
         try:
             self._in_cleanup = True
 
-            # Only tear down shared resources if a stop was explicitly requested.
+            # Only tear down HTTP clients if a stop was explicitly requested.
             if not (self._cancelled or os.environ.get('TRANSLATION_CANCELLED') == '1'):
                 return
-
-            # Close all active streaming responses
-            try:
-                with self._active_streams_lock:
-                    streams = list(self._active_streams)
-                for stream in streams:
-                    try:
-                        if hasattr(stream, 'close'):
-                            stream.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
 
             # Close HTTP clients
             try:
