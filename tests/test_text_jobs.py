@@ -314,7 +314,12 @@ def test_desktop_compile_runners_are_wrappers_with_the_original_finally(legacy_t
 def test_input_preparation_is_moved_verbatim(legacy_tg):
     tree = _tree("input_preparation")
     new = _methods(_class(tree, "InputPreparationMixin"))
-    _assert_moved(legacy_tg["_extract_subtitle_zip_input_if_needed"], new["_extract_subtitle_zip_input_if_needed"])
+    # 2026-11-02: a ZIP's batch work lives in the output folder, where a resumed run finds it
+    edits = _Edits(replace=[("bundle_work_dir = os.path.join(extraction_dir, '.glossarion_subtitle_bundle')",
+                             "bundle_work_dir = os.path.join(next(iter(output_plan.values()), {}).get('output_dir') or extraction_dir, "
+                             "'.glossarion_subtitle_bundle')")])
+    _assert_moved(legacy_tg["_extract_subtitle_zip_input_if_needed"], new["_extract_subtitle_zip_input_if_needed"],
+                  edits, expected_hits=1)
     _assert_moved(legacy_tg["_has_epub_conversion_inputs"], new["_has_epub_conversion_inputs"])
     edits = _Edits(replace=[("try:\n    self.input_files_updated_signal.emit(resolved)\nexcept Exception:\n    pass",
                              "try:\n    self._ui_request('input_files_updated', resolved)\nexcept Exception:\n    pass")])

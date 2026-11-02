@@ -199,6 +199,29 @@ class _Owner(InputPreparationMixin):
         self.logs.append(line)
 
 
+def test_a_zips_batch_work_survives_in_the_output_folder(tmp_path, monkeypatch):
+    monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
+    archive = _zip(tmp_path / "Show.zip", {"one.srt": SAMPLES[".srt"][0], "two.vtt": SAMPLES[".vtt"][0]})
+    owner = _Owner(tmp_path)
+    owner._extract_subtitle_zip_input_if_needed(str(archive))
+    info = next(iter(owner._subtitle_zip_output_groups.values()))
+    assert Path(info["bundle_work_dir"]).parent == Path(info["output_dir"])
+    assert str(tmp_path / "temp") not in info["bundle_work_dir"]
+
+
+def test_each_zip_file_keeps_its_own_history(tmp_path):
+    from history_manager import HistoryManager
+    import TransateKRtoEN as engine
+
+    shared = HistoryManager(str(tmp_path))
+    first = engine._subtitle_file_history(shared, {"subtitle_bundle_source_index": 0})
+    second = engine._subtitle_file_history(shared, {"subtitle_bundle_source_index": 1})
+    assert engine._subtitle_file_history(shared, {"subtitle_bundle_source_index": 0}) is first
+    assert engine._subtitle_file_history(shared, {"num": 3}) is shared
+    first.append_to_history("one", "uno", 5)
+    assert first.load_history() and not second.load_history() and not shared.load_history()
+
+
 @pytest.mark.parametrize("extension", FORMATS)
 def test_every_router_calls_a_zip_of_the_format_subtitles(tmp_path, monkeypatch, extension):
     monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)

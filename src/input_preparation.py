@@ -283,8 +283,10 @@ class InputPreparationMixin(JobHooksMixin):
                 self._subtitle_zip_output_groups = {}
             bundle_id = os.path.normcase(os.path.abspath(path))
             bundle_files = [os.path.abspath(item) for item in subtitle_files]
+            # In the output folder, not the temporary extraction: its finished
+            # batches are what a resumed run reuses.
             bundle_work_dir = os.path.join(
-                extraction_dir,
+                next(iter(output_plan.values()), {}).get("output_dir") or extraction_dir,
                 ".glossarion_subtitle_bundle",
             )
             for member_info in output_plan.values():

@@ -266,6 +266,7 @@ import time
 import request_schedule
 from glossary_matching import is_entry_type_token
 from history_manager import HistoryManager
+SUBTITLE_FILE_HISTORY_PREFIX = "translation_history_subtitle_file_"
 from chapter_splitter import ChapterSplitter
 from chapter_chunk_progress import (
     CHUNK_PROGRESS_SCHEMA_VERSION,
@@ -884,6 +885,22 @@ def _retry_invalid_structured_batch_output(
         candidate = _clean_structured_batch_output(
             retry_request(retries_used, issue, detail)
         )
+
+
+def _subtitle_file_history(history_manager, chapter):
+    """A subtitle ZIP's files take turns in the batch queue, so each keeps its own history:
+    one shared history would give a file the dialogue of the others as its context."""
+    source_index = (chapter or {}).get("subtitle_bundle_source_index")
+    if source_index is None:
+        return history_manager
+    managers = history_manager.__dict__.setdefault("_subtitle_file_managers", {})
+    return managers.setdefault(
+        source_index,
+        HistoryManager(
+            history_manager.payloads_dir,
+            f"{SUBTITLE_FILE_HISTORY_PREFIX}{source_index}.json",
+        ),
+    )
 
 
 def _materialize_completed_subtitle_bundle_file(chapter, output_dir):
@@ -10601,7 +10618,7 @@ class BatchTranslationProcessor:
                 ):
                     try:
                         # Thread-safe history access - load_history() already has internal locking
-                        history = self.history_manager.load_history()
+                        history = _subtitle_file_history(self.history_manager, chapter).load_history()
                         hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
                         trimmed = history[-hist_limit * 2:]
                         include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
@@ -25391,6 +25408,10 @@ def main(log_callback=None, stop_callback=None):
             os.remove(history_file)
             print("[DEBUG] CONTEXTUAL disabled - cleared translation history")
             
+    if not metadata_only and not (config.CONTEXTUAL and config.TRANSLATION_HISTORY_ROLLING):
+        for payload_name in os.listdir(payloads_dir):
+            if payload_name.startswith(SUBTITLE_FILE_HISTORY_PREFIX):
+                os.remove(os.path.join(payloads_dir, payload_name))
     history_manager = HistoryManager(payloads_dir)
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
@@ -30482,7 +30503,7 @@ def main(log_callback=None, stop_callback=None):
                                     user_content, assistant_content, raw_obj = batch_history_map[idx]
                                     try:
                                         time.sleep(0.000001)
-                                        history_manager.append_to_history(
+                                        _subtitle_file_history(history_manager, chapter).append_to_history(
                                             user_content,
                                             assistant_content,
                                             hist_limit,
@@ -30648,7 +30669,7 @@ def main(log_callback=None, stop_callback=None):
                                 user_content, assistant_content, raw_obj = batch_history_map[idx]
                                 try:
                                     time.sleep(0.000001)
-                                    history_manager.append_to_history(
+                                    _subtitle_file_history(history_manager, chapter).append_to_history(
                                         user_content,
                                         assistant_content,
                                         hist_limit,
