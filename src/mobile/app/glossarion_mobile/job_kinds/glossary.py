@@ -28,18 +28,92 @@
   ``wrapper_prompt``, ``system_prompt``, ``profile_name``.
 
 No glossary logic lives here: adapters only check parameters and call the shared functions.
+
+The smart filter of an automatic glossary (``GlossaryManager._filter_text_for_glossary``) runs in a child interpreter on
+every path that reaches it (``filter_in_child``), and on a thread where a child cannot start. The dedupe of a unified
+glossary stays on its thread: it lives on RapidFuzz, and a child gets RapidFuzz's pure Python (its C++ module is refused):
+2,000 entries 0.7 s on a thread and 16 s in a child, the same list.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from glossarion_mobile.job_kinds import INDEXING, owner_method
 from glossarion_mobile.job_kinds.translate import check_inputs, record_output_dirs, resolve_workspace_collisions
 
-__all__ = ["KINDS", "glossary_outputs", "progress_for_glossary", "run", "run_pair", "run_refine", "run_unified"]
+__all__ = ["FILTER_CHILD_MIN_CHARS", "FILTER_IN_CHILD", "KINDS", "filter_in_child", "glossary_outputs",
+           "progress_for_glossary", "run", "run_pair", "run_refine", "run_unified"]
+
+
+#: The smart filter runs in a child interpreter. False: on the job's thread, like a device where a child cannot start.
+FILTER_IN_CHILD = True
+#: From this much text. The filter is pure CPU on the whole book, next to the Flet loop. Measured on the emulator (6 vCPU,
+#: a real Korean book, threads against a child, the same text and terms): 20,000 characters 0.40 and 0.60 s; 50,000 1.97 and
+#: 1.21 s; 169,000 7.3 and 3.7 s, the loop's lateness p95 37 and 2 ms, +32 MB; 746,000 43.5 and 24.9 s, 103 and 1.9 ms,
+#: +51 MB; 746,000 with the gender context 114 and 24 s, +69 MB. A child starts in 0.28 s with what it needs.
+FILTER_CHILD_MIN_CHARS = 30_000
+#: The module a child runs; only a child imports it (``services.glossary_child``).
+_FILTER_CHILD = "glossarion_mobile.services.glossary_child"
+
+
+@contextlib.contextmanager
+def filter_in_child(log: Callable[[Any], Any] = print) -> Iterator[None]:
+    """A job that may reach ``_filter_text_for_glossary`` (a translation's automatic glossary, Extract Glossary's minimal
+    pass): the whole function runs in a child with its own GIL, so none of its sentences compete with the loop, and it
+    finishes sooner because each of its checks for a Stop no longer asks the file system. It uses one of the app's kept
+    children (``services.interpreters``) and that goes back right after: a translation runs for hours after it, and the
+    filter of the next book gets it again. Its log lines come as they are printed.
+
+    The result is the shared function's in both places; where a child cannot start, or compares names differently
+    (``name_comparison.comparison_modules``), it runs here on the job's thread and says so once. A Stop reaches the child
+    (``_check_filter_stop`` asked here at ``STOP_POLL``) and ends it like on a thread."""
+    backend = None
+    if FILTER_IN_CHILD:
+        try:
+            import GlossaryManager as backend
+        except Exception:  # pragma: no cover - the job itself reports a build without the backend
+            backend = None
+    real = getattr(backend, "_filter_text_for_glossary", None)
+    if not callable(real):
+        yield
+        return
+    from glossarion_mobile.services import interpreters
+    from glossarion_mobile.services.name_comparison import comparison_modules
+
+    job = interpreters.JobChildren(log, "Filtering the text", preload=(_FILTER_CHILD,))
+
+    def stopped() -> bool:
+        try:
+            backend._check_filter_stop()
+        except backend._GlossaryFilteringStopped:
+            return True
+        return False
+
+    def in_child(text: Any, min_frequency: Any = 2, max_sentences: Any = None) -> Any:
+        if not isinstance(text, str) or len(text) < FILTER_CHILD_MIN_CHARS:
+            return real(text, min_frequency, max_sentences)
+        pool = job.pool(1)
+        if pool is None:
+            return real(text, min_frequency, max_sentences)
+        try:
+            return pool.call(_FILTER_CHILD, "filter_text", (text, min_frequency, max_sentences, comparison_modules()),
+                             should_stop=stopped, live_output=True)
+        except (interpreters.InterpreterUnavailable, ImportError) as exc:
+            job.fall_back(str(exc))
+            return real(text, min_frequency, max_sentences)
+        finally:
+            job.release()
+
+    backend._filter_text_for_glossary = in_child
+    try:
+        yield
+    finally:
+        backend._filter_text_for_glossary = real
+        job.close()
 
 
 def _job_error(message: str) -> Exception:
@@ -104,7 +178,8 @@ def run(ctx: Any) -> dict:
     owner.selected_files = list(files)
     record_output_dirs(ctx, files)
     ctx.phase("Generating glossary…")
-    result = extract(force_balanced_request_merging=bool(ctx.params.get("force_balanced_request_merging", False)))
+    with filter_in_child():
+        result = extract(force_balanced_request_merging=bool(ctx.params.get("force_balanced_request_merging", False)))
     if result is False and not ctx.stop_requested():
         return {"ok": False, "outputs": [], "error": "Glossary extraction stopped (see the log)."}
     return {"ok": None, "outputs": glossary_outputs(owner, files)}
@@ -294,7 +369,8 @@ def run_pair(ctx: Any) -> dict:
             ctx.log(f"⚠️ {skipped} saved mapping(s) could not be restored because the referenced HTML filename no "
                     "longer exists.")
         ctx.phase("Generating glossary…")
-        result = extract(force_balanced_request_merging=bool(params.get("force_balanced_request_merging", False)))
+        with filter_in_child():
+            result = extract(force_balanced_request_merging=bool(params.get("force_balanced_request_merging", False)))
         if result is False and not ctx.stop_requested():
             return {"ok": False, "outputs": [], "error": "Glossary extraction stopped (see the log)."}
         return {"ok": None, "outputs": glossary_outputs(owner, [raw_path])}

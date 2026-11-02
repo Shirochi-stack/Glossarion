@@ -26,7 +26,9 @@
 #     (llama_vision_describe) adds the preset's vision projector and describes a tiny test picture
 #     through the app's vision path: the GLOSSARION_LLAMA_VISION {json} line goes to llama_vision_result.txt;
 #  7. always save logcat (flet.python + full + crash buffer), meminfo, pidof, package dump, the
-#     app's last self-test report (debuggable builds) and a screenshot into the log dir.
+#     app's last self-test report (debuggable builds) and a screenshot into the log dir; the smoke
+#     suite's GLOSSARION_INTERPRETERS {json} line (a QA scan batch in a child interpreter: pass, or
+#     fallback, which the suite itself fails on Android) goes to interpreters_result.txt and the job summary.
 #
 # Environment overrides: GLOSSARION_PACKAGE, READY_TIMEOUT (300), SELFTEST_TIMEOUT (900),
 # SELFTEST_URL, RUN_E2E (1; 0 skips step 5), E2E_TIMEOUT (1200), E2E_URL, RUN_BG_WEB (RUN_E2E; 0 skips
@@ -216,6 +218,7 @@ collect_diagnostics() {
   if [ "$RUN_LLAMA" = "1" ] && [ ! -s "$LOG_DIR/llama_vision_result.txt" ]; then
     grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA_VISION')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/llama_vision_result.txt" || true
   fi
+  grep -a -h -E "$(marker_regex 'GLOSSARION_INTERPRETERS')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/interpreters_result.txt" || true
   grep -a -c -F 'Traceback (most recent call last)' "$TAG_LOG" > "$LOG_DIR/python_tracebacks_count.txt" 2>/dev/null || true
   log "result: $RESULT (exit $exit_code)"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -227,6 +230,9 @@ collect_diagnostics() {
       echo
       echo "Markers seen:"
       cat "$LOG_DIR/markers.txt" 2>/dev/null
+      echo
+      echo "QA scan in a child interpreter:"
+      cut -c1-500 "$LOG_DIR/interpreters_result.txt" 2>/dev/null
       echo '```'
     } >> "$GITHUB_STEP_SUMMARY"
   fi

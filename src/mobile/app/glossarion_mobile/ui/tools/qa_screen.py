@@ -54,8 +54,11 @@ log = logging.getLogger("glossarion.tools.qa")
 
 EMBEDDINGS_REASON = ("The embeddings method of silent truncation needs sentence-transformers (torch), which "
                      "cannot run on Android/iOS. The heuristic method always works.")
-THREADS_REASON = ("Android and iOS have no process pools: QA scans always use threads. How many: Maximum parallel "
-                  "workers under Scan options (default: half of this device's cores).")
+THREADS_REASON = ("Android and iOS have no process pools. A QA scan runs its workers in separate Python interpreters "
+                  "inside the app: they do not hold up the screen and more of them scan faster. If this device cannot "
+                  "start them, or has too little free memory, the scan's log says so and it uses threads: the same "
+                  "findings, but one worker at a time. How many: Maximum parallel workers under Scan options "
+                  "(default: half of this device's cores).")
 
 
 def qa_eligibility(target: tg.ToolTarget) -> Optional[str]:

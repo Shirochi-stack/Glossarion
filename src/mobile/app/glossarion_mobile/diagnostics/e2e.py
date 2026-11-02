@@ -40,7 +40,8 @@ Scenarios (one self-test check each, in this order):
    (``services.glossary.GlossaryService`` over ``glossary_document``) changes one translated
    name and saves (the desktop backup first); a ``translate`` job then sends that edited
    entry in every chapter prompt (never the old name); a ``qa_scan`` job (quick scan through
-   ``qa_scan_runtime.run_qa_scan_path``, threads only) reports every chapter; and the Book
+   ``qa_scan_runtime.run_qa_scan_path``, its batches in child interpreters: never processes, and
+   the same tripwires in them, ``install_child_guards``) reports every chapter; and the Book
    page's "Compile PDF" (``LibraryService.compile_spec``: the EPUB compile with "Create PDF
    after EPUB") writes a PDF through the PyMuPDF shim with one page per chapter at least and
    an outline entry per chapter.
@@ -271,6 +272,38 @@ def _in_stdlib(filename: str) -> bool:
     return "site-packages" not in path.split(os.sep) and _under(path, _stdlib_dirs())
 
 
+class _LoggedEvents(list):
+    """A guard's list in a child interpreter: nothing a child appends reaches the session's lists, so each event also
+    goes to the file the session reads (``ProcessGuards.child_events``)."""
+
+    def __init__(self, path: str, bucket: str) -> None:
+        super().__init__()
+        self.path, self.bucket = path, bucket
+
+    def append(self, event: Any) -> None:
+        super().append(event)
+        with open(self.path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"bucket": self.bucket, "event": event}, default=str) + "\n")
+
+
+#: where a child interpreter's guards write what they saw, and what they let it write to (``install_child_guards``)
+CHILD_EVENTS_ENV = "GLOSSARION_E2E_CHILD_EVENTS"
+CHILD_ALLOWED_ENV = "GLOSSARION_E2E_CHILD_ALLOWED"
+
+
+def install_child_guards() -> None:
+    """Every child interpreter of an E2E run (``services.interpreters.set_child_setup``): the same tripwires as the
+    session's. A child has its own ``subprocess``, ``os``, ``socket`` and audit hooks, none of them the patched ones."""
+    events = os.environ[CHILD_EVENTS_ENV]
+    guards = ProcessGuards()
+    guards.spawns = _LoggedEvents(events, "spawns")
+    guards.network = _LoggedEvents(events, "network")
+    guards.install()
+    audit = WriteAudit(json.loads(os.environ[CHILD_ALLOWED_ENV]) + [os.path.dirname(events)])
+    audit.violations = _LoggedEvents(events, "writes")
+    audit.start()
+
+
 class ProcessGuards:
     """Refuse process spawning (``OSError(ENOTSUP)``, as on iOS) and non-loopback sockets.
 
@@ -304,6 +337,19 @@ class ProcessGuards:
         )
         with self._lock:
             bucket.append(event)
+
+    @staticmethod
+    def child_events(path: Any) -> dict:
+        """What the guards of the child interpreters saw (``install_child_guards``): ``{bucket: [event]}``."""
+        found: dict = {"spawns": [], "network": [], "writes": []}
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    entry = json.loads(line)
+                    found[entry["bucket"]].append(entry["event"])
+        except OSError:
+            pass
+        return found
 
     def _spawn_error(self, api: str) -> OSError:
         self._record(self.spawns, api=api)
@@ -575,6 +621,24 @@ def _chapter_requests(records: list) -> list:
     return [r.chapters[0] for r in records if r.kind == "translation" and len(r.chapters) == 1]
 
 
+def _why_sent_twice(records: list, log_path: str) -> str:
+    """What a failing check needs when a chapter went to the model twice: how each request of it ended and what the job's
+    log says about it (a job's log is gone with the runner's sandbox)."""
+    chapters = _chapter_requests(records)
+    twice = {chapter for chapter in chapters if chapters.count(chapter) > 1}
+    if not twice:
+        return ""
+    sent = [(r.chapters[0], r.status, round(r.started, 2), r.finished and round(r.finished, 2), r.reply_chars)
+            for r in records if r.kind == "translation" and len(r.chapters) == 1 and r.chapters[0] in twice]
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as handle:
+            lines = [line.strip()[:200] for line in handle if any(word in line.lower() for word in (
+                "retry", "retrying", "cancelled", "timed out", "duplicate", "truncat", "error"))]
+    except OSError as exc:
+        lines = [str(exc)]
+    return f"; sent {sent}; the job's log: {lines[-12:]}"
+
+
 # ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
@@ -618,6 +682,7 @@ class E2ESession:
         self.jobs: list = []
         self.server: Any = None
         self.guards: Optional[ProcessGuards] = None
+        self.child_events: Optional[Path] = None
         self.audit: Optional[WriteAudit] = None
         self.store: Any = None
         self.service: Any = None
@@ -787,6 +852,14 @@ class E2ESession:
         self.guards = ProcessGuards()
         self.guards.install()
         self.audit.start()
+        # interpreters are neither a process nor a fork, so they are allowed; what runs in one is held to the same rules
+        from glossarion_mobile.services import interpreters
+
+        self.child_events = self.root / "child_guards.jsonl"
+        self._set_env(CHILD_EVENTS_ENV, str(self.child_events))
+        self._set_env(CHILD_ALLOWED_ENV, json.dumps([str(path) for path in allowed]))
+        interpreters.set_child_setup(("glossarion_mobile.diagnostics.e2e", "install_child_guards"))
+        self._closers.append(lambda: interpreters.set_child_setup(None))
 
         from glossarion_mobile.services.files import FileBridge
         from glossarion_mobile.services.jobs import JobService
@@ -1285,6 +1358,11 @@ class E2ESession:
         _check(scanned == [f"response_chapter{n:04d}.html" for n in range(1, CHAPTERS + 1)],
                f"the QA report lists the chapter files {scanned}")
         _check(any(os.path.normcase(p) == os.path.normcase(report) for p in qa.outputs), f"QA outputs {qa.outputs}")
+        qa_log = self.service.read_log_tail(qa.job_id)
+        in_children = any("separate Python interpreter" in line for line in qa_log)
+        on_threads = [line.strip() for line in qa_log if "Scanning on threads" in line]
+        _check(in_children or on_threads, "the QA scan's log does not say where its batches ran")
+        _check(in_children or sys.platform != "android", f"the QA scan fell back on Android: {on_threads}")
 
         # 5. Compile PDF (Book page › Compile PDF on an EPUB workspace: the EPUB compile + PDF, shim)
         spec = LibraryService(config=self.store).compile_spec(
@@ -1316,6 +1394,7 @@ class E2ESession:
         return {"glossary": os.path.basename(glossary), "edited": {self.EDIT_RAW: [old_name, self.EDIT_NAME]},
                 "backups": len(backups), "edited_prompts": len(edited), "book": book,
                 "qa": {"files": len(rows), "chapters": len(scanned), "issues": sum(len(r.get("issues") or []) for r in rows),
+                       "batches_in": "child interpreters" if in_children else f"threads: {on_threads[0]}",
                        "secs": round(qa.secs, 1)},
                 "pdf": {"name": pdf.name, "pages": pages, "outline": len(toc), "bytes": pdf.stat().st_size,
                         "producer": producer, "secs": round(compiled.secs, 1)}}
@@ -1453,9 +1532,11 @@ class E2ESession:
         resumed = self._outcome("resume after kill", new_id, snap, t0, before)
         _check(resumed.state == "DONE", f"resumed job ended {resumed.state}: {resumed.error}")
         _check(not relaunched.interrupted, "the resumed job is still listed as Interrupted")
-        again = _chapter_requests(server.records(since=mark))
+        records = server.records(since=mark)
+        again = _chapter_requests(records)
         _check(sorted(again) == sorted(remaining),
-               f"Resume translated chapters {sorted(again)}; the missing ones were {sorted(remaining)}")
+               f"Resume translated chapters {sorted(again)}; the missing ones were {sorted(remaining)}"
+               + _why_sent_twice(records, relaunched.job_log_path(new_id)))
         book = self._expect_complete_book(output_dir, "resume after kill")
         return {"stop_secs": round(stop_secs, 1), "parked_at_stop": taps.get("parked"), "parked_after": still_parked,
                 "saved_before_resume": sorted(done), "resumed": sorted(again), "book": book}
@@ -1820,11 +1901,12 @@ class E2ESession:
         for job in self.jobs:
             if job.process_diff:
                 problems.append(f"{job.label}: {job.process_diff}")
-        all_spawns = list(self.guards.spawns) if self.guards is not None else []
+        in_children = ProcessGuards.child_events(self.child_events) if self.child_events is not None else {}
+        all_spawns = (list(self.guards.spawns) if self.guards is not None else []) + in_children.get("spawns", [])
         spawns = [e for e in all_spawns if not e.get("stdlib")]
         stdlib_spawns = [e for e in all_spawns if e.get("stdlib")]
-        network = list(self.guards.network) if self.guards is not None else []
-        writes = list(self.audit.violations) if self.audit is not None else []
+        network = (list(self.guards.network) if self.guards is not None else []) + in_children.get("network", [])
+        writes = (list(self.audit.violations) if self.audit is not None else []) + in_children.get("writes", [])
         if spawns:
             problems.append(f"{len(spawns)} process spawn attempt(s): " +
                             "; ".join(f"{e['api']} on {e['thread']} ({' < '.join(e['stack'][-3:])})" for e in spawns[:3]))
