@@ -296,11 +296,11 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 - The same jobs stay listed under Interrupted until they are resumed or discarded.
 
 **Job detail**
-- **Header:** title, origin link, state, progress, elapsed, ETA.
-- **Request cards:** live per-API-request cards from the classified log stream (shared `direct_text_store` classifier), sorted by spine order.
+- **Header:** title, state with **Files** beside it, origin link, progress, elapsed, ETA.
+- **Request cards:** live per-API-request cards from the classified log stream (shared `direct_text_store` classifier), sorted by spine order, in a **Requests (N)** tile that stays closed until opened.
 - **LogConsole:** filter chips All / Errors / Thinking / API; search; follow toggle; Copy; Share log. Lines are selectable text in the mono family at the log size (§6.2, 8/11).
 - **Outputs** as `FileChip`s.
-- **Buttons:** Open origin, Stop, Resume / Retry, Files, Progress, **Library** (hotfix 3 issue 2).
+- **Buttons:** Open origin, Stop, Resume / Retry, Progress, **Library** (hotfix 3 issue 2).
   - **Library** (`job-library`) opens the Library Book page of the job's book, pushed over the Job page, so Back returns to it. A job started for a Library book (its origin `bid`: Library, Book page, Reader or Tools jobs of one book, a chat's "Save to: Library" run of an attached Library book) opens that book at once.
   - A chat's own translation of a book attachment (the `direct_text` send, translated in the chat's Attachments folder) shows the button from the start. While it runs it is disabled with the chat card's reason "Added to the Library when the translation finishes" (`job-library-reason`), unless the attached file already is a Library book's raw. Once the run ended a tap looks the book up again (the chat moves it into the Library after the run: `ChatFeature.job_workspace` + `ChatFeature.library_book`); "This book is not in the Library yet" when it did not arrive.
   - Any other job shows it only when its output folder is a Library book's workspace (a chat's "Save to: Library" run of a new file: its workspace is on the In progress shelf from the start, found while it runs; a Tools job over a Library book); typed-text chats and Tools jobs without a Library book have no Library button. A workspace the shelf lacks that changed after the Library's last scan (inside the Library's folders) makes one quiet rescan first (`ChatFeature.library_book`). Each job state starts one lookup; an answer from an earlier state is ignored and a tap waits for a lookup that is running.
@@ -897,7 +897,7 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
 
 **Current item.** The last request label (bodySmall).
 
-**Requests (N)** (`ExpansionTile`, open while the job runs, like Jobs › job; a Result's stays closed)
+**Requests (N)** (`ExpansionTile`, closed until opened, like Jobs › job)
 - The turn's request cards: the cards the run already committed (the glossary gate freezes its phase into the chat; an earlier run of the same turn) followed by the live ones, in spine order. Once the run's finish has committed its cards (the run is still live for a moment, "finishing") the committed rows are listed, as the Result lists them (matched by request number among the cards this run committed, never an earlier run's; the shared commit drops lifecycle-only rows such as the EPUB metadata request's). Each row: label, phase chip (Processing / Thinking / Generating), token counts, and a 3-line streaming preview.
 - The rows and their streamed text come from the job's log, which carries the API client's log records too (`JobBackend.client_logs`, the desktop GuiLogHandler: "Sending API call", the streamed text), so they stream while the job runs. One handler per job, removed when it ends: the Translate headers job's shared code attaches it to its own view instead (`KindInfo.own_client_logs`).
 - The newest `direct_text_rendered_card_limit` rows are shown; "↑ Show N earlier requests (M hidden)" adds a page. Jump-to and search open the list on the target request.

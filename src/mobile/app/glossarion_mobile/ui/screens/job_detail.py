@@ -267,12 +267,14 @@ class JobDetailScreen(Screen):
                                   key="job-issue")
         self.qa_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
                                on_click=lambda e: self._on_progress(failed=True), visible=False, key="job-qa-failed")
+        self.state_row = ft.Row([self.state_chip, self.files_button, self.origin_button], wrap=True, spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER, key="job-state-row")
         header = SectionCard(
             title="Job",
             icon=kind_icon(self.snap.kind),
             children=[
                 ft.Row([self.title_text], wrap=True),
-                ft.Row([self.state_chip, self.origin_button], wrap=True, spacing=8),
+                self.state_row,
                 self.progress_bar,
                 self.progress_text,
                 self.time_text,
@@ -280,7 +282,7 @@ class JobDetailScreen(Screen):
                 self.error_text,
                 self.issue_chip,
                 self.qa_chip,
-                ft.Row([self.review_button, self.stop_button, self.resume_button, self.files_button,
+                ft.Row([self.review_button, self.stop_button, self.resume_button,
                         self.progress_button, self.library_button, self.library_reason], wrap=True, spacing=8,
                        run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                        # a button wrapped onto its own line sits in the middle (owner 2026-10-29)
@@ -301,8 +303,9 @@ class JobDetailScreen(Screen):
         self.requests_tile = ft.ExpansionTile(
             title=self.requests_title,
             controls=[self.requests_box],
-            expanded=self.snap.is_active,
+            expanded=False,  # owner 2026-11-02: a summary until opened, like the chat card's
             controls_padding=ft.Padding.only(left=8, right=8, bottom=8),
+            on_change=self._on_requests_toggle,
             key="job-requests",
         )
         # hidden until the first request card (owner 2026-10-29: an empty Requests box only took space)
@@ -563,6 +566,16 @@ class JobDetailScreen(Screen):
         self._apply(snap)
         self._refresh_requests(force=snap.is_terminal)
         self._mark_dirty()
+
+    def _on_requests_toggle(self, e: Any) -> None:
+        from glossarion_mobile.ui.chat.cards import tile_opened
+
+        value = tile_opened(e)
+        if value is not None:
+            self.requests_tile.expanded = value  # open, its cards repaint with every new log line (_on_lines)
+            if value:
+                self._refresh_requests(force=True)
+                self._mark_dirty()
 
     def _on_lines(self, lines: Any, gap: int) -> None:
         before = self.requests_title.value

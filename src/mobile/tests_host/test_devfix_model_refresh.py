@@ -299,6 +299,37 @@ def test_reduce_motion_keeps_a_still_border(polls):
     _run(scenario())
 
 
+def test_the_auto_poll_marker_shows_while_the_sheets_lookups_still_run(polls, monkeypatch):
+    """The owner's report: the marker only showed after closing and opening the menu. The 24 h poll waited for the
+    route and key lookups, slow on a phone; a sheet opened after them found the poll running."""
+    from glossarion_mobile.services import model_catalog as mc
+
+    lookup_entered, lookup_gate = threading.Event(), threading.Event()
+    real_route_info = mc.route_info
+
+    def slow_route_info(*args: Any, **kwargs: Any) -> Any:
+        lookup_entered.set()
+        assert lookup_gate.wait(30)
+        return real_route_info(*args, **kwargs)
+
+    monkeypatch.setattr(mc, "route_info", slow_route_info)
+    monkeypatch.setattr(mc.ModelCatalogService, "due_provider", lambda self, model=None: "openai")
+
+    async def scenario() -> None:
+        session, page, app, catalog, sheet = await _open_sheet()
+        try:
+            assert await uf._wait(lookup_entered.is_set, 10)
+            assert await uf._wait(lambda: sheet.search_border.active, 10), "no marker until the lookups end"
+            assert not lookup_gate.is_set() and polls.calls == ["openai"]
+            assert "Checking online models" in sheet.status_text.value
+        finally:
+            lookup_gate.set()
+            polls.gate.set()
+            await _shutdown(app)
+
+    _run(scenario())
+
+
 def test_an_explicit_refresh_waits_for_a_running_poll_of_the_provider(polls):
     """The sheet's 24 h auto-poll (explicit=False) holds the provider: the explicit refresh used to be dropped
     ("already running", in the hidden SnackBar); now it waits for it, then polls itself."""

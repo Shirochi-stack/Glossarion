@@ -1991,6 +1991,12 @@ class ModelSheet:
         if spawn is None:
             return
 
+        async def auto_poll(model: str) -> None:
+            try:
+                await catalog.maybe_auto_poll(model)  # its "found N models" line is no snackbar
+            except Exception:
+                log.debug("auto-poll failed", exc_info=True)
+
         async def work() -> None:
             run_io = self.env.run_io
             if catalog is not None and not catalog.snapshot.loaded:
@@ -1999,6 +2005,8 @@ class ModelSheet:
                 except Exception:
                     log.exception("loading the model catalog failed")
             model = self.current["model"]
+            if catalog is not None and model:
+                spawn(auto_poll(model))  # beside the lookups below: on a phone they take long enough to hide its marker
             if run_io is not None:
                 try:
                     config = self.env.store.snapshot() if self.env.store is not None else {}
@@ -2013,11 +2021,6 @@ class ModelSheet:
                     self.set_keyless(keyless)
                 except Exception:
                     log.debug("key classification failed", exc_info=True)
-            if catalog is not None and model:
-                try:
-                    await catalog.maybe_auto_poll(model)  # its "found N models" line is no snackbar
-                except Exception:
-                    log.debug("auto-poll failed", exc_info=True)
 
         spawn(work())
 
