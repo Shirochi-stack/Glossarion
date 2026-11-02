@@ -72,6 +72,7 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 
 import json
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 from urllib.parse import unquote
 import re
 import sys
@@ -930,10 +931,10 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
                     image_files.append(file_path)
                 elif ext in {
                     '.epub', '.txt', '.pdf', '.sdlxliff',
-                    '.srt', '.ass', '.lrc',
+                    *SUBTITLE_EXTENSIONS,
                 }:
                     glossary_source = file_path
-                    if ext in {'.srt', '.ass', '.lrc'}:
+                    if ext in SUBTITLE_EXTENSIONS:
                         subtitle_info = self._subtitle_zip_output_info(file_path)
                         if isinstance(subtitle_info, dict):
                             archive_path = str(
@@ -2273,7 +2274,7 @@ Important rules:
                 pass
             try:
                 self.config['last_input_files'] = normalized
-                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.html', '.htm', '.xhtml', '.txt', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'))]
+                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.html', '.htm', '.xhtml', '.txt', '.pdf', '.md', '.sdlxliff', *SUBTITLE_EXTENSIONS))]
                 if source_files:
                     self.config['last_epub_path'] = source_files[0]
                 self.save_config(show_message=False)
@@ -2331,7 +2332,7 @@ Important rules:
                 # Subtitle ZIP extraction replaces the selected archive with
                 # temporary member paths. Include the original archive name so
                 # the one shared archive-level glossary can be auto-loaded.
-                if ext in {'.srt', '.ass', '.lrc'}:
+                if ext in SUBTITLE_EXTENSIONS:
                     subtitle_info = self._subtitle_zip_output_info(file_path)
                     if isinstance(subtitle_info, dict):
                         archive_path = str(
@@ -4124,7 +4125,7 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                 sdlxliff_files = [f for f in self.selected_files if f.lower().endswith('.sdlxliff')]
                 subtitle_files = [
                     f for f in self.selected_files
-                    if f.lower().endswith(('.srt', '.ass', '.lrc'))
+                    if f.lower().endswith(SUBTITLE_EXTENSIONS)
                 ]
                 
                 if csv_json_files:
@@ -4547,7 +4548,7 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'}:
+                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', *SUBTITLE_EXTENSIONS}:
                         # Process as EPUB/text/PDF/SDLXLIFF/subtitle input.
                         if len(subtitle_bundle_files) > 1:
                             self.append_log(

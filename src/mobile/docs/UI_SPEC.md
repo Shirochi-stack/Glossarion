@@ -517,7 +517,7 @@ Mobile-only string:
 On soft keyboards, Enter inserts a newline; you send with the button.
 
 **Supported attachment types** (desktop 5229–5238, plus the main-window list):
-- `.txt .epub .pdf .md .markdown .html .htm .xhtml .xml .json .csv .tsv .srt .ass .lrc .vtt .log .sdlxliff .zip .cbz`
+- `.txt .epub .pdf .md .markdown .html .htm .xhtml .xml .json .csv .tsv .srt .ass .ssa .lrc .vtt .sbv .log .sdlxliff .zip .cbz`
 - images: `.png .jpg .jpeg .gif .bmp .webp .tif .tiff .svg .ico .heic .heif .avif .jxl`
 - `.mp4`
 
@@ -937,7 +937,7 @@ When failures exist, a pinned error chip **"3 failed – Retry"** sits at the to
 - Elapsed
 - Potential issues (at most 4, shown as warning chips)
 
-**Output chips.** Compiled EPUB / PDF, `*_translated.txt`, glossary.csv, SRT/ASS/LRC, SDLXLIFF. Never `direct_text_stream_translated.txt`, the raw copy of a streamed reply that is already in the chat.
+**Output chips.** Compiled EPUB / PDF, `*_translated.txt`, glossary.csv, SRT/ASS/SSA/VTT/SBV/LRC, SDLXLIFF. Never `direct_text_stream_translated.txt`, the raw copy of a streamed reply that is already in the chat.
 - Tap: epub opens the Reader, pdf opens Share/open, text opens TextEditor, an image opens the viewer.
 
 **AttachmentActionsRow** (wraps; the first 3 are visible, the rest go under "More"):

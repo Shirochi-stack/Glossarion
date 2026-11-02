@@ -2,6 +2,7 @@
 """Shared helpers for per-book glossary storage."""
 
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 import shutil
 import sys
 import threading
@@ -37,9 +38,9 @@ _BACKGROUND_MIGRATION_LOCK = threading.Lock()
 _BACKGROUND_MIGRATION_THREADS = {}
 
 GLOSSARY_INPUT_SOURCE_EXTENSIONS = frozenset(
-    {".epub", ".zip", ".txt", ".pdf", ".srt", ".ass", ".lrc"}
+    {".epub", ".zip", ".txt", ".pdf", *SUBTITLE_EXTENSIONS}
 )
-SUBTITLE_INPUT_EXTENSIONS = frozenset({".srt", ".ass", ".lrc"})
+SUBTITLE_INPUT_EXTENSIONS = frozenset(SUBTITLE_EXTENSIONS)
 
 
 def resolve_glossary_input_sources(

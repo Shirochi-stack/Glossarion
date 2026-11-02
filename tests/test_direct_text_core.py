@@ -1605,7 +1605,7 @@ def _src_text(module):
     return (SRC / f"{module}.py").read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
 
 
-def _legacy_tg_text():
+def _legacy_tg_text(*, runnable=False):
     try:
         data = subprocess.run(["git", "show", f"{BASE_SHA}:src/translator_gui.py"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                               capture_output=True, check=True, timeout=120).stdout
@@ -1613,7 +1613,12 @@ def _legacy_tg_text():
         import pytest
 
         pytest.skip(f"git show {BASE_SHA[:12]}:src/translator_gui.py unavailable: {exc}")
-    return data.decode("utf-8-sig").replace("\r\n", "\n")
+    text = data.decode("utf-8-sig").replace("\r\n", "\n")
+    if runnable:
+        return text
+    from parity.approved_changes import shared_subtitle_lists
+
+    return shared_subtitle_lists(text)
 
 
 def _class_node(tree, name):
@@ -1898,7 +1903,7 @@ def _probe_results():
     if cached is not None:
         return cached
     pytest.importorskip("PySide6")
-    legacy_text = _legacy_tg_text()
+    legacy_text = _legacy_tg_text(runnable=True)
     root = Path(tempfile.mkdtemp(prefix="dtprobe_"))
     try:
         legacy_dir = root / "legacy_tg"

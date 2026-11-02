@@ -33,6 +33,7 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 import concurrent.futures
 import json
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 import sys
 from dataclasses import dataclass
 
@@ -385,7 +386,7 @@ class TextJobsMixin(JobHooksMixin):
                     self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
-                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff', '.srt', '.ass', '.lrc')):
+                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff', *SUBTITLE_EXTENSIONS)):
                     os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
                     self.append_log("📄 Processing as text file")
                 

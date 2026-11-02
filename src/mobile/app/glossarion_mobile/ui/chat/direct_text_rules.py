@@ -107,7 +107,7 @@ def _stream() -> Any:
 MOBILE_EXTRA_ATTACHMENT_EXTENSIONS = frozenset({".sdlxliff", ".zip", ".mp4"})
 
 #: UI_SPEC §2.12.1: attachments that get a Plan card first (unless "Skip plan").
-PLAN_EXTENSIONS = frozenset({".epub", ".pdf", ".cbz", ".zip", ".sdlxliff", ".srt", ".ass", ".lrc", ".vtt"})
+PLAN_EXTENSIONS = frozenset({".epub", ".pdf", ".cbz", ".zip", ".sdlxliff", ".srt", ".ass", ".ssa", ".lrc", ".vtt", ".sbv"})
 PLAN_TEXT_EXTENSIONS = frozenset({".txt", ".md", ".markdown"})
 PLAN_TEXT_THRESHOLD = 20_000
 
@@ -144,7 +144,7 @@ def attachment_icon(extension: str) -> str:
         return "PHOTO"
     if ext in VISION_ARCHIVE_ATTACHMENT_EXTENSIONS:
         return "COLLECTIONS"
-    if ext in {".srt", ".ass", ".lrc", ".vtt"}:
+    if ext in {".srt", ".ass", ".ssa", ".lrc", ".vtt", ".sbv"}:
         return "SUBTITLES"
     if ext == ".zip":
         return "FOLDER_ZIP"

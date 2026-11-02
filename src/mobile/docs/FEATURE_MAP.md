@@ -148,7 +148,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 2 | Browse folder + Deep scan | BatchPlanCard "Include subfolders" switch |  |
 | 3 | Input normalization & workspace collision rename | FileBridge copies with a " (2)" suffix | Automatic; originals are never renamed |
 | 4 | ZIP / CBZ / standalone HTML input conversion | Plan card "ZIP → EPUB on start" | Automatic |
-| 5 | Subtitle & synced-lyrics ZIP bundles (SRT/ASS/LRC) | Attach .zip → Plan card; Book › Chapters subtitle rows |  |
+| 5 | Subtitle & synced-lyrics ZIP bundles (SRT/ASS/SSA/VTT/SBV/LRC) | Attach .zip → Plan card; Book › Chapters subtitle rows |  |
 | 6 | PDF translation | Attach PDF → Plan card; Settings › PDF |  |
 | 7 | SDLXLIFF translation | Attach .sdlxliff → Plan card |  |
 | 8 | TXT/MD/JSON/CSV translation | Paste or attach in chat |  |
@@ -215,7 +215,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 2 | PDF input translation | Attach PDF; Settings › PDF › Input |  |
 | 3 | PDF alignment / RTL layout options | Settings › PDF › Input layout |  |
 | 4 | PDF output format (PDF vs EPUB) and PDF compile options | Settings › PDF |  |
-| 5 | Subtitle translation (SRT/ASS/LRC) | Attach → chat; result file chip |  |
+| 5 | Subtitle translation (SRT/ASS/SSA/VTT/SBV/LRC) | Attach → chat; result file chip |  |
 | 6 | Subtitle/lyrics ZIP bundle | Attach .zip → Plan card |  |
 | 7 | SDLXLIFF translation round-trip | Attach .sdlxliff; output chip; Tools › SDLXLIFF reviewer |  |
 | 8 | HTML / chapter ZIP / CBZ input → EPUB | Plan card note | Automatic |
@@ -1102,7 +1102,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 1 | TXT/MD/CSV/JSON translation | Chat |  |
 | 2 | PDF input extraction (fast_semantic / fast_layout / xhtml / absolute / image render modes, TOC grouping, images, CSS) | Settings › PDF › Input (render mode) | PyMuPDF |
 | 3 | PDF output generation | Settings › PDF › Output; Compile PDF | PyMuPDF |
-| 4 | Subtitle translation (SRT/ASS/LRC, bundles) | Chat attach |  |
+| 4 | Subtitle translation (SRT/ASS/SSA/VTT/SBV/LRC, bundles) | Chat attach |  |
 | 5 | SDLXLIFF translation | Chat attach; SDLXLIFF reviewer |  |
 | 6 | In-EPUB image translation (vision) and Vision OCR source prepass | Settings › Image & vision; Mode options › Vision |  |
 | 7 | Watermark detection/removal | Settings › Image & vision › Watermark | numpy / cv2 |

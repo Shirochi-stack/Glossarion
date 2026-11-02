@@ -192,8 +192,8 @@ CHAT_TEXT_SCALE_RANGE = (0.85, 1.5)
 # ModelSheet field -> chat override key (run_request.OVERRIDE_CONFIG_KEYS maps them to config keys)
 _SHEET_OVERRIDE_KEYS = {"model": "model", "profile": "profile", "language": "target_language"}
 _ATTACH_EXTENSIONS = [
-    "txt", "epub", "pdf", "md", "markdown", "html", "htm", "xhtml", "xml", "json", "csv", "tsv", "srt", "ass",
-    "lrc", "vtt", "log", "sdlxliff", "zip", "cbz", "mp4", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif",
+    "txt", "epub", "pdf", "md", "markdown", "html", "htm", "xhtml", "xml", "json", "csv", "tsv", "srt", "ass", "ssa",
+    "lrc", "vtt", "sbv", "log", "sdlxliff", "zip", "cbz", "mp4", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif",
     "tiff", "svg", "ico", "heic", "heif", "avif", "jxl",
 ]
 _IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif", "avif", "jxl"]

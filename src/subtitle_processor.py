@@ -1,7 +1,8 @@
-"""Structured SRT/ASS/LRC subtitle extraction and round-trip writing.
+"""Structured SRT/ASS/SSA/VTT/SBV/LRC subtitle extraction and round-trip writing.
 
 Only subtitle dialogue or timed lyrics are sent for translation. Cue timing,
-numbering, ASS headers/styles/event fields, LRC timestamps/metadata, line
+numbering, ASS/SSA headers/styles/event fields, WebVTT headers/notes/cue settings,
+LRC timestamps/metadata, line
 endings, and inline formatting tokens remain in the original template and are
 restored locally.
 """
@@ -9,6 +10,7 @@ restored locally.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -20,7 +22,9 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-SUBTITLE_EXTENSIONS = {".srt", ".ass", ".lrc"}
+#: Every format the subtitle pipeline translates. The other modules import this list rather than repeat it.
+SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sbv", ".lrc")
+SUBTITLE_FILE_PATTERNS = " ".join(f"*{extension}" for extension in SUBTITLE_EXTENSIONS)
 SUBTITLE_PROMPT_PROFILE_NAME = "Subtitle Translation"
 DEFAULT_SUBTITLE_TRANSLATION_PROMPT = (
     "You are a professional subtitle and synchronized-lyrics translator. "
@@ -53,6 +57,14 @@ _SRT_TIMESTAMP_RE = re.compile(
     r"^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*"
     r"\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}(?:\s+.*)?$"
 )
+_VTT_TIMESTAMP_RE = re.compile(
+    # WebVTT hours are optional and cue settings may follow the end time.
+    r"^\s*(?:\d+:)?\d{1,2}:\d{2}[,.]\d{1,3}\s*-->\s*"
+    r"(?:\d+:)?\d{1,2}:\d{2}[,.]\d{1,3}(?:\s+.*)?$"
+)
+_SBV_TIMESTAMP_RE = re.compile(
+    r"^\s*\d{1,3}:\d{2}:\d{2}\.\d{1,3}\s*,\s*\d{1,3}:\d{2}:\d{2}\.\d{1,3}\s*$"
+)
 _LRC_LEADING_TIMESTAMPS_RE = re.compile(
     # Standard LRC uses [mm:ss.xx]. Some producers emit milliseconds, comma
     # fractions, optional hours, or multiple timestamps for one lyric line.
@@ -61,7 +73,8 @@ _LRC_LEADING_TIMESTAMPS_RE = re.compile(
     r")+"
 )
 _PROTECTED_TOKEN_RE = re.compile(
-    r"<[^>\r\n]+>|\{[^{}\r\n]*\}|\\[Nnh]",
+    # [br] is the SBV line break, the entities are the escapes WebVTT defines.
+    r"<[^>\r\n]+>|\{[^{}\r\n]*\}|\\[Nnh]|\[br\]|&(?:amp|lt|gt|nbsp|lrm|rlm);",
     re.IGNORECASE,
 )
 _ASS_DRAWING_MODE_RE = re.compile(r"\\p(\d+)", re.IGNORECASE)
@@ -199,7 +212,7 @@ def extract_subtitle_archive(
     max_single_file_bytes: int = 32 * 1024 * 1024,
     max_total_bytes: int = 256 * 1024 * 1024,
 ) -> Dict[str, Any]:
-    """Safely extract SRT/ASS/LRC members from a ZIP without extractall."""
+    """Safely extract subtitle members from a ZIP without extractall."""
     os.makedirs(extraction_root, exist_ok=True)
     root = os.path.abspath(extraction_root)
     selected: List[Tuple[zipfile.ZipInfo, List[str]]] = []
@@ -440,6 +453,43 @@ def _extract_srt_spans(text: str) -> List[Tuple[int, int, str]]:
     return spans
 
 
+def _extract_blank_ended_cue_spans(
+    text: str, timing_re: "re.Pattern[str]"
+) -> List[Tuple[int, int, str]]:
+    """WebVTT and SBV: a cue is the lines after its timing, up to the first blank line.
+
+    What follows a blank line (a WebVTT cue id, NOTE, STYLE or REGION block) is never
+    dialogue, and none of those can hold a timing line.
+    """
+    lines = _line_records(text)
+    spans: List[Tuple[int, int, str]] = []
+    for index, line in enumerate(lines):
+        if not timing_re.match(str(line["text"])):
+            continue
+        cue_end = index + 1
+        while (
+            cue_end < len(lines)
+            and str(lines[cue_end]["text"]).strip()
+            and not timing_re.match(str(lines[cue_end]["text"]))
+        ):
+            cue_end += 1
+        # Tolerate files that omit the blank separator, as in _extract_srt_spans.
+        if (
+            cue_end < len(lines)
+            and cue_end > index + 1
+            and timing_re.match(str(lines[cue_end]["text"]))
+            and re.fullmatch(r"\s*\d+\s*", str(lines[cue_end - 1]["text"]))
+        ):
+            cue_end -= 1
+        if cue_end == index + 1:
+            continue
+        start = int(lines[index + 1]["start"])
+        end = int(lines[cue_end - 1]["content_end"])
+        if end > start:
+            spans.append((start, end, text[start:end]))
+    return spans
+
+
 def _ass_text_offset(payload: str, field_count: int) -> Optional[int]:
     if field_count <= 1:
         return 0
@@ -545,8 +595,12 @@ def _extract_subtitle_spans(
     """Dispatch structured dialogue extraction for a supported subtitle type."""
     if extension == ".srt":
         return _extract_srt_spans(source_text)
-    if extension == ".ass":
+    if extension in (".ass", ".ssa"):
         return _extract_ass_spans(source_text)
+    if extension == ".vtt":
+        return _extract_blank_ended_cue_spans(source_text, _VTT_TIMESTAMP_RE)
+    if extension == ".sbv":
+        return _extract_blank_ended_cue_spans(source_text, _SBV_TIMESTAMP_RE)
     if extension == ".lrc":
         return _extract_lrc_spans(source_text)
     raise ValueError(f"Unsupported subtitle extension: {extension}")
@@ -558,8 +612,10 @@ def _subtitle_text_without_protected_tokens(text: str, segment_index: int) -> st
     for item in protected:
         token = str(item.get("token") or "")
         value = str(item.get("value") or "")
-        if re.fullmatch(r"\\[Nn]", value):
+        if re.fullmatch(r"\\[Nn]|\[br\]", value):
             replacement = "\n"
+        elif value.startswith("&"):
+            replacement = html.unescape(value)
         elif value.casefold() == r"\h":
             replacement = " "
         else:
@@ -569,7 +625,7 @@ def _subtitle_text_without_protected_tokens(text: str, segment_index: int) -> st
 
 
 def extract_subtitle_text_segments(path: str) -> List[str]:
-    """Read only human-visible dialogue/lyrics from SRT, ASS, or LRC."""
+    """Read only human-visible dialogue/lyrics from a subtitle file."""
     extension = os.path.splitext(str(path or ""))[1].lower()
     if extension not in SUBTITLE_EXTENSIONS:
         raise ValueError(f"Unsupported subtitle extension: {extension}")
@@ -659,6 +715,20 @@ def _pack_batches(
         batches.append(segments[start:best_end])
         start = best_end
     return batches
+
+
+def interleave_bundle_batches(items: List[Any], source_of: Any) -> List[Any]:
+    """Queue a ZIP's batches one per file in turn, each file's batches in their order.
+
+    File by file, every worker stays on the first file until its batches run out, so
+    a ZIP of files with several batches each translates one file after another.
+    """
+    by_source: Dict[Any, List[Any]] = {}
+    for item in items:
+        by_source.setdefault(source_of(item), []).append(item)
+    queues = list(by_source.values())
+    deepest = max((len(queue) for queue in queues), default=0)
+    return [queue[depth] for depth in range(deepest) for queue in queues if depth < len(queue)]
 
 
 def _subtitle_extraction_worker_count(source_count: int) -> int:
@@ -1431,7 +1501,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Write translated SRT/ASS/LRC from Glossarion JSON batches."
+        description="Write translated SRT/ASS/SSA/VTT/SBV/LRC from Glossarion JSON batches."
     )
     parser.add_argument("output_dir")
     parser.add_argument("--manifest", default=None)

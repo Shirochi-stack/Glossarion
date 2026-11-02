@@ -88,7 +88,7 @@ log = logging.getLogger("glossarion.files")
 
 #: Desktop input filter (translator_gui Browse + the Direct Text attachment extras).
 IMPORT_EXTENSIONS = (
-    "epub", "zip", "cbz", "pdf", "txt", "json", "csv", "md", "sdlxliff", "xliff", "srt", "ass", "lrc", "vtt",
+    "epub", "zip", "cbz", "pdf", "txt", "json", "csv", "md", "sdlxliff", "xliff", "srt", "ass", "ssa", "lrc", "vtt", "sbv",
     "html", "htm", "xhtml", "png", "jpg", "jpeg", "gif", "bmp", "webp", "mp4",
 )
 #: What the Library accepts as raw books (epub_library ``_import_paths`` raw target).

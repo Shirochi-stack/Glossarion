@@ -92,6 +92,7 @@ if __name__ == '__main__':
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS, SUBTITLE_FILE_PATTERNS
 import tempfile
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
@@ -3991,11 +3992,11 @@ class _InputOutputDialog(DirectTextStreamMixin, ChatStoreMixin, QDialog):
             "",
             (
                 "Supported files (*.txt *.epub *.pdf *.cbz *.md *.markdown *.html *.htm "
-                "*.xhtml *.xml *.json *.csv *.tsv *.srt *.ass *.lrc *.vtt *.log *.png *.jpg "
+                f"*.xhtml *.xml *.json *.csv *.tsv {SUBTITLE_FILE_PATTERNS} *.log *.png *.jpg "
                 "*.jpeg *.gif *.bmp *.webp *.tif *.tiff *.svg *.ico *.heic *.heif "
                 "*.avif *.jxl);;"
                 "Text files (*.txt *.md *.markdown *.html *.htm *.xhtml *.xml *.json "
-                "*.csv *.tsv *.srt *.ass *.lrc *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
+                f"*.csv *.tsv {SUBTITLE_FILE_PATTERNS} *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
                 "Comic Book archives (*.cbz);;"
                 "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tif *.tiff "
                 "*.svg *.ico *.heic *.heif *.avif *.jxl)"
@@ -10929,7 +10930,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             if not urls:
                 return
             paths = []
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff', '.srt', '.ass', '.lrc',
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff', *SUBTITLE_EXTENSIONS,
                                     '.html', '.htm', '.xhtml', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
                                     '.bmp', '.webp', '.mp4'}
             for url in urls:
@@ -20907,7 +20908,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         if chunk and total and t and t > 1:
                             chunk_part = f" {chunk}/{total}"
 
-                        if source_file.lower().endswith((".srt", ".ass", ".lrc")):
+                        if source_file.lower().endswith(SUBTITLE_EXTENSIONS):
                             return (
                                 f"{source_file} [batch {chapter}]"
                                 f"{chunk_part}{retry_suffix}"
@@ -21044,7 +21045,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         if chapter is not None:
                             # Build a compact per-chapter token (keep chunk ratio only when total > 1)
                             is_subtitle_source = source_file.lower().endswith(
-                                (".srt", ".ass", ".lrc")
+                                SUBTITLE_EXTENSIONS
                             )
                             token = (
                                 f"{source_file} [{chapter}]"
@@ -24369,6 +24370,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                srts = [p for p in files if p.lower().endswith('.srt')]
                asses = [p for p in files if p.lower().endswith('.ass')]
                lrcs = [p for p in files if p.lower().endswith('.lrc')]
+               ssas = [p for p in files if p.lower().endswith('.ssa')]
+               vtts = [p for p in files if p.lower().endswith('.vtt')]
+               sbvs = [p for p in files if p.lower().endswith('.sbv')]
 
                summary_parts = []
                if epubs:
@@ -24391,6 +24395,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                    summary_parts.append(f"{len(asses)} ASS")
                if lrcs:
                    summary_parts.append(f"{len(lrcs)} LRC")
+               if ssas:
+                   summary_parts.append(f"{len(ssas)} SSA")
+               if vtts:
+                   summary_parts.append(f"{len(vtts)} VTT")
+               if sbvs:
+                   summary_parts.append(f"{len(sbvs)} SBV")
                if images:
                    summary_parts.append(f"{len(images)} images")
 
@@ -26078,7 +26088,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         supported_extensions = {
             '.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md',
             '.html', '.htm', '.xhtml',
-            '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif',
+            '.sdlxliff', *SUBTITLE_EXTENSIONS, '.png', '.jpg', '.jpeg', '.gif',
             '.bmp', '.webp', '.mp4',
         }
         for url in urls:
@@ -26646,7 +26656,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.zip *.cbz *.pdf *.html *.htm *.xhtml *.txt *.json *.csv *.md *.sdlxliff *.srt *.ass *.lrc *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
+            f"Supported files (*.epub *.zip *.cbz *.pdf *.html *.htm *.xhtml *.txt *.json *.csv *.md *.sdlxliff {SUBTITLE_FILE_PATTERNS} *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
             "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
             "ZIP files (*.zip);;"
@@ -26654,7 +26664,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "PDF files (*.pdf);;"
             "HTML files (*.html *.htm *.xhtml);;"
             "Text files (*.txt *.json *.csv *.md);;"
-            "Subtitle and lyric files (*.srt *.ass *.lrc);;"
+            f"Subtitle and lyric files ({SUBTITLE_FILE_PATTERNS});;"
             "SDLXLIFF files (*.sdlxliff);;"
             "CSV files (*.csv);;"
             "Markdown files (*.md);;"
@@ -26686,7 +26696,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv', '.md', '.sdlxliff', *SUBTITLE_EXTENSIONS, '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -26710,7 +26720,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
                 QMessageBox.warning(self, "No Files Found", 
-                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, HTML, HTM, XHTML, SDLXLIFF, SRT, ASS, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, HTML, HTM, XHTML, SDLXLIFF, SRT, ASS, SSA, VTT, SBV, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
 
     def clear_file_selection(self):
         """Clear all selected files"""
@@ -26939,6 +26949,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             srts = [p for p in processed_paths if p.lower().endswith('.srt')]
             asses = [p for p in processed_paths if p.lower().endswith('.ass')]
             lrcs = [p for p in processed_paths if p.lower().endswith('.lrc')]
+            ssas = [p for p in processed_paths if p.lower().endswith('.ssa')]
+            vtts = [p for p in processed_paths if p.lower().endswith('.vtt')]
+            sbvs = [p for p in processed_paths if p.lower().endswith('.sbv')]
             
             summary_parts = []
             if epubs:
@@ -26959,6 +26972,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 summary_parts.append(f"{len(asses)} ASS")
             if lrcs:
                 summary_parts.append(f"{len(lrcs)} LRC")
+            if ssas:
+                summary_parts.append(f"{len(ssas)} SSA")
+            if vtts:
+                summary_parts.append(f"{len(vtts)} VTT")
+            if sbvs:
+                summary_parts.append(f"{len(sbvs)} SBV")
             if images:
                 summary_parts.append(f"{len(images)} images")
             

@@ -80,7 +80,9 @@ def legacy_source():
 
     sha = BASE_SHA
     try:
-        return sha, freeze_legacy.git_show_text(sha, "src/translator_gui.py")
+        from parity.approved_changes import shared_subtitle_lists
+
+        return sha, shared_subtitle_lists(freeze_legacy.git_show_text(sha, "src/translator_gui.py").replace("\r\n", "\n"))
     except Exception as exc:  # pragma: no cover - shallow clone
         pytest.skip(f"git show {sha[:12]}:src/translator_gui.py unavailable: {exc}")
 

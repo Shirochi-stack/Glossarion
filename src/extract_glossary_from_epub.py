@@ -3538,7 +3538,7 @@ def is_subtitle_glossary_source(path: str) -> bool:
     try:
         from subtitle_processor import SUBTITLE_EXTENSIONS
     except Exception:
-        SUBTITLE_EXTENSIONS = {".srt", ".ass", ".lrc"}
+        SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sbv", ".lrc"}
     if extension in SUBTITLE_EXTENSIONS:
         return True
     if extension != ".zip" or not os.path.isfile(path):
@@ -7908,7 +7908,7 @@ def main(log_callback=None, stop_callback=None):
         parser.add_argument(
             '--epub',
             required=True,
-            help='Path to EPUB/TXT/PDF/SDLXLIFF/SRT/ASS/LRC/subtitle ZIP file',
+            help='Path to EPUB/TXT/PDF/SDLXLIFF/SRT/ASS/SSA/VTT/SBV/LRC/subtitle ZIP file',
         )
         parser.add_argument('--output', required=True, help='Output glossary path')
         parser.add_argument('--config', help='Config file path')

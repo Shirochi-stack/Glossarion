@@ -32,6 +32,7 @@ import copy
 import hashlib
 import json
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 from urllib.parse import unquote
 import re
 import sys
@@ -1524,7 +1525,7 @@ class ProgressViewMixin:
     def _path_is_subtitle_progress_source(self, file_path):
         """Return whether a source path should use subtitle progress semantics."""
         extension = os.path.splitext(str(file_path or ''))[1].lower()
-        if extension in ('.srt', '.ass', '.lrc'):
+        if extension in SUBTITLE_EXTENSIONS:
             return True
         return extension == '.zip' and self._zip_is_subtitle_archive(file_path)
 
@@ -2085,7 +2086,7 @@ class ProgressViewMixin:
             entry.get('output_file'),
             entry.get('original_basename'),
         ):
-            if os.path.splitext(str(candidate or ''))[1].lower() in ('.srt', '.ass', '.lrc'):
+            if os.path.splitext(str(candidate or ''))[1].lower() in SUBTITLE_EXTENSIONS:
                 return True
         return False
 
@@ -3234,7 +3235,7 @@ class ProgressViewMixin:
                     )
                     is_subtitle_output = (
                         subtitle_source
-                        and os.path.splitext(fname)[1].lower() in ('.srt', '.ass', '.lrc')
+                        and os.path.splitext(fname)[1].lower() in SUBTITLE_EXTENSIONS
                     )
                     if is_subtitle_output:
                         subtitle_auto_index += 1
@@ -4122,12 +4123,12 @@ class ProgressViewMixin:
                     ]
                     subtitle_auto_index = 0
                     subtitle_source = str(data.get('file_path') or '').lower().endswith(
-                        ('.srt', '.ass', '.lrc', '.zip')
+                        (*SUBTITLE_EXTENSIONS, '.zip')
                     )
                     for fname in sorted(files):
                         is_subtitle_output = (
                             subtitle_source
-                            and os.path.splitext(fname)[1].lower() in ('.srt', '.ass', '.lrc')
+                            and os.path.splitext(fname)[1].lower() in SUBTITLE_EXTENSIONS
                         )
                         if is_subtitle_output:
                             subtitle_auto_index += 1
@@ -6607,7 +6608,7 @@ def build_book_progress(source_path, config=None, *, owner=None, fixed_output_di
         return None
     if show_special_files is None:
         show_special_files = str(source_path).lower().endswith(
-            ('.txt', '.pdf', '.csv', '.json', '.srt', '.ass', '.lrc', '.zip')
+            ('.txt', '.pdf', '.csv', '.json', *SUBTITLE_EXTENSIONS, '.zip')
         )
     if show_model_info is None:
         show_model_info = owner._get_retranslation_show_model_info_state()
