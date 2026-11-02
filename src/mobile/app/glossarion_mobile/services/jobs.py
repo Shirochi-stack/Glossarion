@@ -153,6 +153,8 @@ JOB_BUFFERS_KEPT = 4  # finished jobs whose LogBuffer stays in memory
 JOB_MESSAGES_KEPT = 4000  # whole log messages a job keeps for listeners that attach late
 LAST_LINE_CHARS = 240
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
+#: Lines written for the request stream's parser, not for people: the log file keeps them, Logs does not
+STREAM_MACHINE_MARKERS = ("[DIRECT_TEXT_RESPONSE_PAYLOAD]", "[DIRECT_TEXT_GLOSSARY_STREAM_START]")
 ANSWERS_KEPT = 64  # answered questions remembered, so a repeated tap of the same answer stays a no-op
 
 #: Lines the auth modules print when a job has no usable login and falls back to the interactive
@@ -3174,12 +3176,14 @@ class JobService:
         # The request stream gets every message whole, blank ones included, like the desktop
         # Direct Text listener (``append_log`` -> ``_on_log_line(message)``): the classifier
         # splits it itself and keeps blank lines inside streamed text (paragraph breaks).
-        # Its "suppress-main-log" answer covers the whole message.
-        suppress = False
+        # Its "suppress-main-log" answer marks the whole message as streamed text. The desktop hides
+        # that from its log for the Direct Text dialog; here Logs shows it for every provider (owner),
+        # and only the job line and the issue chip skip it.
+        streamed_text = False
         stream = job.stream
         if stream is not None:
             try:
-                suppress = stream.feed(raw) == "suppress-main-log"
+                streamed_text = stream.feed(raw) == "suppress-main-log"
             except Exception:
                 log.debug("request stream rejected a message", exc_info=True)
         if not raw.strip():
@@ -3197,11 +3201,13 @@ class JobService:
                 job.sign_in_flagged = True
                 self._post(self._deliver_event, job.id, "sign_in_required",
                            sign_in_event(self._job_model(job), provider, line))
-            if suppress:
+            if line.lstrip().startswith(STREAM_MACHINE_MARKERS):
                 continue
             buffer = job.buffer
             if buffer is not None:
                 buffer.append(line, kind)
+            if streamed_text:
+                continue
             job.last_line = line[:LAST_LINE_CHARS]
             self._note_issue(job, line)
 

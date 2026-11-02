@@ -1606,6 +1606,19 @@ def test_resume_runs_with_the_chats_model_now(desktop_store_cls, tmp_path):
     adapter.new_chat_seed = lambda last_used: {}  # the All-chats model changed after that pick: it wins
     book = jobs.resume_params(JobSpec("translate", "Book", (), sent, {"type": "library"}))
     assert "model" not in book["config_overrides"]
+    # Owner: Resume on the Jobs page kept authnan/ after the drawer moved to authgpt/: the drawer's model wins,
+    # also over a chat's own model and for every translating job; a chat's own Resume keeps the chat's (resubmit).
+    runs.shown_model = lambda: "authgpt/gpt-6-luna"
+    for kind, origin in ((DIRECT_TEXT_JOB_KIND, {"type": "chat", "cid": "5"}), ("translate", {"type": "chat", "cid": "5"}),
+                         ("translate", {"type": "library"}), ("single_chapter", {"type": "library"}),
+                         ("retranslate", {"type": "library"}), ("extract_glossary", {"type": "library"})):
+        out = jobs.resume_params(JobSpec(kind, "Book", (), sent, origin))
+        assert out["model"] == "authgpt/gpt-6-luna" and out["config_overrides"]["model"] == "authgpt/gpt-6-luna", kind
+        assert out["config_overrides"]["active_profile"] == "P", kind
+    assert sent["config_overrides"]["model"] == "gpt-welcome"  # the stored spec is not changed
+    assert runs.with_current_model("5", sent)["config_overrides"]["model"] == "gpt-chat"
+    assert jobs.resume_params(JobSpec("manga", "Pages", (), sent, {"type": "library"})) is None  # chose its own
+    runs.shown_model = lambda: None
     assert jobs.resume_params(JobSpec("manga", "Pages", (), sent, {"type": "library"})) is None  # chose its own model
     runs.detach()
     assert jobs.resume_params is None

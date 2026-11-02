@@ -135,6 +135,8 @@ STARTING_ELSEWHERE = "“{name}” is already starting in another chat"
 _GLOSSARY_QUESTION_KINDS = GLOSSARY_QUESTION_KINDS
 #: JobService kinds a chat run can be (Direct Text send, generative-only run).
 CHAT_JOB_KINDS = (DIRECT_TEXT_JOB_KIND, GENERATE_MEDIA_JOB_KIND)
+#: Jobs whose Resume on the Jobs page follows the model the drawer shows (image, manga and media jobs chose theirs)
+RESUME_SHOWN_MODEL_KINDS = (DIRECT_TEXT_JOB_KIND, "translate", "single_chapter", "retranslate", "extract_glossary")
 #: ``last_job_ending`` values whose job card still offers Resume (running, stopped, failed,
 #: interrupted, discarded) or Retry failed (done with failed chapters, "issues"), UI_SPEC §2.12.4.
 RESUMABLE_ENDINGS = ("live", "stopped", "failed", "interrupted", "discarded", "issues")
@@ -305,12 +307,14 @@ class ChatRuns:
         run_io: Optional[Callable[..., Any]] = None,  # async run_io(fn, *args)
         temp_dir: Optional[str] = None,
         model_name: Callable[[], Optional[str]] = lambda: None,
+        shown_model: Callable[[], Optional[str]] = lambda: None,  # the model the drawer shows
     ) -> None:
         self.store = store
         self.jobs = jobs
         self.run_io = run_io
         self.temp_dir = temp_dir
         self.model_name = model_name
+        self.shown_model = shown_model
         self._lock = threading.RLock()
         self.runs: dict = {}  # cid -> ChatRun (live or the last finished one)
         self.status: dict = {}  # cid -> last status caption when idle
@@ -388,10 +392,22 @@ class ChatRuns:
         with the Run options its stopped card shows by default ("Only for this run" off: the settings now, never
         the Send-time values the Jobs page cannot show). A translation run follows the model now as well: the
         chat's that started it, else the one picked last, else the global one, never a model pinned when it was
-        queued."""
+        queued. The Jobs page has no chat of its own, so a translating job runs on the model the drawer shows
+        when it is known (owner: Resume kept authnan/ after the drawer moved to authgpt/). A chat's own Resume
+        goes through ``resubmit`` and keeps that chat's model."""
         origin = getattr(spec, "origin", None) or {}
         kind = getattr(spec, "kind", None)
         params = dict(getattr(spec, "params", None) or {})
+        shown = str(self.shown_model() or "").strip() if kind in RESUME_SHOWN_MODEL_KINDS else ""
+        if shown:
+            overrides = params.get("config_overrides")
+            overrides = dict(overrides) if isinstance(overrides, Mapping) else {}
+            if kind == DIRECT_TEXT_JOB_KIND:
+                overrides = with_run_config(overrides, {})
+            overrides["model"] = shown
+            params["config_overrides"] = overrides
+            params["model"] = shown
+            return params
         if kind == "translate":
             from glossarion_mobile.services.jobs import MODEL_CHAT_PARAM
 

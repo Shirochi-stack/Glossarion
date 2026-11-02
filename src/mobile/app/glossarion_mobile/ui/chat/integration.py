@@ -321,7 +321,8 @@ class ChatFeature:
         data_dir = getattr(paths, "data", None)
         temp_dir = os.path.join(str(data_dir), "direct_text_runs") if data_dir else None
         self.runs = ChatRuns(self.chats, self.jobs, run_io=self._run_io, temp_dir=temp_dir,
-                             model_name=lambda: self.env.config_get("model", None) if self.env else None)
+                             model_name=lambda: self.env.config_get("model", None) if self.env else None,
+                             shown_model=self._shown_model)
         self.env: Optional[ChatEnv] = None
         self._fallback_factory: Optional[Callable[[RouteMatch], Any]] = None
         self._file_picker: Any = None
@@ -366,6 +367,11 @@ class ChatFeature:
             dispatcher.post(fn, *args)
         else:
             fn(*args)
+
+    def _shown_model(self) -> Optional[str]:
+        """The model the drawer's chip shows (the open chat's, else the global one)."""
+        state = getattr(getattr(self, "app", None), "state", None)
+        return state.chat_context.value.model if state is not None else None
 
     async def _run_io(self, fn: Callable[..., Any], *args: Any) -> Any:
         dispatcher = self.dispatcher

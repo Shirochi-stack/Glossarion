@@ -865,7 +865,7 @@ def test_logs_go_to_buffer_and_file_and_feed_the_shared_request_stream(tmp_path,
 
         def feed(self, line):
             self.fed.append(line)
-            if line.startswith("[DIRECT_TEXT_RESPONSE_PAYLOAD]"):
+            if line.startswith("[DIRECT_TEXT_RESPONSE_PAYLOAD]") or line.startswith("Streamed"):
                 return "suppress-main-log"
             if "Sending API call" in line:
                 self.segs.append({"label": f"Chapter {len(self.segs) + 1}", "phase": "processing", "text": "",
@@ -887,10 +887,13 @@ def test_logs_go_to_buffer_and_file_and_feed_the_shared_request_stream(tmp_path,
     fake_stream.make_stream = make_stream
     monkeypatch.setitem(sys.modules, "direct_text_stream", fake_stream)
     service, backend = make_service(tmp_path)
+    lines_during_stream = []
 
     def chatty(owner, request):
         owner.host.log("📤 Sending API call now")
         owner.host.log("[DIRECT_TEXT_RESPONSE_PAYLOAD] {\"t\": 1}")
+        owner.host.log("Streamed text the desktop hides from its log")
+        lines_during_stream.append(service.snapshot().last_line)
         owner.host.log("Hello world.\n\nSecond paragraph")  # streamed text keeps its blank line
         owner.host.log("")
         owner.host.log("❌ error: something", kind="error")
@@ -907,6 +910,9 @@ def test_logs_go_to_buffer_and_file_and_feed_the_shared_request_stream(tmp_path,
     buffer = service.log_buffer(job_id)
     texts = [line.text for line in buffer.snapshot()]
     assert "📤 Sending API call now" in texts and not any("PAYLOAD" in t for t in texts)
+    # Owner: Logs shows the stream for every provider; hiding it only made sense for the desktop's Direct Text
+    assert "Streamed text the desktop hides from its log" in texts
+    assert lines_during_stream == ["📤 Sending API call now"]  # the job line never shows the book's text
     assert "Second paragraph" in texts and "" not in texts  # the buffer and the file keep non-blank lines
     assert [line.kind for line in buffer.snapshot() if line.text.startswith("❌")] == ["error"]
     file_lines = service.read_log_tail(job_id)
