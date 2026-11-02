@@ -340,16 +340,15 @@ class MobileConfigStore:
             return self._reader(path, decrypt=decrypt)
         import config_store
 
-        return config_store.load_config(path, decrypt=decrypt)
+        return config_store.load_config_retrying(path, decrypt=decrypt)
 
     def load(self) -> dict:
         """Read and decrypt config.json (blocking; call it off the UI loop). Returns a snapshot.
 
         A missing file is an empty config (fresh install). A file that is not a
-        JSON object is copied into ``config_backups`` first (so it can be
-        restored from Backup & restore) and then treated as empty, like the
-        desktop's ``except: config = {}``. A file that cannot be read at all
-        makes the store read-only.
+        JSON object is kept aside and the newest valid backup restored, like the
+        desktop (``config_store.recover_unreadable_config``); without one it starts
+        empty. A file that cannot be read at all makes the store read-only.
         """
         path = self.path
         raw: dict = {}
@@ -367,10 +366,17 @@ class MobileConfigStore:
         except FileNotFoundError:
             raw, data = {}, {}
         except (ValueError, UnicodeDecodeError) as exc:  # json.JSONDecodeError is a ValueError
-            exists = True
             raw, data = {}, {}
-            error = f"config.json could not be parsed ({type(exc).__name__}: {exc}); starting from defaults"
-            corrupt_backup = self._backup_corrupt(path)
+            recovery = self._recover(path, exc)
+            corrupt_backup = recovery["corrupt_copy"]
+            read_only = recovery["state"] == "protected"
+            outcome = "starting from defaults"
+            if recovery["state"] == "restored":
+                raw = self._read(path, decrypt=False)
+                data = self._read(path, decrypt=True)
+                outcome = f"restored settings from backup {recovery['backup']}"
+            error = f"config.json could not be parsed ({type(exc).__name__}: {exc}); {outcome}"
+            exists = os.path.exists(path)
         except OSError as exc:
             exists = os.path.exists(path)
             raw, data = {}, {}
@@ -400,14 +406,10 @@ class MobileConfigStore:
         """Re-read config.json (after a restore/import); unsaved edits are dropped."""
         return self.load()
 
-    def _backup_corrupt(self, path: str) -> Optional[str]:
-        try:
-            import config_store
+    def _recover(self, path: str, load_error: Exception) -> dict:
+        import config_store
 
-            return config_store.backup_config_file(path)
-        except Exception as exc:
-            log.warning("could not back up the unreadable config.json: %s", exc)
-            return None
+        return config_store.recover_unreadable_config(path, load_error, decrypt=False)
 
     @staticmethod
     def _changed_keys(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:

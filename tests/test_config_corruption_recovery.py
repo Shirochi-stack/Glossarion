@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ def config_path(tmp_path, monkeypatch):
     path = tmp_path / "cfg" / "config.json"
     path.parent.mkdir()
     monkeypatch.setattr(app_paths, "CONFIG_FILE", str(path))
+    monkeypatch.setattr(config_store, "READ_RETRY_SECONDS", 0)
+    monkeypatch.setattr(app_paths, "_WRITE_PROTECTED_FILES", set())
     return path
 
 
@@ -121,6 +124,282 @@ def test_desktop_startup_uses_the_recovering_loader():
     # The old block reset the config to {} on any error (a failed prompt fix too), then wrote
     # that over config.json; now only a config that never loaded becomes {}.
     assert "if not isinstance(getattr(self, 'config', None), dict):\n                self.config = {}" in block
+
+
+# ---------------------------------------------------------------------------
+# Looking again before config.json counts as unreadable
+# ---------------------------------------------------------------------------
+
+def _fail_reads(monkeypatch, *errors):
+    """``load_config`` raises *errors* one per call, then reads the file for real."""
+    real_load = config_store.load_config
+    pending = list(errors)
+    calls = []
+
+    def load(path=None, *, decrypt=True):
+        calls.append(path)
+        if pending:
+            raise pending.pop(0)
+        return real_load(path, decrypt=decrypt)
+
+    monkeypatch.setattr(config_store, "load_config", load)
+    return calls
+
+
+@pytest.mark.parametrize("error", [PermissionError(13, "locked"), json.JSONDecodeError("half written", "", 0)])
+def test_a_read_that_works_on_a_later_try_touches_nothing(config_path, monkeypatch, error):
+    config_path.write_text('{"model": "current"}', encoding="utf-8")
+    _write_backup(config_path, "config_20261028_120000.json.bak", '{"model": "old"}', age_hours=2)
+    calls = _fail_reads(monkeypatch, error, error)
+
+    assert config_store.load_config_or_restore_backup(str(config_path)) == ({"model": "current"}, None)
+
+    assert len(calls) == 3
+    assert config_path.read_text(encoding="utf-8") == '{"model": "current"}' and not _corrupt_copies(config_path)
+
+
+def test_every_try_is_used_before_a_backup_is_restored(config_path, monkeypatch):
+    config_path.write_text("not json", encoding="utf-8")
+    _write_backup(config_path, "config_20261028_120000.json.bak", '{"model": "saved"}', age_hours=2)
+    real_load = config_store.load_config
+    calls = []
+
+    def load(path=None, *, decrypt=True):
+        calls.append(path)
+        return real_load(path, decrypt=decrypt)
+
+    monkeypatch.setattr(config_store, "load_config", load)
+    config, _notice = config_store.load_config_or_restore_backup(str(config_path))
+    assert config == {"model": "saved"}
+    assert len(calls) == config_store.READ_ATTEMPTS + 1  # and once for the restored file
+
+
+def test_a_first_run_does_not_wait(config_path, monkeypatch):
+    calls = _fail_reads(monkeypatch)
+    assert config_store.load_config_or_restore_backup(str(config_path)) == ({}, None)
+    assert len(calls) == 1
+
+
+def test_a_missing_config_with_backups_is_looked_for_again(config_path, monkeypatch):
+    _write_backup(config_path, "config_20261028_120000.json.bak", '{"model": "old"}', age_hours=2)
+    real_load = config_store.load_config
+
+    def load(path=None, *, decrypt=True):
+        if not config_path.exists():
+            config_path.write_text('{"model": "back"}', encoding="utf-8")
+            raise FileNotFoundError(path)
+        return real_load(path, decrypt=decrypt)
+
+    monkeypatch.setattr(config_store, "load_config", load)
+    assert config_store.load_config_or_restore_backup(str(config_path)) == ({"model": "back"}, None)
+
+
+def test_a_locked_config_is_never_overwritten(config_path, monkeypatch):
+    original = '{"model": "my settings"}'
+    config_path.write_text(original, encoding="utf-8")
+    _write_backup(config_path, "config_20261028_120000.json.bak", '{"model": "saved"}', age_hours=2)
+    _fail_reads(monkeypatch, *[PermissionError(13, "locked")] * config_store.READ_ATTEMPTS)
+
+    config, notice = config_store.load_config_or_restore_backup(str(config_path))
+
+    assert config == {"model": "saved"}
+    assert "config_20261028_120000.json.bak" in notice and "not be saved" in notice
+    assert config_path.read_text(encoding="utf-8") == original and not _corrupt_copies(config_path)
+    with pytest.raises(PermissionError):
+        app_paths._atomic_json_write(str(config_path), {"auto_update_check": True})
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_a_locked_config_without_backups_is_not_overwritten_either(config_path, monkeypatch):
+    original = '{"model": "my settings"}'
+    config_path.write_text(original, encoding="utf-8")
+    _fail_reads(monkeypatch, *[PermissionError(13, "locked")] * config_store.READ_ATTEMPTS)
+
+    config, notice = config_store.load_config_or_restore_backup(str(config_path))
+
+    assert config == {} and "defaults" in notice
+    with pytest.raises(PermissionError):
+        config_store.save_config_file({"model": "default"}, str(config_path), backup=False)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_a_corrupt_config_that_cannot_be_kept_is_not_replaced(config_path, monkeypatch):
+    config_path.write_text("not json", encoding="utf-8")
+    _write_backup(config_path, "config_20261028_120000.json.bak", '{"model": "saved"}', age_hours=2)
+    monkeypatch.setattr(config_store, "move_corrupt_config_aside", lambda path=None: None)
+
+    config, notice = config_store.load_config_or_restore_backup(str(config_path))
+
+    assert config == {"model": "saved"} and notice
+    assert config_path.read_text(encoding="utf-8") == "not json"
+
+
+def test_other_files_stay_writable_while_config_is_protected(config_path, monkeypatch):
+    config_path.write_text("{}", encoding="utf-8")
+    _fail_reads(monkeypatch, *[PermissionError(13, "locked")] * config_store.READ_ATTEMPTS)
+    config_store.load_config_or_restore_backup(str(config_path))
+    other = config_path.parent / "other.json"
+    app_paths._atomic_json_write(str(other), {"a": 1})
+    assert json.loads(other.read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_a_console_that_cannot_print_does_not_stop_the_recovery(config_path, monkeypatch):
+    config_path.write_text("not json", encoding="utf-8")
+    _write_backup(config_path, "config_20261028_120000.json.bak", '{"model": "saved"}', age_hours=2)
+
+    def refuse(*_args, **_kwargs):
+        raise UnicodeEncodeError("cp1252", "x", 0, 1, "cannot encode")
+
+    monkeypatch.setattr("builtins.print", refuse)
+    config, notice = config_store.load_config_or_restore_backup(str(config_path))
+    assert config == {"model": "saved"} and notice
+
+
+def test_desktop_startup_protects_a_config_that_never_loaded():
+    source = (Path(__file__).resolve().parents[1] / "src" / "translator_gui.py").read_text(encoding="utf-8")
+    start = source.index("self.config_file_path = CONFIG_FILE")
+    block = source[start:source.index("self._init_config_state()", start)]
+    assert "protect_file_from_writes(CONFIG_FILE)" in block
+
+
+# ---------------------------------------------------------------------------
+# Writers holding part of the settings (bubble_detector, local_inpainter)
+# ---------------------------------------------------------------------------
+
+def test_update_config_file_keeps_the_rest_of_the_file(config_path):
+    config_path.write_text('{"model": "mine", "api_key": "ENC:x"}', encoding="utf-8")
+    config_store.update_config_file({"bubble_model_path": "m.pt"}, str(config_path))
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "model": "mine", "api_key": "ENC:x", "bubble_model_path": "m.pt"}
+
+
+@pytest.mark.parametrize("content", ["not json", "[1]"])
+def test_update_config_file_writes_nothing_over_an_unreadable_file(config_path, content):
+    config_path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError):
+        config_store.update_config_file({"bubble_model_path": "m.pt"}, str(config_path))
+    assert config_path.read_text(encoding="utf-8") == content
+
+
+def test_update_config_file_creates_a_missing_file(config_path):
+    config_store.update_config_file({"bubble_model_path": "m.pt"}, str(config_path))
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {"bubble_model_path": "m.pt"}
+
+
+def test_a_bubble_detector_that_failed_to_load_does_not_wipe_the_config(config_path, monkeypatch):
+    bubble_detector = pytest.importorskip("bubble_detector")
+    config_path.write_text('{"model": "mine", "api_key": "ENC:x"}', encoding="utf-8")
+    # The state BubbleDetector._load_config leaves after a failed read, then its model path save.
+    detector = types.SimpleNamespace(config={"bubble_model_path": "m.pt"}, config_path=str(config_path))
+    bubble_detector.BubbleDetector._save_config(detector)
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "model": "mine", "api_key": "ENC:x", "bubble_model_path": "m.pt"}
+    config_path.write_text("half written", encoding="utf-8")
+    bubble_detector.BubbleDetector._save_config(detector)
+    assert config_path.read_text(encoding="utf-8") == "half written"
+
+
+def test_an_inpainter_save_does_not_wipe_an_unreadable_config(config_path):
+    local_inpainter = pytest.importorskip("local_inpainter")
+    config_path.write_text("half written", encoding="utf-8")
+    inpainter = types.SimpleNamespace(config={"inpainter_model": "lama"}, config_path=str(config_path))
+    local_inpainter.LocalInpainter._save_config(inpainter)
+    assert config_path.read_text(encoding="utf-8") == "half written"
+    config_path.write_text('{"model": "mine"}', encoding="utf-8")
+    local_inpainter.LocalInpainter._save_config(inpainter)
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {"model": "mine", "inpainter_model": "lama"}
+
+
+# ---------------------------------------------------------------------------
+# Backups survive
+# ---------------------------------------------------------------------------
+
+def _backup_names(config_path):
+    return sorted(os.listdir(config_store.config_backup_dir(str(config_path))))
+
+
+def test_a_save_after_days_away_keeps_the_old_backups_and_the_new_one(config_path):
+    # The reported loss: 72 h without opening the app, then the first save of the new version.
+    config_path.write_text('{"model": "my settings"}', encoding="utf-8")
+    stamp = time.time() - 5 * 86400
+    os.utime(config_path, (stamp, stamp))
+    first = _write_backup(config_path, "config_20261020_100000.json.bak", '{"model": "first"}', age_hours=150)
+    second = _write_backup(config_path, "config_20261021_100000.json.bak", '{"model": "second"}', age_hours=125)
+
+    new_backup = Path(config_store.backup_config_file(str(config_path)))
+
+    assert first.exists() and second.exists() and new_backup.exists()
+    assert new_backup.read_text(encoding="utf-8") == '{"model": "my settings"}'
+    assert time.time() - new_backup.stat().st_mtime < 60  # its own age, not the config's
+
+
+def test_many_saves_of_one_config_do_not_push_out_an_older_one(config_path):
+    config_path.write_text('{"model": "default"}', encoding="utf-8")
+    _write_backup(config_path, "config_20261020_100000.json.bak", '{"model": "my settings"}', age_hours=150)
+    for second in range(30):  # saves of the same config: one version, however many copies
+        config_store.backup_config_file(str(config_path))
+        backup_dir = Path(config_store.config_backup_dir(str(config_path)))
+        os.rename(config_store.latest_backup(str(config_path)), backup_dir / f"config_20261102_0000{second:02d}.json.bak")
+    texts = [p.read_text(encoding="utf-8") for p in backup_dir.iterdir()]
+    assert '{"model": "my settings"}' in texts
+
+
+def test_backups_past_the_newest_versions_expire(config_path):
+    keep = config_store.BACKUP_KEEP_VERSIONS
+    config_path.write_text('{"model": "now"}', encoding="utf-8")
+    for n in range(keep + 5):
+        _write_backup(config_path, f"config_202610{n:02d}_100000.json.bak", f'{{"model": {n}}}', age_hours=100 + n)
+
+    config_store.backup_config_file(str(config_path))
+
+    names = _backup_names(config_path)
+    # the new backup and the newest old versions stay; the oldest are gone
+    assert len(names) == keep
+    assert "config_20261000_100000.json.bak" in names
+    assert f"config_202610{keep + 4:02d}_100000.json.bak" not in names
+
+
+def test_expired_copies_and_broken_backups_do_not_count_as_versions(config_path):
+    config_path.write_text('{"model": "now"}', encoding="utf-8")
+    keep_me = _write_backup(config_path, "config_20261001_100000.json.bak", '{"model": "older"}', age_hours=200)
+    copy_of_new = _write_backup(config_path, "config_20261002_100000.json.bak", '{"model": "now"}', age_hours=100)
+    broken = _write_backup(config_path, "config_20261003_100000.json.bak", "{broken", age_hours=90)
+
+    config_store.backup_config_file(str(config_path))
+
+    assert keep_me.exists() and not copy_of_new.exists() and not broken.exists()
+
+
+def test_recent_backups_are_never_removed(config_path):
+    keep = config_store.BACKUP_KEEP_VERSIONS
+    config_path.write_text('{"model": "now"}', encoding="utf-8")
+    for n in range(keep + 5):
+        _write_backup(config_path, f"config_202610{n:02d}_100000.json.bak", "{broken", age_hours=1)
+    config_store.backup_config_file(str(config_path))
+    assert len(_backup_names(config_path)) == keep + 6
+
+
+def test_a_failed_backup_removes_nothing(config_path, monkeypatch):
+    config_path.write_text('{"model": "now"}', encoding="utf-8")
+    old = _write_backup(config_path, "config_20261020_100000.json.bak", "{broken", age_hours=150)
+
+    def refuse(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_store, "_replace_config_contents", refuse)
+    assert config_store.backup_config_file(str(config_path)) is None
+    assert old.exists()
+
+
+def test_restore_latest_backup_skips_broken_ones(config_path):
+    config_path.write_text("not json", encoding="utf-8")
+    _write_backup(config_path, "config_20261028_100000.json.bak", '{"model": "saved"}', age_hours=3)
+    _write_backup(config_path, "config_20261028_120000.json.bak", "{broken", age_hours=1)
+
+    restored = config_store.restore_latest_backup(str(config_path))
+
+    assert os.path.basename(restored) == "config_20261028_100000.json.bak"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {"model": "saved"}
 
 
 # ---------------------------------------------------------------------------

@@ -1367,29 +1367,10 @@ class LocalInpainter:
         if not getattr(self, 'config', None):
             return
         try:
-            # Load existing (best-effort)
-            full_config = {}
-            if self.config_path and os.path.exists(self.config_path):
-                try:
-                    with open(self.config_path, 'r', encoding='utf-8') as f:
-                        full_config = json.load(f)
-                except Exception as read_err:
-                    logger.debug(f"Config read during save failed (non-critical): {read_err}")
-                    full_config = {}
-            # Update
-            full_config.update(self.config)
-            # Atomic write: write to temp then replace
+            # A file that cannot be read is not written: it would be replaced by self.config alone
+            from config_store import update_config_file
             _cfg_fallback = self.config_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-            tmp_path = _cfg_fallback + '.tmp'
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(full_config, f, indent=2, ensure_ascii=False)
-            try:
-                os.replace(tmp_path, _cfg_fallback)
-            except Exception as replace_err:
-                logger.debug(f"Config atomic replace failed, trying direct write: {replace_err}")
-                # Fallback to direct write
-                with open(_cfg_fallback, 'w', encoding='utf-8') as f:
-                    json.dump(full_config, f, indent=2, ensure_ascii=False)
+            update_config_file(self.config, _cfg_fallback)
         except Exception as save_err:
             # Never crash on config save, but log for debugging
             logger.debug(f"Config save failed (non-critical): {save_err}")

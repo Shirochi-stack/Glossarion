@@ -529,8 +529,9 @@ class BubbleDetector:
     def _save_config(self):
         """Save configuration to file."""
         try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=2)
+            # self.config is {} when the load failed: never let that replace the whole file
+            from config_store import update_config_file
+            update_config_file(self.config, self.config_path)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
     

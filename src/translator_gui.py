@@ -9431,6 +9431,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             print(f"⚠️ Config load/sanitize failed: {e}")
             if not isinstance(getattr(self, 'config', None), dict):
                 self.config = {}
+                # Nothing loaded: the defaults must not replace a file that may still be fine
+                if os.path.exists(CONFIG_FILE):
+                    from app_paths import protect_file_from_writes
+                    protect_file_from_writes(CONFIG_FILE)
 
         self._init_config_state()
              
