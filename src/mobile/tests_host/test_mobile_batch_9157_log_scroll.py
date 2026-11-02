@@ -104,7 +104,7 @@ def test_job_page_never_paints_the_log_card_off_its_place_while_requests_start(a
             await _TB._route(h.session, f"/jobs/{h.job_id}")
             await h.tick()
             screen = h.job_screen()
-            assert screen.requests_tile.expanded  # the Requests cards are open while the job runs
+            screen.requests_tile.expanded = True  # with the Requests cards open
             log_card = _S._log_card(screen)
             client = PaintedPageList(h.session, h.conn, screen.page_list, h.viewport, log_card=log_card)
             for n in range(2):  # a request or two before the reader goes down

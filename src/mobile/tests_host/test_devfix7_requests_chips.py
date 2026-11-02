@@ -18,6 +18,7 @@ import asyncio
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -70,7 +71,13 @@ def test_running_job_shows_few_cards_at_their_natural_height_then_scrolls(app_en
             await _S._TB._route(h.session, f"/jobs/{h.job_id}")
             await h.tick()
             screen = h.job_screen()
-            assert not screen.snap.is_terminal and screen.requests_tile.expanded
+            assert not screen.snap.is_terminal and not screen.requests_tile.expanded  # a summary until opened
+            screen._on_requests_toggle(SimpleNamespace(data="true"))
+            assert screen.requests_tile.expanded  # what the user opened repaints with the log (_on_lines)
+            screen._on_requests_toggle(SimpleNamespace(data="false"))
+            assert not screen.requests_tile.expanded
+            screen._on_requests_toggle(SimpleNamespace(data="true"))
+            assert screen.state_row.controls[:2] == [screen.state_chip, screen.files_button]  # Files beside the state
 
             # the owner's screenshot: one request of a running job, no empty area under it
             h.segments.append(_segment(1))

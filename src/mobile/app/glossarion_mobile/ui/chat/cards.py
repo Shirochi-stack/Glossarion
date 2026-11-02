@@ -69,6 +69,7 @@ __all__ = [
     "glossary_question",
     "material_surface",
     "save_text_keep_bom",
+    "tile_opened",
 ]
 
 NO_GLOSSARY_FILE_TEXT = "No editable glossary file was found. You can continue or stop this run."
@@ -717,6 +718,14 @@ def offers_resume(phase: Any, status: str = "") -> bool:
     return name != "done" or "failed" in (status or "")
 
 
+def tile_opened(e: Any) -> Optional[bool]:
+    """What an ``ExpansionTile``'s ``on_change`` says: opened, closed, or None when it says neither."""
+    value = getattr(e, "data", None)
+    if isinstance(value, str):
+        value = value.strip().lower() == "true"
+    return value if isinstance(value, bool) else None
+
+
 def material_surface(content: ft.Control, *, bgcolor: Any, radius: float, padding: Any) -> ft.Card:
     """A card's coloured, rounded surface painted by a Material (a flat Flutter ``Card``), not by a decorated
     ``Container``. A ``ListTile`` (every ``ExpansionTile`` header: Requests, Run options, the report) paints
@@ -1109,10 +1118,8 @@ class JobCard(ft.Container):
         return False
 
     def _on_requests_toggle(self, e: Any) -> None:
-        value = getattr(e, "data", None)
-        if isinstance(value, str):
-            value = value.strip().lower() == "true"
-        if isinstance(value, bool):
+        value = tile_opened(e)
+        if value is not None:
             self.requests_tile.expanded = value  # the next reveal / repaint starts from what the user sees
             if value and getattr(self, "_rows_stale", False):
                 self.set_requests(self.request_segments)

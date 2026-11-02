@@ -663,7 +663,7 @@ def test_job_page_stays_at_its_end_while_the_job_ticks(app_env, tmp_path, monkey
             await _TB._route(h.session, f"/jobs/{h.job_id}")
             await h.tick()
             screen = h.job_screen()
-            assert screen.requests_tile.expanded  # the Requests cards are open while the job runs
+            screen.requests_tile.expanded = True  # with the Requests cards open
             client = PageListClient(h.session, h.conn, screen.page_list, h.viewport)
             for n in range(3):  # a few requests and log lines before the reader goes down
                 await h.job_tick(n)
