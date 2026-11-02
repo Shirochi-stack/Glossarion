@@ -325,6 +325,23 @@ def test_store_missing_and_corrupt_files(tmp_path, test_key):
     assert json.loads(corrupt.read_text(encoding="utf-8")) == {"model": "y"}
 
 
+def test_store_restores_the_newest_valid_backup_of_a_corrupt_file(tmp_path, monkeypatch):
+    import config_store
+
+    monkeypatch.setattr(config_store, "READ_RETRY_SECONDS", 0)
+    path = tmp_path / "config.json"
+    path.write_text('{"model": "x",', encoding="utf-8")
+    backups = tmp_path / "config_backups"
+    backups.mkdir()
+    (backups / "config_20261101_100000.json.bak").write_text('{"model": "saved"}', encoding="utf-8")
+    store = MobileConfigStore(path, debounce=10)
+    assert store.load() == {"model": "saved"} and store.exists and not store.read_only
+    assert "config_20261101_100000.json.bak" in store.load_error
+    assert Path(store.corrupt_backup).read_text(encoding="utf-8") == '{"model": "x",'
+    assert json.loads(path.read_text(encoding="utf-8")) == {"model": "saved"}
+    store.close()
+
+
 @needs_crypto
 def test_store_keeps_undecryptable_keys_untouched(tmp_path, test_key):
     from cryptography.fernet import Fernet

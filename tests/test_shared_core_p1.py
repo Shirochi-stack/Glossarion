@@ -835,9 +835,10 @@ def test_save_config_file_backup_and_default_path(config_path):
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"model": "second"}
 
 
-def test_backup_retention_latest_and_restore(config_path, capsys):
+def test_backup_retention_latest_and_restore(config_path, capsys, monkeypatch):
     import config_store
 
+    monkeypatch.setattr(config_store, "BACKUP_KEEP_VERSIONS", 2)
     assert config_store.backup_config_file() is None  # no config yet
     assert config_store.latest_backup() is None and config_store.list_config_backups() == []
     assert config_store.restore_latest_backup() is None
@@ -854,15 +855,17 @@ def test_backup_retention_latest_and_restore(config_path, capsys):
     os.utime(newer, (time.time() - 3600, time.time() - 3600))
     created = config_store.backup_config_file()
     assert created and Path(created).read_text(encoding="utf-8") == '{"v": 1}'
-    assert not old.exists() and newer.exists()  # 72 h retention
+    assert not old.exists() and newer.exists()  # 72 h retention, past the newest versions kept
     names = [b["name"] for b in config_store.list_config_backups()]
     assert names[0] == Path(created).name and names[-1] == newer.name
     assert config_store.latest_backup() == created
     config_path.write_text('{"v": 2}', encoding="utf-8")
     assert config_store.restore_latest_backup() == created
     assert config_path.read_text(encoding="utf-8") == '{"v": 1}'
+    # a failed cleanup keeps the new backup
+    assert config_store.backup_config_file(str(config_path), retention_hours="x")
     # failures are printed, never raised
-    assert config_store.backup_config_file(str(config_path), retention_hours="x") is None
+    assert config_store.backup_config_file(str(config_path.parent)) is None
     assert "Could not create config backup" in capsys.readouterr().out
 
 

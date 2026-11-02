@@ -1984,7 +1984,7 @@ Context & memory (rolling summary), Response handling (translation, truncation r
   - output folder choice (app storage or iOS Files-visible Documents; arbitrary SAF folders are not supported);
   - Phone folder (Android 10+): where books go (U10: books reach Downloads/Glossarion/<book>/ only as the phone-folder destination of Settings › Cloud sync & sharing, overwritten in place under their first name), a link there and its "My cloud app isn't listed" help; the switch "Copy other outputs to Downloads/Glossarion" (Prefs `mirror_outputs`) copies the outputs that are not books (images, subtitles, glossaries, reports) once; chat runs are never copied from their run folder. iOS shows the switch disabled with "Android only" (books are already in Files › On My iPhone › Glossarion); Android 9 with "Needs Android 10 or later" (the legacy branch needs WRITE_EXTERNAL_STORAGE, which the app does not request).
 - **Backup & restore:**
-  - automatic backups list (72 h retention, shared); Create backup / Restore (confirm) / Delete;
+  - automatic backups list (72 h retention, the newest 10 different configs stay longer, shared); Create backup / Restore (confirm) / Delete;
   - Export config (keys excluded, or encrypted with a passphrase) / Import config;
   - profiles import/export; key pools import/export.
 - **Import from desktop:** config.json (with optional `.glossarion_key` to decrypt `ENC:` values; otherwise "re-enter keys"), Direct Text chats ZIP, Library ZIP.

@@ -71,6 +71,22 @@ _ATOMIC_WRITE_LOCK = threading.RLock()
 # reader in a worker thread or subprocess, antivirus, cloud sync); such locks are short.
 _REPLACE_RETRY_SECONDS = 3.0
 
+# Files this process could not read and must not replace (protect_file_from_writes).
+_WRITE_PROTECTED_FILES = set()
+
+
+def _write_protection_key(filepath):
+    return os.path.normcase(os.path.abspath(filepath))
+
+
+def protect_file_from_writes(filepath):
+    """Refuse every later ``_atomic_json_write`` to *filepath* in this process.
+
+    For a config.json that exists but could not be read: all its writers go through
+    ``_atomic_json_write``, and their settings would replace a file nobody could look at.
+    """
+    _WRITE_PROTECTED_FILES.add(_write_protection_key(filepath))
+
 
 def _atomic_json_write(filepath, data):
     """Write JSON atomically: serialize, write a unique temp file, fsync, os.replace.
@@ -81,6 +97,8 @@ def _atomic_json_write(filepath, data):
     raised; there is no direct-write fallback (that truncated config.json whenever
     os.replace was refused on Windows and the dump then failed or was interrupted).
     """
+    if _write_protection_key(filepath) in _WRITE_PROTECTED_FILES:
+        raise PermissionError(f"{os.path.basename(filepath)} could not be read at startup, so it is left as it is")
     text = json.dumps(data, ensure_ascii=False, indent=2)
     directory = os.path.dirname(os.path.abspath(filepath))
     with _ATOMIC_WRITE_LOCK:
