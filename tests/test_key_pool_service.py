@@ -1189,11 +1189,7 @@ def test_probe_preserves_two_keys_with_stale_environment(monkeypatch, tmp_path, 
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
-                self.wfile.write(f'data: {json.dumps(chunk)}
-
-data: [DONE]
-
-'.encode())
+                self.wfile.write(f'data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n'.encode())
                 return
             body = json.dumps({
                 'id': 'key-test', 'object': 'chat.completion', 'created': 0,
