@@ -20759,6 +20759,10 @@ class UnifiedClient:
             pass
         return bool(getattr(self, 'enable_streaming_var', False))
 
+    def _must_stream_to_stay_connected(self, provider: str) -> bool:
+        """Providers whose chat is requested as a stream even with the streaming toggle off."""
+        return provider == 'nanogpt'
+
     def _stream_logging_enabled(self, use_streaming: bool) -> bool:
         if not use_streaming:
             return False
@@ -26039,6 +26043,11 @@ class UnifiedClient:
                     use_streaming = self._streaming_enabled()
                     # Streaming log toggle (must be defined before streaming extraction)
                     log_stream = self._stream_logging_enabled(use_streaming)
+                    # NanoGPT disconnects a request that has received nothing for 340 s (seen through httpx, the
+                    # transport here; not through requests). With the toggle off it still streams, so data keeps
+                    # arriving, and the text is only collected: log_stream stays off.
+                    if self._must_stream_to_stay_connected(provider) and not use_responses_api:
+                        use_streaming = True
                     if use_streaming:
                         call_kwargs["stream"] = True
                         if provider == 'openai' and self._is_gpt6_model_name(effective_model) and not use_responses_api:
