@@ -243,7 +243,9 @@ def legacy_source():
 
     sha = BASE_SHA
     try:
-        tg = freeze_legacy.git_show_text(sha, "src/translator_gui.py").replace("\r\n", "\n")
+        from parity.approved_changes import shared_subtitle_lists
+
+        tg = shared_subtitle_lists(freeze_legacy.git_show_text(sha, "src/translator_gui.py").replace("\r\n", "\n"))
         gm = freeze_legacy.git_show_text(sha, "src/GlossaryManager_GUI.py").replace("\r\n", "\n")
     except Exception as exc:  # pragma: no cover - shallow clone
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):

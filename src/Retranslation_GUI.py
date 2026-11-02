@@ -4,6 +4,7 @@ Force retranslation functionality for EPUB, text, and image files
 """
 
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 import sys
 import json
 import re
@@ -8305,7 +8306,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         # Get current toggle state if it exists, or default based on file type
         # Subtitle files and subtitle ZIPs are non-EPUB progress sources.
         show_special_extensions = (
-            '.txt', '.pdf', '.csv', '.json', '.srt', '.ass', '.lrc', '.zip'
+            '.txt', '.pdf', '.csv', '.json', *SUBTITLE_EXTENSIONS, '.zip'
         )
         show_special = input_path.lower().endswith(show_special_extensions)
         
@@ -15101,7 +15102,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     folders.append(file_path)
                 elif file_path.lower().endswith('.epub'):
                     epub_files.append(file_path)
-                elif file_path.lower().endswith(('.txt', '.srt', '.ass', '.lrc', '.zip')):
+                elif file_path.lower().endswith(('.txt', *SUBTITLE_EXTENSIONS, '.zip')):
                     text_files.append(file_path)
                 elif file_path.lower().endswith(image_extensions):
                     image_files.append(file_path)

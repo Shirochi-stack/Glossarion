@@ -3402,6 +3402,26 @@ APPROVED = (
 )
 
 
+def shared_subtitle_lists(text: str) -> str:
+    """Legacy source with its copies of the subtitle extensions as ``subtitle_processor.SUBTITLE_EXTENSIONS``
+    (2026-11-02 .ssa/.vtt/.sbv). For the moved-verbatim guards, whose legacy text is compared, never run."""
+    import re
+
+    for pattern, replacement in (
+        (r"""(['"])\.srt\1, \1\.ass\1, \1\.lrc\1, \1\.vtt\1""", "*SUBTITLE_EXTENSIONS"),
+        (r"""[({](['"])\.srt\1, \1\.ass\1, \1\.lrc\1[)}]""", "SUBTITLE_EXTENSIONS"),
+        (r"""(['"])\.srt\1, \1\.ass\1, \1\.lrc\1""", "*SUBTITLE_EXTENSIONS"),
+    ):
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(
+        r""" *"\.srt": \{"\.srt": 160, "\.txt": 70\},\n *"\.ass": \{"\.ass": 160, "\.txt": 70\},\n( *)"\.lrc": \{"\.lrc": 160, "\.txt": 70\},""",
+        lambda m: m.group(1) + '**{extension: {extension: 160, ".txt": 70} for extension in SUBTITLE_EXTENSIONS},', text)
+    for old in ('"*.xhtml *.xml *.json *.csv *.tsv *.srt *.ass *.lrc *.vtt *.log *.png *.jpg "',
+                '"*.csv *.tsv *.srt *.ass *.lrc *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"'):
+        text = text.replace(old, "f" + old.replace("*.srt *.ass *.lrc *.vtt", "{SUBTITLE_FILE_PATTERNS}"))
+    return text.replace("legacy support for markup/subtitle/log files", "legacy support for markup/log files")
+
+
 def apply_to_source(relpath: str, text: str) -> str:
     """Legacy source ``relpath`` (as ``git show`` returns it) with the approved changes applied."""
     relpath = str(relpath).replace("\\", "/")

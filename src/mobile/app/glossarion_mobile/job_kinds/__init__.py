@@ -156,7 +156,8 @@ def result_fields(result: Any) -> tuple:
 
 #: Top-level files of an output folder listed as job outputs (the Result card / export).
 OUTPUT_EXTENSIONS = (".epub", ".pdf")
-TRANSLATED_SUFFIXES = ("_translated.txt", "_translated.srt", "_translated.ass", "_translated.lrc")
+TRANSLATED_SUFFIXES = ("_translated.txt", "_translated.srt", "_translated.ass", "_translated.ssa", "_translated.vtt",
+                       "_translated.sbv", "_translated.lrc")
 #: the raw copy of a run's streamed reply (``direct_text_store._persist_output_folder``, when the run left no
 #: output file of its own): the reply is already in the chat, so it is not listed as an output (owner 2026-10-31)
 STREAM_OUTPUT_NAME = "direct_text_stream_translated.txt"

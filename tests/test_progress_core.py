@@ -61,7 +61,9 @@ def _module_source(name):
 
 
 def _legacy_source():
-    return "\n".join(pl.legacy_source_lines())
+    from parity.approved_changes import shared_subtitle_lists
+
+    return shared_subtitle_lists("\n".join(pl.legacy_source_lines()))
 
 
 def _segments(source, *, cls=None):
@@ -215,7 +217,7 @@ def test_moved_mixin_methods_are_verbatim():
 
 
 def _legacy_block(start, end, *, strip, add, edits=()):
-    lines = pl.legacy_source_lines()[start - 1:end]
+    lines = _legacy_source().split("\n")[start - 1:end]
     out = []
     for line in lines:
         if line.strip():

@@ -73,13 +73,13 @@ SUMMARY_KEYS = (*RUN_OPTION_KEYS, "contextual", "use_rolling_summary", "rolling_
 #: desktop-only; mobile picks a game folder in Tools › RPG Maker).
 BATCH_EXTENSIONS = (
     ".epub", ".zip", ".cbz", ".pdf", ".html", ".htm", ".xhtml", ".txt", ".json", ".csv", ".md", ".sdlxliff", ".srt",
-    ".ass", ".lrc", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".mp4",
+    ".ass", ".ssa", ".vtt", ".sbv", ".lrc", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".mp4",
 )
 #: The desktop "No Files Found" text (``browse_folder``).
 NO_FILES_TEXT = ("No supported files found in:\n{folder}\n\nSupported formats: EPUB, HTML, HTM, XHTML, SDLXLIFF, SRT, "
-                 "ASS, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
+                 "ASS, SSA, VTT, SBV, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff")
-_SUBTITLE_EXTENSIONS = (".srt", ".ass", ".lrc", ".vtt")
+_SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sbv", ".lrc")
 _MISSING = object()
 
 
@@ -377,7 +377,7 @@ def plan_facts(path: str) -> dict:
         info = classify_archive(path)
         facts["conversion"] = info["label"]
         facts["archive"] = info["kind"]
-    elif ext in (".txt", ".md", ".markdown", ".html", ".htm", ".xhtml", ".srt", ".ass", ".lrc", ".csv", ".json"):
+    elif ext in (".txt", ".md", ".markdown", ".html", ".htm", ".xhtml", *_SUBTITLE_EXTENSIONS, ".csv", ".json"):
         if size:
             parts.append(_token_text(size))
     text = _size_text(size) if size is not None else ""

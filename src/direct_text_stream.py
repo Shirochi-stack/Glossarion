@@ -33,6 +33,7 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 """
 
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 import re
 import shutil
 import threading
@@ -1554,7 +1555,7 @@ class DirectTextStreamMixin:
         try:
             readable_extensions = {
                 '.txt', '.md', '.markdown', '.html', '.htm', '.xhtml', '.xml',
-                '.json', '.csv', '.tsv', '.srt', '.ass', '.lrc', '.vtt', '.log',
+                '.json', '.csv', '.tsv', *SUBTITLE_EXTENSIONS, '.log',
             }
             if (
                 self._expected_output

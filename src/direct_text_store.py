@@ -75,6 +75,7 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 import contextlib
 import json
 import os
+from subtitle_processor import SUBTITLE_EXTENSIONS
 import re
 import sys
 import tempfile
@@ -1075,7 +1076,7 @@ class ChatStoreMixin:
         extension = os.path.splitext(str(path or ''))[1].lower()
         return extension in {
             '.txt', '.epub', '.pdf', '.md', '.markdown', '.html', '.htm',
-            '.xhtml', '.xml', '.json', '.csv', '.tsv', '.srt', '.ass', '.lrc', '.vtt', '.log',
+            '.xhtml', '.xml', '.json', '.csv', '.tsv', *SUBTITLE_EXTENSIONS, '.log',
         } or extension in (
             ChatStoreMixin._IMAGE_ATTACHMENT_EXTENSIONS
             | ChatStoreMixin._VISION_ARCHIVE_ATTACHMENT_EXTENSIONS
@@ -2252,9 +2253,7 @@ class ChatStoreMixin:
             ".epub": {".epub": 140, ".pdf": 100, ".txt": 80, ".html": 60},
             ".cbz": {".epub": 140, ".pdf": 100, ".txt": 90, ".html": 60},
             ".pdf": {".pdf": 140, ".epub": 130, ".txt": 100, ".html": 70},
-            ".srt": {".srt": 160, ".txt": 70},
-            ".ass": {".ass": 160, ".txt": 70},
-            ".lrc": {".lrc": 160, ".txt": 70},
+            **{extension: {extension: 160, ".txt": 70} for extension in SUBTITLE_EXTENSIONS},
         }
         if self._run_output_mode == 'image':
             preferred = dict(generated_image_scores)
@@ -2496,14 +2495,14 @@ class ChatStoreMixin:
             if (
                 attached_extension in {
                     '.txt', '.epub', '.pdf', '.cbz', '.csv', '.json',
-                    '.srt', '.ass', '.lrc',
+                    *SUBTITLE_EXTENSIONS,
                 }
                 or attached_extension in self._IMAGE_ATTACHMENT_EXTENSIONS
                 or attached_extension in self._EXTRA_PASS_THROUGH_EXTENSIONS
             ):
                 self._temp_input = attached_path
             else:
-                # Preserve legacy support for markup/subtitle/log files by
+                # Preserve legacy support for markup/log files by
                 # adapting them to the regular text pipeline internally,
                 # while the composer/history still displays a file card.
                 try:
@@ -2534,7 +2533,7 @@ class ChatStoreMixin:
             self._temp_root,
             stem,
             f"{stem}_translated"
-            f"{self._run_source_extension if self._run_source_extension in {'.srt', '.ass', '.lrc'} else '.txt'}",
+            f"{self._run_source_extension if self._run_source_extension in SUBTITLE_EXTENSIONS else '.txt'}",
         )
         return manual_glossary_path
 

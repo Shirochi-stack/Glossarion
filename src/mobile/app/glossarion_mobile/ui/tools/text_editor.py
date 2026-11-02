@@ -47,7 +47,7 @@ LANGUAGE_BY_EXTENSION = {
     "html": "XML", "xhtml": "XML", "htm": "XML", "xml": "XML", "sdlxliff": "XML", "opf": "XML", "ncx": "XML",
     "css": "CSS", "json": "JSON", "md": "MARKDOWN",
     "csv": "PLAINTEXT", "txt": "PLAINTEXT", "srt": "PLAINTEXT", "ass": "PLAINTEXT", "vtt": "PLAINTEXT",
-    "lrc": "PLAINTEXT", "log": "PLAINTEXT",
+    "ssa": "PLAINTEXT", "sbv": "PLAINTEXT", "lrc": "PLAINTEXT", "log": "PLAINTEXT",
 }
 TEXT_EXTENSIONS = frozenset(LANGUAGE_BY_EXTENSION)
 EDIT_LIMIT = 4 * 1024 * 1024  # larger files open read-only (a TextField this large is not editable)
