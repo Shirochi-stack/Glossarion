@@ -100,6 +100,7 @@ jobs:
           tests/test_chunk_plan_change_e2e.py \
           tests/test_qa_stop_instant.py \
           tests/test_subtitle_formats.py \
+          tests/test_subtitle_failed_run.py \
           tests/test_nanogpt_quiet_stream.py \
           tests/test_missing_tag_bracket.py \
           tests/test_glossary_progress_core.py \
