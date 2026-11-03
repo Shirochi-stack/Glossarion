@@ -36,6 +36,8 @@ Decision (``banned_scripts``; ``wants_ban`` is its bool), owner 2026-10-19, wide
   scripts is legitimate) and bans the other scripts. The target language's own script is never banned;
 * a target this module does not know ("Other", a custom name in Latin letters) bans CJK only: its own
   script is unknown, and banning it would leave the model nothing to write with.
+* a subtitle input's run never bans, on either switch (owner 2026-11-03): ``unified_api_client`` returns no
+  scripts for it and sends the on-device engine a ``subtitle_...`` kind, which is not one of the kinds above.
 
 Never banned, for any target: ASCII, Latin (accented, extended, fullwidth excepted), Greek (also used as
 symbols: α, Ω, μ), IPA, combining marks, general punctuation (… “ ” —), letterlike symbols, arrows, maths,

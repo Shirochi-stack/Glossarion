@@ -182,6 +182,81 @@ def test_client_bans_nothing_unless_both_switches_are_on(client, monkeypatch):
     assert client._script_ban_scripts("glossary") == ENGLISH_BANS  # Extract Glossary
 
 
+@pytest.mark.parametrize("name", ["show.srt", "show.ass", "show.ssa", "show.vtt", "show.sbv", "show.lrc", "SHOW.VTT"])
+def test_a_subtitle_run_is_never_banned_on_the_universal_switch(client, monkeypatch, name):
+    _turn_on(monkeypatch)
+    monkeypatch.setenv("EPUB_PATH", f"C:/books/{name}")
+    for kind in ("translation", "glossary", "glossary_refinement", "refinement", ""):
+        assert client._script_ban_scripts(kind) == ()
+    assert client._script_ban_request([{"role": "user", "content": "안녕"}], "translation")[0] == ()
+    assert client._script_ban_logit_bias("openai", "gpt-4o", "https://api.openai.com/v1", messages=[]) == {}
+
+
+def test_a_book_run_stays_banned_on_both_switches(client, monkeypatch):
+    _turn_on(monkeypatch)
+    monkeypatch.setenv("EPUB_PATH", "C:/books/novel.epub")
+    assert client._script_ban_scripts("translation") == ENGLISH_BANS
+    fields = client._on_device_task_fields()
+    assert fields["glossarion_task"] == "translation"
+    assert sbc.banned_scripts(fields["glossarion_task"], fields["target_language"]) == ENGLISH_BANS
+
+
+def test_a_subtitle_run_is_never_banned_on_the_on_device_switch(client, monkeypatch, isolated):
+    """What Glossarion Mobile's engine reads, from a real request to its endpoint."""
+    import http.server
+    import json
+    import threading
+
+    bodies = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            raw = json.dumps({"id": "x", "object": "chat.completion", "model": "m", "created": 1,
+                              "choices": [{"index": 0, "finish_reason": "stop",
+                                           "message": {"role": "assistant", "content": "Hello"}}],
+                              "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/token/v1"
+    monkeypatch.setenv("GLOSSARION_LOCAL_LLM_URL", url)
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setattr(client, "_get_max_retries", lambda: 1)
+    monkeypatch.setattr(client, "_get_send_interval", lambda: 0)
+    monkeypatch.setattr(client, "_is_stop_requested", lambda: False)
+    monkeypatch.setattr(client, "_save_response", lambda *args, **kwargs: None)
+
+    def ban_for(path):
+        monkeypatch.setenv("EPUB_PATH", path)
+        client._send_openai_compatible([{"role": "user", "content": "안녕"}], 0.5, 100, url, "on-device-ban-test",
+                                        provider="local", model_override="gemma", api_key_override="x",
+                                        allow_endpoint_override=False)
+        return sbc.banned_scripts(bodies[-1]["glossarion_task"], bodies[-1]["target_language"], enabled=True)
+
+    try:
+        assert ban_for("C:/books/novel.epub") == ENGLISH_BANS
+        assert ban_for("C:/books/show.vtt") == ()
+        assert bodies[-1]["glossarion_task"] == "subtitle_translation"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # a subtitle run's glossary thread keeps its kind's word, which the engine's forced truncation reads
+    monkeypatch.setattr("unified_api_client.current_key_context", lambda: "glossary")
+    fields = client._on_device_task_fields()
+    assert "glossary" in fields["glossarion_task"] and sbc.banned_scripts(fields["glossarion_task"], "English") == ()
+
+
 def test_client_logit_bias_only_for_official_openai(client, monkeypatch):
     _turn_on(monkeypatch)
     monkeypatch.setattr(sbc, "openai_logit_bias", lambda model, scripts: {"1": -100})
