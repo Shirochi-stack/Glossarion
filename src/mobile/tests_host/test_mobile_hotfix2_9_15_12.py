@@ -51,7 +51,8 @@ def test_engine_threads_follow_the_cpus_the_app_may_use(monkeypatch):
     calls: list = []
     monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(
         llama_set_n_threads=lambda ctx, n, nb: calls.append((ctx, n, nb)), LogitsProcessorList=list))
-    cpus = {"set": {0, 1, 2, 3}}
+    assert [eng.cpu_budget(n) for n in (0, 1, 2, 3, 4, 6, 8)] == [1, 1, 1, 2, 2, 4, 6]
+    cpus = {"set": set(range(6))}
     monkeypatch.setattr(eng.os, "sched_getaffinity", lambda pid: set(cpus["set"]), raising=False)
     clock = {"t": 100.0}
     monkeypatch.setattr(eng.time, "monotonic", lambda: clock["t"])
@@ -66,15 +67,15 @@ def test_engine_threads_follow_the_cpus_the_app_may_use(monkeypatch):
         cpus["set"] = set(range(n_cpus))
         clock["t"] += eng.CPU_CHECK_SECONDS
 
-    # four cores: nothing changes
+    # six cores: room for the four threads and two for the app, nothing changes
     out = engine.chat(messages, {"max_tokens": 8}, lambda: False)
     next(out)
     assert calls == []
-    # Home: the app's cpuset shrinks to one core, then two; the threads follow (the decode right after a check)
+    # Home: the app's cpuset shrinks to one core, then three; the threads follow (the decode right after a check)
     tick(1)
     next(out)
     assert calls[-1] == ("ctx-pointer", 1, 1)
-    tick(2)
+    tick(3)
     next(out)
     assert calls[-1] == ("ctx-pointer", 2, 2)
     "".join(out)

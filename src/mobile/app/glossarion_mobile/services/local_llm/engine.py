@@ -201,6 +201,13 @@ def default_threads() -> int:
     return max(2, min(4, cpus - 2))
 
 
+def cpu_budget(cpus: int) -> int:
+    """Threads that fit ``cpus`` allowed CPUs while the app's own threads (the loop, Flutter, the stream)
+    keep a core or two: like ``default_threads``, ``cpus - 2`` from four CPUs, ``cpus - 1`` below, at least 1."""
+    cpus = int(cpus or 0)
+    return max(1, cpus - 2 if cpus >= 4 else cpus - 1)
+
+
 def _text_of(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -618,7 +625,8 @@ def _follow_cpus(llm: Any, threads: int) -> Callable[[], None]:
     moves it to another cpuset; a phone can give that fewer cores than the threads, and ggml's threads
     spin-wait for each other on every step: with more threads than cores generation all but stops (2
     threads on 1 core ran 10x slower on the emulator). About once a second, before a decode, the thread
-    count follows the allowed CPUs (``llama_set_n_threads``) and the change is logged; the end of the
+    count follows the allowed CPUs (``cpu_budget``, never above the loaded count; ``llama_set_n_threads``)
+    and the change is logged; the end of the
     request restores the loaded count. Returns the function that ends it (safe to call again)."""
     context = getattr(llm, "_ctx", None)
     decode = getattr(context, "decode", None)
@@ -650,7 +658,7 @@ def _follow_cpus(llm: Any, threads: int) -> Callable[[], None]:
                 cpus = len(affinity(0))
             except OSError:
                 cpus = threads
-            want = max(1, min(threads, cpus))
+            want = min(threads, cpu_budget(cpus))
             if want != state["n"]:
                 apply(want, cpus)
         return decode(batch)
