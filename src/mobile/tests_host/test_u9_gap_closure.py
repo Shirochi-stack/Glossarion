@@ -876,7 +876,8 @@ def test_sdlxliff_tablet_side_list_and_size_class_switch():
     screen.select_piece(1)
     assert screen.piece_index == 1
     screen.apply_size_class(types.SimpleNamespace(persistent_sidebar=False))
-    assert screen.md is None and screen.root.content.content is screen.list_view and screen.piece_dropdown.visible
+    assert screen.md is None and screen.root.content.content is screen.page_frame and screen.piece_dropdown.visible
+    assert screen.page_frame.content is screen.list_view  # hotfix 3: a padded frame around the page column
 
 
 def test_manga_reason_chips_name_the_reason():

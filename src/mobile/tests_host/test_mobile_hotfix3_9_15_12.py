@@ -103,3 +103,136 @@ def test_line_texts():
     assert "reading the prompt (? tokens)" in unknown.line(15, 0)
     assert eng._batch_tokens(types.SimpleNamespace(batch=types.SimpleNamespace(n_tokens=64))) == 64
     assert eng._batch_tokens(None) == 0 and threading.active_count() >= 1
+
+
+# ---- the SDLXLIFF reviewer (owner: the workspace did not load; the Notepad switch beside Threshold) ----------
+
+
+class _Prefs:
+    def __init__(self) -> None:
+        self.refs: dict = {}
+        self.data: dict = {}
+
+    def file_ref(self, path, *, kind=None):
+        from glossarion_mobile.state.prefs import file_ref_id
+
+        fid = file_ref_id(str(path))
+        self.refs[fid] = str(path)
+        return fid
+
+    def resolve_file_ref(self, fid, *, touch=True):
+        return self.refs.get(fid)
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+
+def test_the_output_tabs_sdlxliff_file_opens_its_workspace_and_piece(tmp_path):
+    """The book page's Output tab sent the book id as ``?out=``, which the reviewer reads as a file reference:
+    it opened empty. It now opens the sidecar's workspace, focused on its piece, with the book's raw file."""
+    from glossarion_mobile.ui.library.output_tab import OutputTab
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools import sdlxliff as sx
+
+    workspace = tmp_path / "Output" / "Book"
+    (workspace / "SDLXLIFF").mkdir(parents=True)
+    sidecar = workspace / "SDLXLIFF" / "response_ch002.html.sdlxliff"
+    sidecar.write_text("<xliff/>", encoding="utf-8")
+    raw = tmp_path / "Book.epub"
+    raw.write_bytes(b"PK")
+    went: list = []
+    prefs = _Prefs()
+    ctx = types.SimpleNamespace(prefs=prefs, go=lambda *a: went.append(a) or "ok")
+    page = types.SimpleNamespace(bid="b1", book={"name": "Book"}, service=types.SimpleNamespace(
+        raw_source=lambda book: str(raw), bid_for=lambda book: "b1"))
+    tab = types.SimpleNamespace(ctx=ctx, page=page)
+    fid = OutputTab._open_reviewer(tab, str(sidecar))
+    assert went[-1] == ("tools.sdlxliff", None, {"out": fid})
+    screen = sx.SdlxliffScreen(parse_route(f"/tools/sdlxliff?out={fid}"), ctx)
+    assert screen.folder == str(workspace) and screen.error is None
+    assert screen.request.focus == "response_ch002.html" and screen.request.source == str(raw)
+
+
+def test_tools_hub_scans_the_library_before_looking_for_the_last_workspace(monkeypatch):
+    import asyncio
+
+    from glossarion_mobile.ui.tools import sdlxliff as sx
+
+    order: list = []
+
+    class Service:
+        snapshot = types.SimpleNamespace(scanned_at=None)
+
+        async def refresh(self, quiet=False, reason=""):
+            order.append("refresh")
+            self.snapshot.scanned_at = 1.0
+
+    async def io(fn, *args):
+        return fn(*args)
+
+    monkeypatch.setattr(sx, "last_workspace", lambda prefs, service, root: order.append("look") or None)
+    screen = sx.SdlxliffScreen.__new__(sx.SdlxliffScreen)
+    screen.ctx = types.SimpleNamespace(service=Service(), prefs=None, chats_root="", io=io)
+    screen.folder, screen._visible = "", True
+    assert asyncio.run(screen.open_last()) is None
+    assert order == ["refresh", "look"]
+    assert asyncio.run(screen.open_last()) is None
+    assert order == ["refresh", "look", "look"]  # scanned once
+
+
+def test_the_notepad_switch_shares_the_actions_row():
+    import flet as ft
+
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools import sdlxliff as sx
+
+    ctx = types.SimpleNamespace(prefs=_Prefs(), tablet=False)
+    screen = sx.SdlxliffScreen(parse_route("/tools/sdlxliff"), ctx)
+    screen.build_body()
+    rows = [c for c in screen.header_column.controls if isinstance(c, ft.Row)]
+    actions = next(r for r in rows if r.key == "sdl-actions")
+    assert actions.controls[:5] == [screen.mt_button, screen.mt_provider, screen.flag_button, screen.threshold_button,
+                                    screen.layout_switch]
+    assert actions.wrap and not any(screen.layout_switch in r.controls for r in rows if r is not actions)
+
+
+def test_notepad_layout_fills_the_screen_and_the_header_steps_aside_for_the_keyboard():
+    """Owner: in the Notepad layout the keyboard covered the text and a tap closed the keyboard. The editor was
+    a fixed-height WebView inside a scrolling list; it now fills the page (which no longer scrolls) and the
+    header hides while the keyboard is up, so the WebView shrinks with it and keeps the caret in view."""
+    import flet as ft
+
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools import sdlxliff as sx
+
+    media = lambda bottom: types.SimpleNamespace(view_insets=types.SimpleNamespace(bottom=bottom))  # noqa: E731
+    page = types.SimpleNamespace(on_media_change=None, media=media(0))
+    shell_calls: list = []
+    page.on_media_change = lambda e=None: shell_calls.append(e)
+    shell = page.on_media_change
+    ctx = types.SimpleNamespace(prefs=_Prefs(), tablet=False, page=page, spawn=lambda c: c.close())
+    screen = sx.SdlxliffScreen(parse_route("/tools/sdlxliff"), ctx)
+    screen.build_body()
+    screen._push = lambda *c: None
+    assert isinstance(screen.list_view, ft.Column) and screen.list_view.scroll == ft.ScrollMode.AUTO
+    screen._hook_keyboard()
+    assert page.on_media_change is not shell
+
+    page.on_media_change(media(300))  # rows layout: the keyboard changes nothing, the shell still hears it
+    assert screen.header_column.visible is not False and shell_calls
+    page.on_media_change(media(0))
+    screen.notepad = True
+    screen._apply_notepad_layout()
+    assert screen.list_view.scroll is None and screen.body_holder.expand is True
+    page.on_media_change(media(320))  # keyboard up: the editor gets the whole visible height
+    assert screen.header_column.visible is False
+    page.on_media_change(media(0))
+    assert screen.header_column.visible is True
+    screen.notepad = False
+    screen._apply_notepad_layout()
+    assert screen.list_view.scroll == ft.ScrollMode.AUTO and not screen.body_holder.expand
+    screen._unhook_keyboard()
+    assert page.on_media_change is shell
