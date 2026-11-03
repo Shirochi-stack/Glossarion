@@ -68,7 +68,9 @@ def test_context_control_slider_steps_and_the_field():
     assert control.slider.value == 4096 and control.field.value == "4096" and control.value == 4096
 
 
-def test_choosing_heavy_resets_the_context_and_the_slider_shows_2048(tmp_path):
+def test_choosing_a_model_keeps_the_saved_context(tmp_path):
+    """Mobile hotfix 2 (owner: "my setting ... 16384 is not applying"): Use no longer resets the saved
+    Context to the model's own; with none saved the model's own still applies (2,048 for Heavy)."""
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
 
     service, engine = _service(tmp_path)
@@ -81,12 +83,14 @@ def test_choosing_heavy_resets_the_context_and_the_slider_shows_2048(tmp_path):
     assert service.context_for(LIGHT) == 16384
 
     assert asyncio.run(panel.activate(HEAVY, "Heavy"))
-    assert model["id"] == f"local/{HEAVY}" and service.settings()["n_ctx"] == 0  # back to the model's own
-    assert panel.context.value == 2048 and panel.context.slider.value == 2048 and panel.ctx_field.value == "2048"
-    assert engine.loads[-1][1] == 2048
-
+    assert model["id"] == f"local/{HEAVY}" and service.settings()["n_ctx"] == 16384  # kept
+    assert panel.context.value == 16384 and panel.ctx_field.value == "16384" and engine.loads[-1][1] == 16384
     assert asyncio.run(panel.activate(LIGHT, "Light"))
-    assert panel.context.value == 4096 and engine.loads[-1][1] == 4096
+    assert panel.context.value == 16384 and engine.loads[-1][1] == 16384
+
+    assert panel.save_context(0) is None  # nothing saved: each model's own
+    assert asyncio.run(panel.activate(HEAVY, "Heavy"))
+    assert panel.context.value == 2048 and panel.context.slider.value == 2048 and engine.loads[-1][1] == 2048
     panel.dispose()
 
 

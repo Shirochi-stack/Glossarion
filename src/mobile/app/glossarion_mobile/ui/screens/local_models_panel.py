@@ -712,10 +712,10 @@ class OnDeviceFlow:
         return stem
 
     async def activate(self, stem: str, label: str = "") -> bool:
-        """Load ``stem`` and make ``local/<stem>`` the model. Context goes back to the model's own
-        (``context_for``: 4,096 for Heavy), which the Context slider then shows. Tight on free RAM only
-        says so (owner 2026-10-27: Use always loads, the warning is cosmetic)."""
-        self.service.save_context(0)
+        """Load ``stem`` and make ``local/<stem>`` the model. The saved Context stays (mobile hotfix 2: the
+        owner's 16,384 was reset to the model's own here); without one the model's own (``context_for``),
+        which the Context slider then shows. Tight on free RAM only says so (owner 2026-10-27: Use always
+        loads, the warning is cosmetic)."""
         self.context_changed(stem)
         verdict, message = self.service.ram_check(stem)
         if verdict == "refuse":
@@ -1047,8 +1047,9 @@ class LocalModelsPanel(OnDeviceFlow):
                    vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             self.engine_detail,
             self.context.control,
-            _small("Choosing a model sets its own context (4,096 for Heavy). Jobs on an on-device model ask for "
-                   "half the context as output and send one request at a time.", key="local-ctx-note"),
+            _small("This Context is used by every on-device model; with none saved a model uses its own (4,096, "
+                   "2,048 for models of 4 GB or more). Jobs on an on-device model ask for half the context as "
+                   "output and send one request at a time.", key="local-ctx-note"),
             ft.Row([self.threads_field,
                     ft.TextButton(content="Save", key="local-settings-save", on_click=lambda e: self.save_settings())],
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
