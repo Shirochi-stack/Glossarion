@@ -109,3 +109,47 @@ def test_a_stop_during_the_prompt_keeps_the_cpu_follower_in_place(monkeypatch):
     assert vars(llm._ctx)["decode"] is follower
     cpus_done()
     assert "decode" not in vars(llm._ctx)
+
+
+def test_on_device_progress_lines_reach_the_job_log(monkeypatch):
+    """A line every HEARTBEAT_SECONDS from its own thread (a frozen app leaves a gap in the timestamps), on a
+    child of the ``unified_api_client`` logger, the one job logs listen to; the thread change lines too."""
+    import logging
+    import threading
+
+    from glossarion_mobile.services.local_llm import engine as eng
+
+    assert eng.job_log.name.startswith("unified_api_client.") and eng.job_log.propagate
+    assert eng._cpu_list({0, 1, 2, 5, 7, 6}) == "0-2,5-7" and eng._cpu_list(set()) == ""
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(
+        llama_set_n_threads=lambda *a: None, llama_n_threads=lambda ctx: 3, LogitsProcessorList=list))
+    monkeypatch.setattr(eng.os, "sched_getaffinity", lambda pid: {0, 1, 2, 3}, raising=False)
+    monkeypatch.setattr(eng, "HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(eng, "_cpuset", lambda: "/foreground")
+
+    lines: list = []
+    seen = threading.Event()
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+            if "tok/s" in lines[-1]:
+                seen.set()
+
+    parent = logging.getLogger("unified_api_client")
+    handler, level = Grab(), parent.level
+    parent.addHandler(handler)
+    parent.setLevel(logging.INFO)
+    try:
+        engine = eng.LlamaEngine()
+        engine.llm, engine.path, engine.n_ctx, engine.n_threads = _Llama(), "m.gguf", 4096, 4
+        out = engine.chat([{"role": "user", "content": "hi"}], {"max_tokens": 8}, lambda: False)
+        next(out)
+        next(out)
+        assert seen.wait(5)
+        "".join(out)
+    finally:
+        parent.removeHandler(handler)
+        parent.setLevel(level)
+    beat = next(line for line in lines if "tok/s" in line)
+    assert beat.startswith("📱 on-device: ") and "3 threads, CPUs 0-3, cpuset /foreground" in beat

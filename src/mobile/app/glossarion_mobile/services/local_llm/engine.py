@@ -49,6 +49,8 @@ import time
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 log = logging.getLogger("glossarion.local_llm")
+#: lines a job's Log shows too (job logs listen to ``unified_api_client`` and its children)
+job_log = logging.getLogger("unified_api_client.on_device")
 
 __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
            "GpuUnavailable", "LlamaEngine", "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
@@ -63,6 +65,8 @@ DRY_SEQUENCE_BREAKERS = ("\n", ":", '"', "*")
 STOP_CHECK_EVERY = 8  # tokens between two "is the client still there?" checks
 #: seconds between two checks of the CPUs Android lets the app use (``_follow_cpus``)
 CPU_CHECK_SECONDS = 1.0
+#: seconds between two progress lines while an on-device request runs (``_Heartbeat``)
+HEARTBEAT_SECONDS = 15.0
 UNAVAILABLE = "The on-device engine is not available in this build (llama-cpp-python is not installed)"
 NO_MTMD = "This build's on-device engine cannot read images (llama-cpp-python without libmtmd)"
 _VISION: list = []  # cached vision_status() result
@@ -530,6 +534,7 @@ class LlamaEngine(_Base):
         # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop; until the first
         # chunk (the prompt, which can take minutes on a phone) a Stop is seen between two decodes.
         cpus_done = _follow_cpus(llm, self.n_threads)
+        heartbeat = _Heartbeat(self).start()
         prompt_done = _stop_between_decodes(llm, should_stop)
         try:
             if handler is not None:
@@ -561,6 +566,7 @@ class LlamaEngine(_Base):
                     text = delta.get("content")
                     if text:
                         completion += 1
+                        heartbeat.tokens = completion
                         yield text
                         if repeat_watch is not None and repeat_watch.feed(text):
                             # Forced Truncation: closing the generator stops sampling; the client sees length, or
@@ -576,6 +582,7 @@ class LlamaEngine(_Base):
                 if close is not None:
                     close()
         finally:
+            heartbeat.stop()
             prompt_done()
             cpus_done()
         prompt = 0
@@ -620,6 +627,72 @@ def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable
     return done
 
 
+def _cpuset() -> str:
+    """This process's cpuset group (``/top-app``, ``/foreground``, ``/background``…), '' where unreadable."""
+    try:
+        with open("/proc/self/cpuset", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _cpu_list(cpus: Any) -> str:
+    """``{0, 1, 2, 5}`` -> ``0-2,5``."""
+    ranges: list = []
+    for cpu in sorted(cpus):
+        if ranges and cpu == ranges[-1][1] + 1:
+            ranges[-1][1] = cpu
+        else:
+            ranges.append([cpu, cpu])
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
+
+
+class _Heartbeat:
+    """Mobile hotfix 2: a progress line every ``HEARTBEAT_SECONDS`` while an on-device request runs (tokens,
+    speed, threads, the CPUs and cpuset Android gives the app), from its own thread. The owner's phone
+    stopped on-device jobs while Glossarion was in the background; a frozen process leaves a gap in these
+    timestamps, a throttled one keeps logging at a low speed, a stuck request logs 0 tok/s."""
+
+    def __init__(self, engine: "LlamaEngine") -> None:
+        self.engine = engine
+        self.tokens = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="gl-llm-heartbeat", daemon=True)
+
+    def start(self) -> "_Heartbeat":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def line(self, seconds: float, new_tokens: int) -> str:
+        affinity = getattr(os, "sched_getaffinity", None)
+        try:
+            cpus = _cpu_list(affinity(0)) if affinity is not None else "?"
+        except OSError:
+            cpus = "?"
+        llm = self.engine.llm
+        threads = self.engine.n_threads
+        try:
+            threads = int(importlib.import_module("llama_cpp").llama_n_threads(llm._ctx.ctx))  # after _follow_cpus
+        except Exception:
+            pass
+        cpuset = _cpuset()
+        return (f"📱 on-device: {self.tokens} tokens, {new_tokens / max(seconds, 0.001):.1f} tok/s "
+                f"(last {seconds:.0f} s), {threads} threads, CPUs {cpus}" + (f", cpuset {cpuset}" if cpuset else ""))
+
+    def _run(self) -> None:
+        last_at, last_tokens = time.monotonic(), 0
+        while not self._stop.wait(HEARTBEAT_SECONDS):
+            now, tokens = time.monotonic(), self.tokens
+            try:
+                job_log.info("%s", self.line(now - last_at, tokens - last_tokens))
+            except Exception:
+                log.debug("the on-device progress line failed", exc_info=True)
+            last_at, last_tokens = now, tokens
+
+
 def _follow_cpus(llm: Any, threads: int) -> Callable[[], None]:
     """Keep llama.cpp's threads within the CPUs Android lets the app use (mobile hotfix 2). Leaving the app
     moves it to another cpuset; a phone can give that fewer cores than the threads, and ggml's threads
@@ -647,8 +720,8 @@ def _follow_cpus(llm: Any, threads: int) -> Callable[[], None]:
             log.debug("changing the thread count failed", exc_info=True)
             return
         state["n"] = count
-        log.info("on-device: %d of %d threads, %d CPU%s available to the app", count, threads, cpus,
-                 "" if cpus == 1 else "s")
+        job_log.info("📱 on-device: %d of %d threads, %d CPU%s available to the app", count, threads, cpus,
+                     "" if cpus == 1 else "s")
 
     def fitted(batch: Any) -> Any:
         now = time.monotonic()
