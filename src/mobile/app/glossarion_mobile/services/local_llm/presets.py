@@ -109,12 +109,13 @@ CUSTOM_FAMILIES: tuple = (
         {"label": "3B", "name": "Llama 3.2 3B", "repo": "unsloth/Llama-3.2-3B-Instruct-GGUF"},
         {"label": "8B", "name": "Llama 3.1 8B", "repo": "unsloth/Llama-3.1-8B-Instruct-GGUF"},
     )},
+    # mobile hotfix 1 #4: a ``group`` heads its sizes in the menu, so Gemma 4 reads as its own generation
     {"id": "gemma", "name": "Gemma", "sizes": (
-        {"label": "270M", "name": "Gemma 3 270M", "repo": "unsloth/gemma-3-270m-it-GGUF"},
-        {"label": "1B", "name": "Gemma 3 1B", "repo": "unsloth/gemma-3-1b-it-GGUF"},
-        {"label": "E2B", "name": "Gemma 4 E2B", "repo": "unsloth/gemma-4-E2B-it-GGUF"},
-        {"label": "4B", "name": "Gemma 3 4B", "repo": "unsloth/gemma-3-4b-it-GGUF"},
-        {"label": "E4B", "name": "Gemma 4 E4B", "repo": "unsloth/gemma-4-E4B-it-GGUF"},
+        {"label": "270M", "name": "Gemma 3 270M", "repo": "unsloth/gemma-3-270m-it-GGUF", "group": "Gemma 3"},
+        {"label": "1B", "name": "Gemma 3 1B", "repo": "unsloth/gemma-3-1b-it-GGUF", "group": "Gemma 3"},
+        {"label": "4B", "name": "Gemma 3 4B", "repo": "unsloth/gemma-3-4b-it-GGUF", "group": "Gemma 3"},
+        {"label": "E2B", "name": "Gemma 4 E2B", "repo": "unsloth/gemma-4-E2B-it-GGUF", "group": "Gemma 4"},
+        {"label": "E4B", "name": "Gemma 4 E4B", "repo": "unsloth/gemma-4-E4B-it-GGUF", "group": "Gemma 4"},
     )},
     {"id": "lfm2", "name": "LFM2", "sizes": (
         {"label": "350M", "name": "LFM2 350M", "repo": "unsloth/LFM2-350M-GGUF"},

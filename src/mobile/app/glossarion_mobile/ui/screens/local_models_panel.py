@@ -398,7 +398,18 @@ class CustomModelSheet:
     # ---- controls -----------------------------------------------------------------------------------
 
     def render(self, push: bool = True) -> None:
-        self.size_row.controls = [self._size_button(i, size) for i, size in enumerate(self.family["sizes"])]
+        controls: list = []
+        for group, sizes in size_groups(self.family):
+            buttons = [self._size_button(i, size) for i, size in sizes]
+            if not group:
+                controls.extend(buttons)
+                continue
+            # a generation's sizes under its name (Gemma 3 / Gemma 4); the groups wrap like the buttons
+            controls.append(ft.Column([
+                ft.Text(group, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Row(buttons, wrap=True, spacing=6, run_spacing=6),
+            ], spacing=2, tight=True, key=f"custom-group-{sizes[0][0]}"))
+        self.size_row.controls = controls
         self.quant_box.controls = self._quant_controls()
         if push and not self.closed:
             _push(self.size_row, self.quant_box)
@@ -1584,9 +1595,23 @@ def _download_status(state: dl.DownloadState) -> str:
     return f"Image support · {state.status}" if state.stem.endswith(dl.PROJECTOR_SUFFIX) else state.status
 
 
+def size_groups(family: dict) -> list:
+    """``[(group, [(index, size)])]`` of a Custom family in table order: the sizes under their ``group``
+    (Gemma 3 / Gemma 4); a family without groups is one group named ''."""
+    groups: list = []
+    for index, size in enumerate(family["sizes"]):
+        group = str(size.get("group") or "")
+        if not groups or groups[-1][0] != group:
+            groups.append((group, []))
+        groups[-1][1].append((index, size))
+    return groups
+
+
 def custom_note(family: dict) -> str:
-    """The text of a Custom row: what its menu offers."""
-    return "Choose a size and a quant: " + " · ".join(size["label"] for size in family["sizes"])
+    """The text of a Custom row: what its menu offers ("Gemma 3 270M · 1B · 4B · Gemma 4 E2B · E4B")."""
+    parts = [" · ".join((f"{group} " if group and i == 0 else "") + size["label"] for i, (_n, size) in enumerate(sizes))
+             for group, sizes in size_groups(family)]
+    return "Choose a size and a quant: " + " · ".join(parts)
 
 
 def _vision_line(key: str) -> ft.Control:
