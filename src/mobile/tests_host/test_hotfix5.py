@@ -702,6 +702,31 @@ def test_share_export_offers_only_the_compiled_outputs(tmp_path):
     assert [k for _p, k in export_outputs(str(subs), "Episode.srt")] == ["subtitle"]
 
 
+def test_a_book_cards_result_never_shows_its_sdlxliff_sidecars(tmp_path):
+    from glossarion_mobile.ui.chat.chat_ops import card_outputs
+
+    book = tmp_path / "Novel"
+    book.mkdir()
+    for index in range(1, 11):
+        (book / f"response_chapter{index:04d}.html.sdlxliff").write_text("<xliff/>", encoding="utf-8")
+    # not compiled yet: the case the owner's screenshot showed, ten chips and nothing else
+    assert card_outputs(str(book), "Novel.epub") == []
+    (book / "glossary.csv").write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    assert [k for _p, k in card_outputs(str(book), "Novel.epub")] == ["glossary"]
+    (book / "Novel.epub").write_bytes(b"PK epub")
+    assert {k for _p, k in card_outputs(str(book), "Novel.epub")} == {"epub", "glossary"}
+    assert all(k != "sdlxliff" for _p, k in card_outputs(str(book), ""))  # a turn without a known attachment
+    # an SDLXLIFF input: they are the run's own results
+    assert sum(k == "sdlxliff" for _p, k in card_outputs(str(book), "Project.SDLXLIFF")) == 10
+    # the card asks with the turn's own attachment
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    view = types.SimpleNamespace(bound=True, _job_workspace=lambda item: str(book), _turn_source=lambda item: "Novel.epub")
+    assert all(k != "sdlxliff" for _p, k in ChatView._outputs_for(view, None))
+    view._turn_source = lambda item: "Project.sdlxliff"
+    assert any(k == "sdlxliff" for _p, k in ChatView._outputs_for(view, None))
+
+
 def test_the_plan_cards_output_sheet_switches_modes():
     from glossarion_mobile.ui.chat.mode_options_sheet import ModeOptionsSheet
     from glossarion_mobile.ui.chat.output_modes import OUTPUT_MODES

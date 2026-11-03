@@ -153,7 +153,7 @@ JOB_BUFFERS_KEPT = 4  # finished jobs whose LogBuffer stays in memory
 JOB_MESSAGES_KEPT = 4000  # whole log messages a job keeps for listeners that attach late
 LAST_LINE_CHARS = 240
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
-#: Lines written for the request stream's parser, not for people: the log file keeps them, Logs does not
+#: Lines written for the request stream's parser, not for people: neither Logs nor the log file keeps them
 STREAM_MACHINE_MARKERS = ("[DIRECT_TEXT_RESPONSE_PAYLOAD]", "[DIRECT_TEXT_GLOSSARY_STREAM_START]")
 ANSWERS_KEPT = 64  # answered questions remembered, so a repeated tap of the same answer stays a no-op
 
@@ -3192,7 +3192,7 @@ class JobService:
         if kind not in ("info", "error", "thinking", "api"):
             kind = None
         for line in raw.replace("\r\n", "\n").split("\n"):
-            if not line.strip():
+            if not line.strip() or line.lstrip().startswith(STREAM_MACHINE_MARKERS):
                 continue
             self._write_log_file(job, line)
             provider = (sign_in_provider(line)
@@ -3201,8 +3201,6 @@ class JobService:
                 job.sign_in_flagged = True
                 self._post(self._deliver_event, job.id, "sign_in_required",
                            sign_in_event(self._job_model(job), provider, line))
-            if line.lstrip().startswith(STREAM_MACHINE_MARKERS):
-                continue
             buffer = job.buffer
             if buffer is not None:
                 buffer.append(line, kind)
@@ -3430,14 +3428,15 @@ class JobService:
             return job.buffer if job is not None else None
 
     def read_log_tail(self, job_id: str, max_lines: int = 2000) -> list[str]:
-        """Last lines of ``<logs>/jobs/<id>.log`` (finished jobs whose buffer is gone)."""
+        """Last lines of ``<logs>/jobs/<id>.log`` (finished jobs whose buffer is gone). A file from before
+        2026-11-03 still holds the stream's machine lines, which are skipped here."""
         path = self.job_log_path(job_id)
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 lines = handle.read().splitlines()
         except OSError:
             return []
-        return lines[-max_lines:]
+        return [line for line in lines if not line.lstrip().startswith(STREAM_MACHINE_MARKERS)][-max_lines:]
 
     def request_stream(self, job_id: Optional[str]) -> Any:
         """The job's ``direct_text_stream.DirectTextStream`` (running and recently finished jobs)."""

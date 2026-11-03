@@ -937,7 +937,7 @@ When failures exist, a pinned error chip **"3 failed – Retry"** sits at the to
 - Elapsed
 - Potential issues (at most 4, shown as warning chips)
 
-**Output chips.** Compiled EPUB / PDF, `*_translated.txt`, glossary.csv, SRT/ASS/SSA/VTT/SBV/LRC, SDLXLIFF. Never `direct_text_stream_translated.txt`, the raw copy of a streamed reply that is already in the chat.
+**Output chips.** Compiled EPUB / PDF, `*_translated.txt`, glossary.csv, SRT/ASS/SSA/VTT/SBV/LRC; SDLXLIFF only when the turn's attachment is SDLXLIFF / XLIFF (a book's per-chapter sidecars stay in Tools › SDLXLIFF reviewer, compiled yet or not). Never `direct_text_stream_translated.txt`, the raw copy of a streamed reply that is already in the chat.
 - Tap: epub opens the Reader, pdf opens Share/open, text opens TextEditor, an image opens the viewer.
 
 **AttachmentActionsRow** (wraps; the first 3 are visible, the rest go under "More"):

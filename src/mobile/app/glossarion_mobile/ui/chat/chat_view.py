@@ -78,8 +78,8 @@ from glossarion_mobile.ui.chat.chat_ops import (
     transcript_markdown,
     turn_workspace,
     version_view,
+    card_outputs,
     export_outputs,
-    workspace_outputs,
 )
 from glossarion_mobile.ui.chat.chat_ops import moved_workspace as _moved_workspace
 from glossarion_mobile.ui.chat.composer import Composer, StatusCaption
@@ -3214,14 +3214,10 @@ class ChatView:
         await self._export_document(documents[0])
 
     def _outputs_for(self, item: Any) -> list:
-        """Blocking: ``[(path, kind)]`` of a job card's turn workspace (``workspace_outputs``). A book run's
-        per-chapter SDLXLIFF sidecars are left out (owner 2026-10-30: "bloat"; Tools › SDLXLIFF reviewer
-        opens them); an SDLXLIFF input's run, whose only outputs they are, keeps them."""
+        """Blocking: ``[(path, kind)]`` of a job card's turn workspace (``chat_ops.card_outputs``: no SDLXLIFF
+        unless the turn's attachment is one)."""
         folder = self._job_workspace(item)
-        outputs = workspace_outputs(folder) if folder else []
-        if any(kind not in ("sdlxliff", "glossary") for _path, kind in outputs):
-            return [(path, kind) for path, kind in outputs if kind != "sdlxliff"]
-        return outputs
+        return card_outputs(folder, self._turn_source(item) if self.bound else "") if folder else []
 
     async def _open_job_output(self, item: Any = None) -> None:
         """Job card › Open output: the turn's ``Attachments/<stem>`` workspace in Files (else the chat's
