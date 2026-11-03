@@ -9,8 +9,9 @@ the session's methods run on the io pool:
 * **Book / piece navigation**: ``session.books`` (another discovered book: ``switch_book``) and
   ``session.pieces`` with the dialog's sidebar labels (``piece_summary``): a ``Dropdown`` and
   ``‹ ›`` steppers.
-* **Legend filter chips** (the dialog's legend: "green ok" · "yellow density/tag-level" ·
-  "purple MT inaccurate" · "red dropped/added/empty/untranslated") filter the rows.
+* **Legend filter buttons** (the dialog's legend: "green ok" · "yellow density/tag-level" ·
+  "purple MT inaccurate" · "red dropped/added/empty/untranslated", shown as the tooltips) filter the
+  rows; one row of short word buttons with their counts: OK · Tags · MT · Lost.
 * **Row cards** (the dialog's ``_add_review_row``): a frame tinted by the status, the tag label
   and reason, the source (small, muted), the MT preview, an editable output field saved 500 ms
   after typing stops and on blur through ``save_row`` (the shared save semantics incl. Manual
@@ -22,9 +23,10 @@ the session's methods run on the io pool:
 * **Machine translation**: provider sheet (Auto / Google / DeepL / Bing / Yandex; Argos shown
   disabled: "Offline engine (ctranslate2) not available on mobile"; the free fallback chain
   skips it), "🔑 Configure … API Key…" (``set_machine_translation_credentials``: encrypted like
-  the desktop's), "🌐 Generate Machine Translation Preview" (``machine_translation_preview``)
-  and per-row **Inject MT** (``inject_machine_translation``).
-* **🟣 Flag Inaccurate** (``flag_inaccurate``) with "Set Score Threshold…" / "Reset Threshold".
+  the desktop's), "🌐 Translate" (the dialog's "Generate Machine Translation Preview",
+  ``machine_translation_preview``) and per-row **Inject MT** (``inject_machine_translation``).
+* **🟣 Flag** (the dialog's "Flag Inaccurate", ``flag_inaccurate``) with "Set Score Threshold…" /
+  "Reset Threshold".
 * **Piece ⋯**: Mark as Completed / Undo (``translation_progress.json`` +
   ``SDLXLIFF/review_status_overrides.json``) - the dialog has no Edit Output.
 * **↻ Refresh** (``refresh(force=True)``: missing / stale sidecars are regenerated) and a 2 s
@@ -47,6 +49,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -60,15 +63,20 @@ from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools.common import hint_text
 
-__all__ = ["ARGOS_REASON", "LEGEND", "NOTEPAD_REASON", "PROVIDERS", "ReviewerBinding", "ReviewerRequest",
-           "SdlxliffScreen", "open_reviewer", "request_open", "sidecar_path_for", "take_request"]
+__all__ = ["ARGOS_REASON", "LAST_PREF", "LEGEND", "NOTEPAD_REASON", "PROVIDERS", "ReviewerBinding", "ReviewerRequest",
+           "SdlxliffScreen", "last_workspace", "open_reviewer", "request_open", "sidecar_path_for", "take_request"]
 
 log = logging.getLogger("glossarion.tools.sdlxliff")
 
 #: The dialog's legend (``_legend_status_label`` texts and statuses).
 LEGEND = (("green", "green ok"), ("yellow", "yellow density/tag-level"), ("purple", "purple MT inaccurate"),
           ("red", "red dropped/added/empty/untranslated"))
+#: The filter buttons' words (mobile hotfix 1 #3: the four fit one row; the legend text is the tooltip)
+LEGEND_WORDS = {"green": "OK", "yellow": "Tags", "purple": "MT", "red": "Lost"}
 STATUS_COLORS = {"green": "#28a745", "yellow": "#d39e00", "purple": "#b967ff", "red": "#dc3545"}
+#: The action buttons (the dialog's "🌐 Generate Machine Translation Preview" / "🟣 Flag Inaccurate")
+TRANSLATE_LABEL = "🌐 Translate"
+FLAG_LABEL = "🟣 Flag"
 #: ``MACHINE_TRANSLATION_PROVIDER_LABELS`` order (the session's labels win when present).
 PROVIDERS = (("auto", "Auto"), ("google", "Google"), ("deepl", "DeepL"), ("bing", "Bing"),
              ("argos", "Argos Translate"), ("yandex", "Yandex"))
@@ -81,6 +89,8 @@ CREDENTIAL_FIELDS = {
     "bing": (("api_key", "Microsoft Translator API key:", True), ("region", "Azure region (optional):", False)),
     "yandex": (("api_key", "Yandex Cloud API key:", True), ("folder_id", "Yandex Cloud folder ID:", False)),
 }
+#: Prefs: the workspace the reviewer showed last, ``{"folder", "source", "piece", "at"}`` (mobile hotfix 1 #2)
+LAST_PREF = "sdlxliff_reviewer_last"
 POLL_SECONDS = 2.0
 #: a row's output is saved this long after the last keystroke (the dialog's ``_edit_save_timer``)
 ROW_SAVE_DELAY = 0.5
@@ -129,6 +139,39 @@ def open_reviewer(ctx: Any, folder: str, *, source: Optional[str] = None, focus:
     fid = prefs.file_ref(folder)
     ctx.go("tools.sdlxliff", None, {"out": fid})
     return fid
+
+
+def _has_sidecars(folder: Any) -> bool:
+    return bool(folder) and os.path.isdir(os.path.join(str(folder), "SDLXLIFF"))
+
+
+def last_workspace(prefs: Any, service: Any = None, chats_root: str = "") -> Optional[tuple]:
+    """``(folder, source, piece)`` the Tools hub's reviewer opens on (blocking: run it on the io pool): the
+    newest translated workspace with SDLXLIFF sidecars (``targets.recent_output_targets``) when a job worked
+    on it after the reviewer last showed one, else the workspace (and piece) shown last; None when neither
+    has sidecars."""
+    saved = None
+    try:
+        saved = prefs.get(LAST_PREF, None) if prefs is not None else None
+    except Exception:
+        saved = None
+    saved = saved if isinstance(saved, dict) and _has_sidecars(saved.get("folder")) else None
+    newest = None
+    if service is not None:
+        try:
+            from glossarion_mobile.ui.tools import targets as tg
+
+            chat = tg.chat_workspace_targets(chats_root, service=service) if chats_root else []
+            newest = next((t for t in tg.recent_output_targets(service, chat_rows=chat) if _has_sidecars(t.folder)),
+                          None)
+        except Exception:
+            log.debug("listing the recent workspaces failed", exc_info=True)
+    if newest is not None and (saved is None or (_key(newest.folder) != _key(saved["folder"])
+                                                 and float(newest.mtime or 0) > float(saved.get("at") or 0))):
+        return str(newest.folder), str(newest.source or ""), ""
+    if saved is not None:
+        return str(saved["folder"]), str(saved.get("source") or ""), str(saved.get("piece") or "")
+    return None
 
 
 def sidecar_path_for(output_dir: str, output_file: Optional[str]) -> Optional[str]:
@@ -343,7 +386,9 @@ class SdlxliffScreen(Screen):
     # ---- layout -----------------------------------------------------------------------------------
 
     def actions(self) -> list:
-        return [ft.IconButton(icon=ft.Icons.REFRESH, tooltip="↻ Refresh", key="sdl-refresh",
+        return [ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="Another workspace…", key="sdl-workspace",
+                              on_click=lambda e: self.open_picker(), size_constraints=HIT_TARGET),
+                ft.IconButton(icon=ft.Icons.REFRESH, tooltip="↻ Refresh", key="sdl-refresh",
                               on_click=lambda e: self.ctx.spawn(self.reload(force=True)), size_constraints=HIT_TARGET)]
 
     def build_body(self) -> ft.Control:
@@ -357,16 +402,18 @@ class SdlxliffScreen(Screen):
                                          on_click=lambda e: self.step(1), key="sdl-next", size_constraints=HIT_TARGET)
         self.piece_menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Piece actions", key="sdl-piece-menu",
                                              items=self._piece_menu_items())
-        self.legend = ft.Row(scroll=ft.ScrollMode.AUTO, spacing=6, key="sdl-legend")
+        self.legend = ft.Row(spacing=6, key="sdl-legend")
         self.summary = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="sdl-summary")
         self.status_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.PRIMARY,
                                    key="sdl-status")
-        self.mt_button = ft.FilledTonalButton(content="🌐 Generate Machine Translation Preview", key="sdl-mt",
-                                              on_click=lambda e: self.ctx.spawn(self.translate_piece()))
+        self.mt_button = ft.FilledButton(content=TRANSLATE_LABEL, key="sdl-mt",
+                                         tooltip="Generate a machine translation preview of this piece",
+                                         on_click=lambda e: self.ctx.spawn(self.translate_piece()))
         self.mt_provider = ft.TextButton(content="Provider: Auto", on_click=lambda e: self.open_provider_sheet(),
                                          key="sdl-provider")
-        self.flag_button = ft.FilledTonalButton(content="🟣 Flag Inaccurate", key="sdl-flag",
-                                                on_click=lambda e: self.ctx.spawn(self.flag()))
+        self.flag_button = ft.FilledButton(content=FLAG_LABEL, key="sdl-flag",
+                                           tooltip="Flag rows the machine translation says are inaccurate",
+                                           on_click=lambda e: self.ctx.spawn(self.flag()))
         self.threshold_button = ft.TextButton(content="Threshold", key="sdl-threshold",
                                               on_click=lambda e: self.open_threshold_sheet())
         webview = self._webview_ok()
@@ -517,6 +564,44 @@ class SdlxliffScreen(Screen):
         self._visible = True
         if self.folder:
             self.ctx.spawn(self.open())
+        else:
+            self.ctx.spawn(self.open_last())
+
+    async def open_last(self) -> Optional[ReviewerBinding]:
+        """The Tools hub tile (no workspace in the route): the newest translated workspace when a job worked
+        on it since, else the workspace and piece shown last (``last_workspace``); the picker otherwise."""
+        try:
+            found = await self.ctx.io(last_workspace, getattr(self.ctx, "prefs", None),
+                                      getattr(self.ctx, "service", None), str(getattr(self.ctx, "chats_root", "") or ""))
+        except Exception:
+            log.debug("finding the last SDLXLIFF workspace failed", exc_info=True)
+            found = None
+        if found is None or self.folder or not self._visible:
+            return None
+        self.folder, source, piece = found
+        self.request = ReviewerRequest(source=source or None, focus=piece or None)
+        self.error = None
+        self.rows_column.controls = []
+        return await self.open()
+
+    def _remember(self, opened: bool = False) -> None:
+        """Keep the workspace and piece shown now for the next time the Tools hub opens the reviewer
+        (``opened``: the workspace was just opened - its time moves on even when nothing else changed)."""
+        prefs = getattr(self.ctx, "prefs", None)
+        if prefs is None or not self.folder or self.binding is None:
+            return
+        piece = self.current_piece() or {}
+        name = str(piece.get("output_name") or piece.get("name") or "")
+        try:
+            saved = prefs.get(LAST_PREF, None)
+            saved = saved if isinstance(saved, dict) else {}
+            same = saved.get("folder") == self.folder
+            if same and saved.get("piece") == name and not opened:
+                return
+            source = str(self.request.source or (saved.get("source") if same else "") or "")
+            prefs.set(LAST_PREF, {"folder": self.folder, "source": source, "piece": name, "at": time.time()})
+        except Exception:
+            log.debug("remembering the SDLXLIFF workspace failed", exc_info=True)
 
     def dispose(self) -> None:
         self._visible = False
@@ -576,6 +661,7 @@ class SdlxliffScreen(Screen):
             self._push(self.rows_column)
             return None
         await self.reload(focus=True)
+        self._remember(opened=True)
         if self._poll_task is None:
             self._poll_task = self.ctx.spawn(self._poll())
         return self.binding
@@ -665,6 +751,7 @@ class SdlxliffScreen(Screen):
             self.body_holder.content = self.rows_column
         self._render_side_list()
         self._push(self.list_view)
+        self._remember()
 
     def _render_header(self) -> Optional[dict]:
         """Book / piece selectors, legend counts, summary, provider and status; returns the piece."""
@@ -685,12 +772,7 @@ class SdlxliffScreen(Screen):
         for row in (piece or {}).get("rows") or ():
             status = str(row.get("status") or "green")
             counts[status] = counts.get(status, 0) + 1
-        self.legend.controls = [
-            ft.Chip(label=ft.Text(f"{text} ({counts.get(status, 0)})"), selected=self.filter_status == status,
-                    show_checkmark=False, key=f"sdl-legend-{status}",
-                    leading=ft.Container(width=10, height=10, bgcolor=STATUS_COLORS[status], border_radius=5),
-                    on_select=lambda e, s=status: self.set_filter(None if self.filter_status == s else s))
-            for status, text in LEGEND]
+        self.legend.controls = [self._legend_button(status, text, counts.get(status, 0)) for status, text in LEGEND]
         if piece is None:
             self.summary.value = "No SDLXLIFF sidecars yet" if binding is not None else ""
         else:
@@ -707,6 +789,24 @@ class SdlxliffScreen(Screen):
         self.status_text.value = binding.status if binding is not None else ""
         self.piece_menu.items = self._piece_menu_items()
         return piece
+
+    def _legend_button(self, status: str, text: str, count: int) -> ft.Control:
+        """A legend filter as a short word button ("OK 12"): the four share one row, the dialog's legend text
+        is the tooltip; a tap filters the rows to that status, a second tap shows them all again."""
+        color = STATUS_COLORS[status]
+        selected = self.filter_status == status
+        return ft.Container(
+            content=ft.Row([
+                ft.Container(width=10, height=10, bgcolor=color, border_radius=5),
+                ft.Text(f"{LEGEND_WORDS[status]} {count}", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                        weight=ft.FontWeight.W_600 if selected else None, theme_style=ft.TextThemeStyle.LABEL_LARGE),
+            ], spacing=6, tight=True, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            expand=True, height=40, border_radius=20, ink=True, tooltip=text,
+            border=ft.Border.all(2 if selected else 1, color if selected else ft.Colors.OUTLINE_VARIANT),
+            bgcolor=ft.Colors.with_opacity(0.18, color) if selected else None,
+            padding=ft.Padding.symmetric(horizontal=6), key=f"sdl-legend-{status}",
+            on_click=lambda e, s=status: self.set_filter(None if self.filter_status == s else s))
 
     def _reader_server(self) -> Any:
         """The Reader's local server (it serves the Notepad page and its images), started on demand."""

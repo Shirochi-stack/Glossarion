@@ -191,6 +191,8 @@ HIGHLIGHT_SECONDS = 1.5
 CHAT_TEXT_SCALE_RANGE = (0.85, 1.5)
 # ModelSheet field -> chat override key (run_request.OVERRIDE_CONFIG_KEYS maps them to config keys)
 _SHEET_OVERRIDE_KEYS = {"model": "model", "profile": "profile", "language": "target_language"}
+#: The config keys behind the chat's model · profile · language (``chat_context_for`` / ``inherited_value``)
+CONTEXT_CONFIG_KEYS = ("model", "active_profile", "prompt_profiles", "output_language", "glossary_target_language")
 _ATTACH_EXTENSIONS = [
     "txt", "epub", "pdf", "md", "markdown", "html", "htm", "xhtml", "xml", "json", "csv", "tsv", "srt", "ass", "ssa",
     "lrc", "vtt", "sbv", "log", "sdlxliff", "zip", "cbz", "mp4", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif",
@@ -636,6 +638,12 @@ class ChatView:
             self._env_unsubs.append(env.jobs.subscribe(lambda snap: env.on_ui(self._on_job_snapshot, snap)))
         if env.oauth is not None:
             self._env_unsubs.append(env.oauth.subscribe(lambda _s: env.on_ui(self._on_signin_changed)))
+        observe_keys = getattr(getattr(env, "store", None), "observe_keys", None)
+        if callable(observe_keys):
+            # mobile hotfix 1 #1: a model / profile / language chosen outside the chat (Settings › Profiles,
+            # Settings) - the header and the Plan / Result chips follow it, as the run does
+            self._env_unsubs.append(observe_keys(CONTEXT_CONFIG_KEYS,
+                                                 lambda key, value: env.on_ui(self._on_context_config)))
         self.load_chat(self.state.current_chat.value)
 
     @property
@@ -671,6 +679,11 @@ class ChatView:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+
+    def _on_context_config(self) -> None:
+        """A ``CONTEXT_CONFIG_KEYS`` write: re-render only when the chat's model · profile · language moved."""
+        if self.bound and self.chat_context_for(self.cid) != self.state.chat_context.value:
+            self.apply_settings_changed()
 
     def _on_context(self, context: Any) -> None:
         self.header.set_context(context)

@@ -339,6 +339,7 @@ class LlamaEngine(_Base):
         self.formatter: Any = None
         self.vision_handler: Any = None
         self._scripts: Any = None  # the loaded model's script_ban.VocabScripts (computed on first use)
+        self.sliding_window = 0  # the loaded model's SWA window in tokens (0: none)
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -362,9 +363,14 @@ class LlamaEngine(_Base):
             else:
                 placement = {"n_gpu_layers": 0, "split_mode": SPLIT_MODE_NONE, "main_gpu": -1}
             try:
+                # mobile hotfix 1: a sliding-window model (Gemma 3 / 4) keeps only its window in the SWA layers'
+                # cache, not the whole context (llama.cpp's default swa_full=true), and the CPU runs flash
+                # attention (llama.cpp's "auto" picks it there; the GPU keeps it off as before), so Gemma 4's
+                # mixed V sizes are not padded. ``chat`` then starts every request on an empty cache.
                 llm = llama_cpp.Llama(model_path=str(path), n_ctx=int(n_ctx), n_threads=int(n_threads),
                                       n_threads_batch=int(n_threads), n_batch=512, n_ubatch=512, use_mmap=True,
-                                      use_mlock=False, verbose=False, **placement)
+                                      use_mlock=False, verbose=False, swa_full=False, flash_attn=not gpu,
+                                      **placement)
             except Exception as exc:
                 if gpu:
                     raise GpuUnavailable(f"the model did not load on the GPU ({exc})") from exc
@@ -379,6 +385,7 @@ class LlamaEngine(_Base):
             if self.formatter is not None:
                 llm.chat_handler = self.formatter.to_chat_handler()
             self.llm = llm
+            self.sliding_window = _sliding_window(llama_cpp, llm)
             self.path, self.n_ctx, self.n_threads = str(path), int(n_ctx), int(n_threads)
             self.mmproj = str(mmproj) if mmproj else None
             self.on_gpu = bool(gpu)
@@ -408,6 +415,7 @@ class LlamaEngine(_Base):
             handler, self.vision_handler = self.vision_handler, None
             self.formatter = None
             self._scripts = None
+            self.sliding_window = 0
             self.path = None
             self.mmproj = None
             self.on_gpu = False
@@ -505,6 +513,8 @@ class LlamaEngine(_Base):
             source = ("\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user")
                       if allow or whitelist else "")
             kwargs["logits_processor"] = processors([self.script_ban(tuple(params["ban_scripts"]), allow, source, whitelist)])
+        if self.sliding_window:
+            _empty_cache(llm)
         self.last_finish = "stop"
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every
@@ -593,6 +603,26 @@ def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable
             del context.decode  # the class's own method again
 
     return done
+
+
+def _sliding_window(llama_cpp: Any, llm: Any) -> int:
+    """The model's sliding attention window (``llama_model_n_swa``), 0 for a model without one."""
+    try:
+        return max(0, int(llama_cpp.llama_model_n_swa(llm._model.model)))
+    except Exception:
+        log.debug("reading the sliding window failed", exc_info=True)
+        return 0
+
+
+def _empty_cache(llm: Any) -> None:
+    """Start the next request on an empty cache. With ``swa_full=False`` the SWA layers have already dropped
+    the tokens behind their window, but 0.3.32's prompt-prefix reuse (``Llama.generate``) only checks that
+    ``seq_rm`` succeeds, and it always does: a reused prefix would attend to tokens that are gone."""
+    try:
+        llm.reset()
+        llm._ctx.kv_cache_clear()
+    except Exception:
+        log.debug("clearing the cache failed", exc_info=True)
 
 
 def _close(llm: Any) -> None:
