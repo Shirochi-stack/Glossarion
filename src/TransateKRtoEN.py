@@ -33817,6 +33817,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"⚠️ PDF bookmark/header batch translation failed: {artifact_exc}")
 
     if is_subtitle_file:
+        subtitles_created = False
         try:
             if is_subtitle_bundle:
                 from subtitle_processor import convert_subtitle_bundle
@@ -33900,6 +33901,7 @@ def main(log_callback=None, stop_callback=None):
                 f"{hours}h {minutes}m {seconds}s"
             )
             print(f"📊 Subtitle batches completed: {chapters_completed}")
+            subtitles_created = bool(result.get("success"))
             if log_callback:
                 if result.get("success"):
                     log_callback(
@@ -33916,7 +33918,8 @@ def main(log_callback=None, stop_callback=None):
             if log_callback:
                 log_callback(f"❌ Error creating translated subtitle: {e}")
         print("TRANSLATION_COMPLETE_SIGNAL")
-        return
+        # A missing subtitle is a failed run: the caller reads False as unfinished, and a Stop reports itself.
+        return bool(subtitles_created or check_stop())
 
     if is_sdlxliff_file:
         try:

@@ -100,11 +100,12 @@ def test_leaving_a_stopped_process_pool_kills_its_workers():
             processes = list(pool._processes.values())
             assert processes
             raise StopIteration
-    started = time.monotonic()
-    for process in processes:
-        process.join(5)
+    # The pool's manager thread reaps the killed workers too. While it holds a worker's exit status without having
+    # stored it yet, is_alive() still says True, so one look can call a dead worker alive.
+    deadline = time.monotonic() + 5
+    while any(process.is_alive() for process in processes) and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert not any(process.is_alive() for process in processes), "a worker survived"
-    assert time.monotonic() - started < 5
 
 
 def test_leaving_a_stopped_thread_pool_does_not_wait_and_drops_the_queue():

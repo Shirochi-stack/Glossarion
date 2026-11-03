@@ -916,7 +916,14 @@ def test_logs_go_to_buffer_and_file_and_feed_the_shared_request_stream(tmp_path,
     assert "Second paragraph" in texts and "" not in texts  # the buffer and the file keep non-blank lines
     assert [line.kind for line in buffer.snapshot() if line.text.startswith("❌")] == ["error"]
     file_lines = service.read_log_tail(job_id)
-    assert any("PAYLOAD" in t for t in file_lines)  # the file keeps everything
+    # a finished job's Log comes from this file once its buffer is gone, and Share sends it: no payload there either
+    assert "📤 Sending API call now" in file_lines and not any("PAYLOAD" in t for t in file_lines)
+    log_file = Path(service.job_log_path(job_id))
+    assert "PAYLOAD" not in log_file.read_text(encoding="utf-8")
+    # a log written by an older version still has them; the page shows it without them
+    with log_file.open("a", encoding="utf-8") as handle:
+        handle.write('[DIRECT_TEXT_RESPONSE_PAYLOAD] {"content": "the book"}\n')
+    assert not any("PAYLOAD" in t for t in service.read_log_tail(job_id))
     stream = service.request_stream(job_id)
     assert isinstance(stream, RequestStream)
     # the desktop listener's view: every message whole, blank ones included (append_log -> _on_log_line)
