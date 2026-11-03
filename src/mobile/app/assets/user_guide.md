@@ -20,7 +20,7 @@ The home screen is a chat, like the desktop Direct Text window.
 - When a book attachment finishes translating, it moves into the **Library** by itself ("Added to the Library" · Open book). There is no Migrate step. **Attachments** lists only workspaces still waiting: a job is running, the run can be resumed, or a different Library book has the same name (⋯ › Merge into Library…).
 - **QA scan:** the **QA scan** button on a finished translation, **＋ › QA scan** or `/qa` runs a Quick Scan and posts a QA card with the report and chapters. On phones the duplicate check is off by default (sample size 0); change it in Tools › QA Scanner or Settings › QA Scanner Settings (-1 = all text).
 - **Output mode** (the chip in the composer row): Text, Vision, Image, Video, Audio or Refinement.
-- The **Result** of a job card shows its output files (EPUB / PDF, `*_translated.txt`, glossary, subtitles, SDLXLIFF): tap one to open, share or save it. **Compile ▾** builds an EPUB or PDF, **Open output** shows the turn's folder in Files, **Read** opens the Reader.
+- The **Result** of a job card shows its output files (EPUB / PDF, `*_translated.txt`, glossary, subtitles; SDLXLIFF only when you attached an SDLXLIFF file, otherwise use **Tools › SDLXLIFF reviewer**): tap one to open, share or save it. **Compile ▾** builds an EPUB or PDF, **Open output** shows the turn's folder in Files, **Read** opens the Reader.
 - **Long-press a reply** for Edit translation, Copy as Markdown / HTML / plain text, **Glossary terms used**, Add term to glossary and Delete.
 - **Stop** finishes the current request first (graceful stop); **Force stop** cancels at once. A stopped or interrupted job offers **Resume**: it continues from the saved progress.
 

@@ -38,6 +38,7 @@ __all__ = [
     "turn_workspace",
     "workspace_outputs",
     "export_outputs",
+    "card_outputs",
     "COMPILED_EXPORT_KINDS",
     "jump_entries",
     "safe_file_stem",
@@ -227,6 +228,8 @@ def workspace_outputs(folder: str) -> list:
 
 #: what Share / Export offers of a book's workspace: its compiled outputs only
 COMPILED_EXPORT_KINDS = ("epub", "pdf", "txt", "html")
+#: inputs whose translated files are SDLXLIFF, so the run's outputs rather than a book's sidecars
+_SDLXLIFF_SOURCES = (".sdlxliff", ".xliff", ".xlf")
 
 
 def export_outputs(folder: str, source: str = "") -> list:
@@ -240,13 +243,23 @@ def export_outputs(folder: str, source: str = "") -> list:
     if compiled:
         return compiled
     extension = os.path.splitext(str(source or ""))[1].lower()
-    if extension in (".sdlxliff", ".xliff", ".xlf"):
+    if extension in _SDLXLIFF_SOURCES:
         wanted = "sdlxliff"
     elif extension and extension.endswith(_SUBTITLE_EXTENSIONS):
         wanted = "subtitle"
     else:
         return []
     return [(path, kind) for path, kind in outputs if kind == wanted]
+
+
+def card_outputs(folder: str, source: str = "") -> list:
+    """Blocking: ``[(path, kind)]`` a job card's Result shows for a workspace. SDLXLIFF files only for an SDLXLIFF /
+    XLIFF ``source``: a book's per-chapter sidecars stay in Tools › SDLXLIFF reviewer, compiled yet or not (owner
+    2026-10-30: "bloat"; again 2026-11-03: "The user can manually find it in tools")."""
+    outputs = workspace_outputs(folder)
+    if os.path.splitext(str(source or ""))[1].lower() in _SDLXLIFF_SOURCES:
+        return outputs
+    return [(path, kind) for path, kind in outputs if kind != "sdlxliff"]
 
 
 # ---------------------------------------------------------------------------
