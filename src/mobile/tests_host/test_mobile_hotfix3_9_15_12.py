@@ -2,7 +2,7 @@
 
 Owner: Gemma 4 reads a long prompt for minutes ("SDK stream opened in 147.5s"), and hotfix 2's line showed
 "0 tokens, 0.0 tok/s" all that time. Until the first output token the line is the prompt's progress
-(``reading the prompt, 1,024 of ~1,536 tokens``), then the tokens written.
+(``processing, 1,024 of ~1,536 tokens``), then the tokens written.
 
 Run from src/mobile (mobile venv):
     python -m pytest -p no:cacheprovider -W ignore tests_host/test_mobile_hotfix3_9_15_12.py -q
@@ -78,7 +78,7 @@ def test_the_progress_line_shows_the_prompt_being_read_then_the_tokens_written(m
         parent.removeHandler(handler)
         parent.setLevel(level)
     beats = [line for line in lines if line.startswith("📱 on-device: ") and "threads, CPUs" in line]
-    reading = [line for line in beats if "reading the prompt" in line]
+    reading = [line for line in beats if "processing" in line]
     written = [line for line in beats if "tokens written" in line]
     assert reading and written and beats.index(reading[-1]) < beats.index(written[0])
     assert not any("0 tokens" in line or "0.0 tok/s" in line for line in reading)
@@ -92,15 +92,15 @@ def test_line_texts():
 
     beat = eng._Heartbeat(types.SimpleNamespace(llm=None, n_threads=4))
     beat.prompt_total = 5896
-    assert beat.line(15, 0).startswith("📱 on-device: reading the prompt (~5,896 tokens), 4 threads")
+    assert beat.line(15, 0).startswith("📱 on-device: processing (~5,896 tokens), 4 threads")
     beat.read(512)
     beat.read(512)
     beat.started = time.monotonic() - 32  # the average since reading began, not the last interval
-    assert "reading the prompt, 1,024 of ~5,896 tokens (32.0 tok/s)" in beat.line(15, 0)
+    assert "processing, 1,024 of ~5,896 tokens (32.0 tok/s)" in beat.line(15, 0)
     beat.reading, beat.tokens = False, 274
     assert "274 tokens written, 4.4 tok/s (last 15 s)" in beat.line(15, 66)
     unknown = eng._Heartbeat(types.SimpleNamespace(llm=None, n_threads=2))
-    assert "reading the prompt (? tokens)" in unknown.line(15, 0)
+    assert "processing (? tokens)" in unknown.line(15, 0)
     assert eng._batch_tokens(types.SimpleNamespace(batch=types.SimpleNamespace(n_tokens=64))) == 64
     assert eng._batch_tokens(None) == 0 and threading.active_count() >= 1
 
@@ -302,10 +302,10 @@ def test_notification_shows_the_on_device_row_and_the_stream_and_ticks_while_vis
         clock.now += 1
         assert await background.job_progress(snap)
         assert texts()[-1] == "Book.epub" and not background.ticker_running  # nothing live: no rows, no ticker
-        rows["ondevice"] = "📱 Reading the prompt · 512 / ~5,896 tokens · 32.0 tok/s"
+        rows["ondevice"] = "📱 Processing · 512 / ~5,896 tokens · 32.0 tok/s"
         clock.now += 1
         assert await background.job_progress(snap)
-        assert texts()[-1] == "Book.epub\n📱 Reading the prompt · 512 / ~5,896 tokens · 32.0 tok/s"
+        assert texts()[-1] == "Book.epub\n📱 Processing · 512 / ~5,896 tokens · 32.0 tok/s"
         assert background.ticker_running  # live rows: the ticker runs though the app is visible
         rows["ondevice"] = "📱 12 tokens written · 6.5 tok/s"
         tails["text"] = "<p>The secret proposal of the noble faction</p>"

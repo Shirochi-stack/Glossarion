@@ -703,17 +703,17 @@ class _Heartbeat:
         self.prompt_read += int(tokens or 0)
 
     def notification_row(self) -> str:
-        """The job notification's on-device row (hotfix 3): "📱 Reading the prompt · 2,048 / ~5,896 tokens ·
+        """The job notification's on-device row (hotfix 3): "📱 Processing · 2,048 / ~5,896 tokens ·
         32.0 tok/s" until the first output token, then "📱 412 tokens written · 6.5 tok/s" (averages: the
         notification updates every second, a per-second speed would jump)."""
         now = time.monotonic()
         if self.reading:
             total = f"~{self.prompt_total:,}" if self.prompt_total else "?"
             if not self.prompt_read:
-                return f"📱 Reading the prompt · {total} tokens"
+                return f"📱 Processing · {total} tokens"
             read = min(self.prompt_read, self.prompt_total or self.prompt_read)
             speed = self.prompt_read / max(now - self.started, 0.001)
-            return f"📱 Reading the prompt · {read:,} / {total} tokens · {speed:.1f} tok/s"
+            return f"📱 Processing · {read:,} / {total} tokens · {speed:.1f} tok/s"
         speed = self.tokens / max(now - (self.first_token_at or self.started), 0.001)
         return f"📱 {self.tokens:,} tokens written · {speed:.1f} tok/s"
 
@@ -738,10 +738,10 @@ class _Heartbeat:
         elif self.prompt_read:
             # the average since the start: a 512-token batch can take longer than one line's interval
             average = self.prompt_read / max(time.monotonic() - self.started, 0.001)
-            progress = (f"reading the prompt, {min(self.prompt_read, self.prompt_total or self.prompt_read):,} "
+            progress = (f"processing, {min(self.prompt_read, self.prompt_total or self.prompt_read):,} "
                         f"of {total} tokens ({average:.1f} tok/s)")
         else:
-            progress = f"reading the prompt ({total} tokens)"
+            progress = f"processing ({total} tokens)"
         return (f"📱 on-device: {progress}, {threads} threads, CPUs {cpus}" + (f", cpuset {cpuset}" if cpuset else ""))
 
     def _count(self) -> int:
