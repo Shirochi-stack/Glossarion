@@ -3556,6 +3556,8 @@ class UnifiedClient:
                 task = 'glossary'
         except Exception:
             pass
+        if UnifiedClient._subtitle_run():
+            task = f'subtitle_{task}'  # no such kind is banned, on the phone's own engine too
         mode = (os.getenv('AUTO_GLOSSARY_MODE') or '').strip().lower().replace(' ', '_').replace('-', '_')
         explicit = (os.getenv('SINGLE_PASS_GLOSSARY_MODE') or '').strip().lower().replace(' ', '_').replace('-', '_')
         single_pass = (explicit in ('1', 'true', 'yes', 'single_pass', 'singlepass', 'single')
@@ -3569,6 +3571,14 @@ class UnifiedClient:
         if UnifiedClient._script_ban_whitelist_source():
             fields['glossarion_whitelist_source'] = True
         return fields
+
+    @staticmethod
+    def _subtitle_run() -> bool:
+        """This run's input is a subtitle file (a ZIP's run names its first one). The script ban leaves those
+        alone (owner 2026-11-03: "Subtitle formats should be excluded from script ban")."""
+        from subtitle_processor import SUBTITLE_EXTENSIONS
+        path = os.getenv('input_path') or os.getenv('EPUB_PATH') or ''
+        return path.strip().lower().endswith(SUBTITLE_EXTENSIONS)
 
     @staticmethod
     def _script_ban_allow_kaomoji() -> bool:
@@ -3634,7 +3644,7 @@ class UnifiedClient:
             if (os.getenv("ENABLE_ANTI_DUPLICATE", "0") != "1"
                     and not str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')):
                 return ()
-            if os.getenv("BLOCK_OTHER_SCRIPTS", "0") != "1":
+            if os.getenv("BLOCK_OTHER_SCRIPTS", "0") != "1" or self._subtitle_run():
                 return ()
             import script_ban_core
             kind = str(context or '').strip().lower()
