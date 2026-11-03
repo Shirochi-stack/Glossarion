@@ -61,6 +61,8 @@ DEFAULT_SAMPLING = {"top_k": 20, "top_p": 0.8, "min_p": 0.0}
 #: quote or an asterisk, so a chapter's paragraph tags and dialogue lines stay free
 DRY_SEQUENCE_BREAKERS = ("\n", ":", '"', "*")
 STOP_CHECK_EVERY = 8  # tokens between two "is the client still there?" checks
+#: seconds between two checks of the CPUs Android lets the app use (``_follow_cpus``)
+CPU_CHECK_SECONDS = 1.0
 UNAVAILABLE = "The on-device engine is not available in this build (llama-cpp-python is not installed)"
 NO_MTMD = "This build's on-device engine cannot read images (llama-cpp-python without libmtmd)"
 _VISION: list = []  # cached vision_status() result
@@ -520,6 +522,7 @@ class LlamaEngine(_Base):
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every
         # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop; until the first
         # chunk (the prompt, which can take minutes on a phone) a Stop is seen between two decodes.
+        cpus_done = _follow_cpus(llm, self.n_threads)
         prompt_done = _stop_between_decodes(llm, should_stop)
         try:
             if handler is not None:
@@ -567,6 +570,7 @@ class LlamaEngine(_Base):
                     close()
         finally:
             prompt_done()
+            cpus_done()
         prompt = 0
         try:
             prompt = self.count_prompt(messages)
@@ -590,6 +594,7 @@ def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable
     decode = getattr(context, "decode", None)
     if decode is None:
         return lambda: None
+    previous = vars(context).get("decode")  # another wrapper (``_follow_cpus``) stays in place
 
     def checked(batch: Any) -> Any:
         if should_stop():
@@ -600,7 +605,67 @@ def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable
 
     def done() -> None:
         if vars(context).get("decode") is checked:
-            del context.decode  # the class's own method again
+            if previous is not None:
+                context.decode = previous
+            else:
+                del context.decode  # the class's own method again
+
+    return done
+
+
+def _follow_cpus(llm: Any, threads: int) -> Callable[[], None]:
+    """Keep llama.cpp's threads within the CPUs Android lets the app use (mobile hotfix 2). Leaving the app
+    moves it to another cpuset; a phone can give that fewer cores than the threads, and ggml's threads
+    spin-wait for each other on every step: with more threads than cores generation all but stops (2
+    threads on 1 core ran 10x slower on the emulator). About once a second, before a decode, the thread
+    count follows the allowed CPUs (``llama_set_n_threads``) and the change is logged; the end of the
+    request restores the loaded count. Returns the function that ends it (safe to call again)."""
+    context = getattr(llm, "_ctx", None)
+    decode = getattr(context, "decode", None)
+    affinity = getattr(os, "sched_getaffinity", None)
+    try:
+        setter = importlib.import_module("llama_cpp").llama_set_n_threads
+    except Exception:
+        setter = None
+    if decode is None or affinity is None or setter is None or int(threads or 0) < 2:
+        return lambda: None
+    threads = int(threads)
+    state = {"n": threads, "at": 0.0}
+
+    def apply(count: int, cpus: int) -> None:
+        try:
+            setter(context.ctx, count, count)
+        except Exception:
+            log.debug("changing the thread count failed", exc_info=True)
+            return
+        state["n"] = count
+        log.info("on-device: %d of %d threads, %d CPU%s available to the app", count, threads, cpus,
+                 "" if cpus == 1 else "s")
+
+    def fitted(batch: Any) -> Any:
+        now = time.monotonic()
+        if now - state["at"] >= CPU_CHECK_SECONDS:
+            state["at"] = now
+            try:
+                cpus = len(affinity(0))
+            except OSError:
+                cpus = threads
+            want = max(1, min(threads, cpus))
+            if want != state["n"]:
+                apply(want, cpus)
+        return decode(batch)
+
+    context.decode = fitted
+
+    def done() -> None:
+        if vars(context).get("decode") is fitted:
+            del context.decode
+        if state["n"] != threads:
+            try:
+                setter(context.ctx, threads, threads)  # the next request starts at the loaded count again
+            except Exception:
+                log.debug("restoring the thread count failed", exc_info=True)
+            state["n"] = threads
 
     return done
 
