@@ -100,6 +100,7 @@ LAUNCH_ASK_DELAY = 2.0
 PREF_NOTIFICATIONS_OFF_HINT = "jobs_notifications_off_hint_shown"
 PREF_KEEP_SCREEN_ON = "keep_screen_on_during_jobs"
 UPDATE_INTERVAL = 1.0  # seconds between foreground-service / Live Activity updates
+UPDATE_SLACK = 0.05  # seconds the throttle forgives (the ticker sleeps exactly UPDATE_INTERVAL)
 REPOST_INTERVAL = 1.0  # a swiped-away job notification is posted again at most once per second
 JOBS_HOLD = "jobs"  # ServiceHolds name of the job runner
 NOTIFICATION_SETTINGS_ROUTE = "/settings/notifications"
@@ -596,8 +597,10 @@ class BackgroundExecution:
         from glossarion_mobile.services.jobs import notification_lines, notification_text
 
         now = self.clock()
-        text = notification_text(snap)
-        if not force and now - self._last_update < self.update_interval:
+        rows = self._live_rows(snap)
+        text = "\n".join([notification_text(snap), *rows])
+        # a little slack: the 1 s ticker must not land just under the interval and skip every other second
+        if not force and now - self._last_update < self.update_interval - min(UPDATE_SLACK, self.update_interval / 10):
             if text != self._last_text:
                 self._pending = snap
                 self._sync_ticker()
@@ -614,7 +617,10 @@ class BackgroundExecution:
             holds = service_holds(self.native)
             if holds is not None:
                 holds.hold(JOBS_HOLD, headline, book)  # what to show again after a sign-in releases it
-            await self._native("update_job_service", title=headline, text=book)
+            # hotfix 3: the live rows under the book line (the plugin's BigTextStyle shows each line as a row)
+            await self._native("update_job_service", title=headline, text="\n".join(r for r in (book, *rows) if r))
+            self._rows_shown = bool(rows)
+            self._sync_ticker()  # live rows keep the ticker going, the app visible or not
             return True
         if self.is_ios and self.continued_started:
             await self._native("update_continued_processing", int(progress.completed or 0),
@@ -708,7 +714,30 @@ class BackgroundExecution:
         """While the app is hidden the UI dispatcher parks the jobs view (``_on_view`` stops calling
         ``job_progress``), so the ticker reads the active job itself; while visible it only runs to send an
         update the throttle held back, or a swiped-away notification the re-post limit held back."""
-        return self._service_up() and (not self.app_visible or self._pending is not None or self._repost_wanted)
+        # live rows keep it going, and so do rows still shown (their removal must reach the notification)
+        return self._service_up() and (not self.app_visible or self._pending is not None or self._repost_wanted
+                                       or getattr(self, "_rows_shown", False)
+                                       or bool(self._live_rows(self._active())))
+
+    def _live_rows(self, snap: Any) -> list:
+        """The job notification's live rows (``jobs.live_rows``: on-device speed, streamed text); Android only
+        (the iOS continued-processing task shows one line)."""
+        if not self.is_android or snap is None:
+            return []
+        from glossarion_mobile.services.jobs import live_rows
+
+        tail = ""
+        getter = getattr(self.jobs, "stream_tail", None)
+        if callable(getter):
+            try:
+                tail = str(getter(getattr(snap, "id", None)) or "")
+            except Exception:
+                tail = ""
+        try:
+            return live_rows(snap, tail)
+        except Exception:
+            log.debug("the notification's live rows failed", exc_info=True)
+            return []
 
     @property
     def ticker_running(self) -> bool:

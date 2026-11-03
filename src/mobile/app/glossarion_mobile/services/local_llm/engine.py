@@ -353,6 +353,7 @@ class LlamaEngine(_Base):
         self.vision_handler: Any = None
         self._scripts: Any = None  # the loaded model's script_ban.VocabScripts (computed on first use)
         self.sliding_window = 0  # the loaded model's SWA window in tokens (0: none)
+        self.live: Optional["_Heartbeat"] = None  # the request running now (``chat``), for the notification
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -540,6 +541,7 @@ class LlamaEngine(_Base):
         except Exception:
             heartbeat.prompt_total = 0
         heartbeat.start()
+        self.live = heartbeat  # the job notification's on-device row (``notification_row``)
         prompt_done = _stop_between_decodes(llm, should_stop, on_batch=heartbeat.read)
         try:
             if handler is not None:
@@ -566,7 +568,8 @@ class LlamaEngine(_Base):
             try:
                 for index, chunk in enumerate(chunks):
                     prompt_done()
-                    heartbeat.reading = False
+                    if heartbeat.reading:
+                        heartbeat.reading, heartbeat.first_token_at = False, time.monotonic()
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
                     text = delta.get("content")
@@ -589,6 +592,8 @@ class LlamaEngine(_Base):
                     close()
         finally:
             heartbeat.stop()
+            if self.live is heartbeat:
+                self.live = None
             prompt_done()
             cpus_done()
         prompt = 0
@@ -682,6 +687,7 @@ class _Heartbeat:
         self.prompt_total = 0  # the prompt's estimated tokens (``count_prompt``), 0 when unknown
         self.prompt_read = 0  # prompt tokens decoded so far (``_stop_between_decodes`` batches)
         self.started = time.monotonic()
+        self.first_token_at = 0.0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="gl-llm-heartbeat", daemon=True)
 
@@ -695,6 +701,21 @@ class _Heartbeat:
 
     def read(self, tokens: int) -> None:
         self.prompt_read += int(tokens or 0)
+
+    def notification_row(self) -> str:
+        """The job notification's on-device row (hotfix 3): "📱 Reading the prompt · 2,048 / ~5,896 tokens ·
+        32.0 tok/s" until the first output token, then "📱 412 tokens written · 6.5 tok/s" (averages: the
+        notification updates every second, a per-second speed would jump)."""
+        now = time.monotonic()
+        if self.reading:
+            total = f"~{self.prompt_total:,}" if self.prompt_total else "?"
+            if not self.prompt_read:
+                return f"📱 Reading the prompt · {total} tokens"
+            read = min(self.prompt_read, self.prompt_total or self.prompt_read)
+            speed = self.prompt_read / max(now - self.started, 0.001)
+            return f"📱 Reading the prompt · {read:,} / {total} tokens · {speed:.1f} tok/s"
+        speed = self.tokens / max(now - (self.first_token_at or self.started), 0.001)
+        return f"📱 {self.tokens:,} tokens written · {speed:.1f} tok/s"
 
     def line(self, seconds: float, new_tokens: int) -> str:
         """The progress since the last line: ``new_tokens`` output tokens, or prompt tokens while reading."""

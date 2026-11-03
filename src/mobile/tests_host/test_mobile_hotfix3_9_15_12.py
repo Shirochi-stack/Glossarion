@@ -236,3 +236,89 @@ def test_notepad_layout_fills_the_screen_and_the_header_steps_aside_for_the_keyb
     assert screen.list_view.scroll == ft.ScrollMode.AUTO and not screen.body_holder.expand
     screen._unhook_keyboard()
     assert page.on_media_change is shell
+
+
+# ---- the job notification: an on-device row and the streamed text, updated every second ------------------------
+
+
+def _jobs_helpers():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_glossarion_jobs_helpers_hf3", Path(__file__).with_name("test_jobs.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_stream_row_is_the_end_of_the_streamed_text_without_tags():
+    from glossarion_mobile.services.jobs import NOTIFICATION_STREAM_CHARS, stream_row
+
+    assert stream_row("") == "" and stream_row("<br/><br/>") == ""
+    assert stream_row("<p>Hello &amp; welcome</p>\n<br/><p>back.</p>") == "Hello & welcome back."
+    long = "<p>" + " ".join(f"word{i}" for i in range(80)) + "</p>"
+    row = stream_row(long)
+    assert row.startswith("…word") and row.endswith("word79") and len(row) <= NOTIFICATION_STREAM_CHARS + 1
+
+
+def test_job_keeps_the_tail_of_its_streamed_text_and_drops_it_for_the_next_request(tmp_path):
+    from glossarion_mobile.services import jobs as jb
+
+    job = types.SimpleNamespace(stream=types.SimpleNamespace(feed=lambda raw: "suppress-main-log" if raw.startswith("<") else None),
+                                stream_tail="", buffer=None, sign_in_flagged=True, last_line="", spec=None, id="j1")
+    service = jb.JobService.__new__(jb.JobService)
+    service._deliver_message = lambda job, raw: None
+    service._write_log_file = lambda job, line: None
+    service._note_issue = lambda job, line: None
+    service._job_log(job, "<p>first part</p>", {})
+    service._job_log(job, "<p>second</p>", {})
+    assert job.stream_tail == "<p>first part</p><p>second</p>"
+    service._job_log(job, "📤 [Thread-2 (api_call)] Chapter 7 — Sending API call now", {})
+    assert job.stream_tail == ""
+    service._job_log(job, "<p>" + "x" * 3000 + "</p>", {})
+    assert len(job.stream_tail) == jb.STREAM_TAIL_KEEP
+
+
+def test_notification_shows_the_on_device_row_and_the_stream_and_ticks_while_visible(monkeypatch):
+    import asyncio
+
+    from glossarion_mobile.services import jobs as jb
+    from glossarion_mobile.services.jobs import JobState, Progress
+
+    helpers = _jobs_helpers()
+    background, native, clock, fake_jobs = helpers._background("android", update_interval=0.05)
+    tails = {"text": ""}
+    fake_jobs.stream_tail = lambda job_id=None: tails["text"]
+    rows = {"ondevice": ""}
+    monkeypatch.setattr(jb, "on_device_row", lambda: rows["ondevice"])
+
+    def texts():
+        return [c[2].get("text") for c in native.calls if c[0] == "update_job_service"]
+
+    async def scenario():
+        await background.job_started(helpers._snap(state=JobState.STARTING))
+        snap = helpers._snap(progress=Progress(total=80, completed=1))
+        fake_jobs.snap = snap
+        clock.now += 1
+        assert await background.job_progress(snap)
+        assert texts()[-1] == "Book.epub" and not background.ticker_running  # nothing live: no rows, no ticker
+        rows["ondevice"] = "📱 Reading the prompt · 512 / ~5,896 tokens · 32.0 tok/s"
+        clock.now += 1
+        assert await background.job_progress(snap)
+        assert texts()[-1] == "Book.epub\n📱 Reading the prompt · 512 / ~5,896 tokens · 32.0 tok/s"
+        assert background.ticker_running  # live rows: the ticker runs though the app is visible
+        rows["ondevice"] = "📱 12 tokens written · 6.5 tok/s"
+        tails["text"] = "<p>The secret proposal of the noble faction</p>"
+        clock.now += 1
+        assert await helpers._until(lambda: texts()[-1] == "Book.epub\n📱 12 tokens written · 6.5 tok/s\n"
+                                                           "The secret proposal of the noble faction")
+        rows["ondevice"], tails["text"] = "", ""  # the request ended: rows go, the ticker stops
+        clock.now += 1
+        assert await helpers._until(lambda: texts()[-1] == "Book.epub")
+        assert await helpers._until(lambda: not background.ticker_running)
+        # a question: no rows
+        rows["ondevice"] = "📱 1 tokens written · 1.0 tok/s"
+        assert background._live_rows(helpers._snap(question={"kind": "glossary"})) == []
+        background.close()
+
+    asyncio.run(scenario())
