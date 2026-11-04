@@ -85,6 +85,23 @@ def test_on_device_streamed_text_reaches_the_notification_rows():
     assert job.stream_tail == "" and not job.stream_open
 
 
+def test_status_lines_the_stream_marks_as_text_stay_out_of_the_notification():
+    """Owner's phone (AuthND, 5 in flight): "…acquired; sending NVIDIA request⏳ AuthND: NVIDIA queue / prefill —
+    request submitted" in the notification. The request stream's own hint marked those lines as streamed."""
+    from glossarion_mobile.services.jobs import live_rows, stream_status_line
+
+    service = _service()
+    job = _job(types.SimpleNamespace(feed=lambda raw: "suppress-main-log"))  # the hint says "text" for all
+    for message in ("📨 AuthND: captcha token acquired; sending NVIDIA request",
+                    "⏳ AuthND: NVIDIA queue / prefill — request submitted; waiting for response headers",
+                    "<p>Erica smiled.</p>", "[DEBUG] chunk", "<p>\"......?\"</p>"):
+        service._job_log(job, message, {})
+    assert job.stream_tail == "<p>Erica smiled.</p><p>\"......?\"</p>"
+    assert not stream_status_line("<p>text</p>") and not stream_status_line("") and stream_status_line("✓ done")
+    snap = types.SimpleNamespace(question=None, is_active=True)
+    assert live_rows(snap, job.stream_tail)[-1] == "✍️ Erica smiled. \"......?\""
+
+
 def test_streaming_off_and_status_lines_add_nothing():
     import direct_text_stream
 
@@ -249,6 +266,78 @@ def test_the_shell_hides_the_app_bar_and_job_strip_while_immersive():
     shell._immersive(entry, False)
     assert isinstance(view.appbar, ft.AppBar) and entry.footer.visible is True
     Screen(None).set_immersive(True)  # no shell: nothing happens
+
+
+# ---- the model menu: Done on a route prefix, the typed auto-poll, "Add key" on keyless routes ---------------------
+
+
+def _model_sheet(models, *, catalog=None, spawn=None, selected=None):
+    from glossarion_mobile.ui.sheets.model_sheet import ModelSheet, SheetEnv
+
+    env = SheetEnv(catalog=catalog, spawn=spawn)
+    sheet = ModelSheet(current_model="gpt-6", models=list(models), env=env,
+                       on_select=lambda *a: (selected if selected is not None else []).append(a))
+    sheet._push_all = lambda: None
+    return sheet
+
+
+def test_done_on_a_route_prefix_keeps_the_menu_open():
+    pytest.importorskip("flet")
+
+    selected: list = []
+    sheet = _model_sheet(["gpt-6", "authnd/google/gemma-4-31b-it", "authnd/z-ai/glm-5.3-flash"], selected=selected)
+    for prefix in ("authnd/", "authnd"):  # two models start with it: Done only closes the keyboard
+        sheet.query = prefix
+        sheet.submit_query()
+    assert selected == []
+    sheet.query = "authnd/z-ai/glm"
+    sheet.submit_query()
+    assert [s[:2] for s in selected] == [("model", "authnd/z-ai/glm-5.3-flash")]  # the one match left
+    sheet.query = "chutes/some/model"  # a whole id that is not listed is still used as typed
+    sheet.submit_query()
+    assert selected[-1][:2] == ("model", "chutes/some/model")
+
+
+def test_a_typed_route_is_auto_polled_once_typing_settles(monkeypatch):
+    pytest.importorskip("flet")
+    from glossarion_mobile.ui.sheets import model_sheet as ms
+
+    monkeypatch.setattr(ms, "TYPED_POLL_DELAY", 0.02)
+    polled: list = []
+
+    class Catalog:
+        snapshot = None
+
+        async def maybe_auto_poll(self, model):
+            polled.append(model)
+
+    async def scenario():
+        tasks: list = []
+        sheet = _model_sheet(["gpt-6"], catalog=Catalog(),
+                             spawn=lambda coro: tasks.append(asyncio.ensure_future(coro)) or tasks[-1])
+        sheet.tab = "model"
+        for text in ("a", "au", "authnd/"):  # typing: only the settled text is polled
+            sheet._schedule_typed_poll(text)
+        await asyncio.gather(*tasks)
+        assert polled == ["authnd/"]
+        sheet._schedule_typed_poll("authgpt/")
+        sheet.closed = True  # the menu closed meanwhile: no poll
+        await asyncio.gather(*tasks)
+        assert polled == ["authnd/"]
+        assert sheet._schedule_typed_poll("   ") is None
+
+    asyncio.run(scenario())
+
+
+def test_models_a_poll_adds_are_classified_for_their_key():
+    pytest.importorskip("flet")
+    import unified_api_client  # noqa: F401  (loaded in the app before the menu lists models)
+
+    sheet = _model_sheet(["gpt-6"])
+    sheet._keyless = {"some/keyless-model"}  # classified when the menu opened
+    assert sheet._needs_key("authnd/deepseek-ai/deepseek-v4.1-flash") is False  # added by a poll later
+    assert sheet._needs_key("gpt-6") is True
+    assert sheet._needs_key("some/keyless-model") is False
 
 
 def test_the_source_tooltip_docks_away_from_the_text_on_a_touch_screen():

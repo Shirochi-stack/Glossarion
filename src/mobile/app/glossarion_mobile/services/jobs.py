@@ -162,9 +162,26 @@ STREAM_TAIL_RESETS = ("SDK stream start", "Sending API call")
 STREAM_OPEN_PHRASES = ("stream start (model=", "stream opened in ")
 STREAM_CLOSE_PHRASES = ("received response", "stream finished", "stream complete", "sdk call finished",
                         "received translation", "sending api call")
-#: how a status line starts (the client's and the pipeline's emoji), never streamed text
-STREAM_STATUS_PREFIXES = ("⏳", "📤", "📥", "🛰", "📱", "✅", "✓", "⚠", "❌", "🧠", "🌐", "💾", "📂", "🔄", "🔁",
-                          "⏱", "📊", "🛑", "⏹", "[DEBUG]", "[INFO]", "[WARN", "[ERROR")
+#: how a status line starts besides an emoji / symbol (``stream_status_line``), never streamed text
+STREAM_STATUS_PREFIXES = ("[DEBUG]", "[INFO]", "[WARN", "[ERROR")
+
+
+def stream_status_line(raw: str, stream: Any = None) -> bool:
+    """Whether a log message is a status line, not streamed text: it starts with an emoji or other symbol
+    (Unicode "So": the client's and the routes' status lines, "⏳ AuthND: …", "📤 …", "✓ …"; not "<" of
+    the HTML text), a log tag, or the request stream calls it a pipeline status. Blank: not status."""
+    import unicodedata
+
+    stripped = str(raw or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith(STREAM_STATUS_PREFIXES) or unicodedata.category(stripped[0]) == "So":
+        return True
+    status = getattr(stream, "_looks_like_pipeline_status", None)
+    try:
+        return bool(callable(status) and status(stripped))
+    except Exception:
+        return False
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
 #: Lines written for the request stream's parser, not for people: neither Logs nor the log file keeps them
 STREAM_MACHINE_MARKERS = ("[DIRECT_TEXT_RESPONSE_PAYLOAD]", "[DIRECT_TEXT_GLOSSARY_STREAM_START]")
@@ -1256,6 +1273,8 @@ def notification_lines(snap: JobSnapshot) -> tuple:
 
 #: the streamed text the job notification shows (about three rows on a phone, Android wraps it)
 NOTIFICATION_STREAM_CHARS = 120
+#: what leads the streamed text's rows in the notification (``live_rows``)
+STREAM_ROW_MARK = "✍️ "
 _TAG_RE = re.compile(r"<[^>]*>")
 
 
@@ -1296,7 +1315,10 @@ def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "") -> list:
     rows). None while the job waits for an answer or is not running."""
     if snap is None or snap.question or not snap.is_active:
         return []
-    rows = [row for row in (on_device_row(), stream_row(stream_tail)) if row]
+    streamed = stream_row(stream_tail)
+    # hotfix 4 (owner: "why is there no visual styling for that log area"): the notification is plain text
+    # (flutter_foreground_task's BigTextStyle takes a string), so the streamed text gets its own marker
+    rows = [row for row in (on_device_row(), f"{STREAM_ROW_MARK}{streamed}" if streamed else "") if row]
     return rows
 
 
@@ -3255,7 +3277,9 @@ class JobService:
             except Exception:
                 log.debug("request stream rejected a message", exc_info=True)
         # hotfix 3: the notification's streaming rows read the end of the streamed text (Streaming off: none)
-        if streamed_text or self._streamed_text(job, raw):
+        # hotfix 4: the stream's own hint also marks some routes' status lines ("⏳ AuthND: NVIDIA queue /
+        # prefill …", owner: "the notification area just shows random logs"), so both paths skip status lines
+        if (streamed_text or self._streamed_text(job, raw)) and not stream_status_line(raw, job.stream):
             job.stream_tail = (job.stream_tail + raw)[-STREAM_TAIL_KEEP:]
         elif any(marker in raw for marker in STREAM_TAIL_RESETS):
             job.stream_tail = ""
@@ -3293,16 +3317,7 @@ class JobService:
         if any(phrase in low for phrase in STREAM_CLOSE_PHRASES):
             job.stream_open = False
             return False
-        if not job.stream_open:
-            return False
-        stripped = raw.strip()
-        if stripped.startswith(STREAM_STATUS_PREFIXES):
-            return False
-        status = getattr(job.stream, "_looks_like_pipeline_status", None)
-        try:
-            return not (stripped and callable(status) and status(stripped))
-        except Exception:
-            return True
+        return job.stream_open and not stream_status_line(raw, job.stream)
 
     @staticmethod
     def _job_model(job: _Job) -> Optional[str]:

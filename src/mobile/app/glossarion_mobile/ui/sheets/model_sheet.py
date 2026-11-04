@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 import re
+import sys
 
 import flet as ft
 
@@ -268,6 +269,8 @@ REFRESH_BUSY_REASON = "A refresh of this provider is running"
 #: How long an explicit refresh waits for a poll of the same provider already running (the sheet's own
 #: 24 h auto-poll on open) before it polls again itself.
 REFRESH_WAIT_S = 60.0
+#: seconds the search text must stay unchanged before its provider is auto-polled (desktop: 1200 ms)
+TYPED_POLL_DELAY = 1.2
 _MODEL_COUNT = re.compile(r"(\d+)\s+models?\b")
 
 
@@ -347,6 +350,8 @@ class ModelSheet:
         self._page: Any = None
         self._unsub: Optional[Callable[[], None]] = None
         self.closed = False
+        self._typed_poll_token: Any = None  # the latest typed auto-poll (``_schedule_typed_poll``)
+        self._key_needs: dict = {}  # model -> needs an API key, for models outside ``_keyless`` (``_needs_key``)
         self.rows: dict = {}
         self.group_headers: dict = {}
         self.route: Optional[RouteInfo] = None
@@ -655,8 +660,19 @@ class ModelSheet:
         return "ready", None
 
     def _needs_key(self, model: str) -> bool:
-        if self._keyless:
-            return model not in self._keyless
+        """Mobile hotfix 4 (owner: "why is add key shown for models in the optional api key list"): the keyless
+        set is classified once, from the list the menu opened with; a model a poll added later (authnd/ after
+        typing "authnd/") counted as keyed. It is now classified itself (``model_needs_api_key``, the client's
+        list), once the client is loaded; the prefix guess is only for before that."""
+        if model in self._keyless:
+            return False
+        known = self._key_needs.get(model)
+        if known is not None:
+            return known
+        if "unified_api_client" in sys.modules:
+            needs = mc.model_needs_api_key(model, list(self.snapshot.custom_routes))
+            self._key_needs[model] = needs
+            return needs
         lowered = str(model or "").lower()
         return not lowered.startswith(("ollama/", "lmstudio/", "local/", "google-translate-free", "search/"))
 
@@ -1155,13 +1171,15 @@ class ModelSheet:
 
     def submit_query(self, e: Any = None) -> None:
         """Search field Enter: the typed id (Model tab) / language (Language tab) like its free-text row,
-        else the single remaining match."""
+        else the single remaining match. Mobile hotfix 4 (owner: the keyboard's Done closed the menu on
+        "authnd/" with no model chosen): a route prefix ("authnd/", or the start of listed ids) is a search,
+        not a model; Done then only closes the keyboard unless one model is left."""
         needle = self.query.strip()
         if not needle:
             return
         if self.tab == "model":
             typed = self.typed_model()
-            if typed and not excluded_route(typed):
+            if typed and not excluded_route(typed) and not self._is_prefix(typed):
                 self.select("model", typed)
                 return
             ranked = filter_models(self.visible_models(), needle, limit=2)
@@ -1171,6 +1189,12 @@ class ModelSheet:
             names = list(self.languages)
             exact = next((v for v in names if v.casefold() == needle.casefold()), None)
             self.select("language", exact or needle)
+
+    def _is_prefix(self, typed: str) -> bool:
+        """``typed`` ends with "/" or begins listed model ids (a route being typed, not a model)."""
+        if typed.endswith("/"):
+            return True
+        return any(m != typed and m.startswith(typed) for m in self.snapshot.visible_models())
 
     def signed_in_slots(self, route: str) -> list:
         """Signed-in account slots of a sign-in route (from ``signed_in_keys``: authgpt, authgpt2, …)."""
@@ -1289,6 +1313,34 @@ class ModelSheet:
             self.search.value = query
         self.refresh()
         self._push_all()
+        if self.tab == "model":
+            self._schedule_typed_poll(query)
+
+    def _schedule_typed_poll(self, query: str) -> Any:
+        """Mobile hotfix 4 (owner: typing "authnd/" did not start the purple auto-poll until the menu was
+        reopened): like the desktop's ``_schedule_current_provider_catalog_refresh``, once typing has settled
+        for ``TYPED_POLL_DELAY`` the typed text's provider is auto-polled when its 24 h TTL is due
+        (``maybe_auto_poll``); the catalog's snapshot then turns the search border."""
+        catalog, spawn = self.env.catalog, self.env.spawn
+        needle = query.strip()
+        self._typed_poll_token = token = object()
+        if catalog is None or spawn is None or not needle or excluded_route(needle):
+            return None
+
+        async def poll() -> None:
+            await asyncio.sleep(TYPED_POLL_DELAY)
+            if token is not self._typed_poll_token or self.closed:
+                return  # typing went on, or the menu closed
+            try:
+                await catalog.maybe_auto_poll(needle)
+            except Exception:
+                log.debug("auto-poll of the typed model failed", exc_info=True)
+
+        try:
+            return spawn(poll())
+        except Exception:
+            log.debug("the typed auto-poll could not start", exc_info=True)
+            return None
 
     def set_chip(self, chip_id: str) -> None:
         self.chip = chip_id if chip_id in self.chips else "all"
@@ -1312,6 +1364,7 @@ class ModelSheet:
 
     def set_keyless(self, keyless: set) -> None:
         self._keyless = set(keyless or ())
+        self._key_needs = {}
         if self.closed:
             return
         self.refresh()

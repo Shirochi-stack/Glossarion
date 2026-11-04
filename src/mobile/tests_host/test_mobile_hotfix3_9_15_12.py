@@ -313,7 +313,7 @@ def test_notification_shows_the_on_device_row_and_the_stream_and_ticks_while_vis
         tails["text"] = "<p>The secret proposal of the noble faction</p>"
         clock.now += 1
         assert await helpers._until(lambda: texts()[-1] == "Book.epub\n📱 12 tokens written · 6.5 tok/s\n"
-                                                           "The secret proposal of the noble faction")
+                                                           "✍️ The secret proposal of the noble faction")
         rows["ondevice"], tails["text"] = "", ""  # the request ended: rows go, the ticker stops
         clock.now += 1
         assert await helpers._until(lambda: texts()[-1] == "Book.epub")
