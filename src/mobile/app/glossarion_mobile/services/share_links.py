@@ -546,11 +546,12 @@ class ShareLinkService:
             view = getattr(service, "view", None)
             if not callable(view):
                 return False
+            from glossarion_mobile.services.jobs import pending_jobs
             from glossarion_mobile.ui.chat.attachments import job_writes_into
 
             current = view()
             folder = os.path.dirname(os.path.abspath(path))
-            snapshots = [getattr(current, "active", None), *getattr(current, "queue", ())]
+            snapshots = pending_jobs(current)  # every instance's running job, then the queue
             return any(job_writes_into(snap, folder) for snap in snapshots if snap is not None)
 
         async def run_in_thread(fn: Callable[..., Any], *args: Any) -> Any:

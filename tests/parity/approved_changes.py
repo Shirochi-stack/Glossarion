@@ -3399,6 +3399,84 @@ APPROVED = (
         },
         "values": {},
     },
+    {
+        "date": "2026-11-04",
+        "what": "Multi-instance translation: the QA scanner reads the user's selection through instance_runs.user_selection (every file of a running multi-instance run), its live config under a "
+                "key scope is that instance's (instance_plan.config_for_instance), and the AI truncation key pool keeps only the scanning instance's keys (off for it when it has none)",
+        "source": {
+            "src/QA_Scanner_GUI.py": [
+                (
+                    '        current_epub_files = []\n'
+                    "        if hasattr(self, 'selected_files') and self.selected_files:\n"
+                    '            current_epub_files = [\n'
+                    '                f for f in self.selected_files\n'
+                    "                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.html', '.htm', '.xhtml'))\n",
+                    '        current_epub_files = []\n'
+                    '        from instance_runs import user_selection  # every file of a multi-instance run\n'
+                    '\n'
+                    '        selected_files = user_selection(self)\n'
+                    '        if selected_files:\n'
+                    '            current_epub_files = [\n'
+                    '                f for f in selected_files\n'
+                    "                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.html', '.htm', '.xhtml'))\n",
+                ),
+                (
+                    '                files = []\n'
+                    '                try:\n'
+                    '                    files = [\n'
+                    "                        f for f in (getattr(self, 'selected_files', []) or [])\n"
+                    '                        if isinstance(f, str) and f.lower().endswith(source_exts)\n',
+                    '                files = []\n'
+                    '                try:\n'
+                    '                    from instance_runs import user_selection  # every file of a multi-instance run\n'
+                    '\n'
+                    '                    files = [\n'
+                    '                        f for f in user_selection(self)\n'
+                    '                        if isinstance(f, str) and f.lower().endswith(source_exts)\n',
+                ),
+            ],
+            "src/qa_scan_runtime.py": [
+                (
+                    '    cfg.setdefault("rotation_frequency", cfg.get("rotation_frequency", 1))\n'
+                    '    return cfg, api_key, model\n',
+                    '    cfg.setdefault("rotation_frequency", cfg.get("rotation_frequency", 1))\n'
+                    '    # Multi-instance: under a key scope the scan runs as that instance (its keys in every pool; an\n'
+                    "    # instance >= 2 on its own key in place of the main GUI key, which is instance 1's)\n"
+                    '    import instance_plan\n'
+                    '\n'
+                    '    scope = instance_plan.key_scope()\n'
+                    '    if scope is not None:\n'
+                    '        try:\n'
+                    '            cfg = instance_plan.config_for_instance(cfg, scope)\n'
+                    '            api_key, model = cfg.get("api_key", api_key), cfg.get("model", model)\n'
+                    '        except ValueError:\n'
+                    "            pass  # no Translation key of its own: the API client's key scope still applies\n"
+                    '    return cfg, api_key, model\n',
+                ),
+            ],
+            "src/scan_html_folder.py": [
+                (
+                    '            if not isinstance(_ai_pool_keys, list):\n'
+                    '                _ai_pool_keys = []\n'
+                    '            _ai_pool_usable_keys = [\n',
+                    '            if not isinstance(_ai_pool_keys, list):\n'
+                    '                _ai_pool_keys = []\n'
+                    "            # Multi-instance: only the scanning instance's keys; with none of them the pool is off\n"
+                    '            # for it (its Translation keys do the work)\n'
+                    '            from instance_plan import scope_keys\n'
+                    '            _ai_pool_scoped = scope_keys(_ai_pool_keys)\n'
+                    '            if _ai_pool_scoped is not _ai_pool_keys:\n'
+                    '                _ai_pool_keys = _ai_pool_scoped\n'
+                    '                _ai_pool_enabled = _ai_pool_enabled and any(\n'
+                    "                    isinstance(key, dict) and key.get('enabled', True) and key.get('model')\n"
+                    '                    for key in _ai_pool_keys\n'
+                    '                )\n'
+                    '            _ai_pool_usable_keys = [\n',
+                ),
+            ],
+        },
+        "values": {},
+    },
 )
 
 

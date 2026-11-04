@@ -12160,6 +12160,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _ai_pool_keys = _ai_config.get('ai_truncation_detection_keys', [])
             if not isinstance(_ai_pool_keys, list):
                 _ai_pool_keys = []
+            # Multi-instance: only the scanning instance's keys; with none of them the pool is off
+            # for it (its Translation keys do the work)
+            from instance_plan import scope_keys
+            _ai_pool_scoped = scope_keys(_ai_pool_keys)
+            if _ai_pool_scoped is not _ai_pool_keys:
+                _ai_pool_keys = _ai_pool_scoped
+                _ai_pool_enabled = _ai_pool_enabled and any(
+                    isinstance(key, dict) and key.get('enabled', True) and key.get('model')
+                    for key in _ai_pool_keys
+                )
             _ai_pool_usable_keys = [
                 key for key in _ai_pool_keys
                 if isinstance(key, dict)

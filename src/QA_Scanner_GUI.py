@@ -694,9 +694,12 @@ class QAScannerMixin:
         primary_epub_path = None
         # First check if current selection contains a supported source file.
         current_epub_files = []
-        if hasattr(self, 'selected_files') and self.selected_files:
+        from instance_runs import user_selection  # every file of a multi-instance run
+
+        selected_files = user_selection(self)
+        if selected_files:
             current_epub_files = [
-                f for f in self.selected_files
+                f for f in selected_files
                 if f.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.html', '.htm', '.xhtml'))
             ]
             epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
@@ -4260,8 +4263,10 @@ class QAScannerMixin:
                 source_exts = ('.epub', '.txt', '.pdf', '.md', '.html', '.htm', '.xhtml')
                 files = []
                 try:
+                    from instance_runs import user_selection  # every file of a multi-instance run
+
                     files = [
-                        f for f in (getattr(self, 'selected_files', []) or [])
+                        f for f in user_selection(self)
                         if isinstance(f, str) and f.lower().endswith(source_exts)
                     ]
                 except Exception:

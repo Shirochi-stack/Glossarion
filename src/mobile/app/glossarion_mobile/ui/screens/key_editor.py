@@ -6,7 +6,8 @@ used by the ModelSheet route row, Poe setup, the Endpoints page and the KeyEdito
 
 ``KeyEditor`` is the full-screen per-key form of the Multi-Key Manager, field for field the
 desktop key (``APIKeyEntry.to_dict``): API key, model (``ModelPicker``), cooldown, per-key
-output token limit, temperature and API delay, enabled, the individual endpoint (URL + Azure API
+output token limit, temperature and API delay, enabled, the 🔢 instance (multi-instance translation,
+1..99, stored only when not 1), the individual endpoint (URL + Azure API
 version), Google credentials + region, 🧩 request parameters (``request_parameters`` parsing:
 plain text is a string, JSON for numbers / booleans / objects; reserved names are refused) and
 the request contexts the key serves (``key_contexts.POOL_CONTEXTS`` for its pool; switching one
@@ -340,6 +341,16 @@ class KeyEditor(FullScreenEditor):
         self.model_picker = ModelPicker(value=str(entry.get("model") or ""), label="Model", env=self.sheet_env,
                                         page=getattr(self.ctx, "page", None), key="key-model")
         self.enabled_switch = ft.Switch(label="Enabled", value=bool(entry.get("enabled", True)))
+        # 🔢 the key's multi-instance number (desktop Instance column; every pool's keys carry one, default 1)
+        from glossarion_mobile.ui.screens.keys import INSTANCE_FIELD, INSTANCE_HELP, INSTANCE_MAX, key_instance_number
+
+        self.instance_field = ft.TextField(value=str(key_instance_number(entry)), label="Instance", dense=True,
+                                           keyboard_type=number_keyboard(), border_radius=tokens.RADII["field"],
+                                           helper=f"1–{INSTANCE_MAX} · 1 = default", width=200, key="key-instance")
+        self.number_fields[INSTANCE_FIELD] = (self.instance_field, "int", 1, INSTANCE_MAX, None)
+        instance_section = _section("🔢 Instance", [
+            ft.Text(INSTANCE_HELP, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+            self.instance_field])
         numbers: list = []
         for name, label, kind, low, high, empty in _NUMBER_FIELDS:
             value = entry.get(name)
@@ -402,6 +413,7 @@ class KeyEditor(FullScreenEditor):
             self.key_field,
             self.model_picker,
             self.enabled_switch,
+            instance_section,
             _section("Limits", numbers),
             _section("Individual endpoint", [self.endpoint_switch, self.endpoint_box]),
             _section("Google Cloud", [self.creds_field,
@@ -562,6 +574,9 @@ class KeyEditor(FullScreenEditor):
         from settings_rules import store_key_delay
 
         store_key_delay(entry, self._number("api_call_delay") or 0.0)  # api_call_delay (+ its range max)
+        from glossarion_mobile.ui.screens.keys import INSTANCE_FIELD, set_instance_field
+
+        set_instance_field(entry, self._number(INSTANCE_FIELD))  # stored only when not 1 (APIKeyEntry.to_dict)
         # The Translation pool stores APIKeyEntry.to_dict(); the other pools keep the dict shape
         # of their "Add key" buttons, so optional fields are only written when used.
         if self.pool_id == "main" or "cooldown" in self.entry or cooldown != 60:

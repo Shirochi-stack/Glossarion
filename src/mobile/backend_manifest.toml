@@ -297,3 +297,7 @@ files = []
 
 # String literals naming GUI/excluded module files inside calls ("translator_gui.py").
 [baseline.gui_file_refs]
+# Multi-instance: the mobile JobService uses instance_worker.restrict_keys (a job's API keys kept to its instance, in
+# every key pool); command_line(), which names the desktop entry script for the desktop child process, never runs
+# on mobile.
+"instance_worker->translator_gui.py" = "command_line: the desktop instance child's command (desktop only; mobile calls restrict_keys)"

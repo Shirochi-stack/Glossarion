@@ -142,6 +142,9 @@ import json
 from request_parameters import normalize_request_parameters
 import requests
 from key_contexts import key_enabled_for_context, route_key_context, current_key_context
+from instance_plan import current_instance as _current_instance
+from instance_plan import key_scope as _key_scope, scope_keys as _scope_keys, scoped_env as _scoped_env
+from instance_plan import foreign_key_owners as _foreign_key_owners, instance_payloads_dir as _instance_payloads_dir
 import contextvars
 from requests.adapters import HTTPAdapter
 try:
@@ -469,6 +472,8 @@ def _api_watchdog_external_write(state: dict) -> None:
             tmp_path = f"{path}.tmp"
             state = dict(state or {})
             state["pid"] = os.getpid()
+            # Multi-instance: the GUI's watchdog dropdown filters the merged files by it
+            state["instance"] = _current_instance()
             state["updated_ts"] = time.time()
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False)
@@ -988,10 +993,12 @@ def setup_http_logging():
             return True
 
     try:
-        # Avoid adding duplicates
+        # Avoid adding duplicates. The emoji filter by class name: it is a new class on every call
+        # and in every multi-instance copy of this module (Glossarion Mobile), and two of them
+        # print "🌐 🌐". Each copy keeps its own run-id filter (it passes the other copies' records).
         if not any(isinstance(f, _RunIdFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
             httpx_logger.addFilter(_RunIdFilter())
-        if not any(isinstance(f, _HttpEmojiFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
+        if not any(type(f).__name__ == _HttpEmojiFilter.__name__ for f in (getattr(httpx_logger, 'filters', None) or [])):
             httpx_logger.addFilter(_HttpEmojiFilter())
         if not any(isinstance(f, _RunIdFilter) for f in (getattr(openai_logger, 'filters', None) or [])):
             openai_logger.addFilter(_RunIdFilter())
@@ -1042,6 +1049,35 @@ def _mobile_data_dir(default_dir: str) -> str:
         return default_dir
     return _mobile_runtime.data_dir(default_dir)
 
+
+#: UnifiedClient's in-memory key list of each pool (instance_plan.POOLS names)
+_IN_MEMORY_POOL_KEYS = {
+    'main': '_in_memory_multi_keys',
+    'glossary': '_in_memory_glossary_keys',
+    'glossary_refinement': '_in_memory_glossary_refinement_keys',
+    'qa_scan': '_in_memory_qa_scan_keys',
+    'rolling_summary': '_in_memory_rolling_summary_keys',
+    'truncation_retry': '_in_memory_truncation_retry_keys',
+    'inpainter': '_in_memory_inpainter_keys',
+    'tts': '_in_memory_tts_keys',
+}
+
+
+def _key_pool_env(name, default=None):
+    """``os.getenv(name, default)`` for a key-pool variable (``FALLBACK_KEYS``, ``USE_GLOSSARY_KEYS``,
+    ``USE_MAIN_KEY_FALLBACK`` ...). Inside one instance of a multi-instance run
+    (``instance_plan.key_scope``) the value is narrowed to that instance's keys, whoever exported
+    it (``instance_plan.scoped_env``); otherwise it is the plain environment value."""
+    value = os.getenv(name, default)
+    if _key_scope() is None:
+        return value
+
+    def memory_rows(pool):
+        attr = _IN_MEMORY_POOL_KEYS.get(pool)
+        return list(getattr(UnifiedClient, attr, None) or []) if attr else []
+
+    return _scoped_env(name, value, memory_rows)
+
 def _payloads_dir() -> str:
     global _payloads_resolved_dir, _PAYLOADS_DISABLED
     if _payloads_resolved_dir is not None:
@@ -1060,7 +1096,7 @@ def _payloads_dir() -> str:
         # Glossarion Mobile: the app dir is read-only (iOS) or replaced on
         # every update (Android); desktop never sets GLOSSARION_DATA_DIR.
         _base = _mobile_data_dir(_base)
-        _candidate = os.path.join(_base, "Payloads")
+        _candidate = _instance_payloads_dir(os.path.join(_base, "Payloads"))
         try:
             os.makedirs(_candidate, exist_ok=True)
             # Verify we can actually write there (unique name to avoid thread races)
@@ -1079,7 +1115,7 @@ def _payloads_dir() -> str:
         # Fallback: use temp directory
         try:
             import tempfile
-            fallback = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+            fallback = _instance_payloads_dir(os.path.join(tempfile.gettempdir(), "Glossarion_Payloads"))
             os.makedirs(fallback, exist_ok=True)
             _payloads_resolved_dir = fallback
             logger.info(f"Payloads directory: using fallback {fallback} (primary {_candidate!r} not writable)")
@@ -4228,6 +4264,7 @@ class UnifiedClient:
     @classmethod
     def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared API key pool"""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with cls._pool_lock:
             if cls._api_key_pool is None:
                 cls._api_key_pool = APIKeyPool("Main key pool")
@@ -4308,6 +4345,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_multi_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure multi-key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_multi_keys_lock:
                 cls._in_memory_multi_keys = keys_list
@@ -4334,7 +4372,7 @@ class UnifiedClient:
             if not bool(config.get('use_multi_api_keys', False)):
                 return []
             keys = config.get('multi_api_keys', [])
-            return keys if isinstance(keys, list) else []
+            return _scope_keys(keys) if isinstance(keys, list) else []
         except Exception:
             return []
 
@@ -4354,6 +4392,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_glossary_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure glossary-key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_glossary_keys_lock:
                 cls._in_memory_glossary_keys = keys_list
@@ -4380,6 +4419,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_glossary_refinement_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure glossary-refinement key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_glossary_refinement_keys_lock:
                 cls._in_memory_glossary_refinement_keys = keys_list
@@ -4402,6 +4442,7 @@ class UnifiedClient:
     @classmethod
     def setup_glossary_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared glossary API key pool (mirrors setup_multi_key_pool)."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with cls._glossary_pool_lock:
             if cls._glossary_key_pool is None:
                 cls._glossary_key_pool = APIKeyPool("Glossary key pool")
@@ -4455,6 +4496,7 @@ class UnifiedClient:
     @classmethod
     def setup_glossary_refinement_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared glossary-refinement API key pool."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with cls._glossary_refinement_pool_lock:
             if cls._glossary_refinement_key_pool is None:
                 cls._glossary_refinement_key_pool = APIKeyPool("Glossary refinement key pool")
@@ -4508,6 +4550,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_qa_scan_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure Vision-key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_qa_scan_keys_lock:
                 cls._in_memory_qa_scan_keys = keys_list
@@ -4545,6 +4588,7 @@ class UnifiedClient:
     @classmethod
     def setup_qa_scan_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared Vision API key pool (mirrors setup_glossary_key_pool)."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with cls._qa_scan_pool_lock:
             if cls._qa_scan_key_pool is None:
                 cls._qa_scan_key_pool = APIKeyPool("Vision key pool")
@@ -4616,6 +4660,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_inpainter_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure Image gen/edit-key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_inpainter_keys_lock:
                 cls._in_memory_inpainter_keys = keys_list
@@ -4644,6 +4689,7 @@ class UnifiedClient:
         Shared by dedicated pools whose keys use the standard key shape
         (Image gen/edit, Audio / TTS).
         """
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with getattr(cls, lock_attr):
             if getattr(cls, pool_attr, None) is None:
                 setattr(cls, pool_attr, APIKeyPool(label))
@@ -4727,6 +4773,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_tts_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure Audio / TTS key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_tts_keys_lock:
                 cls._in_memory_tts_keys = keys_list
@@ -4761,12 +4808,12 @@ class UnifiedClient:
 
     def _resolve_tts_key_pool(self):
         """Return (pool, key_data_list) when the Audio / TTS pool applies, else (None, None)."""
-        if os.getenv('USE_TTS_KEYS', '0') != '1':
+        if _key_pool_env('USE_TTS_KEYS', '0') != '1':
             return None, None
         cls = self.__class__
         pool = cls._tts_key_pool
         if not pool or not getattr(pool, 'keys', []):
-            keys_json = os.getenv('TTS_API_KEYS', '[]')
+            keys_json = _key_pool_env('TTS_API_KEYS', '[]')
             if keys_json and keys_json != '[]':
                 try:
                     keys_list = json.loads(keys_json)
@@ -4794,6 +4841,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_truncation_retry_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure truncation-retry key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_truncation_retry_keys_lock:
                 cls._in_memory_truncation_retry_keys = keys_list
@@ -4820,6 +4868,7 @@ class UnifiedClient:
     @classmethod
     def setup_truncation_retry_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared truncation-retry API key pool (mirrors setup_glossary_key_pool)."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with cls._truncation_retry_pool_lock:
             if cls._truncation_retry_key_pool is None:
                 cls._truncation_retry_key_pool = APIKeyPool("Truncation retry key pool")
@@ -4874,6 +4923,7 @@ class UnifiedClient:
     @classmethod
     def set_in_memory_rolling_summary_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Configure rolling-summary key mode without storing the full key list in environment variables."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         try:
             with cls._in_memory_rolling_summary_keys_lock:
                 cls._in_memory_rolling_summary_keys = keys_list
@@ -4900,6 +4950,7 @@ class UnifiedClient:
     @classmethod
     def setup_rolling_summary_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared rolling-summary API key pool (mirrors setup_glossary_key_pool)."""
+        keys_list = _scope_keys(keys_list)  # multi-instance: only this instance's keys
         with cls._rolling_summary_pool_lock:
             if cls._rolling_summary_key_pool is None:
                 cls._rolling_summary_key_pool = APIKeyPool("Rolling summary key pool")
@@ -4950,6 +5001,7 @@ class UnifiedClient:
     @classmethod
     def initialize_key_pool(cls, key_list: list):
         """Initialize the shared API key pool (legacy compatibility)"""
+        key_list = _scope_keys(key_list)  # multi-instance: only this instance's keys
         with cls._pool_lock:
             if cls._api_key_pool is None:
                 cls._api_key_pool = APIKeyPool("Main key pool")
@@ -5395,8 +5447,8 @@ class UnifiedClient:
         self.azure_api_version = None
 
         self.translator_config = {
-            'use_fallback_keys': os.getenv('USE_FALLBACK_KEYS', '0') == '1',
-            'fallback_keys': json.loads(os.getenv('FALLBACK_KEYS', '[]'))
+            'use_fallback_keys': _key_pool_env('USE_FALLBACK_KEYS', '0') == '1',
+            'fallback_keys': json.loads(_key_pool_env('FALLBACK_KEYS', '[]'))
         }
         
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
@@ -5424,7 +5476,7 @@ class UnifiedClient:
         
         if use_multi_keys_env:
             # Initialize from environment OR from in-memory config (avoids Windows env var length limit)
-            multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
+            multi_keys_json = _key_pool_env('MULTI_API_KEYS', '[]')
             if debug_enabled:
                 print(f"[DEBUG] Loading multi-keys config...")
             force_rotation = self._force_rotation
@@ -8239,11 +8291,11 @@ class UnifiedClient:
 
     def activate_refinement_key_pool_for_batch(self):
         """Bind the refinement key pool for a whole batch without per-request override locking."""
-        if os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') != '1':
+        if _key_pool_env('USE_GLOSSARY_REFINEMENT_KEYS', '0') != '1':
             return None
         refinement_pool = self.__class__._glossary_refinement_key_pool
         if not refinement_pool or not getattr(refinement_pool, 'keys', []):
-            refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')
+            refinement_keys_json = _key_pool_env('GLOSSARY_REFINEMENT_API_KEYS', '[]')
             if refinement_keys_json != '[]':
                 try:
                     refinement_keys_list = json.loads(refinement_keys_json)
@@ -8296,12 +8348,12 @@ class UnifiedClient:
     def _apply_truncation_retry_key_pool_override(self):
         """Temporarily route a RETRY_TRUNCATED attempt through the truncation-retry pool."""
         try:
-            if os.getenv('USE_TRUNCATION_RETRY_KEYS', '0') != '1':
+            if _key_pool_env('USE_TRUNCATION_RETRY_KEYS', '0') != '1':
                 return None, None
 
             truncation_pool = self.__class__._truncation_retry_key_pool
             if not truncation_pool or not getattr(truncation_pool, 'keys', []):
-                truncation_keys_json = os.getenv('TRUNCATION_RETRY_API_KEYS', '[]')
+                truncation_keys_json = _key_pool_env('TRUNCATION_RETRY_API_KEYS', '[]')
                 if truncation_keys_json != '[]':
                     try:
                         truncation_keys_list = json.loads(truncation_keys_json)
@@ -8495,7 +8547,7 @@ class UnifiedClient:
         }
         _vision_parallel_request = (
             context_norm in _vision_parallel_contexts
-            and (os.getenv('USE_VISION_KEYS', '0') == '1' or os.getenv('USE_QA_SCAN_KEYS', '0') == '1')
+            and (_key_pool_env('USE_VISION_KEYS', '0') == '1' or _key_pool_env('USE_QA_SCAN_KEYS', '0') == '1')
         )
         _qa_truncation_parallel_request = context_norm == 'qa_truncation'
         _serialize_send = (not batch_mode) and (not _vision_parallel_request) and (not _qa_truncation_parallel_request)
@@ -8627,9 +8679,9 @@ class UnifiedClient:
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
 
             # METADATA KEY OVERRIDE: book title, metadata, TOC, and header translation.
-            if context_norm in ('book_title', 'metadata', 'batch_toc_translation', 'batch_header_translation') and os.getenv('USE_METADATA_KEYS', '0') == '1':
+            if context_norm in ('book_title', 'metadata', 'batch_toc_translation', 'batch_header_translation') and _key_pool_env('USE_METADATA_KEYS', '0') == '1':
                 try:
-                    metadata_keys = json.loads(os.getenv('METADATA_API_KEYS', '[]') or '[]')
+                    metadata_keys = json.loads(_key_pool_env('METADATA_API_KEYS', '[]') or '[]')
                     if not metadata_keys:
                         raise UnifiedClientError("Metadata key pool is enabled for this context but has no keys; refusing fallback to another pool", error_type="no_keys")
                     with self.__class__._metadata_pool_lock:
@@ -8678,9 +8730,9 @@ class UnifiedClient:
                     print(f"[METADATA KEYS] Failed to apply override: {e}")
             
             # AI TRUNCATION DETECTION KEY OVERRIDE: qa_truncation can use its own pool before normal fallback.
-            if context_norm == 'qa_truncation' and os.getenv('USE_AI_TRUNCATION_DETECTION_KEYS', '0') == '1':
+            if context_norm == 'qa_truncation' and _key_pool_env('USE_AI_TRUNCATION_DETECTION_KEYS', '0') == '1':
                 try:
-                    ai_keys = json.loads(os.getenv('AI_TRUNCATION_DETECTION_API_KEYS', '[]') or '[]')
+                    ai_keys = json.loads(_key_pool_env('AI_TRUNCATION_DETECTION_API_KEYS', '[]') or '[]')
                     if not ai_keys:
                         raise UnifiedClientError("AI truncation detection key pool is enabled for this context but has no keys; refusing fallback to another pool", error_type="no_keys")
                     with self.__class__._ai_truncation_detection_pool_lock:
@@ -8719,11 +8771,11 @@ class UnifiedClient:
                     print(f"[AI TRUNCATION DETECTION KEYS] Failed to apply override: {e}")
 
             # ROLLING SUMMARY KEY OVERRIDE: generated memory summaries can use an isolated pool.
-            if not _qa_scan_overridden and context_norm == 'summary' and os.getenv('USE_ROLLING_SUMMARY_KEYS', '0') == '1':
+            if not _qa_scan_overridden and context_norm == 'summary' and _key_pool_env('USE_ROLLING_SUMMARY_KEYS', '0') == '1':
                 try:
                     rolling_summary_pool = self.__class__._rolling_summary_key_pool
                     if not rolling_summary_pool or not getattr(rolling_summary_pool, 'keys', []):
-                        rolling_summary_keys_json = os.getenv('ROLLING_SUMMARY_API_KEYS', '[]')
+                        rolling_summary_keys_json = _key_pool_env('ROLLING_SUMMARY_API_KEYS', '[]')
                         if rolling_summary_keys_json != '[]':
                             try:
                                 rolling_summary_keys_list = json.loads(rolling_summary_keys_json)
@@ -8790,8 +8842,8 @@ class UnifiedClient:
             _is_qa_scan_context = context_norm in _vision_key_contexts or (not context and 'truncation' in threading.current_thread().name.lower())
             if not _qa_scan_overridden and _is_qa_scan_context:
                 try:
-                    vision_keys_flag = os.getenv('USE_VISION_KEYS', '0')
-                    legacy_qa_keys_flag = os.getenv('USE_QA_SCAN_KEYS', '0')
+                    vision_keys_flag = _key_pool_env('USE_VISION_KEYS', '0')
+                    legacy_qa_keys_flag = _key_pool_env('USE_QA_SCAN_KEYS', '0')
                     use_qa_scan_keys = vision_keys_flag == '1' or legacy_qa_keys_flag == '1'
                     if not use_qa_scan_keys:
                         if not getattr(self.__class__, '_qa_scan_env_warned', False):
@@ -8801,8 +8853,8 @@ class UnifiedClient:
                         qa_scan_pool = self.__class__._qa_scan_key_pool
                         if not qa_scan_pool or not getattr(qa_scan_pool, 'keys', []):
                             # Fallback: try loading from env var
-                            vision_keys_json = os.getenv('VISION_API_KEYS')
-                            legacy_qa_keys_json = os.getenv('QA_SCAN_API_KEYS', '[]')
+                            vision_keys_json = _key_pool_env('VISION_API_KEYS')
+                            legacy_qa_keys_json = _key_pool_env('QA_SCAN_API_KEYS', '[]')
                             qa_scan_keys_json = (
                                 vision_keys_json
                                 if vision_keys_json and vision_keys_json != '[]'
@@ -8993,11 +9045,11 @@ class UnifiedClient:
             _uses_image_gen_edit_keys = self._uses_image_gen_edit_key_context(context)
             if not _qa_scan_overridden and _uses_image_gen_edit_keys:
                 try:
-                    use_inpainter_keys = os.getenv('USE_INPAINTER_KEYS', '0') == '1'
+                    use_inpainter_keys = _key_pool_env('USE_INPAINTER_KEYS', '0') == '1'
                     if use_inpainter_keys:
                         inpainter_pool = self.__class__._inpainter_key_pool
                         if not inpainter_pool or not getattr(inpainter_pool, 'keys', []):
-                            inpainter_keys_json = os.getenv('INPAINTER_API_KEYS', '[]')
+                            inpainter_keys_json = _key_pool_env('INPAINTER_API_KEYS', '[]')
                             if inpainter_keys_json != '[]':
                                 try:
                                     inpainter_keys_list = json.loads(inpainter_keys_json)
@@ -9056,7 +9108,7 @@ class UnifiedClient:
             context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
             if not _qa_scan_overridden and not _inpainter_overridden and context_norm in ('refinement', 'glossary_refinement'):
                 try:
-                    use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
+                    use_refinement_keys = _key_pool_env('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
                     try:
                         tls = self._get_thread_local_client()
                         skip_refinement_pool = bool(getattr(tls, 'skip_glossary_refinement_pool_for_request', False))
@@ -9065,7 +9117,7 @@ class UnifiedClient:
                     if use_refinement_keys and not skip_refinement_pool:
                         refinement_pool = self.__class__._glossary_refinement_key_pool
                         if not refinement_pool or not getattr(refinement_pool, 'keys', []):
-                            refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')
+                            refinement_keys_json = _key_pool_env('GLOSSARY_REFINEMENT_API_KEYS', '[]')
                             if refinement_keys_json != '[]':
                                 try:
                                     refinement_keys_list = json.loads(refinement_keys_json)
@@ -9138,13 +9190,13 @@ class UnifiedClient:
                 and (context_norm in ('glossary', 'glossary_refinement') or (not context and 'Glossary' in threading.current_thread().name))
             ):
                 try:
-                    use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+                    use_glossary_keys = _key_pool_env('USE_GLOSSARY_KEYS', '0') == '1'
                     if use_glossary_keys:
                         # Try in-memory glossary keys first (set by GUI)
                         glossary_pool = self.__class__._glossary_key_pool
                         if not glossary_pool or not getattr(glossary_pool, 'keys', []):
                             # Fallback: try loading from env var
-                            glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
+                            glossary_keys_json = _key_pool_env('GLOSSARY_API_KEYS', '[]')
                             if glossary_keys_json != '[]':
                                 try:
                                     glossary_keys_list = json.loads(glossary_keys_json)
@@ -10526,7 +10578,7 @@ class UnifiedClient:
             # TTS must participate in multi-key/per-key-delay setup just like
             # translation calls. Without this, it can skip key rotation and the
             # individual key's API call delay.
-            if getattr(self, "_multi_key_mode", False) and os.getenv("USE_TTS_KEYS", "0") != "1":
+            if getattr(self, "_multi_key_mode", False) and _key_pool_env("USE_TTS_KEYS", "0") != "1":
                 self._ensure_thread_client()
                 _api_watchdog_update_model(getattr(self, "model", None), request_id)
 
@@ -10599,6 +10651,8 @@ class UnifiedClient:
                 or os.getenv("GEMINI_API_KEY")
                 or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
             )
+        # Multi-instance: never another instance's key (every TTS request passes here)
+        self._refuse_foreign_key(self.api_key, google_key)
 
         # Match normal HTTP lifecycle: obey SEND_INTERVAL_SECONDS/per-key
         # delay and transition watchdog from queued -> in-flight only when
@@ -11514,8 +11568,8 @@ class UnifiedClient:
                         # Try glossary keys if context is glossary (independent of multi-key mode toggle)
                         if not getattr(self, '_is_retry_client', False):
                             context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
-                            use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
-                            use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
+                            use_glossary_keys = _key_pool_env('USE_GLOSSARY_KEYS', '0') == '1'
+                            use_refinement_keys = _key_pool_env('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
                             should_try_context_keys = (
                                 (context_norm == 'glossary' and use_glossary_keys)
                                 or (context_norm == 'glossary_refinement' and (use_refinement_keys or use_glossary_keys))
@@ -11545,7 +11599,7 @@ class UnifiedClient:
                                         print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                             
                             # Try fallback keys directly (independent of multi-key mode toggle)
-                            use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                            use_fallback_keys = _key_pool_env('USE_FALLBACK_KEYS', '0') == '1'
                             if use_fallback_keys:
                                 print(f"[FALLBACK DIRECT] Safety filter detected - trying fallback keys")
                                 try:
@@ -11686,11 +11740,11 @@ class UnifiedClient:
                             allowed_attempts = min(truncation_retry_attempts, attempts_remaining)
 
                             def _isolated_truncation_retry_pool():
-                                if os.getenv("BATCH_TRANSLATION", "0") != "1" or os.getenv('USE_TRUNCATION_RETRY_KEYS', '0') != '1':
+                                if os.getenv("BATCH_TRANSLATION", "0") != "1" or _key_pool_env('USE_TRUNCATION_RETRY_KEYS', '0') != '1':
                                     return None, None
                                 truncation_pool = self.__class__._truncation_retry_key_pool
                                 if not truncation_pool or not getattr(truncation_pool, 'keys', []):
-                                    truncation_keys_json = os.getenv('TRUNCATION_RETRY_API_KEYS', '[]')
+                                    truncation_keys_json = _key_pool_env('TRUNCATION_RETRY_API_KEYS', '[]')
                                     if truncation_keys_json != '[]':
                                         try:
                                             truncation_keys_list = json.loads(truncation_keys_json)
@@ -12010,6 +12064,8 @@ class UnifiedClient:
                         logger.info(f"Propagating cancellation to caller (Error: {e})")
                     # Re-raise so send_with_interrupt can handle it
                     raise
+                if getattr(e, "key_refused", False):
+                    raise  # another instance's key (_refuse_foreign_key): no retry with it, the caller moves on
                 if e.error_type == "no_keys" and _glossary_refinement_overridden:
                     return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                 
@@ -12212,8 +12268,8 @@ class UnifiedClient:
                                     return res_content, res_fr
                     
                     # Try glossary keys if context is glossary (independent of multi-key mode toggle)
-                    use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
-                    use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
+                    use_glossary_keys = _key_pool_env('USE_GLOSSARY_KEYS', '0') == '1'
+                    use_refinement_keys = _key_pool_env('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
                     should_try_context_keys = (
                         (context_norm == 'glossary' and use_glossary_keys)
                         or (context_norm == 'glossary_refinement' and (use_refinement_keys or use_glossary_keys))
@@ -12242,7 +12298,7 @@ class UnifiedClient:
                                 print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                     
                     # Try fallback keys directly (independent of multi-key mode toggle)
-                    use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                    use_fallback_keys = _key_pool_env('USE_FALLBACK_KEYS', '0') == '1'
                     if use_fallback_keys:
                         print(f"[FALLBACK DIRECT] Using fallback keys for prohibited content retry")
                         try:
@@ -12783,8 +12839,8 @@ class UnifiedClient:
         
         # CHECK: Multi-key mode is already verified above via self._multi_key_mode
         # DO NOT gate main-GUI-key retry on fallback toggle; only use toggle for additional fallback keys
-        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
-        use_main_key_fb = os.getenv('USE_MAIN_KEY_FALLBACK', '1') == '1'
+        use_fallback_keys = _key_pool_env('USE_FALLBACK_KEYS', '0') == '1'
+        use_main_key_fb = _key_pool_env('USE_MAIN_KEY_FALLBACK', '1') == '1'
         
         # CHECK: Verify we have the necessary attributes (fall back to env if missing)
         main_api_key = getattr(self, 'original_api_key', None) or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -12807,7 +12863,7 @@ class UnifiedClient:
                     'model': main_model,
                     'label': 'MAIN GUI KEY'
                 })
-            fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
+            fallback_keys_json = _key_pool_env('FALLBACK_KEYS', '[]')
             if use_fallback_keys and fallback_keys_json != '[]':
                 try:
                     configured_fallbacks = json.loads(fallback_keys_json)
@@ -13212,7 +13268,7 @@ class UnifiedClient:
         tls.tried_fallback_direct_per_request[request_id] = True
         
         # Check if fallback keys are enabled
-        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        use_fallback_keys = _key_pool_env('USE_FALLBACK_KEYS', '0') == '1'
         if not use_fallback_keys:
             print(f"[FALLBACK DIRECT] Fallback keys not enabled, skipping")
             # Clean up tracking since we're not actually trying
@@ -13220,7 +13276,7 @@ class UnifiedClient:
             return None
         
         # Load fallback keys from environment
-        fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
+        fallback_keys_json = _key_pool_env('FALLBACK_KEYS', '[]')
         if fallback_keys_json == '[]':
             print(f"[FALLBACK DIRECT] No fallback keys configured")
             # Clean up tracking since we're not actually trying
@@ -13584,17 +13640,17 @@ class UnifiedClient:
             skip_refinement_keys = False
         use_refinement_keys = (
             context_norm in ('refinement', 'glossary_refinement')
-            and os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
+            and _key_pool_env('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
             and not skip_refinement_keys
         )
-        use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+        use_glossary_keys = _key_pool_env('USE_GLOSSARY_KEYS', '0') == '1'
         if not use_refinement_keys and not use_glossary_keys:
             print(f"[GLOSSARY DIRECT] Glossary keys not enabled, skipping")
             del tls.tried_glossary_direct_per_request[request_id]
             return None
         
         # Load glossary keys from environment
-        glossary_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]') if use_refinement_keys else os.getenv('GLOSSARY_API_KEYS', '[]')
+        glossary_keys_json = _key_pool_env('GLOSSARY_REFINEMENT_API_KEYS', '[]') if use_refinement_keys else _key_pool_env('GLOSSARY_API_KEYS', '[]')
         pool_label = "refinement" if use_refinement_keys else "glossary"
         if glossary_keys_json == '[]':
             print(f"[GLOSSARY DIRECT] No {pool_label} keys configured")
@@ -20205,6 +20261,27 @@ class UnifiedClient:
                 pass
         return client
     
+    def _refuse_foreign_key(self, *keys):
+        """Multi-instance backstop: under a key scope (``instance_plan.key_scope``) no request goes
+        out with a key that belongs to another instance only, or, inside an instance >= 2, with the
+        main GUI key (instance 1's), whichever path picked it (rotation, a fallback, the main-key
+        retry, a dedicated pool, a hand-built client); the request fails instead. No scope: nothing
+        is looked up."""
+        scope = _key_scope()
+        if scope is None:
+            return
+        for key in keys:
+            owners = _foreign_key_owners(key)
+            if owners:
+                label = str(getattr(self, 'key_identifier', None) or 'its API key')
+                owner_text = ", ".join(str(number) for number in owners)
+                error = UnifiedClientError(
+                    f"Instance {scope} refused to send {label}: that key belongs to instance {owner_text}",
+                    error_type="no_keys",
+                )
+                error.key_refused = True  # never retried with the same key (_send_internal)
+                raise error
+
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name, request_id: Optional[str] = None) -> UnifiedResponse:
         """Retry one temperature-related HTTP 400, then keep it off for this model."""
         try:
@@ -20261,6 +20338,9 @@ class UnifiedClient:
         except Exception:
             if not hasattr(self, 'client_type'):
                 self.client_type = None
+
+        # Multi-instance: never another instance's key (every chat / image request passes here)
+        self._refuse_foreign_key(self.api_key, getattr(self._get_thread_local_client(), 'api_key', None))
 
         # Most providers are ready to send at this point. AuthND still needs a
         # browser token and AuthZA still needs a healthy local proxy, so those

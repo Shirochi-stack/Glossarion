@@ -5,6 +5,8 @@ Comprehensive glossary management for automatic and manual glossary extraction
 
 import os
 import settings_rules  # glossary-mode lock rules shared with the mobile app (U4)
+# The user's input selection (a multi-instance run narrows selected_files to instance 1's files)
+from instance_runs import user_selection
 import sys
 import json
 import threading
@@ -9877,7 +9879,7 @@ Do not stop after the glossary."""
             # _open_glossary_mapping_dialog).
             try:
                 _selected_epubs = [
-                    p for p in (getattr(self, 'selected_files', []) or [])
+                    p for p in user_selection(self)
                     if str(p).lower().endswith('.epub')
                 ]
             except Exception:
@@ -10013,7 +10015,7 @@ Do not stop after the glossary."""
                     #   2. EPUB_PATH env var
                     #   3. config['last_epub_path']
                     epub_path = glossary_document.manual_only_epub_path(
-                        getattr(self, 'selected_files', []),
+                        user_selection(self),
                         self.config if hasattr(self, 'config') else None,
                     )
                     if not epub_path:

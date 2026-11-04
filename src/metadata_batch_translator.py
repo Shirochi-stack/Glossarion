@@ -419,7 +419,11 @@ class MetadataBatchTranslatorUI:
             
             # --- Gather all EPUB paths ---
             epub_paths = []
-            selected_files = getattr(self.gui, 'selected_epub_files', None) or getattr(self.gui, 'selected_files', None) or []
+            try:
+                from instance_runs import user_selection  # a multi-instance run narrows selected_files
+            except ImportError:  # no desktop GUI (Glossarion Mobile)
+                user_selection = lambda gui: list(getattr(gui, 'selected_files', None) or [])
+            selected_files = getattr(self.gui, 'selected_epub_files', None) or user_selection(self.gui)
             for f in selected_files:
                 f_str = str(f)
                 if f_str.lower().endswith('.epub') and os.path.isfile(f_str):

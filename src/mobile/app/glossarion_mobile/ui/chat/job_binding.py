@@ -345,15 +345,16 @@ class JobsAdapter:
         return list(value or []) if isinstance(value, (list, tuple)) else []
 
     def pending(self) -> list:
-        """The active job's and the queued jobs' snapshots (``JobService.view``)."""
+        """Every running job's (one per instance) and the queued jobs' snapshots (``JobService.view``)."""
         view = self._signal("view")
         if callable(view):
             try:
                 jobs_view = view()
             except Exception:
                 return []
-            active = getattr(jobs_view, "active", None)
-            return ([active] if active is not None else []) + list(getattr(jobs_view, "queue", ()) or ())
+            from glossarion_mobile.services.jobs import pending_jobs
+
+            return pending_jobs(jobs_view)
         active = self.snapshot()
         return ([active] if active is not None else []) + self.queue()
 

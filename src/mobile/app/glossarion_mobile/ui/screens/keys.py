@@ -7,7 +7,10 @@ requests), pool chips with the pool switch / description / count, key cards in r
 enable / disable / test / remove / set contexts / "⏰ Schedule…" (``sheets.schedule_sheet.ScheduleSheet``
 mode "key": one schedule per key, "During the windows:" 🗓️ disable the key or ⏳ queue requests; the
 desktop Multi API Key Manager's ⏰ Schedules tab; the card shows "🗓️ Disabled until 13:00" / "⏳ Queued
-until 13:00" and the windows) / move / copy to pool, pool ⋯ (Clear all keys
+until 13:00" and the windows) / "🔢 Set instance…" (multi-instance translation, ``instance_plan``: every key
+of every pool carries an instance, default 1, edited in the KeyEditor too; once a key of the pool is on
+another instance, each card starts with "🔢N" and the schedule sheet's title names the keys' instance) /
+move / copy to pool, pool ⋯ (Clear all keys
 with confirm, import into / export this pool), app bar ⋯ (import / export all pools in the
 ``glossarion-key-pools`` v1 format through FileBridge, with a plain-text warning; Refusal
 patterns) and the two desktop-only rows (Lock mouse wheel, Key list zoom) disabled with a
@@ -39,6 +42,8 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
     "IMPORT_EXTENSIONS",
+    "INSTANCE_FIELD",
+    "INSTANCE_HELP",
     "ImportPlan",
     "KeyBackend",
     "KeysController",
@@ -46,7 +51,10 @@ __all__ = [
     "POOL_TO_SLUG",
     "PoolSpec",
     "SLUG_TO_POOL",
+    "instance_text",
+    "key_instance_number",
     "parse_request_params",
+    "pool_uses_instances",
     "request_param_display",
 ]
 
@@ -514,6 +522,56 @@ def key_counts_text(entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] 
     return f"✅ {success} · ❌ {errors}"
 
 
+#: A key's multi-instance number (``instance_plan``; the desktop key lists' Instance column and the Schedules
+#: tab's "🔢N" parameter): an integer 1..``INSTANCE_MAX``, stored only when it is not 1 (``APIKeyEntry.to_dict``).
+INSTANCE_FIELD = "instance"
+INSTANCE_MAX = 99  # desktop MultiAPIKeyDialog.KEY_INSTANCE_MAX
+INSTANCE_HELP = ("Multi-instance translation: when 2 or more books are translated together and the enabled "
+                 "Translation keys carry 2 or more instance numbers, each instance runs its own books as a "
+                 "separate job, in parallel, using only the keys of its number in every key pool (1 = default). "
+                 "A pool without an enabled key of an instance is off for it (its Translation keys do the work); "
+                 "the main API key belongs to instance 1.")
+#: The selection ⋯ entry that sets the keys' instance (desktop shared key menu "🔢 Set Instance").
+INSTANCE_LABEL = "🔢 Set instance…"
+
+
+def key_instance_number(entry: Mapping[str, Any]) -> int:
+    """The instance a key row belongs to (``instance_plan.key_instance``: the ``instance`` field, 1 when missing
+    or invalid)."""
+    try:
+        from instance_plan import key_instance
+    except ImportError:  # backend missing: whole numbers >= 1 as stored
+        try:
+            value = int(entry.get(INSTANCE_FIELD) or 1)
+        except (TypeError, ValueError):
+            return 1
+        return value if value >= 1 else 1
+    return key_instance(dict(entry))
+
+
+def instance_text(entries: Iterable[Mapping[str, Any]]) -> str:
+    """"🔢2" (the desktop Schedules tab's Parameters item) for keys of one instance, "🔢1, 2" for a mix."""
+    numbers = sorted({key_instance_number(entry) for entry in entries})
+    return f"🔢{', '.join(str(n) for n in numbers)}" if numbers else ""
+
+
+def pool_uses_instances(keys: Iterable[Mapping[str, Any]]) -> bool:
+    """A key of the pool is on an instance other than 1: then its cards and the schedule sheet name every key's
+    instance; a single-instance user's pool shows none (the KeyEditor always has the field)."""
+    return any(key_instance_number(entry) != 1 for entry in keys)
+
+
+def set_instance_field(entry: dict, value: Any) -> dict:
+    """Write a key's instance like ``APIKeyEntry.to_dict``: the field only when it is not 1, so a single-instance
+    user's config keeps its shape."""
+    number = key_instance_number({INSTANCE_FIELD: value})
+    if number == 1:
+        entry.pop(INSTANCE_FIELD, None)
+    else:
+        entry[INSTANCE_FIELD] = number
+    return entry
+
+
 #: The selection ⋯ entry for the keys' schedule (desktop Multi API Key Manager ⏰ Schedules tab).
 SCHEDULE_LABEL = "⏰ Schedule…"
 #: The key fields of a schedule (``request_schedule.DISABLE_FIELD`` / ``QUEUE_FIELD``).
@@ -656,6 +714,8 @@ class KeysController:
                 for field in _SCHEDULE_FIELDS:  # {} removes a schedule (one schedule per key)
                     if field in values and not entry.get(field):
                         entry.pop(field, None)
+                if INSTANCE_FIELD in values:  # instance 1 is the missing field
+                    set_instance_field(entry, values[INSTANCE_FIELD])
                 clean, error = self.backend.validate(entry, self.spec(pool).id)
                 if clean is None:
                     errors.append(f"#{i + 1}: {error or 'invalid'}")
@@ -1083,6 +1143,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self._unsub: Optional[Callable[[], None]] = None
         self._stop_tests = threading.Event()
         self.cooling = False
+        self.show_instances = False  # the pool has a key on another instance than 1 (``render``)
         self._ticker: Any = None
 
     # ---- helpers -------------------------------------------------------------------------------------
@@ -1298,6 +1359,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         live = self.controller.live_stats(self.pool)
         live = list(live) + [None] * (len(keys) - len(live))
         self.cooling = any(row and row.get("is_cooling_down") for row in live)
+        self.show_instances = pool_uses_instances(keys)
         self.cards = [self._key_card(i, entry, live[i]) for i, entry in enumerate(keys)]
         if not keys:
             self.list_view.controls = [ft.Container(
@@ -1375,7 +1437,10 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             status, text = ("disabled" if schedule_status.startswith("🗓") else "cooling"), schedule_status
         color = status_color(_STATUS_PALETTE.get(status, "info"), self.dark)
         disabled_ctx = list(entry.get("disabled_contexts") or [])
-        details = [str(entry.get("model") or "(no model)")]
+        # 🔢 the key's instance first (the desktop Instance column / Schedules "🔢N" parameter), once the pool
+        # has a key on another instance than 1
+        details = [instance_text([entry])] if self.show_instances else []
+        details.append(str(entry.get("model") or "(no model)"))
         overrides = key_overrides_text(entry)
         if overrides:
             details.append(overrides)
@@ -1514,6 +1579,8 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         others = [s for s in self.controller.specs if s.id != self.pool]
         items = [
             ActionItem("Change model…", lambda: self.open_bulk_field("model"), icon="SMART_TOY_OUTLINED"),
+            ActionItem(INSTANCE_LABEL, lambda: self.open_bulk_field(INSTANCE_FIELD), icon="NUMBERS",
+                       key="keys-instance"),
             ActionItem("Set cooldown…", lambda: self.open_bulk_field("cooldown"), icon="TIMER_OUTLINED"),
             ActionItem("Set / clear output token limit…", lambda: self.open_bulk_field("individual_output_token_limit"),
                        icon="DATA_USAGE"),
@@ -1594,6 +1661,8 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         except Exception:
             pass
         subject = f"{len(entries)} keys" if len(entries) > 1 else str(entries[0].get("model") or "")
+        if pool_uses_instances(keys):  # "gpt-6 · 🔢2"
+            subject = " · ".join(part for part in (subject, instance_text(entries)) if part)
         sheet: Any = None
         sheet = ScheduleSheet(config or None, mode="key", subject=subject, page=self.page, kind=kind,
                               kinds=schedule_kinds(self.pool),
@@ -1906,6 +1975,7 @@ BULK_NUMBER_FIELDS = {
     "individual_output_token_limit": ("Output token limit", "int", 0, 2_000_000, "clear"),
     "individual_key_temperature": ("Temperature", "float", 0.0, 2.0, "clear"),
     "api_call_delay": ("API call delay (s, or 5-7)", "float", 0.0, 3600.0, "clear"),
+    INSTANCE_FIELD: ("Instance (1 = default)", "int", 1, INSTANCE_MAX, None),
 }
 #: What "Clear" writes (the KeyEditor's empty values: the global limit / temperature / delay).
 BULK_CLEAR_VALUES = {"individual_output_token_limit": None, "individual_key_temperature": None,
@@ -1940,7 +2010,8 @@ class BulkFieldSheet:
     """Apply one key field to N selected keys (Change model / cooldown / limits / temperature / delay /
     individual endpoint / request parameters)."""
 
-    TITLES = {"model": "Change model", "endpoint": "Individual endpoint", "request_parameters": "🧩 Request parameters"}
+    TITLES = {"model": "Change model", "endpoint": "Individual endpoint", "request_parameters": "🧩 Request parameters",
+              INSTANCE_FIELD: "🔢 Instance"}
 
     def __init__(self, field: str, sample: Mapping[str, Any], *, count: int,
                  on_apply: Callable[[Mapping[str, Any]], Optional[str]], sheet_env: Any = None,
@@ -1981,11 +2052,16 @@ class BulkFieldSheet:
                 from settings_rules import key_delay
 
                 value = str(key_delay(sample)) if key_delay(sample) > 0 else value
+            elif field == INSTANCE_FIELD:  # a missing field is instance 1
+                value = key_instance_number(sample)
             self.input = ft.TextField(value="" if value in (None, "") else str(value), label=label, dense=True,
                                       keyboard_type=number_keyboard(),
                                       helper=f"{low}–{high:,}" if kind == "int" else f"{low}–{high}",
                                       key="bulk-number")
             controls.append(self.input)
+            if field == INSTANCE_FIELD:
+                controls.append(ft.Text(INSTANCE_HELP, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                        color=ft.Colors.ON_SURFACE_VARIANT, key="bulk-instance-help"))
             self.can_clear = BULK_NUMBER_FIELDS[field][4] is not None
         title = self.TITLES.get(field) or BULK_NUMBER_FIELDS.get(field, (field,))[0]
         buttons = [ft.TextButton(content="Cancel", on_click=lambda e: self.close())]

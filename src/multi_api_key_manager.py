@@ -11,6 +11,8 @@ from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, context_presets, key_en
                           normalize_disabled_contexts)
 import key_pool_service
 import request_schedule
+# a key's multi-instance number (instance_plan; 1 when missing or invalid), every pool
+from instance_plan import coerce_instance, key_instance, key_scope
 # per-key API call delay ranges ('5-7'), shared with Glossarion Mobile's key editor
 from settings_rules import DelayRange, clamp_delay_max, parse_delay_range, store_key_delay
 
@@ -560,11 +562,13 @@ class APIKeyEntry:
                  individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0,
                  api_call_delay_max=None,
                  request_parameters: Optional[dict] = None, disabled_contexts=None,
-                 disable_schedule=None, queue_schedule=None):
+                 disable_schedule=None, queue_schedule=None, instance=1):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
         self.enabled = enabled
+        # Multi-instance translation: the instance whose runs use this key (instance_plan)
+        self.instance = coerce_instance(instance)
         self.disabled_contexts = normalize_disabled_contexts(disabled_contexts)
         # Time-based scheduling (request_schedule): 🗓️ Disable schedule / ⏳ Request Queue windows
         self.disable_schedule = request_schedule.normalize_config(disable_schedule)
@@ -695,6 +699,8 @@ class APIKeyEntry:
             # Schedules are written only when set (configs without them stay unchanged)
             **({'disable_schedule': dict(self.disable_schedule)} if getattr(self, 'disable_schedule', None) else {}),
             **({'queue_schedule': dict(self.queue_schedule)} if getattr(self, 'queue_schedule', None) else {}),
+            # ... and so is a multi-instance number other than the default 1
+            **({'instance': self.instance} if getattr(self, 'instance', 1) != 1 else {}),
         }
 
     @classmethod
@@ -725,6 +731,7 @@ class APIKeyEntry:
             api_call_delay_max=data.get('api_call_delay_max'),
             disable_schedule=data.get('disable_schedule'),
             queue_schedule=data.get('queue_schedule'),
+            instance=data.get('instance', 1),
         )
         # Restore persisted usage counter and last-test results
         entry.times_used = data.get('times_used', 0) or 0
@@ -819,6 +826,7 @@ class APIKeyPool:
                     api_call_delay_max=key_data.get('api_call_delay_max'),
                     disable_schedule=key_data.get('disable_schedule'),
                     queue_schedule=key_data.get('queue_schedule'),
+                    instance=key_data.get('instance', 1),
                 )
                 entry._queue_peers = self.keys
                 # Load saved test results and usage counter
@@ -3448,7 +3456,12 @@ class MultiAPIKeyDialog(QDialog):
         """Bind this dialog to the UnifiedClient's shared APIKeyPool if available.
         If UnifiedClient has no pool yet, register our pool as the shared pool.
         This keeps Times Used and other counters in sync across UI and runtime.
+        Not while one instance of a multi-instance run narrows the keys (instance_plan.key_scope):
+        that pool holds only the instance's keys, and loading the full list into it would hand the
+        other instances' keys to the running instance.
         """
+        if key_scope() is not None:
+            return
         try:
             from unified_api_client import UnifiedClient
             # If UC already has a pool, use it; otherwise share ours
@@ -4671,17 +4684,8 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree = QTreeWidget()
         self.fallback_tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(self.fallback_tree)
-        # Add explicit column for per-key output token limit
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
-        self.fallback_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)  # API Key
-        self.fallback_tree.setColumnWidth(1, 220)  # Model
-        self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
-        self.fallback_tree.setColumnWidth(3, 100)  # Temperature
-        self.fallback_tree.setColumnWidth(4, 90)   # API Delay
-        self.fallback_tree.setColumnWidth(5, 170)  # Status
-        self.fallback_tree.setColumnWidth(6, 42)   # Success
-        self.fallback_tree.setColumnWidth(7, 42)   # Errors
-        self.fallback_tree.setColumnWidth(8, 80)   # Requests
+        # API Key, Model, Instance, per-key Output Limit / Temperature / Delay, Status, \u2705 / \u274c / Requests
+        self._setup_pool_key_tree_columns(self.fallback_tree)
 
         # Set header font to match multi-key tree
         fb_header = self.fallback_tree.header()
@@ -4690,10 +4694,7 @@ class MultiAPIKeyDialog(QDialog):
         fb_header_font.setPointSize(11)
         fb_header.setFont(fb_header_font)
         self._enable_api_key_tree_font_zoom(self.fallback_tree)
-        self._enable_api_key_tree_responsive_columns(
-            self.fallback_tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
-        )
+        self._enable_api_key_tree_responsive_columns(self.fallback_tree, self._pool_key_tree_widths())
 
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
@@ -4771,8 +4772,8 @@ class MultiAPIKeyDialog(QDialog):
         for i in range(self.fallback_tree.topLevelItemCount()):
             item = self.fallback_tree.topLevelItem(i)
             if item:
-                # Status column is index 5 (after Delay)
-                item.setText(5, "⏳ Testing...")
+                # the Status column (after Delay)
+                item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "⏳ Testing...")
 
         # Submit all tests to executor in parallel
         for i, key_data in enumerate(fallback_keys):
@@ -4794,6 +4795,7 @@ class MultiAPIKeyDialog(QDialog):
                 lambda: (self.translator_gui.save_config(show_message=False), self._load_fallback_keys()),
             ),
             disable_endpoint_callback=lambda i: self._toggle_fallback_individual_endpoint(i, False),
+            set_instance_callback=lambda: self._set_instance_for_selected('fallback'),
             set_cooldown_callback=self._set_fallback_cooldown_for_selected,
             set_limit_callback=self._set_fallback_output_token_limit_for_selected,
             clear_limit_callback=self._clear_fallback_output_token_limit_for_selected,
@@ -4899,7 +4901,8 @@ class MultiAPIKeyDialog(QDialog):
             # Insert into tree (with Success and Errors columns matching multi-key tree)
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, str(key_instance(key_data)), output_limit_str, temp_str,
+                                    delay_str, status, str(success_count), str(error_count), str(times_used)])
             self._center_api_key_tree_item_text(item)
             item.setData(0, Qt.UserRole, config_index)
             # Apply status-based coloring (consistent with multi-key tree)
@@ -4910,6 +4913,7 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(self._key_parameter_tooltip_lines(key_data))
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
+            item.setToolTip(self.POOL_KEY_TREE_COLUMNS['instance'], self._key_instance_tooltip(key_data))
 
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
@@ -4958,7 +4962,7 @@ class MultiAPIKeyDialog(QDialog):
             status, color = "Error", Qt.darkRed
         else:
             status, color = "Enabled", Qt.gray
-        item.setText(5, status)
+        item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, status)
         self._decorate_key_context_status(item, key_data or {}, 'fallback')
         for col in range(item.columnCount()):
             item.setForeground(col, color)
@@ -5086,8 +5090,8 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                # Status column is index 5 (after Delay)
-                item.setText(5, "⏳ Testing...")
+                # the Status column (after Delay)
+                item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "⏳ Testing...")
 
         key_data = fallback_keys[index]
 
@@ -5116,33 +5120,33 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                # Update status (column 5) and apply coloring (consistent with multi-key tree)
+                # Update status and apply coloring (consistent with multi-key tree)
                 if success:
-                    item.setText(5, "✅ Passed")
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "✅ Passed")
                     color = Qt.darkGreen
                 else:
-                    item.setText(5, "❌ Failed")
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "❌ Failed")
                     color = Qt.red
                 key_data = self.translator_gui.config.get('fallback_keys', [])[index]
                 self._decorate_key_context_status(item, key_data, 'fallback')
                 for col in range(item.columnCount()):
                     item.setForeground(col, color)
-                # Update success (col 6) / errors (col 7) cells
+                # Update the success / errors cells (after Status)
                 try:
                     if success:
-                        current = int(item.text(6))
-                        item.setText(6, str(current + 1))
+                        current = int(item.text(self.POOL_KEY_TREE_STATUS_COLUMN + 1))
+                        item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 1, str(current + 1))
                     else:
-                        current = int(item.text(7))
-                        item.setText(7, str(current + 1))
+                        current = int(item.text(self.POOL_KEY_TREE_STATUS_COLUMN + 2))
+                        item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 2, str(current + 1))
                 except Exception:
                     pass
-                # Update times used cell (column 8)
+                # Update the times used cell (Requests)
                 try:
-                    current_times = int(item.text(8))
-                    item.setText(8, str(current_times + 1))
+                    current_times = int(item.text(self.POOL_KEY_TREE_STATUS_COLUMN + 3))
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 3, str(current_times + 1))
                 except Exception:
-                    item.setText(8, "1")
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 3, "1")
 
     @Slot(int) if HAS_GUI else lambda x: x
     def _update_fallback_timeout_status(self, index):
@@ -5150,7 +5154,7 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                item.setText(5, "⏱️ Timed Out")
+                item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "⏱️ Timed Out")
                 key_data = self.translator_gui.config.get('fallback_keys', [])[index]
                 self._decorate_key_context_status(item, key_data, 'fallback')
                 for col in range(item.columnCount()):
@@ -5813,19 +5817,21 @@ class MultiAPIKeyDialog(QDialog):
         self.tree = QTreeWidget()
         self.tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(self.tree)
-        # Add explicit column for per-key output token limit
-        self.tree.setHeaderLabels(['API Key', 'Model', '\u231b', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        # Add explicit column for per-key output token limit (and the multi-instance Instance column)
+        self.tree.setHeaderLabels(['API Key', 'Model', 'Instance', '\u231b', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        self.tree.headerItem().setToolTip(self.MAIN_KEY_TREE_COLUMNS['instance'], self.KEY_INSTANCE_HELP)
         # Adjusted column widths: balanced distribution
         self.tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)  # API Key
         self.tree.setColumnWidth(1, 220)  # Model
-        self.tree.setColumnWidth(2, 42)   # Cooldown
-        self.tree.setColumnWidth(3, 105)  # Output Limit
-        self.tree.setColumnWidth(4, 100)  # Temperature
-        self.tree.setColumnWidth(5, 90)   # API Delay
-        self.tree.setColumnWidth(6, 170)  # Status
-        self.tree.setColumnWidth(7, 42)   # Success
-        self.tree.setColumnWidth(8, 42)   # Errors
-        self.tree.setColumnWidth(9, 80)   # Requests
+        self.tree.setColumnWidth(2, 80)   # Instance
+        self.tree.setColumnWidth(3, 42)   # Cooldown
+        self.tree.setColumnWidth(4, 105)  # Output Limit
+        self.tree.setColumnWidth(5, 100)  # Temperature
+        self.tree.setColumnWidth(6, 90)   # API Delay
+        self.tree.setColumnWidth(7, 170)  # Status
+        self.tree.setColumnWidth(8, 42)   # Success
+        self.tree.setColumnWidth(9, 42)   # Errors
+        self.tree.setColumnWidth(10, 80)  # Requests
 
         # Set header font
         header = self.tree.header()
@@ -5836,7 +5842,7 @@ class MultiAPIKeyDialog(QDialog):
         self._enable_api_key_tree_font_zoom(self.tree)
         self._enable_api_key_tree_responsive_columns(
             self.tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 42, 105, 100, 90, 170, 42, 42, 80),
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 80, 42, 105, 100, 90, 170, 42, 42, 80),
         )
 
         # Set context menu
@@ -6200,12 +6206,10 @@ class MultiAPIKeyDialog(QDialog):
         if index >= len(fallback_keys):
             return
 
-        # Column 1 = Model (editable)
-        # Column 2 = Output Limit (editable)
-        # Column 3 = Temp (editable)
-        # Column 4 = API Delay (editable)
-        if column == 1:
-            old_value = item.text(1)
+        # Editable columns (POOL_KEY_TREE_COLUMNS): Model, Instance, Output Limit, Temp, API Delay
+        columns = self.POOL_KEY_TREE_COLUMNS
+        if column == columns['model']:
+            old_value = item.text(column)
             new_value, ok = self._show_model_edit_dialog(old_value)
             if ok and new_value and new_value != old_value:
                 fallback_keys[index]['model'] = new_value
@@ -6214,7 +6218,9 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated model to: {new_value}")
                 self._notify_authgpt_visibility()
-        elif column == 2:  # Output Limit column
+        elif column == columns['instance']:  # Instance column (multi-instance translation)
+            self._set_instance_for_selected('fallback', items=[item], title="Edit Instance")
+        elif column == columns['output_limit']:  # Output Limit column
             value, ok = self._show_output_token_limit_dialog(
                 self._default_output_token_limit([fallback_keys[index]], fallback=0),
                 title="Edit Output Token Limit",
@@ -6227,7 +6233,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 3:  # Temp column
+        elif column == columns['temperature']:  # Temp column
             value, ok = self._show_key_temperature_dialog(
                 self._default_key_temperature([fallback_keys[index]], allow_global=True),
                 title="Edit Key Temperature",
@@ -6244,7 +6250,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 4:  # API Delay column
+        elif column == columns['api_call_delay']:  # API Delay column
             value, ok = self._show_api_call_delay_dialog(
                 self._default_api_call_delay([fallback_keys[index]]),
                 "Edit API Call Delay",
@@ -6306,6 +6312,7 @@ class MultiAPIKeyDialog(QDialog):
             item = QTreeWidgetItem([
                 masked_key,
                 key.model,
+                str(key_instance(key)),
                 self._key_cooldown_text(key),
                 output_limit_str,
                 temp_str,
@@ -6321,6 +6328,7 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(self._key_parameter_tooltip_lines(key))
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
+            item.setToolTip(self.MAIN_KEY_TREE_COLUMNS['instance'], self._key_instance_tooltip(key))
 
             # Set colors based on status
             if tags == ('active',):
@@ -6388,21 +6396,21 @@ class MultiAPIKeyDialog(QDialog):
 
         key = self.key_pool.keys[index]
 
-        # Column 1 = Model (editable)
-        # Column 2 = Cooldown (editable)
-        # Column 3 = Output Limit (editable)
-        # Column 4 = Temp (editable)
-        # Column 5 = API Delay (editable)
-        if column == 1:  # Model column
+        # Editable columns (MAIN_KEY_TREE_COLUMNS): Model, Instance, Cooldown, Output Limit,
+        # Temp, API Delay
+        columns = self.MAIN_KEY_TREE_COLUMNS
+        if column == columns['model']:  # Model column
             # Create inline editor for model
-            old_value = item.text(1)
+            old_value = item.text(column)
             new_value, ok = self._show_model_edit_dialog(old_value)
             if ok and new_value and new_value != old_value:
                 key.model = new_value
                 self._refresh_key_list()
                 self._show_status(f"Updated model to: {new_value}")
                 self._notify_authgpt_visibility()
-        elif column == 2:  # Cooldown column
+        elif column == columns['instance']:  # Instance column (multi-instance translation)
+            self._set_instance_for_selected('main', items=[item], title="Edit Instance")
+        elif column == columns['cooldown']:  # Cooldown column
             # Create inline editor for cooldown
             old_value = key.cooldown
             new_value, ok = self._show_cooldown_edit_dialog(old_value)
@@ -6410,7 +6418,7 @@ class MultiAPIKeyDialog(QDialog):
                 key.cooldown = new_value
                 self._refresh_key_list()
                 self._show_status(f"Updated cooldown to: {new_value}s")
-        elif column == 3:  # Output Limit column
+        elif column == columns['output_limit']:  # Output Limit column
             value, ok = self._show_output_token_limit_dialog(
                 self._default_output_token_limit([key], fallback=0),
                 title="Edit Output Token Limit",
@@ -6421,7 +6429,7 @@ class MultiAPIKeyDialog(QDialog):
                 key.individual_output_token_limit = value if value > 0 else None
                 self._refresh_key_list()
                 self._show_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 4:  # Temp column
+        elif column == columns['temperature']:  # Temp column
             value, ok = self._show_key_temperature_dialog(
                 self._default_key_temperature([key], allow_global=True),
                 title="Edit Key Temperature",
@@ -6435,7 +6443,7 @@ class MultiAPIKeyDialog(QDialog):
                     key.individual_key_temperature = value
                 self._refresh_key_list()
                 self._show_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 5:  # API Delay column
+        elif column == columns['api_call_delay']:  # API Delay column
             value, ok = self._show_api_call_delay_dialog(
                 self._default_api_call_delay([key]),
                 "Edit API Call Delay",
@@ -6625,6 +6633,17 @@ class MultiAPIKeyDialog(QDialog):
                                     f"'{text}' is not a delay: enter seconds (5) or a range (5-7).")
                 return current, False
             return DelayRange(*parsed), True
+        if setting == 'instance':
+            # a key's multi-instance number (instance_plan): an integer >= 1
+            return QInputDialog.getInt(
+                self,
+                title or "Set Instance",
+                label or "Instance (1 = default):",
+                coerce_instance(current_value),
+                1,
+                self.KEY_INSTANCE_MAX,
+                1,
+            )
         raise ValueError(f"Unsupported per-key setting: {setting}")
 
     def _show_output_token_limit_dialog(self, current_value, title="Set Output Token Limit", label="Max output tokens:", allow_global=False):
@@ -6655,6 +6674,10 @@ class MultiAPIKeyDialog(QDialog):
             allow_global=True,
         )
 
+    def _show_key_instance_dialog(self, current_value=1, title="Set Instance"):
+        """Shared editor for a key's multi-instance number (every pool)."""
+        return self._show_per_key_setting_dialog('instance', current_value, title=title)
+
     def _show_shared_key_context_menu(
         self, *, tree, position, total_keys, key_at_index, move_callback,
         change_model_callback, configure_endpoint_callback, configure_parameters_callback,
@@ -6663,9 +6686,11 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_callback, clear_temp_callback, set_delay_callback,
         clear_delay_callback, test_callback, enable_callback, disable_callback,
         remove_callback, clear_all_callback=None, index_resolver=None,
-        configure_contexts_callback=None, anchor_tree=None, anchor_item=None
+        configure_contexts_callback=None, anchor_tree=None, anchor_item=None,
+        set_instance_callback=None
     ):
-        """Shared context menu for every API key tree.
+        """Shared context menu for every API key tree (*set_instance_callback*: the selected keys'
+        multi-instance number).
 
         *anchor_tree* / *anchor_item*: the menu was requested on another view of the same keys
         (the ⏰ Schedules tab's list, which has already mirrored its selection into *tree*):
@@ -6699,6 +6724,8 @@ class MultiAPIKeyDialog(QDialog):
             menu.addSeparator()
 
         menu.addAction(selected_label("📝 Change Model")).triggered.connect(change_model_callback)
+        if set_instance_callback:
+            menu.addAction(selected_label("🔢 Set Instance")).triggered.connect(set_instance_callback)
         menu.addAction(selected_label("⏳ Set Cooldown")).triggered.connect(set_cooldown_callback)
         menu.addSeparator()
 
@@ -6779,6 +6806,7 @@ class MultiAPIKeyDialog(QDialog):
                 lambda: (self._save_keys_to_config(), self._refresh_key_list()),
             ),
             disable_endpoint_callback=lambda i: self._toggle_individual_endpoint(i, False),
+            set_instance_callback=lambda: self._set_instance_for_selected('main'),
             set_cooldown_callback=self._set_cooldown_for_selected,
             set_limit_callback=self._set_output_token_limit_for_selected,
             clear_limit_callback=self._clear_output_token_limit_for_selected,
@@ -6811,6 +6839,39 @@ class MultiAPIKeyDialog(QDialog):
                 self.key_pool.keys[idx].cooldown = value
         self._refresh_key_list()
         self._show_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
+
+    def _set_instance_for_selected(self, pool_name='main', items=None, title="Set Instance"):
+        """Set the multi-instance number of *pool_name*'s selected keys (or of *items*: a
+        double-click on the Instance column). Translation keys (APIKeyEntry) are saved with the
+        list's other edits; the other pools' config rows store ``instance`` like
+        ``APIKeyEntry.to_dict`` (left out for 1) and are saved at once."""
+        keys, entries = self._selected_pool_key_entries(pool_name, items)
+        if not entries:
+            return
+        value, ok = self._show_key_instance_dialog(key_instance(entries[0]), title)
+        if not ok:
+            return
+
+        value = coerce_instance(value)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                entry.instance = value
+            elif value != 1:
+                entry['instance'] = value
+            else:
+                entry.pop('instance', None)
+        message = f"Set instance to {value} for {len(entries)} key(s)"
+        if pool_name == 'main':
+            self._refresh_key_list()
+            self._show_status(message)
+            return
+        self._save_pool_key_entries(pool_name, keys)
+        if pool_name == 'fallback':
+            self._show_fallback_status(message)
+        elif pool_name == 'glossary':
+            self._show_glossary_status(message)
+        else:
+            self._dedicated_status(pool_name, message)
 
     def _set_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected multi-key entries"""
@@ -7256,16 +7317,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree = QTreeWidget()
         self.glossary_tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(self.glossary_tree)
-        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
-        self.glossary_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)
-        self.glossary_tree.setColumnWidth(1, 220)
-        self.glossary_tree.setColumnWidth(2, 105)
-        self.glossary_tree.setColumnWidth(3, 100)
-        self.glossary_tree.setColumnWidth(4, 90)
-        self.glossary_tree.setColumnWidth(5, 170)
-        self.glossary_tree.setColumnWidth(6, 42)
-        self.glossary_tree.setColumnWidth(7, 42)
-        self.glossary_tree.setColumnWidth(8, 80)
+        self._setup_pool_key_tree_columns(self.glossary_tree)
 
         gl_header = self.glossary_tree.header()
         gl_header_font = QFont()
@@ -7273,10 +7325,7 @@ class MultiAPIKeyDialog(QDialog):
         gl_header_font.setPointSize(11)
         gl_header.setFont(gl_header_font)
         self._enable_api_key_tree_font_zoom(self.glossary_tree)
-        self._enable_api_key_tree_responsive_columns(
-            self.glossary_tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
-        )
+        self._enable_api_key_tree_responsive_columns(self.glossary_tree, self._pool_key_tree_widths())
 
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.glossary_tree.customContextMenuRequested.connect(self._show_glossary_context_menu)
@@ -7385,7 +7434,8 @@ class MultiAPIKeyDialog(QDialog):
 
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, str(key_instance(key_data)), output_limit_str, temp_str,
+                                    delay_str, status, str(success_count), str(error_count), str(times_used)])
             self._center_api_key_tree_item_text(item)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
@@ -7394,6 +7444,7 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(self._key_parameter_tooltip_lines(key_data))
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
+            item.setToolTip(self.POOL_KEY_TREE_COLUMNS['instance'], self._key_instance_tooltip(key_data))
 
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self._decorate_key_context_status(item, key_data, 'glossary')
@@ -7524,7 +7575,7 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.glossary_tree.topLevelItemCount():
             item = self.glossary_tree.topLevelItem(index)
             if item:
-                item.setText(5, "⏳ Testing...")
+                item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "⏳ Testing...")
 
         key_data = glossary_keys[index]
 
@@ -7547,7 +7598,7 @@ class MultiAPIKeyDialog(QDialog):
         for i in range(self.glossary_tree.topLevelItemCount()):
             item = self.glossary_tree.topLevelItem(i)
             if item:
-                item.setText(5, "⏳ Testing...")
+                item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "⏳ Testing...")
 
         try:
             from unified_api_client import UnifiedClient
@@ -7578,10 +7629,10 @@ class MultiAPIKeyDialog(QDialog):
             item = self.glossary_tree.topLevelItem(index)
             if item:
                 if success:
-                    item.setText(5, "✅ Passed")
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "✅ Passed")
                     color = Qt.darkGreen
                 else:
-                    item.setText(5, "❌ Failed")
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "❌ Failed")
                     color = Qt.red
                 key_data = self.translator_gui.config.get('glossary_keys', [])[index]
                 self._decorate_key_context_status(item, key_data, 'glossary')
@@ -7589,18 +7640,18 @@ class MultiAPIKeyDialog(QDialog):
                     item.setForeground(col, color)
                 try:
                     if success:
-                        current = int(item.text(6))
-                        item.setText(6, str(current + 1))
+                        current = int(item.text(self.POOL_KEY_TREE_STATUS_COLUMN + 1))
+                        item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 1, str(current + 1))
                     else:
-                        current = int(item.text(7))
-                        item.setText(7, str(current + 1))
+                        current = int(item.text(self.POOL_KEY_TREE_STATUS_COLUMN + 2))
+                        item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 2, str(current + 1))
                 except Exception:
                     pass
                 try:
-                    current_times = int(item.text(8))
-                    item.setText(8, str(current_times + 1))
+                    current_times = int(item.text(self.POOL_KEY_TREE_STATUS_COLUMN + 3))
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 3, str(current_times + 1))
                 except Exception:
-                    item.setText(8, "1")
+                    item.setText(self.POOL_KEY_TREE_STATUS_COLUMN + 3, "1")
 
     @Slot(int) if HAS_GUI else lambda x: x
     def _update_glossary_timeout_status(self, index):
@@ -7608,7 +7659,7 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.glossary_tree.topLevelItemCount():
             item = self.glossary_tree.topLevelItem(index)
             if item:
-                item.setText(5, "⏱️ Timed Out")
+                item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, "⏱️ Timed Out")
                 key_data = self.translator_gui.config.get('glossary_keys', [])[index]
                 self._decorate_key_context_status(item, key_data, 'glossary')
                 for col in range(item.columnCount()):
@@ -7918,6 +7969,7 @@ class MultiAPIKeyDialog(QDialog):
                 lambda: (self.translator_gui.save_config(show_message=False), self._load_glossary_keys()),
             ),
             disable_endpoint_callback=lambda i: self._toggle_glossary_individual_endpoint(i, False),
+            set_instance_callback=lambda: self._set_instance_for_selected('glossary'),
             set_cooldown_callback=self._set_glossary_cooldown_for_selected,
             set_limit_callback=self._set_glossary_output_token_limit_for_selected,
             clear_limit_callback=self._clear_glossary_output_token_limit_for_selected,
@@ -8006,9 +8058,10 @@ class MultiAPIKeyDialog(QDialog):
         if index >= len(glossary_keys):
             return
 
-        # Column 1 = Model, 2 = Output Limit, 3 = Temp, 4 = API Delay
-        if column == 1:
-            old_value = item.text(1)
+        # Editable columns (POOL_KEY_TREE_COLUMNS): Model, Instance, Output Limit, Temp, API Delay
+        columns = self.POOL_KEY_TREE_COLUMNS
+        if column == columns['model']:
+            old_value = item.text(column)
             new_value, ok = self._show_model_edit_dialog(old_value)
             if ok and new_value and new_value != old_value:
                 glossary_keys[index]['model'] = new_value
@@ -8017,7 +8070,9 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated model to: {new_value}")
                 self._notify_authgpt_visibility()
-        elif column == 2:  # Output Limit column
+        elif column == columns['instance']:  # Instance column (multi-instance translation)
+            self._set_instance_for_selected('glossary', items=[item], title="Edit Instance")
+        elif column == columns['output_limit']:  # Output Limit column
             value, ok = self._show_output_token_limit_dialog(
                 self._default_output_token_limit([glossary_keys[index]], fallback=0),
                 title="Edit Output Token Limit",
@@ -8030,7 +8085,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 3:  # Temp column
+        elif column == columns['temperature']:  # Temp column
             value, ok = self._show_key_temperature_dialog(
                 self._default_key_temperature([glossary_keys[index]], allow_global=True),
                 title="Edit Key Temperature",
@@ -8047,7 +8102,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 4:  # API Delay column
+        elif column == columns['api_call_delay']:  # API Delay column
             value, ok = self._show_api_call_delay_dialog(
                 self._default_api_call_delay([glossary_keys[index]]),
                 "Edit API Call Delay",
@@ -9743,17 +9798,18 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status = "Active"
 
-            # Update status column (column 6)
-            item.setText(6, status)
+            # Update status column (then the ✅ / ❌ / Requests columns)
+            status_column = self._key_status_column('main')
+            item.setText(status_column, status)
             self._decorate_key_context_status(item, key, 'main')
 
             # Update success/error counts
-            item.setText(7, str(key.success_count))
-            item.setText(8, str(key.error_count))
+            item.setText(status_column + 1, str(key.success_count))
+            item.setText(status_column + 2, str(key.error_count))
 
             # Update times used
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
-            item.setText(9, str(times_used))
+            item.setText(status_column + 3, str(times_used))
 
         # Run in main thread
         QTimer.singleShot(0, update)
@@ -10085,13 +10141,48 @@ class MultiAPIKeyDialog(QDialog):
 
     # The Key Pools tab's own handlers of a pool's key list. The ⏰ Schedules tab mirrors its
     # selection into that list and runs these, so both tabs share one code path per action.
-    # The editable columns of the lists (the Translation list has the extra ⌛ cooldown column):
-    POOL_KEY_TREE_COLUMNS = {'model': 1, 'output_limit': 2, 'temperature': 3, 'api_call_delay': 4}
-    MAIN_KEY_TREE_COLUMNS = {'model': 1, 'cooldown': 2, 'output_limit': 3, 'temperature': 4, 'api_call_delay': 5}
+    # The editable columns of the lists (the Translation list has the extra ⌛ cooldown column) and
+    # the Status column (followed by ✅ / ❌ / Requests):
+    POOL_KEY_TREE_COLUMNS = {'model': 1, 'instance': 2, 'output_limit': 3, 'temperature': 4, 'api_call_delay': 5}
+    MAIN_KEY_TREE_COLUMNS = {'model': 1, 'instance': 2, 'cooldown': 3, 'output_limit': 4, 'temperature': 5,
+                             'api_call_delay': 6}
+    POOL_KEY_TREE_STATUS_COLUMN = 6
+    MAIN_KEY_TREE_STATUS_COLUMN = 7
+    # the Fallback / Glossary / dedicated lists (POOL_KEY_TREE_COLUMNS) and their default widths
+    POOL_KEY_TREE_HEADERS = ('API Key', 'Model', 'Instance', 'Output Limit', 'Temperature', 'Delay (s)', 'Status',
+                             '✅', '❌', 'Requests')
+    POOL_KEY_TREE_WIDTHS = (220, 80, 105, 100, 90, 170, 42, 42, 80)  # after the API Key column
+    # a key's multi-instance number (instance_plan), in every pool
+    KEY_INSTANCE_MAX = 99
+    KEY_INSTANCE_HELP = ("Instance: with 2 or more input files selected and enabled Translation keys on 2 or "
+                         "more instances, each instance translates its own files in its own run, using only "
+                         "the keys of its number in every key pool (1 = default). A pool without an enabled "
+                         "key of an instance is off for that instance (its Translation keys do the work); the "
+                         "main GUI key belongs to instance 1.")
+
+    def _pool_key_tree_widths(self):
+        """Default column widths of a Fallback / Glossary / dedicated key list."""
+        return (self.API_KEY_TREE_FIRST_COLUMN_WIDTH,) + self.POOL_KEY_TREE_WIDTHS
+
+    def _setup_pool_key_tree_columns(self, tree):
+        """The columns of a Fallback / Glossary / dedicated key list (``POOL_KEY_TREE_HEADERS``)."""
+        tree.setHeaderLabels(list(self.POOL_KEY_TREE_HEADERS))
+        for column, width in enumerate(self._pool_key_tree_widths()):
+            tree.setColumnWidth(column, width)
+        tree.headerItem().setToolTip(self.POOL_KEY_TREE_COLUMNS['instance'], self.KEY_INSTANCE_HELP)
 
     def _pool_key_tree_columns(self, pool_name):
         """``{field: column}`` of *pool_name*'s Key Pools list (its double-click handler's columns)."""
         return self.MAIN_KEY_TREE_COLUMNS if pool_name == 'main' else self.POOL_KEY_TREE_COLUMNS
+
+    @classmethod
+    def _key_status_column(cls, pool_name):
+        """The Status column of *pool_name*'s Key Pools list."""
+        return cls.MAIN_KEY_TREE_STATUS_COLUMN if pool_name == 'main' else cls.POOL_KEY_TREE_STATUS_COLUMN
+
+    @classmethod
+    def _key_instance_tooltip(cls, key):
+        return f"Instance {key_instance(key)}\n\n{cls.KEY_INSTANCE_HELP}\n\nDouble-click to change."
 
     def _pool_key_tree_actions(self, pool_name):
         """``menu(position, **anchor)``, ``move(direction)``, ``double_click(item, column)``,
@@ -10187,11 +10278,11 @@ class MultiAPIKeyDialog(QDialog):
                 tree.topLevelItem(row).setSelected(True)
 
     def _key_status_clicked(self, pool_name, item, column):
-        if column == (6 if pool_name == 'main' else 5):
+        if column == self._key_status_column(pool_name):
             self._edit_selected_key_contexts(pool_name, items=[item])
 
     def _decorate_key_context_status(self, item, key, pool_name):
-        column = 6 if pool_name == 'main' else 5
+        column = self._key_status_column(pool_name)
         routes = POOL_CONTEXTS[pool_name]
         allowed = [c for c in routes if key_enabled_for_context(key, c, include_schedule=False)]
         if allowed and len(allowed) < len(routes):
@@ -10341,11 +10432,12 @@ class MultiAPIKeyDialog(QDialog):
     SCHEDULE_PARAMETERS_COLUMN = 3
     SCHEDULE_SCHEDULE_COLUMN = 4
     SCHEDULE_STATUS_COLUMN = 5
-    SCHEDULE_PARAMETERS_HELP = ("📤 Output limit · 🌡️ temperature · ⏱️ API call delay (and ⌛ cooldown for "
-                                "Translation keys), as in the 🔑 Key Pools columns; \"global\" uses "
-                                "the global setting. Double-click to edit.")
+    SCHEDULE_PARAMETERS_HELP = ("🔢 Instance · 📤 output limit · 🌡️ temperature · ⏱️ API call delay (and ⌛ "
+                                "cooldown for Translation keys), as in the 🔑 Key Pools columns; \"global\" "
+                                "uses the global setting. Double-click to edit.")
     # the Parameters double-click menu: (label, Key Pools column field), in the text's order
-    SCHEDULE_PARAMETER_EDITS = (("📤 Output limit…", 'output_limit'), ("🌡️ Temperature…", 'temperature'),
+    SCHEDULE_PARAMETER_EDITS = (("🔢 Instance…", 'instance'),
+                                ("📤 Output limit…", 'output_limit'), ("🌡️ Temperature…", 'temperature'),
                                 ("⏱️ API call delay…", 'api_call_delay'), ("⌛ Cooldown…", 'cooldown'))
     SCHEDULE_PARAMETER_ICONS = ("📤", "🌡️", "⏱️")
     # the editor panel's width cap: its widest rows (Days, the windows box title) without clipping
@@ -10490,18 +10582,19 @@ class MultiAPIKeyDialog(QDialog):
         header = self.schedule_key_tree.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        # API Key: the last 4 characters ("…49a6"): just the header's width
+        # API Key: the last 4 characters ("…49a6"): just the header's width (the Status column,
+        # stretched last, gets the rest)
         self.schedule_key_tree.setColumnWidth(1, max(
             header.fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[1]),
-            self.schedule_key_tree.fontMetrics().horizontalAdvance("…WWWW")) + 24)
+            self.schedule_key_tree.fontMetrics().horizontalAdvance("…8888")) + 16)
         self.schedule_key_tree.setColumnWidth(2, 140)
         self.schedule_key_tree.headerItem().setToolTip(self.SCHEDULE_PARAMETERS_COLUMN, self.SCHEDULE_PARAMETERS_HELP)
         # just wide enough for the "Schedule" header; longer states are elided (the cell tooltip lists them)
         self.schedule_key_tree.setColumnWidth(
             self.SCHEDULE_SCHEDULE_COLUMN,
             header.fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[self.SCHEDULE_SCHEDULE_COLUMN]) + 24)
-        self.schedule_key_tree.setToolTip("Double-click a model or the parameters to change them; right-click for "
-                                          "the key menu; drag rows or use Reorder to change the key order.")
+        self.schedule_key_tree.setToolTip("Double-click a model or the parameters to change them; right-click "
+                                          "for the key menu; drag rows or use Reorder to change the key order.")
         self.schedule_key_tree.itemSelectionChanged.connect(self._on_schedule_selection_changed)
         list_row.addWidget(self.schedule_key_tree, 1)
         list_layout.addLayout(list_row, 1)
@@ -10829,9 +10922,9 @@ class MultiAPIKeyDialog(QDialog):
         return [entry for _row, entry in sorted(rows, key=lambda pair: pair[0])]
 
     def _refresh_schedule_key_list(self, selected=None, selected_entries=None):
-        """Fill the key list of the chosen pool from the stored keys: key (masked), model,
-        schedule state and the Key Pools list's status. The selection follows the selected
-        keys (by entry, so it survives reorders); *selected* rows replace it."""
+        """Fill the key list of the chosen pool from the stored keys: key (masked), model, parameters
+        (led by the key's instance), schedule state and the Key Pools list's status. The selection follows
+        the selected keys (by entry, so it survives reorders); *selected* rows replace it."""
         tree = self.schedule_key_tree
         pool_name = self._schedule_pool()
         keys = list(self._pool_key_list(pool_name) or [])
@@ -10847,7 +10940,7 @@ class MultiAPIKeyDialog(QDialog):
         pool_items = self._pool_tree_items_by_index(pool_name)
         if len(pool_items) != len(keys):
             pool_items = {}
-        status_column = 6 if pool_name == 'main' else 5
+        status_column = self._key_status_column(pool_name)
         scroll = tree.verticalScrollBar().value()
         blocked = tree.blockSignals(True)
         try:
@@ -10878,6 +10971,7 @@ class MultiAPIKeyDialog(QDialog):
                     item.setForeground(self.SCHEDULE_STATUS_COLUMN, pool_item.foreground(status_column))
                 tree.addTopLevelItem(item)
             self._fit_schedule_parameters_column()
+            self._fit_schedule_status_column()
             for index in selected:
                 if 0 <= index < tree.topLevelItemCount():
                     tree.topLevelItem(index).setSelected(True)
@@ -10887,19 +10981,26 @@ class MultiAPIKeyDialog(QDialog):
         tree.verticalScrollBar().setValue(scroll)
         self._on_schedule_selection_changed()
 
+    def _pool_has_instances(self, pool_name):
+        """Whether *pool_name*'s keys have a multi-instance number (its list's Instance column):
+        every pool's do."""
+        return 'instance' in self._pool_key_tree_columns(pool_name)
+
     def _schedule_parameter_fields(self, pool_name):
-        """The Parameters column's fields of *pool_name*, in order (⌛ cooldown only where the
-        Key Pools list has that column: Translation keys)."""
+        """The Parameters column's fields of *pool_name*, in order (🔢 instance and ⌛ cooldown only
+        where the Key Pools list has those columns: ⌛ only for Translation keys)."""
         columns = self._pool_key_tree_columns(pool_name)
         return [(label, field) for label, field in self.SCHEDULE_PARAMETER_EDITS if field in columns]
 
     def _schedule_parameters_text(self, key, pool_name):
-        """The Key Pools Output Limit · Temperature · Delay (s) texts in one cell, e.g.
-        "16384 · 0.7 · 2.0s" (delay with its unit; "global" as there), plus "⌛60s" for
-        Translation keys (their list's cooldown column)."""
+        """The Key Pools Instance · Output Limit · Temperature · Delay (s) texts in one cell, e.g.
+        "🔢2 · 📤16384 · 🌡️0.7 · ⏱️2.0s" (delay with its unit; "global" as there); Translation keys
+        end with "⌛60s" (their list's cooldown column)."""
         limit, temperature, delay = self._key_parameter_texts(key)
         values = [limit, temperature, delay if delay == "global" else f"{delay}s"]
         parts = [f"{icon}{value}" for icon, value in zip(self.SCHEDULE_PARAMETER_ICONS, values)]
+        if self._pool_has_instances(pool_name):
+            parts.insert(0, f"🔢{key_instance(key)}")
         if 'cooldown' in self._pool_key_tree_columns(pool_name):
             parts.append(f"⌛{self._key_cooldown_text(key)}")
         return " · ".join(parts)
@@ -10907,11 +11008,15 @@ class MultiAPIKeyDialog(QDialog):
     def _schedule_parameters_tooltip(self, key, pool_name):
         lines = [f"{icon} {line}" for icon, line in zip(self.SCHEDULE_PARAMETER_ICONS,
                                                         self._key_parameter_tooltip_lines(key))]
+        if self._pool_has_instances(pool_name):
+            lines.insert(0, f"🔢 Instance {key_instance(key)}")
         if 'cooldown' in self._pool_key_tree_columns(pool_name):
             lines.append(f"⌛ Rate-limit cooldown: {self._key_cooldown_text(key)}")
+        if self._pool_has_instances(pool_name):
+            lines += ["", self.KEY_INSTANCE_HELP]
         return "\n".join(lines + ["", "Double-click to edit."])
 
-    SCHEDULE_PARAMETERS_MAX_WIDTH = "📤global · 🌡️global · ⏱️global · ⌛3600s"
+    SCHEDULE_PARAMETERS_MAX_WIDTH = "🔢10 · 📤global · 🌡️global · ⏱️global · ⌛3600s"
 
     def _fit_schedule_parameters_column(self):
         """The Parameters column fits its texts (as compact as the Schedule column), up to the
@@ -10925,6 +11030,18 @@ class MultiAPIKeyDialog(QDialog):
         width = min(width, metrics.horizontalAdvance(self.SCHEDULE_PARAMETERS_MAX_WIDTH))
         if tree.columnWidth(column) != width + 24:
             tree.setColumnWidth(column, width + 24)
+
+    def _fit_schedule_status_column(self):
+        """The Status column (stretched last) is as wide as its texts when there is no room left
+        to stretch into (Qt otherwise keeps it at the default section size, past the list's edge)."""
+        tree = self.schedule_key_tree
+        column = self.SCHEDULE_STATUS_COLUMN
+        texts = [tree.topLevelItem(row).text(column) for row in range(tree.topLevelItemCount())]
+        width = max([tree.header().fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[column])]
+                    + [tree.fontMetrics().horizontalAdvance(text) for text in texts]) + 24
+        if tree.columnWidth(column) < width or getattr(self, '_schedule_status_width', None) != width:
+            self._schedule_status_width = width
+            tree.setColumnWidth(column, width)
 
     def _on_schedule_selection_changed(self):
         """Load the first selected key's schedule (and its behaviour) into the editor; a refresh
@@ -11000,9 +11117,9 @@ class MultiAPIKeyDialog(QDialog):
         self._refresh_schedule_tab_after_action(selected_entries)
 
     def _on_schedule_item_double_clicked(self, item, column):
-        """Double-click on a model: the Key Pools list's own double-click model editor; on the
-        parameters: a menu of them, each running the Key Pools list's double-click editor of its
-        column (the clicked key, as a double-click there)."""
+        """Double-click on a model: the Key Pools list's own double-click editor of that column; on
+        the parameters (the key's instance among them): a menu of them, each running the Key
+        Pools list's double-click editor of its column (the clicked key, as a double-click there)."""
         if item is None:
             return
         if column == self.SCHEDULE_MODEL_COLUMN:
@@ -11750,19 +11867,14 @@ class MultiAPIKeyDialog(QDialog):
         tree = QTreeWidget()
         tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(tree)
-        tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
-        for col, width in enumerate((self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80)):
-            tree.setColumnWidth(col, width)
+        self._setup_pool_key_tree_columns(tree)
         header = tree.header()
         header_font = QFont()
         header_font.setBold(True)
         header_font.setPointSize(11)
         header.setFont(header_font)
         self._enable_api_key_tree_font_zoom(tree)
-        self._enable_api_key_tree_responsive_columns(
-            tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
-        )
+        self._enable_api_key_tree_responsive_columns(tree, self._pool_key_tree_widths())
         tree.setContextMenuPolicy(Qt.CustomContextMenu)
         tree.customContextMenuRequested.connect(lambda pos, p=pool_name: self._dedicated_show_context_menu(p, pos))
         tree.setMinimumHeight(150)
@@ -11836,7 +11948,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status, color = "Enabled", Qt.gray
             item = QTreeWidgetItem([
-                masked_key, model, output_limit_str, temp_str, delay_str, status,
+                masked_key, model, str(key_instance(key_data)), output_limit_str, temp_str, delay_str, status,
                 str(int(key_data.get('success_count', 0))),
                 str(int(key_data.get('error_count', 0))),
                 str(int(key_data.get('times_used', 0))),
@@ -11844,6 +11956,7 @@ class MultiAPIKeyDialog(QDialog):
             self._center_api_key_tree_item_text(item)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
+            item.setToolTip(self.POOL_KEY_TREE_COLUMNS['instance'], self._key_instance_tooltip(key_data))
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self._decorate_key_context_status(item, key_data, pool_name)
             tree_items.append(item)
@@ -12007,7 +12120,7 @@ class MultiAPIKeyDialog(QDialog):
         tree = self._dedicated_widget(pool_name, 'tree')
         if tree is not None and 0 <= index < tree.topLevelItemCount():
             item = tree.topLevelItem(index)
-            item.setText(5, status)
+            item.setText(self.POOL_KEY_TREE_STATUS_COLUMN, status)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
 
@@ -12157,6 +12270,7 @@ class MultiAPIKeyDialog(QDialog):
                 lambda: (self._dedicated_set_keys(pool_name, keys), self._dedicated_load_keys(pool_name)),
             ),
             disable_endpoint_callback=lambda i: self._dedicated_toggle_individual_endpoint(pool_name, i, False),
+            set_instance_callback=lambda: self._set_instance_for_selected(pool_name),
             set_cooldown_callback=lambda: self._dedicated_set_cooldown_for_selected(pool_name),
             set_limit_callback=lambda: self._dedicated_set_output_token_limit_for_selected(pool_name),
             clear_limit_callback=lambda: self._dedicated_clear_output_token_limit_for_selected(pool_name),
@@ -12221,13 +12335,16 @@ class MultiAPIKeyDialog(QDialog):
         label.setText(f"#{tree.indexOfTopLevelItem(selected[0]) + 1}/{tree.topLevelItemCount()}" if selected else "")
 
     def _dedicated_on_click(self, pool_name: str, item, column: int):
-        if column == 1:
+        columns = self.POOL_KEY_TREE_COLUMNS
+        if column == columns['model']:
             self._dedicated_change_model_for_selected(pool_name)
-        elif column == 2:
+        elif column == columns['instance']:
+            self._set_instance_for_selected(pool_name)
+        elif column == columns['output_limit']:
             self._dedicated_set_output_token_limit_for_selected(pool_name)
-        elif column == 3:
+        elif column == columns['temperature']:
             self._dedicated_set_temperature_for_selected(pool_name)
-        elif column == 4:
+        elif column == columns['api_call_delay']:
             self._dedicated_set_api_call_delay_for_selected(pool_name)
 
     def _dedicated_configure_endpoint(self, pool_name: str, key_index: int):

@@ -3915,8 +3915,13 @@ class ChatView:
         self._push(self.composer)
 
     def _on_strip_stop(self) -> None:
-        if self.env is not None and self.env.jobs is not None and self.env.jobs.snapshot() is not None:
-            self.env.jobs.request_stop(force=False)
+        jobs = self.env.jobs if self.env is not None else None
+        # the job the strip shows (another instance's job of a multi-instance run while instance 1 is idle)
+        job_id = getattr(self.job_strip.model, "job_id", None)
+        if jobs is not None and job_id and jobs.snapshot(job_id) is not None:
+            jobs.request_stop(job_id, force=False)
+        elif jobs is not None and jobs.snapshot() is not None:
+            jobs.request_stop(force=False)
         else:
             self.notify("No job is running")
 

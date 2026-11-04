@@ -61,7 +61,7 @@ def _job_config(store, spec) -> dict:
     """The config a job of ``spec`` starts with (the real ``JobService._config_snapshot``)."""
     from glossarion_mobile.services.jobs import JobService
 
-    owner = types.SimpleNamespace(config_store=store, _config_loader=None)
+    owner = types.SimpleNamespace(config_store=store, _config_loader=None, _note_job_running=store.set_job_running)
     try:
         return JobService._config_snapshot(owner, types.SimpleNamespace(spec=spec))
     finally:

@@ -548,6 +548,17 @@ def _live_config_from_owner(owner):
     cfg.setdefault("ai_truncation_detection_keys", cfg.get("ai_truncation_detection_keys", []))
     cfg.setdefault("force_key_rotation", cfg.get("force_key_rotation", True))
     cfg.setdefault("rotation_frequency", cfg.get("rotation_frequency", 1))
+    # Multi-instance: under a key scope the scan runs as that instance (its keys in every pool; an
+    # instance >= 2 on its own key in place of the main GUI key, which is instance 1's)
+    import instance_plan
+
+    scope = instance_plan.key_scope()
+    if scope is not None:
+        try:
+            cfg = instance_plan.config_for_instance(cfg, scope)
+            api_key, model = cfg.get("api_key", api_key), cfg.get("model", model)
+        except ValueError:
+            pass  # no Translation key of its own: the API client's key scope still applies
     return cfg, api_key, model
 
 

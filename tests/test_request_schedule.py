@@ -760,7 +760,7 @@ def test_schedules_tab_edits_one_schedule_per_key(monkeypatch):
         assert saved[-1]["multi_api_keys"][0] == config["multi_api_keys"][0]
         # the key list's Status column keeps showing the schedule state
         status, _lines = rs.key_schedule_summary(dialog.key_pool.keys[0])
-        column = dialog.tree.topLevelItem(0).text(6)
+        column = dialog.tree.topLevelItem(0).text(dialog._key_status_column("main"))
         assert (status and column == status) or "🗓️" in column
         # 🧹 Clear removes both fields
         _select(tree, 0)
@@ -957,7 +957,7 @@ def test_schedules_tab_context_menu_is_the_key_pools_menu(monkeypatch):
             app.processEvents()
             keys = dialog._pool_key_list(pool)
             assert [dialog._schedule_key_value(k, "enabled", True) for k in keys][:2] == [False, False], pool
-            status_column = 6 if pool == "main" else 5
+            status_column = dialog._key_status_column(pool)
             assert pool_tree.topLevelItem(0).text(status_column) == "Disabled"
             assert tree.topLevelItem(0).text(dialog.SCHEDULE_STATUS_COLUMN) == "Disabled" and tree.topLevelItem(1).text(dialog.SCHEDULE_STATUS_COLUMN) == "Disabled"
             assert tree.topLevelItem(0).isSelected() and tree.topLevelItem(1).isSelected()
@@ -1061,7 +1061,8 @@ def _parameters_config():
     config = _sync_config()
     config["multi_api_keys"][0].update(individual_output_token_limit=16384, individual_key_temperature=0.7,
                                        api_call_delay=2, cooldown=120)
-    config["fallback_keys"][1].update(individual_key_temperature=1, api_call_delay="0.5")
+    config["multi_api_keys"][1].update(instance=2)
+    config["fallback_keys"][1].update(individual_key_temperature=1, api_call_delay="0.5", instance=3)
     config["glossary_keys"][0].update(individual_output_token_limit="8192")
     config["metadata_keys"][1].update(individual_output_token_limit=4000, individual_key_temperature=0.2,
                                       api_call_delay=3.5)
@@ -1071,12 +1072,14 @@ def _parameters_config():
 
 
 def _key_pools_parameters(dialog, pool, row):
-    """The 🔑 Key Pools list's Output Limit / Temperature / Delay (s) (and ⌛) texts of *row*."""
+    """The 🔑 Key Pools list's (🔢 Instance,) Output Limit / Temperature / Delay (s) (and ⌛) texts of *row*."""
     columns = dialog._pool_key_tree_columns(pool)
     item = dialog._pool_tree_items_by_index(pool)[row]
     limit, temperature, delay = (item.text(columns[field]) for field in ("output_limit", "temperature", "api_call_delay"))
     values = [limit, temperature, delay if delay == "global" else f"{delay}s"]
     parts = [f"{icon}{value}" for icon, value in zip(("📤", "🌡️", "⏱️"), values)]
+    if "instance" in columns:
+        parts.insert(0, f"🔢{item.text(columns['instance'])}")
     if "cooldown" in columns:
         parts.append(f"⌛{item.text(columns['cooldown'])}")
     return " · ".join(parts)
@@ -1086,21 +1089,25 @@ def test_schedules_parameters_column_shows_the_key_pools_values(monkeypatch):
     app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch, _parameters_config())
     tree, column = dialog.schedule_key_tree, dialog.SCHEDULE_PARAMETERS_COLUMN
     try:
+        # Model, then Parameters (the key's multi-instance number leads them, in every pool)
         assert dialog.SCHEDULE_TREE_COLUMNS[column] == "Parameters" and column == dialog.SCHEDULE_MODEL_COLUMN + 1
-        assert "temperature" in tree.headerItem().toolTip(column)
+        assert "Instance" not in dialog.SCHEDULE_TREE_COLUMNS
+        assert "temperature" in tree.headerItem().toolTip(column) and "🔢" in tree.headerItem().toolTip(column)
         for pool in ("main", "fallback", "glossary", "metadata"):
             assert dialog.select_schedule_pool(pool)
             for row in range(tree.topLevelItemCount()):
                 assert tree.topLevelItem(row).text(column) == _key_pools_parameters(dialog, pool, row), (pool, row)
         dialog.select_schedule_pool("main")
-        assert tree.topLevelItem(0).text(column) == "📤16384 · 🌡️0.7 · ⏱️2.0s · ⌛120s"
-        assert tree.topLevelItem(1).text(column) == "📤global · 🌡️global · ⏱️global · ⌛60s"
+        assert tree.topLevelItem(0).text(column) == "🔢1 · 📤16384 · 🌡️0.7 · ⏱️2.0s · ⌛120s"
+        assert tree.topLevelItem(1).text(column) == "🔢2 · 📤global · 🌡️global · ⏱️global · ⌛60s"
         tip = tree.topLevelItem(0).toolTip(column)
         assert "Individual Output Token Limit: 16384" in tip and "cooldown: 120s" in tip
+        assert tip.startswith("🔢 Instance 1\n") and dialog.KEY_INSTANCE_HELP in tip
         dialog.select_schedule_pool("fallback")
-        assert tree.topLevelItem(1).text(column) == "📤global · 🌡️1.0 · ⏱️0.5s"   # no ⌛ column there
+        assert tree.topLevelItem(1).text(column) == "🔢3 · 📤global · 🌡️1.0 · ⏱️0.5s"   # no ⌛ column there
+        assert tree.topLevelItem(1).toolTip(column).startswith("🔢 Instance 3\n")
         dialog.select_schedule_pool("glossary")
-        assert tree.topLevelItem(0).text(column) == "📤8192 · 🌡️global · ⏱️global"
+        assert tree.topLevelItem(0).text(column) == "🔢1 · 📤8192 · 🌡️global · ⏱️global"
         assert "Using global temperature" in tree.topLevelItem(0).toolTip(column)
         # compact: no wider than all-global values with a cooldown
         metrics = tree.fontMetrics()
@@ -1147,12 +1154,13 @@ def test_schedules_parameters_double_click_uses_the_key_pools_editors(monkeypatc
             tree.itemDoubleClicked.emit(tree.topLevelItem(1), column)
             app.processEvents()
             assert calls[-1] == (pool, columns[field]), pool
-            expected = ["📤 Output limit…", "🌡️ Temperature…", "⏱️ API call delay…"] + (
+            expected = ["🔢 Instance…", "📤 Output limit…", "🌡️ Temperature…", "⏱️ API call delay…"] + (
                 ["⌛ Cooldown…"] if pool == "main" else [])
             assert menus[-1] == expected
             keys = dialog._pool_key_list(pool)
             assert dialog._key_parameter_texts(keys[1])[position] == text.rstrip("s"), pool
-            assert tree.topLevelItem(1).text(column).split(" · ")[position] == PARAMETER_ICONS[field] + text, pool
+            shown = tree.topLevelItem(1).text(column).split(" · ")[position + 1]   # after 🔢
+            assert shown == PARAMETER_ICONS[field] + text, pool
             assert tree.topLevelItem(1).text(column) == _key_pools_parameters(dialog, pool, 1)
             if pool != "main":
                 assert saved and dialog._key_parameter_texts(saved[-1][f"{pool}_keys"][1])[position] == text.rstrip("s")
@@ -1198,7 +1206,7 @@ def test_schedules_parameters_sync_both_ways(monkeypatch):
             _select(pool_tree, 0)
             pool_tree.itemDoubleClicked.emit(pool_tree.topLevelItem(0), columns["temperature"])
             app.processEvents()
-            assert tree.topLevelItem(0).text(column).split(" · ")[1] == "🌡️0.9", pool
+            assert tree.topLevelItem(0).text(column).split(" · ")[2] == "🌡️0.9", pool   # after 🔢 and 📤
             if pool == "main":       # the ⌛ cooldown too
                 pool_tree.itemDoubleClicked.emit(pool_tree.topLevelItem(0), columns["cooldown"])
                 app.processEvents()

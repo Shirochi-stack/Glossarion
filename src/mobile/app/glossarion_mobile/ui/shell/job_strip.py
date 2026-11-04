@@ -2,8 +2,10 @@
 
 Leading ``ProgressRing(28)`` with the job-kind icon in its centre
 (indeterminate until a total is known) · title (labelLarge) over subtitle
-(labelSmall; warning colour for "Waiting for your glossary decision") · "+N"
-queued badge · Stop (same state vocabulary as Send). Tap opens job detail.
+(labelSmall; warning colour for "Waiting for your glossary decision") · "+N running"
+(the other instances' jobs of a multi-instance translation) · "+N" queued badge · Stop
+(same state vocabulary as Send; it stops the job shown). Tap opens job detail (the Jobs page
+while several jobs run).
 ``Semantics(live_region=True)`` so screen readers announce progress.
 
 ``AppState.job_strip`` is fed by the jobs feature (``JobService`` snapshots,
@@ -63,6 +65,11 @@ class JobStrip(ft.Container):
         )
         self.end_icon = ft.Icon(ft.Icons.TASK_ALT, size=24, visible=False)
         self.open_button = ft.TextButton(content="Open", on_click=self._open, visible=False)
+        # "+1 running": the other instances' running jobs of a multi-instance translation (tap: the Jobs page)
+        self.running_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1)
+        self.running_badge = ft.Container(content=self.running_text, visible=False, key="strip-running",
+                                          padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                                          bgcolor=ft.Colors.SECONDARY_CONTAINER, border_radius=tokens.RADII["chip"])
         self.dismissed_state: Optional[str] = None
         self._announced_at = 0.0
         self._announced_state: Optional[str] = None
@@ -82,6 +89,7 @@ class JobStrip(ft.Container):
                         height=28,
                     ),
                     ft.Column([self.title_text, self.subtitle_text], spacing=0, tight=True, expand=True),
+                    self.running_badge,
                     self.open_button,
                     self.stop_button,
                 ],
@@ -127,6 +135,9 @@ class JobStrip(ft.Container):
         self.subtitle_text.value = model.subtitle
         self.subtitle_text.color = semantic("warning", self.dark) if model.warning else None
         self.stop_button.badge = count_badge(f"+{model.queued}") if model.queued else None
+        more = int(getattr(model, "running_more", 0) or 0)
+        self.running_badge.visible = more > 0 and not ended
+        self.running_text.value = f"+{more} running" if more > 0 else ""
         running = model.state in ("running", "finishing")
         self.stop_button.visible = running or model.state == "stopping"
         self.stop_button.disabled = model.state == "stopping"
@@ -142,7 +153,9 @@ class JobStrip(ft.Container):
         (a live region re-announces every label change: progress ticks would flood TalkBack)."""
         now = time.monotonic()
         if model.state != self._announced_state or now - self._announced_at >= self.ANNOUNCE_SECONDS:
-            self.semantics.label = f"{model.title}. {model.subtitle}".strip()
+            more = int(getattr(model, "running_more", 0) or 0)
+            extra = f" {more} more job{'s' if more != 1 else ''} running." if more > 0 else ""
+            self.semantics.label = f"{model.title}. {model.subtitle}{extra}".strip()
             self._announced_state = model.state
             self._announced_at = now
 

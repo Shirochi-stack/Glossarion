@@ -2312,8 +2312,9 @@ class CloudSyncService:
             current = view()
         except Exception:
             return False
-        snaps = ([current.active] if getattr(current, "active", None) is not None else []) + \
-            list(getattr(current, "queue", ()) or ())
+        from glossarion_mobile.services.jobs import pending_jobs
+
+        snaps = pending_jobs(current)  # every instance's running job, then the queue
         if not snaps:
             return False
         try:

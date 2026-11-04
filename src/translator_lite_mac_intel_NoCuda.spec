@@ -263,6 +263,11 @@ app_files = [
     ('html_output_utils.py', '.'),
     ('onnx_cpp_backend.py', '.'),
     ('unified_glossary.py', '.'),
+    # Multi-instance translation: GUI-free file -> instance planning
+    ('instance_plan.py', '.'),
+    # ... the instance processes and the main window's side of a run (Qt)
+    ('instance_worker.py', '.'),
+    ('instance_runs.py', '.'),
     # Mobile rewrite U1: GUI-free shared core + runtime gates
     ('mobile_runtime.py', '.'),
     ('app_paths.py', '.'),
@@ -496,6 +501,11 @@ app_modules = [
     'tqdm_safety',
     'unified_glossary',
     'vision_ocr_source_epub',
+    # Multi-instance translation: GUI-free file -> instance planning
+    'instance_plan',
+    # ... the instance processes and the main window's side of a run (Qt)
+    'instance_worker',
+    'instance_runs',
     # Mobile rewrite U1: GUI-free shared core + runtime gates
     'mobile_runtime',
     'app_paths',

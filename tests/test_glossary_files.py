@@ -167,6 +167,8 @@ MOVED_BODIES = {
     ("glossary_files", "analyze_json_errors"): ([(TG, 32377, 32414)], []),
     ("stop_control", "kill_glossary_helper_subprocesses"): ([(TG, 26652, 26718)], [
         (_PREPEND, "if not subprocesses_available():\n    return"),
+        # multi-instance: an instance process's helpers belong to that instance's own Stop
+        ("if child.pid in _protected_pids:", "if child.pid in _protected_pids or in_instance_process_tree(child):"),
     ]),
 }
 

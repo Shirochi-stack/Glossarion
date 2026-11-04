@@ -72,6 +72,8 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 
 import json
 import os
+# Multi-instance: an instance >= 2 keeps its payload folders under Payloads/Instance N
+from instance_plan import instance_payloads_dir
 from subtitle_processor import SUBTITLE_EXTENSIONS
 from urllib.parse import unquote
 import re
@@ -1223,7 +1225,7 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
             # Set up thread-safe payload directory
             thread_name = threading.current_thread().name
             thread_id = threading.current_thread().ident
-            thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+            thread_dir = os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")
             try:
                 os.makedirs(thread_dir, exist_ok=True)
             except (PermissionError, OSError):
