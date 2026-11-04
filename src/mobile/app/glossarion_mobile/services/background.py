@@ -726,15 +726,22 @@ class BackgroundExecution:
             return []
         from glossarion_mobile.services.jobs import live_rows
 
-        tail = ""
+        tail, thinking = "", False
+        job_id = getattr(snap, "id", None)
         getter = getattr(self.jobs, "stream_tail", None)
         if callable(getter):
             try:
-                tail = str(getter(getattr(snap, "id", None)) or "")
+                tail = str(getter(job_id) or "")
             except Exception:
                 tail = ""
+        phase = getattr(self.jobs, "stream_thinking", None)  # hotfix 4: 🧠 rows for the request's thinking
+        if callable(phase):
+            try:
+                thinking = bool(phase(job_id))
+            except Exception:
+                thinking = False
         try:
-            return live_rows(snap, tail)
+            return live_rows(snap, tail, thinking)
         except Exception:
             log.debug("the notification's live rows failed", exc_info=True)
             return []

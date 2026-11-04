@@ -66,7 +66,7 @@ def test_the_progress_line_shows_the_prompt_being_read_then_the_tokens_written(m
         def emit(self, record):
             lines.append(record.getMessage())
 
-    parent = logging.getLogger("unified_api_client")
+    parent = eng.progress_log
     handler, level = Grab(), parent.level
     parent.addHandler(handler)
     parent.setLevel(logging.INFO)
@@ -194,9 +194,9 @@ def test_the_notepad_switch_shares_the_actions_row():
     screen.build_body()
     rows = [c for c in screen.header_column.controls if isinstance(c, ft.Row)]
     actions = next(r for r in rows if r.key == "sdl-actions")
-    assert actions.controls[:5] == [screen.mt_button, screen.mt_provider, screen.flag_button, screen.threshold_button,
-                                    screen.layout_switch]
-    assert actions.wrap and not any(screen.layout_switch in r.controls for r in rows if r is not actions)
+    # hotfix 4: Provider and Threshold went behind the options button; the switch is still in this row
+    assert actions.controls[:3] == [screen.mt_button, screen.flag_button, screen.options_button]
+    assert actions.controls[3].content.controls[-1] is screen.layout_switch
 
 
 def test_notepad_layout_fills_the_screen_and_the_header_steps_aside_for_the_keyboard():
@@ -225,6 +225,7 @@ def test_notepad_layout_fills_the_screen_and_the_header_steps_aside_for_the_keyb
     assert screen.header_column.visible is not False and shell_calls
     page.on_media_change(media(0))
     screen.notepad = True
+    screen.controls_open = True  # hotfix 4: the header shows in the Notepad layout only behind its Controls button
     screen._apply_notepad_layout()
     assert screen.list_view.scroll is None and screen.body_holder.expand is True
     page.on_media_change(media(320))  # keyboard up: the editor gets the whole visible height
@@ -265,7 +266,8 @@ def test_job_keeps_the_tail_of_its_streamed_text_and_drops_it_for_the_next_reque
     from glossarion_mobile.services import jobs as jb
 
     job = types.SimpleNamespace(stream=types.SimpleNamespace(feed=lambda raw: "suppress-main-log" if raw.startswith("<") else None),
-                                stream_tail="", buffer=None, sign_in_flagged=True, last_line="", spec=None, id="j1")
+                                stream_tail="", stream_open=False, stream_thinking=False, buffer=None, sign_in_flagged=True, last_line="",
+                                spec=None, id="j1")
     service = jb.JobService.__new__(jb.JobService)
     service._deliver_message = lambda job, raw: None
     service._write_log_file = lambda job, line: None
@@ -311,7 +313,7 @@ def test_notification_shows_the_on_device_row_and_the_stream_and_ticks_while_vis
         tails["text"] = "<p>The secret proposal of the noble faction</p>"
         clock.now += 1
         assert await helpers._until(lambda: texts()[-1] == "Book.epub\n📱 12 tokens written · 6.5 tok/s\n"
-                                                           "The secret proposal of the noble faction")
+                                                           "✍️ The secret proposal of the noble faction")
         rows["ondevice"], tails["text"] = "", ""  # the request ended: rows go, the ticker stops
         clock.now += 1
         assert await helpers._until(lambda: texts()[-1] == "Book.epub")

@@ -394,7 +394,28 @@ class AppShell:
             safe = view.controls[0]
             safe.content = ft.Column([ft.Container(content=safe.content, expand=True), entry.footer], spacing=0, expand=True)
             entry.view = view
+            entry.screen.immersive_handler = lambda on, e=entry: self._immersive(e, on)
         return entry.view
+
+    def _immersive(self, entry: StackEntry, on: bool) -> None:
+        """``Screen.set_immersive`` on a phone: the View's app bar and the JobStrip slot go away while ``on``."""
+        view = entry.view
+        if view is None:
+            return
+        if on and view.appbar is not None:
+            entry.extra["appbar"] = view.appbar
+            view.appbar = None
+        elif not on and view.appbar is None and entry.extra.get("appbar") is not None:
+            view.appbar = entry.extra.pop("appbar")
+        else:
+            return
+        if entry.footer is not None:
+            entry.footer.visible = not on
+        try:
+            if getattr(view, "page", None) is not None:
+                view.update()
+        except Exception as exc:  # the View left the page meanwhile
+            log.debug("immersive update failed: %s", exc)
 
     def _install_views(self) -> None:
         views: list[ft.View] = [self.root_view]

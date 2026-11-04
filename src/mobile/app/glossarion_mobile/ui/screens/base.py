@@ -64,6 +64,9 @@ class Screen:
     #: The title Text the shell built for this screen (phone app bar / tablet main-area bar); a screen
     #: whose title changes while it is shown sets its ``value`` and updates it.
     app_bar_title: Optional[ft.Text] = None
+    #: Set by the phone shell on the screen's View: ``(on)`` hides / shows its app bar and the JobStrip under it
+    #: (``set_immersive``). None on a tablet and outside the app.
+    immersive_handler: Optional[Callable[[bool], Any]] = None
 
     def __init__(self, match: Optional[RouteMatch] = None) -> None:
         self.match = match
@@ -83,6 +86,13 @@ class Screen:
 
     def actions(self) -> list[ft.Control]:
         return []
+
+    def set_immersive(self, on: bool) -> None:
+        """Full screen while ``on``: no app bar and no JobStrip on a phone (the SDLXLIFF Notepad layout, mobile
+        hotfix 4); the screen gives its own way back. Nothing happens on a tablet or outside the app."""
+        handler = self.immersive_handler
+        if handler is not None:
+            handler(bool(on))
 
     def did_show(self) -> None:
         """Called after the screen's View/body is on the page."""

@@ -29,6 +29,8 @@ class SectionCard(ft.Container):
     collapsible: bool = field(default=False, metadata={"skip": True})
     expanded: bool = field(default=True, metadata={"skip": True})
     modified_count: int = field(default=0, metadata={"skip": True})
+    #: a control in the title's row, after the title, taking the row's free width (a status beside the title)
+    title_extra: Optional[ft.Control] = field(default=None, metadata={"skip": True})
 
     def init(self) -> None:
         super().init()
@@ -65,7 +67,11 @@ class SectionCard(ft.Container):
                 collapsed_shape=ft.RoundedRectangleBorder(radius=tokens.RADII["card"]),
             )
             return
-        header_text: list[ft.Control] = [ft.Row([self.title_text, self.modified_dot], spacing=6, tight=True)]
+        title_row = ft.Row([self.title_text, self.modified_dot], spacing=6, tight=True)
+        if self.title_extra is not None:
+            title_row = ft.Row([self.title_text, self.modified_dot, self.title_extra], spacing=6,
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        header_text: list[ft.Control] = [title_row]
         if subtitle is not None:
             header_text.append(subtitle)
         header: list[ft.Control] = []

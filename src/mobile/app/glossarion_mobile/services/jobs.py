@@ -156,6 +156,34 @@ LAST_LINE_CHARS = 240
 STREAM_TAIL_KEEP = 2000
 #: log lines that start a new request: the streamed text of the last one is dropped
 STREAM_TAIL_RESETS = ("SDK stream start", "Sending API call")
+#: hotfix 4: lowercased phrases that open / close a request's stream. The OpenAI-compatible routes (on-device
+#: ``local/`` among them) log no "Text streaming" banner, so the request stream never marked their text as
+#: streamed and the notification showed none; messages between these that are not status lines are the text
+STREAM_OPEN_PHRASES = ("stream start (model=", "stream opened in ")
+STREAM_CLOSE_PHRASES = ("received response", "stream finished", "stream complete", "sdk call finished",
+                        "received translation", "sending api call")
+#: lowercased phrases that end a request's thinking: what streams next is the answer (``_note_stream_phase``)
+STREAM_TEXT_PHRASES = ("thinking complete", "text streaming", "first text token")
+#: how a status line starts besides an emoji / symbol (``stream_status_line``), never streamed text
+STREAM_STATUS_PREFIXES = ("[DEBUG]", "[INFO]", "[WARN", "[ERROR")
+
+
+def stream_status_line(raw: str, stream: Any = None) -> bool:
+    """Whether a log message is a status line, not streamed text: it starts with an emoji or other symbol
+    (Unicode "So": the client's and the routes' status lines, "⏳ AuthND: …", "📤 …", "✓ …"; not "<" of
+    the HTML text), a log tag, or the request stream calls it a pipeline status. Blank: not status."""
+    import unicodedata
+
+    stripped = str(raw or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith(STREAM_STATUS_PREFIXES) or unicodedata.category(stripped[0]) == "So":
+        return True
+    status = getattr(stream, "_looks_like_pipeline_status", None)
+    try:
+        return bool(callable(status) and status(stripped))
+    except Exception:
+        return False
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
 #: Lines written for the request stream's parser, not for people: neither Logs nor the log file keeps them
 STREAM_MACHINE_MARKERS = ("[DIRECT_TEXT_RESPONSE_PAYLOAD]", "[DIRECT_TEXT_GLOSSARY_STREAM_START]")
@@ -914,6 +942,8 @@ class _Job:
     issued_stop: Optional[str] = None  # the last stop mode whose protocol ran for this job
     sign_in_flagged: bool = False  # a "sign_in_required" event was sent for this job
     stream_tail: str = ""  # the end of the text the current request streams (the notification's rows)
+    stream_open: bool = False  # between a request's stream start and its end (``_streamed_text``)
+    stream_thinking: bool = False  # the streamed text is thinking (``_note_stream_phase``)
     announced: threading.Event = field(default_factory=threading.Event)  # its QUEUED transition was posted
     run_id: Any = None
     log_path: Optional[str] = None
@@ -1246,6 +1276,9 @@ def notification_lines(snap: JobSnapshot) -> tuple:
 
 #: the streamed text the job notification shows (about three rows on a phone, Android wraps it)
 NOTIFICATION_STREAM_CHARS = 120
+#: what leads the streamed text's rows in the notification (``live_rows``)
+STREAM_ROW_MARK = "✍️ "
+THINKING_ROW_MARK = "🧠 "
 _TAG_RE = re.compile(r"<[^>]*>")
 
 
@@ -1264,8 +1297,9 @@ def stream_row(text: str, limit: int = NOTIFICATION_STREAM_CHARS) -> str:
     return "…" + tail
 
 
-def on_device_row() -> str:
-    """The running on-device request's row ("📱 412 tokens written · 6.5 tok/s"), '' when none runs."""
+def on_device_row(threads: bool = False) -> str:
+    """The running on-device request's row ("📱 412 tokens written · 6.5 tok/s"; ``threads``: " · 4 threads"
+    after it, the job screen's status), '' when none runs."""
     try:
         from glossarion_mobile.services.local_llm.service import default_service
     except Exception:
@@ -1273,19 +1307,24 @@ def on_device_row() -> str:
     service = default_service()
     live = getattr(getattr(service, "engine", None), "live", None) if service is not None else None
     try:
-        return str(live.notification_row()) if live is not None else ""
+        return str(live.notification_row(threads=threads)) if live is not None else ""
     except Exception:
         log.debug("the on-device notification row failed", exc_info=True)
         return ""
 
 
-def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "") -> list:
+def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "", thinking: bool = False) -> list:
     """Hotfix 3: rows under the job notification's book line while a request runs: the on-device model's
     prompt reading / speed (one row) and, with Streaming on, the end of the text it streams (about three
     rows). None while the job waits for an answer or is not running."""
     if snap is None or snap.question or not snap.is_active:
         return []
-    rows = [row for row in (on_device_row(), stream_row(stream_tail)) if row]
+    streamed = stream_row(stream_tail)
+    # hotfix 4 (owner: "why is there no visual styling for that log area"): the notification is plain text
+    # (flutter_foreground_task's BigTextStyle takes a string), so the streamed text gets its own marker: 🧠 for
+    # the request's thinking, ✍️ for its answer
+    mark = THINKING_ROW_MARK if thinking else STREAM_ROW_MARK
+    rows = [row for row in (on_device_row(), f"{mark}{streamed}" if streamed else "") if row]
     return rows
 
 
@@ -2050,6 +2089,12 @@ class JobService:
         with self._lock:
             job = self._active if job_id is None else self._find_live(job_id)
             return job.stream_tail if job is not None else ""
+
+    def stream_thinking(self, job_id: Optional[str] = None) -> bool:
+        """Whether ``stream_tail`` is the request's thinking (hotfix 4: the notification marks it 🧠)."""
+        with self._lock:
+            job = self._active if job_id is None else self._find_live(job_id)
+            return bool(job.stream_thinking) if job is not None else False
 
     def _find_live(self, job_id: str) -> Optional[_Job]:
         if self._active is not None and self._active.id == job_id:
@@ -3244,7 +3289,10 @@ class JobService:
             except Exception:
                 log.debug("request stream rejected a message", exc_info=True)
         # hotfix 3: the notification's streaming rows read the end of the streamed text (Streaming off: none)
-        if streamed_text:
+        self._note_stream_phase(job, raw)
+        # hotfix 4: the stream's own hint also marks some routes' status lines ("⏳ AuthND: NVIDIA queue /
+        # prefill …", owner: "the notification area just shows random logs"), so both paths skip status lines
+        if (streamed_text or self._streamed_text(job, raw)) and not stream_status_line(raw, job.stream):
             job.stream_tail = (job.stream_tail + raw)[-STREAM_TAIL_KEEP:]
         elif any(marker in raw for marker in STREAM_TAIL_RESETS):
             job.stream_tail = ""
@@ -3270,6 +3318,37 @@ class JobService:
                 continue
             job.last_line = line[:LAST_LINE_CHARS]
             self._note_issue(job, line)
+
+    @staticmethod
+    def _note_stream_phase(job: _Job, raw: str) -> None:
+        """Hotfix 4 (owner: thinking should have a brain emoji in the notification): the client's markers
+        ("🧠 [x] Thinking...", then "Thinking complete" / "📡 Text streaming...") switch the streamed text
+        between thinking and answer; a switch starts the tail anew, so the two never share a row."""
+        low = raw.strip().lower()
+        if not low:
+            return
+        if raw.strip().startswith("🧠") and low.endswith("thinking..."):
+            thinking = True
+        elif any(phrase in low for phrase in STREAM_TEXT_PHRASES) or any(p in low for p in STREAM_OPEN_PHRASES):
+            thinking = False
+        else:
+            return
+        if thinking != job.stream_thinking:
+            job.stream_thinking = thinking
+            job.stream_tail = ""
+
+    @staticmethod
+    def _streamed_text(job: _Job, raw: str) -> bool:
+        """Hotfix 4: whether ``raw`` is text of an open request stream (``STREAM_OPEN_PHRASES`` ..
+        ``STREAM_CLOSE_PHRASES``) rather than a status line; opening / closing updates ``job.stream_open``."""
+        low = raw.strip().lower()
+        if any(phrase in low for phrase in STREAM_OPEN_PHRASES):
+            job.stream_open = True
+            return False
+        if any(phrase in low for phrase in STREAM_CLOSE_PHRASES):
+            job.stream_open = False
+            return False
+        return job.stream_open and not stream_status_line(raw, job.stream)
 
     @staticmethod
     def _job_model(job: _Job) -> Optional[str]:

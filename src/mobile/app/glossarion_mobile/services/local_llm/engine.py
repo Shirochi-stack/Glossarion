@@ -49,8 +49,9 @@ import time
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 log = logging.getLogger("glossarion.local_llm")
-#: lines a job's Log shows too (job logs listen to ``unified_api_client`` and its children)
-job_log = logging.getLogger("unified_api_client.on_device")
+#: the progress and thread lines (hotfix 2). Hotfix 4: the diagnostics log only, no longer a child of
+#: ``unified_api_client`` (a job's Log); the job screen shows the live row beside its Log title instead
+progress_log = logging.getLogger("glossarion.local_llm.progress")
 
 __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
            "GpuUnavailable", "LlamaEngine", "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
@@ -702,20 +703,31 @@ class _Heartbeat:
     def read(self, tokens: int) -> None:
         self.prompt_read += int(tokens or 0)
 
-    def notification_row(self) -> str:
+    def notification_row(self, threads: bool = False) -> str:
         """The job notification's on-device row (hotfix 3): "📱 Processing · 2,048 / ~5,896 tokens ·
         32.0 tok/s" until the first output token, then "📱 412 tokens written · 6.5 tok/s" (averages: the
-        notification updates every second, a per-second speed would jump)."""
+        notification updates every second, a per-second speed would jump). ``threads`` (the job screen's
+        status beside its Log title, hotfix 4) adds " · 4 threads"."""
         now = time.monotonic()
         if self.reading:
             total = f"~{self.prompt_total:,}" if self.prompt_total else "?"
             if not self.prompt_read:
-                return f"📱 Processing · {total} tokens"
-            read = min(self.prompt_read, self.prompt_total or self.prompt_read)
-            speed = self.prompt_read / max(now - self.started, 0.001)
-            return f"📱 Processing · {read:,} / {total} tokens · {speed:.1f} tok/s"
-        speed = self.tokens / max(now - (self.first_token_at or self.started), 0.001)
-        return f"📱 {self.tokens:,} tokens written · {speed:.1f} tok/s"
+                row = f"📱 Processing · {total} tokens"
+            else:
+                read = min(self.prompt_read, self.prompt_total or self.prompt_read)
+                speed = self.prompt_read / max(now - self.started, 0.001)
+                row = f"📱 Processing · {read:,} / {total} tokens · {speed:.1f} tok/s"
+        else:
+            speed = self.tokens / max(now - (self.first_token_at or self.started), 0.001)
+            row = f"📱 {self.tokens:,} tokens written · {speed:.1f} tok/s"
+        return f"{row} · {self.threads()} threads" if threads else row
+
+    def threads(self) -> int:
+        """The threads llama.cpp runs now (``_follow_cpus`` changes them), else the loaded count."""
+        try:
+            return int(importlib.import_module("llama_cpp").llama_n_threads(self.engine.llm._ctx.ctx))
+        except Exception:
+            return self.engine.n_threads
 
     def line(self, seconds: float, new_tokens: int) -> str:
         """The progress since the last line: ``new_tokens`` output tokens, or prompt tokens while reading."""
@@ -724,12 +736,7 @@ class _Heartbeat:
             cpus = _cpu_list(affinity(0)) if affinity is not None else "?"
         except OSError:
             cpus = "?"
-        llm = self.engine.llm
-        threads = self.engine.n_threads
-        try:
-            threads = int(importlib.import_module("llama_cpp").llama_n_threads(llm._ctx.ctx))  # after _follow_cpus
-        except Exception:
-            pass
+        threads = self.threads()
         cpuset = _cpuset()
         rate = f"{new_tokens / max(seconds, 0.001):.1f} tok/s"
         total = f"~{self.prompt_total:,}" if self.prompt_total else "?"
@@ -755,7 +762,7 @@ class _Heartbeat:
                 last_tokens, was_reading = 0, False
             now, tokens = time.monotonic(), self._count()
             try:
-                job_log.info("%s", self.line(now - last_at, tokens - last_tokens))
+                progress_log.info("%s", self.line(now - last_at, tokens - last_tokens))
             except Exception:
                 log.debug("the on-device progress line failed", exc_info=True)
             last_at, last_tokens = now, tokens
@@ -788,7 +795,7 @@ def _follow_cpus(llm: Any, threads: int) -> Callable[[], None]:
             log.debug("changing the thread count failed", exc_info=True)
             return
         state["n"] = count
-        job_log.info("📱 on-device: %d of %d threads, %d CPU%s available to the app", count, threads, cpus,
+        progress_log.info("📱 on-device: %d of %d threads, %d CPU%s available to the app", count, threads, cpus,
                      "" if cpus == 1 else "s")
 
     def fitted(batch: Any) -> Any:
