@@ -71,12 +71,45 @@ CAPTURE_SCRIPT = (
 ) % (CHUNK_CHARS, json.dumps(CONSOLE_PREFIX), POLL_MS)
 
 
+#: hotfix 4 (owner: "the raw text pop up ... is blocking the text itself on mobile"): a tap is a synthetic
+#: mouseover, so the editing script's source tooltip (made for a mouse) opened beside the finger, over the text
+#: being edited. On a touch screen it is a full-width bar docked at the viewport's top or bottom edge, away from
+#: the tapped text (it moves when the keyboard resizes the page). Runs after the editing script's listeners.
+TOUCH_TOOLTIP_SCRIPT = (
+    "(function () {\n"
+    "  var tip = document.getElementById('sdl-notepad-source-tooltip');\n"
+    "  if (!tip || !(window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) return;\n"
+    "  var style = document.createElement('style');\n"
+    "  style.textContent = '#sdl-notepad-source-tooltip { left: 8px !important; right: 8px !important;' +\n"
+    "    ' max-width: none !important; max-height: 30vh; overflow: hidden; }';\n"
+    "  (document.head || document.documentElement).appendChild(style);\n"
+    "  var anchor = null;\n"
+    "  function dock() {\n"
+    "    if (tip.style.display !== 'block' || !anchor) return;\n"
+    "    var r = anchor.getBoundingClientRect();\n"
+    "    var lower = (r.top + r.bottom) / 2 > window.innerHeight / 2;\n"
+    "    tip.style.top = lower ? '8px' : 'auto';\n"
+    "    tip.style.bottom = lower ? 'auto' : '8px';\n"
+    "  }\n"
+    "  function follow(event) {\n"
+    "    var t = event.target;\n"
+    "    anchor = t && t.nodeType === 1 ? t : (t && t.parentElement);\n"
+    "    dock();\n"
+    "  }\n"
+    "  document.addEventListener('mouseover', follow, true);\n"
+    "  document.addEventListener('mousemove', function () { dock(); }, true);\n"
+    "  window.addEventListener('resize', dock);\n"
+    "  window.addEventListener('scroll', dock, true);\n"
+    "})();\n"
+)
+
+
 def page_html(renderable: str, editing_script: str, nonce: str) -> str:
-    """The published page: the renderable document plus one nonce'd script (the editor, then the
-    capture poll) that removes its own element first."""
+    """The published page: the renderable document plus one nonce'd script (the editor, its touch
+    tooltip, then the capture poll) that removes its own element first."""
     script = ("<script nonce=\"%s\">(function(){var s=document.currentScript;if(s&&s.parentNode)"
-              "s.parentNode.removeChild(s);})();\n%s\n%s</script>"
-              % (nonce, editing_script.replace("</script", "<\\/script"), CAPTURE_SCRIPT))
+              "s.parentNode.removeChild(s);})();\n%s\n%s\n%s</script>"
+              % (nonce, editing_script.replace("</script", "<\\/script"), TOUCH_TOOLTIP_SCRIPT, CAPTURE_SCRIPT))
     lower = renderable.lower()
     at = lower.rfind("</body>")
     if at < 0:

@@ -18,7 +18,9 @@
   that height that follows its newest card itself, so from then on the page never grows above the Log card
   (v9.15.7 batch and owner 2026-10-31, see ``JobDetailScreen._show_requests``).
 * Log: ``LogConsole`` over the job's ``LogBuffer`` (live), or the tail of
-  ``<logs>/jobs/<id>.log`` for older jobs; Copy and Share log.
+  ``<logs>/jobs/<id>.log`` for older jobs; Copy and Share log. Beside its title, while an on-device request
+  runs, the notification's on-device row with the thread count, read every ``DEVICE_STATUS_SECONDS``
+  (hotfix 4: it replaces the progress lines the engine wrote into the log).
 * Outputs: one chip per output file -> Share / Save to… / Save to Downloads /
   Show in Files (``FileBridge``).
 
@@ -45,6 +47,7 @@ from glossarion_mobile.services.jobs import (
     issue_label,
     job_target,
     kind_icon,
+    on_device_row,
     progress_line,
     progress_view,
     status_key,
@@ -68,6 +71,8 @@ log = logging.getLogger("glossarion.jobs")
 MAX_REQUEST_CARDS = 60
 PREVIEW_CHARS = 280
 REQUEST_REFRESH_S = 1.0
+#: seconds between two reads of the on-device status beside the Log title (the notification's rate)
+DEVICE_STATUS_SECONDS = 1.0
 #: height (dp) of the box the request cards scroll in once they would not fit it (``_show_requests``,
 #: measured with ``request_card_height``)
 JOB_REQUESTS_BOX_HEIGHT = 320
@@ -222,6 +227,7 @@ class JobDetailScreen(Screen):
         self._unsubs: list[Callable[[], None]] = []
         self._last_requests = 0.0
         self._log_buffer: Optional[LogBuffer] = None
+        self._device_task: Any = None  # the on-device status loop (``_follow_device_status``)
         known = service.snapshot(self.job_id) if self.job_id else None
         self.title = (known.title if known is not None else "") or "Job"  # the app bar is built first
 
@@ -323,9 +329,17 @@ class JobDetailScreen(Screen):
             backlog=2000,
             header_follow=True,
         )
+        # hotfix 4: the on-device request's status beside the title (``_follow_device_status``)
+        self.device_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
+                                   overflow=ft.TextOverflow.ELLIPSIS, key="job-device-text")
+        self.device_status = ft.Container(content=self.device_text, expand=True, visible=False,
+                                          padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                                          bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+                                          border_radius=tokens.RADII["field"], key="job-device-status")
         log_card = SectionCard(
             title="Log",
             icon="TERMINAL",
+            title_extra=self.device_status,
             # auto-scroll on/off next to Share (owner 2026-10-18), so the filter row keeps its width
             trailing=ft.Row([self.console.follow_button,
                              ft.IconButton(icon=ft.Icons.SHARE, tooltip="Share log", on_click=self._on_share_log,
@@ -553,11 +567,53 @@ class JobDetailScreen(Screen):
         self._unsubs.append(self.service.subscribe(self._on_view))
         if self.dispatcher is not None and self._log_buffer is not None and hasattr(self.dispatcher, "subscribe_log"):
             self._unsubs.append(self.dispatcher.subscribe_log(self._log_buffer, self._on_lines))
+        if not self.snap.is_terminal:
+            self._device_task = self._spawn(self._follow_device_status(), remember=False)
 
     def dispose(self) -> None:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        task, self._device_task = self._device_task, None
+        if task is not None:
+            task.cancel()
+
+    def device_row(self) -> str:
+        """The status beside the Log title: the on-device row while this job runs a request ('' otherwise)."""
+        snap = self.snap
+        if snap is None or snap.question or not snap.is_active:
+            return ""
+        return on_device_row(threads=True)
+
+    def apply_device_status(self) -> bool:
+        """Show ``device_row`` beside the Log title; True when it changed."""
+        row = self.device_row()
+        if row == self.device_text.value:
+            return False
+        self.device_text.value = row
+        self.device_status.visible = bool(row)
+        return True
+
+    async def _follow_device_status(self) -> None:
+        """Read the on-device row every ``DEVICE_STATUS_SECONDS`` while the screen is shown and the job has not
+        ended (the job notification's rate; the engine's row has no change events)."""
+        while self._unsubs and self.snap is not None and not self.snap.is_terminal:
+            if self.apply_device_status():
+                self._update_device_status()
+            await asyncio.sleep(DEVICE_STATUS_SECONDS)
+        if self.apply_device_status():
+            self._update_device_status()
+
+    def _update_device_status(self) -> None:
+        """Send only the status (not the page: a whole-page refresh every second would re-pin its end)."""
+        control, dispatcher = self.device_status, self.dispatcher
+        try:
+            if dispatcher is not None and getattr(dispatcher, "bound", False) and hasattr(dispatcher, "mark_dirty"):
+                dispatcher.mark_dirty(control)
+            elif getattr(control, "page", None) is not None:
+                control.update()
+        except Exception:
+            pass
 
     def _on_view(self, view: Any) -> None:
         snap = view.find(self.job_id)
@@ -898,9 +954,9 @@ class JobDetailScreen(Screen):
             return await self.run_io(fn, *args)
         return await asyncio.to_thread(fn, *args)
 
-    def _spawn(self, coro: Any) -> Any:
+    def _spawn(self, coro: Any, remember: bool = True) -> Any:
         """Run ``coro`` on the UI loop (the dispatcher keeps a reference); closed when there is no loop (a
-        screen built outside the app)."""
+        screen built outside the app). ``remember``: it is the Library lookup (``_library_task``)."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -911,7 +967,8 @@ class JobDetailScreen(Screen):
             task = dispatcher.spawn(coro)
         else:
             task = asyncio.ensure_future(coro)
-        self._library_task = task
+        if remember:
+            self._library_task = task
         return task
 
     def _open_origin(self, e: Any = None) -> None:

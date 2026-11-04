@@ -403,46 +403,73 @@ class SdlxliffScreen(Screen):
         self.piece_menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Piece actions", key="sdl-piece-menu",
                                              items=self._piece_menu_items())
         self.legend = ft.Row(spacing=6, key="sdl-legend")
-        self.summary = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="sdl-summary")
+        # hotfix 4 (owner: "The sdlxliff reviewer top part is not compact enough"): the summary is one line (the
+        # whole text in its tooltip), the status line only shows when there is one
+        self.summary = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1,
+                               overflow=ft.TextOverflow.ELLIPSIS, key="sdl-summary")
         self.status_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.PRIMARY,
-                                   key="sdl-status")
-        self.mt_button = ft.FilledButton(content=TRANSLATE_LABEL, key="sdl-mt",
+                                   max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, visible=False, key="sdl-status")
+        self.provider_label = "Auto"
+        self.mt_button = ft.FilledButton(content=TRANSLATE_LABEL, key="sdl-mt", expand=True,
                                          tooltip="Generate a machine translation preview of this piece",
                                          on_click=lambda e: self.ctx.spawn(self.translate_piece()))
-        self.mt_provider = ft.TextButton(content="Provider: Auto", on_click=lambda e: self.open_provider_sheet(),
-                                         key="sdl-provider")
-        self.flag_button = ft.FilledButton(content=FLAG_LABEL, key="sdl-flag",
+        self.flag_button = ft.FilledButton(content=FLAG_LABEL, key="sdl-flag", expand=True,
                                            tooltip="Flag rows the machine translation says are inaccurate",
                                            on_click=lambda e: self.ctx.spawn(self.flag()))
-        self.threshold_button = ft.TextButton(content="Threshold", key="sdl-threshold",
-                                              on_click=lambda e: self.open_threshold_sheet())
+        # hotfix 4: Provider and Threshold behind one button (``open_options_sheet``), so the actions are one row
+        self.options_button = ft.IconButton(icon=ft.Icons.TUNE, tooltip="Provider and threshold", key="sdl-options",
+                                            on_click=lambda e: self.open_options_sheet(),
+                                            size_constraints=HIT_TARGET)
         webview = self._webview_ok()
-        self.layout_switch = ft.Switch(label="Notepad layout", value=False, disabled=not webview,
-                                       on_change=self._on_layout, key="sdl-layout")
-        # mobile hotfix 3: the switch shares the actions row (beside Threshold), not a row of its own
-        layout_row: list = [self.layout_switch]
-        if not webview:
-            layout_row.append(ReasonChip(reason=NOTEPAD_REASON, detail="The Notepad layout is the desktop's live "
-                                                                       "HTML editor: the chapter as it reads, edited "
-                                                                       "in place. It runs in the in-app browser."))
+        self.layout_switch = ft.Switch(value=False, disabled=not webview, on_change=self._on_layout, key="sdl-layout")
+        # mobile hotfix 3: the Notepad switch shares the actions row; hotfix 4: an icon instead of its label
+        notepad_toggle = ft.Container(
+            content=ft.Row([ft.Icon(ft.Icons.EDIT_NOTE, size=20, color=ft.Colors.ON_SURFACE_VARIANT),
+                            self.layout_switch], spacing=0, tight=True,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            tooltip="Notepad layout", key="sdl-layout-toggle")
         self.rows_column = ft.Column(spacing=8, key="sdl-rows")
         self.body_holder = ft.Container(content=self.rows_column, key="sdl-holder")
-        header = ft.Column([
+        header_rows: list = [
             self.book_dropdown,
             ft.Row([self.prev_button, self.piece_dropdown, self.next_button, self.piece_menu],
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.summary, self.legend,
-            ft.Row([self.mt_button, self.mt_provider, self.flag_button, self.threshold_button, *layout_row], wrap=True,
-                   spacing=6, run_spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="sdl-actions"),
-            self.status_text,
-        ], spacing=6, tight=True)
+            ft.Row([self.mt_button, self.flag_button, self.options_button, notepad_toggle], spacing=6,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER, key="sdl-actions"),
+        ]
+        if not webview:
+            header_rows.append(ReasonChip(reason=NOTEPAD_REASON, detail="The Notepad layout is the desktop's live "
+                                                                        "HTML editor: the chapter as it reads, edited "
+                                                                        "in place. It runs in the in-app browser."))
+        header_rows.append(self.status_text)
+        header = ft.Column(header_rows, spacing=6, tight=True)
         self.header_column = header
+        # hotfix 4 (owner: the Notepad layout should "use the full screen like an actual notepad, with the other UI
+        # elements appearing when clicking a button at the top"): in the Notepad layout the header above is
+        # hidden behind this bar's Controls button, and the app bar and job strip step aside (``set_immersive``)
+        self.notepad_label = ft.Text("", theme_style=ft.TextThemeStyle.TITLE_SMALL, max_lines=1,
+                                     overflow=ft.TextOverflow.ELLIPSIS, expand=True, key="sdl-notepad-label")
+        self.controls_button = ft.IconButton(icon=ft.Icons.EXPAND_MORE, tooltip="Show the controls",
+                                             key="sdl-notepad-controls", size_constraints=HIT_TARGET,
+                                             on_click=lambda e: self.toggle_controls())
+        self.notepad_bar = ft.Row([
+            ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Leave the Notepad layout", key="sdl-notepad-exit",
+                          size_constraints=HIT_TARGET, on_click=lambda e: self.set_notepad(False)),
+            ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous piece", key="sdl-notepad-prev",
+                          size_constraints=HIT_TARGET, on_click=lambda e: self.step(-1)),
+            self.notepad_label,
+            ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next piece", key="sdl-notepad-next",
+                          size_constraints=HIT_TARGET, on_click=lambda e: self.step(1)),
+            self.controls_button,
+        ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER, visible=False, key="sdl-notepad-bar")
+        self.controls_open = False  # the Notepad layout's header shown (``toggle_controls``)
         # mobile hotfix 3: a Column, scrolled in the rows layout; in the Notepad layout it does not scroll and the
         # editor (a WebView) takes the height left (``_apply_notepad_layout``). Inside a scrolling list the
         # WebView kept its height when the keyboard opened, so the caret stayed under the keyboard, and the
         # list's relayout around the platform view closed the keyboard on a tap.
-        self.list_view = ft.Column(controls=[header, self.body_holder], expand=True, spacing=tokens.SPACING["sm"],
-                                   scroll=ft.ScrollMode.AUTO, key="sdl-screen")
+        self.list_view = ft.Column(controls=[self.notepad_bar, header, self.body_holder], expand=True,
+                                   spacing=tokens.SPACING["sm"], scroll=ft.ScrollMode.AUTO, key="sdl-screen")
         self.page_frame = ft.Container(content=self.list_view, expand=True,
                                        padding=ft.Padding.symmetric(horizontal=12, vertical=8))
         self._keyboard_up = False
@@ -652,6 +679,8 @@ class SdlxliffScreen(Screen):
     def dispose(self) -> None:
         self._visible = False
         self._unhook_keyboard()
+        if self.notepad:
+            self.set_immersive(False)
         task, self._poll_task = self._poll_task, None
         if task is not None:
             try:
@@ -798,7 +827,7 @@ class SdlxliffScreen(Screen):
             self.rows_column.controls = self._row_cards(piece)
             self.body_holder.content = self.rows_column
         self._render_side_list()
-        self._push(self.list_view)
+        self._push(self.page_frame)
         self._remember()
 
     def _render_header(self) -> Optional[dict]:
@@ -831,10 +860,14 @@ class SdlxliffScreen(Screen):
             header = header_of(self.piece_index) if callable(header_of) else ""
             self.summary.value = (header or f"{piece.get('source_count', 0)} source · "
                                             f"{piece.get('target_count', 0)} output") + f"{manual}{completed}"
+        self.summary.tooltip = self.summary.value or None
+        self.notepad_label.value = binding.label(self.piece_index) if binding is not None and piece is not None else ""
         provider = binding.provider() if binding is not None else "auto"
         labels = binding.provider_labels() if binding is not None else dict(PROVIDERS)
-        self.mt_provider.content = f"Provider: {labels.get(provider, 'Auto')}"
+        self.provider_label = labels.get(provider, "Auto")
+        self.mt_button.tooltip = f"Generate a machine translation preview of this piece ({self.provider_label})"
         self.status_text.value = binding.status if binding is not None else ""
+        self.status_text.visible = bool(self.status_text.value)
         self.piece_menu.items = self._piece_menu_items()
         return piece
 
@@ -902,7 +935,16 @@ class SdlxliffScreen(Screen):
         notepad = bool(self.notepad)
         self.list_view.scroll = None if notepad else ft.ScrollMode.AUTO
         self.body_holder.expand = notepad
-        self.header_column.visible = not (notepad and self._keyboard_up)
+        # hotfix 4: full screen. The header waits behind the bar's Controls button; the page loses its margins
+        # and the shell's app bar and job strip (the bar's ✕ / system back leave)
+        self.header_column.visible = not notepad or (self.controls_open and not self._keyboard_up)
+        self.notepad_bar.visible = notepad
+        self.controls_button.icon = ft.Icons.EXPAND_LESS if self.controls_open else ft.Icons.EXPAND_MORE
+        self.controls_button.tooltip = "Hide the controls" if self.controls_open else "Show the controls"
+        self.page_frame.padding = (ft.Padding.symmetric(horizontal=4, vertical=0) if notepad
+                                   else ft.Padding.symmetric(horizontal=12, vertical=8))
+        self.list_view.spacing = 4 if notepad else tokens.SPACING["sm"]
+        self.set_immersive(notepad)
 
     def keyboard_changed(self, media: Any = None) -> None:
         """``page.on_media_change``: the keyboard's height (``view_insets.bottom``) shows or hides the header in
@@ -915,13 +957,14 @@ class SdlxliffScreen(Screen):
         self._keyboard_up = up
         if self.notepad:
             self._apply_notepad_layout()
-            self._push(self.list_view)
+            self._push(self.page_frame)
 
     def _notepad_saved(self, status: str) -> None:
         """A Notepad save: the header, legend counts and status follow (the page itself stays)."""
         self._render_header()
         if status:
             self.status_text.value = status
+            self.status_text.visible = True
         self._render_side_list()
         self._push(self.legend, self.summary, self.status_text, self.piece_dropdown)
 
@@ -1127,7 +1170,34 @@ class SdlxliffScreen(Screen):
             self.ctx.say(NOTEPAD_REASON)
             return
         self.notepad = bool(self.layout_switch.value)
+        self.controls_open = False  # the Notepad opens full screen
         self._rerender()
+
+    def set_notepad(self, on: bool) -> None:
+        """Turn the Notepad layout on / off (the switch's own path)."""
+        self.layout_switch.value = bool(on)
+        self._on_layout()
+
+    def toggle_controls(self) -> None:
+        """The Notepad bar's Controls button: show / hide the reviewer's header above the editor."""
+        self.controls_open = not self.controls_open
+        self._apply_notepad_layout()
+        self._push(self.page_frame)
+
+    def open_options_sheet(self) -> Any:
+        """Provider and threshold (hotfix 4: one button instead of two in the actions row)."""
+        from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+
+        threshold = self.binding.threshold() if self.binding is not None else None
+        sheet = ActionSheet([
+            ActionItem(f"🌐 Provider: {self.provider_label}…", lambda: self.open_provider_sheet(), key="sdl-provider"),
+            ActionItem("🟣 Threshold" + (f" ({threshold:g})…" if threshold is not None else "…"),
+                       lambda: self.open_threshold_sheet(), key="sdl-threshold",
+                       disabled_reason=None if self.binding is not None else "Choose a workspace first"),
+        ], title="Machine translation", tablet=bool(getattr(self.ctx, "tablet", False)))
+        if getattr(self.ctx, "page", None) is not None:
+            sheet.show(self.ctx.page)
+        return sheet
 
     # ---- actions --------------------------------------------------------------------------------------
 
@@ -1194,6 +1264,7 @@ class SdlxliffScreen(Screen):
             return ""
         await self._flush_edits()
         self.status_text.value = "⏳ Generating machine translation preview..."
+        self.status_text.visible = True
         self._push(self.status_text)
         try:
             message = await self.ctx.io(self.binding.translate_piece, self.piece_index)
