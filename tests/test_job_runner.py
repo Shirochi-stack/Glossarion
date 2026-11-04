@@ -562,6 +562,10 @@ def test_stop_control_parts_are_the_desktop_statements():
     added = " or ('--authza-captcha' in cmd_s)"
     assert psutil_new.count(added) == 1
     psutil_new = psutil_new.replace(added, "")
+    # multi-instance: an instance process's helpers belong to that instance's own Stop
+    added = " or in_instance_process_tree(child)"
+    assert psutil_new.count(added) == 1
+    psutil_new = psutil_new.replace(added, "")
     assert textwrap.dedent(psutil_new).split() == textwrap.dedent(psutil_legacy).split()
 
 

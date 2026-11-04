@@ -19,19 +19,28 @@ Two things keep that cheap:
   ``EXTRACTION_WORKERS`` threads, the same setting Other Settings uses for
   every other parallel job (it is ``1`` when Parallel Processing is off).
 
+The unified files are the one thing several Glossarion instances (and
+several threads of one) share, so every read -> merge -> write holds
+``unified_lock``: an in-process lock plus a lock file in the unified folder.
+
 The heavy glossary machinery lives in ``extract_glossary_from_epub``; it is
 imported lazily so this module stays importable from the GUI and from
 TransateKRtoEN without a cycle. Nothing here touches Qt.
 """
 
+import contextlib
 import hashlib
 import json
 import os
+import socket
 import tempfile
 import threading
+import time
 import unicodedata
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import instance_plan
 import mobile_runtime
 from glossary_paths import resolve_shared_glossary_dir, sanitize_glossary_folder_name
 
@@ -39,6 +48,7 @@ UNIFIED_FOLDER_NAME = "Unified Glossary"
 UNIFIED_BASENAME = "glossary_unified"
 STATE_FILENAME = "unified_glossary_state.json"
 STATE_VERSION = 1
+LOCK_FILENAME = ".unified_glossary.lock"
 
 _TRUTHY = ("1", "true", "yes", "on")
 _SKIP_DIR_NAMES = frozenset({"unified glossary", "backups"})
@@ -87,6 +97,20 @@ _LOCK = threading.RLock()
 _THREAD_STATE = threading.local()
 # One manual rebuild at a time (the Rebuild Now button).
 _REBUILD_NOW_LOCK = threading.Lock()
+
+# unified_lock: lock file polling, the holder's heartbeat, and how long a
+# waiter watches an unchanged heartbeat before it calls the lock stale (polls,
+# not seconds, so a computer waking from sleep does not count as a minute).
+_LOCK_POLL_SECONDS = 0.1
+_LOCK_HEARTBEAT_SECONDS = 5.0
+_LOCK_STALE_POLLS = 600
+_LOCK_WAIT_LOG_POLLS = 300
+_FILE_LOCKS = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+try:
+    _HOST = socket.gethostname()
+except Exception:
+    _HOST = ""
 
 
 def _extractor():
@@ -584,7 +608,7 @@ def _strip_non_shareable(entries, exclude_gender=None):
 #     deduplicated, so only the book's entries are matched against it.
 
 class _DedupeStopped(Exception):
-    """The user pressed Stop while a background dedup was running."""
+    """The user pressed Stop while a background dedup (or the wait for unified_lock) was running."""
 
 
 def _subprocess_min_entries():
@@ -676,8 +700,11 @@ def _incremental_merge(book, existing):
 
 
 def _dedupe_job(kind, first, second, env_vars):
-    """Child-process entry point. Returns (entries, captured log lines)."""
-    import contextlib
+    """Child-process entry point. Returns (entries, captured log lines).
+
+    Never takes ``unified_lock``: the parent holds it for the whole merge and
+    waits for this child, so a child waiting for it would deadlock.
+    """
     import io
 
     os.environ.update(env_vars or {})
@@ -789,6 +816,290 @@ def _remove_quiet(path):
     return False
 
 
+# ─── Cross-process lock ──────────────────────────────────────────────────────
+#
+# merge_book and rebuild read the unified CSV and state, merge, then write
+# both back. Two of them running side by side (two Glossarion instances, or
+# two threads of one) each write their own merge over the other's, and one
+# book's entries are lost. ``unified_lock`` serialises them for one unified
+# root (every language key):
+#
+#   * threads of this process: an RLock, re-entrant for the thread that holds
+#     it, so a holder may call merge_book / rebuild again;
+#   * processes: an O_EXCL lock file, ``Unified Glossary/.unified_glossary.lock``
+#     (the mechanism of history_manager._file_lock), holding the owner's pid,
+#     host and a token. The holder rewrites it every few seconds (heartbeat).
+#
+# A lock file is stale when its owner is a pid on this computer that no
+# longer runs, or when its heartbeat has not moved for _LOCK_STALE_POLLS
+# polls (a reused pid, another computer on a shared folder, a crash between
+# creating the file and writing it). A stale lock is moved aside and the wait
+# goes on. A long dedup never makes a lock stale: the heartbeat keeps moving.
+
+class _HeldFileLock:
+    """This process's side of one unified root's lock."""
+
+    def __init__(self):
+        self.thread_lock = threading.RLock()
+        self.depth = 0
+        self.token = None
+        self.heartbeat_stop = None
+        self.heartbeat_thread = None
+
+
+_KERNEL32 = None
+
+
+def _pid_alive(pid):
+    """True unless process ``pid`` is known not to run on this computer (it is never signalled)."""
+    if pid == os.getpid():
+        return True
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            # os.kill(pid, 0) would terminate the process on Windows.
+            import ctypes
+            from ctypes import wintypes
+
+            global _KERNEL32
+            if _KERNEL32 is None:
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.OpenProcess.restype = wintypes.HANDLE
+                kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+                kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+                kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+                _KERNEL32 = kernel32
+            handle = _KERNEL32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
+            try:
+                code = wintypes.DWORD()
+                if not _KERNEL32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return True
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                _KERNEL32.CloseHandle(handle)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True  # cannot tell: the heartbeat check decides
+    return True
+
+
+def _lock_record(token):
+    return {
+        "pid": os.getpid(),
+        "host": _HOST,
+        "instance": instance_plan.current_instance(),
+        "token": token,
+        "created": time.time(),
+        "beat": 0,
+    }
+
+
+def _read_lock_file(path):
+    """``(raw bytes, owner dict or None)``; ``(None, None)`` when there is no lock file."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(4096)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return b"", None  # briefly unreadable (Windows sharing); judged again next poll
+    try:
+        owner = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        owner = None
+    return raw, owner if isinstance(owner, dict) else None
+
+
+def _describe_lock_owner(owner):
+    if not owner:
+        return "another run"
+    where = f"pid {owner.get('pid')}"
+    if owner.get("host") and owner.get("host") != _HOST:
+        where += f" on {owner.get('host')}"
+    return f"Glossarion instance {owner.get('instance') or 1} ({where})"
+
+
+def _lock_owner_gone(owner):
+    """True when the lock's owner is a process of this computer that no longer runs."""
+    if not owner or owner.get("host") != _HOST:
+        return False
+    try:
+        pid = int(owner.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    return not _pid_alive(pid)
+
+
+def _try_create_lock_file(path, token):
+    """True when this call created the lock file. False while another one holds it, and while
+    Windows still deletes a just-released one (CreateFile fails with access denied then)."""
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except (FileExistsError, PermissionError):
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(_lock_record(token), handle)
+    except BaseException:
+        _remove_quiet(path)
+        raise
+    return True
+
+
+def _break_stale_lock(path, raw):
+    """Move the stale lock file aside. True when the moved file is the one judged stale; a lock
+    that changed in the meantime (a new owner) is put back."""
+    tomb = f"{path}.stale-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        os.replace(path, tomb)
+    except OSError:
+        return False  # gone already, or busy: judged again next poll
+    try:
+        with open(tomb, "rb") as handle:
+            moved = handle.read(4096)
+    except OSError:
+        moved = None
+    if moved != raw:
+        try:
+            os.link(tomb, path)  # fails if a newer lock file exists
+        except FileExistsError:
+            pass
+        except OSError:
+            if not os.path.exists(path):
+                try:
+                    os.replace(tomb, path)
+                except OSError:
+                    pass
+        _remove_quiet(tomb)
+        return False
+    _remove_quiet(tomb)
+    return True
+
+
+def _acquire_lock_file(path, token, log):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    last_raw = None
+    unchanged = missing = polls = 0
+    while True:
+        if _try_create_lock_file(path, token):
+            if polls:
+                log("📚 Unified glossary: lock acquired — continuing")
+            return
+        raw, owner = _read_lock_file(path)
+        if raw is None:
+            # Not created and not there: Windows is still deleting the previous
+            # owner's file (milliseconds), or the folder refuses new files.
+            missing += 1
+            if missing > 50:
+                raise PermissionError(f"cannot create the unified glossary lock file {path}")
+        else:
+            missing = 0
+            if raw == last_raw:
+                unchanged += 1
+            else:
+                last_raw, unchanged = raw, 0
+            if unchanged >= _LOCK_STALE_POLLS or _lock_owner_gone(owner):
+                if _break_stale_lock(path, raw):
+                    log(f"📚 Unified glossary: removed a stale lock left by {_describe_lock_owner(owner)}")
+                last_raw, unchanged = None, 0
+                continue
+            if polls == 10 or (polls and polls % _LOCK_WAIT_LOG_POLLS == 0):
+                log(
+                    f"📚 Unified glossary: waiting for {_describe_lock_owner(owner)} to finish "
+                    "updating the unified glossary…"
+                )
+        if _stop_requested():
+            raise _DedupeStopped("stopped by user while waiting for the unified glossary lock")
+        polls += 1
+        time.sleep(_LOCK_POLL_SECONDS)
+
+
+def _heartbeat(path, token, stop):
+    beat = 0
+    while not stop.wait(_LOCK_HEARTBEAT_SECONDS):
+        beat += 1
+        try:
+            with open(path, "r+", encoding="utf-8") as handle:
+                record = json.loads(handle.read() or "{}")
+                if record.get("token") != token:
+                    continue  # not ours any more (it was judged stale): leave it alone
+                record["beat"] = beat
+                handle.seek(0)
+                json.dump(record, handle)
+                handle.truncate()
+        except Exception:
+            continue
+
+
+def _release_lock_file(path, token):
+    for _attempt in range(100):
+        raw, owner = _read_lock_file(path)
+        if raw is None or (raw and (owner or {}).get("token") != token):
+            return  # gone, or no longer ours
+        if raw:
+            try:
+                os.remove(path)
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                pass  # a waiter is reading it (Windows): try again
+            except OSError:
+                return
+        time.sleep(0.02)
+
+
+@contextlib.contextmanager
+def unified_lock(shared_dir, log=print):
+    """Hold the lock of ``shared_dir``'s unified glossaries (every language key).
+
+    Serialises other threads of this process (re-entrant for the thread that
+    already holds it) and other processes. Waiting honours Stop (except in
+    Rebuild Now) by raising ``_DedupeStopped``; it never times out while the
+    owner is alive.
+    """
+    path = os.path.join(unified_root(shared_dir), LOCK_FILENAME)
+    with _FILE_LOCKS_GUARD:
+        held = _FILE_LOCKS.setdefault(_path_key(path), _HeldFileLock())
+    waited = 0
+    while not held.thread_lock.acquire(timeout=0.25):
+        if _stop_requested():
+            raise _DedupeStopped("stopped by user while waiting for the unified glossary lock")
+        waited += 1
+        if waited == 4:
+            log("📚 Unified glossary: waiting for another update in this process to finish…")
+    try:
+        if held.depth == 0:
+            token = uuid.uuid4().hex
+            _acquire_lock_file(path, token, log)
+            held.token = token
+            held.heartbeat_stop = threading.Event()
+            held.heartbeat_thread = threading.Thread(
+                target=_heartbeat, args=(path, token, held.heartbeat_stop),
+                name="unified-glossary-lock-heartbeat", daemon=True,
+            )
+            held.heartbeat_thread.start()
+        held.depth += 1
+        try:
+            yield path
+        finally:
+            held.depth -= 1
+            if held.depth == 0:
+                # Stop the heartbeat first: a late beat must never touch a lock
+                # file the next owner has already created.
+                held.heartbeat_stop.set()
+                held.heartbeat_thread.join()
+                _release_lock_file(path, held.token)
+                held.token = held.heartbeat_stop = held.heartbeat_thread = None
+    finally:
+        held.thread_lock.release()
+
+
 # ─── Rebuild / merge ─────────────────────────────────────────────────────────
 
 def rebuild(shared_dir, key, current_entries=None, current_path=None, log=print,
@@ -809,7 +1120,15 @@ def rebuild(shared_dir, key, current_entries=None, current_path=None, log=print,
         language group is deduplicated from scratch, in a child process when
         large. The current book's in-memory entries go first so they win
         raw-name conflicts; other books follow newest file first.
+
+    The whole state read -> dedupe -> write holds ``unified_lock``.
     """
+    with unified_lock(shared_dir, log=log):
+        return _rebuild_locked(shared_dir, key, current_entries, current_path, log, force, settings)
+
+
+def _rebuild_locked(shared_dir, key, current_entries, current_path, log, force, settings):
+    """``rebuild`` with ``unified_lock`` held."""
     combine_all = combine_all_enabled(settings)
     target = target_language(settings)
     files = iter_book_glossary_files(shared_dir)
@@ -1015,7 +1334,22 @@ def rebuild_now(shared_dir=None, settings=None, log=print):
 
 
 def merge_book(shared_dir, key, book_entries, book_path=None, log=print):
-    """Merge one book into its unified glossary; skipped when unchanged."""
+    """Merge one book into its unified glossary; skipped when unchanged.
+
+    The whole state read -> merge -> write holds ``unified_lock``, so a merge
+    from another instance or thread never overwrites this one (or the other
+    way round) with an older copy of the file.
+    """
+    # Nothing to merge and no unified glossary yet: nothing can change on
+    # disk, so do not create the folder just to hold its lock.
+    if not os.path.isdir(unified_root(shared_dir)) and not _strip_non_shareable(book_entries or []):
+        return False
+    with unified_lock(shared_dir, log=log):
+        return _merge_book_locked(shared_dir, key, book_entries, book_path, log)
+
+
+def _merge_book_locked(shared_dir, key, book_entries, book_path, log):
+    """``merge_book`` with ``unified_lock`` held."""
     _folder, json_path, csv_path, state_path = unified_paths(shared_dir, key)
     state = _load_state(state_path)
     on_disk = book_glossary_file(book_path)

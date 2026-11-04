@@ -108,6 +108,9 @@ NEW_METHODS = ("_prepare_translation_run", "_translation_worker")
 
 #: The documented edits per moved method: (old text, new text, occurrences).
 EDITS = {
+    # multi-instance: an instance >= 2 writes its glossary payload folders under Payloads/Instance N
+    "_process_image_folder_for_glossary": [('os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")',
+                                            'os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")', 1)],
     # 2026-11-02: an OPF href is a URL, decoded when read
     "_get_spine_filenames_for_preview": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
     "_get_opf_file_order": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],

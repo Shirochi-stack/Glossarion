@@ -57,6 +57,18 @@ configured through process-global state (``os.environ``, ``sys.argv``, stdout,
   answers are idempotent (the first one counts) and refused while ``refine_at_gate``
   refines its glossary: the job waits until the refinement ended, so the translation never
   starts before it.
+* Multi-instance (design §6, §6b): a job submitted with ``instance=N`` (``JobSpec.params["instance"]``, kept for
+  Resume) runs on instance N's keys only, in every key pool (``instance_plan.config_for_instance``; the main
+  API key is instance 1's), and its API client is kept to them (``instance_worker.restrict_keys``). Instance 1 is the
+  queue and ``gl-job`` worker above, unchanged; each instance N >= 2 has its own queue and ``gl-job-iN``
+  worker, so one job per instance runs at a time and the instances run side by side. An instance N job runs
+  inside its isolated in-process runtime (``services.instance_runtime``: its own environment, stdout, argv,
+  module copies, stop flags, key pools and watchdog), set up when it starts - a job whose runtime cannot be
+  set up fails, it never runs shared. The Stop protocol, the ``ProgressWatcher`` and the request stream of
+  that job use the instance's own modules. The old no-argument forms (``snapshot()``, ``busy``,
+  ``request_stop()``, ``stream_tail()``) still mean instance 1's job; ``running_snapshots``,
+  ``request_stop_all`` and ``JobsView.running`` cover every instance. ``set_job_running`` stays true while
+  any job runs, and ``active.state`` keeps every instance's running and queued jobs.
 
 Threading: internal state is guarded by one lock and is safe to call from any
 thread. Listeners (``subscribe``, ``on_transition``, ``on_question``,
@@ -75,6 +87,7 @@ import collections
 import contextlib
 import copy
 import enum
+import importlib
 import json
 import logging
 import os
@@ -87,7 +100,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
-from glossarion_mobile.job_kinds import INDEXING
+from glossarion_mobile.job_kinds import INDEXING, result_fields
 from glossarion_mobile.services.dispatcher import LogBuffer
 
 __all__ = [
@@ -102,6 +115,7 @@ __all__ = [
     "GLOSSARY_QUESTION_KINDS",
     "HISTORY_LIMIT",
     "HISTORY_STATE_FILE",
+    "INSTANCE_PARAM",
     "INTERRUPTED_STATE_FILE",
     "JOB_FAMILIES",
     "JOB_TARGET_PARAM",
@@ -117,6 +131,8 @@ __all__ = [
     "JobTarget",
     "JobsView",
     "Progress",
+    "RESUMED_EVENT",
+    "pending_jobs",
     "STATE_LABELS",
     "SubmitResult",
     "TERMINAL_STATES",
@@ -125,11 +141,15 @@ __all__ = [
     "already_active_text",
     "classify_issue",
     "client_log_handlers",
+    "coerce_instance",
     "format_duration",
+    "instance_label",
     "is_glossary_question",
     "issue_label",
+    "job_instance",
     "job_target",
     "notification_lines",
+    "notification_summary",
     "notification_text",
     "position_line",
     "short_title",
@@ -255,6 +275,48 @@ def local_context_scope() -> Iterator[None]:
         yield
 
 
+def _without_key_env(env: Mapping[str, str]) -> dict:
+    """``env`` (instance 1's environment) without its API keys, key-pool lists and switches and its key scope
+    (``instance_plan.KEY_ENV``, ``GLOSSARION_KEY_INSTANCE``): an instance >= 2 exports its own from its config
+    snapshot, never instance 1's leftovers (the desktop instance process: ``instance_worker.child_environment``)."""
+    import instance_plan
+
+    dropped = {name.upper() for name in instance_plan.KEY_ENV + (instance_plan.ENV_KEY_INSTANCE,)}
+    return {key: value for key, value in env.items() if str(key).upper() not in dropped}
+
+
+def _http_logger_levels() -> dict:
+    """The levels of the HTTP client loggers a graceful stop silences (``stop_control.HTTP_LOGGER_NAMES``): they
+    are the process's, every instance's job logs its requests through them."""
+    try:
+        names = importlib.import_module("stop_control").HTTP_LOGGER_NAMES
+    except Exception:
+        return {}
+    return {name: logging.getLogger(name).level for name in names}
+
+
+def _restore_http_logger_levels(levels: Mapping[str, int]) -> None:
+    for name, level in levels.items():
+        logging.getLogger(name).setLevel(level)
+
+
+def _release_base_stop_flags() -> None:
+    """Instance 1's stopped job has ended while another instance's job still runs: instance 1's immediate-stop
+    flags (the base client's ``global_stop_flag`` / ``UnifiedClient._global_cancelled``) and ``GRACEFUL_STOP``
+    must not stay set, since the app's on-device endpoint reads them for every instance's request
+    (``local_llm.service.process_stop_state``) and would refuse the other instance's ``local/`` requests until
+    instance 1 runs again (its next run resets them anyway). On the base thread: the base modules and env."""
+    client = sys.modules.get("unified_api_client")
+    if client is not None:
+        try:
+            client.global_stop_flag = False
+            client.UnifiedClient._global_cancelled = False
+        except Exception:
+            log.debug("the base client's stop flags could not be cleared", exc_info=True)
+    if os.environ.get("GRACEFUL_STOP") == "1":
+        os.environ["GRACEFUL_STOP"] = "0"
+
+
 @contextlib.contextmanager
 def _env_scope(name: str, value: str) -> Iterator[None]:
     previous = os.environ.get(name)
@@ -314,6 +376,9 @@ GLOSSARY_REFINING_TEXT = "Refining the glossary…"
 #: Job event while the gate's glossary is refined: the "Glossary ready" notification is withdrawn (the
 #: question is delivered again when the refinement ends and the question still waits).
 QUESTION_SUSPENDED_EVENT = "question_suspended"
+#: Job event of a stopped / failed / interrupted job that Resume carried on in another job (``{"job": its id}``):
+#: its "Stopped: … Tap to resume" / "Paused" notifications have nothing left to resume.
+RESUMED_EVENT = "resumed"
 
 
 def is_glossary_question(kind: Any) -> bool:
@@ -451,6 +516,60 @@ def _norm(path: Any) -> str:
         return os.path.normcase(os.path.abspath(os.fspath(path)))
     except Exception:
         return str(path)
+
+
+# ---------------------------------------------------------------------------
+# Multi-instance (design §6): which instance a job runs in
+# ---------------------------------------------------------------------------
+
+#: ``JobSpec.params`` key of a job of a multi-instance run: its instance (``submit_job(spec, instance=N)``; kept in
+#: the spec, so a Resume runs on the same instance). Absent: instance 1 exactly as before, on the whole Translation
+#: key pool. Present (1 included): the job's config snapshot keeps only that instance's Translation keys.
+INSTANCE_PARAM = "instance"
+#: the instance runtime module, once something imported it (``_installed_runtime``)
+_RUNTIME_MODULE = "glossarion_mobile.services.instance_runtime"
+
+
+def coerce_instance(value: Any) -> int:
+    """An instance number from a stored value (``instance_plan.coerce_instance``: integers >= 1, else 1); 1 in a
+    build without the shared backend, where no other instance can run."""
+    try:
+        import instance_plan
+    except ImportError:
+        return 1
+    return instance_plan.coerce_instance(value)
+
+
+def job_instance(spec: Any) -> int:
+    """The instance a job (a ``JobSpec``, a snapshot's spec or its dict) runs in: ``params["instance"]``, else 1."""
+    params = _spec_field(spec, "params") if spec is not None else None
+    if isinstance(params, Mapping) and params.get(INSTANCE_PARAM) is not None:
+        return coerce_instance(params.get(INSTANCE_PARAM))
+    return 1
+
+
+def instance_label(snap: Any) -> str:
+    """"Instance 2" (the Jobs page row, the notification's rows of a multi-instance run)."""
+    return f"Instance {job_instance(getattr(snap, 'spec', None))}"
+
+
+def _installed_runtime() -> Any:
+    """``services.instance_runtime`` once an instance >= 2 job installed it, else None (never imports it, so a
+    session without one runs exactly as before)."""
+    module = sys.modules.get(_RUNTIME_MODULE)
+    return module if module is not None and module.installed() else None
+
+
+def _loaded(name: str) -> Any:
+    """``sys.modules.get(name)`` as the calling thread's instance sees it (its own copy inside an instance)."""
+    runtime = _installed_runtime()
+    return runtime.loaded_module(name) if runtime is not None else sys.modules.get(name)
+
+
+def _instance_key() -> int:
+    """The calling thread's instance (1 outside every instance runtime)."""
+    runtime = _installed_runtime()
+    return (runtime.current() or 1) if runtime is not None else 1
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +910,11 @@ class JobSnapshot:
         return self.spec.title
 
     @property
+    def instance(self) -> int:
+        """The instance the job runs in (``JobSpec.params["instance"]``; 1 for a job of no multi-instance run)."""
+        return job_instance(self.spec)
+
+    @property
     def is_terminal(self) -> bool:
         return self.state in TERMINAL_STATES
 
@@ -877,7 +1001,12 @@ class JobSnapshot:
 
 @dataclass(frozen=True)
 class JobsView:
-    """Everything the Jobs page shows (UI_SPEC §1.8), built fresh at delivery time."""
+    """Everything the Jobs page shows (UI_SPEC §1.8), built fresh at delivery time.
+
+    ``active`` is instance 1's running job, else the first running job of another instance (what the job strip
+    and the old single-job callers show); ``running`` lists every instance's running job, instance 1 first, then
+    by instance number; ``queue`` holds every instance's queued jobs (instance 1's in order first; a snapshot's
+    ``instance`` says whose)."""
 
     active: Optional[JobSnapshot] = None
     queue: tuple = ()
@@ -887,22 +1016,39 @@ class JobsView:
     # ended entries a newer job of their book replaced (``JobService._drop_superseded``): not listed; what refers to
     # them by id (a chat's Result and QA cards, an open-job link, a notification) still reads them
     carried_on: tuple = ()
+    running: tuple = ()
 
     @property
     def running_count(self) -> int:
-        return 1 if self.active is not None else 0
+        return len(self.running) if self.running else (1 if self.active is not None else 0)
 
     @property
     def queued_count(self) -> int:
         return len(self.queue)
 
+    def instance_job(self, number: int) -> Optional[JobSnapshot]:
+        """The running job of instance ``number`` (None when that instance is idle)."""
+        wanted = coerce_instance(number)
+        return next((snap for snap in (self.running or ((self.active,) if self.active is not None else ()))
+                     if snap.instance == wanted), None)
+
     def find(self, job_id: str) -> Optional[JobSnapshot]:
-        for snap in ((self.active,) if self.active is not None else ()) + tuple(self.queue) + tuple(
-            self.interrupted
-        ) + tuple(self.history) + tuple(self.carried_on):
+        for snap in ((self.active,) if self.active is not None else ()) + tuple(self.running) + tuple(self.queue) + \
+                tuple(self.interrupted) + tuple(self.history) + tuple(self.carried_on):
             if snap is not None and snap.id == job_id:
                 return snap
         return None
+
+
+def pending_jobs(view: Any) -> list:
+    """Every job of ``view`` that runs or waits: each instance's running job (``running``; a view without it: its
+    ``active`` job), then the queue. What a "does a job write this folder?" guard checks: with several instances
+    running, ``active`` is only one of them."""
+    running = [snap for snap in (getattr(view, "running", ()) or ()) if snap is not None]
+    if not running:
+        active = getattr(view, "active", None)
+        running = [active] if active is not None else []
+    return running + list(getattr(view, "queue", ()) or ())
 
 
 @dataclass(frozen=True)
@@ -969,6 +1115,9 @@ class _Job:
     # hotfix 1 issue 5: what the job works on (``job_target``) and its request (``spec_key``), set at submit
     target: Optional[JobTarget] = None
     spec_key: str = ""
+    instance: int = 1  # multi-instance: the instance whose queue and worker run it (``job_instance``)
+    isolated: bool = False  # an instance >= 2 job: its instance runtime is set up (``_prepare_instance``)
+    key_owners: Optional[dict] = None  # a multi-instance job: whose key is whose (``instance_plan.key_owners``)
 
     def snapshot(self) -> JobSnapshot:
         return JobSnapshot(
@@ -1313,19 +1462,47 @@ def on_device_row(threads: bool = False) -> str:
         return ""
 
 
-def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "", thinking: bool = False) -> list:
+def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "", thinking: bool = False, *,
+              device: Optional[str] = None, limit: int = NOTIFICATION_STREAM_CHARS) -> list:
     """Hotfix 3: rows under the job notification's book line while a request runs: the on-device model's
     prompt reading / speed (one row) and, with Streaming on, the end of the text it streams (about three
-    rows). None while the job waits for an answer or is not running."""
+    rows). None while the job waits for an answer or is not running. ``device``: the on-device row to show
+    (``JobService.device_row``: '' for a job of a multi-instance run that does not use the on-device model);
+    None reads it here."""
     if snap is None or snap.question or not snap.is_active:
         return []
-    streamed = stream_row(stream_tail)
+    streamed = stream_row(stream_tail, limit)
     # hotfix 4 (owner: "why is there no visual styling for that log area"): the notification is plain text
     # (flutter_foreground_task's BigTextStyle takes a string), so the streamed text gets its own marker: 🧠 for
     # the request's thinking, ✍️ for its answer
     mark = THINKING_ROW_MARK if thinking else STREAM_ROW_MARK
-    rows = [row for row in (on_device_row(), f"{mark}{streamed}" if streamed else "") if row]
+    rows = [row for row in (on_device_row() if device is None else device, f"{mark}{streamed}" if streamed else "")
+            if row]
     return rows
+
+
+#: the streamed text each job's rows show in a multi-instance notification (one job's rows stay short)
+NOTIFICATION_SUMMARY_STREAM_CHARS = 80
+
+
+def notification_summary(snaps: Sequence[JobSnapshot],
+                         rows_for: Optional[Callable[[JobSnapshot], Sequence[str]]] = None) -> tuple:
+    """The ongoing notification while jobs of several instances run (design §6): (headline, lines) with one row
+    per running job, "[2] Translating • [3/12] Ch. 3 · 2 in flight · Book", each followed by its own live rows
+    (``rows_for(snap)``: its 🧠 / ✍️ stream row, its on-device row). One job: ``notification_lines`` as before."""
+    snaps = [snap for snap in snaps if snap is not None]
+    if len(snaps) == 1:
+        headline, book = notification_lines(snaps[0])
+        return headline, [book, *(rows_for(snaps[0]) if rows_for is not None else ())]
+    lines: list = []
+    for snap in snaps:
+        headline, book = notification_lines(snap)
+        lines.append(f"[{snap.instance}] {headline} · {book}" if book else f"[{snap.instance}] {headline}")
+        if rows_for is not None:
+            lines.extend(f"    {row}" for row in rows_for(snap) if row)
+    stopping = all(snap.state in (JobState.STOPPING, JobState.FORCE_STOPPING) for snap in snaps) and snaps
+    headline = f"{len(snaps)} jobs running" + (" · stopping" if stopping else "")
+    return headline, lines
 
 
 def notification_text(snap: JobSnapshot) -> str:
@@ -1436,7 +1613,7 @@ def client_log_handlers(outer: Any) -> Iterator[None]:
     ours, so a record is never written twice)."""
     attached = False
     try:
-        import translate_headers_standalone as headers_core
+        headers_core = importlib.import_module("translate_headers_standalone")  # an instance's own copy there
 
         headers_core._attach_logging_handlers(outer)
         attached = True
@@ -1464,14 +1641,24 @@ class JobBackend:
 
     def __init__(self) -> None:
         self._fallback_lock = threading.RLock()
-        #: the last immediate stop's ``translation-stop-cleanup`` thread (desktop:
-        #: ``TranslatorGUI._translation_stop_cleanup_thread``); the next job waits for it
-        self.stop_cleanup_thread: Optional[threading.Thread] = None
+        #: instance -> the last immediate stop's ``translation-stop-cleanup`` thread of that instance (desktop:
+        #: ``TranslatorGUI._translation_stop_cleanup_thread``); that instance's next job waits for it
+        self._stop_cleanup_threads: dict = {}
+
+    @property
+    def stop_cleanup_thread(self) -> Optional[threading.Thread]:
+        """The calling thread's instance's last stop cleanup thread (instance 1 outside every instance)."""
+        return self._stop_cleanup_threads.get(_instance_key())
+
+    @stop_cleanup_thread.setter
+    def stop_cleanup_thread(self, thread: Optional[threading.Thread]) -> None:
+        if thread is None:
+            self._stop_cleanup_threads.pop(_instance_key(), None)
+        else:
+            self._stop_cleanup_threads[_instance_key()] = thread
 
     @staticmethod
     def _module(name: str) -> Any:
-        import importlib
-
         try:
             return importlib.import_module(name)
         except ImportError as exc:
@@ -1480,9 +1667,8 @@ class JobBackend:
     @property
     def job_lock(self) -> Any:
         try:
-            import job_runner  # shared (U3)
-
-            return job_runner.JOB_LOCK
+            # shared (U3); importlib, so an instance's thread gets its own copy (``services.instance_runtime``)
+            return importlib.import_module("job_runner").JOB_LOCK
         except Exception:
             return self._fallback_lock
 
@@ -1540,6 +1726,7 @@ class JobBackend:
         kind: str = "translation",
         job_kind: str = "",
         owner: Any = None,
+        stop_engine: bool = True,
     ) -> None:
         """The desktop ``stop_translation`` sequence without its widgets.
 
@@ -1566,8 +1753,12 @@ class JobBackend:
         a forced stop is the desktop's double-click (graceful False). A build without it falls
         back to the translation protocol above (it latches the owner's ``stop_requested``,
         which the glossary extractor's stop callback polls).
+
+        Multi-instance: it runs as the job's instance (``JobService._in_instance``), so every module it reaches
+        is that instance's own; ``stop_engine`` False (a job of one instance that does not use the on-device
+        model while another instance runs) leaves the shared on-device engine's generation alone.
         """
-        if force or not graceful:  # the on-device engine's generation ends even if the flags are cleared soon
+        if (force or not graceful) and stop_engine:  # the on-device generation ends even if the flags clear soon
             engine = sys.modules.get("glossarion_mobile.services.local_llm.service")
             engine = engine.default_service() if engine is not None else None
             if engine is not None:
@@ -1588,7 +1779,7 @@ class JobBackend:
             def glossary_stop_flag(value: bool) -> None:
                 # Desktop: the lazily loaded ``glossary_stop_flag`` global
                 # (extract_glossary_from_epub.set_stop_flag), set once the extractor is loaded.
-                module = sys.modules.get("extract_glossary_from_epub")
+                module = _loaded("extract_glossary_from_epub")
                 set_flag = getattr(module, "set_stop_flag", None) if module is not None else None
                 if callable(set_flag):
                     set_flag(value)
@@ -1624,7 +1815,7 @@ class JobBackend:
         def translation_stop_flag_hook() -> None:
             # Desktop: the lazily loaded ``translation_stop_flag`` (TransateKRtoEN.set_stop_flag)
             # once the backend is loaded.
-            module = sys.modules.get("TransateKRtoEN")
+            module = _loaded("TransateKRtoEN")
             set_flag = getattr(module, "set_stop_flag", None) if module is not None else None
             if callable(set_flag):
                 set_flag(True)
@@ -1650,7 +1841,7 @@ class JobBackend:
 
     def progress_watcher(self, resolver: Callable[..., Any], host: Any, interval: float) -> Any:
         try:
-            import job_runner
+            job_runner = importlib.import_module("job_runner")  # an instance's job: its own client's watchdog
         except ImportError:
             return None
         cls = getattr(job_runner, "ProgressWatcher", None)
@@ -1659,7 +1850,7 @@ class JobBackend:
     def progress_summary(self, path: str) -> Optional[Mapping[str, Any]]:
         """The counts ``ProgressWatcher`` reports for a progress file; None when it cannot be read."""
         try:
-            import job_runner
+            job_runner = importlib.import_module("job_runner")
 
             return job_runner._default_summary_reader(path)
         except Exception:
@@ -1818,7 +2009,7 @@ def _make_request_stream(spec: JobSpec) -> Any:
     ``_start_translation``; other kinds get a plain stream for the job detail cards.
     """
     try:
-        import direct_text_stream  # shared (U3)
+        direct_text_stream = importlib.import_module("direct_text_stream")  # shared (U3); an instance's own copy
     except Exception:
         log.warning("direct_text_stream is not in this build; jobs show no request cards", exc_info=True)
         return None
@@ -1911,6 +2102,19 @@ class JobService:
         self._paused = False
         self._closed = False
         self._thread: Optional[threading.Thread] = None
+        # Multi-instance: instance N >= 2's queue, running job and ``gl-job-iN`` worker (instance 1 is the above)
+        self._iqueues: dict[int, list[_Job]] = {}
+        self._iactive: dict[int, _Job] = {}
+        self._ithreads: dict[int, threading.Thread] = {}
+        self._jobs_running = 0  # jobs between their config snapshot and their end (``_note_job_running``)
+        # instance 1's environment / argv / streams as they were before its running job's scope changed them: an
+        # instance N job starts from it (``_pristine_process_state``), never from instance 1's job state
+        self._pristine: Optional[tuple] = None
+        self._pristine_lock = threading.Lock()
+        # owner rule: while a job of an instance >= 2 runs, instance 1's plain jobs (chat, Book page, Chapters) use
+        # instance 1's API keys only: [the running plain job, its scope's undo or None, its config] (``_instance_keys``)
+        self._base_plain: Optional[list] = None
+        self._base_scope_lock = threading.RLock()
         # question id -> (answered event, [value], the asking job); the last answers the jobs took (repeats)
         self._answers: dict[str, tuple[threading.Event, list, Optional[_Job]]] = {}
         self._answered: "collections.OrderedDict[str, Any]" = collections.OrderedDict()
@@ -1932,6 +2136,8 @@ class JobService:
         self._stop_tasks: list[tuple[_Job, str]] = []
         self._stop_thread: Optional[threading.Thread] = None
         self._stop_lock = threading.RLock()
+        # one such lock per instance (instance 1's is ``_stop_lock``): instances never wait for each other's starts
+        self._stop_locks: dict[int, Any] = {1: self._stop_lock}
         self.stream_drain_interval = STREAM_DRAIN_INTERVAL
 
         self._listeners: list[Listener] = []
@@ -2006,8 +2212,8 @@ class JobService:
 
     def on_event(self, callback: EventListener) -> Callable[[], None]:
         """``callback(job_id, kind, data)`` for job events the service does not consume itself, plus its own
-        ``sign_in_required`` and ``question_resolved`` (``{"id", "kind"}``: a delivered question was
-        answered or given up)."""
+        ``sign_in_required``, ``question_resolved`` (``{"id", "kind"}``: a delivered question was
+        answered or given up) and ``RESUMED_EVENT`` (``{"job"}``: Resume carried the job on in that job)."""
         self._event_listeners.append(callback)
         return self._remover(self._event_listeners, callback)
 
@@ -2061,14 +2267,58 @@ class JobService:
 
     def view(self) -> JobsView:
         with self._lock:
+            running = tuple(job.snapshot() for job in self._running_jobs_locked())
             return JobsView(
-                active=self._active.snapshot() if self._active is not None else None,
-                queue=tuple(job.snapshot() for job in self._queue),
+                active=running[0] if running else None,
+                queue=tuple(job.snapshot() for job in self._queued_jobs_locked()),
                 interrupted=tuple(self._interrupted),
                 history=tuple(self._history),
                 paused=self._paused,
                 carried_on=tuple(self._carried_on),
+                running=running,
             )
+
+    def _running_jobs_locked(self) -> list:
+        """Every instance's running job (``_active`` / ``_iactive``): instance 1 first, then by instance number."""
+        jobs = [self._active] if self._active is not None else []
+        jobs.extend(self._iactive[number] for number in sorted(self._iactive))
+        return jobs
+
+    def _queued_jobs_locked(self) -> list:
+        jobs = list(self._queue)
+        for number in sorted(self._iqueues):
+            jobs.extend(self._iqueues[number])
+        return jobs
+
+    def _queue_of_locked(self, job: _Job) -> list:
+        """The queue ``job`` waits in (its instance's)."""
+        return self._queue if job.instance < 2 else self._iqueues.setdefault(job.instance, [])
+
+    def _is_running_locked(self, job: _Job) -> bool:
+        """``job`` is its instance's running job."""
+        return job is self._active if job.instance < 2 else self._iactive.get(job.instance) is job
+
+    def running_snapshots(self) -> list:
+        """Every instance's running job (also while it starts, waits at a gate or stops), instance 1 first."""
+        with self._lock:
+            return [job.snapshot() for job in self._running_jobs_locked()]
+
+    def instance_busy(self, number: int) -> bool:
+        """Instance ``number`` runs a job now."""
+        wanted = coerce_instance(number)
+        with self._lock:
+            return (self._active is not None) if wanted < 2 else wanted in self._iactive
+
+    @property
+    def any_busy(self) -> bool:
+        """A job of any instance runs (``busy`` is instance 1's)."""
+        with self._lock:
+            return self._active is not None or bool(self._iactive)
+
+    def instance_of(self, job_id: str) -> int:
+        """The instance job ``job_id`` runs (or ran) in."""
+        snap = self.snapshot(job_id)
+        return snap.instance if snap is not None else 1
 
     def snapshot(self, job_id: Optional[str] = None) -> Optional[JobSnapshot]:
         """The active job (``job_id=None``) or any known job."""
@@ -2096,10 +2346,43 @@ class JobService:
             job = self._active if job_id is None else self._find_live(job_id)
             return bool(job.stream_thinking) if job is not None else False
 
+    def device_row(self, job_id: Optional[str] = None, *, threads: bool = False) -> str:
+        """The on-device model's status row for job ``job_id`` (instance 1's job when None; ``on_device_row``)
+        while it runs and asks nothing. The on-device engine is the app's, one for every instance: while jobs of
+        several instances run, only a job whose model is ``local/`` shows it ('' for the others)."""
+        with self._lock:
+            job = self._active if job_id is None else self._find_live(job_id)
+            if job is None or job.question or job.state not in ACTIVE_STATES:
+                return ""
+            shared = any(other is not job for other in self._running_jobs_locked())
+        if shared and not str(self._job_model(job) or "").startswith("local/"):
+            return ""
+        return on_device_row(threads=threads)
+
+    def watchdog_state(self, job_id: Optional[str] = None) -> Optional[dict]:
+        """``unified_api_client.get_api_watchdog_state()`` of job ``job_id``'s own instance (its in-flight
+        requests; instance 1's job when None); None while that instance has not loaded the client."""
+        with self._lock:
+            job = self._active if job_id is None else self._find_live(job_id)
+        if job is None:
+            return None
+        with self._in_instance(job):
+            module = _loaded("unified_api_client")
+            getter = getattr(module, "get_api_watchdog_state", None) if module is not None else None
+            try:
+                state = getter() if callable(getter) else None
+            except Exception:
+                log.debug("the watchdog state of job %s is unavailable", job.id, exc_info=True)
+                state = None
+        return dict(state) if isinstance(state, Mapping) else None
+
     def _find_live(self, job_id: str) -> Optional[_Job]:
         if self._active is not None and self._active.id == job_id:
             return self._active
-        for job in self._queue:
+        for job in self._iactive.values():
+            if job.id == job_id:
+                return job
+        for job in self._queued_jobs_locked():
             if job.id == job_id:
                 return job
         for job in self._recent:
@@ -2109,6 +2392,7 @@ class JobService:
 
     @property
     def busy(self) -> bool:
+        """Instance 1 runs a job (``any_busy``: any instance)."""
         with self._lock:
             return self._active is not None
 
@@ -2119,25 +2403,35 @@ class JobService:
 
     # ---- submit / queue -------------------------------------------------------------------------------
 
-    def submit(self, spec: JobSpec, *, front: bool = False) -> str:
+    def submit(self, spec: JobSpec, *, front: bool = False, instance: Optional[int] = None) -> str:
         """Queue ``spec`` (starts at once when idle); returns the job id: the id of the active job that already
         does this work when there is one (``submit_job``, hotfix 1 issue 5), so the caller binds to it."""
-        return self.submit_job(spec, front=front).job_id
+        if instance is None:  # a plain job: the call of before (a wrapped ``submit_job`` sees no new argument)
+            return self.submit_job(spec, front=front).job_id
+        return self.submit_job(spec, front=front, instance=instance).job_id
 
-    def submit_job(self, spec: JobSpec, *, front: bool = False) -> SubmitResult:
+    def submit_job(self, spec: JobSpec, *, front: bool = False, instance: Optional[int] = None) -> SubmitResult:
         """``submit`` that says whether it queued a job (``SubmitResult``; ``reused``: nothing new was queued).
 
         An ACTIVE job (queued, starting, running, waiting at the glossary gate, refining, stopping) that does
         the same request (``spec_key``) or, in the same family, a target that covers this one's
         (``job_target``) is reused: two surfaces, a double tap, two chats with the same file, a Resume of a
-        book that is running never queue the same work twice. The check and the insert run under the service
-        lock, so concurrent submits from any thread give one job. Jobs still run one at a time."""
+        book that is running never queue the same work twice - whichever instance runs it. The check and the
+        insert run under the service lock, so concurrent submits from any thread give one job.
+
+        ``instance``: the job of a multi-instance run for instance N (1 included) - it goes into that
+        instance's queue and runs on that instance's Translation keys; recorded as ``params["instance"]``, so
+        a Resume runs on the same instance. None (the default): the spec's own ``params["instance"]`` (a
+        Resume), else instance 1 exactly as before. Each instance runs one job at a time."""
         if not isinstance(spec, JobSpec):
             raise TypeError("submit() takes a JobSpec")
         if not self.has_kind(spec.kind):
             raise JobError(f"Unknown job kind: {spec.kind}")
+        if instance is not None:
+            spec = replace(spec, params={**dict(spec.params), INSTANCE_PARAM: coerce_instance(instance)})
         target, key = job_target(spec), spec_key(spec)  # paths are resolved outside the lock
-        job = _Job(id=uuid.uuid4().hex[:12], spec=spec, created=self.clock(), target=target, spec_key=key)
+        job = _Job(id=uuid.uuid4().hex[:12], spec=spec, created=self.clock(), target=target, spec_key=key,
+                   instance=job_instance(spec))
         job.log_path = self.job_log_path(job.id)
         with self._cond:
             if self._closed:
@@ -2146,13 +2440,14 @@ class JobService:
             if existing is not None:
                 snap = existing.snapshot()
             else:
+                queue = self._queue_of_locked(job)
                 if front:
-                    self._queue.insert(0, job)
+                    queue.insert(0, job)
                 else:
-                    self._queue.append(job)
+                    queue.append(job)
                 self._write_active_locked()
                 snap = job.snapshot()
-                self._ensure_worker_locked()
+                self._ensure_worker_for_locked(job.instance)
                 self._cond.notify_all()
         if existing is not None:
             log.info("job %s reused for %s %s (it is %s)", existing.id, spec.kind, spec.title, snap.state.value)
@@ -2272,13 +2567,10 @@ class JobService:
         return best
 
     def _live_jobs_locked(self) -> list:
-        """The jobs that have not ended: the running one (also while it starts, waits at a gate or stops),
-        then the queue in order."""
-        jobs = []
-        active = self._active
-        if active is not None and active.state not in TERMINAL_STATES:
-            jobs.append(active)
-        jobs.extend(job for job in self._queue if job.state not in TERMINAL_STATES)
+        """The jobs that have not ended: the running ones (also while they start, wait at a gate or stop; every
+        instance's), then the queues in order."""
+        jobs = [job for job in self._running_jobs_locked() if job.state not in TERMINAL_STATES]
+        jobs.extend(job for job in self._queued_jobs_locked() if job.state not in TERMINAL_STATES)
         return jobs
 
     def _covering_job_locked(self, target: Optional[JobTarget], key: str) -> Optional[_Job]:
@@ -2316,10 +2608,10 @@ class JobService:
 
     def cancel_queued(self, job_id: str) -> bool:
         with self._cond:
-            job = next((j for j in self._queue if j.id == job_id), None)
+            job = next((j for j in self._queued_jobs_locked() if j.id == job_id), None)
             if job is None:
                 return False
-            self._queue.remove(job)
+            self._queue_of_locked(job).remove(job)
             job.state = JobState.CANCELLED
             job.finished = self.clock()
             snap = job.snapshot()
@@ -2332,24 +2624,25 @@ class JobService:
 
     def cancel_all_queued(self) -> int:
         with self._lock:
-            ids = [job.id for job in self._queue]
+            ids = [job.id for job in self._queued_jobs_locked()]
         return sum(1 for job_id in ids if self.cancel_queued(job_id))
 
     def move_queued(self, job_id: str, index: int) -> bool:
-        """Reorder the queue (Jobs page drag handles)."""
+        """Reorder the queue (Jobs page drag handles); a job moves within its own instance's queue."""
         with self._lock:
-            job = next((j for j in self._queue if j.id == job_id), None)
+            job = next((j for j in self._queued_jobs_locked() if j.id == job_id), None)
             if job is None:
                 return False
-            self._queue.remove(job)
-            index = max(0, min(int(index), len(self._queue)))
-            self._queue.insert(index, job)
+            queue = self._queue_of_locked(job)
+            queue.remove(job)
+            index = max(0, min(int(index), len(queue)))
+            queue.insert(index, job)
             self._write_active_locked()
         self._changed()
         return True
 
     def pause_queue(self) -> None:
-        """Stop starting the next queued job (the running one continues)."""
+        """Stop starting the next queued job of every instance (the running ones continue)."""
         with self._cond:
             self._paused = True
         self._changed()
@@ -2359,6 +2652,9 @@ class JobService:
             self._paused = False
             if self._queue:
                 self._ensure_worker_locked()
+            for number, queue in self._iqueues.items():
+                if queue:
+                    self._ensure_worker_for_locked(number)
             self._cond.notify_all()
         self._changed()
 
@@ -2442,6 +2738,9 @@ class JobService:
                 self._resolve_interrupted(job_id, "resumed")
             if left_finished:
                 self._changed()
+            if result.job_id != job_id:
+                # its "Stopped: … Tap to resume" notification goes (JobsFeature), whichever Resume button it was
+                self._post(self._deliver_event, job_id, RESUMED_EVENT, {"job": result.job_id})
             return result
 
     def discard(self, job_id: str) -> bool:
@@ -2511,11 +2810,17 @@ class JobService:
         (``JobBackend.request_stop``: env flags, backend imports, watchdog reset) runs on the
         ``gl-job-stop`` thread when called on the UI loop (UI_SPEC §2.4: the button never
         touches ``os.environ``), inline from any other thread.
+
+        ``job_id`` None: instance 1's running job (``request_stop_all`` stops every instance's); a job id: that
+        job, whichever instance runs it - the protocol then runs as its instance, on its own modules.
         """
         with self._lock:
-            active = self._active
-            if job_id is not None and (active is None or active.id != job_id):
-                if any(j.id == job_id for j in self._queue):
+            if job_id is None:
+                active = self._active
+            else:
+                active = next((j for j in self._running_jobs_locked() if j.id == job_id), None)
+            if job_id is not None and active is None:
+                if any(j.id == job_id for j in self._queued_jobs_locked()):
                     queued_id: Optional[str] = job_id
                 else:
                     queued_id = None
@@ -2555,13 +2860,45 @@ class JobService:
         if self._on_ui_loop():
             self._issue_stop_soon(job, mode)
         else:
-            with self._stop_lock:
+            with self._stop_lock_for(job):
                 self._issue_stop(job, mode)
         if snap.state is not previous:
             self._post(self._deliver_transition, snap, previous)
         else:
             self._changed()
         return mode
+
+    def request_stop_all(self, *, force: bool = False, escalate: bool = True, reason: str = "") -> dict:
+        """Stop every instance's running job (the notification's Stop, a system time limit): ``{job id: the stop
+        mode used}``. Queued jobs stay queued (``cancel_all_queued``)."""
+        with self._lock:
+            ids = [job.id for job in self._running_jobs_locked() if job.state not in TERMINAL_STATES]
+        return {job_id: self.request_stop(job_id, force=force, escalate=escalate, reason=reason) for job_id in ids}
+
+    def _in_instance(self, job: Any) -> Any:
+        """A context that runs as ``job``'s instance (its runtime's modules, environment and streams); instance 1,
+        or an instance whose runtime was never made: nothing changes."""
+        number = getattr(job, "instance", 1) or 1
+        if number < 2:
+            return contextlib.nullcontext()
+        runtime = _installed_runtime()
+        if runtime is None or runtime.get(number) is None:
+            return contextlib.nullcontext()
+        return runtime.activated(number)
+
+    def _others_running(self, job: Any) -> bool:
+        """A job of another instance runs besides ``job``."""
+        with self._lock:
+            return any(other is not job for other in self._running_jobs_locked())
+
+    def _stop_lock_for(self, job: Any) -> Any:
+        """The lock ``job``'s instance holds around a stop protocol and its jobs' run resets (``_stop_lock``)."""
+        number = getattr(job, "instance", 1) or 1
+        with self._lock:
+            lock = self._stop_locks.get(number)
+            if lock is None:
+                lock = self._stop_locks[number] = threading.RLock()
+            return lock
 
     def _on_ui_loop(self) -> bool:
         dispatcher = self.dispatcher
@@ -2590,10 +2927,10 @@ class JobService:
                     return
                 job, mode = self._stop_tasks.pop(0)
             try:
-                with self._stop_lock:
+                with self._stop_lock_for(job):
                     with self._lock:
                         # a protocol for a job that already ended must not reach the next one
-                        current = job is self._active and job.state not in TERMINAL_STATES
+                        current = self._is_running_locked(job) and job.state not in TERMINAL_STATES
                         repeat = job.issued_stop == mode
                     if current and not repeat:
                         self._issue_stop(job, mode)
@@ -2633,26 +2970,50 @@ class JobService:
                 except Exception:
                     pass
 
+        if job.instance >= 2 and not job.isolated:
+            # just picked, its instance runtime not set up yet: nothing of it runs, and the stop protocol would run
+            # on instance 1's modules and environment (stopping instance 1's job); the latch alone ends it
+            set_stop_requested()
+            return
         _graceful, wait = self._graceful_setting(job)
         try:
             stop_kind = getattr(self._kind(job.spec.kind), "stop_kind", "translation") or "translation"
         except Exception:
             stop_kind = "translation"
+        extra: dict = {}
+        shared = job.instance >= 2 or self._others_running(job)
+        if shared:
+            # the on-device engine is the app's, not this job's: its generation belongs to whichever job uses it
+            if not str(self._job_model(job) or "").startswith("local/"):
+                extra["stop_engine"] = False
+        # a graceful stop silences the HTTP loggers, which are the process's: not while another instance's job
+        # writes its own log with them
+        http_levels = _http_logger_levels() if shared else None
         try:
-            self.backend.request_stop(
-                graceful=graceful,
-                wait_for_chunks=bool(wait),
-                force=mode == STOP_FORCE,
-                set_stop_requested=set_stop_requested,
-                log=lambda text="", *a, **k: self._job_log(job, text, {}),
-                kind=stop_kind,
-                job_kind=job.spec.kind,
-                owner=job.owner,
-            )
+            with self._in_instance(job):  # an instance's job stops through its own stop_control / client
+                self.backend.request_stop(
+                    graceful=graceful,
+                    wait_for_chunks=bool(wait),
+                    force=mode == STOP_FORCE,
+                    set_stop_requested=set_stop_requested,
+                    log=lambda text="", *a, **k: self._job_log(job, text, {}),
+                    kind=stop_kind,
+                    job_kind=job.spec.kind,
+                    owner=job.owner,
+                    **extra,
+                )
         except Exception as exc:
             log.warning("stop_control.request_stop failed (%s); latching the stop flag only", exc)
+        finally:
+            if http_levels is not None and self._others_running(job):
+                _restore_http_logger_levels(http_levels)
         if not latched:  # the latch must always end up set
             set_stop_requested()
+        if job.instance < 2 and self._others_running(job):
+            with self._lock:
+                ended = job.state in TERMINAL_STATES or not self._is_running_locked(job)
+            if ended:  # the job saw the latch and ended before the protocol raised its module flags
+                _release_base_stop_flags()
 
     # ---- questions ----------------------------------------------------------------------------------------------
 
@@ -2717,12 +3078,13 @@ class JobService:
     def _refine_at_gate(self, job: _Job, glossary_path: str, selected_types: Optional[Sequence[str]]) -> dict:
         question = self._suspend_question(job)  # the card and the alerts go away at once
         try:
-            return self._run_gate_refinement(job, glossary_path, selected_types)
+            with self._in_instance(job):  # the paused job's own instance: its modules, environment and keys
+                return self._run_gate_refinement(job, glossary_path, selected_types)
         finally:
             self._resume_question(job, question)
 
     def _run_gate_refinement(self, job: _Job, glossary_path: str, selected_types: Optional[Sequence[str]]) -> dict:
-        import glossary_progress_core as gpc
+        gpc = importlib.import_module("glossary_progress_core")  # the job's instance's own (``_in_instance``)
 
         from glossarion_mobile.services.library import bind_call
 
@@ -2877,6 +3239,196 @@ class JobService:
                         self._active = None
                     self._cond.notify_all()
 
+    def _ensure_worker_for_locked(self, number: int) -> None:
+        """The worker of instance ``number``: instance 1's ``gl-job``, else that instance's ``gl-job-iN``."""
+        if number < 2:
+            self._ensure_worker_locked()
+            return
+        thread = self._ithreads.get(number)
+        if thread is not None and thread.is_alive():
+            return
+        thread = threading.Thread(target=self._instance_worker, args=(number,), name=f"gl-job-i{number}", daemon=True)
+        thread._gl_instance = number  # every thread it starts belongs to the instance too (instance_runtime)
+        self._ithreads[number] = thread
+        thread.start()
+
+    def _instance_worker(self, number: int) -> None:
+        """``_worker`` for instance ``number`` >= 2: its own queue, one job at a time, beside every other instance."""
+        while True:
+            with self._cond:
+                while not self._closed and (self._paused or not self._iqueues.get(number)):
+                    self._cond.wait()
+                if self._closed:
+                    return
+                job = self._iqueues[number].pop(0)
+                self._iactive[number] = job
+            job.announced.wait(5.0)  # submit() posts QUEUED right after queueing; keep the order
+            try:
+                self._execute(job)
+            except BaseException:  # noqa: BLE001 - the worker must survive anything
+                log.exception("job worker of instance %d crashed on %s", number, job.id)
+            finally:
+                with self._cond:
+                    if self._iactive.get(number) is job:
+                        del self._iactive[number]
+                    self._cond.notify_all()
+
+    def _prepare_instance(self, job: _Job) -> Any:
+        """Instance N's runtime for ``job`` (N >= 2), set up on its worker: installed on first use, its process
+        state reset to instance 1's outside any job (``_pristine_process_state``) and its essential modules copied.
+        ``JobError`` when it cannot be isolated: the job fails, it never runs on shared modules."""
+        number = job.instance
+        try:
+            from glossarion_mobile.services import instance_runtime
+
+            runtime = instance_runtime.ensure(number)
+            env, argv, stdout, stderr = self._pristine_process_state()
+            runtime.prepare(env=_without_key_env(env), argv=argv, stdout=stdout, stderr=stderr)
+            runtime.warm(instance_runtime.ESSENTIAL_MODULES)
+        except Exception as exc:
+            log.exception("instance %d could not be set up for job %s", number, job.id)
+            raise JobError(f"Instance {number} could not be isolated, so this job did not start: {exc}") from exc
+        return runtime
+
+    def _pristine_process_state(self) -> tuple:
+        """(environment, argv, stdout, stderr) of instance 1 outside any job: what instance 1's running job saw
+        before its scope changed them (``_capture_pristine``), else the process state now - read while instance
+        1's job lock is free, so no owner built outside a job (the settings env preview) is caught halfway."""
+        from glossarion_mobile.services import instance_runtime
+
+        with self._pristine_lock:
+            saved = self._pristine
+        if saved is not None:
+            return saved
+        with instance_runtime.activated(None):
+            lock = self.backend.job_lock
+        acquired = False
+        try:
+            acquired = bool(lock.acquire(timeout=2.0)) if hasattr(lock, "acquire") else False
+        except Exception:
+            acquired = False
+        try:
+            with self._pristine_lock:
+                saved = self._pristine  # instance 1's job may have started meanwhile
+                if saved is None:
+                    saved = (dict(instance_runtime.base_environ()), list(instance_runtime.base_argv()),
+                             instance_runtime.base_stream("stdout"), instance_runtime.base_stream("stderr"))
+        finally:
+            if acquired:
+                lock.release()
+        return saved
+
+    def _capture_pristine(self, job: _Job) -> None:
+        """Instance 1's job is about to enter its scope: what an instance N job starts from meanwhile."""
+        if job.instance >= 2:
+            return
+        with self._pristine_lock:
+            self._pristine = (dict(os.environ), list(sys.argv), sys.stdout, sys.stderr)
+
+    def _release_pristine(self, job: _Job) -> None:
+        if job.instance >= 2:
+            return
+        with self._pristine_lock:
+            self._pristine = None
+
+    @contextlib.contextmanager
+    def _instance_keys(self, job: _Job, config: Mapping[str, Any]) -> Iterator[None]:
+        """A job of a multi-instance run (``params["instance"]``, instance 1 too): while it runs, the API client
+        uses only its instance's keys, in every key pool - every key list it is given or reads (the glossary
+        extractor loads the pools from config.json itself), the main-key retry and the fallback paths - and a pool
+        without an enabled key of the instance is off for it, so its tasks use the instance's own Translation keys.
+        The desktop instances' own guard (``instance_worker.restrict_keys``: ``GLOSSARION_KEY_INSTANCE`` in the
+        job's environment, the client's pools detached and rebuilt from ``config``, the job's
+        ``config_for_instance`` snapshot) on the job's instance's client, entered before the owner is built; its
+        request guard knows whose key is whose (``job.key_owners``) and refuses another instance's key outright.
+
+        A job of no multi-instance run (a chat translation, the Book page, Chapters) is left as it always was,
+        except while a job of an instance >= 2 runs (owner rule: instance 2's keys are never instance 1's): then it
+        uses instance 1's keys only, from its start, or from the moment such a job starts (``_scope_plain_job``)."""
+        if job.spec.params.get(INSTANCE_PARAM) is None:
+            with self._base_scope_lock:
+                undo = None
+                if self._instance_jobs_alive():
+                    try:
+                        undo = self._plain_scope(config)
+                    except Exception as exc:
+                        raise JobError(f"Instance 1's API keys could not be kept to it while another instance runs: "
+                                       f"{exc}") from exc
+                self._base_plain = [job, undo, config]
+            try:
+                yield
+            finally:
+                with self._base_scope_lock:  # inside the job's own process-state scope: undone before it restores
+                    entry, self._base_plain = self._base_plain, None
+                    if entry is not None and entry[1] is not None:
+                        entry[1]()
+            return
+        if job.instance >= 2:
+            self._scope_plain_job()
+        try:
+            restore = importlib.import_module("instance_worker").restrict_keys(
+                job.instance, config, key_owners=job.key_owners)
+        except Exception as exc:
+            raise JobError(f"Instance {job.instance}'s API keys could not be kept to it: {exc}") from exc
+        try:
+            yield
+        finally:
+            restore()
+
+    def _instance_jobs_alive(self) -> bool:
+        """A job of an instance >= 2 is picked or running."""
+        with self._lock:
+            return any(number >= 2 for number in self._iactive)
+
+    def _plain_scope(self, config: Mapping[str, Any]) -> Callable[[], None]:
+        """Instance 1's keys only for instance 1's side (``restrict_keys(1, config_for_instance(config, 1))``, the
+        request guard told every instance's keys); returns the undo. Runs on instance 1's modules and env."""
+        instance_plan = importlib.import_module("instance_plan")
+        try:
+            scoped = instance_plan.config_for_instance(config, 1)
+        except ValueError:
+            scoped = dict(config)  # no Translation key of its own: the client's scope still narrows every list
+        return importlib.import_module("instance_worker").restrict_keys(
+            1, scoped, key_owners=instance_plan.key_owners(config))
+
+    def _scope_plain_job(self) -> None:
+        """A job of an instance >= 2 starts while a plain job of instance 1 runs unscoped: from now on that job
+        uses instance 1's keys only (its own scope undoes it, ``_instance_keys``)."""
+        with self._base_scope_lock:
+            entry = self._base_plain
+            if entry is None or entry[1] is not None:
+                return
+            try:
+                from glossarion_mobile.services import instance_runtime
+
+                with instance_runtime.activated(None):  # instance 1's modules and environment
+                    entry[1] = self._plain_scope(entry[2])
+            except Exception:
+                log.exception("instance 1's running job could not be kept to instance 1's keys")
+
+    def _kind_of(self, job: _Job) -> Any:
+        """``job``'s ``KindInfo``: an instance's job runs the adapter of the instance's own copy of the job kinds."""
+        if job.instance < 2 or self._kinds is not None:
+            return self._kind(job.spec.kind)
+        from glossarion_mobile.services import instance_runtime
+
+        runtime = instance_runtime.get(job.instance)
+        if runtime is None:
+            raise JobError(f"Instance {job.instance} is not set up")
+        return runtime.module("glossarion_mobile.job_kinds").get_kind(job.spec.kind)
+
+    def _note_job_running(self, running: bool) -> None:
+        """``set_job_running`` for the Settings banner: True when a job takes its snapshot, False once the last
+        running job of every instance ended (one job: True then False, as before)."""
+        with self._lock:
+            self._jobs_running = max(0, self._jobs_running + (1 if running else -1))
+            last = self._jobs_running == 0
+        if running or last:
+            try:
+                self.config_store.set_job_running(bool(running))
+            except Exception:
+                log.debug("set_job_running(%s) failed", running, exc_info=True)
+
     def _transition(self, job: _Job, state: JobState, *, only_from: Optional[Iterable[JobState]] = None) -> None:
         with self._lock:
             previous = job.state
@@ -2897,16 +3449,27 @@ class JobService:
             except Exception:
                 log.exception("config flush at job start failed")
             config = store.snapshot()
-            try:
-                store.set_job_running(True)
-            except Exception:
-                log.debug("set_job_running failed", exc_info=True)
+            self._note_job_running(True)
         elif self._config_loader is not None:
             config = dict(self._config_loader() or {})
         config = copy.deepcopy(config if isinstance(config, dict) else {})
         overrides = job.spec.params.get("config_overrides")
         if isinstance(overrides, Mapping):
             config.update(copy.deepcopy(dict(overrides)))
+        if job.spec.params.get(INSTANCE_PARAM) is not None:
+            # a job of a multi-instance run uses only its instance's keys, in every pool (a pool without one is off
+            # for it); an instance >= 2 runs on its own Translation key in place of the main API key (instance 1's)
+            import instance_plan
+
+            # whose key is whose (fingerprints of the whole config): the request guard of the job's client
+            job.key_owners = instance_plan.key_owners(config)
+            try:
+                config = instance_plan.config_for_instance(config, job.instance)
+            except ValueError as exc:
+                if store is not None:
+                    self._note_job_running(False)  # the job never took its snapshot
+                raise JobError(f"{exc}: assign a Translation key to instance {job.instance} in the Multi-Key Manager"
+                               ) from exc
         # the mobile Streaming default (absent toggles ON) and the thoughts lock; config.json is untouched
         from glossarion_mobile.state.setting_writes import with_mobile_streaming_defaults
 
@@ -3050,8 +3613,21 @@ class JobService:
                 log.debug("the final request stream drain failed", exc_info=True)
 
     def _execute(self, job: _Job) -> None:
+        if job.instance >= 2:
+            try:
+                # on gl-job-iN: from here on the job's imports, environment and streams are its instance's own
+                self._prepare_instance(job)
+                job.isolated = True  # a Stop now runs in the instance (before: it only latches, ``_issue_stop``)
+            except JobError as exc:
+                with self._lock:
+                    job.started = self.clock()
+                    job.buffer = LogBuffer(JOB_LOG_MAXLEN, name=f"job:{job.id}")
+                self._transition(job, JobState.STARTING, only_from={JobState.QUEUED})
+                self._job_log(job, f"❌ {exc}", {})
+                self._finish(job, None, str(exc))
+                return
         try:
-            kind = self._kind(job.spec.kind)
+            kind = self._kind_of(job)
         except Exception as exc:
             job.started = self.clock()
             self._finish(job, None, f"Unknown job kind: {job.spec.kind} ({exc})")
@@ -3067,7 +3643,8 @@ class JobService:
                 job.stream = None
         self._transition(job, JobState.STARTING, only_from={JobState.QUEUED})
         self._checkpoint(job, force=True)
-        self._job_log(job, f"▶ {kind_verb(job.spec.kind)} {job.spec.title}", {})
+        where = f" · Instance {job.instance}" if job.spec.params.get(INSTANCE_PARAM) is not None else ""
+        self._job_log(job, f"▶ {kind_verb(job.spec.kind)} {job.spec.title}{where}", {})
         result: Any = None
         error: Optional[str] = None
         exit_ok = True
@@ -3077,12 +3654,14 @@ class JobService:
                 raise _Cancelled()
             config = self._config_snapshot(job)
             config_taken = True
-            lock = self.backend.job_lock
+            lock = self.backend.job_lock  # an instance's job: its own job_runner copy's JOB_LOCK
+            self._capture_pristine(job)
             with self.backend.scoped_process_state(capture_stdout=host.log, lock=lock), \
-                    no_sign_in_scope(job.spec.kind), local_context_scope(), _env_scope("GLOSSARY_STREAM_CARDS", "1"):
+                    no_sign_in_scope(job.spec.kind), local_context_scope(), _env_scope("GLOSSARY_STREAM_CARDS", "1"), \
+                    self._instance_keys(job, config):
                 # Held from the run reset to the owner latch: a stop protocol still running on
                 # gl-job-stop (the previous job's, or this job's own) never interleaves with them.
-                with self._stop_lock:
+                with self._stop_lock_for(job):
                     # The previous immediate stop's cleanup closes HTTP transports on a helper
                     # thread; do not reset the cancellation state underneath it (desktop preflight).
                     wait_cleanup = getattr(self.backend, "wait_for_stop_cleanup", None)
@@ -3122,18 +3701,16 @@ class JobService:
             error = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             self._job_log(job, "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)), {"kind": "error"})
         finally:
+            self._release_pristine(job)
+            if job.instance < 2 and job.stop_mode is not None and self._others_running(job):
+                _release_base_stop_flags()  # the on-device endpoint must not refuse the other instance's requests
             with self._lock:
                 job.owner = None
             if config_taken and self.config_store is not None:
-                try:
-                    self.config_store.set_job_running(False)
-                except Exception:
-                    log.debug("set_job_running(False) failed", exc_info=True)
+                self._note_job_running(False)
         self._finish(job, result, error)
 
     def _finish(self, job: _Job, result: Any, error: Optional[str]) -> None:
-        from glossarion_mobile.job_kinds import result_fields
-
         ok, outputs, result_error = result_fields(result)
         with self._lock:
             previous = job.state
@@ -3162,6 +3739,8 @@ class JobService:
             self._recent.insert(0, job)
             del self._recent[JOB_BUFFERS_KEPT:]
             self._active = None if self._active is job else self._active
+            if self._iactive.get(job.instance) is job:
+                del self._iactive[job.instance]
             self._write_active_locked()
         self._job_log(job, f"■ {snap.state_label}: {job.spec.title}" + (f" — {snap.error}" if snap.error else ""), {})
         self._close_log(job)
@@ -3613,18 +4192,29 @@ class JobService:
 
     def _active_payload_locked(self) -> dict:
         active = self._active.snapshot().to_dict() if self._active is not None else None
-        return {
+        payload = {
             "version": STATE_VERSION,
             "saved_at": self.clock(),
             "active": active,
             "queue": [job.snapshot().to_dict() for job in self._queue],
         }
+        # multi-instance: instance N's running and queued jobs (only while it has some, so a session of one
+        # instance writes the file it always wrote)
+        instances = {}
+        for number in sorted(set(self._iactive) | set(self._iqueues)):
+            running, queued = self._iactive.get(number), self._iqueues.get(number) or []
+            if running is not None or queued:
+                instances[str(number)] = {"active": running.snapshot().to_dict() if running is not None else None,
+                                          "queue": [job.snapshot().to_dict() for job in queued]}
+        if instances:
+            payload["instances"] = instances
+        return payload
 
     def _write_active_locked(self) -> None:
         payload = self._active_payload_locked()
         path = self.active_state_path
         try:
-            if payload["active"] is None and not payload["queue"]:
+            if payload["active"] is None and not payload["queue"] and not payload.get("instances"):
                 if os.path.exists(path):
                     os.remove(path)
                 return
@@ -3709,6 +4299,12 @@ class JobService:
         if isinstance(data.get("active"), dict):
             entries.append(data["active"])
         entries.extend(e for e in data.get("queue") or () if isinstance(e, dict))
+        instances = data.get("instances")
+        for _number, part in sorted(instances.items()) if isinstance(instances, dict) else ():
+            if isinstance(part, dict):  # every instance's running job, then its queue (Resume keeps the instance)
+                if isinstance(part.get("active"), dict):
+                    entries.append(part["active"])
+                entries.extend(e for e in part.get("queue") or () if isinstance(e, dict))
         adopted: list[JobSnapshot] = []
         for entry in entries:
             try:
@@ -3780,10 +4376,10 @@ class JobService:
     # ---- lifecycle ------------------------------------------------------------------------------------------------------
 
     def wait_idle(self, timeout: Optional[float] = None) -> bool:
-        """Block until nothing runs and nothing (unpaused) is queued (tests, shutdown)."""
+        """Block until nothing runs and nothing (unpaused) is queued, in any instance (tests, shutdown)."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cond:
-            while self._active is not None or (self._queue and not self._paused):
+            while self._active is not None or self._iactive or (self._queued_jobs_locked() and not self._paused):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
@@ -3794,6 +4390,7 @@ class JobService:
         with self._cond:
             self._closed = True
             self._cond.notify_all()
-            thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
+            threads = [self._thread, *self._ithreads.values()]
+        for thread in threads:
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout)

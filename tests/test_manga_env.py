@@ -253,8 +253,36 @@ def test_moved_method_is_the_legacy_text(module, class_name, name):
     if name == "_start_translation_heavy":
         new = _inline_start_translation_heavy(new)
         assert _rstrip_lines(new) == _rstrip_lines(legacy[name])
+    elif name == "_stop_translation":
+        # multi-instance: the Stop's "end every child process" sweep spares the instance processes
+        assert new.count(_INSTANCE_SWEEP[1]) == 1
+        assert new.replace(_INSTANCE_SWEEP[1], _INSTANCE_SWEEP[0]) == legacy[name]
     else:
         assert new == legacy[name]
+
+
+#: The one owner-requested change of MangaRunMixin._stop_translation since the move: (legacy, now).
+_INSTANCE_SWEEP = (
+    "                    processes_to_terminate = []\n"
+    "                    for child in children:\n"
+    "                        try:\n"
+    "                            # Get process name to avoid killing important processes\n"
+    "                            name = child.name().lower()\n"
+    "                            # Only terminate Python/script processes, not system processes\n"
+    "                            # Skip inpainter workers — they survive stop and are reused\n"
+    "                            if ('python' in name or 'glossarion' in name) and child.pid not in _protected_pids:\n",
+    "                    from instance_plan import in_instance_process_tree\n"
+    "                    processes_to_terminate = []\n"
+    "                    for child in children:\n"
+    "                        try:\n"
+    "                            # Get process name to avoid killing important processes\n"
+    "                            name = child.name().lower()\n"
+    "                            # Only terminate Python/script processes, not system processes\n"
+    "                            # Skip inpainter workers — they survive stop and are reused — and the\n"
+    "                            # instance processes of a multi-instance run (they have their own Stop)\n"
+    "                            if (('python' in name or 'glossarion' in name) and child.pid not in _protected_pids\n"
+    "                                    and not in_instance_process_tree(child)):\n",
+)
 
 
 def _inline_start_translation_heavy(text):

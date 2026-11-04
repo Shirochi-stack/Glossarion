@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Slot, QEvent
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QGraphicsOpacityEffect
+# The user's input selection (a multi-instance run narrows selected_files to instance 1's files)
+from instance_runs import user_selection
 
 from review_generator import (
     DEFAULT_REVIEW_PROMPT,
@@ -545,7 +547,7 @@ class ReviewDialog(QDialog):
         _REVIEW_EXTS = ('.epub', '.pdf', '.txt', '.html', '.htm', '.xhtml', '.md')
         self._all_epub_paths = []
         selected = getattr(self.translator_gui, 'selected_epub_files', None) or \
-                   getattr(self.translator_gui, 'selected_files', None) or []
+                   user_selection(self.translator_gui)
         for f in selected:
             f_str = str(f)
             if f_str.lower().endswith(_REVIEW_EXTS) and os.path.exists(f_str):
@@ -1291,7 +1293,7 @@ class ReviewDialog(QDialog):
         # Build authoritative list from translator_gui — do NOT keep stale file_path
         new_paths = []
         selected = getattr(self.translator_gui, 'selected_epub_files', None) or \
-                   getattr(self.translator_gui, 'selected_files', None) or []
+                   user_selection(self.translator_gui)
         for f in selected:
             f_str = str(f)
             if f_str.lower().endswith(_REVIEW_EXTS) and os.path.exists(f_str):

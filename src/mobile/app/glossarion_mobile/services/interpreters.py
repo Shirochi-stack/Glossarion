@@ -344,15 +344,34 @@ class _Child:
 
 
 class _Watched:
-    """A ``should_stop`` and the file that tells the children about it."""
+    """A ``should_stop`` and the file that tells the children about it. ``instance``: the multi-instance
+    instance that asked (``instance_runtime.current``), whose state the check reads (``ask``)."""
 
-    __slots__ = ("function", "path", "calls", "is_set")
+    __slots__ = ("function", "path", "calls", "is_set", "instance")
 
     def __init__(self, function: Callable[[], Any], path: str) -> None:
         self.function = function
         self.path = path
         self.calls = 0
         self.is_set = False
+        self.instance = _caller_instance()
+
+    def ask(self) -> Any:
+        """The check, run as the instance that asked: the pool's one watcher thread serves every instance, and
+        a job's stop check reads its own instance's environment and modules."""
+        runtime = sys.modules.get("glossarion_mobile.services.instance_runtime")
+        if runtime is None or not runtime.installed():
+            return self.function()
+        with runtime.activated(self.instance):
+            return self.function()
+
+
+def _caller_instance() -> Optional[int]:
+    """The multi-instance instance of the calling thread; None for instance 1 (or no instance runtime)."""
+    runtime = sys.modules.get("glossarion_mobile.services.instance_runtime")
+    if runtime is None or not runtime.installed():
+        return None
+    return runtime.current()
 
 
 _FOLDER_PREFIX = "glossarion-interp-"
@@ -707,7 +726,7 @@ class InterpreterPool:
             self._lock.notify_all()
         if first:  # a check that already says stop is not asked a poll later: this batch would start
             try:
-                if should_stop():
+                if entry.ask():
                     self._set(entry)
             except Exception:
                 log.debug("a stop check raised", exc_info=True)
@@ -745,7 +764,7 @@ class InterpreterPool:
                 entries = asked()
             for entry in entries:
                 try:
-                    if entry.function():
+                    if entry.ask():
                         self._set(entry)
                 except Exception:
                     log.debug("a stop check raised", exc_info=True)

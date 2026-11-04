@@ -40,6 +40,8 @@ Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup
 """
 
 import os
+# Multi-instance: an instance >= 2 keeps its payload folders under Payloads/Instance N
+from instance_plan import instance_payloads_dir
 
 from mobile_runtime import data_dir
 
@@ -942,7 +944,7 @@ class ImageJobMixin:
             try:
                 # Create Payloads/image directory for API response tracking
                 # Route to the image subfolder to match unified_api_client routing
-                payloads_dir = os.path.join("Payloads", "image")
+                payloads_dir = os.path.join(instance_payloads_dir("Payloads"), "image")
                 try:
                     os.makedirs(payloads_dir, exist_ok=True)
                 except (PermissionError, OSError):

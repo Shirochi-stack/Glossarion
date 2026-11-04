@@ -1,7 +1,8 @@
 """Jobs page (``/jobs``, UI_SPEC §1.8) and ``JobsFeature``, which wires jobs, files and intents into the app.
 
 Jobs page
-  One list with sections **Running** (at most one) · **Queued**
+  One list with sections **Running** (one card per running job, each with its own Stop: one job per
+  instance of a multi-instance translation, whose rows name their instance) · **Queued**
   (``ReorderableListView`` with drag handles; ✕ Cancel asks "Cancel job / Keep
   job") · **Interrupted** (recovered from ``jobs/active.state``: Resume ·
   Discard) · **Finished** (last 50: Open · Retry; a book's entries leave while a new job for it is queued or
@@ -29,7 +30,8 @@ after ``SettingsFeature.install`` so the config store and Prefs exist)
     needed: …" for Tools › Async batch) unless the surface that answers it (the
     owning chat, the Book page, Tools › Async batch) is on screen; while the app
     is visible on another screen also a snackbar with Review / Answer. The
-    notification is cancelled when the question is answered (``question_resolved``);
+    notification is cancelled when the question is answered (``question_resolved``),
+    and a job's "Stopped: … Tap to resume" one once it is resumed (``RESUMED_EVENT``);
   * checkpoints ``active.state`` when the app goes to the background;
   * runs ``JobService.recover()`` on a worker thread and shows the launch
     banner "N interrupted jobs · Resume / Review".
@@ -45,7 +47,8 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Callable, Optional
+from dataclasses import replace
+from typing import Any, Callable, Mapping, Optional
 
 import flet as ft
 
@@ -53,12 +56,15 @@ from glossarion_mobile.services.background import IOS_BACKGROUND_NOTICE, Backgro
 from glossarion_mobile.services.files import FileBridge
 from glossarion_mobile.services.intents import IntentImport, IntentRouter
 from glossarion_mobile.services.jobs import (
+    INSTANCE_PARAM,
     QUESTION_SUSPENDED_EVENT,
+    RESUMED_EVENT,
     JobService,
     JobSnapshot,
     JobSpec,
     JobState,
     JobsView,
+    instance_label,
     is_glossary_question,
     kind_icon,
     progress_line,
@@ -87,7 +93,8 @@ from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.screens.job_detail import JobDetailScreen
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
-__all__ = ["DONE_STRIP_SECONDS", "JobsFeature", "JobsScreen", "SCREEN_ROUTES", "open_job_in_panel"]
+__all__ = ["DONE_STRIP_SECONDS", "JobsFeature", "JobsScreen", "SCREEN_ROUTES", "is_instance_job", "open_job_in_panel",
+           "running_jobs"]
 
 log = logging.getLogger("glossarion.jobs.ui")
 
@@ -104,6 +111,22 @@ def _platform_name(page: Any) -> str:
     if getattr(page, "web", False):
         return "desktop"
     return value if value in ("android", "ios") else "desktop"
+
+
+def running_jobs(view: Any) -> tuple:
+    """Every running job of ``view`` (one per instance, instance 1 first; ``JobsView.running``), else its
+    ``active`` job (a view of a service without instances)."""
+    running = tuple(getattr(view, "running", ()) or ())
+    if running:
+        return running
+    active = getattr(view, "active", None)
+    return (active,) if active is not None else ()
+
+
+def is_instance_job(snap: Any) -> bool:
+    """A job of a multi-instance run (``params["instance"]``): its rows name the instance."""
+    params = getattr(getattr(snap, "spec", None), "params", None)
+    return isinstance(params, Mapping) and params.get(INSTANCE_PARAM) is not None
 
 
 def open_job_in_panel(page: Any, jid: Any) -> bool:
@@ -176,8 +199,12 @@ class JobsScreen(Screen):
         )
 
     def _origin_line(self, snap: JobSnapshot) -> str:
+        """"Library · Book", with " · Instance 2" for a job of a multi-instance run."""
         origin = snap.spec.origin or {}
-        return str(origin.get("label") or "")
+        parts = [str(origin.get("label") or "")]
+        if is_instance_job(snap):
+            parts.append(instance_label(snap))
+        return " · ".join(part for part in parts if part)
 
     def _row(self, snap: JobSnapshot, section: str) -> ft.Control:
         chip = StatusChip(status=status_key(snap), text=snap.state_label, dark=self.dark)
@@ -259,15 +286,17 @@ class JobsScreen(Screen):
                 padding=10, bgcolor=ft.Colors.SURFACE_CONTAINER, border_radius=tokens.RADII["card"],
                 key="jobs-ios-notice",
             ))
-        if view.active is None and not view.queue and not view.interrupted and not view.history:
+        running = running_jobs(view)
+        if not running and not view.queue and not view.interrupted and not view.history:
             controls.append(EmptyState(
                 icon="FOLDER_OPEN",
                 title="No jobs yet",
                 body="Translations, glossary extractions, scans and compiles you start appear here.",
                 key="jobs-empty",
             ))
-        if view.active is not None:
-            controls += [self._section("Running"), self._row(view.active, "running")]
+        if running:  # one card per running job, each with its own Stop (one job per instance)
+            controls.append(self._section("Running", len(running) if len(running) > 1 else None))
+            controls += [self._row(snap, "running") for snap in running]
         if view.queue:
             controls.append(self._section("Queued", len(view.queue)))
             self.queue_list = ft.ReorderableListView(
@@ -733,8 +762,9 @@ class JobsFeature:
         self._navigate("settings.models")
         return None
 
-    async def submit(self, spec: JobSpec, *, long_job: bool = True) -> Optional[str]:
-        """Send / Start: background preparation on the user's tap, then queue the job.
+    async def submit(self, spec: JobSpec, *, long_job: bool = True, instance: Optional[int] = None) -> Optional[str]:
+        """Send / Start: background preparation on the user's tap, then queue the job (``instance``: the job of
+        a multi-instance run for that instance, ``JobService.submit(spec, instance=N)``).
 
         U9 preflight: a job whose model is a route excluded on mobile (ocz/, ollamapull/, antigravity/ …)
         is not queued - it would fail inside the API client with desktop-only text - and the reason is
@@ -747,7 +777,25 @@ class JobsFeature:
             await self.background.prepare_for_run(spec, long_job=long_job)
         except Exception:
             log.exception("background preparation failed; the job still runs in the foreground")
+        if instance is not None:
+            return self.service.submit(spec, instance=instance)
         return self.service.submit(spec)  # a queued job shows in the strip and the Jobs list (no snackbar)
+
+    async def submit_instances(self, pairs: list, *, long_job: bool = True) -> list:
+        """A multi-instance Start (``[(instance, spec), ...]``): the preflight and the background preparation once
+        for the run (one tap), then each job queued on its own instance. Returns the job ids."""
+        pairs = list(pairs)
+        if not pairs:
+            return []
+        block = next((b for b in (self.model_block(spec) for _n, spec in pairs) if b is not None), None)
+        if block is not None:
+            self._notify(block[0], "Choose model", self.choose_model)
+            return [None] * len(pairs)
+        try:
+            await self.background.prepare_for_run(pairs[0][1], long_job=long_job)
+        except Exception:
+            log.exception("background preparation failed; the jobs still run in the foreground")
+        return [self.service.submit(spec, instance=number) for number, spec in pairs]
 
     def undo_queue(self, job_id: str) -> bool:
         """The Queue snackbar's Undo (UI_SPEC §2.4): take the job out of the queue again."""
@@ -756,11 +804,24 @@ class JobsFeature:
             self._notify("It already started; stop it from the job strip")
         return cancelled
 
+    def strip_job_id(self) -> Optional[str]:
+        """The job the global strip shows (``JobStripModel.job_id``), else the first running job."""
+        model = getattr(getattr(self.state, "job_strip", None), "value", None)
+        job_id = getattr(model, "job_id", None)
+        if job_id:
+            return str(job_id)
+        running = running_jobs(self.service.view())
+        return running[0].id if running else None
+
     def stop_from_strip(self) -> Optional[str]:
-        return self.service.request_stop()
+        """The strip's Stop: the job it shows (with several instances running, the others keep going: each has
+        its own Stop on the Jobs page)."""
+        job_id = self.strip_job_id()
+        return self.service.request_stop(job_id) if job_id else self.service.request_stop()
 
     def open_strip_job(self) -> None:
-        snap = self.service.snapshot()
+        job_id = self.strip_job_id()
+        snap = self.service.snapshot(job_id) if job_id else self.service.snapshot()
         if snap is None and self._ended is not None:
             snap = self._ended[0]
         if snap is not None:
@@ -776,6 +837,9 @@ class JobsFeature:
                 return
             if snap.question and (snap.question or {}).get("kind") == "async_batch_question":
                 self._navigate("tools.async")  # Tools › Async batch answers the dialog's questions
+                return
+            if len(running_jobs(self.service.view())) > 1:
+                self._navigate("jobs")  # "+N running": every running job's card (the notification's tap too)
                 return
             if open_job_in_panel(self.page, snap.id):  # tablets: SidePanel (UI_SPEC §1.7)
                 return
@@ -865,11 +929,14 @@ class JobsFeature:
     # ---- JobService -> strip, badge, background, notifications ---------------------------------------
 
     def _strip_model(self, view: JobsView) -> Any:
+        """The strip's job (``view.active``: instance 1's, else the first running one) with "+N running" for the
+        other instances' running jobs, else a job that just ended."""
         if view.active is not None:
-            return strip_model_for(view.active, view.queued_count)
+            model = strip_model_for(view.active, view.queued_count)
+            return replace(model, job_id=view.active.id, running_more=max(0, len(running_jobs(view)) - 1))
         ended = self._ended
         if ended is not None and time.monotonic() < ended[1]:
-            return strip_model_for(ended[0], view.queued_count)
+            return replace(strip_model_for(ended[0], view.queued_count), job_id=ended[0].id)
         return None
 
     def _on_view(self, view: JobsView) -> None:
@@ -961,6 +1028,11 @@ class JobsFeature:
             # so this also runs while the dispatcher's pump is parked with the app hidden). Issue 12: also while
             # the gate's glossary is refined; the question is delivered again once the refinement ends.
             self.spawn(self.notifications.cancel_action(job_id))
+            return
+        if kind == RESUMED_EVENT:
+            # resumed from the Jobs page, the job's page, the Book page, a chat or the notification: its
+            # "Stopped: … Tap to resume" notification has nothing left to resume (one instance or several)
+            self.spawn(self.notifications.cancel_resumed(job_id))
             return
         if kind == "sign_in_required":
             # UI_SPEC §1.9: the job lost (or never had) its login (ChatGPT / Claude / Gemini / Grok)

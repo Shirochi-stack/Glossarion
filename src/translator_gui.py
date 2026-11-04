@@ -33,6 +33,26 @@ if __name__ == '__main__':
             )
             raise SystemExit(1)
 
+    # Multi-instance translation: instances 2..N of a run are this program started again with
+    # --run-translation-instance <job.json> (instance_runs). Handled before the GUI imports, so an
+    # instance process never initializes Qt; instance_worker.main ends the process itself.
+    if "--run-translation-instance" in _early_sys.argv:
+        _idx = _early_sys.argv.index("--run-translation-instance")
+        _job_path = (
+            _early_sys.argv[_idx + 1]
+            if len(_early_sys.argv) > _idx + 1 else ""
+        )
+        try:
+            from instance_worker import main as _instance_worker_main
+        except Exception as _instance_worker_exc:
+            print(
+                f"[ERROR] Translation instance failed to start: "
+                f"{_instance_worker_exc}",
+                flush=True,
+            )
+            raise SystemExit(1)
+        raise SystemExit(_instance_worker_main(_job_path))
+
     # Use the executable's bundled PySide6 for Arena's isolated browser helper.
     # Exit here before importing or opening the full translator GUI.
     if "--autharena-qt-browser" in _early_sys.argv:
@@ -1178,6 +1198,11 @@ from direct_text_stream import DirectTextStreamMixin
 # the Map Glossaries data steps, JSON repair) live in glossary_files; the methods and closures
 # below keep the widgets and call it.
 import glossary_files
+# Multi-instance translation: which file runs in which instance (instance_plan) and the main
+# window's side of such a run (instance_runs: assignment dialog, instance processes, per-instance
+# logs and watchdog filter).
+import instance_plan
+import instance_runs
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
 
 
@@ -9534,7 +9559,12 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 pass
 
             self._request_hard_stop_for_shutdown()
-            
+            # Multi-instance: no instance process outlives the window (instance_runs)
+            try:
+                instance_runs.shutdown(self)
+            except Exception as e:
+                print(f"[CLOSE] Could not end the instance processes: {e}")
+
             # Save all settings before shutdown so they persist across restarts
             try:
                 if getattr(self, '_config_restore_pending', False):
@@ -19363,7 +19393,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         def _delete_current_glossary():
             try:
                 epubs = glossary_files.selected_glossary_epubs(
-                    getattr(self, 'selected_files', []),
+                    instance_runs.user_selection(self),
                     getattr(self, 'get_current_epub_path', None),
                 )
                 if not epubs:
@@ -19435,7 +19465,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             """Find the latest backup subfolder across all selected EPUBs."""
             try:
                 epubs = glossary_files.selected_glossary_epubs(
-                    getattr(self, 'selected_files', []),
+                    instance_runs.user_selection(self),
                     getattr(self, 'get_current_epub_path', None),
                 )
                 if not epubs:
@@ -19487,7 +19517,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         pass
                     # Re-trigger glossary auto-load
                     epub_path = None
-                    files = list(getattr(self, 'selected_files', []) or [])
+                    files = instance_runs.user_selection(self)
                     epubs = [p for p in files if str(p).lower().endswith('.epub')]
                     if len(epubs) == 1:
                         epub_path = epubs[0]
@@ -19887,7 +19917,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 )
             return
 
-        if not hasattr(self, 'selected_files') or not self.selected_files:
+        # the user's selection (a multi-instance run narrows selected_files to instance 1's files)
+        selected_files = instance_runs.user_selection(self)
+        if not selected_files:
              # Try to use self.file_path if set (single file legacy/other mode)
              if hasattr(self, 'file_path') and self.file_path:
                  files = [self.file_path]
@@ -19895,7 +19927,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                  QMessageBox.warning(self, "No File Selected", "Please select a file first.")
                  return
         else:
-            files = self.selected_files
+            files = selected_files
             
         if not files:
              QMessageBox.warning(self, "No File Selected", "Please select a file first.")
@@ -20403,7 +20435,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         
         # Create a custom button widget with icon above text
         self.run_button = QPushButton()
-        self.run_button.clicked.connect(self.run_translation_thread)
+        self.run_button.clicked.connect(self._run_translation_clicked)
         
         # Create a container widget for custom layout
         button_container = QWidget()
@@ -20584,7 +20616,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         except Exception:
             pass
 
-        self.frame.addWidget(self.api_watchdog_bar, 10, 0, 1, 5)
+        # The bar shares row 10 with the multi-instance watchdog filter, hidden until a run uses
+        # several instances (instance_runs)
+        self.frame.addWidget(instance_runs.watchdog_row(self), 10, 0, 1, 5)
 
         # Log viewer (row 11, spans all 5 columns). QPlainTextEdit uses Qt's
         # block-oriented plain-text layout, which is specifically optimized
@@ -20612,7 +20646,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.log_text.setMinimumHeight(40)
         # Make sure it greedily expands vertically and horizontally but can also shrink.
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.frame.addWidget(self.log_text, 11, 0, 1, 5)  # row, col, rowspan, colspan
+        # One log per instance of a multi-instance run; this one is instance 1's (instance_runs)
+        self.frame.addWidget(instance_runs.log_area(self), 11, 0, 1, 5)  # row, col, rowspan, colspan
         
         # Setup context menu
         self.log_text.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -20678,6 +20713,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _update_api_watchdog(self):
         """Update the API watchdog progress bar based on in-flight API calls."""
+        # Multi-instance runs: None shows every instance, a number only that instance (instance_runs)
+        instance_view = instance_runs.watchdog_view(self)
         try:
             unified_api_client = sys.modules.get('unified_api_client')
             if unified_api_client is None:
@@ -20685,6 +20722,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             state = unified_api_client.get_api_watchdog_state()
         except Exception:
             state = {}
+        if instance_view not in (None, 1):
+            state = {}  # this process's own calls are instance 1's
 
         in_flight = 0
         backlog = 0
@@ -20726,8 +20765,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         try:
             watchdog_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
             if watchdog_dir and os.path.isdir(watchdog_dir):
-                import glob, json as _json
-                files = glob.glob(os.path.join(watchdog_dir, "api_watchdog_*.json"))
+                import json as _json
+                # this folder plus each instance process's subfolder (instance_runs)
+                files = instance_runs.watchdog_files(watchdog_dir)
                 if files:
                     total_in_flight = 0
                     total_backlog = 0
@@ -20741,6 +20781,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         try:
                             with open(fp, "r", encoding="utf-8") as f:
                                 st = _json.load(f)
+                            if instance_view is not None and instance_runs.file_instance(st, fp) != instance_view:
+                                continue
                             cnt = int(st.get("in_flight", 0) or 0)
                             total_in_flight += cnt
                             total_backlog += max(0, int(st.get("backlog", 0) or 0))
@@ -22887,7 +22929,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if hasattr(self, '_multi_file_retranslation_dialog') and self._multi_file_retranslation_dialog:
                 dlg = self._multi_file_retranslation_dialog
                 # Validate selection hasn't changed (user may have cleared/added EPUBs)
-                current_key = tuple(sorted(getattr(self, 'selected_files', [])))
+                current_key = tuple(sorted(instance_runs.user_selection(self)))
                 cached_key = getattr(self, '_multi_file_selection_key', None)
                 if cached_key is not None and current_key != cached_key:
                     # Selection changed — destroy stale dialog so it gets rebuilt
@@ -22907,8 +22949,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
             # Image folder cache
-            if hasattr(self, '_image_retranslation_dialog_cache') and hasattr(self, 'selected_files') and self.selected_files:
-                first = self.selected_files[0]
+            selected_files = instance_runs.user_selection(self)
+            if hasattr(self, '_image_retranslation_dialog_cache') and selected_files:
+                first = selected_files[0]
                 folder_key = os.path.abspath(first if os.path.isdir(first) else os.path.dirname(first))
                 cache = getattr(self, '_image_retranslation_dialog_cache', None)
                 if isinstance(cache, dict) and folder_key in cache and cache[folder_key]:
@@ -23349,6 +23392,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             ok_button.setMinimumSize(140, 44)
         return message_box
 
+    def _run_translation_clicked(self, *_args):
+        """The Run Translation button: a multi-instance run when the selection and the Translation
+        keys' instance numbers ask for one (instance_runs.start_run starts instance 1 through
+        run_translation_thread itself), otherwise run_translation_thread exactly as before."""
+        if instance_runs.start_run(self):
+            return
+        self.run_translation_thread()
+
     def run_translation_thread(self):
         """Start translation in a background worker (ThreadPoolExecutor)"""
         # Prevent overlap with glossary extraction
@@ -23677,7 +23728,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
        """Open the review generation dialog for the currently selected file."""
        try:
            # Find selected file (any supported type)
-           files = list(getattr(self, 'selected_files', []) or [])
+           files = instance_runs.user_selection(self)
            if not files:
                # Flash button text and play warning sound
                try:
@@ -23726,7 +23777,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
        try:
            if not hasattr(self, 'review_indicator_label'):
                return
-           files = list(getattr(self, 'selected_files', []) or [])
+           files = instance_runs.user_selection(self)
            if not files:
                self.review_indicator_label.hide()
                return
@@ -23747,7 +23798,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
        """Check if any background process is currently running"""
        translation_running = (
            (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
-           (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())
+           (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done()) or
+           instance_runs.children_alive(self)  # instance processes of a multi-instance run
        )
        glossary_running = (
            (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or
@@ -23771,7 +23823,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
        """Switch Run↔Stop depending on whether a process is active."""
        translation_running = (
            (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
-           (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())
+           (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done()) or
+           instance_runs.children_alive(self)  # instance processes of a multi-instance run
        )
        glossary_running = (
            (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or
@@ -23833,7 +23886,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                    background-color: #218838;
                }
            """)
-           self.run_button.clicked.connect(self.run_translation_thread)
+           self.run_button.clicked.connect(self._run_translation_clicked)
            self.run_button.setEnabled(not any_process_running)
            # Stop spinning animation gracefully with deceleration
            if hasattr(self, 'icon_spin_animation') and hasattr(self, 'run_button_icon') and hasattr(self, 'icon_stop_animation'):
@@ -24177,6 +24230,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             state.setdefault("last_change_ts", now)
             state["updated_ts"] = now
             state["pid"] = os.getpid()
+            state["instance"] = instance_plan.current_instance()  # the watchdog filter reads it
             path = os.path.join(watchdog_dir, f"api_watchdog_{os.getpid()}.json")
             tmp_path = f"{path}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -24332,6 +24386,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         # Schedule stop-flag reset once the worker has halted
         QTimer.singleShot(500, self._reset_stop_flags_if_idle)
+
+        # Multi-instance: the same Stop for every instance process (a stop file each; a double
+        # click or a second Stop ends their process trees) (instance_runs)
+        instance_runs.stop_children(self, graceful=graceful_stop, force=force_stop)
 
     def preserve_file_path(self, file_path):
        """Helper to ensure file path stays in the entry field"""
@@ -26038,9 +26096,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
        """Show context menu for log text"""
        context_menu = QMenu(self)
        context_menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
-       
+       # The log on screen: instance 1's log_text, or another instance's (instance_runs)
+       log_widget = instance_runs.visible_log(self)
+
        # Check if there's selected text
-       cursor = self.log_text.textCursor()
+       cursor = log_widget.textCursor()
        has_selection = cursor.hasSelection()
        
        copy_action = context_menu.addAction("Copy")
@@ -26061,11 +26121,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
        )
        
        # Show the context menu at the cursor position
-       context_menu.exec(self.log_text.mapToGlobal(pos))
+       context_menu.exec(log_widget.mapToGlobal(pos))
 
     def copy_selection(self):
        """Copy selected text from log to clipboard"""
-       cursor = self.log_text.textCursor()
+       cursor = instance_runs.visible_log(self).textCursor()
        if cursor.hasSelection():
            selected_text = cursor.selectedText()
            clipboard = QApplication.clipboard()
@@ -26073,7 +26133,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
     def select_all_log(self):
        """Select all text in the log"""
-       self.log_text.selectAll()
+       instance_runs.visible_log(self).selectAll()
 
     # File Selection Methods
     def dragEnterEvent(self, event):
@@ -29642,7 +29702,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         # If multiple EPUBs are selected, let the user map glossaries per-EPUB.
         try:
-            epubs = [p for p in getattr(self, 'selected_files', []) if str(p).lower().endswith('.epub')]
+            epubs = [p for p in instance_runs.user_selection(self) if str(p).lower().endswith('.epub')]
         except Exception:
             epubs = []
         if len(epubs) > 1:

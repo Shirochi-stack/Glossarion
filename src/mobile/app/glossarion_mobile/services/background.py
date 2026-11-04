@@ -51,6 +51,16 @@ from the background), so they are only released when the queue drains. The
 service is shared with a sign-in waiting in the browser (``OAuthBridge``)
 through the bridge's ``ServiceHolds``: the last one to finish stops it.
 
+Multi-instance (design §6): jobs of several instances run at once
+(``JobService.running_snapshots``). They share the one foreground service, its
+notification and the background grant: the notification then summarises them,
+one row per running job ("[2] Translating • [3/12] Ch. 3 · Book") followed by
+that job's own 🧠 / ✍️ stream row (and the on-device row of the job that uses
+the on-device model; ``jobs.notification_summary``); a job that ends while
+another instance's runs leaves the service to it. **Stop** stops every running
+job (``request_stop_all``), **Open** / tap opens the Jobs page while more than one
+runs, and a system time limit stops every job that does not only finish.
+
 Both: ``Wakelock`` while a job runs when "Keep screen on during jobs" is on
 (Prefs ``keep_screen_on_during_jobs``; default on for iOS, off on Android
 where the foreground service holds a CPU wake lock with the screen off).
@@ -553,12 +563,16 @@ class BackgroundExecution:
 
         text = notification_text(snap)
         headline, book = notification_lines(snap)
+        running = self._running(snap)
+        if len(running) > 1:  # another instance's job runs: the notification summarises them all
+            headline, first, rows, text = self._notification(snap, running)
+            book = "\n".join(r for r in (first, *rows) if r)
         if self.is_android:
             if self.notifications is not None:
                 await self.notifications.ensure_init()
             if self.service_running:
                 # The service stayed up for this queued job (Android does not allow starting a
-                # foreground service while the app is in the background).
+                # foreground service while the app is in the background), or another instance's job holds it.
                 await self._native("update_job_service", title=headline, text=book)
             else:
                 started = await self._native("start_job_service", headline, book, default=False,
@@ -591,14 +605,61 @@ class BackgroundExecution:
         self._browser_pages(True, snap)
         self._sync_ticker()  # a job that starts while the app is hidden
 
+    def _running(self, snap: Any = None) -> list:
+        """Every instance's running job (``JobService.running_snapshots``) with ``snap``, the freshest view of its
+        job, in its place; a jobs service without it (one instance): ``snap`` alone."""
+        getter = getattr(self.jobs, "running_snapshots", None) if self.jobs is not None else None
+        if not callable(getter):
+            return [snap] if snap is not None else []
+        try:
+            running = [s for s in getter() if s is not None]
+        except Exception:
+            log.debug("the running jobs are unavailable", exc_info=True)
+            return [snap] if snap is not None else []
+        if snap is not None:
+            ids = [getattr(s, "id", None) for s in running]
+            if getattr(snap, "id", None) in ids:
+                running[ids.index(snap.id)] = snap
+            elif getattr(snap, "is_active", False):
+                running.append(snap)
+        return running
+
+    def _rows_of(self, snap: Any) -> list:
+        """One running job's live rows in a multi-instance notification: its stream row (shorter than a single
+        job's) and its on-device row only when it is the job using the on-device model (``device_row``)."""
+        from glossarion_mobile.services.jobs import NOTIFICATION_SUMMARY_STREAM_CHARS, live_rows
+
+        job_id = getattr(snap, "id", None)
+        tail, thinking, device = "", False, ""
+        try:
+            tail = str(self.jobs.stream_tail(job_id) or "")
+            thinking = bool(self.jobs.stream_thinking(job_id))
+            device = str(self.jobs.device_row(job_id) or "")
+        except Exception:
+            log.debug("the notification rows of job %s failed", job_id, exc_info=True)
+        if not self.is_android:
+            tail, device = "", ""  # the iOS continued-processing task shows one line per job
+        return live_rows(snap, tail, thinking, device=device, limit=NOTIFICATION_SUMMARY_STREAM_CHARS)
+
+    def _notification(self, snap: Any, running: Optional[list] = None) -> tuple:
+        """(headline, book line, live rows, text) of the ongoing notification: ``snap``'s as before while it runs
+        alone, else the summary of every running job (one row each, then that job's live rows)."""
+        from glossarion_mobile.services.jobs import notification_lines, notification_summary, notification_text
+
+        running = self._running(snap) if running is None else running
+        if len(running) <= 1:
+            rows = self._live_rows(snap)
+            headline, book = notification_lines(snap)
+            return headline, book, rows, "\n".join([notification_text(snap), *rows])
+        headline, lines = notification_summary(running, self._rows_of)
+        return headline, lines[0], list(lines[1:]), "\n".join([headline, *lines])
+
     async def job_progress(self, snap: Any, *, force: bool = False) -> bool:
         """Throttled (1/s) progress to the FGS notification / iOS Live Activity; a change the throttle holds
-        back is sent by the next tick (trailing edge)."""
-        from glossarion_mobile.services.jobs import notification_lines, notification_text
-
+        back is sent by the next tick (trailing edge). While jobs of several instances run, it shows them all."""
         now = self.clock()
-        rows = self._live_rows(snap)
-        text = "\n".join([notification_text(snap), *rows])
+        running = self._running(snap)
+        headline, book, rows, text = self._notification(snap, running)
         # a little slack: the 1 s ticker must not land just under the interval and skip every other second
         if not force and now - self._last_update < self.update_interval - min(UPDATE_SLACK, self.update_interval / 10):
             if text != self._last_text:
@@ -612,7 +673,7 @@ class BackgroundExecution:
         self._pending = None
         self._last_update = now
         self._last_text = text
-        headline, book = self._last_lines = notification_lines(snap)
+        self._last_lines = (headline, book)
         if self.is_android and self.service_running:
             holds = service_holds(self.native)
             if holds is not None:
@@ -623,8 +684,11 @@ class BackgroundExecution:
             self._sync_ticker()  # live rows keep the ticker going, the app visible or not
             return True
         if self.is_ios and self.continued_started:
-            await self._native("update_continued_processing", int(progress.completed or 0),
-                               int(progress.total or 0), text)
+            done, total = int(progress.completed or 0), int(progress.total or 0)
+            if len(running) > 1:  # one task for every running job: their chapters together
+                done = sum(int(getattr(s.progress, "completed", 0) or 0) for s in running)
+                total = sum(int(getattr(s.progress, "total", 0) or 0) for s in running)
+            await self._native("update_continued_processing", done, total, text)
             return True
         return False
 
@@ -634,6 +698,12 @@ class BackgroundExecution:
         self._pending = None
         if self.notifications is not None:
             await self.notifications.job_finished(snap)
+        others = [s for s in self._running() if getattr(s, "id", None) != snap.id and getattr(s, "is_active", False)]
+        if others:
+            # another instance's job still runs: the service, the background grant, the wakelock and the ticker
+            # stay with it, and the notification shows what still runs
+            await self.job_progress(others[0], force=True)
+            return
         if self._next_job_waiting():
             if self.is_android and self.service_running:
                 await self._native("update_job_service", title="Glossarion", text="Starting the next job…")
@@ -714,10 +784,11 @@ class BackgroundExecution:
         """While the app is hidden the UI dispatcher parks the jobs view (``_on_view`` stops calling
         ``job_progress``), so the ticker reads the active job itself; while visible it only runs to send an
         update the throttle held back, or a swiped-away notification the re-post limit held back."""
-        # live rows keep it going, and so do rows still shown (their removal must reach the notification)
+        # live rows keep it going, and so do rows still shown (their removal must reach the notification); so do
+        # jobs of several instances (each one's row)
         return self._service_up() and (not self.app_visible or self._pending is not None or self._repost_wanted
                                        or getattr(self, "_rows_shown", False)
-                                       or bool(self._live_rows(self._active())))
+                                       or bool(self._live_rows(self._active())) or len(self._running()) > 1)
 
     def _live_rows(self, snap: Any) -> list:
         """The job notification's live rows (``jobs.live_rows``: on-device speed, streamed text); Android only
@@ -805,8 +876,28 @@ class BackgroundExecution:
     # ---- native events (UI loop) ---------------------------------------------------------------
 
     def _active(self) -> Any:
+        """Instance 1's running job, else the first running job of another instance."""
         jobs = self.jobs
-        return jobs.snapshot() if jobs is not None else None
+        if jobs is None:
+            return None
+        snap = jobs.snapshot()
+        if snap is None and callable(getattr(jobs, "running_snapshots", None)):
+            running = self._running()
+            snap = running[0] if running else None
+        return snap
+
+    async def _stop_every_instance(self, running: list, *, reason: str, paused: str) -> None:
+        """A system limit while jobs of several instances run: each job stops (gracefully, never escalated) and
+        gets its "Paused" notification, except a job that only finishes (hotfix 5), which goes on."""
+        for snap in running:
+            if job_finishing(snap):
+                log.info("background time limit while job %s finishes: it keeps going", getattr(snap, "id", "?"))
+                if self.notifications is not None:
+                    await self.notifications.finishing(snap)
+                continue
+            self.jobs.request_stop(snap.id, escalate=False, reason=reason)
+            if self.notifications is not None and paused:
+                await self.notifications.paused(snap, paused)
 
     def _next_job_waiting(self) -> bool:
         """A queued job starts right after this one: keep the service / background grant."""
@@ -829,10 +920,16 @@ class BackgroundExecution:
             return
         if kind == "button" and button == "stop":
             if self.jobs is not None:
-                self.jobs.request_stop(reason="Stop pressed in the notification")
+                stop_all = getattr(self.jobs, "request_stop_all", None)
+                if callable(stop_all):  # the one notification stands for every instance's running job
+                    stop_all(reason="Stop pressed in the notification")
+                else:
+                    self.jobs.request_stop(reason="Stop pressed in the notification")
             return
         if (kind == "button" and button == "open") or kind == "tap":
-            if snap is not None and self.navigate_route is not None:
+            if len(self._running(snap)) > 1 and self.navigate_route is not None:
+                self.navigate_route("/jobs")  # jobs of several instances: the Jobs page lists them all
+            elif snap is not None and self.navigate_route is not None:
                 self.navigate_route(f"/job/{snap.id}")
             return
         if kind in ("timeout", "destroyed"):
@@ -844,6 +941,11 @@ class BackgroundExecution:
         if kind == "timeout" or (kind == "destroyed" and event.get("is_timeout")):
             self.service_running = False
             self._sync_ticker()
+            running = self._running(snap)
+            if len(running) > 1 and self.jobs is not None:
+                await self._stop_every_instance(running, reason="Android ended the background service (time limit)",
+                                                paused="system limit")
+                return
             if snap is not None and self.jobs is not None:
                 if job_finishing(snap):
                     # hotfix 5: all chapters are in, only the EPUB build is left - a graceful stop would end it
@@ -852,7 +954,9 @@ class BackgroundExecution:
                     if self.notifications is not None:
                         await self.notifications.finishing(snap)
                     return
-                self.jobs.request_stop(escalate=False, reason="Android ended the background service (time limit)")
+                # by its id: the one job left may be an instance's (no id stops instance 1's job only)
+                self.jobs.request_stop(getattr(snap, "id", None), escalate=False,
+                                       reason="Android ended the background service (time limit)")
                 if self.notifications is not None:
                     await self.notifications.paused(snap, "system limit")
             return
@@ -899,8 +1003,16 @@ class BackgroundExecution:
         else:
             return
         snap = self._active()
+        running = self._running(snap)
+        if len(running) > 1 and self.jobs is not None:
+            for each in running:  # every instance's job pauses (graceful, never escalated)
+                self.jobs.request_stop(each.id, escalate=False, reason="iOS paused the app in the background")
+                if self.notifications is not None and kind == "continued_expired":
+                    await self.notifications.paused(each, "background time ended")
+            return
         if snap is not None and self.jobs is not None:
-            self.jobs.request_stop(escalate=False, reason="iOS paused the app in the background")
+            # by its id: the one job left may be an instance's (no id stops instance 1's job only)
+            self.jobs.request_stop(getattr(snap, "id", None), escalate=False, reason="iOS paused the app in the background")
             if self.notifications is not None and kind == "continued_expired":
                 await self.notifications.paused(snap, "background time ended")
 

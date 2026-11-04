@@ -1904,14 +1904,17 @@ class MangaRunMixin:
                         pass
                     
                     # Filter out important GUI processes we should keep
+                    from instance_plan import in_instance_process_tree
                     processes_to_terminate = []
                     for child in children:
                         try:
                             # Get process name to avoid killing important processes
                             name = child.name().lower()
                             # Only terminate Python/script processes, not system processes
-                            # Skip inpainter workers — they survive stop and are reused
-                            if ('python' in name or 'glossarion' in name) and child.pid not in _protected_pids:
+                            # Skip inpainter workers — they survive stop and are reused — and the
+                            # instance processes of a multi-instance run (they have their own Stop)
+                            if (('python' in name or 'glossarion' in name) and child.pid not in _protected_pids
+                                    and not in_instance_process_tree(child)):
                                 processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             continue

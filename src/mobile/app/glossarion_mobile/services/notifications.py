@@ -7,7 +7,7 @@ Channels (created by ``init_notifications`` from the extension's
   (owned by ``BackgroundExecution``: ``start/update/stop_job_service``);
 * ``jobs.done``: "Done: *Book*" / "Stopped: *Book* (12/80)" / "Failed: *Book*";
   tap -> the job's route, actions **Open** and **Share** (when the job has one
-  compiled output);
+  compiled output); withdrawn once the job is resumed (``cancel_resumed``);
 * ``jobs.action``: "Glossary ready: review needed" (actions **Accept** /
   **Review**), "Answer needed: *question*" (Tools › Async batch), "Sign-in
   required for ChatGPT", "Paused (system limit): tap to resume".
@@ -43,6 +43,7 @@ __all__ = [
     "NotificationTap",
     "action_notification_id",
     "chat_of",
+    "done_notification_id",
     "done_text",
     "job_route",
     "question_route",
@@ -125,6 +126,11 @@ def action_notification_id(job_id: str) -> int:
     return _notification_id(_ACTION_BASE, str(job_id))
 
 
+def done_notification_id(job_id: str) -> int:
+    """The id of job ``job_id``'s ``jobs.done`` notification ("Done" / "Stopped: … Tap to resume" / "Failed")."""
+    return _notification_id(_DONE_BASE, str(job_id))
+
+
 def done_text(snap: Any) -> tuple:
     """(title, body) for the ``jobs.done`` notification."""
     from glossarion_mobile.services.jobs import JobState
@@ -198,7 +204,7 @@ class JobNotifications:
         if len(snap.outputs) == 1:
             actions.append({"id": ACTION_SHARE, "title": "Share"})
         await self.cancel_action(snap.id)
-        return await self._show(_notification_id(_DONE_BASE, snap.id), title, body, channel=CHANNEL_DONE,
+        return await self._show(done_notification_id(snap.id), title, body, channel=CHANNEL_DONE,
                                 route=job_route(snap.id), actions=actions)
 
     async def glossary_review_needed(self, snap: Any) -> bool:
@@ -236,6 +242,15 @@ class JobNotifications:
             await self.native.cancel_notification(action_notification_id(job_id))
         except Exception:
             pass
+
+    async def cancel_resumed(self, job_id: str) -> None:
+        """Job ``job_id`` was resumed (``jobs.RESUMED_EVENT``, from any Resume button): its "Stopped: … Tap to
+        resume" / "Failed" notification and its "Paused (system limit)" one have nothing left to resume."""
+        try:
+            await self.native.cancel_notification(done_notification_id(job_id))
+        except Exception:
+            pass
+        await self.cancel_action(job_id)
 
     @staticmethod
     def parse_event(event: Mapping[str, Any]) -> Optional[NotificationTap]:

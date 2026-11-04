@@ -65,6 +65,10 @@ class JobStripModel:
     # so its chat hides the strip; a chat-origin job without a card (Extract glossary, Compile, a
     # Library translation from the Plan card) keeps the strip there (progress, Stop, Done · Open).
     chat_card: bool = True
+    # Multi-instance translation: the job the strip shows (its Stop / Open act on it) and how many other
+    # instances run a job meanwhile ("+1 running"; their cards are on the Jobs page)
+    job_id: Optional[str] = None
+    running_more: int = 0
 
 
 @dataclass(frozen=True)

@@ -91,8 +91,10 @@ def jobs_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queue
     folder = folder or book.get("output_folder")
     folder = _norm(folder) if folder else None
     raw = _norm(book.get("raw_source_path")) if book.get("raw_source_path") else None
-    candidates = ([view.active] if getattr(view, "active", None) is not None else []) + (
-        list(getattr(view, "queue", ()) or ()) if include_queued else [])
+    from glossarion_mobile.ui.screens.jobs import running_jobs
+
+    # every instance's running job (a book of a multi-instance translation may run in instance 2)
+    candidates = list(running_jobs(view)) + (list(getattr(view, "queue", ()) or ()) if include_queued else [])
     out = []
     for snap in candidates:
         spec = getattr(snap, "spec", None)
@@ -114,9 +116,10 @@ def job_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queued
 
 def run_wait_reason(view: Any, bid: str, book: Mapping[str, Any], *, folder: Optional[str] = None) -> Optional[str]:
     """Why Chapters › Run translation / Run QA scan wait (None: they can start), hotfix 1 issue 7: a translation
-    or glossary run is going (``view.active``, also while it waits at its glossary gate) or one is queued for this
-    book."""
-    active = getattr(view, "active", None) if view is not None else None
+    or glossary run is going (instance 1's job, which a new run would queue behind, also while it waits at its
+    glossary gate) or one is queued for this book."""
+    instance_job = getattr(view, "instance_job", None) if view is not None else None
+    active = instance_job(1) if callable(instance_job) else (getattr(view, "active", None) if view is not None else None)
     if active is not None and not getattr(active, "is_terminal", False):
         kind = job_kind_of(active)
         if kind in GLOSSARY_RUN_KINDS:

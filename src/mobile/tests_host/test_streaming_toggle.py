@@ -266,7 +266,7 @@ def test_reset_goes_back_to_the_mobile_default_with_undo(tmp_path):
 def _job_config(store, overrides=None):
     from glossarion_mobile.services.jobs import JobService
 
-    holder = types.SimpleNamespace(config_store=store, _config_loader=None)
+    holder = types.SimpleNamespace(config_store=store, _config_loader=None, _note_job_running=store.set_job_running)
     job = types.SimpleNamespace(spec=types.SimpleNamespace(params={"config_overrides": dict(overrides or {})}))
     try:
         return JobService._config_snapshot(holder, job)

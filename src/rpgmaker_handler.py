@@ -4,6 +4,8 @@ from safe_image import open_image
 # Detects RPG Maker version, extracts translatable text, sends through
 # Glossarion's translation pipeline, and patches translations back.
 import os
+# Multi-instance: an instance >= 2 keeps its payload folders under Payloads/Instance N
+from instance_plan import instance_payloads_dir
 import sys
 import json
 import re
@@ -2306,7 +2308,7 @@ def translate_game_images(
                         log(f"   📝 Response was: {response_text[:200]}")
                         # Dump full response to Payloads/image/skipped/ for debugging
                         try:
-                            skipped_dir = os.path.join("Payloads", "image", "skipped")
+                            skipped_dir = os.path.join(instance_payloads_dir("Payloads"), "image", "skipped")
                             os.makedirs(skipped_dir, exist_ok=True)
                             safe_name = re.sub(r'[\\/:*?"<>|]', '_', os.path.splitext(os.path.basename(rel))[0])
                             ts = __import__('datetime').datetime.now().strftime("%Y%m%d_%H%M%S")

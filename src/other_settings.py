@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics, QIntValidator
+# The user's input selection (a multi-instance run narrows selected_files to instance 1's files)
+from instance_runs import user_selection
 from PySide6.QtCore import QObject, Signal
 from translation_artifacts import (
     load_translation_artifact_progress,
@@ -330,8 +332,8 @@ def discover_glossary_entry_types(self):
             # Try to derive from selected EPUB
             override = os.environ.get('OUTPUT_DIRECTORY', '')
             epub_path = os.environ.get('EPUB_PATH', '')
-            if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
-                for f in self.selected_files:
+            if not epub_path and user_selection(self):
+                for f in user_selection(self):
                     if str(f).lower().endswith('.epub'):
                         epub_path = str(f)
                         break
@@ -9872,7 +9874,7 @@ def _create_processing_options_section(self, parent):
         if getattr(self, '_md_txt_retro_running', False):
             return
 
-        files = list(getattr(self, 'selected_files', None) or [])
+        files = user_selection(self)
         if not files:
             try:
                 _p = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ''
@@ -10522,7 +10524,7 @@ def _create_processing_options_section(self, parent):
         if getattr(self, '_manual_br_conversion_running', False):
             return
 
-        files = list(getattr(self, 'selected_files', None) or [])
+        files = user_selection(self)
         if not files:
             try:
                 selected_path = (
@@ -15868,8 +15870,8 @@ def validate_epub_structure_gui(self):
 
     # Gather all selected EPUB files
     epub_files_to_process = []
-    if hasattr(self, 'selected_files') and self.selected_files:
-        current_epub_files = [f for f in self.selected_files if str(f).lower().endswith('.epub')]
+    if user_selection(self):
+        current_epub_files = [f for f in user_selection(self) if str(f).lower().endswith('.epub')]
         if current_epub_files:
             epub_files_to_process = [str(f) for f in current_epub_files]
     if not epub_files_to_process:
@@ -15961,8 +15963,8 @@ def _delete_translation_cache_files(self, kind, error_label):
         epub_files_to_process = []
 
         # First check if current selection actually contains EPUBs
-        if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+        if user_selection(self):
+            current_epub_files = [f for f in user_selection(self) if f.lower().endswith('.epub')]
             if current_epub_files:
                 epub_files_to_process = current_epub_files
                 self.append_log(f"📚 Found {len(epub_files_to_process)} EPUB files in current selection")

@@ -1,5 +1,7 @@
 # extract_glossary_from_epub.py
 import os
+# Multi-instance: an instance >= 2 keeps its payload folders under Payloads/Instance N
+from instance_plan import instance_payloads_dir
 from urllib.parse import unquote
 import json
 import contextlib
@@ -6839,7 +6841,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
     # Thread-safe payload directory
     thread_name = threading.current_thread().name
     thread_id = threading.current_thread().ident
-    thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+    thread_dir = os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")
     try:
         os.makedirs(thread_dir, exist_ok=True)
     except (PermissionError, OSError):
@@ -7207,7 +7209,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     # Thread-safe payload directory
     thread_name = threading.current_thread().name
     thread_id = threading.current_thread().ident
-    thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+    thread_dir = os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")
     try:
         os.makedirs(thread_dir, exist_ok=True)
     except (PermissionError, OSError):
@@ -10199,7 +10201,7 @@ def main(log_callback=None, stop_callback=None):
                         # Save chunk response with thread-safe location
                         thread_name = threading.current_thread().name
                         thread_id = threading.current_thread().ident
-                        thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+                        thread_dir = os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")
                         try:
                             os.makedirs(thread_dir, exist_ok=True)
                         except (PermissionError, OSError):
@@ -10378,7 +10380,7 @@ def main(log_callback=None, stop_callback=None):
                     # Save the raw response with thread-safe location
                     thread_name = threading.current_thread().name
                     thread_id = threading.current_thread().ident
-                    thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+                    thread_dir = os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")
                     try:
                         os.makedirs(thread_dir, exist_ok=True)
                     except (PermissionError, OSError):

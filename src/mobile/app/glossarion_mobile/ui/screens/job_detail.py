@@ -1,6 +1,7 @@
 """Job detail (``/jobs/<jid>``, UI_SPEC §1.8; also the target of ``/job/<jid>`` notification links).
 
-* Header: title, origin link, state chip, progress bar (determinate once
+* Header: title, origin link, state chip (and "Instance N" for a job of a multi-instance
+  translation; its on-device row is ``JobService.device_row`` of this job), progress bar (determinate once
   ``ProgressWatcher`` knows the chapter total), "Ch 12/80 · 3 in flight ·
   12:41", elapsed and ETA (UI-only moving average of chapter completions),
   the error for failed jobs and the pending question ("Waiting for your
@@ -44,6 +45,7 @@ from glossarion_mobile.services.jobs import (
     JobSnapshot,
     JobState,
     format_duration,
+    instance_label,
     issue_label,
     job_target,
     kind_icon,
@@ -273,8 +275,14 @@ class JobDetailScreen(Screen):
                                   key="job-issue")
         self.qa_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
                                on_click=lambda e: self._on_progress(failed=True), visible=False, key="job-qa-failed")
-        self.state_row = ft.Row([self.state_chip, self.files_button, self.origin_button], wrap=True, spacing=8,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER, key="job-state-row")
+        # a job of a multi-instance translation names its instance (its own keys, log and watchdog); after
+        # Files, which stays beside the state
+        from glossarion_mobile.ui.screens.jobs import is_instance_job
+
+        self.instance_chip = ft.Chip(label=ft.Text(instance_label(self.snap)), leading=ft.Icon(ft.Icons.NUMBERS, size=16),
+                                     visible=is_instance_job(self.snap), key="job-instance")
+        self.state_row = ft.Row([self.state_chip, self.files_button, self.instance_chip, self.origin_button], wrap=True,
+                                spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="job-state-row")
         header = SectionCard(
             title="Job",
             icon=kind_icon(self.snap.kind),
@@ -583,7 +591,9 @@ class JobDetailScreen(Screen):
         snap = self.snap
         if snap is None or snap.question or not snap.is_active:
             return ""
-        return on_device_row(threads=True)
+        # per job: '' for another instance's job that does not run on local/
+        row = getattr(getattr(self, "service", None), "device_row", None)
+        return str(row(snap.id, threads=True) or "") if callable(row) else on_device_row(threads=True)
 
     def apply_device_status(self) -> bool:
         """Show ``device_row`` beside the Log title; True when it changed."""

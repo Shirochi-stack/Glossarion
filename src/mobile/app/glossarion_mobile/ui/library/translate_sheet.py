@@ -15,7 +15,12 @@ mode (the chat's ``effective_glossary_label``, the desktop rule) - plus:
 * **Start**: :func:`confirm_output_root` first (the desktop "Output Folder Mismatch"
   question of Load for translation), then ``LibraryService.translate_spec`` ->
   ``JobsFeature.submit`` (origin = book, so the Book page strip, the JobStrip and Jobs
-  show it).
+  show it);
+* multi-instance translation (design §6, ``instance_plan``): when several books are loaded and the
+  enabled Translation keys carry 2+ instance numbers, each book row has an instance dropdown
+  (prefilled from the saved ``instance_file_map``, else round-robin, like the desktop assignment
+  dialog) and a line names the jobs; Start saves the choice and queues one ``translate`` job per
+  instance with only its books (:func:`submit_instances`). Otherwise the one job of before.
 
 Raw sources are resolved on the io pool before the sheet opens
 (:func:`open_translate_sheet`); books without one are listed with the desktop
@@ -42,7 +47,7 @@ from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.library.models import size_text
 
 __all__ = ["OUTPUT_MISMATCH_TITLE", "TranslateSheet", "confirm_output_root", "open_translate_sheet",
-           "resume_translation", "review_gate_supported", "submit_translation"]
+           "resume_translation", "review_gate_supported", "submit_instances", "submit_translation"]
 
 log = logging.getLogger("glossarion.library.ui")
 
@@ -141,11 +146,22 @@ class TranslateSheet:
         self.books = [dict(b) for b in books]
         self.sources = list(sources)
         self.started_job: Optional[str] = None
+        self.started_jobs: list = []  # every job Start queued (one per instance of a multi-instance run)
         service = ctx.service
         cfg = service.cfg
         ready = [b for b, s in zip(self.books, self.sources) if s]
         self.ready_books = ready
         self.ready_sources = [s for s in self.sources if s]  # aligned with ready_books
+        # Multi-instance translation (design §6): with the Translation keys on 2+ instances, each book gets an
+        # instance (prefilled from the saved instance_file_map, else round-robin) and Start queues one job per
+        # instance with only its books; otherwise the one job of today (``instances`` stays empty).
+        self.instances: list = []
+        self.assignment: dict = {}  # {source: instance}
+        self.instance_pickers: dict = {}  # source -> Dropdown
+        finder = getattr(service, "instance_assignment", None)
+        multi = finder(self.ready_sources) if callable(finder) and len(self.ready_sources) > 1 else None
+        if multi is not None:
+            self.instances, self.assignment = list(multi[0]), dict(multi[1])
         rows: list[ft.Control] = []
         for index, (book, source) in enumerate(zip(self.books, self.sources)):
             name = str(book.get("name") or os.path.basename(source or ""))
@@ -156,10 +172,13 @@ class TranslateSheet:
                     meta = f"{os.path.splitext(source)[1].lstrip('.').upper()} · {size_text(os.path.getsize(source))}"
                 except OSError:
                     meta = os.path.splitext(source)[1].lstrip(".").upper()
+                # the same file selected twice runs once: one picker, on its first row
+                picker = (self._instance_picker(index, source)
+                          if source in self.assignment and source not in self.instance_pickers else None)
                 rows.append(ft.ListTile(leading=ft.Icon(ft.Icons.MENU_BOOK), title=ft.Text(name, max_lines=2),
                                         subtitle=ft.Text(f"{os.path.basename(source)} · {meta}", max_lines=1,
                                                          overflow=ft.TextOverflow.ELLIPSIS),
-                                        dense=True, key=f"translate-book-{index}"))
+                                        trailing=picker, dense=True, key=f"translate-book-{index}"))
             else:
                 rows.append(ft.ListTile(leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR),
                                         title=ft.Text(name, max_lines=2),
@@ -217,6 +236,9 @@ class TranslateSheet:
         self.start_reason = self.base_reason or (self.model_block[0] if self.model_block is not None else None)
         self.start_button = ft.FilledButton(content="Start", icon=ft.Icons.PLAY_ARROW, on_click=self._on_start,
                                             disabled=self.start_reason is not None, key="start")
+        self.instance_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                     visible=bool(self.assignment), key="translate-instances")
+        self._refresh_instances(push=False)
         chat_handler = self._chat_handler()
         self.chat_reason = None
         if chat_handler is None:
@@ -234,13 +256,14 @@ class TranslateSheet:
         scale = float(getattr(ctx, "text_scale", 1.0) or 1.0)
         content = fitted_column([
             ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600, key="title"),
+            self.instance_text,
             *rows,
             self.facts_row,
             *run_controls,
             ft.Row(review_row, wrap=True),
             self.start_reason_text,
             ft.Row([self.chat_button, self.start_button], alignment=ft.MainAxisAlignment.END, wrap=True),
-        ], spacing=tokens.SPACING["sm"], estimate=(360 + 56 * len(rows)) * scale)
+        ], spacing=tokens.SPACING["sm"], estimate=(360 + 56 * len(rows) + (40 if self.assignment else 0)) * scale)
         self.sheet = ft.BottomSheet(
             content=sheet_frame(content, padding=tokens.SPACING["sheet_padding"]),
             show_drag_handle=True,
@@ -289,6 +312,51 @@ class TranslateSheet:
         self.start_reason_text.visible = bool(self.start_reason)
         self.ctx.push(self.facts_row, self.start_button, self.start_reason_text)
 
+    # ---- multi-instance assignment -----------------------------------------------------------------------
+
+    def _instance_picker(self, index: int, source: str) -> ft.Dropdown:
+        """A book row's instance dropdown (the desktop assignment dialog's per-file combo)."""
+        picker = ft.Dropdown(value=str(self.assignment[source]), dense=True, width=150,
+                             options=[ft.DropdownOption(key=str(n), text=f"Instance {n}") for n in self.instances],
+                             on_select=lambda e, s=source: self.set_instance(s, e.control.value),
+                             key=f"translate-instance-{index}")
+        self.instance_pickers[source] = picker
+        return picker
+
+    def instance_groups(self) -> dict:
+        """{instance: [sources]} of the current assignment (``instance_plan.plan``); {} for a single-instance run."""
+        if not self.assignment:
+            return {}
+        import instance_plan
+
+        return instance_plan.plan(self.ready_sources, self.assignment)
+
+    def set_instance(self, source: str, value: Any) -> int:
+        """A picker changed: ``source`` runs in instance ``value`` (an instance with keys; others are refused)."""
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 0
+        if number not in self.instances:
+            number = self.assignment.get(source, self.instances[0] if self.instances else 1)
+        self.assignment[source] = number
+        picker = self.instance_pickers.get(source)
+        if picker is not None:
+            picker.value = str(number)
+        self._refresh_instances()
+        return number
+
+    def _refresh_instances(self, *, push: bool = True) -> None:
+        """The jobs line over the books: "2 parallel jobs · Instance 1: 1 book · Instance 2: 1 book" (one line on a
+        phone, so Start stays in view; the key editor explains instances)."""
+        plan = self.instance_groups()
+        if plan:
+            parts = [f"Instance {n}: {len(files)} book{'s' if len(files) != 1 else ''}" for n, files in plan.items()]
+            lead = f"{len(plan)} parallel jobs" if len(plan) > 1 else f"1 job on Instance {next(iter(plan))}'s keys"
+            self.instance_text.value = " · ".join([lead, *parts])
+        if push:
+            self.ctx.push(self.instance_text, *self.instance_pickers.values())
+
     def _review_changed(self, e: Any = None) -> None:
         if self.review_hint is not None:
             self.review_hint.visible = bool(self.review_switch.value)
@@ -323,8 +391,17 @@ class TranslateSheet:
         overrides = self.run_panel.config_overrides() if self.run_panel is not None else {}
         if self.picked_model:
             overrides = {"model": self.picked_model, **overrides}
-        job_id = await submit_translation(self.ctx, self.ready_books, self.ready_sources,
-                                          review_glossary=bool(self.review_switch.value), config_overrides=overrides)
+        if self.assignment:  # multi-instance: one job per instance, the choice remembered for next time
+            self.ctx.service.save_instance_assignment(self.assignment)
+            self.started_jobs = await submit_instances(self.ctx, self.ready_books, self.ready_sources, self.assignment,
+                                                       review_glossary=bool(self.review_switch.value),
+                                                       config_overrides=overrides)
+            job_id = next((j for j in self.started_jobs if j), None)
+        else:
+            job_id = await submit_translation(self.ctx, self.ready_books, self.ready_sources,
+                                              review_glossary=bool(self.review_switch.value),
+                                              config_overrides=overrides)
+            self.started_jobs = [job_id]
         self.started_job = job_id
         self.close()
         self.ctx.haptic("medium_impact")
@@ -412,6 +489,18 @@ async def submit_translation(ctx: Any, books: Sequence[Mapping[str, Any]], sourc
     spec = service.translate_spec(list(books), review_glossary=review_glossary, sources=list(sources),
                                   config_overrides=dict(config_overrides or {}), **tied)
     return await service.submit(spec)
+
+
+async def submit_instances(ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str],
+                           assignment: Mapping[str, int], *, review_glossary: bool = False,
+                           config_overrides: Optional[Mapping[str, Any]] = None) -> list:
+    """A multi-instance Start: ``LibraryService.translate_instance_specs`` (one ``translate`` job per instance with
+    only its books) -> ``submit_instances`` (each job queued on its instance). Returns the job ids."""
+    service = ctx.service
+    pairs = service.translate_instance_specs(list(books), sources=list(sources), assignment=dict(assignment),
+                                             review_glossary=review_glossary,
+                                             config_overrides=dict(config_overrides or {}))
+    return await service.submit_instances(pairs)
 
 
 async def resume_translation(ctx: Any, book: Mapping[str, Any],

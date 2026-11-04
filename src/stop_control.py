@@ -28,6 +28,11 @@ moved verbatim out of ``TranslatorGUI`` (``translator_gui.py`` @ 1719fb59):
   shorter helper-process list and the glossary stop file -> log line) as
   ``request_glossary_stop`` / ``kill_glossary_helper_subprocesses``.
 
+Multi-instance translation: instances 2..N share the desktop GUI's watchdog folder, so
+``reset_api_watchdog`` keeps its desktop body (the GUI's full reset, every process's file)
+behind ``_scoped_to_this_instance``: inside instance N > 1 a run that ends or stops deletes only
+its own pid's file (``clear_own_watchdog_file``).
+
 Flag order matters (see the race comment kept in ``request_stop``): the environment
 mode flags are published before the ``set_stop_requested`` latch, so a graceful first
 click is never mistaken for an immediate stop by a worker polling both.
@@ -35,10 +40,15 @@ click is never mistaken for an immediate stop by a worker polling both.
 Rules: Python 3.10 compatible; never import PySide6, translator_gui or dpi_setup.
 """
 
+import functools
 import os
 import threading
 import time
 
+from instance_plan import current_instance
+# the instance processes of a desktop multi-instance run (and their helpers) are left to their
+# own instance's Stop by every "kill this process's helpers" sweep
+from instance_plan import in_instance_process_tree
 from mobile_runtime import subprocesses_available
 
 __all__ = [
@@ -49,6 +59,7 @@ __all__ = [
     "apply_force_stop_flags",
     "clear_client_cancellation",
     "clear_module_stop_flags",
+    "clear_own_watchdog_file",
     "kill_glossary_helper_subprocesses",
     "kill_helper_subprocesses",
     "make_glossary_stop_callback",
@@ -286,8 +297,52 @@ def apply_force_stop_flags():
         pass
 
 
+def clear_own_watchdog_file():
+    """Delete this process's own cross-process watchdog file (``api_watchdog_<pid>.json`` and
+    its ``.tmp``); every other process's file is left alone."""
+    try:
+        watchdog_dir = os.environ.get("GLOSSARION_WATCHDOG_DIR")
+        if watchdog_dir and os.path.isdir(watchdog_dir):
+            own = os.path.join(watchdog_dir, f"api_watchdog_{os.getpid()}.json")
+            for fp in (own, f"{own}.tmp"):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+
+def _scoped_to_this_instance(reset):
+    """Limit ``reset_api_watchdog``'s file sweep to the caller's own run in multi-instance mode.
+
+    ``all_processes=None`` (the default) keeps the desktop behaviour in instance 1 - the GUI
+    process, whose Stop / full reset deletes every process's watchdog file - and inside instance
+    N > 1 (a desktop child process or a mobile instance runtime) resets the counters and deletes
+    only this process's own file, so the other instances' watchdog bars keep their entries.
+    ``all_processes=True`` / ``False`` picks either sweep explicitly.
+    """
+    @functools.wraps(reset)
+    def scoped(clear_stale_external_files=True, *, all_processes=None):
+        if all_processes is None:
+            all_processes = current_instance() == 1
+        if all_processes:
+            return reset(clear_stale_external_files=clear_stale_external_files)
+        reset(clear_stale_external_files=False)
+        if clear_stale_external_files:
+            clear_own_watchdog_file()
+        return None
+
+    return scoped
+
+
+@_scoped_to_this_instance
 def reset_api_watchdog(clear_stale_external_files=True):
-    """Reset the API watchdog counters and (on Stop) delete every cross-process watchdog file."""
+    """Reset the API watchdog counters and (on Stop) delete every cross-process watchdog file.
+
+    Instance N > 1 of a multi-instance run deletes only its own file (``_scoped_to_this_instance``;
+    ``all_processes=`` overrides).
+    """
     # 1) Reset watchdog counters in unified_api_client (best effort)
     try:
         import unified_api_client
@@ -357,7 +412,7 @@ def kill_helper_subprocesses():
         processes_to_terminate = []
         for child in children:
             try:
-                if child.pid in _protected_pids:
+                if child.pid in _protected_pids or in_instance_process_tree(child):
                     continue
                 cmd_s = _cmdline_s(child)
                 if _is_mp_internal(cmd_s):
@@ -632,7 +687,7 @@ def kill_glossary_helper_subprocesses():
         processes_to_terminate = []
         for child in children:
             try:
-                if child.pid in _protected_pids:
+                if child.pid in _protected_pids or in_instance_process_tree(child):
                     continue
                 cmd_s = _cmdline_s(child)
                 if _is_mp_internal(cmd_s):

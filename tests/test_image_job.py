@@ -69,6 +69,9 @@ EDITS = {
     ],
     # owner 2026-10-12: a graceful stop keeps the received translation (it only skips the title request)
     "_process_image_file": [
+        # multi-instance: an instance >= 2 writes its image payloads under Payloads/Instance N
+        ('payloads_dir = os.path.join("Payloads", "image")',
+         'payloads_dir = os.path.join(instance_payloads_dir("Payloads"), "image")', 1),
         ("                # Check if stopped after API call\n"
          "                if self.stop_requested:\n",
          "                # Check if stopped after API call. A graceful stop lets this in-flight request finish:\n"

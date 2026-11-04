@@ -1508,6 +1508,56 @@ class LibraryService:
         origin = self.origin_for(first) if len(books) == 1 else {"type": "library", "label": "Library"}
         return JobSpec(kind="translate", title=title, inputs=inputs, params=params, origin=origin)
 
+    # ---- multi-instance translation (instance_plan, design §6) ------------------------------------------
+
+    def instance_assignment(self, sources: Sequence[str]) -> Optional[tuple]:
+        """``(instances, {source: instance})`` when translating ``sources`` together is a multi-instance run
+        (``instance_plan.is_multi_instance``: Translation pool on, its enabled keys on 2+ instances, 2+ files),
+        prefilled like the desktop assignment dialog (``default_assignment``: the saved ``instance_file_map``,
+        else round-robin in file order); None for a single-instance run (exactly today's one job)."""
+        try:
+            import instance_plan
+        except ImportError:  # a build without the shared module: one instance
+            return None
+        config = self.config_snapshot()
+        files = [str(s) for s in sources if s]
+        if not instance_plan.is_multi_instance(config, files):
+            return None
+        instances = list(instance_plan.available_instances(config))
+        saved = config.get(instance_plan.CONFIG_FILE_MAP)
+        return instances, instance_plan.default_assignment(files, instances, saved if isinstance(saved, Mapping) else None)
+
+    def save_instance_assignment(self, assignment: Mapping[str, int]) -> None:
+        """Remember the confirmed file -> instance choice in ``instance_file_map`` ({absolute path: instance}),
+        merged into the saved map like the desktop's Run (``instance_runs.start_run``)."""
+        import instance_plan
+
+        saved = self.cfg(instance_plan.CONFIG_FILE_MAP, {})
+        saved = dict(saved) if isinstance(saved, Mapping) else {}
+        for path, number in assignment.items():
+            if path:
+                saved[os.path.abspath(str(path))] = instance_plan.coerce_instance(number)
+        self.set_cfg(instance_plan.CONFIG_FILE_MAP, saved)
+
+    def translate_instance_specs(self, books: Sequence[Mapping[str, Any]], *, sources: Sequence[str],
+                                 assignment: Mapping[str, int], review_glossary: bool = False,
+                                 config_overrides: Optional[Mapping[str, Any]] = None) -> list:
+        """``[(instance, JobSpec), ...]``: one ``translate`` job per instance with only the books assigned to it
+        (``instance_plan.plan``: instance order, each book once in its selection order, instances without books
+        left out), each built by :meth:`translate_spec`. ``books`` and ``sources`` are aligned."""
+        import instance_plan
+
+        book_of: dict = {}
+        for book, source in zip(books, sources):
+            if source:
+                book_of.setdefault(_norm(source), book)
+        out: list = []
+        for number, files in instance_plan.plan([s for s in sources if s], dict(assignment)).items():
+            group = [book_of[_norm(path)] for path in files]
+            out.append((number, self.translate_spec(group, review_glossary=review_glossary, sources=files,
+                                                    config_overrides=config_overrides)))
+        return out
+
     def metadata_spec(self, books: Sequence[Mapping[str, Any]]) -> Any:
         """A ``metadata`` job (desktop ``start_metadata_translation(paths, output_roots=)``)."""
         from glossarion_mobile.services.jobs import JobSpec
@@ -1543,17 +1593,34 @@ class LibraryService:
                 return str(resolved)
         return ""
 
-    async def submit(self, spec: Any) -> Optional[str]:
+    async def submit(self, spec: Any, *, instance: Optional[int] = None) -> Optional[str]:
+        """Queue ``spec``; ``instance``: the job of a multi-instance run for that instance
+        (``JobService.submit(spec, instance=N)``), None for a plain job."""
         jobs = self.jobs
         if jobs is None:
             return None
-        result = jobs.submit(spec)
+        result = jobs.submit(spec) if instance is None else jobs.submit(spec, instance=instance)
         if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
             result = await result
         if spec.kind in ("compile_epub", "compile_pdf"):
             for path in spec.inputs:
                 self.compiling.add(_norm(path))
         return result
+
+    async def submit_instances(self, pairs: Sequence[tuple]) -> list:
+        """Queue the jobs of a multi-instance run (``[(instance, spec), ...]``): through the jobs feature's
+        ``submit_instances`` (one background preparation for the whole run) when it has one, else one
+        :meth:`submit` per instance. Returns the job ids (None for a job that was not queued)."""
+        jobs = self.jobs
+        if jobs is None:
+            return []
+        many = getattr(jobs, "submit_instances", None)
+        if callable(many):
+            result = many(list(pairs))
+            if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                result = await result
+            return list(result or [])
+        return [await self.submit(spec, instance=number) for number, spec in pairs]
 
     def is_compiling(self, book: Mapping[str, Any]) -> bool:
         folder = str(book.get("output_folder") or "") or self.workspace_for(book)

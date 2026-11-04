@@ -197,6 +197,8 @@ from glossary_progress_core import (  # noqa: F401 -- moved in U5; re-exported f
     run_manual_glossary_refinement,
 )
 from sdlxliff_review_core import NOTEPAD_EDITING_SCRIPT
+# The user's input selection (a multi-instance run narrows selected_files to instance 1's files)
+from instance_runs import user_selection
 from sdlxliff_review_core import (  # noqa: F401 -- moved in U7; re-exported for desktop code and tests
     SdlxliffAutogenMixin,
     SdlxliffReviewCoreMixin,
@@ -7286,7 +7288,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         """Return the stable input selection represented by the main file field."""
         selected = [
             str(path).strip()
-            for path in (getattr(self, 'selected_files', None) or [])
+            for path in user_selection(self)
             if str(path or '').strip() and str(path).strip() != '__generative_mode__'
         ]
         try:
@@ -8182,20 +8184,24 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 )
                 return
 
-        subtitle_bundle_target = self._selected_subtitle_bundle_progress_target()
+        # The user's selection: while a multi-instance run translates, selected_files holds only
+        # instance 1's files, and the Progress Manager shows every file of the run
+        selected_files = user_selection(self)
+
+        subtitle_bundle_target = self._selected_subtitle_bundle_progress_target(selected_files)
         if subtitle_bundle_target:
             self._open_subtitle_bundle_progress_manager(subtitle_bundle_target)
             return
 
         # Check for multiple file selection first
-        if hasattr(self, 'selected_files') and len(self.selected_files) > 1:
-            self._force_retranslation_multiple_files()
+        if len(selected_files) > 1:
+            self._force_retranslation_multiple_files(selected_files)
             return
-        
+
         # Check if it's a folder selection (for images)
-        if hasattr(self, 'selected_files') and len(self.selected_files) > 0:
+        if len(selected_files) > 0:
             # Check if the first selected file is actually a folder
-            first_item = self.selected_files[0]
+            first_item = selected_files[0]
             if os.path.isdir(first_item):
                 self._force_retranslation_images_folder(first_item)
                 return
@@ -13012,8 +13018,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                                     pass
 
                                 if selection is not None:
-                                    self.selected_files = selection
-                                    self._force_retranslation_multiple_files()
+                                    self._force_retranslation_multiple_files(selection)
                             except Exception as e:
                                 print(f"Error during multi-file rebuild: {e}")
 
@@ -15056,25 +15061,28 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             import traceback
             traceback.print_exc()
 
-    def _force_retranslation_multiple_files(self):
-        """Handle force retranslation when multiple files are selected - now uses shared logic"""
-        try:
-            print(f"[DEBUG] _force_retranslation_multiple_files called with {len(self.selected_files)} files")
+    def _force_retranslation_multiple_files(self, selected_files=None):
+        """Handle force retranslation when multiple files are selected - now uses shared logic
 
-            subtitle_bundle_target = self._selected_subtitle_bundle_progress_target()
+        *selected_files*: the files to show (default: the user's selection, ``user_selection``)."""
+        try:
+            selected_files = list(selected_files) if selected_files is not None else user_selection(self)
+            print(f"[DEBUG] _force_retranslation_multiple_files called with {len(selected_files)} files")
+
+            subtitle_bundle_target = self._selected_subtitle_bundle_progress_target(selected_files)
             if subtitle_bundle_target:
                 self._open_subtitle_bundle_progress_manager(subtitle_bundle_target)
                 return
 
             # First, check if all selected files are images from the same folder
             # This handles the case where folder selection results in individual file selections
-            if len(self.selected_files) > 1:
+            if len(selected_files) > 1:
                 all_images = True
                 parent_dirs = set()
                 
                 image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
                 
-                for file_path in self.selected_files:
+                for file_path in selected_files:
                     if os.path.isfile(file_path) and file_path.lower().endswith(image_extensions):
                         parent_dirs.add(os.path.dirname(file_path))
                     else:
@@ -15084,7 +15092,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 # If all files are images from the same directory, treat it as a folder selection
                 if all_images and len(parent_dirs) == 1:
                     folder_path = parent_dirs.pop()
-                    print(f"[DEBUG] Detected {len(self.selected_files)} images from same folder: {folder_path}")
+                    print(f"[DEBUG] Detected {len(selected_files)} images from same folder: {folder_path}")
                     print(f"[DEBUG] Treating as folder selection")
                     self._force_retranslation_images_folder(folder_path)
                     return
@@ -15097,7 +15105,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             
             image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
             
-            for file_path in self.selected_files:
+            for file_path in selected_files:
                 if os.path.isdir(file_path):
                     folders.append(file_path)
                 elif file_path.lower().endswith('.epub'):
@@ -15123,7 +15131,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 return
             
             # Create a unique key for the current selection
-            selection_key = tuple(sorted(self.selected_files))
+            selection_key = tuple(sorted(selected_files))
             
             # Check if we already have a cached dialog for this exact selection
             if (hasattr(self, '_multi_file_retranslation_dialog') and 

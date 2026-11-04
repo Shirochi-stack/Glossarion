@@ -335,7 +335,7 @@ def _job_config(store) -> dict:
     """The config snapshot a job's HeadlessOwner is built from (``JobService._config_snapshot``)."""
     from glossarion_mobile.services.jobs import JobService
 
-    holder = types.SimpleNamespace(config_store=store, _config_loader=None)
+    holder = types.SimpleNamespace(config_store=store, _config_loader=None, _note_job_running=store.set_job_running)
     job = types.SimpleNamespace(spec=types.SimpleNamespace(params={"config_overrides": {}}))
     try:
         return JobService._config_snapshot(holder, job)

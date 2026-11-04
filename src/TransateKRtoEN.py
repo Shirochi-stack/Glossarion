@@ -25736,8 +25736,11 @@ def main(log_callback=None, stop_callback=None):
                             # and during PDF extraction all children belong to our executor.
                             try:
                                 import psutil
+                                from instance_plan import in_instance_process_tree
                                 _current = psutil.Process(os.getpid())
                                 for _child in _current.children(recursive=True):
+                                    if in_instance_process_tree(_child):
+                                        continue  # another instance of a multi-instance run: its own Stop
                                     try:
                                         _child.kill()
                                     except Exception:

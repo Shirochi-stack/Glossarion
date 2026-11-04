@@ -129,6 +129,14 @@ jobs:
           tests/test_api_delay_range.py \
           tests/test_empty_tag_cleanup.py \
           tests/test_request_schedule.py \
+          tests/test_instance_plan.py \
+          tests/test_multi_instance_backend.py \
+          tests/test_unified_glossary_lock.py \
+          tests/test_key_instance_column.py \
+          tests/test_instance_worker.py \
+          tests/test_instance_runs.py \
+          tests/test_instance_key_isolation.py \
+          tests/test_instance_guards.py \
           tests/test_review_prompt_profiles.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
@@ -172,6 +180,8 @@ jobs:
             # U9: the release check the desktop UpdateManager and the mobile About > Updates share,
             # and the browser-driver seam (authnd/ + search/gemini keep their Qt helpers lazy)
             "update_core", "browser_driver", "authnd_auth", "gemini_free",
+            # multi-instance translation: the instance plan / key scope and the instance process
+            "instance_plan", "instance_worker",
         )
         failed = []
         for name in SHARED:
