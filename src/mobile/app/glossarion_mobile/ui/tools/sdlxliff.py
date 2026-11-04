@@ -419,6 +419,7 @@ class SdlxliffScreen(Screen):
         webview = self._webview_ok()
         self.layout_switch = ft.Switch(label="Notepad layout", value=False, disabled=not webview,
                                        on_change=self._on_layout, key="sdl-layout")
+        # mobile hotfix 3: the switch shares the actions row (beside Threshold), not a row of its own
         layout_row: list = [self.layout_switch]
         if not webview:
             layout_row.append(ReasonChip(reason=NOTEPAD_REASON, detail="The Notepad layout is the desktop's live "
@@ -431,13 +432,20 @@ class SdlxliffScreen(Screen):
             ft.Row([self.prev_button, self.piece_dropdown, self.next_button, self.piece_menu],
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.summary, self.legend,
-            ft.Row([self.mt_button, self.mt_provider, self.flag_button, self.threshold_button], wrap=True, spacing=6,
-                   run_spacing=6),
-            ft.Row(layout_row, wrap=True, spacing=6), self.status_text,
+            ft.Row([self.mt_button, self.mt_provider, self.flag_button, self.threshold_button, *layout_row], wrap=True,
+                   spacing=6, run_spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="sdl-actions"),
+            self.status_text,
         ], spacing=6, tight=True)
         self.header_column = header
-        self.list_view = ft.ListView(controls=[header, self.body_holder], expand=True, spacing=tokens.SPACING["sm"],
-                                     padding=ft.Padding.symmetric(horizontal=12, vertical=8), key="sdl-screen")
+        # mobile hotfix 3: a Column, scrolled in the rows layout; in the Notepad layout it does not scroll and the
+        # editor (a WebView) takes the height left (``_apply_notepad_layout``). Inside a scrolling list the
+        # WebView kept its height when the keyboard opened, so the caret stayed under the keyboard, and the
+        # list's relayout around the platform view closed the keyboard on a tap.
+        self.list_view = ft.Column(controls=[header, self.body_holder], expand=True, spacing=tokens.SPACING["sm"],
+                                   scroll=ft.ScrollMode.AUTO, key="sdl-screen")
+        self.page_frame = ft.Container(content=self.list_view, expand=True,
+                                       padding=ft.Padding.symmetric(horizontal=12, vertical=8))
+        self._keyboard_up = False
         if self.error:
             self.rows_column.controls = [hint_text(self.error, key="sdl-error")]
             if not self.folder:  # the Tools hub tile: choose a workspace (SourcePicker), like the Progress manager
@@ -458,7 +466,7 @@ class SdlxliffScreen(Screen):
             return
         self._layout_gen += 1
         gen = self._layout_gen
-        main = ft.Container(content=self.list_view, expand=True, key=f"sdl-main-{gen}")
+        main = ft.Container(content=self.page_frame, expand=True, key=f"sdl-main-{gen}")
         compact_selectors = not self.side_by_side
         for control in (self.piece_dropdown, self.prev_button, self.next_button):
             control.visible = compact_selectors
@@ -560,8 +568,39 @@ class SdlxliffScreen(Screen):
             picker.show(self.ctx.page)
         return picker
 
+    def _hook_keyboard(self) -> None:
+        """Follow ``page.on_media_change`` (the keyboard), chaining the handler installed before (the shell's);
+        ``_unhook_keyboard`` puts it back."""
+        page = getattr(self.ctx, "page", None)
+        if page is None or getattr(self, "_media_previous", None) is not None:
+            return
+        previous = getattr(page, "on_media_change", None)
+
+        def on_media_change(e: Any = None) -> Any:
+            try:
+                self.keyboard_changed(e if getattr(e, "view_insets", None) is not None else None)
+            except Exception:
+                log.debug("keyboard layout change failed", exc_info=True)
+            return previous(e) if callable(previous) else None
+
+        self._media_previous = (previous, on_media_change)
+        try:
+            page.on_media_change = on_media_change
+        except Exception:
+            self._media_previous = None
+
+    def _unhook_keyboard(self) -> None:
+        hooked, self._media_previous = getattr(self, "_media_previous", None), None
+        page = getattr(self.ctx, "page", None)
+        if hooked is not None and page is not None and getattr(page, "on_media_change", None) is hooked[1]:
+            try:
+                page.on_media_change = hooked[0]
+            except Exception:
+                pass
+
     def did_show(self) -> None:
         self._visible = True
+        self._hook_keyboard()
         if self.folder:
             self.ctx.spawn(self.open())
         else:
@@ -570,6 +609,13 @@ class SdlxliffScreen(Screen):
     async def open_last(self) -> Optional[ReviewerBinding]:
         """The Tools hub tile (no workspace in the route): the newest translated workspace when a job worked
         on it since, else the workspace and piece shown last (``last_workspace``); the picker otherwise."""
+        service = getattr(self.ctx, "service", None)
+        snapshot = getattr(service, "snapshot", None)
+        if snapshot is not None and not getattr(snapshot, "scanned_at", None) and hasattr(service, "refresh"):
+            try:  # the Library not scanned yet this session (the SourcePicker does the same)
+                await service.refresh(quiet=True, reason="sdlxliff last workspace")
+            except Exception:
+                log.debug("library refresh for the reviewer failed", exc_info=True)
         try:
             found = await self.ctx.io(last_workspace, getattr(self.ctx, "prefs", None),
                                       getattr(self.ctx, "service", None), str(getattr(self.ctx, "chats_root", "") or ""))
@@ -605,6 +651,7 @@ class SdlxliffScreen(Screen):
 
     def dispose(self) -> None:
         self._visible = False
+        self._unhook_keyboard()
         task, self._poll_task = self._poll_task, None
         if task is not None:
             try:
@@ -740,6 +787,7 @@ class SdlxliffScreen(Screen):
         self._focused_row = None
         self.notepad_view = None
         self._notepad_token = None
+        self._apply_notepad_layout()
         if self.notepad and piece is not None and binding is not None:
             # the document is built from the output HTML (BeautifulSoup): on the io pool
             self.body_holder.content = ft.ProgressRing(width=24, height=24, key="sdl-notepad-loading")
@@ -841,12 +889,33 @@ class SdlxliffScreen(Screen):
                                                  key="sdl-notepad-error")
         else:
             self.notepad_view = view
-            height = getattr(getattr(self.ctx, "page", None), "height", None) or 800
-            self.body_holder.content = ft.Container(content=view.make_control(), height=max(420, height * 0.78),
+            self.body_holder.content = ft.Container(content=view.make_control(), expand=True,
                                                     border_radius=tokens.RADII["card"], key="sdl-notepad-frame",
                                                     clip_behavior=ft.ClipBehavior.HARD_EDGE)
         self._push(self.body_holder)
         return url
+
+    def _apply_notepad_layout(self) -> None:
+        """The Notepad layout: the page does not scroll and the editor fills the height under the header; while
+        the keyboard is up the header steps aside, so the editor is the whole visible area and the WebView,
+        resized with it, scrolls the caret into view itself. The rows layout scrolls as one page."""
+        notepad = bool(self.notepad)
+        self.list_view.scroll = None if notepad else ft.ScrollMode.AUTO
+        self.body_holder.expand = notepad
+        self.header_column.visible = not (notepad and self._keyboard_up)
+
+    def keyboard_changed(self, media: Any = None) -> None:
+        """``page.on_media_change``: the keyboard's height (``view_insets.bottom``) shows or hides the header in
+        the Notepad layout."""
+        media = media if media is not None else getattr(getattr(self.ctx, "page", None), "media", None)
+        insets = getattr(media, "view_insets", None)
+        up = float(getattr(insets, "bottom", 0) or 0) > 80
+        if up == self._keyboard_up:
+            return
+        self._keyboard_up = up
+        if self.notepad:
+            self._apply_notepad_layout()
+            self._push(self.list_view)
 
     def _notepad_saved(self, status: str) -> None:
         """A Notepad save: the header, legend counts and status follow (the page itself stays)."""

@@ -152,6 +152,10 @@ JOB_LOG_MAXLEN = 5000  # lines held in a job's LogBuffer (the per-job file keeps
 JOB_BUFFERS_KEPT = 4  # finished jobs whose LogBuffer stays in memory
 JOB_MESSAGES_KEPT = 4000  # whole log messages a job keeps for listeners that attach late
 LAST_LINE_CHARS = 240
+#: what a job keeps of its current request's streamed text (``JobService.stream_tail``, hotfix 3)
+STREAM_TAIL_KEEP = 2000
+#: log lines that start a new request: the streamed text of the last one is dropped
+STREAM_TAIL_RESETS = ("SDK stream start", "Sending API call")
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
 #: Lines written for the request stream's parser, not for people: neither Logs nor the log file keeps them
 STREAM_MACHINE_MARKERS = ("[DIRECT_TEXT_RESPONSE_PAYLOAD]", "[DIRECT_TEXT_GLOSSARY_STREAM_START]")
@@ -909,6 +913,7 @@ class _Job:
     metadata_mtime: float = 0.0  # the output folder's metadata.json last read for its translated title
     issued_stop: Optional[str] = None  # the last stop mode whose protocol ran for this job
     sign_in_flagged: bool = False  # a "sign_in_required" event was sent for this job
+    stream_tail: str = ""  # the end of the text the current request streams (the notification's rows)
     announced: threading.Event = field(default_factory=threading.Event)  # its QUEUED transition was posted
     run_id: Any = None
     log_path: Optional[str] = None
@@ -1237,6 +1242,51 @@ def notification_lines(snap: JobSnapshot) -> tuple:
         details = [("Refining the glossary" if getattr(snap, "refining", False) else "Waiting for your glossary decision")
                    if is_glossary_question(_question_kind(snap.question)) else "Waiting for your answer"]
     return " · ".join(details), short_title(snap.title)
+
+
+#: the streamed text the job notification shows (about three rows on a phone, Android wraps it)
+NOTIFICATION_STREAM_CHARS = 120
+_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def stream_row(text: str, limit: int = NOTIFICATION_STREAM_CHARS) -> str:
+    """The end of streamed text as one paragraph for the notification: tags and runs of spaces and new lines
+    removed, the last ``limit`` characters (from a word start) behind "…"; '' for no text."""
+    import html
+
+    plain = " ".join(html.unescape(_TAG_RE.sub(" ", str(text or ""))).split())
+    if len(plain) <= limit:
+        return plain
+    tail = plain[-limit:]
+    space = tail.find(" ")
+    if 0 <= space < limit // 4:
+        tail = tail[space + 1:]
+    return "…" + tail
+
+
+def on_device_row() -> str:
+    """The running on-device request's row ("📱 412 tokens written · 6.5 tok/s"), '' when none runs."""
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+    except Exception:
+        return ""
+    service = default_service()
+    live = getattr(getattr(service, "engine", None), "live", None) if service is not None else None
+    try:
+        return str(live.notification_row()) if live is not None else ""
+    except Exception:
+        log.debug("the on-device notification row failed", exc_info=True)
+        return ""
+
+
+def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "") -> list:
+    """Hotfix 3: rows under the job notification's book line while a request runs: the on-device model's
+    prompt reading / speed (one row) and, with Streaming on, the end of the text it streams (about three
+    rows). None while the job waits for an answer or is not running."""
+    if snap is None or snap.question or not snap.is_active:
+        return []
+    rows = [row for row in (on_device_row(), stream_row(stream_tail)) if row]
+    return rows
 
 
 def notification_text(snap: JobSnapshot) -> str:
@@ -1993,6 +2043,13 @@ class JobService:
             if job is not None:
                 return job.snapshot()
         return self.view().find(job_id)
+
+    def stream_tail(self, job_id: Optional[str] = None) -> str:
+        """The end of the text the active job's (or ``job_id``'s) current request streams; '' when nothing
+        streams (Streaming off, between requests)."""
+        with self._lock:
+            job = self._active if job_id is None else self._find_live(job_id)
+            return job.stream_tail if job is not None else ""
 
     def _find_live(self, job_id: str) -> Optional[_Job]:
         if self._active is not None and self._active.id == job_id:
@@ -3186,6 +3243,11 @@ class JobService:
                 streamed_text = stream.feed(raw) == "suppress-main-log"
             except Exception:
                 log.debug("request stream rejected a message", exc_info=True)
+        # hotfix 3: the notification's streaming rows read the end of the streamed text (Streaming off: none)
+        if streamed_text:
+            job.stream_tail = (job.stream_tail + raw)[-STREAM_TAIL_KEEP:]
+        elif any(marker in raw for marker in STREAM_TAIL_RESETS):
+            job.stream_tail = ""
         if not raw.strip():
             return
         kind = kwargs.get("kind") if isinstance(kwargs, Mapping) else None

@@ -367,6 +367,25 @@ class OutputTab:
                            on_click=lambda e, g=group_id, p=path: self.open_workspace_file(g, p),
                            key=f"out-{group_id}-{index}")
 
+    def _open_reviewer(self, path: str) -> Any:
+        """An SDLXLIFF sidecar (``<workspace>/SDLXLIFF/<output>.sdlxliff``): the reviewer on its workspace,
+        focused on its piece (mobile hotfix 3: the route carried the book id, which the reviewer reads as a
+        file reference, so it opened empty)."""
+        from glossarion_mobile.ui.tools import sdlxliff
+
+        folder = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+        name = os.path.basename(path)
+        focus = name[: -len(".sdlxliff")] if name.lower().endswith(".sdlxliff") else None
+        source = ""
+        raw_source = getattr(getattr(self.page, "service", None), "raw_source", None)
+        if callable(raw_source):
+            try:
+                source = str(raw_source(self.page.book) or "")
+            except Exception:
+                source = ""
+        return sdlxliff.open_reviewer(self.ctx, folder, source=source if source and os.path.isfile(source) else None,
+                                      focus=focus)
+
     def open_workspace_file(self, group_id: str, path: str) -> Any:
         """Open one workspace file the way its group does: QA report viewer, the MediaViewer player, the
         SDLXLIFF reviewer, the metadata editor, the images folder in Files, else the text editor."""
@@ -385,7 +404,7 @@ class OutputTab:
                 return viewer
             return self.ctx.spawn(self._share([path]))
         if group_id == "sdlxliff":
-            return self.ctx.go("tools.sdlxliff", None, {"out": bid or self.page.service.bid_for(self.page.book)})
+            return self._open_reviewer(path)
         if group_id == "metadata" and os.path.basename(path) == "metadata.json":
             return self.ctx.go("library.book.metadata", {"bid": bid or self.page.service.bid_for(self.page.book)})
         if group_id == "images" and prefs is not None:

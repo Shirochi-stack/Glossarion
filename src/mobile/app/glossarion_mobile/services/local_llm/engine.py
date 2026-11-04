@@ -353,6 +353,7 @@ class LlamaEngine(_Base):
         self.vision_handler: Any = None
         self._scripts: Any = None  # the loaded model's script_ban.VocabScripts (computed on first use)
         self.sliding_window = 0  # the loaded model's SWA window in tokens (0: none)
+        self.live: Optional["_Heartbeat"] = None  # the request running now (``chat``), for the notification
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -534,8 +535,14 @@ class LlamaEngine(_Base):
         # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop; until the first
         # chunk (the prompt, which can take minutes on a phone) a Stop is seen between two decodes.
         cpus_done = _follow_cpus(llm, self.n_threads)
-        heartbeat = _Heartbeat(self).start()
-        prompt_done = _stop_between_decodes(llm, should_stop)
+        heartbeat = _Heartbeat(self)
+        try:
+            heartbeat.prompt_total = self.count_prompt(messages)
+        except Exception:
+            heartbeat.prompt_total = 0
+        heartbeat.start()
+        self.live = heartbeat  # the job notification's on-device row (``notification_row``)
+        prompt_done = _stop_between_decodes(llm, should_stop, on_batch=heartbeat.read)
         try:
             if handler is not None:
                 # the MTMD handler evaluates the prompt (text and image chunks) in this call and returns the
@@ -561,6 +568,8 @@ class LlamaEngine(_Base):
             try:
                 for index, chunk in enumerate(chunks):
                     prompt_done()
+                    if heartbeat.reading:
+                        heartbeat.reading, heartbeat.first_token_at = False, time.monotonic()
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
                     text = delta.get("content")
@@ -583,6 +592,8 @@ class LlamaEngine(_Base):
                     close()
         finally:
             heartbeat.stop()
+            if self.live is heartbeat:
+                self.live = None
             prompt_done()
             cpus_done()
         prompt = 0
@@ -598,12 +609,23 @@ class ContextOverflow(ValueError):
     """The prompt with its images does not fit ``n_ctx`` (libmtmd's own count, after the estimate)."""
 
 
-def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable[[], None]:
+def _batch_tokens(batch: Any) -> int:
+    """The tokens of a ``LlamaBatch`` (its native ``llama_batch.n_tokens``), 0 when unknown."""
+    try:
+        native = getattr(batch, "batch", batch)
+        return max(0, int(getattr(native, "n_tokens", 0) or 0))
+    except Exception:
+        return 0
+
+
+def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool],
+                          on_batch: Optional[Callable[[int], Any]] = None) -> Callable[[], None]:
     """While a prompt is evaluated ``Llama.eval`` runs one native ``llama_decode`` per ``n_batch`` tokens
     with no stop check: raise ``GenerationStopped`` before the next one on a Stop (``Llama.eval`` keeps its
     token count and the context's memory consistent for the next request). The decode running then ends
-    first: native code is never interrupted. Returns the function that ends the checks (safe to call again).
-    The MTMD handler's image chunks do not go through here."""
+    first: native code is never interrupted. ``on_batch(tokens)`` follows each decoded batch (the prompt's
+    progress). Returns the function that ends the checks (safe to call again). The MTMD handler's image
+    chunks do not go through here."""
     context = getattr(llm, "_ctx", None)
     decode = getattr(context, "decode", None)
     if decode is None:
@@ -613,7 +635,10 @@ def _stop_between_decodes(llm: Any, should_stop: Callable[[], bool]) -> Callable
     def checked(batch: Any) -> Any:
         if should_stop():
             raise GenerationStopped("A Stop arrived while the prompt was being evaluated")
-        return decode(batch)
+        result = decode(batch)
+        if on_batch is not None:
+            on_batch(_batch_tokens(batch))
+        return result
 
     context.decode = checked
 
@@ -651,22 +676,49 @@ class _Heartbeat:
     """Mobile hotfix 2: a progress line every ``HEARTBEAT_SECONDS`` while an on-device request runs (tokens,
     speed, threads, the CPUs and cpuset Android gives the app), from its own thread. The owner's phone
     stopped on-device jobs while Glossarion was in the background; a frozen process leaves a gap in these
-    timestamps, a throttled one keeps logging at a low speed, a stuck request logs 0 tok/s."""
+    timestamps, a throttled one keeps logging at a low speed, a stuck request logs 0 tok/s. Until the first
+    output token the line is the prompt's progress (hotfix 3: Gemma 4 reads a long prompt for minutes, which
+    read as "0 tokens, 0.0 tok/s")."""
 
     def __init__(self, engine: "LlamaEngine") -> None:
         self.engine = engine
         self.tokens = 0
+        self.reading = True  # no output yet: the prompt is evaluated
+        self.prompt_total = 0  # the prompt's estimated tokens (``count_prompt``), 0 when unknown
+        self.prompt_read = 0  # prompt tokens decoded so far (``_stop_between_decodes`` batches)
+        self.started = time.monotonic()
+        self.first_token_at = 0.0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="gl-llm-heartbeat", daemon=True)
 
     def start(self) -> "_Heartbeat":
+        self.started = time.monotonic()
         self._thread.start()
         return self
 
     def stop(self) -> None:
         self._stop.set()
 
+    def read(self, tokens: int) -> None:
+        self.prompt_read += int(tokens or 0)
+
+    def notification_row(self) -> str:
+        """The job notification's on-device row (hotfix 3): "📱 Processing · 2,048 / ~5,896 tokens ·
+        32.0 tok/s" until the first output token, then "📱 412 tokens written · 6.5 tok/s" (averages: the
+        notification updates every second, a per-second speed would jump)."""
+        now = time.monotonic()
+        if self.reading:
+            total = f"~{self.prompt_total:,}" if self.prompt_total else "?"
+            if not self.prompt_read:
+                return f"📱 Processing · {total} tokens"
+            read = min(self.prompt_read, self.prompt_total or self.prompt_read)
+            speed = self.prompt_read / max(now - self.started, 0.001)
+            return f"📱 Processing · {read:,} / {total} tokens · {speed:.1f} tok/s"
+        speed = self.tokens / max(now - (self.first_token_at or self.started), 0.001)
+        return f"📱 {self.tokens:,} tokens written · {speed:.1f} tok/s"
+
     def line(self, seconds: float, new_tokens: int) -> str:
+        """The progress since the last line: ``new_tokens`` output tokens, or prompt tokens while reading."""
         affinity = getattr(os, "sched_getaffinity", None)
         try:
             cpus = _cpu_list(affinity(0)) if affinity is not None else "?"
@@ -679,13 +731,29 @@ class _Heartbeat:
         except Exception:
             pass
         cpuset = _cpuset()
-        return (f"📱 on-device: {self.tokens} tokens, {new_tokens / max(seconds, 0.001):.1f} tok/s "
-                f"(last {seconds:.0f} s), {threads} threads, CPUs {cpus}" + (f", cpuset {cpuset}" if cpuset else ""))
+        rate = f"{new_tokens / max(seconds, 0.001):.1f} tok/s"
+        total = f"~{self.prompt_total:,}" if self.prompt_total else "?"
+        if not self.reading:
+            progress = f"{self.tokens:,} tokens written, {rate} (last {seconds:.0f} s)"
+        elif self.prompt_read:
+            # the average since the start: a 512-token batch can take longer than one line's interval
+            average = self.prompt_read / max(time.monotonic() - self.started, 0.001)
+            progress = (f"processing, {min(self.prompt_read, self.prompt_total or self.prompt_read):,} "
+                        f"of {total} tokens ({average:.1f} tok/s)")
+        else:
+            progress = f"processing ({total} tokens)"
+        return (f"📱 on-device: {progress}, {threads} threads, CPUs {cpus}" + (f", cpuset {cpuset}" if cpuset else ""))
+
+    def _count(self) -> int:
+        """What the speed counts: prompt tokens while reading, output tokens after."""
+        return self.prompt_read if self.reading else self.tokens
 
     def _run(self) -> None:
-        last_at, last_tokens = time.monotonic(), 0
+        last_at, last_tokens, was_reading = time.monotonic(), 0, True
         while not self._stop.wait(HEARTBEAT_SECONDS):
-            now, tokens = time.monotonic(), self.tokens
+            if was_reading and not self.reading:  # the first output token: the speed counts tokens from 0
+                last_tokens, was_reading = 0, False
+            now, tokens = time.monotonic(), self._count()
             try:
                 job_log.info("%s", self.line(now - last_at, tokens - last_tokens))
             except Exception:
