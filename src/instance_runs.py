@@ -191,13 +191,38 @@ def _log_widget(gui, number):
     return widget
 
 
+def _at_end(bar):
+    """True when the log scrolled by *bar* shows its last lines."""
+    return bar.value() >= bar.maximum() - 4
+
+
+def _show_log(gui, widget):
+    """Show *widget* in the log stack where it was: at its end when it followed new lines, else
+    at the line it showed.
+
+    A QPlainTextEdit given text while hidden scrolls to its text cursor when shown again; after a
+    click in the log that cursor stays on the clicked line, so the view jumped there (near the top,
+    mostly) and the main log's auto-scroll took it for the user scrolling up."""
+    if gui.log_stack.currentWidget() is widget:
+        return
+    bar = widget.verticalScrollBar()
+    value = bar.value()
+    if widget is gui.log_text:
+        follow = not (getattr(gui, "_user_scrolled_up", False)
+                      or getattr(gui, "_log_auto_scroll_disabled", False))
+    else:
+        follow = _at_end(bar)
+    gui.log_stack.setCurrentWidget(widget)
+    bar.setValue(bar.maximum() if follow else value)
+
+
 def _on_watchdog_instance_changed(gui, index):
     """"Instance N" shows instance N's API calls and log; "All instances" every instance's API
     calls (the log shown stays)."""
     number = gui.watchdog_instance_combo.itemData(index)
     widget = gui._instance_logs.get(int(number)) if number else None
     if widget is not None:
-        gui.log_stack.setCurrentWidget(widget)
+        _show_log(gui, widget)
     try:
         gui._update_api_watchdog()
     except Exception:
@@ -219,7 +244,7 @@ def _prepare_views(gui, numbers):
     for number in numbers:
         if number != 1:
             _log_widget(gui, number).clear()
-    gui.log_stack.setCurrentWidget(gui.log_text)
+    _show_log(gui, gui.log_text)
     combo.setVisible(len(numbers) > 1)
 
 
@@ -227,7 +252,7 @@ def show_single_instance(gui):
     """A single-instance run: back to instance 1's log, switcher hidden."""
     if children_alive(gui) or getattr(gui, "log_stack", None) is None:
         return
-    gui.log_stack.setCurrentWidget(gui.log_text)
+    _show_log(gui, gui.log_text)
     gui.watchdog_instance_combo.hide()
 
 
@@ -808,7 +833,7 @@ class InstanceRun(QObject):
     @staticmethod
     def _append(widget, lines):
         bar = widget.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum() - 4
+        at_bottom = _at_end(bar)
         widget.appendPlainText("\n".join(lines))
         if at_bottom:
             bar.setValue(bar.maximum())
