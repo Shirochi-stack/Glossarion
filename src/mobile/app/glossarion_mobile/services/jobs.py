@@ -162,6 +162,8 @@ STREAM_TAIL_RESETS = ("SDK stream start", "Sending API call")
 STREAM_OPEN_PHRASES = ("stream start (model=", "stream opened in ")
 STREAM_CLOSE_PHRASES = ("received response", "stream finished", "stream complete", "sdk call finished",
                         "received translation", "sending api call")
+#: lowercased phrases that end a request's thinking: what streams next is the answer (``_note_stream_phase``)
+STREAM_TEXT_PHRASES = ("thinking complete", "text streaming", "first text token")
 #: how a status line starts besides an emoji / symbol (``stream_status_line``), never streamed text
 STREAM_STATUS_PREFIXES = ("[DEBUG]", "[INFO]", "[WARN", "[ERROR")
 
@@ -941,6 +943,7 @@ class _Job:
     sign_in_flagged: bool = False  # a "sign_in_required" event was sent for this job
     stream_tail: str = ""  # the end of the text the current request streams (the notification's rows)
     stream_open: bool = False  # between a request's stream start and its end (``_streamed_text``)
+    stream_thinking: bool = False  # the streamed text is thinking (``_note_stream_phase``)
     announced: threading.Event = field(default_factory=threading.Event)  # its QUEUED transition was posted
     run_id: Any = None
     log_path: Optional[str] = None
@@ -1275,6 +1278,7 @@ def notification_lines(snap: JobSnapshot) -> tuple:
 NOTIFICATION_STREAM_CHARS = 120
 #: what leads the streamed text's rows in the notification (``live_rows``)
 STREAM_ROW_MARK = "✍️ "
+THINKING_ROW_MARK = "🧠 "
 _TAG_RE = re.compile(r"<[^>]*>")
 
 
@@ -1309,7 +1313,7 @@ def on_device_row(threads: bool = False) -> str:
         return ""
 
 
-def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "") -> list:
+def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "", thinking: bool = False) -> list:
     """Hotfix 3: rows under the job notification's book line while a request runs: the on-device model's
     prompt reading / speed (one row) and, with Streaming on, the end of the text it streams (about three
     rows). None while the job waits for an answer or is not running."""
@@ -1317,8 +1321,10 @@ def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "") -> list:
         return []
     streamed = stream_row(stream_tail)
     # hotfix 4 (owner: "why is there no visual styling for that log area"): the notification is plain text
-    # (flutter_foreground_task's BigTextStyle takes a string), so the streamed text gets its own marker
-    rows = [row for row in (on_device_row(), f"{STREAM_ROW_MARK}{streamed}" if streamed else "") if row]
+    # (flutter_foreground_task's BigTextStyle takes a string), so the streamed text gets its own marker: 🧠 for
+    # the request's thinking, ✍️ for its answer
+    mark = THINKING_ROW_MARK if thinking else STREAM_ROW_MARK
+    rows = [row for row in (on_device_row(), f"{mark}{streamed}" if streamed else "") if row]
     return rows
 
 
@@ -2083,6 +2089,12 @@ class JobService:
         with self._lock:
             job = self._active if job_id is None else self._find_live(job_id)
             return job.stream_tail if job is not None else ""
+
+    def stream_thinking(self, job_id: Optional[str] = None) -> bool:
+        """Whether ``stream_tail`` is the request's thinking (hotfix 4: the notification marks it 🧠)."""
+        with self._lock:
+            job = self._active if job_id is None else self._find_live(job_id)
+            return bool(job.stream_thinking) if job is not None else False
 
     def _find_live(self, job_id: str) -> Optional[_Job]:
         if self._active is not None and self._active.id == job_id:
@@ -3277,6 +3289,7 @@ class JobService:
             except Exception:
                 log.debug("request stream rejected a message", exc_info=True)
         # hotfix 3: the notification's streaming rows read the end of the streamed text (Streaming off: none)
+        self._note_stream_phase(job, raw)
         # hotfix 4: the stream's own hint also marks some routes' status lines ("⏳ AuthND: NVIDIA queue /
         # prefill …", owner: "the notification area just shows random logs"), so both paths skip status lines
         if (streamed_text or self._streamed_text(job, raw)) and not stream_status_line(raw, job.stream):
@@ -3305,6 +3318,24 @@ class JobService:
                 continue
             job.last_line = line[:LAST_LINE_CHARS]
             self._note_issue(job, line)
+
+    @staticmethod
+    def _note_stream_phase(job: _Job, raw: str) -> None:
+        """Hotfix 4 (owner: thinking should have a brain emoji in the notification): the client's markers
+        ("🧠 [x] Thinking...", then "Thinking complete" / "📡 Text streaming...") switch the streamed text
+        between thinking and answer; a switch starts the tail anew, so the two never share a row."""
+        low = raw.strip().lower()
+        if not low:
+            return
+        if raw.strip().startswith("🧠") and low.endswith("thinking..."):
+            thinking = True
+        elif any(phrase in low for phrase in STREAM_TEXT_PHRASES) or any(p in low for p in STREAM_OPEN_PHRASES):
+            thinking = False
+        else:
+            return
+        if thinking != job.stream_thinking:
+            job.stream_thinking = thinking
+            job.stream_tail = ""
 
     @staticmethod
     def _streamed_text(job: _Job, raw: str) -> bool:

@@ -50,8 +50,8 @@ LOCAL_STREAM = (
 
 
 def _job(stream):
-    return types.SimpleNamespace(stream=stream, stream_tail="", stream_open=False, buffer=None, sign_in_flagged=True,
-                                 last_line="", spec=None, id="j1")
+    return types.SimpleNamespace(stream=stream, stream_tail="", stream_open=False, stream_thinking=False, buffer=None,
+                                 sign_in_flagged=True, last_line="", spec=None, id="j1")
 
 
 def _service():
@@ -100,6 +100,27 @@ def test_status_lines_the_stream_marks_as_text_stay_out_of_the_notification():
     assert not stream_status_line("<p>text</p>") and not stream_status_line("") and stream_status_line("✓ done")
     snap = types.SimpleNamespace(question=None, is_active=True)
     assert live_rows(snap, job.stream_tail)[-1] == "✍️ Erica smiled. \"......?\""
+
+
+def test_thinking_and_answer_get_their_own_marks():
+    """Owner: thinking should have a brain emoji in the notification, so thinking and text streaming differ."""
+    import direct_text_stream
+
+    from glossarion_mobile.services.jobs import live_rows
+
+    service = _service()
+    job = _job(direct_text_stream.make_stream(source_is_attachment=True, model="local/qwen"))
+    snap = types.SimpleNamespace(question=None, is_active=True)
+    for message in ("🛰️ [local] SDK stream start (model=qwen, base_url=x)", "🧠 [local] Thinking...",
+                    "The user wants a translation."):
+        service._job_log(job, message, {})
+    assert job.stream_thinking and live_rows(snap, job.stream_tail, job.stream_thinking) == [
+        "🧠 The user wants a translation."]
+    for message in ("🧠 [local] Thinking complete (12 chunks, 3.0s)", "📡 [local] Text streaming...",
+                    "<p>Erica smiled.</p>"):
+        service._job_log(job, message, {})
+    assert not job.stream_thinking and job.stream_tail == "<p>Erica smiled.</p>"  # the thinking is not kept
+    assert live_rows(snap, job.stream_tail, job.stream_thinking) == ["✍️ Erica smiled."]
 
 
 def test_streaming_off_and_status_lines_add_nothing():

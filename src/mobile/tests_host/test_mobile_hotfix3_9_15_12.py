@@ -266,7 +266,7 @@ def test_job_keeps_the_tail_of_its_streamed_text_and_drops_it_for_the_next_reque
     from glossarion_mobile.services import jobs as jb
 
     job = types.SimpleNamespace(stream=types.SimpleNamespace(feed=lambda raw: "suppress-main-log" if raw.startswith("<") else None),
-                                stream_tail="", stream_open=False, buffer=None, sign_in_flagged=True, last_line="",
+                                stream_tail="", stream_open=False, stream_thinking=False, buffer=None, sign_in_flagged=True, last_line="",
                                 spec=None, id="j1")
     service = jb.JobService.__new__(jb.JobService)
     service._deliver_message = lambda job, raw: None
