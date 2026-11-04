@@ -4574,6 +4574,7 @@ class MultiAPIKeyDialog(QDialog):
         # Fallback Model
         add_fallback_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         self.fallback_model_combo = self._create_model_combo()
+        self.fallback_model_combo._catalog_key_entry = self.fallback_key_entry
         add_fallback_grid.addWidget(self._wrap_model_with_ollama_settings(self.fallback_model_combo), 0, 4)
 
         # Add fallback button
@@ -5936,6 +5937,7 @@ class MultiAPIKeyDialog(QDialog):
         # Model
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         self.model_combo = self._create_model_combo()
+        self.model_combo._catalog_key_entry = self.api_key_entry   # its catalog auto-poll's key
         add_grid.addWidget(self._wrap_model_with_ollama_settings(self.model_combo), 0, 4)
 
         # Row 1: Cooldown and buttons
@@ -7212,6 +7214,7 @@ class MultiAPIKeyDialog(QDialog):
         # Model
         add_glossary_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         self.glossary_model_combo = self._create_model_combo()
+        self.glossary_model_combo._catalog_key_entry = self.glossary_key_entry
         add_glossary_grid.addWidget(self._wrap_model_with_ollama_settings(self.glossary_model_combo), 0, 4)
 
         # Add button
@@ -8601,6 +8604,28 @@ class MultiAPIKeyDialog(QDialog):
         except RuntimeError:
             pass
 
+    @staticmethod
+    def _model_field_catalog_source(combo):
+        """A manager model field as translator_gui's catalog poll source: a callable returning
+        its ``(model, api_key, poll_border)`` (the key of its add-key form, if it has one)."""
+        def source():
+            key_entry = getattr(combo, '_catalog_key_entry', None)
+            return (
+                combo.currentText(),
+                key_entry.text() if key_entry is not None else '',
+                lambda active: MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, active),
+            )
+        return source
+
+    def _schedule_model_field_catalog_poll(self, combo, delay_ms=1200):
+        """Auto-poll the provider typed in a manager model field: the main model field's
+        24-hour per-provider catalog auto-poll, with this field's model and key."""
+        schedule = getattr(
+            getattr(self, 'translator_gui', None), '_schedule_current_provider_catalog_refresh', None,
+        )
+        if callable(schedule):
+            schedule(delay_ms, source=MultiAPIKeyDialog._model_field_catalog_source(combo))
+
     def _show_model_context_menu(self, combo, global_position):
         """Show the translator model field's edit and catalog actions."""
         line_edit = combo.lineEdit() if combo.isEditable() else None
@@ -8645,8 +8670,12 @@ class MultiAPIKeyDialog(QDialog):
                     translator, '_start_provider_catalog_refresh_with_antigravity', None,
                 )
             else:
-                refresh = getattr(
-                    translator, '_start_provider_model_catalog_refresh', None,
+                # this field's provider first (not the main model field's), then the full sweep
+                field_refresh = getattr(translator, '_start_model_field_catalog_refresh', None)
+                refresh = None if not callable(field_refresh) else (
+                    lambda show_feedback, field=combo: field_refresh(
+                        *MultiAPIKeyDialog._model_field_catalog_source(field)()
+                    )
                 )
             if callable(refresh):
                 try:
@@ -9182,6 +9211,13 @@ class MultiAPIKeyDialog(QDialog):
                         [text], add_to_saved=True, refresh=True
                     )
                 )
+            # Typing a provider prefix auto-polls its catalog, as in the main model field.
+            combo.lineEdit().textEdited.connect(
+                lambda _text, target=combo: MultiAPIKeyDialog._schedule_model_field_catalog_poll(self, target)
+            )
+        combo.activated.connect(
+            lambda *_args, target=combo: MultiAPIKeyDialog._schedule_model_field_catalog_poll(self, target, 250)
+        )
 
         combo._model_completer = completer
         combo._model_completer_proxy = completion_model
@@ -11780,6 +11816,7 @@ class MultiAPIKeyDialog(QDialog):
 
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         model_combo = self._create_model_combo()
+        model_combo._catalog_key_entry = key_entry
         setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
         add_grid.addWidget(self._wrap_model_with_ollama_settings(model_combo), 0, 4)
 

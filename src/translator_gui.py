@@ -15142,8 +15142,14 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             # The window may be closing as a daemon catalog worker reports back.
             pass
 
-    def _schedule_current_provider_catalog_refresh(self, delay_ms=1200):
-        """Debounce automatic polling until model/key typing has settled."""
+    def _schedule_current_provider_catalog_refresh(self, delay_ms=1200, source=None):
+        """Debounce automatic polling until model/key typing has settled.
+
+        *source* polls another model field instead of the main one (a Multi API Key Manager
+        model field): a callable returning that field's ``(model, api_key, poll_border)``,
+        ``poll_border(active)`` animating the field while its poll runs. The field edited last wins.
+        """
+        self._current_provider_catalog_source = source
         timer = getattr(self, '_current_provider_catalog_timer', None)
         if timer is None:
             timer = QTimer(self)
@@ -15300,9 +15306,16 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _auto_poll_current_provider_catalog(self):
         """Poll only the selected provider when its persisted 24-hour TTL is due."""
+        source = getattr(self, '_current_provider_catalog_source', None)
+        poll_border = None
         try:
-            active_model = self.model_combo.currentText().strip()
-            active_api_key = self.api_key_entry.text().strip()
+            if callable(source):
+                active_model, active_api_key, poll_border = source()
+                active_model = str(active_model or '').strip()
+                active_api_key = str(active_api_key or '').strip()
+            else:
+                active_model = self.model_combo.currentText().strip()
+                active_api_key = self.api_key_entry.text().strip()
         except (AttributeError, RuntimeError):
             return
 
@@ -15337,23 +15350,62 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         )
         if not provider:
             return
+        # another model field than the main one polls with its own model, key and border
+        field = {} if not callable(source) else {
+            'active_model': active_model,
+            'active_api_key': active_api_key,
+            'poll_border': poll_border,
+        }
         started = self._start_provider_model_catalog_refresh(
             only_provider=provider,
             automatic=True,
+            **field,
         )
         if not started:
             # A manual/startup request may already be finishing. Recheck its
             # persisted attempt timestamp shortly rather than dropping this
             # provider or launching a duplicate request.
-            self._schedule_current_provider_catalog_refresh(1500)
+            if field:
+                self._schedule_current_provider_catalog_refresh(1500, source=source)
+            else:
+                self._schedule_current_provider_catalog_refresh(1500)
+
+    def _start_model_field_catalog_refresh(self, active_model, active_api_key='', poll_border=None):
+        """"🌐 Refresh Online Models" of another model field (a Multi API Key Manager model
+        field): that field's provider first, so its models show within seconds, then the full
+        sweep queued behind it (the main field's refresh is that sweep alone)."""
+        try:
+            custom_routes = self._normalize_custom_prefix_routes(
+                getattr(self, 'custom_prefix_routes', self.config.get('custom_prefix_routes', []))
+            )
+        except Exception:
+            custom_routes = []
+        provider = catalog_provider_for_model(active_model, custom_routes)
+        started = self._start_provider_model_catalog_refresh(
+            show_feedback=True,
+            only_provider=provider or None,
+            active_model=str(active_model or '').strip(),
+            active_api_key=str(active_api_key or '').strip(),
+            poll_border=poll_border,
+        )
+        if started and provider:
+            self._provider_model_catalog_full_refresh_pending = True
+        return started
 
     def _start_provider_model_catalog_refresh(
         self,
         show_feedback=False,
         only_provider=None,
         automatic=False,
+        active_model=None,
+        active_api_key=None,
+        poll_border=None,
     ):
-        """Refresh eligible online model catalogs without blocking Qt."""
+        """Refresh eligible online model catalogs without blocking Qt.
+
+        *active_model* / *active_api_key* poll for another model field than the main one, and
+        *poll_border(active)* animates that field instead of the main one.
+        """
         if show_feedback:
             # If startup polling is already active, its result will satisfy
             # this explicit request without launching a duplicate request.
@@ -15383,14 +15435,16 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     )
             return False
 
-        try:
-            active_model = self.model_combo.currentText().strip()
-        except Exception:
-            active_model = str(getattr(self, 'model_var', self.config.get('model', '')) or '').strip()
-        try:
-            active_api_key = self.api_key_entry.text().strip()
-        except Exception:
-            active_api_key = str(self.config.get('api_key', '') or '').strip()
+        if active_model is None:
+            try:
+                active_model = self.model_combo.currentText().strip()
+            except Exception:
+                active_model = str(getattr(self, 'model_var', self.config.get('model', '')) or '').strip()
+        if active_api_key is None:
+            try:
+                active_api_key = self.api_key_entry.text().strip()
+            except Exception:
+                active_api_key = str(self.config.get('api_key', '') or '').strip()
         try:
             custom_routes = self._normalize_custom_prefix_routes(
                 getattr(self, 'custom_prefix_routes', self.config.get('custom_prefix_routes', []))
@@ -15441,7 +15495,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             only_provider=only_provider,
         )
         self._provider_model_catalog_poll_active = True
-        set_poll_border = getattr(self, '_set_model_poll_border_active', None)
+        set_poll_border = (
+            poll_border if callable(poll_border)
+            else getattr(self, '_set_model_poll_border_active', None)
+        )
         if callable(set_poll_border):
             set_poll_border(True)
         return True

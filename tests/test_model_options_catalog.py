@@ -2948,6 +2948,106 @@ def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch)
     assert len(worker_calls) == 1
 
 
+def test_multi_key_model_field_polls_its_own_provider(monkeypatch):
+    """A Multi API Key Manager model field auto-polls the provider typed in it, with its add-key
+    form's key and its own border (not the main model field's); its right-click refresh polls that
+    provider first and queues the full sweep behind it."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    schedules = []
+    translator = SimpleNamespace(
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids=set(),
+        _model_polled_icon=qt_gui.QIcon(),
+        _schedule_current_provider_catalog_refresh=(
+            lambda delay_ms=1200, source=None: schedules.append((delay_ms, source))
+        ),
+    )
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo._catalog_key_entry = qt_widgets.QLineEdit("form-key")
+    multi_api_key_manager.MultiAPIKeyDialog._attach_model_autofill(
+        SimpleNamespace(translator_gui=translator), combo, model_values=["authnan/model-a"],
+    )
+    qt_test.QTest.keyClicks(combo.lineEdit(), "authnan/")
+    app.processEvents()
+    assert len(schedules) == len("authnan/") and schedules[-1][0] == 1200
+    source = schedules[-1][1]
+    model, api_key, poll_border = source()
+    assert (model, api_key) == ("authnan/", "form-key")
+    combo.show()
+    app.processEvents()
+    poll_border(True)
+    assert combo._model_catalog_poll_border.isAnimating()
+    poll_border(False)
+
+    # the main window's debounced auto-poll then polls that field's provider
+    due_calls, poll_calls = [], []
+    monkeypatch.setattr(
+        translator_gui, "due_provider_catalog_for_model",
+        lambda active_model, active_api_key, _routes: due_calls.append((active_model, active_api_key)) or "authnan",
+    )
+    gui = SimpleNamespace(
+        model_combo=SimpleNamespace(currentText=lambda: "or/main-model"),
+        api_key_entry=SimpleNamespace(text=lambda: "main-key"),
+        config={},
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _current_provider_catalog_source=source,
+        _start_provider_model_catalog_refresh=lambda **kwargs: poll_calls.append(kwargs) or True,
+    )
+    translator_gui.TranslatorGUI._auto_poll_current_provider_catalog(gui)
+    assert due_calls == [("authnan/", "form-key")]
+    assert poll_calls == [{"only_provider": "authnan", "automatic": True, "active_model": "authnan/",
+                           "active_api_key": "form-key", "poll_border": poll_calls[0]["poll_border"]}]
+
+    # the worker gets the field's model; the field's border animates, not the main one
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    worker_calls, main_border, field_border = [], [], []
+    monkeypatch.setattr(
+        translator_gui, "start_provider_model_catalog_refresh",
+        lambda *_args, **kwargs: worker_calls.append(kwargs) or FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "or/main-model"),
+        api_key_entry=SimpleNamespace(text=lambda: "main-key"),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=SimpleNamespace(connect=lambda _callback: None),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_poll_border_active=main_border.append,
+        append_log=lambda _message: None,
+    )
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui, only_provider="authnan", automatic=True,
+        active_model="authnan/", active_api_key="", poll_border=field_border.append,
+    )
+    assert worker_calls[-1]["active_model"] == "authnan/" and worker_calls[-1]["only_provider"] == "authnan"
+    assert field_border == [True] and main_border == []
+
+    # right-click "Refresh Online Models": that provider now, the full sweep queued after it
+    gui._provider_model_catalog_thread = None
+    gui._start_provider_model_catalog_refresh = (
+        lambda **kwargs: translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(gui, **kwargs)
+    )
+    assert translator_gui.TranslatorGUI._start_model_field_catalog_refresh(
+        gui, "authnan/model-a", "", field_border.append,
+    )
+    assert worker_calls[-1]["only_provider"] == "authnan"
+    assert worker_calls[-1]["active_model"] == "authnan/model-a"
+    assert gui._provider_model_catalog_full_refresh_pending is True
+
+
 def test_uninstalled_ollama_auto_poll_stops_before_log_or_worker(monkeypatch):
     import translator_gui
 
