@@ -275,12 +275,13 @@ class JobDetailScreen(Screen):
                                   key="job-issue")
         self.qa_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
                                on_click=lambda e: self._on_progress(failed=True), visible=False, key="job-qa-failed")
-        # a job of a multi-instance translation names its instance (its own keys, log and watchdog)
+        # a job of a multi-instance translation names its instance (its own keys, log and watchdog); after
+        # Files, which stays beside the state
         from glossarion_mobile.ui.screens.jobs import is_instance_job
 
         self.instance_chip = ft.Chip(label=ft.Text(instance_label(self.snap)), leading=ft.Icon(ft.Icons.NUMBERS, size=16),
                                      visible=is_instance_job(self.snap), key="job-instance")
-        self.state_row = ft.Row([self.state_chip, self.instance_chip, self.files_button, self.origin_button], wrap=True,
+        self.state_row = ft.Row([self.state_chip, self.files_button, self.instance_chip, self.origin_button], wrap=True,
                                 spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="job-state-row")
         header = SectionCard(
             title="Job",
