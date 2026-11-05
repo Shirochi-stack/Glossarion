@@ -780,6 +780,42 @@ def test_authgem_poll_uses_selected_account_quota_catalog(tmp_path, monkeypatch)
     ]
 
 
+def test_authgem_vertex_poll_uses_vertex_publisher_catalog(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+
+    class FakeStore:
+        has_tokens = True
+
+        def get_valid_access_token(self, auto_login=True):
+            assert auto_login is False
+            return "google-oauth"
+
+    fake_authgem = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda *args, **kwargs: pytest.fail("Code Assist catalog used"),
+        fetch_vertex_models=lambda token, timeout, account_id: (
+            fetch_calls.append((token, timeout, account_id))
+            or ["gemini-vertex-live"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "authgem_auth", fake_authgem)
+
+    assert model_options.due_provider_catalog_for_model(
+        "authgem-vertex3/gemini-old"
+    ) == "authgem-vertex:3"
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgem-vertex3/gemini-old",
+        only_provider="authgem-vertex:3",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [("google-oauth", 1, 3)]
+    assert result.provider_models["authgem-vertex:3"] == [
+        "authgem-vertex3/gemini-vertex-live",
+    ]
+
+
 def test_authnd_poll_uses_complete_compatible_build_catalog_without_static_intersection(
     tmp_path, monkeypatch
 ):
@@ -1004,7 +1040,8 @@ def test_only_vertex_style_routes_remain_static_by_design():
     assert "authnd/" not in static_routes
     assert "authza/" not in static_routes
     assert "authgem-key/" not in static_routes
-    assert "authgem-vertex*/" in static_routes
+    assert "authgem-vertex*/" not in static_routes
+    assert "vertex/" in static_routes
 
 
 def test_provider_poll_log_omits_authgem_key_from_nonpollable_routes():
@@ -1021,7 +1058,7 @@ def test_provider_poll_log_omits_authgem_key_from_nonpollable_routes():
         online_model_count=0,
     )
 
-    assert "Not pollable by design: 4 routes" in logs[0]
+    assert "Not pollable by design: 3 routes" in logs[0]
     assert "authgem-key" not in logs[0]
 
 
