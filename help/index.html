@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Getting Started · Glossarion Help</title>
+  <meta name="description" content="Install Glossarion on Windows, macOS, Linux, Android or iOS, pick a model, and translate your first book.">
+  <link rel="icon" type="image/png" href="../assets/site/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/site/site.css">
+  <script src="../assets/site/site.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/site/halgakos-avatar.webp" alt="" width="34" height="34">Glossarion</a>
+      <nav class="nav" aria-label="Main">
+        <a href="../#features">Features</a>
+        <a href="../#download">Download</a>
+        <a href="./" aria-current="page">Help</a>
+        <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
+        <a href="donate/">Donate</a>
+      </nav>
+      <div class="header-actions">
+        <a class="icon-btn" href="https://github.com/Shirochi-stack/Glossarion" aria-label="Glossarion on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.4c.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a>
+        <button class="icon-btn" type="button" data-theme-toggle aria-label="Toggle dark mode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg></button>
+        <button class="icon-btn menu-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      </div>
+    </div>
+    <nav class="mobile-nav" aria-label="Mobile">
+      <a href="../#features">Features</a>
+      <a href="../#download">Download</a>
+      <a href="./">Help</a>
+      <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
+      <a href="donate/">Donate</a>
+    </nav>
+  </header>
+
+  <main class="wrap help">
+    <aside class="help-side" aria-label="Help topics">
+      <h5>Guides</h5>
+      <ul>
+        <li><a href="./" aria-current="page">Getting started</a>
+          <ul>
+            <li><a href="#which-download">Which download?</a></li>
+            <li><a href="#windows">Windows</a></li>
+            <li><a href="#macos">macOS</a></li>
+            <li><a href="#linux">Linux</a></li>
+            <li><a href="#android">Android</a></li>
+            <li><a href="#ios">iOS</a></li>
+            <li><a href="#from-source">From source</a></li>
+            <li><a href="#pick-a-model">Pick a model</a></li>
+            <li><a href="#first-translation">First translation</a></li>
+          </ul>
+        </li>
+        <li><a href="guides/">All guides &amp; docs</a></li>
+      </ul>
+      <h5>Help</h5>
+      <ul>
+        <li><a href="faq/">FAQ</a></li>
+        <li><a href="https://discord.gg/n7WXRXn533">Discord support</a></li>
+        <li><a href="https://github.com/Shirochi-stack/Glossarion/issues">Report a bug</a></li>
+      </ul>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="donate/">Contribute &amp; donate</a></li>
+        <li><a href="https://github.com/Shirochi-stack/Glossarion/releases">Release notes</a></li>
+      </ul>
+    </aside>
+
+    <article class="prose">
+      <h1>Getting started</h1>
+      <p class="lead">Glossarion is free and open source. There is no account, no store and no subscription: every build comes from the <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest">GitHub releases page</a>. You bring the AI — your own API key, a subscription login, or a model running on your own machine.</p>
+
+      <div class="callout tip"><p><strong>Short version:</strong> download the build for your device from the <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest">latest release</a>, open it, type a model name (for example <code>gemini-3.1-flash-lite</code> with a free Google AI Studio key, or <code>ollamapull/qwen3.5:9b</code> for a local model), choose a book, and press Run.</p></div>
+
+      <h2 id="which-download">Which download do I need?</h2>
+      <p>Every release ships these files. Version numbers in the names change with each release.</p>
+      <table>
+        <thead><tr><th>Device</th><th>File</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Windows</strong></td><td><code>Glossarion.vX.exe</code> ⭐</td><td>Standard build — recommended for novels. Includes the EPUB library/reader and the SDLXLIFF editor. No manga translator.</td></tr>
+          <tr><td></td><td><code>N_Glossarion_NoCuda.vX.exe</code></td><td>Everything, <strong>including the manga translator</strong> and the optional NER name check. Best for manga. No NVIDIA GPU needed.</td></tr>
+          <tr><td></td><td><code>L_Glossarion_Lite.vX.exe</code></td><td>Smaller: drops the EPUB reader, the SDLXLIFF notepad mode and browser-based routes.</td></tr>
+          <tr><td></td><td><code>L_Glossarion_TurboLite.vX.exe</code></td><td>Smallest and fastest to start: also drops the Vertex AI SDK and PDF generation.</td></tr>
+          <tr><td><strong>macOS</strong></td><td><code>…_MAC.dmg</code> / <code>…_MAC_Intel.dmg</code></td><td>Apple Silicon (M1 and newer) or Intel Macs. <code>NoCuda</code> includes the manga translator; <code>Lite</code> does not.</td></tr>
+          <tr><td><strong>Linux</strong></td><td><code>Z_Glossarion_vX_Linux.zip</code></td><td>Standard build. <code>NoCuda</code> (manga) and <code>TurboLite</code> variants are also published.</td></tr>
+          <tr><td><strong>Android</strong></td><td><code>…_Android_arm64-v8a.apk</code></td><td>Almost every phone and tablet. Use <code>x86_64</code> only for emulators and Chromebooks.</td></tr>
+          <tr><td><strong>iOS / iPadOS</strong></td><td><code>…_iOS_unsigned.ipa</code></td><td>Unsigned — install with a sideloading tool (see below).</td></tr>
+        </tbody>
+      </table>
+      <p>Not sure? On Windows take the standard build; switch to <code>NoCuda</code> only when you want to translate manga.</p>
+
+      <h2 id="windows">Windows</h2>
+      <ol>
+        <li>Download the <code>.exe</code> you picked from the <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest">latest release</a>.</li>
+        <li>Double-click it. There is nothing to install — the program is a single file.</li>
+        <li>The first start shows a splash screen and can take 10–60 seconds while files unpack. Later starts are faster.</li>
+      </ol>
+      <div class="callout warn"><p><strong>"Windows protected your PC"?</strong> The builds are not code-signed, so SmartScreen may warn about an unrecognised app. Choose <em>More info → Run anyway</em>. If your antivirus is unsure, you can always build from source instead.</p></div>
+
+      <h2 id="macos">macOS</h2>
+      <ol>
+        <li>Download the <code>.dmg</code> for your Mac: <code>_MAC</code> for Apple Silicon, <code>_MAC_Intel</code> for Intel.</li>
+        <li>Open the disk image and drag Glossarion into <em>Applications</em>.</li>
+        <li>The app is not notarised, so the first time macOS may refuse to open it. Right-click the app and choose <em>Open</em>, or go to <em>System Settings → Privacy &amp; Security</em> and click <em>Open Anyway</em>.</li>
+      </ol>
+
+      <h2 id="linux">Linux</h2>
+      <ol>
+        <li>Download the <code>_Linux.zip</code> and unzip it. It contains a single executable.</li>
+        <li>Make it executable and run it:
+<pre><code>chmod +x Glossarion*
+./Glossarion*</code></pre></li>
+        <li>The build uses Qt. If it complains about the <code>xcb</code> platform plugin, install the XCB libraries — on Debian/Ubuntu: <code>sudo apt install libxcb-cursor0</code>.</li>
+      </ol>
+
+      <h2 id="android">Android</h2>
+      <ol>
+        <li>On your phone, download the <code>_Android_arm64-v8a.apk</code> from the <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest">latest release</a>.</li>
+        <li>Open it. Android asks you to allow installs from your browser or file manager the first time — allow it, then tap <em>Install</em>.</li>
+        <li>To update, install the newer APK over the old one; your books, keys and settings stay.</li>
+      </ol>
+      <p>The mobile app is chat-first: talk to the model, drop in a book, and long jobs keep running in the background with a notification. It can also run small GGUF models <strong>on the phone itself</strong> — no server and no internet once the model is downloaded. A 4B model wants about 4&nbsp;GB of free RAM.</p>
+
+      <h2 id="ios">iOS &amp; iPadOS</h2>
+      <p>Glossarion is not on the App Store, so the iOS build is an <strong>unsigned IPA</strong>. Install it with any sideloading tool that signs the app with your own Apple ID, for example <a href="https://sidestore.io/">SideStore</a>, <a href="https://altstore.io/">AltStore</a> or Sideloadly:</p>
+      <ol>
+        <li>Download <code>_iOS_unsigned.ipa</code> from the <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest">latest release</a>.</li>
+        <li>Open it with your sideloading tool and let it sign and install the app.</li>
+        <li>With a free Apple ID, apps signed this way must be refreshed every 7 days; your sideloading tool does this for you.</li>
+      </ol>
+      <div class="callout"><p><strong>On-device models on iOS:</strong> sideloaded apps cannot ask for Apple's increased-memory entitlement, so iOS lets a local model use at most about half of the device's RAM. Small models (0.8B–4B) are the sweet spot.</p></div>
+
+      <h2 id="from-source">Run from source</h2>
+      <p>Prefer Python? Glossarion runs from source on Windows, macOS and Linux with Python 3.10 or newer.</p>
+<pre><code>git clone https://github.com/Shirochi-stack/Glossarion.git
+cd Glossarion
+pip install -r requirements.txt        # macOS: requirements-macos.txt
+cd src
+python translator_gui.py</code></pre>
+      <p>On Windows you can also double-click <code>src/launch_Glossarion.bat</code>.</p>
+
+      <h2 id="pick-a-model">Pick a model</h2>
+      <p>Glossarion does not sell AI access, so you choose where translations come from. The <strong>Model</strong> box is a free-text field: type the model name, including its prefix, and Glossarion routes the request.</p>
+      <table>
+        <thead><tr><th>You want…</th><th>Type in Model</th><th>What you need</th></tr></thead>
+        <tbody>
+          <tr><td>Free, on your own PC</td><td><code>ollamapull/qwen3.5:9b</code></td><td>Nothing — Glossarion installs Ollama and downloads the model for you.</td></tr>
+          <tr><td>Free, on your phone</td><td>Model manager › On-device</td><td>A phone with enough free RAM for the model (Qwen3.5 0.8B–9B presets). Mobile can also use Ollama or LM Studio running on a PC on your network.</td></tr>
+          <tr><td>Free cloud tier</td><td><code>gemini-3.1-flash-lite</code></td><td>A free <a href="https://aistudio.google.com/apikey">Google AI Studio key</a> (about 500 requests a day on Flash Lite).</td></tr>
+          <tr><td>Free models on OpenRouter</td><td><code>or/…:free</code></td><td>A free <a href="https://openrouter.ai/settings/keys">OpenRouter key</a>.</td></tr>
+          <tr><td>Use a subscription you have</td><td><code>authgpt/…</code>, <code>authgrok/…</code></td><td>Sign in with the 🔐 button next to the model field.</td></tr>
+          <tr><td>Top quality</td><td><code>gpt-5.4</code>, <code>claude-sonnet-4-6</code>, <code>gemini-3.1-pro-preview</code>, <code>deepseek-chat</code>…</td><td>An API key from that provider. You pay the provider directly, per use.</td></tr>
+          <tr><td>Your own server</td><td><code>ollama/…</code>, <code>lmstudio/…</code> or a custom prefix</td><td>Any OpenAI-compatible endpoint.</td></tr>
+        </tbody>
+      </table>
+      <p>The full list of 40+ providers and every free route is in the <a href="https://github.com/Shirochi-stack/Glossarion/blob/main/docs/Glossarion_User_Guide_Sep-23-2026.md#17-how-to-translate-for-free">user guide</a>.</p>
+
+      <h2 id="first-translation">Your first translation (desktop)</h2>
+      <ol>
+        <li><strong>Choose a file</strong> — an EPUB, TXT, PDF, subtitle file, image or manga archive.</li>
+        <li><strong>Pick a profile</strong> for the source language (Korean, Japanese, Chinese and more). The profile holds the translation prompt; edit it freely.</li>
+        <li><strong>Type a model</strong> and paste its API key (skip the key for local models and logins).</li>
+        <li><strong>Set a chapter range</strong> to try a couple of chapters first.</li>
+        <li><strong>Turn on the glossary</strong> so names stay the same in every chapter (see <a href="guides/#glossary">Glossary</a>).</li>
+        <li><strong>Press Run.</strong> Progress, the API watchdog and logs update live; Stop and resume any time.</li>
+        <li><strong>Open the output</strong> — a translated EPUB is built for you. Read it in the built-in library, then run a <strong>QA Scan</strong> to catch untranslated or duplicated passages.</li>
+      </ol>
+      <p>On mobile the flow starts in the chat: tap <strong>＋</strong> to attach a book from your files or Library, check the plan card, and start the job. It keeps running in the background with a notification, and the finished book lands in your Library. To translate a few lines, just paste them into the chat.</p>
+
+      <div class="toc-next">
+        <a class="next" href="guides/"><small>Next</small>All guides &amp; docs →</a>
+      </div>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-bottom" style="margin-top:0;border-top:0;padding-top:0">
+        <span>Glossarion · free and open source under AGPL-3.0</span>
+        <span><a href="https://github.com/Shirochi-stack/Glossarion">GitHub</a> · <a href="https://discord.gg/n7WXRXn533">Discord</a> · <a href="donate/">Donate</a></span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
