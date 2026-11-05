@@ -488,5 +488,21 @@ def test_update_and_clear_region_styles(tmp_path):
     assert core._update_region_styles(host, None, [0], {'bold': True}) == {}
 
 
+def test_style_change_survives_a_render_that_holds_the_page_state(tmp_path):
+    """A render on the executor reads the page's state dict, then set_state()s that same dict back
+    with its last_render_positions: a style changed meanwhile must still be there afterwards."""
+    page = str(tmp_path / "001.png")
+    host = _host(page, {'translated_texts': [], 'region_styles': {'0': {'bold': True}}})
+    held = host.image_state_manager.get_state(page)  # the render's read
+    core._update_region_styles(host, page, [0], {'italic': True})
+    held['last_render_positions'] = {'0': [0, 0, 10, 10]}
+    host.image_state_manager.set_state(page, held, save=True)  # the render's write
+    assert core._region_text_styles(host, page) == {0: {'bold': True, 'italic': True}}
+    held = host.image_state_manager.get_state(page)
+    core._clear_region_styles(host, page)
+    host.image_state_manager.set_state(page, held, save=True)
+    assert core._region_text_styles(host, page) == {}
+
+
 def test_attach_region_styles_reaches_the_desktop_namespace():
     assert '_attach_region_styles' in core.SHARED_NAMES

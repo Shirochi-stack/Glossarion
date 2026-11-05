@@ -136,7 +136,11 @@ def _update_region_styles(self, image_path, indexes, changes=None, *, reset=Fals
     state_manager = getattr(self, 'image_state_manager', None)
     if not image_path or not state_manager:
         return {}
-    state = dict(state_manager.get_state(image_path) or {})
+    # Changed in place: a render on the executor holds this page's state dict and set_state()s it
+    # back when it finishes (last_render_positions); a replaced dict would lose this change then.
+    state = state_manager.get_state(image_path)
+    if not isinstance(state, dict):
+        state = {}
     styles = manga_ocr_io.region_styles_from_state(state)
     stored = {}
     for index in sorted({int(value) for value in indexes or ()}):
@@ -156,10 +160,9 @@ def _clear_region_styles(self, image_path):
     state_manager = getattr(self, 'image_state_manager', None)
     if not image_path or not state_manager:
         return
-    state = state_manager.get_state(image_path) or {}
-    if 'region_styles' in state:
-        state = dict(state)
-        state.pop('region_styles', None)
+    state = state_manager.get_state(image_path)
+    if isinstance(state, dict) and 'region_styles' in state:
+        state.pop('region_styles', None)  # in place, like _update_region_styles
         state_manager.set_state(image_path, state, save=True)
 
 
