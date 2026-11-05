@@ -1472,7 +1472,9 @@ def _load_inpainter_into_pool(self, local_model: str, resolved_model_path: str, 
     Used when no preload is filling the pool, e.g. the model was switched after startup preload."""
     from manga_translator import MangaTranslator
     from local_inpainter import LocalInpainter
-    new_inpainter = LocalInpainter()
+    # The endpoint-backed image edit runs in-process, as MangaTranslator's shared getter loads it:
+    # a worker process never receives the Image Gen/Edit key model copied into config below.
+    new_inpainter = LocalInpainter(enable_worker_process=not is_custom_image_edit)
     try:
         if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
             new_inpainter.config.update(self.main_gui.config)

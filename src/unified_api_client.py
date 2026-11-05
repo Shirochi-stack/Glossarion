@@ -29413,20 +29413,23 @@ class UnifiedClient:
 
     def _authgem_retry_loop(self, send_fn, label: str, actual_model: str,
                             messages, temperature, max_tokens,
-                            store=None) -> UnifiedResponse:
+                            store=None, response_name=None) -> UnifiedResponse:
         """Common retry / error-handling loop for all AuthGem variants.
 
         Parameters
         ----------
         send_fn : callable
             The actual send function to call on each attempt.
-            Signature: send_fn(attempt) -> Dict with content/finish_reason/usage.
+            Signature: send_fn(attempt) -> Dict with content/finish_reason/usage
+            (and "images" for an image reply).
         label : str
             Human-readable label for log messages (e.g. "AuthGem", "AuthGem-Key").
         actual_model : str
             Bare model name (after prefix stripping).
         store : AuthGemTokenStore or None
             If provided, 401 errors will trigger a token refresh from this store.
+        response_name : str or None
+            Names the saved file of an image reply, as on the other image routes.
         """
         max_retries = self._get_max_retries()
         last_error = None
@@ -29455,8 +29458,12 @@ class UnifiedClient:
                         error_type="prohibited_content"
                     )
 
+                content = result.get("content", "")
+                images = result.pop("images", None)  # bytes stay out of raw_response (saved as JSON)
+                if images:
+                    content = self._authgem_save_image(images[0], response_name)
                 return UnifiedResponse(
-                    content=result.get("content", ""),
+                    content=content,
                     finish_reason=result.get("finish_reason", "stop"),
                     usage=result.get("usage"),
                     raw_response=result,
@@ -29577,6 +29584,34 @@ class UnifiedClient:
 
         raise UnifiedClientError(f"{label} request failed after {max_retries} attempts: {last_error}", error_type="api_error")
 
+    def _authgem_image_output(self, actual_model: str):
+        """Image-reply options for an AuthGem request, or None for a text reply.
+
+        Same rule as the native Gemini route: never in a vision-only scan, always
+        for an image model, otherwise when image output mode is on."""
+        if getattr(threading.current_thread(), '_force_vision_mode', False) or self._is_vision_input_only_context():
+            return None
+        if self._is_image_gen_model(actual_model):
+            if not self._is_stop_requested():
+                print(f"[ImageGen] Image output mode auto-enabled for {actual_model}")
+        elif not self._image_output_mode_enabled():
+            return None
+        return {
+            "size": self._get_image_output_resolution("1K"),
+            "aspect_ratio": self._get_image_output_aspect_ratio("auto"),
+        }
+
+    def _authgem_save_image(self, image: dict, response_name) -> str:
+        """Saves an AuthGem image reply like the native Gemini route and returns its marker."""
+        filepath = self._save_web_chat_image(image, response_name)
+        try:
+            tls = self._get_thread_local_client()
+            tls._last_generated_image_bytes = image['data']
+            tls._last_generated_image_path = filepath
+        except Exception:
+            pass
+        return f"[GENERATED_IMAGE:{filepath}]"
+
     # ------------------------------------------------------------------
     # authgem/  →  Google AI Studio  +  OAuth Bearer token
     # ------------------------------------------------------------------
@@ -29628,6 +29663,7 @@ class UnifiedClient:
 
         # Mutable token holder so retry loop can refresh it
         token = [access_token]
+        image_output = self._authgem_image_output(actual_model)
 
         def _do_send(attempt):
             return _authgem_send_aistudio(
@@ -29640,9 +29676,11 @@ class UnifiedClient:
                 log_fn=print,
                 connect_timeout=_connect_timeout,
                 account_id=account_id or 0,
+                image_output=image_output,
             )
 
-        return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
+        return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens,
+                                        store=store, response_name=response_name)
 
     # ------------------------------------------------------------------
     # authgem-key/  →  Google AI Studio  +  API key (no OAuth)
@@ -29682,6 +29720,7 @@ class UnifiedClient:
                 pass
 
         print(f"🔑 AuthGem-Key: Sending request to AI Studio (model={actual_model})")
+        image_output = self._authgem_image_output(actual_model)
 
         def _do_send(attempt):
             return _authgem_send_aistudio_key(
@@ -29693,9 +29732,11 @@ class UnifiedClient:
                 timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
+                image_output=image_output,
             )
 
-        return self._authgem_retry_loop(_do_send, "AuthGem-Key", actual_model, messages, temperature, max_tokens)
+        return self._authgem_retry_loop(_do_send, "AuthGem-Key", actual_model, messages, temperature, max_tokens,
+                                        response_name=response_name)
 
     # ------------------------------------------------------------------
     # authgem-vertex/  →  Vertex AI  +  OAuth Bearer token (GCP project required)
@@ -29748,6 +29789,7 @@ class UnifiedClient:
         print(f"\U0001f510 {label}: Sending request to Vertex AI (model={actual_model})")
 
         token = [access_token]
+        image_output = self._authgem_image_output(actual_model)
 
         def _do_send(attempt):
             return _authgem_send_vertex(
@@ -29760,9 +29802,11 @@ class UnifiedClient:
                 log_fn=print,
                 connect_timeout=_connect_timeout,
                 account_id=account_id or 0,
+                image_output=image_output,
             )
 
-        return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
+        return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens,
+                                        store=store, response_name=response_name)
 
     def _send_ollamapull(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Use the managed local Ollama server and its native chat API."""
