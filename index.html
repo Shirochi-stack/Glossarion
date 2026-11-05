@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Glossarion · Free AI Translator for Novels &amp; Manga</title>
+  <meta name="description" content="Glossarion is a free, open-source AI translation suite for light novels, web novels, manga, subtitles and games. Bring your own API key or run a local model. Windows, macOS, Linux, Android and iOS.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Glossarion · Free AI Translator for Novels & Manga">
+  <meta property="og:description" content="Translate novels, manga, subtitles and games with any AI model — or a local one. Free and open source on Windows, macOS, Linux, Android and iOS.">
+  <meta property="og:url" content="https://shirochi-stack.github.io/Glossarion/">
+  <meta property="og:image" content="https://shirochi-stack.github.io/Glossarion/assets/site/halgakos-chibi.png">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/png" href="assets/site/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site/site.css">
+  <script src="assets/site/site.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/site/halgakos-avatar.webp" alt="" width="34" height="34">Glossarion</a>
+      <nav class="nav" aria-label="Main">
+        <a href="#features">Features</a>
+        <a href="#free">Free</a>
+        <a href="#download">Download</a>
+        <a href="help/">Help</a>
+        <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
+        <a href="help/donate/">Donate</a>
+      </nav>
+      <div class="header-actions">
+        <a class="icon-btn" href="https://github.com/Shirochi-stack/Glossarion" aria-label="Glossarion on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.4c.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a>
+        <button class="icon-btn" type="button" data-theme-toggle aria-label="Toggle dark mode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg></button>
+        <button class="icon-btn menu-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      </div>
+    </div>
+    <nav class="mobile-nav" aria-label="Mobile">
+      <a href="#features">Features</a>
+      <a href="#free">Free</a>
+      <a href="#download">Download</a>
+      <a href="help/">Help</a>
+      <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
+      <a href="help/donate/">Donate</a>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ========== HERO ========== -->
+    <section class="hero">
+      <div class="wrap">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow"><span class="dot"></span>Free &amp; open source<span data-release-shown hidden>&nbsp;· latest <b data-release-tag></b></span></span>
+            <h1>Translate novels, manga &amp; more with <span class="grad">any AI you like</span>.</h1>
+            <p class="lede">Glossarion is a complete AI translation studio for light novels, web novels, manga, subtitles and games. Bring your own API key or run a model on your own device — there is nothing to buy, no word limits and no account.</p>
+            <div class="hero-cta">
+              <a class="btn btn-primary" href="#download" data-download-primary>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 19h16"/></svg>
+                <span data-download-label>Download free</span>
+              </a>
+              <a class="btn btn-ghost" href="help/">Getting started</a>
+            </div>
+            <p class="hero-note">You only pay your AI provider, if anything. Local models cost nothing.</p>
+            <div class="platform-chips" aria-label="Supported platforms">
+              <span class="chip"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.4v7.1H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7.1L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg>Windows</span>
+              <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></svg>macOS</span>
+              <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m5 0h5"/></svg>Linux</span>
+              <span class="chip"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.5 9.3 19 6.8a.4.4 0 0 0-.7-.4l-1.5 2.6A9 9 0 0 0 12 8a9 9 0 0 0-4.8 1L5.7 6.4a.4.4 0 1 0-.7.4l1.5 2.5A8 8 0 0 0 3 15.5h18a8 8 0 0 0-3.5-6.2ZM8 13a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm8 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Android</span>
+              <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18.5h2"/></svg>iOS</span>
+            </div>
+          </div>
+          <div class="hero-art">
+            <div class="halo"></div>
+            <img src="assets/site/halgakos-full.webp" alt="Halgakos, the Glossarion mascot" width="658" height="760" fetchpriority="high">
+            <div class="float-card fc1"><b>📓 Glossary</b>Names stay the same in every chapter</div>
+            <div class="float-card fc2"><b>Ch. 112 / 340</b><div class="bar" style="width:140px;margin-top:6px"><b style="width:33%"></b></div></div>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><b>$0</b><span>Free forever · AGPL-3.0</span></div>
+          <div class="stat"><b>40+</b><span>AI providers, plus any OpenAI-compatible endpoint</span></div>
+          <div class="stat"><b>64</b><span>target languages, and you can add more</span></div>
+          <div class="stat"><b>5</b><span>platforms: desktop and mobile</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== HOW IT WORKS ========== -->
+    <section class="section-alt" id="how">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">How it works</span>
+          <h2>From raw chapters to a finished book in four steps.</h2>
+          <p>Glossarion runs on your computer or phone. Your files stay with you, and text only goes to the AI you pick.</p>
+        </div>
+        <div class="steps">
+          <div class="step"><span class="num">01</span><h3>Drop in a file</h3><p>EPUB, TXT, PDF, Markdown, subtitles, images, CBZ manga, SDLXLIFF, even RPG Maker games.</p></div>
+          <div class="step"><span class="num">02</span><h3>Pick any model</h3><p>Your API key, a ChatGPT / Grok / Claude / Gemini login, Ollama on your PC or a model on your phone.</p></div>
+          <div class="step"><span class="num">03</span><h3>Lock names &amp; terms</h3><p>An automatic glossary keeps names, genders and terms consistent from the first chapter to the last.</p></div>
+          <div class="step"><span class="num">04</span><h3>Read, check, export</h3><p>Get a rebuilt EPUB or PDF, read it in the built-in library and let the QA scanner catch mistakes.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== FEATURES ========== -->
+    <section id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">Features</span>
+          <h2>Everything a paid translator does. None of the bill.</h2>
+          <p>Glossarion has been built in the open, release after release, by people who read a lot of translated fiction.</p>
+        </div>
+
+        <!-- Novel -->
+        <div class="feature">
+          <div class="feature-copy">
+            <span class="feature-tag">📖 Novel translation</span>
+            <h3>Whole books, chapter after chapter, with context.</h3>
+            <p>Load an EPUB, TXT or PDF and translate it end to end. Glossarion carries recent chapters (or a rolling summary) into every request, so tone and story stay coherent, and splits long chapters into chunks automatically.</p>
+            <ul class="ticks">
+              <li>Parallel chapters, automatic retries and key failover</li>
+              <li>Stop any time and resume exactly where you left off</li>
+              <li>Prompt profiles for Korean, Japanese and Chinese — edit them or write your own</li>
+              <li>Rebuilt EPUB keeps images, cover and structure; titles and metadata are translated too</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Glossarion — Translating</span></div>
+            <div class="mock-body">
+              <div class="row"><span class="label">Model</span><span class="field">gemini-3.1-pro-preview</span><span class="pill ok">● key 2/4</span></div>
+              <div class="row"><span class="label">Profile</span><span class="field">korean · novel</span><span class="pill plum">→ English</span></div>
+              <table>
+                <tr><th>Chapter</th><th>Status</th><th></th></tr>
+                <tr><td>110 · The Northern Pass</td><td><span class="pill ok">done</span></td><td>2,914 words</td></tr>
+                <tr><td>111 · An Old Debt</td><td><span class="pill ok">done</span></td><td>3,102 words</td></tr>
+                <tr><td>112 · Snowfall</td><td><span class="pill rose">chunk 2/3</span></td><td>streaming…</td></tr>
+                <tr><td>113 · Lanterns</td><td><span class="pill">queued</span></td><td></td></tr>
+              </table>
+              <div class="bar"><b style="width:33%"></b></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Manga -->
+        <div class="feature flip">
+          <div class="feature-copy">
+            <span class="feature-tag">🎌 Manga translation</span>
+            <h3>Clean, typeset manga and webtoon pages.</h3>
+            <p>Glossarion finds every speech bubble, reads the text, removes it from the art and letters the translation back in. The AI sees the whole page, so expressions and context shape the wording.</p>
+            <ul class="ticks">
+              <li>Bubble detection with RT-DETR and YOLO models</li>
+              <li>OCR from your vision model, Google, Azure, RapidOCR, manga-ocr and more</li>
+              <li>Local inpainting (LaMa, AOT, anime) or a cloud image-edit model</li>
+              <li>Fonts, colours, outlines, webtoon mode, a page editor and CBZ output</li>
+            </ul>
+            <p class="platform-line">Desktop NoCuda build · Android · iOS (ONNX and cloud engines)</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Manga Translator — page 07</span></div>
+            <div class="mock-body">
+              <div class="manga-page">
+                <span class="box b1"></span><span class="box b2"></span>
+                <span class="sb b1">You came back… after all this time?</span>
+                <span class="sb b2">I promised, didn't I?</span>
+              </div>
+              <div class="row" style="flex-wrap:wrap"><span class="pill ok">Detect ✓</span><span class="pill ok">Clean ✓</span><span class="pill ok">Recognize ✓</span><span class="pill rose">Translate…</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Glossary -->
+        <div class="feature">
+          <div class="feature-copy">
+            <span class="feature-tag">📓 Glossary generation</span>
+            <h3>Names, genders and terms that never drift.</h3>
+            <p>Glossarion builds a glossary from your book before or during translation and sends only the terms each chapter needs. Characters keep one spelling and the right pronouns, and techniques and places keep one name.</p>
+            <ul class="ticks">
+              <li>Automatic extraction with eight modes, from minimal to full</li>
+              <li>Glossary Manager: filter, find &amp; replace, undo, de-duplicate, resolve gender conflicts</li>
+              <li>A unified glossary per language pair, auto-matched to each of your books</li>
+              <li>Optional <strong>NER</strong> name check flags and fixes misspelled names in the output</li>
+              <li>Build a glossary from a raw book and an existing translation of it</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux · Android · iOS · NER in the NoCuda build and on mobile</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Glossary Manager — 248 terms</span></div>
+            <div class="mock-body">
+              <table>
+                <tr><th>Raw</th><th>Translation</th><th>Type</th><th>Gender</th></tr>
+                <tr><td class="src">강서연</td><td>Kang Seo-yeon</td><td><span class="pill plum">character</span></td><td>female</td></tr>
+                <tr><td class="src">백운검법</td><td>White Cloud Sword Art</td><td><span class="pill">term</span></td><td>—</td></tr>
+                <tr><td class="src">천마신교</td><td>Heavenly Demon Cult</td><td><span class="pill">term</span></td><td>—</td></tr>
+                <tr><td class="src">무진</td><td>Mujin</td><td><span class="pill plum">character</span></td><td>male</td></tr>
+              </table>
+              <div class="para">NER check · ch. 112: <span class="diff-del">Gang Seo-yeon</span> <span class="diff-add">Kang Seo-yeon</span> <span class="pill ok">auto-fixed</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reader -->
+        <div class="feature flip">
+          <div class="feature-copy">
+            <span class="feature-tag">📚 Library reader</span>
+            <h3>A library and a reader built in.</h3>
+            <p>Your translated books land on a cover shelf with In Progress and Completed tabs. Open one to read it with your own theme and font, flip between the raw and translated text, or translate the next chapter right inside the reader and watch it stream in.</p>
+            <ul class="ticks">
+              <li>Six reading themes, font, size, spacing and four page layouts</li>
+              <li>Search the whole book, jump through the table of contents</li>
+              <li>Mobile adds a bilingual view, bookmarks, saved position and "Add to glossary" on any selection</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux (standard build) · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Library</span></div>
+            <div class="mock-body">
+              <div class="row"><span class="pill rose">In Progress</span><span class="pill">Completed</span><span class="field" style="font-family:var(--font)">Search library…</span></div>
+              <div class="thumbs">
+                <div class="thumb" data-t="The Northern Pass"><span class="prog" style="width:33%"></span></div>
+                <div class="thumb" data-t="Lanterns Over the Lake"><span class="prog" style="width:78%"></span></div>
+                <div class="thumb" data-t="A Return Ten Years Late 📝"><span class="prog" style="width:100%"></span></div>
+              </div>
+              <div class="para">Snow had already buried the pass when Seo-yeon reached the gate. She did not knock; the old guard opened it before she could raise her hand…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Keys / instances -->
+        <div class="feature">
+          <div class="feature-copy">
+            <span class="feature-tag">🔑 Multiple API keys &amp; instances</span>
+            <h3>Many keys, many books, all at once.</h3>
+            <p>Add as many keys as you like and Glossarion rotates through them, cools down any key that hits a rate limit and fails over on errors. Give keys an instance number and several books translate side by side, each with its own keys, log and progress.</p>
+            <ul class="ticks">
+              <li>Separate pools for translation, fallback, glossary, QA, image editing and more</li>
+              <li>A per-key endpoint, model, parameters and schedule</li>
+              <li>A fallback pool retries refused content on another model</li>
+              <li>Keys are encrypted on your device</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Multi API Key Manager</span></div>
+            <div class="mock-body">
+              <table>
+                <tr><th>Model</th><th>Key</th><th>Instance</th><th>Status</th></tr>
+                <tr><td>gemini-3.1-pro-preview</td><td>AIza…f2Q</td><td>1</td><td><span class="pill ok">ready</span></td></tr>
+                <tr><td>gemini-3.1-pro-preview</td><td>AIza…8kL</td><td>1</td><td><span class="pill warn">cooldown 42s</span></td></tr>
+                <tr><td>deepseek-chat</td><td>sk-…91c</td><td>2</td><td><span class="pill ok">ready</span></td></tr>
+                <tr><td>or/deepseek/deepseek-v3.2</td><td>sk-or…a7</td><td>2</td><td><span class="pill ok">ready</span></td></tr>
+              </table>
+              <div class="row"><span class="pill plum">Instance 1 · book_a.epub</span><span class="pill plum">Instance 2 · book_b.epub</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Local LLMs -->
+        <div class="feature flip">
+          <div class="feature-copy">
+            <span class="feature-tag">🦙 Local LLMs</span>
+            <h3>Run it all offline, on your own hardware.</h3>
+            <p>Type <code>ollamapull/qwen3.5:9b</code> and Glossarion installs Ollama, downloads the model and starts translating — no setup and no bill. Already running Ollama or LM Studio? Use <code>ollama/</code> or <code>lmstudio/</code>, or point any prefix at your own OpenAI-compatible server.</p>
+            <ul class="ticks">
+              <li>On Android and iOS, GGUF models run <strong>on the phone itself</strong> through llama.cpp</li>
+              <li>Ready-made Qwen3.5 presets from 0.8B to 9B, plus Llama, Gemma and LFM2</li>
+              <li>The phone app can also use Ollama or LM Studio running on your PC</li>
+              <li>Nothing leaves your device</li>
+            </ul>
+            <p class="platform-line">Desktop: Ollama, LM Studio, any local server · Mobile: on-device llama.cpp</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Model</span></div>
+            <div class="mock-body">
+              <div class="row"><span class="label">Model</span><span class="field">ollamapull/qwen3.5:9b</span><span class="pill">🦙 Ollama Settings</span></div>
+              <div class="para">Downloading qwen3.5:9b · 4.1 / 6.6 GB</div>
+              <div class="bar"><b style="width:62%"></b></div>
+              <div class="row"><span class="label">Phone</span><span class="field">On-device · Qwen3.5 4B (Medium)</span><span class="pill ok">loaded</span></div>
+              <div class="para"><span class="pill ok">offline</span> <span class="pill">$0.00 this run</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Vision -->
+        <div class="feature">
+          <div class="feature-copy">
+            <span class="feature-tag">👁️ Vision &amp; image editing</span>
+            <h3>Send images, get text — or get new images back.</h3>
+            <p>Every job has an output mode. <strong>Vision</strong> reads text out of images, scans and image-only EPUBs, then translates it. <strong>Image</strong> mode sends your pictures to an image-editing or image-generation model; video and audio modes are there too.</p>
+            <ul class="ticks">
+              <li>Translate the illustrations inside a web novel EPUB</li>
+              <li>Image editing through models like <code>nan/gpt-image-2</code> or any OpenAI-compatible edit endpoint</li>
+              <li>Text-to-speech of a finished translation</li>
+              <li>Results show inline in the chat on desktop and mobile</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Chat</span></div>
+            <div class="mock-body">
+              <div class="row" style="flex-wrap:wrap"><span class="pill">📝 Text</span><span class="pill rose">👁️ Vision</span><span class="pill">🖼️ Image</span><span class="pill">🎬 Video</span><span class="pill">🔊 Audio</span><span class="pill">✨ Refine</span></div>
+              <div class="bubble me">📎 poster_ch3.png — translate the sign</div>
+              <div class="bubble ai">The sign reads: <b>"Moonlit Tea House — closed until the festival."</b></div>
+              <div class="bubble me">🖼️ Now replace the sign text with the English.</div>
+              <div class="bubble ai">Done — edited image attached ✓</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Review -->
+        <div class="feature flip">
+          <div class="feature-copy">
+            <span class="feature-tag">⭐ Review generator</span>
+            <h3>Know if a book is worth it before you translate 500 chapters.</h3>
+            <p>Point the review generator at an EPUB and get a review in your language: summary, characters, themes, writing style, strengths and weaknesses, an originality score per category and an overall rating.</p>
+            <ul class="ticks">
+              <li>Spoiler-free by default, or spoiler mode that reads the ending</li>
+              <li>Full-review mode covers very long books chunk by chunk</li>
+              <li>Reviewed books get a 📝 badge in your library</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>Review — The Northern Pass</span></div>
+            <div class="mock-body">
+              <div class="para"><b>Overall</b> <span class="stars">★★★★☆</span> 8.1 / 10 — a slow-burn martial arts story whose quiet character work outshines its fights.</div>
+              <table>
+                <tr><th>Originality</th><th>Score</th></tr>
+                <tr><td>Premise</td><td>7 / 10</td></tr>
+                <tr><td>Characters</td><td>9 / 10</td></tr>
+                <tr><td>World-building</td><td>8 / 10</td></tr>
+                <tr><td>Prose</td><td>8 / 10</td></tr>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- QA -->
+        <div class="feature">
+          <div class="feature-copy">
+            <span class="feature-tag">🛡️ QA scanner</span>
+            <h3>Catch the mistakes before your readers do.</h3>
+            <p>After a run, the QA scanner reads every translated chapter and flags what went wrong, then lets you fix chapters one by one or send them back for retranslation.</p>
+            <ul class="ticks">
+              <li>Duplicate or skipped chapters, including AI Hunter similarity checks</li>
+              <li>Untranslated foreign text, AI "thinking" leftovers and truncated replies</li>
+              <li>Broken HTML, missing images, word-count ratio and glossary drift</li>
+              <li>Runs automatically after translation if you want</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>QA Scan — 340 chapters</span></div>
+            <div class="mock-body">
+              <table>
+                <tr><th>Chapter</th><th>Issue</th><th></th></tr>
+                <tr><td>87</td><td><span class="pill warn">duplicate of ch. 86</span></td><td>retranslate</td></tr>
+                <tr><td>143</td><td><span class="pill warn">korean text left</span></td><td>fix</td></tr>
+                <tr><td>201</td><td><span class="pill warn">truncated</span></td><td>retranslate</td></tr>
+                <tr><td>256</td><td><span class="pill rose">name drift: "Gang"</span></td><td>fix</td></tr>
+              </table>
+              <div class="row"><span class="pill ok">336 chapters clean</span><span class="pill">HTML report</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SDLXLIFF -->
+        <div class="feature flip">
+          <div class="feature-copy">
+            <span class="feature-tag">🗂️ SDLXLIFF editor</span>
+            <h3>Professional CAT files, translated and reviewed.</h3>
+            <p>Translate <code>.sdlxliff</code> files from Trados-style workflows and review them segment by segment: source and target side by side, a notepad view, machine-translation previews and flags for inaccurate segments. Glossarion can also write SDLXLIFF copies of any translated book.</p>
+            <ul class="ticks">
+              <li>Aligned source/target rows with inline editing</li>
+              <li>Compare with Google, DeepL, Bing, Yandex or Argos and insert a suggestion</li>
+              <li>Score segments and flag the ones below your threshold</li>
+            </ul>
+            <p class="platform-line">Windows · macOS · Linux (standard build) · Android · iOS</p>
+          </div>
+          <div class="mock" aria-hidden="true">
+            <div class="mock-bar"><i></i><i></i><i></i><span>SDLXLIFF Reviewer</span></div>
+            <div class="mock-body">
+              <table>
+                <tr><th>#</th><th>Source</th><th>Target</th></tr>
+                <tr><td>14</td><td class="src">本製品は防水仕様です。</td><td>This product is waterproof.</td></tr>
+                <tr><td>15</td><td class="src">充電中は使用しないでください。</td><td>Do not use while charging. <span class="pill ok">✓</span></td></tr>
+                <tr><td>16</td><td class="src">詳しくは説明書をご覧ください。</td><td>See manual. <span class="pill warn">flag · 0.62</span></td></tr>
+              </table>
+              <div class="row"><span class="pill">MT: DeepL</span><span class="field" style="font-family:var(--font)">For details, please see the instruction manual.</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- compact grid -->
+        <div class="section-head" style="margin-top:48px">
+          <h2 style="font-size:clamp(1.5rem,3.4vw,2rem)">And a lot more.</h2>
+        </div>
+        <div class="grid-cards">
+          <div class="card"><h3><span class="ico">💬</span>Chat translator</h3><p>A chat-style translator with saved chats, per-chat settings and glossary. Attach a file and the full pipeline runs behind it.</p></div>
+          <div class="card"><h3><span class="ico">🎬</span>Subtitles &amp; lyrics</h3><p>SRT, ASS, SSA, VTT, SBV and LRC — timing and styling kept, whole ZIPs of episodes at once.</p></div>
+          <div class="card"><h3><span class="ico">🎮</span>RPG Maker games</h3><p>Pulls dialogue and choices out of RPG Maker MV/MZ games, translates them and writes them back, with backups.</p></div>
+          <div class="card"><h3><span class="ico">✨</span>Refinement &amp; retranslation</h3><p>A second polishing pass over finished chapters, and a progress manager to redo only the chapters you choose.</p></div>
+          <div class="card"><h3><span class="ico">📦</span>EPUB &amp; PDF output</h3><p>Rebuild a clean EPUB with translated titles, table of contents and metadata, or export PDF, Markdown and TXT.</p></div>
+          <div class="card"><h3><span class="ico">💸</span>Batch API at half price</h3><p>Send whole books through the OpenAI, Anthropic, Gemini, Mistral or Groq batch APIs for about 50% off.</p></div>
+          <div class="card"><h3><span class="ico">🧠</span>AI Hunter &amp; script ban</h3><p>Detects chapters that come back as copies of earlier ones, and keeps stray foreign scripts out of your output.</p></div>
+          <div class="card"><h3><span class="ico">🌐</span>64 target languages</h3><p>Translate into English, Spanish, Vietnamese, Indonesian and many more — the list is yours to extend.</p></div>
+          <div class="card"><h3><span class="ico">🔐</span>Subscription logins</h3><p>Already pay for ChatGPT, Claude, Gemini or Grok? Sign in and translate with your plan instead of an API key.</p></div>
+          <div class="card"><h3><span class="ico">📱</span>Background jobs on mobile</h3><p>Long translations keep running in the background, with a notification to accept a new glossary or review results.</p></div>
+          <div class="card"><h3><span class="ico">💾</span>Safe by default</h3><p>Encrypted keys, automatic config backups and an update checker that verifies every download.</p></div>
+          <div class="card"><h3><span class="ico">🤖</span>Self-hosted Discord bot</h3><p>Run your own bot that translates EPUB, TXT and PDF files or extracts glossaries for your server.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== FREE ========== -->
+    <section class="section-alt" id="free">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">Pricing</span>
+          <h2>There is no pricing. Glossarion is free.</h2>
+          <p>No plans, no credits, no word caps, no paywall on features. Glossarion never stands between you and the AI — you choose the model and, if it costs anything, you pay the provider directly at their price.</p>
+        </div>
+        <div class="free-grid">
+          <div class="free-card highlight">
+            <span class="kicker">Local</span>
+            <div class="price">$0 <small>forever</small></div>
+            <p>Run a model on your own PC or phone. <code>ollamapull/qwen3.5:9b</code> on desktop, an on-device Qwen3.5 preset on mobile. Fully private, works offline.</p>
+          </div>
+          <div class="free-card">
+            <span class="kicker">Free tiers</span>
+            <div class="price">$0 <small>within limits</small></div>
+            <p>Free Google AI Studio key with Gemini Flash Lite (about 500 requests a day), OpenRouter <code>:free</code> models, the free Grok tier, Google Translate and more.</p>
+          </div>
+          <div class="free-card">
+            <span class="kicker">Your own key</span>
+            <div class="price">Provider <small>price</small></div>
+            <p>Use GPT, Claude, Gemini, DeepSeek, Grok, Qwen, Kimi, GLM and 40+ providers at cost — or a subscription you already pay for. No markup, ever.</p>
+          </div>
+        </div>
+        <p class="release-line">Want to help keep it free? <a href="help/donate/">Support the project on Ko-fi</a>.</p>
+      </div>
+    </section>
+
+    <!-- ========== PROVIDERS ========== -->
+    <section id="providers">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">Models</span>
+          <h2>Works with the AI you already use.</h2>
+          <p>Type a model name with its prefix and Glossarion routes it. Online model lists are polled for you.</p>
+        </div>
+        <div class="providers">
+          <span class="hl">OpenAI</span><span class="hl">Google Gemini</span><span class="hl">Anthropic Claude</span><span class="hl">DeepSeek</span><span class="hl">xAI Grok</span><span>Mistral</span><span>Cohere</span><span>OpenRouter</span><span>Vertex AI</span><span>Groq</span><span>NVIDIA</span><span>Chutes</span><span>NanoGPT</span><span>ElectronHub</span><span>OpenCode</span><span>Poe</span><span>SambaNova</span><span>Fireworks</span><span>Together AI</span><span>Perplexity</span><span>Zhipu GLM</span><span>Moonshot Kimi</span><span>Qwen</span><span>Yi</span><span>AI21</span><span>DeepL</span><span>Google Translate</span><span class="hl">Ollama</span><span class="hl">LM Studio</span><span class="hl">llama.cpp on-device</span><span>Any OpenAI-compatible endpoint</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== DOWNLOAD ========== -->
+    <section class="section-alt" id="download">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">Download</span>
+          <h2>One app, every device.</h2>
+          <p>All builds are published on GitHub — no store, no sign-up. Not sure which file? Read <a href="help/#which-download">Which download do I need?</a></p>
+        </div>
+        <div class="platforms">
+          <div class="platform" id="download-windows">
+            <div class="os"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.4v7.1H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7.1L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg>Windows</div>
+            <p>Windows 10 and 11. A single .exe, nothing to install.</p>
+            <div class="files">
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="^(L_)?Glossarion\.v[\d.]+\.exe$">Standard ⭐<span>.exe</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="^N_Glossarion_NoCuda\.v[\d.]+\.exe$">With manga<span>.exe</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="_Lite\.v[\d.]+\.exe$">Lite<span>.exe</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="TurboLite\.v[\d.]+\.exe$">TurboLite<span>.exe</span></a>
+            </div>
+          </div>
+          <div class="platform" id="download-macos">
+            <div class="os"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></svg>macOS</div>
+            <p>Apple Silicon and Intel Macs, as a .dmg.</p>
+            <div class="files">
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="_Lite_v[\d.]+_MAC\.dmg$">Apple Silicon<span>.dmg</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="NoCuda_v[\d.]+_MAC\.dmg$">Apple Silicon + manga<span>.dmg</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="_Lite_v[\d.]+_MAC_Intel\.dmg$">Intel<span>.dmg</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="NoCuda_v[\d.]+_MAC_Intel\.dmg$">Intel + manga<span>.dmg</span></a>
+            </div>
+          </div>
+          <div class="platform" id="download-linux">
+            <div class="os"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m5 0h5"/></svg>Linux</div>
+            <p>x86-64 desktop Linux. Unzip, <code>chmod +x</code>, run.</p>
+            <div class="files">
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="^Z_Glossarion_v[\d.]+_Linux\.zip$">Standard ⭐<span>.zip</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="NoCuda_v[\d.]+_Linux\.zip$">With manga<span>.zip</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="TurboLite_v[\d.]+_Linux\.zip$">TurboLite<span>.zip</span></a>
+            </div>
+          </div>
+          <div class="platform" id="download-android">
+            <div class="os"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.5 9.3 19 6.8a.4.4 0 0 0-.7-.4l-1.5 2.6A9 9 0 0 0 12 8a9 9 0 0 0-4.8 1L5.7 6.4a.4.4 0 1 0-.7.4l1.5 2.5A8 8 0 0 0 3 15.5h18a8 8 0 0 0-3.5-6.2ZM8 13a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm8 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>Android</div>
+            <p>Phones and tablets. Install the APK directly.</p>
+            <div class="files">
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="_Android_arm64-v8a\.apk$">Phones (arm64) ⭐<span>.apk</span></a>
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="_Android_x86_64\.apk$">Emulators (x86_64)<span>.apk</span></a>
+            </div>
+          </div>
+          <div class="platform" id="download-ios">
+            <div class="os"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18.5h2"/></svg>iOS &amp; iPadOS</div>
+            <p>Sideload with SideStore, AltStore or similar. <a href="help/#ios">How?</a></p>
+            <div class="files">
+              <a href="https://github.com/Shirochi-stack/Glossarion/releases/latest" data-asset="_iOS_unsigned\.ipa$">iPhone &amp; iPad<span>.ipa</span></a>
+            </div>
+          </div>
+        </div>
+        <p class="release-line"><span data-release-shown hidden>Latest release: <b data-release-tag></b> · <span data-release-date></span> · </span><a href="https://github.com/Shirochi-stack/Glossarion/releases">All releases &amp; notes</a> · <a href="help/#from-source">Run from source</a></p>
+      </div>
+    </section>
+
+    <!-- ========== FAQ ========== -->
+    <section id="faq">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">FAQ</span>
+          <h2>Questions people ask.</h2>
+        </div>
+        <div class="faq">
+          <details>
+            <summary>Is Glossarion really free?</summary>
+            <div><p>Yes. Glossarion is open source under the AGPL-3.0 license and every feature is in every free download. The only possible cost is the AI itself: if you use a paid API, you pay that provider directly. With a local model or a free tier, translating costs nothing.</p></div>
+          </details>
+          <details>
+            <summary>Do I need an API key?</summary>
+            <div><p>No. You can run a local model (<code>ollamapull/qwen3.5:9b</code> sets everything up for you), run a model on your phone, sign in with a ChatGPT, Claude, Gemini or Grok account, or use free tiers such as a Google AI Studio key or OpenRouter's free models. See <a href="help/#pick-a-model">Pick a model</a>.</p></div>
+          </details>
+          <details>
+            <summary>Which model gives the best translations?</summary>
+            <div><p>Large frontier models (Gemini Pro, Claude, GPT, DeepSeek, Kimi, GLM) give the most natural prose. For free, Gemini Flash Lite on a free key is a strong start, and Qwen3.5 9B is a good local model if your PC has the memory. You can switch models at any time.</p></div>
+          </details>
+          <details>
+            <summary>How does it keep names consistent?</summary>
+            <div><p>A glossary. Glossarion extracts characters, places and terms from the book (with gender, so pronouns stay right) and sends the relevant entries with each chapter. The optional NER name check then scans the output for misspelled names and fixes them.</p></div>
+          </details>
+          <details>
+            <summary>Is my data private?</summary>
+            <div><p>Glossarion runs on your own device and has no server of its own. Your text goes only to the AI provider you choose — or nowhere at all with a local model. API keys are encrypted at rest.</p></div>
+          </details>
+          <details>
+            <summary>What about mature content?</summary>
+            <div><p>Glossarion doesn't add its own filters or word limits; what a model will translate is up to its provider. If a model refuses a passage, a fallback key pool can retry it on a different model automatically. Local models have no provider policy at all.</p></div>
+          </details>
+          <details>
+            <summary>Why isn't it on the App Store or Google Play?</summary>
+            <div><p>Glossarion is a free community project, and every build is published on GitHub. On Android you install the APK directly; on iPhone and iPad you sideload the IPA with a tool like SideStore or AltStore. See the <a href="help/#android">install guide</a>.</p></div>
+          </details>
+        </div>
+        <p class="release-line"><a href="help/faq/">More questions →</a></p>
+      </div>
+    </section>
+
+    <!-- ========== CTA ========== -->
+    <section style="padding-top:0">
+      <div class="wrap">
+        <div class="cta">
+          <img src="assets/site/halgakos-chibi.webp" alt="" width="271" height="360" loading="lazy">
+          <h2>Start your first translation today.</h2>
+          <p>Download Glossarion, pick a model, and read the book you've been waiting for — in your language.</p>
+          <div class="row">
+            <a class="btn btn-primary" href="#download">Download free</a>
+            <a class="btn btn-ghost" href="https://discord.gg/n7WXRXn533">Join the Discord</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-grid">
+        <div>
+          <a class="brand" href="./"><img src="assets/site/halgakos-avatar.webp" alt="" width="34" height="34">Glossarion</a>
+          <p style="margin-top:10px;max-width:30em">A free, open-source AI translation suite for novels, manga, subtitles and games. Made for the translation community.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#download">Download</a></li>
+            <li><a href="https://github.com/Shirochi-stack/Glossarion/releases">Release notes</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Help</h4>
+          <ul>
+            <li><a href="help/">Getting started</a></li>
+            <li><a href="help/guides/">Guides &amp; docs</a></li>
+            <li><a href="help/faq/">FAQ</a></li>
+            <li><a href="https://discord.gg/n7WXRXn533">Discord</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Project</h4>
+          <ul>
+            <li><a href="https://github.com/Shirochi-stack/Glossarion">GitHub</a></li>
+            <li><a href="https://github.com/Shirochi-stack/Glossarion/issues">Report a bug</a></li>
+            <li><a href="help/donate/">Contribute &amp; donate</a></li>
+            <li><a href="https://github.com/Shirochi-stack/Glossarion/blob/main/LICENSE">AGPL-3.0 license</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2025–2026 Shirochi-stack · Glossarion is free software under the AGPL-3.0.</span>
+        <span>Made with 🌸 for the translation community</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

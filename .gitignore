@@ -11,6 +11,11 @@
 !requirements_NoCuda.txt
 !install_requirements.bat
 !build_msix.bat
+
+# GitHub Pages site (landing page + help pages; styles and images live in assets/site)
+!index.html
+!help/
+!help/**
 requirements-dev.txt
 
 # Allow .github, docs, assets folders if present
