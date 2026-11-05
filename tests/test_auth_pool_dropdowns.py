@@ -208,13 +208,19 @@ def test_ollamapull_settings_persist_native_options(ollama_qapp, monkeypatch):
         "future_key": "keep",
     }
     dialog = OllamaSettingsDialog(translator, "ollamapull/llama3.2")
-    dialog.option_fields["num_ctx"][0].setText("8192")
-    dialog.option_fields["draft_num_predict"][0].setText("4")
+    # Named options are _OptionEditor rows ("Model default" box + slider, or a
+    # mode combo + spin box) and the advanced fields are editable combo boxes.
+    num_ctx = dialog.option_fields["num_ctx"][0]
+    num_ctx.default.setChecked(False)
+    num_ctx.slider.setValue(8192)
+    draft = dialog.option_fields["draft_num_predict"][0]
+    draft.mode.setCurrentIndex(2)  # "On (MTP if supported)"
+    draft.control.setValue(4)
     dialog.extra_options_edit.setPlainText('{"future_option": 123}')
     dialog.extra_request_edit.setPlainText('{"logprobs": true}')
-    dialog.think_field.setText("high")
-    dialog.keep_alive_field.setText("10m")
-    dialog.format_field.setText("json")
+    dialog.think_field.setCurrentText("high")
+    dialog.keep_alive_field.setCurrentText("10m")
+    dialog.format_field.setCurrentText("json")
     dialog.auto_update_checkbox.setChecked(False)
     dialog.save_settings()
 
@@ -285,8 +291,20 @@ def test_ollamapull_advanced_fields_validate_input(ollama_qapp, monkeypatch):
     with pytest.raises(ValueError, match="cannot override"):
         dialog._collect_model_settings()
     dialog.extra_request_edit.setPlainText("{}")
-    dialog.option_fields["num_ctx"][0].setText("0")
-    with pytest.raises(ValueError, match="greater than zero"):
+    dialog.extra_options_edit.setPlainText('{"num_ctx": 0}')
+    with pytest.raises(ValueError, match="duplicate a named field: num_ctx"):
+        dialog._collect_model_settings()
+    dialog.extra_options_edit.setPlainText("{}")
+    # The context slider cannot reach zero, so num_ctx 0 is never collected.
+    num_ctx = dialog.option_fields["num_ctx"][0]
+    num_ctx.default.setChecked(False)
+    num_ctx.slider.setValue(0)
+    assert num_ctx.slider.minimum() == 1
+    assert dialog._collect_model_settings()["options"]["num_ctx"] == 1
+    stop = dialog.option_fields["stop"][0]
+    stop.default.setChecked(False)
+    stop.control.setText('"<end>"')
+    with pytest.raises(ValueError, match="stop: enter a JSON array of strings"):
         dialog._collect_model_settings()
 
 
@@ -364,7 +382,7 @@ def test_multi_key_ollamapull_button_follows_model_field(ollama_qapp, monkeypatc
     assert button.isHidden()
     combo.setCurrentText("ollamapull")
     assert not button.isHidden()
-    assert button.text() == "🦙 Download Ollama"
+    assert button.text() == "🦙 Load Ollama"
     combo.setCurrentText("ollamapull/")
     assert not button.isHidden()
     combo.setCurrentText("ollamapull/qwen3")
@@ -439,7 +457,7 @@ def test_ollamapull_button_rechecks_then_installs_or_opens_settings(ollama_qapp,
     button = QPushButton()
     controller = module.OllamaRouteButtonController(button, translator, lambda: route[0], translator)
     controller.update_model()
-    assert button.text() == "🦙 Download Ollama"
+    assert button.text() == "🦙 Load Ollama"
     operations = []
     monkeypatch.setattr(controller, "_start_job", lambda operation, fn: operations.append(operation))
     monkeypatch.setattr(controller, "_begin_install", lambda: operations.append("install"))
@@ -472,13 +490,32 @@ def test_ollamapull_button_status_runs_in_background(ollama_qapp, monkeypatch):
         button, translator, lambda: "ollamapull", translator,
     )
     controller.update_model()
-    assert button.text() == "🦙 Download Ollama"
+    assert button.text() == "🦙 Load Ollama"
     deadline = time.monotonic() + 3
     while button.text() != "🦙 Ollama Settings" and time.monotonic() < deadline:
         ollama_qapp.processEvents()
         time.sleep(0.01)
     assert button.text() == "🦙 Ollama Settings"
     assert not controller._jobs
+
+
+def test_ollama_job_finishing_after_signal_source_is_deleted_is_quiet(ollama_qapp):
+    # Closing the app while a status check or install still runs on the pool
+    # deletes the job's signal source; the job used to raise
+    # "Signal source has been deleted" twice from the worker thread.
+    import shiboken6
+    from ollama_settings_dialog import _OllamaJob
+
+    finished = []
+    job = _OllamaJob("passive_status", lambda _progress: {"installed": True})
+    job.signals.finished.connect(finished.append)
+    job.run()
+    assert finished == [(id(job), "passive_status", {"installed": True}, None)]
+
+    for function in (lambda _progress: {"installed": True}, lambda progress: progress("step")):
+        job = _OllamaJob("passive_status", function)
+        shiboken6.delete(job.signals)
+        job.run()  # must not raise
 
 
 def test_ollama_install_error_is_suppressed_when_server_is_ready(ollama_qapp, monkeypatch):
@@ -548,7 +585,7 @@ def test_ollama_install_error_is_reported_when_server_is_stopped(ollama_qapp, mo
         jobs[0][1](lambda _progress: None)
     controller._on_job_finished((1, "install", None, "Ollama server exited (code 1)."))
 
-    assert button.text() == "🦙 Download Ollama"
+    assert button.text() == "🦙 Load Ollama"
     assert len(warnings) == 1
 
 

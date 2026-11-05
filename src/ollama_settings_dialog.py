@@ -451,10 +451,17 @@ class _OllamaJob(QRunnable):
 
     def run(self):
         try:
-            result = self.function(self.signals.progress.emit)
-            self.signals.finished.emit((id(self), self.operation, result, None))
+            outcome = (id(self), self.operation, self.function(self.signals.progress.emit), None)
         except Exception as exc:
-            self.signals.finished.emit((id(self), self.operation, None, str(exc)))
+            outcome = (id(self), self.operation, None, str(exc))
+        try:
+            self.signals.finished.emit(outcome)
+        except RuntimeError:
+            # Qt deleted the signal source (the app quit while this job was still
+            # running on the pool), so nobody is left to receive the outcome.
+            from shiboken6 import isValid
+            if isValid(self.signals):
+                raise
 
 
 class OllamaRouteButtonController(QObject):
