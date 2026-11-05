@@ -12066,14 +12066,15 @@ class MangaTranslator:
                         roi_height=render_h,
                         init_font_size=font_size,
                         min_font_size=font_size,
-                        draw=draw
+                        draw=draw,
+                        font_index=style_font_index
                     )
                     lines = wrapped_text.split('\n')
                 else:
                     # Normal mode: use _fit_text_to_region for optimal sizing
                     # Pass use_as_is=True since render dimensions are already safe area
                     font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True,
-                                                                font_path=style_font_path)
+                                                                font_path=style_font_path, font_index=style_font_index)
                 # Fonts
                 font = self._get_font(font_size, font_path=style_font_path, index=style_font_index)
                 # Mixed font fallback if available (Meiryo for symbols/CJK)
@@ -12602,7 +12603,7 @@ class MangaTranslator:
         return ImageFont.load_default()
      
     def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
-                       init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int]:
+                       init_font_size: int, min_font_size: int, draw: ImageDraw, font_index: int = 0) -> Tuple[str, int]:
         """Binary search for perfect-fit font sizing.
         
         When strict_text_wrapping is disabled:
@@ -12616,6 +12617,12 @@ class MangaTranslator:
         When strict_text_wrapping is enabled:
         - Falls back to original column-based algorithm (legacy behavior)
         """
+        # font_index: the face of a font collection (a box's bold / italic face, per-box style)
+        def _truetype(path, size):
+            if font_index:
+                return ImageFont.truetype(path, size, index=font_index)
+            return ImageFont.truetype(path, size)
+
         from hyphen_textwrap import wrap as hyphen_wrap
         import statistics
         
@@ -12850,7 +12857,7 @@ class MangaTranslator:
         # Get initial font
         try:
             if font_path:
-                font = ImageFont.truetype(font_path, font_size)
+                font = _truetype(font_path, font_size)
             else:
                 font = ImageFont.load_default()
         except Exception:
@@ -12904,14 +12911,14 @@ class MangaTranslator:
                     allow_overflow = (auto_fit_style in ['readable', 'balanced'])
                     merge_width = roi_width
                     
-                    best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     
                     while low <= high:
                         mid = (low + high) // 2
                         
                         # Load font at this size
                         try:
-                            test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                            test_font = _truetype(font_path, mid) if font_path else ImageFont.load_default()
                         except Exception:
                             test_font = ImageFont.load_default()
                         
@@ -12944,7 +12951,7 @@ class MangaTranslator:
                     # Fallback
                     allow_overflow = (auto_fit_style in ['readable', 'balanced'])
                     merge_width = roi_width
-                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     # Ensure we respect minimum font size
                     return wrapped, max(min_font_size, init_font_size)
             
@@ -12955,14 +12962,14 @@ class MangaTranslator:
                 high = init_font_size
                 low = min_font_size
                 best_font_size = min_font_size
-                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
+                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
                 
                 while low <= high:
                     mid = (low + high) // 2
                     
                     # Load font at this size
                     try:
-                        test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                        test_font = _truetype(font_path, mid) if font_path else ImageFont.load_default()
                     except Exception:
                         test_font = ImageFont.load_default()
                     
@@ -13002,7 +13009,7 @@ class MangaTranslator:
                 
                 # Load font at this size
                 try:
-                    test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                    test_font = _truetype(font_path, mid) if font_path else ImageFont.load_default()
                 except Exception:
                     test_font = ImageFont.load_default()
                 
@@ -13063,7 +13070,7 @@ class MangaTranslator:
                     font_size = ideal_font_size
                     try:
                         if font_path:
-                            font = ImageFont.truetype(font_path, font_size)
+                            font = _truetype(font_path, font_size)
                         else:
                             font = ImageFont.load_default()
                     except Exception:
@@ -13076,7 +13083,7 @@ class MangaTranslator:
         while font_size > min_font_size:
             try:
                 if font_path:
-                    font = ImageFont.truetype(font_path, font_size)
+                    font = _truetype(font_path, font_size)
                 else:
                     font = ImageFont.load_default()
             except Exception:
@@ -13110,7 +13117,7 @@ class MangaTranslator:
             
             try:
                 if font_path:
-                    font = ImageFont.truetype(font_path, font_size)
+                    font = _truetype(font_path, font_size)
                 else:
                     font = ImageFont.load_default()
             except Exception:
@@ -13338,7 +13345,7 @@ class MangaTranslator:
         
         return safe_x, safe_y, safe_width, safe_height
     
-    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False, font_path: str = None) -> Tuple[int, List[str]]:
+    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False, font_path: str = None, font_index: int = 0) -> Tuple[int, List[str]]:
         """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments
 
         Args:
@@ -13349,6 +13356,7 @@ class MangaTranslator:
             region: Optional TextRegion for safe area calculation
             use_as_is: If True, use max_width/max_height directly without further shrinking
             font_path: Optional font file to fit with (a box's own font) instead of the selected one
+            font_index: the face of ``font_path`` when it is a font collection
         """
         font_path = font_path or self.selected_font_style or self.font_path
 
@@ -13405,7 +13413,8 @@ class MangaTranslator:
             roi_height=usable_height,
             init_font_size=init_font_size,
             min_font_size=min_font_size,
-            draw=draw
+            draw=draw,
+            font_index=font_index
         )
         
         # Convert wrapped text to lines
@@ -13429,7 +13438,8 @@ class MangaTranslator:
                     roi_height=usable_height,
                     init_font_size=target_size,
                     min_font_size=target_size,  # Force this size
-                    draw=draw
+                    draw=draw,
+                    font_index=font_index
                 )
                 test_lines = test_wrapped.split('\n') if test_wrapped else [text]
                 test_height = len(test_lines) * target_size * 1.2

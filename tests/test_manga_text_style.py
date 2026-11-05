@@ -338,6 +338,29 @@ def test_find_font_face_uses_the_family_files(tmp_path, monkeypatch):
     assert translator._resolve_region_font({'italic': True}) == (None, 0, False, True)  # no Bold Italic face
 
 
+@pytest.mark.parametrize("size", (None, 26), ids=("auto_fit", "fixed_size"))
+def test_a_collection_face_is_measured_with_that_face(tmp_path, monkeypatch, size):
+    """A bold / italic face inside a font collection (macOS Helvetica.ttc) wraps and fits with that
+    face, not the collection's first (regular) face it would otherwise be measured with."""
+    translator = _translator()
+    collection = tmp_path / "Family.ttf"  # stands in for the collection's file
+    shutil.copyfile(FONT_PATH, collection)
+    monkeypatch.setattr(translator, "_resolve_region_font", lambda style: (str(collection), 1, False, False))
+    real = ImageFont.truetype
+    indexes = []
+
+    def truetype(font=None, size=10, index=0, *args, **kwargs):
+        if os.path.normcase(str(font)) == os.path.normcase(str(collection)):
+            indexes.append(index)
+            index = 0  # the fixture font has one face
+        return real(font, size, index, *args, **kwargs)
+
+    monkeypatch.setattr(ImageFont, "truetype", truetype)
+    style = {'bold': True, **({'font_size': size} if size else {})}
+    _render(translator, [("Hello there my friend", style), ("", None)])
+    assert indexes and set(indexes) == {1}
+
+
 def test_find_font_face_on_a_system_family():
     """A real installed family when there is one (Windows Arial, Linux DejaVu Sans)."""
     for regular, bold in ((r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
