@@ -161,6 +161,28 @@ def test_text_box_inside_bubble_grows_to_the_bubble(mt):
     assert not (_ink(page, out) & ~inside).any()
 
 
+def test_bubble_bounds_still_count_on_pages_with_several_regions(mt):
+    """With several regions render_translated_text lays out _adjust_overlapping_regions' copies,
+    which carry no bubble_bounds: the bubble box is taken from the region each copy was made from."""
+    page, inside, bubble = _oval_page()
+    page = np.vstack([page, page])
+    inside = np.vstack([inside, inside])
+
+    def regions():
+        return [_region((250, 210 + 500 * i, 140, 80), LONG,
+                        bubble_bounds=(bubble[0], bubble[1] + 500 * i, bubble[2], bubble[3]))
+                for i in range(2)]
+
+    out = _render(mt, page, regions())
+    ink = _ink(page, out)
+    for top in (0, 500):
+        ys, xs = np.nonzero(ink[top:top + 500])
+        assert xs.min() < 250 and xs.max() > 390, "text stayed in the OCR box instead of the bubble"
+    assert not (ink & ~inside).any()
+    single = _ink(page[:500], _render(mt, page[:500], regions()[:1]))
+    assert (single == ink[:500]).all()
+
+
 def test_free_text_on_busy_background_only_gains_the_stroke_margin(mt):
     page = _busy(300, 500, seed=7)
     box = (100, 80, 300, 120)

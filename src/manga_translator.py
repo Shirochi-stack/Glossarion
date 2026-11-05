@@ -11889,7 +11889,7 @@ class MangaTranslator:
                         render_x, render_y, render_w, render_h = x, y, w, h
                     # Keep text inside the bubble / box actually drawn on the page
                     render_x, render_y, render_w, render_h = self._container_render_area(
-                        image, region, (render_x, render_y, render_w, render_h))
+                        image, region, (render_x, render_y, render_w, render_h), regions)
                     # Cache the result
                     region._cached_safe_area = (render_x, render_y, render_w, render_h)
                 else:
@@ -13263,18 +13263,27 @@ class MangaTranslator:
             'cx': x0 + cx, 'row0': y0, 'left': left, 'right': right, 'margin': margin,
         }
 
-    def _container_render_area(self, image: np.ndarray, region: TextRegion, area) -> Tuple[int, int, int, int]:
+    def _container_render_area(self, image: np.ndarray, region: TextRegion, area,
+                               source_regions=None) -> Tuple[int, int, int, int]:
         """Render area for auto-sized text that respects the bubble / box drawn on the page.
 
         With a container (see _find_text_container) the area becomes its interior, and the
         container is stored on ``region._fit_container`` for _fit_text_to_region. Without one
         (free text over art) the area only loses what the outline stroke and shadow add.
+        ``source_regions`` are the regions render_translated_text was given: with several,
+        it lays out _adjust_overlapping_regions' copies, which carry no bubble_bounds.
         """
         region._fit_container = None
         if not getattr(self, 'constrain_to_bubble', True):
             return area
         # A safe area the user switched on is an explicit limit: stay inside it
         clip = None if getattr(self, 'safe_area_enabled', False) else getattr(region, 'bubble_bounds', None)
+        idx = getattr(region, 'original_index', None)
+        if (clip is None and not getattr(self, 'safe_area_enabled', False) and source_regions
+                and isinstance(idx, int) and 0 <= idx < len(source_regions)
+                and tuple(region.bounding_box) == tuple(getattr(region, 'original_bbox', None) or ())):
+            # the copy's own region, unless the overlap adjustment moved the copy off its place
+            clip = getattr(source_regions[idx], 'bubble_bounds', None)
         try:
             container = self._find_text_container(image, area, clip)
         except Exception as e:
