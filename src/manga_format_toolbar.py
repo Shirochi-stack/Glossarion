@@ -95,7 +95,7 @@ class MangaFormatToolbar(QObject):
         self.preview = preview
         self.tab = tab
         self._updating = False
-        self._pending = False
+        self._pending = None  # the page whose re-render is waiting for the debounce
         self._tab_fonts = 0
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -378,16 +378,37 @@ class MangaFormatToolbar(QObject):
 
     def schedule_render(self):
         """Re-render the page once the changes settle (Save & Update Overlay: render only)."""
-        self._pending = True
+        page = self.image_path()
+        if self._pending and self._pending != page:
+            self._render_left_page(self._pending)  # a change on another page is still waiting
+        self._pending = page
         self._render_timer.start()
 
     def _render(self):
-        if not self._pending:
+        page, self._pending = self._pending, None
+        if not page:
             return
-        self._pending = False
+        if page != self.image_path():
+            # the page was left before its re-render: Save & Update Overlay would render the new one
+            self._render_left_page(page)
+            return
         handler = getattr(self.preview, '_on_save_overlay_clicked', None)
-        if callable(handler) and self.image_path():
+        if callable(handler):
             handler()
+
+    def _render_left_page(self, page):
+        """Render a page that is no longer shown from its saved state (render only, on the executor)."""
+        try:
+            import ImageRenderer
+            render = ImageRenderer.render_persisted_translation_state
+        except Exception as error:
+            print(f"[FORMAT] Re-render of {os.path.basename(page)} skipped: {error}")
+            return
+        executor = getattr(getattr(self.preview, 'main_gui', None), 'executor', None)
+        if executor is not None:
+            executor.submit(render, self.tab, page, False)
+        else:
+            render(self.tab, page, refresh_preview=False)
 
 
 def install_format_toolbar(preview, tab):

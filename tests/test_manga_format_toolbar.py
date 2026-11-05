@@ -165,6 +165,20 @@ def test_changes_are_stored_per_box_and_render_once(editor):
     assert len(editor.renders) == 2
 
 
+def test_a_page_left_before_its_render_is_rendered_from_its_state(editor, monkeypatch):
+    """Switching images inside the debounce must not re-render the newly shown page in its place."""
+    import ImageRenderer
+    calls = []
+    # ImageRenderer's persisted-state render (on main_gui.executor when there is one; none here)
+    monkeypatch.setattr(ImageRenderer, "render_persisted_translation_state",
+                        lambda tab, page, refresh_preview=True: calls.append((tab, page, refresh_preview)))
+    _select(editor, 0)
+    editor.toolbar.bold_btn.click()
+    editor.widget.current_image_path = editor.page.replace("001", "002")
+    _pump(editor.app, 0.1)
+    assert calls == [(editor.tab, editor.page, False)] and editor.renders == []
+
+
 def test_shows_the_selected_box_style(editor):
     editor.tab.image_state_manager.set_state(editor.page, {'region_styles': {
         '1': {'bold': True, 'underline': True, 'font_size': 33, 'align': 'left', 'font': str(FONT_PATH)}}})
