@@ -164,7 +164,7 @@
                 <button type="button" data-left="assets/site/shots/manga-before.webp" data-label="Original" aria-pressed="true">Original ⟷ Translated</button>
                 <button type="button" data-left="assets/site/shots/manga-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
               </div>
-              <figcaption>Japanese → English. The “ドキッ” sound effect was boxed by hand in the editor; the text was removed with Gemini Nano Banana.</figcaption>
+              <figcaption>Japanese → English. The “ドキッ” sound effect was missed by detection, so it was boxed by hand in the editor and translated with the rest.</figcaption>
             </figure>
             <figure class="compare compare-tall" data-compare data-compare-panel="webtoon" hidden>
               <div class="compare-scroll">
@@ -180,15 +180,15 @@
                 <button type="button" data-left="assets/site/shots/webtoon-before.webp" data-label="Original" aria-pressed="true">Original ⟷ Translated</button>
                 <button type="button" data-left="assets/site/shots/webtoon-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
               </div>
-              <figcaption>Korean → English, narration boxes included. Scroll inside the strip; the “두근!” sound effect was added in the editor.</figcaption>
+              <figcaption>Korean → English, narration boxes included; scroll inside the strip. The “두근!” sound effect was boxed by hand in the editor, and the first narration box uses a 26 px maximum font size.</figcaption>
             </figure>
-            <p class="phone-note" style="text-align:left;margin-top:10px">Real runs of the Manga Translator on test pages made from Halgakos art.</p>
+            <p class="phone-note" style="text-align:left;margin-top:10px">Real runs of the Manga Translator on test pages made from Halgakos art. The original text was removed by Gemini Nano Banana 2.1 (an image-edit model), with the mask limited to each text box, so the artwork around the text is left untouched.</p>
           </div>
         </div>
         <div class="gallery gallery-2" style="margin:8px 0 24px">
           <figure class="shot"><a href="assets/site/shots/manga-manual-box.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-manual-box.webp" alt="Manga editor with detected bubbles and a hand-drawn box over a sound effect" width="1600" height="842" loading="lazy" decoding="async"></a><figcaption>1 · Detect, then box anything missed (here the sound effect)</figcaption></figure>
           <figure class="shot"><a href="assets/site/shots/manga-context-menu.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-context-menu.webp" alt="Region menu with Mark as Free Text, OCR This Text and Clean This Rectangle" width="1100" height="690" loading="lazy" decoding="async"></a><figcaption>2 · Mark it as free text and OCR just that box</figcaption></figure>
-          <figure class="shot"><a href="assets/site/shots/image-keys.webp" target="_blank" rel="noopener"><img src="assets/site/shots/image-keys.webp" alt="Image Gen and Edit key pool with an image-edit model" width="1300" height="820" loading="lazy" decoding="async"></a><figcaption>3 · Pick the image-edit model that removes the text</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/image-keys.webp" target="_blank" rel="noopener"><img src="assets/site/shots/image-keys.webp" alt="Image Gen and Edit key pool with an image-edit model" width="1300" height="820" loading="lazy" decoding="async"></a><figcaption>3 · Pick the image-edit model that erases the text inside the masked areas</figcaption></figure>
           <figure class="shot"><a href="assets/site/shots/manga-window.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-window.webp" alt="Manga Translator showing the translated page with the sound effect lettered" width="1600" height="842" loading="lazy" decoding="async"></a><figcaption>4 · Translate: cleaned, translated and lettered</figcaption></figure>
         </div>
 
