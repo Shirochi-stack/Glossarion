@@ -154,6 +154,8 @@ tests/**
 !tests/test_authgpt_request.py
 !tests/test_authnan_auth.py
 !tests/test_authnan_routes.py
+!tests/test_authgem_image_output.py
+!tests/test_manga_image_edit_pool_load.py
 !tests/test_openai_token_compatibility.py
 !tests/test_antigravity_proxy.py
 !tests/test_ocagy_cli.py

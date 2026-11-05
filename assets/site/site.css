@@ -180,6 +180,8 @@ p { margin: 0 0 1em; }
   background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); font-size: .88rem; font-weight: 600;
 }
 .chip svg { width: 16px; height: 16px; }
+a.chip { transition: background .15s ease, color .15s ease, border-color .15s ease; }
+a.chip:hover { text-decoration: none; color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); }
 .hero-art { position: relative; display: grid; place-items: center; }
 .hero-art .halo {
   position: absolute; width: min(420px, 86%); aspect-ratio: 1; border-radius: 50%;
@@ -263,8 +265,12 @@ section { padding: 56px 0; }
 .compare-box img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
 .compare-box .after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--pos, 50%)); }
 .compare-box .handle { position: absolute; top: 0; bottom: 0; left: var(--pos, 50%); width: 3px; margin-left: -1.5px; background: var(--accent); pointer-events: none; }
-.compare-box .handle::after { content: "⟷"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 800; box-shadow: var(--shadow); }
-.compare-box input[type="range"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
+/* Only the knob drags on touch screens, so swiping over the image scrolls the page. */
+.compare-box .knob { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 800; box-shadow: var(--shadow); pointer-events: auto; cursor: ew-resize; touch-action: none; user-select: none; }
+/* the range stays for keyboard and screen readers; pointers are handled in site.js */
+.compare-box input[type="range"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; pointer-events: none; }
+.compare-box:has(input:focus-visible) .knob { outline: 3px solid var(--ink); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .compare-box { cursor: ew-resize; } }
 .compare-box .tag { position: absolute; top: 10px; padding: 4px 10px; border-radius: 999px; font-size: .75rem; font-weight: 800; background: rgba(20, 16, 26, .78); color: #fff; pointer-events: none; }
 .compare-box .tag.l { left: 10px; } .compare-box .tag.r { right: 10px; }
 .compare-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
@@ -277,8 +283,9 @@ section { padding: 56px 0; }
 .compare-tabs button[aria-selected="true"] { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
 /* a tall webtoon strip scrolls inside a fixed-height window */
 .compare-scroll { max-height: 640px; overflow-y: auto; overscroll-behavior: contain; border-radius: 14px; box-shadow: var(--shadow-lg); }
-.compare-scroll .compare-box { box-shadow: none; }
-.compare-tall .compare-box .handle::after { top: 300px; }
+.compare-scroll .compare-box { box-shadow: none; overflow: clip; }  /* clip, not hidden: hidden would capture the sticky knob */
+/* in the tall webtoon the knob stays in view while the strip scrolls */
+.compare-tall .compare-box .knob { position: sticky; top: 298px; left: auto; transform: none; margin-left: -20.5px; }
 
 /* phone gallery */
 .phones { display: flex; gap: 18px; overflow-x: auto; padding: 6px 4px 18px; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
