@@ -1,7 +1,7 @@
 # extract_glossary_from_epub.py
 import os
 # Multi-instance: an instance >= 2 keeps its payload folders under Payloads/Instance N
-from instance_plan import instance_payloads_dir
+from instance_plan import instance_payloads_dir, has_enabled_key
 from urllib.parse import unquote
 import json
 import contextlib
@@ -588,7 +588,8 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config, con
         if not glossary_keys:
             glossary_keys = config.get('glossary_keys', [])
     
-    if use_glossary_keys and glossary_keys:
+    # A glossary pool whose keys are all disabled is an empty pool: not enabled.
+    if use_glossary_keys and has_enabled_key(glossary_keys):
         # ── GLOSSARY KEYS MODE ──────────────────────────────────────────
         # Use glossary-specific keys for rotation, NOT the translation multi-keys
         if context == 'glossary':

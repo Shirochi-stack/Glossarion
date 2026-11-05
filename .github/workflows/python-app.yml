@@ -137,6 +137,7 @@ jobs:
           tests/test_instance_runs.py \
           tests/test_instance_key_isolation.py \
           tests/test_instance_guards.py \
+          tests/test_empty_key_pool_disabled.py \
           tests/test_review_prompt_profiles.py \
           tests/test_authgem_image_output.py \
           tests/test_manga_image_edit_pool_load.py \
