@@ -180,6 +180,8 @@ p { margin: 0 0 1em; }
   background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); font-size: .88rem; font-weight: 600;
 }
 .chip svg { width: 16px; height: 16px; }
+a.chip { transition: background .15s ease, color .15s ease, border-color .15s ease; }
+a.chip:hover { text-decoration: none; color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); }
 .hero-art { position: relative; display: grid; place-items: center; }
 .hero-art .halo {
   position: absolute; width: min(420px, 86%); aspect-ratio: 1; border-radius: 50%;

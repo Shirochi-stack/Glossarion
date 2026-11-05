@@ -125,9 +125,21 @@
     document.querySelectorAll("[data-download-primary]").forEach(function (el) {
       el.setAttribute("href", "#download-" + os);
     });
-    var card = document.getElementById("download-" + os);
-    if (card) card.classList.add("current");
+    highlightPlatform(os);
   }
+
+  // The platform chips jump to their download card and highlight it.
+  function highlightPlatform(os) {
+    var card = document.getElementById("download-" + os);
+    if (!card) return;
+    document.querySelectorAll(".platform.current").forEach(function (c) { c.classList.remove("current"); });
+    card.classList.add("current");
+  }
+
+  document.addEventListener("click", function (e) {
+    var chip = e.target.closest && e.target.closest("[data-download-os]");
+    if (chip) highlightPlatform(chip.getAttribute("data-download-os"));
+  });
 
   // ----- latest release -----
   // Each download link carries data-asset="<regex>"; the static href already points at
