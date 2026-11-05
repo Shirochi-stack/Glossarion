@@ -90,6 +90,35 @@
       function update() { box.style.setProperty("--pos", range.value + "%"); }
       range.addEventListener("input", update);
       update();
+
+      // Dragging: the knob works for every pointer; a mouse may also drag anywhere on the image.
+      // Touches elsewhere on the image are left to the browser, so a swipe scrolls the page.
+      var knob = fig.querySelector(".knob");
+      var dragging = null;
+      function moveTo(clientX) {
+        var rect = box.getBoundingClientRect();
+        var pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
+        range.value = String(Math.round(pct));
+        update();
+      }
+      function start(e) {
+        dragging = e.pointerId;
+        try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        moveTo(e.clientX);
+        e.preventDefault();
+      }
+      function move(e) { if (dragging === e.pointerId) moveTo(e.clientX); }
+      function end(e) { if (dragging === e.pointerId) dragging = null; }
+      [knob, box].forEach(function (el) {
+        if (!el) return;
+        el.addEventListener("pointermove", move);
+        el.addEventListener("pointerup", end);
+        el.addEventListener("pointercancel", end);
+      });
+      if (knob) knob.addEventListener("pointerdown", function (e) { e.stopPropagation(); start(e); });
+      box.addEventListener("pointerdown", function (e) {
+        if (e.pointerType === "mouse" && e.button === 0) start(e);
+      });
       fig.querySelectorAll("[data-left]").forEach(function (btn) {
         btn.addEventListener("click", function () {
           before.src = btn.getAttribute("data-left");
