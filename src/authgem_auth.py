@@ -147,6 +147,20 @@ def _candidate_finish_reason(candidate: Dict[str, Any]) -> Any:
     return None
 
 
+def _gemini_part_image(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return {"mime", "data"} for a non-thought inline image part, else None."""
+    if not isinstance(part, dict) or part.get("thought"):
+        return None
+    inline = part.get("inlineData") or part.get("inline_data")
+    if not isinstance(inline, dict) or not inline.get("data"):
+        return None
+    try:
+        data = base64.b64decode(inline["data"])
+    except Exception:
+        return None
+    return {"mime": inline.get("mimeType") or inline.get("mime_type") or "image/png", "data": data}
+
+
 def _normalize_gemini_finish_reason(finish_reason: Any) -> str:
     """Map Gemini finish reasons to OpenAI-style values without hiding unknowns."""
     if finish_reason in (None, ""):
@@ -1219,6 +1233,7 @@ def _build_gemini_request_body(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     model: str = "",
+    image_output: Optional[Dict] = None,
 ) -> Dict:
     """Convert OpenAI-style messages to Gemini API generateContent format.
 
@@ -1226,6 +1241,10 @@ def _build_gemini_request_body(
       - system → systemInstruction
       - user → user parts (text and/or images)
       - assistant → model parts
+
+    ``image_output`` ({"size": "1K", "aspect_ratio": "auto"}) asks for an image
+    reply (responseModalities TEXT+IMAGE plus imageConfig), as the native Gemini
+    route does for image models; thinking is not configured for those requests.
 
     Reads thinking settings from environment variables:
       - ENABLE_GEMINI_THINKING: "1" (default) or "0"
@@ -1285,7 +1304,9 @@ def _build_gemini_request_body(
         gen_config["maxOutputTokens"] = max_tokens
 
     # ── Thinking / reasoning configuration ──
-    enable_thinking = os.getenv("ENABLE_GEMINI_THINKING", "1") == "1"
+    # Image models do not take thinking settings (the native route logs them as
+    # "thinking not supported"), so an image request skips the thinking block.
+    enable_thinking = os.getenv("ENABLE_GEMINI_THINKING", "1") == "1" and not image_output
     thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
     thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
@@ -1334,6 +1355,13 @@ def _build_gemini_request_body(
 
         if thinking_config:
             gen_config["thinkingConfig"] = thinking_config
+    elif image_output:
+        gen_config["responseModalities"] = ["TEXT", "IMAGE"]
+        image_config = {"imageSize": str(image_output.get("size") or "1K")}
+        aspect_ratio = str(image_output.get("aspect_ratio") or "auto")
+        if aspect_ratio != "auto":
+            image_config["aspectRatio"] = aspect_ratio
+        gen_config["imageConfig"] = image_config
     else:
         # Thinking explicitly disabled
         if is_gemini_3:
@@ -1919,6 +1947,7 @@ def send_chat_completion_aistudio(
     log_fn=None,
     connect_timeout: Optional[float] = None,
     account_id: int = 0,
+    image_output: Optional[Dict] = None,
 ) -> Dict:
     """Send a chat completion via Google Code Assist proxy using OAuth.
 
@@ -1940,7 +1969,8 @@ def send_chat_completion_aistudio(
         logger.info("AuthGem: No project from loadCodeAssist — proceeding with empty project (proxy auto-provisions)")
         _log("⚠️ No project assigned yet — proxy will auto-provision")
 
-    inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
+    inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model,
+                                            image_output=image_output)
 
     # Wrap in Code Assist envelope matching Gemini CLI's converter.ts format:
     # {model, project, user_prompt_id, enabled_credit_types?, request: {contents, ..., session_id}}
@@ -2051,6 +2081,7 @@ def send_chat_completion_aistudio_key(
     timeout: int = 300,
     log_fn=None,
     connect_timeout: Optional[float] = None,
+    image_output: Optional[Dict] = None,
 ) -> Dict:
     """Send a chat completion via Google AI Studio using an API key.
 
@@ -2062,7 +2093,8 @@ def send_chat_completion_aistudio_key(
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
-    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
+    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model,
+                                      image_output=image_output)
 
     # API key is sent via x-goog-api-key header (not ?key= query param)
     # to match the @google/genai SDK's default behaviour.
@@ -2146,6 +2178,7 @@ def send_chat_completion_vertex(
     log_fn=None,
     connect_timeout: Optional[float] = None,
     account_id: int = 0,
+    image_output: Optional[Dict] = None,
 ) -> Dict:
     """Send a chat completion via Vertex AI using an OAuth Bearer token.
 
@@ -2156,7 +2189,8 @@ def send_chat_completion_vertex(
         raise RuntimeError("AuthGem: stream cancelled by user")
 
     _log = log_fn or (lambda *a, **kw: None)
-    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model)
+    body = _build_gemini_request_body(messages, temperature, max_tokens, model=model,
+                                      image_output=image_output)
 
 
     # Resolve project — auto-detect from the OAuth token (per-account cache)
@@ -2393,12 +2427,17 @@ def _stream_gemini_common(
         # Extract text from candidates
         text_parts = []
         thought_parts = []
+        images = []
         finish_reason = "STOP"
         for candidate in data.get("candidates", []):
             fr = _candidate_finish_reason(candidate)
             if fr:
                 finish_reason = fr
             for part in candidate.get("content", {}).get("parts", []):
+                image = _gemini_part_image(part)
+                if image:
+                    images.append(image)
+                    continue
                 text = part.get("text", "")
                 if not text:
                     continue
@@ -2423,7 +2462,9 @@ def _stream_gemini_common(
         # Log when text is empty but thoughts exist — do NOT promote
         # thought content to output, as it's typically internal reasoning
         # (not structured data).  Let downstream handle the empty response.
-        if not final_content and thought_text:
+        if images:
+            _log(f"🖼️ AuthGem: Received {len(images)} image(s) ({images[0]['mime']})")
+        elif not final_content and thought_text:
             _log("⚠️ AuthGem: Text empty — response contained only thinking/reasoning, no output text.")
         elif not final_content:
             _log("⚠️ AuthGem: Empty response — no text received.")
@@ -2431,14 +2472,17 @@ def _stream_gemini_common(
         # Map Gemini finish reasons to OpenAI-style (same mapping as streaming path)
         mapped_finish_reason = _normalize_gemini_finish_reason(finish_reason)
 
-        return {
+        result = {
             "content": final_content,
             "finish_reason": mapped_finish_reason,
             "thought_content": thought_text,
             "usage": usage,
-            "_silent_block": (not final_content and mapped_finish_reason == "stop"
+            "_silent_block": (not final_content and not images and mapped_finish_reason == "stop"
                               and usage.get("candidatesTokenCount", 0) == 0),
         }
+        if images:
+            result["images"] = images
+        return result
 
     # ── Streaming path: use streamGenerateContent (SSE) ──
     # Prefer httpx for true real-time SSE (same stack as openai SDK)
@@ -2466,6 +2510,7 @@ def _new_gemini_stream_state() -> Dict:
     return {
         "text_parts": [],        # Non-thought text chunks
         "thought_parts": [],     # Thought/reasoning chunks (filtered from output)
+        "images": [],            # Inline image parts ({"mime", "data"}) of an image reply
         "got_first_data": False,
         "streamed_chars": 0,
         "log_buf": [],
@@ -2527,6 +2572,10 @@ def _process_gemini_sse_line(
 
         content_parts = candidate.get("content", {}).get("parts", [])
         for part in content_parts:
+            image = _gemini_part_image(part)
+            if image:
+                state["images"].append(image)
+                continue
             text = part.get("text", "")
             if not text:
                 continue
@@ -2670,11 +2719,14 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
 
     content = "".join(state["text_parts"])
     thought_content = "".join(state["thought_parts"]) if state["thought_parts"] else None
+    images = state.get("images") or []
 
     # Log when text is empty — do NOT promote thought content to output,
     # as it's typically internal reasoning (not structured data).
     # Let downstream handle the empty response (retry / error).
-    if not content and thought_content:
+    if images:
+        _log(f"🖼️ AuthGem: Received {len(images)} image(s) ({images[0]['mime']})")
+    elif not content and thought_content:
         _log("⚠️ AuthGem: Text empty — response contained only thinking/reasoning, no output text.")
     elif not content:
         _log("⚠️ AuthGem: Empty response — no text received.")
@@ -2700,19 +2752,22 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
     # content is empty with 0 completion tokens — this is a disguised
     # prohibition, not a legitimate empty response.
     _silent_block = False
-    if not content and mapped_reason == "stop":
+    if not content and not images and mapped_reason == "stop":
         _completion_tokens = (usage or {}).get("completion_tokens", 0)
         if _completion_tokens == 0:
             _silent_block = True
             mapped_reason = "content_filter"
             _log("   🚫 Silent content block detected (empty content + 0 completion tokens + stop) — overriding finish_reason to content_filter")
 
-    return {
+    result = {
         "content": content,
         "finish_reason": mapped_reason,
         "usage": usage,
         "_silent_block": _silent_block,
     }
+    if images:
+        result["images"] = images
+    return result
 
 
 # ---------------------------------------------------------------------------
