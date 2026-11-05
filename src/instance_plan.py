@@ -59,6 +59,7 @@ __all__ = [
     "current_instance",
     "default_assignment",
     "foreign_key_owners",
+    "has_enabled_key",
     "in_instance_process_tree",
     "instance_payloads_dir",
     "is_multi_instance",
@@ -67,6 +68,7 @@ __all__ = [
     "key_owners",
     "key_scope",
     "plan",
+    "pool_switch",
     "register_instance_process",
     "scope_keys",
     "scoped_env",
@@ -151,7 +153,17 @@ def key_instance(entry):
 
 def _key_enabled(entry):
     # The runtime pool's own test (APIKeyEntry.enabled / key_contexts.key_enabled_for_context)
-    return bool(entry.get("enabled", True))
+    if isinstance(entry, dict):
+        return bool(entry.get("enabled", True))
+    return bool(getattr(entry, "enabled", True))
+
+
+def has_enabled_key(rows):
+    """True when the key-pool list ``rows`` (config dicts or ``APIKeyEntry`` objects) holds an
+    enabled key. A pool without one is an empty pool: the runtime treats it as switched off."""
+    if not isinstance(rows, (list, tuple)):
+        return False
+    return any(_key_enabled(entry) for entry in rows if isinstance(entry, dict) or hasattr(entry, "api_key"))
 
 
 def _translation_keys(config):
@@ -359,8 +371,19 @@ def scoped_env(name, value, memory_rows=None, environ=None):
             return "[]"
         kept = scope_keys(rows, number)
         return value if len(kept) == len(rows) else json.dumps(kept)
+    return pool_switch(name, value, memory_rows, environ, instance=number)
+
+
+def pool_switch(name, value, memory_rows=None, environ=None, instance=None):
+    """``value`` (a dedicated pool's switch ``name``, e.g. ``USE_INPAINTER_KEYS``, as read from the
+    environment) as the runtime may use it: "1" reads "0" when neither the pool's key lists in
+    ``environ`` (default ``os.environ``) nor ``memory_rows(pool)`` (the client's in-memory list)
+    hold an enabled row (of ``instance`` when given). A pool whose keys are all disabled, or that
+    has none, is an empty pool and counts as switched off: its requests take the normal route
+    instead of failing, and the user's saved toggle is left as it is. Other variables, other
+    values and the Translation pool's switches pass through unchanged."""
     pool = _TOGGLE_ENV_POOL.get(name)
-    if pool is None or pool == "main" or str(value) != "1":
+    if pool is None or pool == "main" or value is None or str(value) != "1":
         return value
     environ = os.environ if environ is None else environ
     rows = []
@@ -371,8 +394,9 @@ def scoped_env(name, value, memory_rows=None, environ=None):
             rows.extend(memory_rows(pool) or [])
         except Exception:
             pass
-    own = scope_keys([entry for entry in rows if isinstance(entry, dict)], number)
-    return value if any(_key_enabled(entry) for entry in own) else "0"
+    if instance is not None:
+        rows = scope_keys([entry for entry in rows if isinstance(entry, dict)], instance)
+    return value if has_enabled_key(rows) else "0"
 
 
 # ---------------------------------------------------------------------------

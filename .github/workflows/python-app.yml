@@ -118,6 +118,8 @@ jobs:
           tests/test_u7_tool_cores.py \
           tests/test_manga_env.py \
           tests/test_manga_editor_core.py \
+          tests/test_manga_text_style.py \
+          tests/test_manga_format_toolbar.py \
           tests/test_manga_models.py \
           tests/test_hayai_ocr.py \
           tests/test_google_vision_rest.py \
@@ -137,10 +139,13 @@ jobs:
           tests/test_instance_runs.py \
           tests/test_instance_key_isolation.py \
           tests/test_instance_guards.py \
+          tests/test_empty_key_pool_disabled.py \
           tests/test_review_prompt_profiles.py \
           tests/test_authgem_image_output.py \
           tests/test_manga_image_edit_pool_load.py \
           tests/test_manga_bubble_fit.py \
+          tests/test_auth_pool_dropdowns.py \
+          tests/test_gemini_future_and_br_chapters.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \

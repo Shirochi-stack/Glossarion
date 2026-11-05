@@ -363,6 +363,7 @@ app_files = [
     ('manga_integration.py', '.'),
     ('manga_settings_dialog.py', '.'),
     ('manga_image_preview.py', '.'),
+    ('manga_format_toolbar.py', '.'),
     
     # Dialog animations
     ('dialog_animations.py', '.'),
@@ -648,6 +649,7 @@ app_modules = [
     'manga_integration',   # Manga GUI integration
     'manga_settings_dialog',
     'manga_image_preview', # Manga image preview widget
+    'manga_format_toolbar', # Manga editor Format toolbar (per-box text style)
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'rotatable_label',     # Rotatable label widget

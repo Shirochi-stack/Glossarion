@@ -732,6 +732,18 @@ class FakeEditorSession:
     def set_box_iterations(self, index, value):
         self.calls.append(("set_box_iterations", index, value))
 
+    def set_box_style(self, index, style=None, *, reset=False):
+        self.calls.append(("set_box_style", index, style, reset))
+        box = self.boxes[self.current_page][index]
+        merged = {} if reset else dict(box.get("style") or {})
+        for key, value in (style or {}).items():
+            if value is None or value is False:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        box["style"] = merged
+        return merged
+
     def edit_box_text(self, index, *, ocr_text=None, translation=None):
         self.calls.append(("edit_box_text", index, ocr_text, translation))
         box = self.boxes[self.current_page][index]
@@ -2013,6 +2025,90 @@ def test_editor_tab_edits_boxes_on_the_real_editor_session(iso, tmp_path, monkey
     asyncio.run(scenario())
 
 
+def test_editor_box_style_tab_on_the_real_editor_session(iso, tmp_path, monkeypatch):
+    """The box panel's Style tab (the desktop Format toolbar) over ``MangaEditorSession``: a change is
+    stored in the page state (``region_styles``), the rebuilt panel shows it, and a page with a
+    translation is re-rendered (Save & Update Overlay); Reset drops it."""
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    monkeypatch.setenv("GLOSSARION_NO_PROCESSES", "1")
+    monkeypatch.setenv("CONFIG_FILE", str(tmp_path / "config.json"))
+    monkeypatch.chdir(tmp_path)
+    pages = [write_png(tmp_path / "in" / "1.png", 100, 200)]
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        ctx = _ctx(session.page, {}, files=FakeFiles(), output_root=str(iso["Output"]))
+        manga = _session(tmp_path, {})
+        manga.files.host.selected_files = list(pages)
+        manga.loaded = True
+        screen = MangaScreen(parse_route("/tools/manga?tab=editor"), ctx, session=manga)
+        _mount(session.page, screen.get_body())
+        tab = screen.editor_tab
+        await tab.open_page(0)
+        tab.geometry.display_w = 50.0
+        tab.set_tool("box")
+        tab.pan_start(5, 10)
+        tab.pan_update(25, 40)
+        await tab.pan_end()
+        tab.set_tool("select")
+        steps = []
+
+        async def run_step(step, **kwargs):
+            steps.append(step)
+            return None
+
+        monkeypatch.setattr(tab, "run_step", run_step)
+        assert tab.long_press_at(15, 25) is not None
+        panel = tab.show_box_tab("style")
+        assert panel.tab == "style" and panel.style_body.visible and panel.reset_style_button.disabled
+        # no translation yet: stored, nothing to render
+        await tab.box_action("style", 0, {**panel.changes(), "style": {"bold": True, "font_size": 30}})
+        assert tab.boxes[0]["style"] == {"bold": True, "font_size": 30} and steps == []
+        assert tab.panel.style_toggles["bold"].selected and tab.panel.size_field.value == "30"
+        assert tab.panel.tab == "style" and not tab.panel.reset_style_button.disabled
+        tab.panel.translation_field.value = "Hello!"
+        await tab.box_action("style", 0, {**tab.panel.changes(), "style": {"align": "right", "bold": False}})
+        assert tab.boxes[0]["style"] == {"font_size": 30, "align": "right"} and tab.boxes[0]["translation"] == "Hello!"
+        assert steps == ["render"] and tab.panel.align_buttons["right"].selected
+        state = manga.editor.image_state_manager.get_state(os.path.abspath(pages[0]))
+        assert state["region_styles"] == {"0": {"font_size": 30, "align": "right"}}
+        await tab.box_action("style", 0, {"style": None})
+        assert tab.boxes[0]["style"] == {} and steps == ["render", "render"]
+        screen.dispose()
+        manga.editor.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(importlib.util.find_spec("flet") is None, reason="flet not installed")
+def test_box_panel_style_tab_controls():
+    """The Style tab's controls send ``style`` changes (None / False: back to the Rendering Settings)."""
+    from glossarion_mobile.ui.tools.manga.box_sheet import BOX_TABS, STYLE_COLORS, BoxPanel, box_signature
+
+    font = str(Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "manga_editor" / "DejaVuSans-Latin.ttf")
+    actions = []
+    box = {"ocr_text": "a", "translation": "Hi", "style": {"italic": True, "align": "left", "font": font}}
+    panel = BoxPanel(box, 1, on_action=lambda *a: actions.append(a), tab="style", fonts=["x/Other.ttf"])
+    assert dict(BOX_TABS)["style"] == "Style" and panel.style_body.visible and not panel.translation_body.visible
+    assert panel.style_toggles["italic"].selected and not panel.style_toggles["bold"].selected
+    assert panel.align_buttons["left"].selected and not panel.align_buttons["center"].selected
+    assert [o.key for o in panel.font_dropdown.options] == ["", "x/Other.ttf", font] and panel.font_dropdown.value == font
+    panel.style_toggles["italic"].on_click(None)
+    panel.align_buttons["center"].on_click(None)
+    assert panel.set_size("x") is None and panel.size_field.error_text
+    panel.set_size("28")
+    panel.set_size("")
+    panel.color_menu.items[3].on_click(None)
+    panel.color_menu.items[0].on_click(None)
+    panel.reset_style()
+    assert [a[2]["style"] for a in actions] == [{"italic": False}, {"align": None}, {"font_size": 28},
+                                               {"font_size": None}, {"color": STYLE_COLORS[3][1]}, {"color": None},
+                                               None]
+    assert box_signature(box, 1) != box_signature({**box, "style": {}}, 1)
+
+
 # ==========================================================================
 # What a mobile run starts from: phone defaults, models, output paths, archives, editor gestures
 # ==========================================================================
@@ -2850,6 +2946,7 @@ def test_bindings_match_the_shared_core_contracts():
         "rerender_boxes": ("indexes", "image_path", "owner"), "clear_page": ("image_path", "include_cleaned"),
         "set_box_free_text": ("index", "free_text"), "set_box_excluded": ("index", "excluded"),
         "set_box_iterations": ("index", "value"), "edit_box_text": ("index", "ocr_text", "translation"),
+        "set_box_style": ("index", "style", "reset"),
         "ocr_box": ("index", "owner"), "translate_box": ("index", "owner"), "clean_box": ("index", "owner"),
         "stop": ("force",), "export_ocr": ("destination", "image_paths", "source_root"),
         "import_ocr": ("path", "image_paths", "owner", "render"), "close": (),

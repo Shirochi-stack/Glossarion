@@ -144,6 +144,7 @@ import requests
 from key_contexts import key_enabled_for_context, route_key_context, current_key_context
 from instance_plan import current_instance as _current_instance
 from instance_plan import key_scope as _key_scope, scope_keys as _scope_keys, scoped_env as _scoped_env
+from instance_plan import pool_switch as _pool_switch
 from instance_plan import foreign_key_owners as _foreign_key_owners, instance_payloads_dir as _instance_payloads_dir
 import contextvars
 from requests.adapters import HTTPAdapter
@@ -1067,15 +1068,17 @@ def _key_pool_env(name, default=None):
     """``os.getenv(name, default)`` for a key-pool variable (``FALLBACK_KEYS``, ``USE_GLOSSARY_KEYS``,
     ``USE_MAIN_KEY_FALLBACK`` ...). Inside one instance of a multi-instance run
     (``instance_plan.key_scope``) the value is narrowed to that instance's keys, whoever exported
-    it (``instance_plan.scoped_env``); otherwise it is the plain environment value."""
+    it (``instance_plan.scoped_env``); otherwise it is the plain environment value, except that a
+    dedicated pool's switch reads "0" while the pool holds no enabled key
+    (``instance_plan.pool_switch``): an empty pool is not an enabled pool."""
     value = os.getenv(name, default)
-    if _key_scope() is None:
-        return value
 
     def memory_rows(pool):
         attr = _IN_MEMORY_POOL_KEYS.get(pool)
         return list(getattr(UnifiedClient, attr, None) or []) if attr else []
 
+    if _key_scope() is None:
+        return _pool_switch(name, value, memory_rows)
     return _scoped_env(name, value, memory_rows)
 
 def _payloads_dir() -> str:
@@ -7197,6 +7200,22 @@ class UnifiedClient:
         except Exception:
             pass
         return os.getenv("IMAGE_OUTPUT_RESOLUTION", default)
+
+    @staticmethod
+    def _authnan_image_size(requested: Any) -> str:
+        """NanoGPT ``size`` for an authnan/ image request, never below 2K.
+
+        NanoGPT takes a tier ('1k', '2k', '4k') or a pixel size there. Tiers and
+        pixel sizes under 2K (and 'auto') become '2k'; larger ones are kept."""
+        value = str(requested or '').strip().lower()
+        tier = re.fullmatch(r'(\d+(?:\.\d+)?)\s*k', value)
+        if tier:
+            number = float(tier.group(1))
+            return f"{int(number)}k" if number > 2 else '2k'
+        pixels = re.fullmatch(r'(\d+)\s*[x*]\s*(\d+)', value)
+        if pixels and max(int(pixels.group(1)), int(pixels.group(2))) >= 2048:
+            return value
+        return '2k'
 
     def _get_image_output_aspect_ratio(self, default: str = "auto") -> str:
         try:
@@ -32027,8 +32046,18 @@ class UnifiedClient:
         if not prompt:
             prompt = "Generate an image"
 
-        image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
-        image_path = '/api/v1/images/generations' if re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I) else '/v1/images/generations'
+        is_authnan = bool(re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I))
+        if is_authnan:
+            # The subscription models answer 400 below 2K ("supports 1K or 2K
+            # resolution" for "1024x1024"), so authnan/ always asks for 2K or more.
+            image_size = self._authnan_image_size(
+                getattr(self, '_forced_image_output_resolution', None)
+                or os.getenv("NANOGPT_IMAGE_SIZE")
+                or self._get_image_output_resolution("1K")
+            )
+        else:
+            image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
+        image_path = '/api/v1/images/generations' if is_authnan else '/v1/images/generations'
         url = f"{base_url}{image_path}"
         headers = {
             "Authorization": f"Bearer {api_key}",

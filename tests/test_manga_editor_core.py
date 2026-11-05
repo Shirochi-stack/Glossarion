@@ -226,6 +226,12 @@ EDITS = (
     # a page OpenCV may not decode is not decoded by Pillow either (tests/test_cv2_decode_gate.py)
     ("_render_with_manga_translator",
      "            pil_image = open_image(image_path)\n", "            pil_image = open_page_image(image_path)\n"),
+    # Owner-approved per-box text formatting (2026-11-06, the Format toolbar): the regions get their
+    # box's style from the page state before the render (_attach_region_styles; no styles: no-op)
+    ("_render_with_manga_translator",
+     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n",
+     "        _attach_region_styles(self, original_image_path or image_path, regions)\n"
+     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"),
     # Owner-approved fix (2026-11-06, PR 129): Translate's fallback load of the endpoint-backed
     # custom image edit runs in-process, as MangaTranslator's shared getter loads it; a worker
     # process never received the Image Gen/Edit key model (tests/test_manga_image_edit_pool_load.py).
@@ -1949,6 +1955,42 @@ def test_session_renders_with_the_real_renderer(tmp_path, fakes):
     cleaned = cv2.imread(session.image_state_manager.get_state(page)['cleaned_image_path'])
     assert rendered.shape == cleaned.shape
     assert int(np.count_nonzero(np.any(rendered != cleaned, axis=2))) > 200
+
+
+def test_session_box_styles_persist_and_render(tmp_path, fakes):
+    """Per-box text style (the Format toolbar, 2026-11-06): stored in the page state, shown by the
+    snapshot, kept across a page switch and a reopen, moved up with the boxes after a deleted one,
+    dropped by Clear boxes, and drawn by the real renderer for that box only."""
+    pages = [make_page(tmp_path / "pages" / "001.png"), make_page(tmp_path / "pages" / "002.png")]
+    session = _session(tmp_path, pages)
+    session.open_page(pages[0])
+    session.detect()
+    session.recognize()
+    session.translate()
+    session._manga_translator = _real_manga_translator()
+    plain = cv2.imread(session.save_and_update_overlay())
+    style = {'font_size': 30, 'bold': True, 'underline': True, 'align': 'left', 'color': [200, 0, 0]}
+    assert session.set_box_style(1, {**style, 'italic': False}) == style
+    assert [box['style'] for box in session.page_snapshot()['boxes']] == [{}, style]
+    styled = cv2.imread(session.save_and_update_overlay())
+    x, y, w, h = BOXES[0]
+    assert np.array_equal(plain[y - 10:y + h + 10, x - 10:x + w + 10], styled[y - 10:y + h + 10, x - 10:x + w + 10])
+    x, y, w, h = BOXES[1]
+    assert not np.array_equal(plain[y:y + h, x:x + w], styled[y:y + h, x:x + w])
+    assert int(np.count_nonzero(np.all(styled == (0, 0, 200), axis=2))) > 50  # red text (BGR)
+
+    session.open_page(pages[1])
+    session.close()
+    reopened = _session(tmp_path, pages)
+    snapshot = reopened.open_page(pages[0])
+    assert [box['style'] for box in snapshot['boxes']] == [{}, style]
+    assert reopened.set_box_style(0, {'italic': True}) == {'italic': True}
+    reopened.delete_box(0)
+    assert [box['style'] for box in reopened.page_snapshot()['boxes']] == [style]
+    assert reopened.set_box_style(0, reset=True) == {}
+    reopened.set_box_style(0, {'bold': True})
+    reopened.clear_page()
+    assert 'region_styles' not in reopened.image_state_manager.get_state(os.path.abspath(pages[0]))
 
 
 # ===========================================================================

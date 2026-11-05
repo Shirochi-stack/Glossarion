@@ -9,6 +9,7 @@ from safe_image import open_image, open_page_image, cv2_imdecode, cv2_imread, cv
 
 import os
 import json
+import math
 import base64
 import logging
 import time
@@ -236,11 +237,79 @@ class TextRegion:
         }
         # Detector metadata is assigned dynamically. Preserve it so imported
         # OCR keeps the same free-text and inpainting behavior as the first run.
-        for key in ('bubble_bounds', 'bubble_type', 'should_inpaint', 'shape', 'polygon', 'rect_index'):
+        for key in ('bubble_bounds', 'bubble_type', 'should_inpaint', 'shape', 'polygon', 'rect_index', 'style'):
             value = getattr(self, key, None)
             if value is not None:
                 data[key] = value
         return data
+
+
+# Per-box text style (the manual editor's Format toolbar): font faces of a family
+#: Synthesized italic: horizontal shift per pixel of height (about 11 degrees).
+SYNTHETIC_ITALIC_SHEAR = 0.2
+_FONT_FACE_EXTENSIONS = ('.ttf', '.ttc', '.otf')
+_FONT_FACE_CACHE: Dict[tuple, Optional[Tuple[str, int]]] = {}
+_FONT_FACE_LOCK = threading.Lock()
+
+
+def _font_style_flags(style_name) -> Tuple[bool, bool]:
+    """(bold, italic) of a face's style name ("Bold Italic", "Oblique", "Black", ...)."""
+    name = str(style_name or '').lower()
+    return any(word in name for word in ('bold', 'black', 'heavy')), ('italic' in name or 'oblique' in name)
+
+
+def _font_face_name(path, index=0):
+    """(family, style) of a font file's face, or None."""
+    try:
+        return ImageFont.truetype(path, 12, index=index).getname()
+    except Exception:
+        return None
+
+
+def find_font_face(font_path, bold, italic) -> Optional[Tuple[str, int]]:
+    """``(path, face index)`` of the face of ``font_path``'s family with that weight and slant, or None.
+
+    Looks at the font file's own faces (TrueType collections) and the files beside it whose names
+    start like it (arial.ttf -> arialbd.ttf / ariali.ttf, DejaVuSans.ttf -> DejaVuSans-Bold.ttf).
+    """
+    if not font_path or not os.path.isfile(font_path):
+        return None
+    font_path = os.path.abspath(font_path)
+    key = (os.path.normcase(font_path), bool(bold), bool(italic))
+    with _FONT_FACE_LOCK:
+        if key in _FONT_FACE_CACHE:
+            return _FONT_FACE_CACHE[key]
+    found = None
+    base = _font_face_name(font_path)
+    if base:
+        family = str(base[0] or '').lower()
+        folder = os.path.dirname(font_path)
+        prefix = os.path.splitext(os.path.basename(font_path))[0].lower()[:4]
+        candidates = [font_path]
+        try:
+            for name in sorted(os.listdir(folder)):
+                path = os.path.join(folder, name)
+                if (name.lower().startswith(prefix) and name.lower().endswith(_FONT_FACE_EXTENSIONS)
+                        and os.path.normcase(path) != key[0]):
+                    candidates.append(path)
+        except OSError:
+            pass
+        best = None
+        for path in candidates:
+            for index in (range(8) if path.lower().endswith('.ttc') else range(1)):
+                face = _font_face_name(path, index)
+                if face is None:
+                    break
+                if str(face[0] or '').lower() != family or _font_style_flags(face[1]) != (bool(bold), bool(italic)):
+                    continue
+                rank = len(str(face[1] or ''))  # "Bold" before "Bold Condensed"
+                if best is None or rank < best[0]:
+                    best = (rank, path, index)
+        if best is not None:
+            found = (best[1], best[2])
+    with _FONT_FACE_LOCK:
+        _FONT_FACE_CACHE[key] = found
+    return found
 
 
 def _region_has_ocr_text(region) -> bool:
@@ -11388,7 +11457,9 @@ class MangaTranslator:
             )
             if hasattr(region, 'translated_text'):
                 adjusted_region.translated_text = region.translated_text
-            
+            if getattr(region, 'style', None):
+                adjusted_region.style = region.style  # per-box text style (Format toolbar)
+
             # IMPORTANT: Preserve original index to maintain text mapping
             adjusted_region.original_index = idx
             adjusted_region.original_bbox = tuple(region.bounding_box)  # Store original position
@@ -11740,7 +11811,82 @@ class MangaTranslator:
             cur_x += cw
             i += 1
 
-    
+    # ------------------------------------------------------------------
+    # Per-box text style (the manual editor's Format toolbar)
+    # ------------------------------------------------------------------
+    def _region_text_style(self, region) -> dict:
+        """The region's own text style (``region.style``), normalized; {} = the Rendering Settings."""
+        style = getattr(region, 'style', None)
+        if not style:
+            return {}
+        try:
+            from manga_ocr_io import normalize_region_style
+            return normalize_region_style(style)
+        except Exception:
+            return {}
+
+    def _resolve_region_font(self, style: dict):
+        """``(font path, face index, synthesize bold, synthesize italic)`` for a box style.
+
+        The path is None when the box keeps the Rendering Settings font face. Bold / italic use the
+        family's real face when one exists (arialbd.ttf for arial.ttf, a collection's other face);
+        what has no face is synthesized by the renderer (bold: a same-colour stroke; italic: a shear).
+        """
+        if not style:
+            return None, 0, False, False
+        style_font = style.get('font')
+        if not (style_font and os.path.isfile(style_font)):
+            style_font = None
+        want_bold, want_italic = bool(style.get('bold')), bool(style.get('italic'))
+        if not (want_bold or want_italic):
+            return style_font, 0, False, False
+        base = style_font or self.selected_font_style or self.font_path
+        name = _font_face_name(base) if base and os.path.isfile(base) else None
+        if name is None:
+            return style_font, 0, want_bold, want_italic
+        base_bold, base_italic = _font_style_flags(name[1])
+        bold, italic = base_bold or want_bold, base_italic or want_italic
+        if (bold, italic) == (base_bold, base_italic):
+            return style_font, 0, False, False
+        for face_bold, face_italic in ((bold, italic), (bold, base_italic), (base_bold, italic)):
+            if (face_bold, face_italic) == (base_bold, base_italic):
+                continue
+            face = find_font_face(base, face_bold, face_italic)
+            if face:
+                return face[0], face[1], bold and not face_bold, italic and not face_italic
+        return style_font, 0, bold and not base_bold, italic and not base_italic
+
+    def _draw_text_underline(self, draw, x, y, width, font, font_size, outline_width, fill_rgba, outline_rgba):
+        """Underline a rendered line (drawn before the text, so the glyph outlines cut through it)."""
+        try:
+            ascent, descent = font.getmetrics()
+        except Exception:
+            ascent, descent = int(font_size * 0.8), int(font_size * 0.2)
+        thickness = max(1, int(round(font_size / 16.0)))
+        top = int(round(y + ascent + max(1, descent // 3)))
+        x0, x1 = int(round(x)), int(round(x + width))
+        if outline_width > 0:
+            draw.rectangle([x0 - outline_width, top - outline_width, x1 + outline_width,
+                            top + thickness - 1 + outline_width], fill=outline_rgba)
+        draw.rectangle([x0, top, x1, top + thickness - 1], fill=fill_rgba)
+
+    def _shear_text_lines(self, layer, bands, padding, shear=SYNTHETIC_ITALIC_SHEAR):
+        """Synthesized italic: shear each line's band of ``layer`` around the line's middle."""
+        width, height = layer.size
+        out = Image.new('RGBA', layer.size, (0, 0, 0, 0))
+        for i, (top, line_height) in enumerate(bands):
+            band_top = top - (padding if i == 0 else 0)
+            band_bottom = bands[i + 1][0] if i + 1 < len(bands) else top + line_height + padding
+            band_top, band_bottom = max(0, int(band_top)), min(height, int(math.ceil(band_bottom)))
+            if band_bottom <= band_top:
+                continue
+            band = layer.crop((0, band_top, width, band_bottom))
+            middle = (top + line_height / 2.0) - band_top
+            sheared = band.transform(band.size, Image.AFFINE, (1, shear, -shear * middle, 0, 1, 0),
+                                     resample=Image.BICUBIC)
+            out.alpha_composite(sheared, dest=(0, band_top))
+        return out
+
     def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Enhanced text rendering with customizable backgrounds and styles"""
         # OPTIMIZATION: Reduce logging overhead - only log summary
@@ -11905,26 +12051,35 @@ class MangaTranslator:
                     self._log(f"  📝 Text wrap settings: strict={self.strict_text_wrapping}, constrain={self.constrain_to_bubble}", "debug")
                     self._logged_wrap_settings = True
                 
-                if self.custom_font_size:
-                    # Custom font size mode: use greedy_word_wrap from _pil_word_wrap
-                    font_size = self.custom_font_size
+                # Per-box text style (the manual editor's Format toolbar): own font face, fixed size,
+                # bold / italic / underline, alignment and colour. No style renders exactly as before.
+                style = self._region_text_style(region)
+                style_font_path, style_font_index, synth_bold, synth_italic = self._resolve_region_font(style)
+                text_rgb = tuple(style['color']) if style.get('color') else self.text_color
+                align = style.get('align')
+
+                if style.get('font_size') or self.custom_font_size:
+                    # Custom font size mode (or the box's own size): use greedy_word_wrap from _pil_word_wrap
+                    font_size = style.get('font_size') or self.custom_font_size
                     font = self._get_font(font_size)
                     wrapped_text, _ = self._pil_word_wrap(
                         text=tr_text,
-                        font_path=self.selected_font_style or self.font_path,
+                        font_path=style_font_path or self.selected_font_style or self.font_path,
                         roi_width=render_w,
                         roi_height=render_h,
-                        init_font_size=self.custom_font_size,
-                        min_font_size=self.custom_font_size,
-                        draw=draw
+                        init_font_size=font_size,
+                        min_font_size=font_size,
+                        draw=draw,
+                        font_index=style_font_index
                     )
                     lines = wrapped_text.split('\n')
                 else:
                     # Normal mode: use _fit_text_to_region for optimal sizing
                     # Pass use_as_is=True since render dimensions are already safe area
-                    font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
+                    font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True,
+                                                                font_path=style_font_path, font_index=style_font_index)
                 # Fonts
-                font = self._get_font(font_size)
+                font = self._get_font(font_size, font_path=style_font_path, index=style_font_index)
                 # Mixed font fallback if available (Meiryo for symbols/CJK)
                 # EXCLUDED for custom fonts outside predefined authorized locations
                 # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
@@ -11966,10 +12121,17 @@ class MangaTranslator:
                 except Exception:
                     pass
                 if draw_bg:
-                    self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, font_size, start_y, emote_font)
+                    if align:
+                        self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, font_size, start_y, emote_font, align=align)
+                    else:
+                        self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, font_size, start_y, emote_font)
                 # Get image dimensions for bounds checking
                 img_width, img_height = overlay.size
-                
+                # A synthesized italic is drawn on its own layer and sheared line by line afterwards
+                text_layer = _PIL.new('RGBA', overlay.size, (0, 0, 0, 0)) if synth_italic else overlay
+                tdraw = ImageDraw.Draw(text_layer) if synth_italic else draw
+                line_bands = []
+
                 # Text - use render dimensions for centering
                 for i, line in enumerate(lines):
                     if emote_font is not None:
@@ -11977,7 +12139,12 @@ class MangaTranslator:
                     else:
                         tb = draw.textbbox((0,0), line, font=font)
                         text_width = tb[2]-tb[0]
-                    tx = render_x + (render_w - text_width)//2
+                    if align == 'left':
+                        tx = render_x
+                    elif align == 'right':
+                        tx = render_x + render_w - text_width
+                    else:
+                        tx = render_x + (render_w - text_width)//2
                     ty = start_y + i*line_height
                     
                     # CLIPPING: Ensure text stays within image bounds
@@ -12000,31 +12167,55 @@ class MangaTranslator:
                     # Ensure final position is valid
                     tx = max(0, min(tx, img_width - 1))
                     ty = max(0, min(ty, img_height - 1))
+                    line_bands.append((ty, line_height))
+                    if style.get('underline'):
+                        self._draw_text_underline(tdraw, tx, ty, text_width, font, font_size, ow,
+                                                  text_rgb + (255,), self.outline_color + (255,))
+                    # Synthesized bold (no bold face of the font): a same-colour stroke inside the outline
+                    bold_px = max(1, int(round(font_size / 24.0))) if synth_bold else 0
                     if emote_font is not None:
-                        self._draw_text_line_emote_mixed(draw, line, tx, ty, font, emote_font,
-                                                         self.text_color + (255,), self.outline_color + (255,), ow,
-                                                         self.shadow_enabled,
-                                                         self.shadow_color + (255,) if isinstance(self.shadow_color, tuple) and len(self.shadow_color)==3 else (0,0,0,255),
-                                                         (self.shadow_offset_x, self.shadow_offset_y))
+                        shadow_rgba = self.shadow_color + (255,) if isinstance(self.shadow_color, tuple) and len(self.shadow_color)==3 else (0,0,0,255)
+                        if bold_px:
+                            self._draw_text_line_emote_mixed(tdraw, line, tx, ty, font, emote_font,
+                                                             self.outline_color + (255,), self.outline_color + (255,), ow + bold_px,
+                                                             self.shadow_enabled, shadow_rgba,
+                                                             (self.shadow_offset_x, self.shadow_offset_y))
+                            self._draw_text_line_emote_mixed(tdraw, line, tx, ty, font, emote_font,
+                                                             text_rgb + (255,), text_rgb + (255,), bold_px,
+                                                             False, shadow_rgba, (0, 0))
+                        else:
+                            self._draw_text_line_emote_mixed(tdraw, line, tx, ty, font, emote_font,
+                                                             text_rgb + (255,), self.outline_color + (255,), ow,
+                                                             self.shadow_enabled,
+                                                             shadow_rgba,
+                                                             (self.shadow_offset_x, self.shadow_offset_y))
                     else:
                         if self.shadow_enabled:
-                            self._draw_text_shadow(draw, tx, ty, line, font)
+                            self._draw_text_shadow(tdraw, tx, ty, line, font)
                         # OPTIMIZED: Use PIL's built-in stroke parameter (10x faster than nested loop)
                         # This replaces the O(n²) nested loop with a single draw call
                         try:
-                            draw.text(
-                                (tx, ty), line, font=font,
-                                fill=self.text_color + (255,),
-                                stroke_width=ow,
-                                stroke_fill=self.outline_color + (255,)
-                            )
+                            if bold_px:
+                                tdraw.text((tx, ty), line, font=font, fill=self.outline_color + (255,),
+                                           stroke_width=ow + bold_px, stroke_fill=self.outline_color + (255,))
+                                tdraw.text((tx, ty), line, font=font, fill=text_rgb + (255,),
+                                           stroke_width=bold_px, stroke_fill=text_rgb + (255,))
+                            else:
+                                tdraw.text(
+                                    (tx, ty), line, font=font,
+                                    fill=text_rgb + (255,),
+                                    stroke_width=ow,
+                                    stroke_fill=self.outline_color + (255,)
+                                )
                         except TypeError:
                             # Fallback for older PIL versions without stroke support
                             for dx in range(-ow, ow+1):
                                 for dy in range(-ow, ow+1):
                                     if dx!=0 or dy!=0:
-                                        draw.text((tx+dx, ty+dy), line, font=font, fill=self.outline_color + (255,))
-                            draw.text((tx, ty), line, font=font, fill=self.text_color + (255,))
+                                        tdraw.text((tx+dx, ty+dy), line, font=font, fill=self.outline_color + (255,))
+                            tdraw.text((tx, ty), line, font=font, fill=text_rgb + (255,))
+                if synth_italic:
+                    overlay = _PIL.alpha_composite(overlay, self._shear_text_lines(text_layer, line_bands, ow + 2))
                 return overlay
 
             overlays = []
@@ -12285,9 +12476,10 @@ class MangaTranslator:
 
     def _draw_text_background(self, draw: ImageDraw, x: int, y: int, w: int, h: int,
                             lines: List[str], font: ImageFont, font_size: int, 
-                            start_y: int, emote_font: ImageFont = None):
+                            start_y: int, emote_font: ImageFont = None, align: str = None):
         """Draw background behind text with selected style.
         If emote_font is provided, measure lines with emote-only mixing.
+        align: 'left' / 'right' puts the background under left / right aligned text (per-box style).
         """
         # Early return if opacity is 0 (fully transparent)
         if self.text_bg_opacity == 0:
@@ -12312,6 +12504,10 @@ class MangaTranslator:
         
         # Center background
         bg_x = x + (w - bg_width) // 2
+        if align == 'left':
+            bg_x = x - padding
+        elif align == 'right':
+            bg_x = x + w + padding - bg_width
         bg_y = int(start_y - padding)
         
         # Create semi-transparent color
@@ -12343,6 +12539,10 @@ class MangaTranslator:
                 
                 line_bg_width = int((line_width + padding) * self.text_bg_reduction)
                 line_bg_x = x + (w - line_bg_width) // 2
+                if align == 'left':
+                    line_bg_x = x - padding // 2
+                elif align == 'right':
+                    line_bg_x = x + w + padding // 2 - line_bg_width
                 line_bg_y = int(start_y + i * line_height - padding // 2)
                 line_bg_height = int(line_height + padding // 2)
                 
@@ -12390,12 +12590,15 @@ class MangaTranslator:
         draw.pieslice([x1, y2 - 2 * radius, x1 + 2 * radius, y2], 90, 180, fill=fill)
         draw.pieslice([x2 - 2 * radius, y2 - 2 * radius, x2, y2], 0, 90, fill=fill)
     
-    def _get_font(self, font_size: int) -> ImageFont:
-        """Get font with specified size, using selected style if available"""
-        font_path = self.selected_font_style or self.font_path
-        
+    def _get_font(self, font_size: int, font_path: str = None, index: int = 0) -> ImageFont:
+        """Get font with specified size, using selected style if available.
+        ``font_path`` / ``index``: a box's own font face (per-box style) instead of the selected one."""
+        font_path = font_path or self.selected_font_style or self.font_path
+
         if font_path:
             try:
+                if index:
+                    return ImageFont.truetype(font_path, font_size, index=index)
                 return ImageFont.truetype(font_path, font_size)
             except:
                 pass
@@ -12403,7 +12606,7 @@ class MangaTranslator:
         return ImageFont.load_default()
      
     def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
-                       init_font_size: int, min_font_size: int, draw: ImageDraw,
+                       init_font_size: int, min_font_size: int, draw: ImageDraw, font_index: int = 0,
                        container: Optional[Dict[str, Any]] = None) -> Tuple[str, int]:
         """Binary search for perfect-fit font sizing.
         
@@ -12423,8 +12626,14 @@ class MangaTranslator:
         """
         if container is not None:
             wrapped, size, _fits = self._fit_lines_to_container(
-                text, font_path, container, init_font_size, min_font_size, draw)
+                text, font_path, container, init_font_size, min_font_size, draw, font_index=font_index)
             return wrapped, size
+        # font_index: the face of a font collection (a box's bold / italic face, per-box style)
+        def _truetype(path, size):
+            if font_index:
+                return ImageFont.truetype(path, size, index=font_index)
+            return ImageFont.truetype(path, size)
+
         from hyphen_textwrap import wrap as hyphen_wrap
         import statistics
         
@@ -12659,7 +12868,7 @@ class MangaTranslator:
         # Get initial font
         try:
             if font_path:
-                font = ImageFont.truetype(font_path, font_size)
+                font = _truetype(font_path, font_size)
             else:
                 font = ImageFont.load_default()
         except Exception:
@@ -12713,14 +12922,14 @@ class MangaTranslator:
                     allow_overflow = (auto_fit_style in ['readable', 'balanced'])
                     merge_width = roi_width
                     
-                    best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     
                     while low <= high:
                         mid = (low + high) // 2
                         
                         # Load font at this size
                         try:
-                            test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                            test_font = _truetype(font_path, mid) if font_path else ImageFont.load_default()
                         except Exception:
                             test_font = ImageFont.load_default()
                         
@@ -12753,7 +12962,7 @@ class MangaTranslator:
                     # Fallback
                     allow_overflow = (auto_fit_style in ['readable', 'balanced'])
                     merge_width = roi_width
-                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     # Ensure we respect minimum font size
                     return wrapped, max(min_font_size, init_font_size)
             
@@ -12764,14 +12973,14 @@ class MangaTranslator:
                 high = init_font_size
                 low = min_font_size
                 best_font_size = min_font_size
-                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
+                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
                 
                 while low <= high:
                     mid = (low + high) // 2
                     
                     # Load font at this size
                     try:
-                        test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                        test_font = _truetype(font_path, mid) if font_path else ImageFont.load_default()
                     except Exception:
                         test_font = ImageFont.load_default()
                     
@@ -12811,7 +13020,7 @@ class MangaTranslator:
                 
                 # Load font at this size
                 try:
-                    test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                    test_font = _truetype(font_path, mid) if font_path else ImageFont.load_default()
                 except Exception:
                     test_font = ImageFont.load_default()
                 
@@ -12872,7 +13081,7 @@ class MangaTranslator:
                     font_size = ideal_font_size
                     try:
                         if font_path:
-                            font = ImageFont.truetype(font_path, font_size)
+                            font = _truetype(font_path, font_size)
                         else:
                             font = ImageFont.load_default()
                     except Exception:
@@ -12885,7 +13094,7 @@ class MangaTranslator:
         while font_size > min_font_size:
             try:
                 if font_path:
-                    font = ImageFont.truetype(font_path, font_size)
+                    font = _truetype(font_path, font_size)
                 else:
                     font = ImageFont.load_default()
             except Exception:
@@ -12919,7 +13128,7 @@ class MangaTranslator:
             
             try:
                 if font_path:
-                    font = ImageFont.truetype(font_path, font_size)
+                    font = _truetype(font_path, font_size)
                 else:
                     font = ImageFont.load_default()
             except Exception:
@@ -13302,7 +13511,8 @@ class MangaTranslator:
         return area
 
     def _fit_lines_to_container(self, text: str, font_path: str, container: Dict[str, Any],
-                                init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int, bool]:
+                                init_font_size: int, min_font_size: int, draw: ImageDraw,
+                                font_index: int = 0) -> Tuple[str, int, bool]:
         """Largest font size whose wrapped lines all stay inside a bubble interior.
 
         Lays the block out the way render_translated_text does (vertically centred in
@@ -13327,7 +13537,12 @@ class MangaTranslator:
 
         def make(size):
             try:
-                font = ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default()
+                if not font_path:
+                    font = ImageFont.load_default()
+                elif font_index:  # a box's bold / italic face of a font collection
+                    font = ImageFont.truetype(font_path, size, index=font_index)
+                else:
+                    font = ImageFont.truetype(font_path, size)
             except Exception:
                 font = ImageFont.load_default()
             emote = self._get_emote_fallback_font(size) if mixed else None
@@ -13466,18 +13681,21 @@ class MangaTranslator:
         lines.append(cur)
         return '\n'.join(' '.join(ws) for ws in lines), min_font_size, False
 
-    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False) -> Tuple[int, List[str]]:
+    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False, font_path: str = None, font_index: int = 0) -> Tuple[int, List[str]]:
         """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments
-        
+
         Args:
             text: Text to fit
             max_width: Maximum width available
-            max_height: Maximum height available  
+            max_height: Maximum height available
             draw: PIL ImageDraw object
             region: Optional TextRegion for safe area calculation
             use_as_is: If True, use max_width/max_height directly without further shrinking
+            font_path: Optional font file to fit with (a box's own font) instead of the selected one
+            font_index: the face of ``font_path`` when it is a font collection
         """
-        
+        font_path = font_path or self.selected_font_style or self.font_path
+
         # Get font sizing settings
         try:
             manga_settings = self.main_gui.config.get('manga_settings', {})
@@ -13529,12 +13747,13 @@ class MangaTranslator:
         # Use comic-translate's pil_word_wrap algorithm
         wrapped_text, final_font_size = self._pil_word_wrap(
             text=text,
-            font_path=self.selected_font_style or self.font_path,
+            font_path=font_path,
             roi_width=usable_width,
             roi_height=usable_height,
             init_font_size=init_font_size,
             min_font_size=min_font_size,
             draw=draw,
+            font_index=font_index,
             container=container
         )
         
@@ -13554,17 +13773,17 @@ class MangaTranslator:
                 # Re-wrap at target size to check fit
                 if container is not None:
                     test_wrapped, _, test_fits = self._fit_lines_to_container(
-                        text, self.selected_font_style or self.font_path, container,
-                        target_size, target_size, draw)
+                        text, font_path, container, target_size, target_size, draw, font_index=font_index)
                 else:
                     test_wrapped, _ = self._pil_word_wrap(
                         text=text,
-                        font_path=self.selected_font_style or self.font_path,
+                        font_path=font_path,
                         roi_width=usable_width,
                         roi_height=usable_height,
                         init_font_size=target_size,
                         min_font_size=target_size,  # Force this size
-                        draw=draw
+                        draw=draw,
+                        font_index=font_index
                     )
                     test_fits = None
                 test_lines = test_wrapped.split('\n') if test_wrapped else [text]

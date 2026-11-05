@@ -161,6 +161,7 @@ app_files = [
     ('manga_integration.py', '.'),
     ('manga_settings_dialog.py', '.'),
     ('manga_image_preview.py', '.'),
+    ('manga_format_toolbar.py', '.'),
     
     # Dialog animations
     ('dialog_animations.py', '.'),
@@ -577,6 +578,7 @@ app_modules = [
     'manga_env',
     'manga_files_core',
     'manga_image_preview',
+    'manga_format_toolbar', # Manga editor Format toolbar (per-box text style)
     'manga_integration',
     'manga_models',
     'hayai_ocr',

@@ -240,6 +240,54 @@ def test_media_uses_separate_routes_and_key(monkeypatch, tmp_path, mode, url):
     if mode == 'video': assert calls[1][0] == 'https://nano-gpt.com/api/generate-video/status'
 
 
+EDIT_MESSAGES = [{'role': 'user', 'content': [{'type': 'text', 'text': 'Remove the text.'},
+    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAAA'}}]}]
+
+
+@pytest.mark.parametrize('forced,env_size,ui_resolution,sent', [
+    ('1K', None, None, '2k'),  # the custom image edit's forced default
+    (None, None, None, '2k'),  # nothing set: NanoGPT's old 1024x1024 default
+    (None, None, '1K', '2k'),
+    (None, '1024x1024', None, '2k'),
+    (None, 'auto', None, '2k'),
+    ('0.5K', None, None, '2k'),
+    ('2K', None, None, '2k'),
+    ('4K', None, None, '4k'),  # a larger size is kept
+    (None, '2048x2048', None, '2048x2048'),
+    (None, None, '4K', '4k'),
+])
+def test_authnan_image_requests_ask_for_at_least_2k(monkeypatch, tmp_path, forced, env_size, ui_resolution, sent):
+    auth.get_store().save_tokens({'key': 'media-key'})
+    client = make_client(monkeypatch, tmp_path, 'authnan/nano-banana-2.1')
+    client._force_image_output_mode = True
+    if forced: client._forced_image_output_resolution = forced
+    for name, value in (('NANOGPT_IMAGE_SIZE', env_size), ('IMAGE_OUTPUT_RESOLUTION', ui_resolution)):
+        if value: monkeypatch.setenv(name, value)
+        else: monkeypatch.delenv(name, raising=False)
+    calls = []
+    monkeypatch.setattr(api.requests, 'post', lambda url, **kw: calls.append((url, kw)) or Response(payload={'data': [{'url': 'edited'}]}))
+    monkeypatch.setattr(client, '_shrink_nanogpt_image_data_url', lambda url, force_webp=False: url)
+    assert client._send_authnan(EDIT_MESSAGES, 0.5, 30, 'test').content == 'edited'
+    assert len(calls) == 1 and calls[0][0] == 'https://nano-gpt.com/api/v1/images/generations'
+    payload = calls[0][1]['json']
+    assert payload['model'] == 'nano-banana-2.1' and payload['size'] == sent
+    assert payload['imageDataUrl'] == 'data:image/png;base64,AAAA'
+
+
+def test_nan_api_key_image_requests_keep_their_size(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path, 'nan/nano-banana-2.1')
+    client._forced_image_output_resolution = '1K'
+    monkeypatch.delenv('NANOGPT_IMAGE_SIZE', raising=False)
+    calls = []
+    monkeypatch.setattr(api.requests, 'post', lambda url, **kw: calls.append((url, kw)) or Response(payload={'data': [{'url': 'edited'}]}))
+    client._send_nanogpt_image(MESSAGES, 'nano-banana-2.1', 'https://nano-gpt.com', 'api-key', 'test')
+    assert calls[0][0] == 'https://nano-gpt.com/v1/images/generations'
+    assert calls[0][1]['json']['size'] == '1024x1024'
+    monkeypatch.setenv('NANOGPT_IMAGE_SIZE', '1k')
+    client._send_nanogpt_image(MESSAGES, 'nano-banana-2.1', 'https://nano-gpt.com', 'api-key', 'test')
+    assert calls[1][1]['json']['size'] == '1k'
+
+
 def test_authenticated_catalog_keeps_pool_prefix_and_never_logs_in(monkeypatch):
     monkeypatch.setattr(auth, 'run_oauth_flow', lambda **_: pytest.fail('catalog login'))
     with pytest.raises(RuntimeError): model_options._fetch_authenticated_catalog('authnan/model', 5)
