@@ -7198,6 +7198,22 @@ class UnifiedClient:
             pass
         return os.getenv("IMAGE_OUTPUT_RESOLUTION", default)
 
+    @staticmethod
+    def _authnan_image_size(requested: Any) -> str:
+        """NanoGPT ``size`` for an authnan/ image request, never below 2K.
+
+        NanoGPT takes a tier ('1k', '2k', '4k') or a pixel size there. Tiers and
+        pixel sizes under 2K (and 'auto') become '2k'; larger ones are kept."""
+        value = str(requested or '').strip().lower()
+        tier = re.fullmatch(r'(\d+(?:\.\d+)?)\s*k', value)
+        if tier:
+            number = float(tier.group(1))
+            return f"{int(number)}k" if number > 2 else '2k'
+        pixels = re.fullmatch(r'(\d+)\s*[x*]\s*(\d+)', value)
+        if pixels and max(int(pixels.group(1)), int(pixels.group(2))) >= 2048:
+            return value
+        return '2k'
+
     def _get_image_output_aspect_ratio(self, default: str = "auto") -> str:
         try:
             value = getattr(self, '_forced_image_output_aspect_ratio', None)
@@ -32027,8 +32043,18 @@ class UnifiedClient:
         if not prompt:
             prompt = "Generate an image"
 
-        image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
-        image_path = '/api/v1/images/generations' if re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I) else '/v1/images/generations'
+        is_authnan = bool(re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I))
+        if is_authnan:
+            # The subscription models answer 400 below 2K ("supports 1K or 2K
+            # resolution" for "1024x1024"), so authnan/ always asks for 2K or more.
+            image_size = self._authnan_image_size(
+                getattr(self, '_forced_image_output_resolution', None)
+                or os.getenv("NANOGPT_IMAGE_SIZE")
+                or self._get_image_output_resolution("1K")
+            )
+        else:
+            image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
+        image_path = '/api/v1/images/generations' if is_authnan else '/v1/images/generations'
         url = f"{base_url}{image_path}"
         headers = {
             "Authorization": f"Bearer {api_key}",
