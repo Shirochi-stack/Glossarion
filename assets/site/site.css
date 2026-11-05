@@ -192,8 +192,10 @@ p { margin: 0 0 1em; }
 }
 @media (min-width: 560px) { .float-card { display: block; } }
 .float-card b { color: var(--ink); display: block; font-size: .86rem; }
-.float-card.fc1 { left: 0; top: 14%; }
-.float-card.fc2 { right: 0; bottom: 18%; }
+.float-card { max-width: 200px; }
+/* keep both cards below the shoulders and out to the sides, clear of the mascot's face */
+.float-card.fc1 { left: 0; bottom: 24%; }
+.float-card.fc2 { right: 0; bottom: 4%; }
 
 .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 30px; }
 @media (min-width: 720px) { .stats { grid-template-columns: repeat(4, 1fr); } }
