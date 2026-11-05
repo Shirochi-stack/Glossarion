@@ -272,6 +272,14 @@ section { padding: 56px 0; }
 .compare-steps button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .compare figcaption { font-size: .82rem; color: var(--muted); margin-top: 8px; text-align: center; }
 
+.compare-tabs { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
+.compare-tabs button { font: inherit; font-size: .86rem; font-weight: 700; padding: 7px 14px; border-radius: 999px; border: 0; background: transparent; color: var(--ink-soft); cursor: pointer; }
+.compare-tabs button[aria-selected="true"] { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
+/* a tall webtoon strip scrolls inside a fixed-height window */
+.compare-scroll { max-height: 640px; overflow-y: auto; overscroll-behavior: contain; border-radius: 14px; box-shadow: var(--shadow-lg); }
+.compare-scroll .compare-box { box-shadow: none; }
+.compare-tall .compare-box .handle::after { top: 300px; }
+
 /* phone gallery */
 .phones { display: flex; gap: 18px; overflow-x: auto; padding: 6px 4px 18px; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
 .phones figure { margin: 0; flex: 0 0 auto; width: min(220px, 62vw); scroll-snap-align: start; }
@@ -284,6 +292,12 @@ section { padding: 56px 0; }
 @media (min-width: 640px) { .gallery { grid-template-columns: repeat(2, 1fr); } }
 @media (min-width: 1000px) { .gallery { grid-template-columns: repeat(3, 1fr); } }
 .gallery .shot img { aspect-ratio: 16 / 10; object-fit: cover; object-position: top left; }
+/* the manga walkthrough: four steps in one row on wide screens */
+.gallery.gallery-2 { grid-template-columns: 1fr; }
+@media (min-width: 640px) { .gallery.gallery-2 { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .gallery.gallery-2 { grid-template-columns: repeat(4, 1fr); } }
+.gallery-2 .shot { display: flex; flex-direction: column; }
+.gallery-2 .shot figcaption { flex: 1; }
 
 /* compact feature grid */
 .grid-cards { display: grid; gap: 14px; }
