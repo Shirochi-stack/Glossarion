@@ -13372,7 +13372,10 @@ class MangaTranslator:
                     if not fits_at(cur, ty, cap):
                         return None
                     i += 1
-                    while i < len(words) and fits_at(cur + [words[i]], ty, cap):
+                    # Leave a word for every line still to come: n lines are laid out at the
+                    # n-line positions, so running out of words early is not an (n-1)-line fit
+                    while (i < len(words) - (n - 1 - k)
+                           and fits_at(cur + [words[i]], ty, cap)):
                         cur.append(words[i])
                         i += 1
                     out.append(cur)
@@ -13380,7 +13383,12 @@ class MangaTranslator:
 
             return measure, line_height, wrap, pads
 
-        def try_size(size):
+        def orphaned(lines):
+            """A line holding one 1-2 letter word ("I", "A", "IT.") that the other lines left alone."""
+            return len(lines) > 1 and any(
+                len(ws) == 1 and len(ws[0].strip('.,!?~;:"\'')) <= 2 for ws in lines)
+
+        def try_size(size, no_orphans=False):
             measure, line_height, wrap, pads = make(size)
             lh = size * 1.2
             usable = max(1, rw - pads[0] - pads[2])
@@ -13396,18 +13404,29 @@ class MangaTranslator:
                     if out is None or line_height(out[0]) > lh:
                         lh = size * 1.2
                         continue
+                if no_orphans and orphaned(out):
+                    continue
                 return out, n, lh
             return None
 
-        lo, hi, best = min_font_size, init_font_size, None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            out = try_size(mid)
-            if out is not None:
-                best = (mid,) + out
-                lo = mid + 1
-            else:
-                hi = mid - 1
+        def largest(hi, no_orphans=False):
+            lo, found = min_font_size, None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                out = try_size(mid, no_orphans)
+                if out is not None:
+                    found = (mid,) + out
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            return found
+
+        best = largest(init_font_size)
+        if best is not None and orphaned(best[1]):
+            # Like the rectangle fit, keep short words with a neighbour when that costs little size
+            tidy = largest(best[0], no_orphans=True)
+            if tidy is not None and tidy[0] >= best[0] - max(2, best[0] // 10):
+                best = tidy
         if best is not None:
             size, lines, n, lh = best
             if n > 1:
@@ -13415,10 +13434,12 @@ class MangaTranslator:
                 measure, line_height, wrap, _pads = make(size)
                 lo_cap = max(measure([wd])[3] for wd in words)
                 hi_cap = max(measure(ws)[3] for ws in lines)
+                keep_tidy = not orphaned(lines)
                 while lo_cap < hi_cap:
                     cap = (lo_cap + hi_cap) // 2
                     out = wrap(n, lh, cap)
-                    if out is not None and line_height(out[0]) <= lh:
+                    if (out is not None and line_height(out[0]) <= lh
+                            and not (keep_tidy and orphaned(out))):
                         lines, hi_cap = out, cap
                     else:
                         lo_cap = cap + 1
