@@ -587,6 +587,25 @@ _FORMAT_TOOLBAR_INSTALL = (
     "        # Connect viewer click signal to sync file list selection with current image\n",
 )
 
+# 2026-11-06 A box's right-click menu gets a "Text format" submenu: the Format toolbar's changes
+# (bold / italic / underline, alignment, size, font, colour, reset) from the box itself.
+_FORMAT_CONTEXT_MENU = (
+    '                    menu.addAction(clean_action)\n'
+    '                    \n'
+    '                    # Add "Delete Selected" option\n',
+    '                    menu.addAction(clean_action)\n'
+    '                    \n'
+    "                    # Text format submenu (the preview's Format toolbar: per-box font, size, style, colour)\n"
+    '                    try:\n'
+    "                        format_toolbar = getattr(getattr(self, 'image_preview_widget', None), 'format_toolbar', None)\n"
+    '                        if format_toolbar is not None:\n'
+    '                            format_toolbar.add_context_menu(menu, actual_index)\n'
+    '                    except Exception as format_err:\n'
+    '                        print(f"[FORMAT] Text format menu unavailable: {format_err}")\n'
+    '                    \n'
+    '                    # Add "Delete Selected" option\n',
+)
+
 # 2026-10-22 The image state manager's worker shutdown no longer waits for its queues' feeder
 # threads (cancel_join_thread): with the worker gone a feeder writing a queued state blocked
 # forever and the window hung on close. Every caller flush()es the state itself first.
@@ -3502,6 +3521,7 @@ APPROVED = (
                 "stored per box in the page state (region_styles) and drawn by the renderer",
         "source": {
             "src/manga_integration.py": [_FORMAT_TOOLBAR_INSTALL],
+            "src/ImageRenderer.py": [_FORMAT_CONTEXT_MENU],
         },
         "values": {},
     },

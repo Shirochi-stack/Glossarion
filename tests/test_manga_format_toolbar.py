@@ -81,6 +81,7 @@ def editor(qapp, tmp_path, monkeypatch):
     toolbar._render_timer.setInterval(0)
     yield types.SimpleNamespace(widget=widget, tab=tab, toolbar=toolbar, page=page, renders=renders,
                                 rects=viewer.rectangles, app=qapp)
+    _pump(qapp, 0.6)  # let the Manual Editing icon's spin (~0.5 s) finish before its label goes
     for item in list(viewer.rectangles):
         viewer.scene().removeItem(item)
     widget.close()
@@ -217,3 +218,75 @@ def test_keyboard_shortcuts_and_clear_boxes(editor):
     assert _styles(editor) == {'2': {'bold': True}}
     toolbar._on_boxes_cleared()  # Clear Boxes (connected after the preview's own handler)
     assert _styles(editor) == {}
+
+
+def _menu_actions(menu):
+    return {action.text(): action for action in menu.actions() if action.text()}
+
+
+def test_right_click_menu_formats_the_box(editor, monkeypatch):
+    """The box's right-click "Text format" submenu applies the toolbar's changes to that box."""
+    from PySide6 import QtWidgets as W
+    toolbar = editor.toolbar
+    _select(editor, 0)
+    menu = W.QMenu()
+    sub = toolbar.add_context_menu(menu, 1)  # right-clicked box 2, not part of the selection
+    assert sub.title() == "🔤 Text format" and sub.isEnabled()
+    actions = _menu_actions(sub)
+    assert {"Bold", "Italic", "Underline", "Align left", "Center", "Align right", "Font size: Auto…",
+            "Font", "Text colour…", "⟲ Reset to default"} <= set(actions)
+    assert actions["Center"].isChecked() and not actions["Bold"].isChecked()
+    actions["Bold"].trigger()
+    actions["Align right"].trigger()
+    assert _styles(editor) == {'1': {'bold': True, 'align': 'right'}}
+
+    monkeypatch.setattr(W.QInputDialog, "getInt", staticmethod(lambda *a, **k: (30, True)))
+    actions["Font size: Auto…"].trigger()
+    fonts = _menu_actions(actions["Font"].menu())
+    assert fonts["Default font"].isChecked()
+    fonts["DejaVu Sans"].trigger()
+    monkeypatch.setattr(W.QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor(1, 2, 3)))
+    actions["Text colour…"].trigger()
+    assert _styles(editor) == {'1': {'bold': True, 'align': 'right', 'font_size': 30, 'font': str(FONT_PATH),
+                                     'color': [1, 2, 3]}}
+
+    # a fresh menu shows the stored style; on a selected box it acts on the whole selection
+    _select(editor, 1, 2)
+    menu = W.QMenu()
+    sub = toolbar.add_context_menu(menu, 1)
+    assert sub.title() == "🔤 Text format (2 boxes)"
+    actions = _menu_actions(sub)
+    assert actions["Bold"].isChecked() and actions["Align right"].isChecked() and "Font size: 30 px…" in actions
+    actions["Italic"].trigger()
+    assert _styles(editor)['2'] == {'italic': True} and _styles(editor)['1']['italic'] is True
+    actions["⟲ Reset to default"].trigger()
+    assert _styles(editor) == {}
+    _pump(editor.app, 0.1)
+    assert editor.renders and set(editor.renders) == {editor.page}  # render-only passes of this page
+
+
+def test_box_context_menu_has_the_text_format_submenu(editor, monkeypatch):
+    """ImageRenderer's box right-click menu (pinned code, approved edit) adds the submenu."""
+    import ImageRenderer
+    from PySide6 import QtWidgets as W
+    from PySide6.QtCore import QPointF, QTimer
+    from PySide6.QtGui import QMouseEvent
+    shown = []
+
+    def read_and_close_popup():
+        popup = W.QApplication.activePopupWidget()
+        if popup is None:
+            QTimer.singleShot(20, read_and_close_popup)
+            return
+        shown.append([action.text() for action in popup.actions()])
+        popup.close()
+
+    QTimer.singleShot(20, read_and_close_popup)  # the menu runs its own event loop (QMenu.exec)
+    editor.tab.image_preview_widget = editor.widget
+    rect = editor.rects[1]
+    ImageRenderer._add_context_menu_to_rectangle(editor.tab, rect, 1)
+    event = QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPointF(5, 5), QPointF(5, 5),
+                        Qt.MouseButton.RightButton, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier)
+    rect.mousePressEvent(event)
+    assert shown and "🔤 Text format" in shown[0]
+    assert shown[0].index("🔤 Text format") < shown[0].index("🗑️ Delete Selected")

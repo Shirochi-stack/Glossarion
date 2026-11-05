@@ -13,14 +13,15 @@ is one). ``MangaTranslator.render_translated_text`` draws the style; a box witho
 with the Rendering Settings as before.
 
 The widget class itself stays as it is (tests/test_manga_editor_core.py pins it): the toolbar is
-installed from outside by ``install_format_toolbar(preview, tab)``.
+installed from outside by ``install_format_toolbar(preview, tab)``. A box's right-click menu gets the
+same changes as a "Text format" submenu (``MangaFormatToolbar.add_context_menu``).
 """
 
 import os
 
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QSpinBox
+from PySide6.QtWidgets import QColorDialog, QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QSpinBox
 
 import manga_editor_core
 
@@ -157,7 +158,7 @@ class MangaFormatToolbar(QObject):
 
         self.color_btn = preview._create_tool_button("", "Text colour of the selected box")
         self.color_btn.setIcon(_color_icon(None))
-        self.color_btn.clicked.connect(self._on_color)
+        self.color_btn.clicked.connect(lambda _checked=False: self._on_color())
         layout.addWidget(self.color_btn)
         self.reset_btn = preview._create_tool_button("⟲", "Reset to default (the Rendering Settings)")
         self.reset_btn.clicked.connect(self._on_reset)
@@ -340,13 +341,13 @@ class MangaFormatToolbar(QObject):
         except Exception:
             return False
 
-    def _apply(self, changes=None, *, reset=False):
+    def _apply(self, changes=None, *, reset=False, indexes=None):
         if self._updating:
             return None
         if self._blocked():
             self.refresh()  # put the buttons back to the box's stored style
             return None
-        indexes = self.indexes()
+        indexes = self.indexes() if indexes is None else list(indexes)
         if not indexes:
             return None
         stored = manga_editor_core._update_region_styles(self.tab, self.image_path(), indexes, changes, reset=reset)
@@ -363,8 +364,8 @@ class MangaFormatToolbar(QObject):
     def _on_align(self, align):
         self._apply({'align': None if align == 'center' else align})
 
-    def _on_color(self):
-        indexes = self.indexes()
+    def _on_color(self, indexes=None):
+        indexes = self.indexes() if indexes is None else list(indexes)
         if not indexes or self._blocked():
             return None
         current = self.styles().get(indexes[0], {}).get('color')
@@ -376,10 +377,66 @@ class MangaFormatToolbar(QObject):
         color = QColorDialog.getColor(initial, self.preview, "Choose Text Colour")
         if not color.isValid():
             return None
-        return self._apply({'color': [color.red(), color.green(), color.blue()]})
+        return self._apply({'color': [color.red(), color.green(), color.blue()]}, indexes=indexes)
 
     def _on_reset(self):
         return self._apply(reset=True)
+
+    def _on_size_dialog(self, indexes):
+        current = int(self.styles().get(indexes[0], {}).get('font_size') or 0)
+        value, ok = QInputDialog.getInt(self.preview, "Font Size", "Font size in px (0: Auto, fit the box):",
+                                        current, 0, SIZE_MAX)
+        if ok:
+            self._apply({'font_size': int(value) or None}, indexes=indexes)
+
+    # ---- right-click menu ----------------------------------------------------------------------------
+
+    def add_context_menu(self, menu, region_index):
+        """Add the "Text format" submenu to a box's right-click menu (the same changes as the row).
+
+        It acts on the selected boxes when the right-clicked box is one of them, else on that box."""
+        selected = self.indexes() if self.image_path() else []
+        targets = selected if region_index in selected else [region_index]
+        style = self.styles().get(region_index, {})
+        label = "🔤 Text format" if len(targets) == 1 else f"🔤 Text format ({len(targets)} boxes)"
+        sub = menu.addMenu(label)
+        sub.setEnabled(bool(self.image_path()) and not self._blocked())
+
+        for key, text in (('bold', "Bold"), ('italic', "Italic"), ('underline', "Underline")):
+            action = sub.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(bool(style.get(key)))
+            action.triggered.connect(lambda checked, k=key: self._apply({k: bool(checked)}, indexes=targets))
+        sub.addSeparator()
+
+        current_align = style.get('align') or 'center'
+        for align, text in ALIGNMENTS:
+            action = sub.addAction(_alignment_icon(align), text)
+            action.setCheckable(True)
+            action.setChecked(align == current_align)
+            action.triggered.connect(lambda _checked=False, a=align: self._apply(
+                {'align': None if a == 'center' else a}, indexes=targets))
+        sub.addSeparator()
+
+        size = style.get('font_size')
+        size_action = sub.addAction(f"Font size: {size} px…" if size else "Font size: Auto…")
+        size_action.triggered.connect(lambda: self._on_size_dialog(targets))
+
+        font_menu = sub.addMenu("Font")
+        wanted = os.path.normcase(os.path.abspath(style['font'])) if style.get('font') else None
+        for i in range(self.font_combo.count()):
+            path = self.font_combo.itemData(i)
+            action = font_menu.addAction(self.font_combo.itemText(i))
+            action.setCheckable(True)
+            action.setChecked(os.path.normcase(os.path.abspath(path)) == wanted if path else wanted is None)
+            action.triggered.connect(lambda _checked=False, f=path: self._apply({'font': f}, indexes=targets))
+
+        color_action = sub.addAction(_color_icon(style.get('color')), "Text colour…")
+        color_action.triggered.connect(lambda: self._on_color(targets))
+        sub.addSeparator()
+        reset_action = sub.addAction("⟲ Reset to default")
+        reset_action.triggered.connect(lambda: self._apply(reset=True, indexes=targets))
+        return sub
 
     def _on_boxes_cleared(self):
         manga_editor_core._clear_region_styles(self.tab, self.image_path())
