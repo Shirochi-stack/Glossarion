@@ -208,6 +208,7 @@ tests/**
 !tests/test_model_catalog_core.py
 !tests/test_prompt_profiles.py
 !tests/test_key_pool_service.py
+!tests/test_empty_key_pool_disabled.py
 !tests/test_mobile_auth_splits.py
 # Mobile rewrite (U5+): the Library / covers / reader document / live stream moves and the Progress
 # Manager / Glossary Progress cores (verbatim pins, legacy-vs-new fuzz and file-system fixtures).

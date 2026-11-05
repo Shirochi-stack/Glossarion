@@ -144,6 +144,7 @@ import requests
 from key_contexts import key_enabled_for_context, route_key_context, current_key_context
 from instance_plan import current_instance as _current_instance
 from instance_plan import key_scope as _key_scope, scope_keys as _scope_keys, scoped_env as _scoped_env
+from instance_plan import pool_switch as _pool_switch
 from instance_plan import foreign_key_owners as _foreign_key_owners, instance_payloads_dir as _instance_payloads_dir
 import contextvars
 from requests.adapters import HTTPAdapter
@@ -1067,15 +1068,17 @@ def _key_pool_env(name, default=None):
     """``os.getenv(name, default)`` for a key-pool variable (``FALLBACK_KEYS``, ``USE_GLOSSARY_KEYS``,
     ``USE_MAIN_KEY_FALLBACK`` ...). Inside one instance of a multi-instance run
     (``instance_plan.key_scope``) the value is narrowed to that instance's keys, whoever exported
-    it (``instance_plan.scoped_env``); otherwise it is the plain environment value."""
+    it (``instance_plan.scoped_env``); otherwise it is the plain environment value, except that a
+    dedicated pool's switch reads "0" while the pool holds no enabled key
+    (``instance_plan.pool_switch``): an empty pool is not an enabled pool."""
     value = os.getenv(name, default)
-    if _key_scope() is None:
-        return value
 
     def memory_rows(pool):
         attr = _IN_MEMORY_POOL_KEYS.get(pool)
         return list(getattr(UnifiedClient, attr, None) or []) if attr else []
 
+    if _key_scope() is None:
+        return _pool_switch(name, value, memory_rows)
     return _scoped_env(name, value, memory_rows)
 
 def _payloads_dir() -> str:
