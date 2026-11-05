@@ -140,6 +140,7 @@ jobs:
           tests/test_review_prompt_profiles.py \
           tests/test_authgem_image_output.py \
           tests/test_manga_image_edit_pool_load.py \
+          tests/test_manga_bubble_fit.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \
