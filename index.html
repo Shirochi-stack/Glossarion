@@ -24,6 +24,7 @@
       <a class="brand" href="./"><img src="assets/site/halgakos-avatar.webp" alt="" width="34" height="34">Glossarion</a>
       <nav class="nav" aria-label="Main">
         <a href="#features">Features</a>
+        <a href="#mobile">Mobile</a>
         <a href="#free">Free</a>
         <a href="#download">Download</a>
         <a href="help/">Help</a>
@@ -38,6 +39,7 @@
     </div>
     <nav class="mobile-nav" aria-label="Mobile">
       <a href="#features">Features</a>
+      <a href="#mobile">Mobile</a>
       <a href="#free">Free</a>
       <a href="#download">Download</a>
       <a href="help/">Help</a>
@@ -127,21 +129,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Glossarion — Translating</span></div>
-            <div class="mock-body">
-              <div class="row"><span class="label">Model</span><span class="field">gemini-3.1-pro-preview</span><span class="pill ok">● key 2/4</span></div>
-              <div class="row"><span class="label">Profile</span><span class="field">korean · novel</span><span class="pill plum">→ English</span></div>
-              <table>
-                <tr><th>Chapter</th><th>Status</th><th></th></tr>
-                <tr><td>110 · The Northern Pass</td><td><span class="pill ok">done</span></td><td>2,914 words</td></tr>
-                <tr><td>111 · An Old Debt</td><td><span class="pill ok">done</span></td><td>3,102 words</td></tr>
-                <tr><td>112 · Snowfall</td><td><span class="pill rose">chunk 2/3</span></td><td>streaming…</td></tr>
-                <tr><td>113 · Lanterns</td><td><span class="pill">queued</span></td><td></td></tr>
-              </table>
-              <div class="bar"><b style="width:33%"></b></div>
-            </div>
-          </div>
+          <div class="with-phone"><figure class="shot"><a href="assets/site/shots/main-window.webp" target="_blank" rel="noopener"><img src="assets/site/shots/main-window.webp" alt="Glossarion main window translating a Korean EPUB with a NanoGPT model" width="1600" height="1119" loading="lazy" decoding="async"></a><figcaption>The main window during a real run: Korean profile, Balanced glossary, live log.</figcaption></figure><figure class="phone"><img src="assets/site/shots/m-job.webp" alt="Glossarion on Android translating a book in the background" width="540" height="960" loading="lazy" decoding="async"></figure></div>
         </div>
 
         <!-- Manga -->
@@ -158,17 +146,20 @@
             </ul>
             <p class="platform-line">Desktop NoCuda build · Android · iOS (ONNX and cloud engines)</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Manga Translator — page 07</span></div>
-            <div class="mock-body">
-              <div class="manga-page">
-                <span class="box b1"></span><span class="box b2"></span>
-                <span class="sb b1">You came back… after all this time?</span>
-                <span class="sb b2">I promised, didn't I?</span>
+          <figure class="compare" data-compare>
+              <div class="compare-box">
+                <img class="before" src="assets/site/shots/manga-before.webp" alt="Original Japanese manga page" width="900" height="1276" loading="lazy" decoding="async">
+                <img class="after" src="assets/site/shots/manga-after.webp" alt="The same page translated and lettered in English by Glossarion" width="900" height="1276" loading="lazy" decoding="async">
+                <span class="handle"></span>
+                <span class="tag l">Original</span><span class="tag r">Translated</span>
+                <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the original and translated page">
               </div>
-              <div class="row" style="flex-wrap:wrap"><span class="pill ok">Detect ✓</span><span class="pill ok">Clean ✓</span><span class="pill ok">Recognize ✓</span><span class="pill rose">Translate…</span></div>
-            </div>
-          </div>
+              <div class="compare-steps" style="grid-template-columns:1fr 1fr" role="group" aria-label="Compare the translated page with">
+                <button type="button" data-left="assets/site/shots/manga-before.webp" data-label="Original" aria-pressed="true">Original ⟷ Translated</button>
+                <button type="button" data-left="assets/site/shots/manga-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
+              </div>
+              <figcaption>A real run of the Manga Translator on a test page made from Halgakos art. Drag to compare.</figcaption>
+            </figure>
         </div>
 
         <!-- Glossary -->
@@ -186,19 +177,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux · Android · iOS · NER in the NoCuda build and on mobile</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Glossary Manager — 248 terms</span></div>
-            <div class="mock-body">
-              <table>
-                <tr><th>Raw</th><th>Translation</th><th>Type</th><th>Gender</th></tr>
-                <tr><td class="src">강서연</td><td>Kang Seo-yeon</td><td><span class="pill plum">character</span></td><td>female</td></tr>
-                <tr><td class="src">백운검법</td><td>White Cloud Sword Art</td><td><span class="pill">term</span></td><td>—</td></tr>
-                <tr><td class="src">천마신교</td><td>Heavenly Demon Cult</td><td><span class="pill">term</span></td><td>—</td></tr>
-                <tr><td class="src">무진</td><td>Mujin</td><td><span class="pill plum">character</span></td><td>male</td></tr>
-              </table>
-              <div class="para">NER check · ch. 112: <span class="diff-del">Gang Seo-yeon</span> <span class="diff-add">Kang Seo-yeon</span> <span class="pill ok">auto-fixed</span></div>
-            </div>
-          </div>
+          <div class="shot-stack"><figure class="shot"><a href="assets/site/shots/glossary-editor.webp" target="_blank" rel="noopener"><img src="assets/site/shots/glossary-editor.webp" alt="Glossary Editor listing characters, terms and locations with gender" width="1600" height="576" loading="lazy" decoding="async"></a><figcaption>The Glossary Editor with the glossary Glossarion extracted from a Korean demo novel.</figcaption></figure><figure class="shot"><a href="assets/site/shots/glossary-modes.webp" target="_blank" rel="noopener"><img src="assets/site/shots/glossary-modes.webp" alt="Glossary mode picker: Off, Fuzzy, Manual, No glossary, Minimal, Balanced, Full, Single pass" width="1200" height="1044" loading="lazy" decoding="async"></a><figcaption>Eight glossary modes, from no glossary to full per-chapter extraction.</figcaption></figure></div>
         </div>
 
         <!-- Reader -->
@@ -214,18 +193,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux (standard build) · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Library</span></div>
-            <div class="mock-body">
-              <div class="row"><span class="pill rose">In Progress</span><span class="pill">Completed</span><span class="field" style="font-family:var(--font)">Search library…</span></div>
-              <div class="thumbs">
-                <div class="thumb" data-t="The Northern Pass"><span class="prog" style="width:33%"></span></div>
-                <div class="thumb" data-t="Lanterns Over the Lake"><span class="prog" style="width:78%"></span></div>
-                <div class="thumb" data-t="A Return Ten Years Late 📝"><span class="prog" style="width:100%"></span></div>
-              </div>
-              <div class="para">Snow had already buried the pass when Seo-yeon reached the gate. She did not knock; the old guard opened it before she could raise her hand…</div>
-            </div>
-          </div>
+          <div class="shot-stack"><figure class="shot"><a href="assets/site/shots/library.webp" target="_blank" rel="noopener"><img src="assets/site/shots/library.webp" alt="Glossarion Library with three translated books" width="1400" height="900" loading="lazy" decoding="async"></a><figcaption>The Library's Completed tab.</figcaption></figure><div class="with-phone"><figure class="shot"><a href="assets/site/shots/reader.webp" target="_blank" rel="noopener"><img src="assets/site/shots/reader.webp" alt="Built-in reader showing a translated chapter" width="1400" height="693" loading="lazy" decoding="async"></a><figcaption>The reader, with TOC, raw/translated switch, themes and layouts.</figcaption></figure><figure class="phone"><img src="assets/site/shots/m-reader.webp" alt="Reader on Android" width="540" height="960" loading="lazy" decoding="async"></figure></div></div>
         </div>
 
         <!-- Keys / instances -->
@@ -242,19 +210,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Multi API Key Manager</span></div>
-            <div class="mock-body">
-              <table>
-                <tr><th>Model</th><th>Key</th><th>Instance</th><th>Status</th></tr>
-                <tr><td>gemini-3.1-pro-preview</td><td>AIza…f2Q</td><td>1</td><td><span class="pill ok">ready</span></td></tr>
-                <tr><td>gemini-3.1-pro-preview</td><td>AIza…8kL</td><td>1</td><td><span class="pill warn">cooldown 42s</span></td></tr>
-                <tr><td>deepseek-chat</td><td>sk-…91c</td><td>2</td><td><span class="pill ok">ready</span></td></tr>
-                <tr><td>or/deepseek/deepseek-v3.2</td><td>sk-or…a7</td><td>2</td><td><span class="pill ok">ready</span></td></tr>
-              </table>
-              <div class="row"><span class="pill plum">Instance 1 · book_a.epub</span><span class="pill plum">Instance 2 · book_b.epub</span></div>
-            </div>
-          </div>
+          <figure class="shot"><a href="assets/site/shots/key-manager.webp" target="_blank" rel="noopener"><img src="assets/site/shots/key-manager.webp" alt="Multi API Key Manager with keys assigned to instances 1, 2 and 3" width="1300" height="1115" loading="lazy" decoding="async"></a><figcaption>Multi API Key Manager: rotation, pools, and an Instance column for parallel books (demo keys).</figcaption></figure>
         </div>
 
         <!-- Local LLMs -->
@@ -271,16 +227,7 @@
             </ul>
             <p class="platform-line">Desktop: Ollama, LM Studio, any local server · Mobile: on-device llama.cpp</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Model</span></div>
-            <div class="mock-body">
-              <div class="row"><span class="label">Model</span><span class="field">ollamapull/qwen3.5:9b</span><span class="pill">🦙 Ollama Settings</span></div>
-              <div class="para">Downloading qwen3.5:9b · 4.1 / 6.6 GB</div>
-              <div class="bar"><b style="width:62%"></b></div>
-              <div class="row"><span class="label">Phone</span><span class="field">On-device · Qwen3.5 4B (Medium)</span><span class="pill ok">loaded</span></div>
-              <div class="para"><span class="pill ok">offline</span> <span class="pill">$0.00 this run</span></div>
-            </div>
-          </div>
+          <div class="with-phone"><figure class="shot"><a href="assets/site/shots/ollama.webp" target="_blank" rel="noopener"><img src="assets/site/shots/ollama.webp" alt="Ollama settings for the qwen3.5:9b local model" width="1100" height="1042" loading="lazy" decoding="async"></a><figcaption>Managed Ollama: Glossarion installs, starts and updates it.</figcaption></figure><figure class="phone"><img src="assets/site/shots/m-ondevice.webp" alt="On-device model presets on Android" width="540" height="960" loading="lazy" decoding="async"></figure></div>
         </div>
 
         <!-- Vision -->
@@ -297,16 +244,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Chat</span></div>
-            <div class="mock-body">
-              <div class="row" style="flex-wrap:wrap"><span class="pill">📝 Text</span><span class="pill rose">👁️ Vision</span><span class="pill">🖼️ Image</span><span class="pill">🎬 Video</span><span class="pill">🔊 Audio</span><span class="pill">✨ Refine</span></div>
-              <div class="bubble me">📎 poster_ch3.png — translate the sign</div>
-              <div class="bubble ai">The sign reads: <b>"Moonlit Tea House — closed until the festival."</b></div>
-              <div class="bubble me">🖼️ Now replace the sign text with the English.</div>
-              <div class="bubble ai">Done — edited image attached ✓</div>
-            </div>
-          </div>
+          <figure class="shot"><a href="assets/site/shots/chat.webp" target="_blank" rel="noopener"><img src="assets/site/shots/chat.webp" alt="Direct Text chat translating a Japanese line and reading a manga page with a vision model" width="1100" height="1138" loading="lazy" decoding="async"></a><figcaption>Direct Text: a plain text translation, then Vision mode reading the manga page.</figcaption></figure>
         </div>
 
         <!-- Review -->
@@ -322,19 +260,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>Review — The Northern Pass</span></div>
-            <div class="mock-body">
-              <div class="para"><b>Overall</b> <span class="stars">★★★★☆</span> 8.1 / 10 — a slow-burn martial arts story whose quiet character work outshines its fights.</div>
-              <table>
-                <tr><th>Originality</th><th>Score</th></tr>
-                <tr><td>Premise</td><td>7 / 10</td></tr>
-                <tr><td>Characters</td><td>9 / 10</td></tr>
-                <tr><td>World-building</td><td>8 / 10</td></tr>
-                <tr><td>Prose</td><td>8 / 10</td></tr>
-              </table>
-            </div>
-          </div>
+          <figure class="shot"><a href="assets/site/shots/review.webp" target="_blank" rel="noopener"><img src="assets/site/shots/review.webp" alt="Review generator output with an originality score table and overall assessment" width="1400" height="945" loading="lazy" decoding="async"></a><figcaption>A generated review of the Korean demo novel, honest scores included.</figcaption></figure>
         </div>
 
         <!-- QA -->
@@ -351,19 +277,7 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>QA Scan — 340 chapters</span></div>
-            <div class="mock-body">
-              <table>
-                <tr><th>Chapter</th><th>Issue</th><th></th></tr>
-                <tr><td>87</td><td><span class="pill warn">duplicate of ch. 86</span></td><td>retranslate</td></tr>
-                <tr><td>143</td><td><span class="pill warn">korean text left</span></td><td>fix</td></tr>
-                <tr><td>201</td><td><span class="pill warn">truncated</span></td><td>retranslate</td></tr>
-                <tr><td>256</td><td><span class="pill rose">name drift: "Gang"</span></td><td>fix</td></tr>
-              </table>
-              <div class="row"><span class="pill ok">336 chapters clean</span><span class="pill">HTML report</span></div>
-            </div>
-          </div>
+          <div class="shot-stack"><figure class="shot"><a href="assets/site/shots/qa-report.webp" target="_blank" rel="noopener"><img src="assets/site/shots/qa-report.webp" alt="QA scan report listing a duplicate chapter, leftover Korean text and an AI preamble" width="1500" height="862" loading="lazy" decoding="async"></a><figcaption>QA report for a test folder with three planted mistakes: all three were caught.</figcaption></figure><figure class="shot"><a href="assets/site/shots/qa-modes.webp" target="_blank" rel="noopener"><img src="assets/site/shots/qa-modes.webp" alt="QA scanner detection modes: AI Hunter, Aggressive, Quick Scan, Custom" width="1400" height="696" loading="lazy" decoding="async"></a><figcaption>Pick how hard the scanner looks for duplicates.</figcaption></figure></div>
         </div>
 
         <!-- SDLXLIFF -->
@@ -379,22 +293,25 @@
             </ul>
             <p class="platform-line">Windows · macOS · Linux (standard build) · Android · iOS</p>
           </div>
-          <div class="mock" aria-hidden="true">
-            <div class="mock-bar"><i></i><i></i><i></i><span>SDLXLIFF Reviewer</span></div>
-            <div class="mock-body">
-              <table>
-                <tr><th>#</th><th>Source</th><th>Target</th></tr>
-                <tr><td>14</td><td class="src">本製品は防水仕様です。</td><td>This product is waterproof.</td></tr>
-                <tr><td>15</td><td class="src">充電中は使用しないでください。</td><td>Do not use while charging. <span class="pill ok">✓</span></td></tr>
-                <tr><td>16</td><td class="src">詳しくは説明書をご覧ください。</td><td>See manual. <span class="pill warn">flag · 0.62</span></td></tr>
-              </table>
-              <div class="row"><span class="pill">MT: DeepL</span><span class="field" style="font-family:var(--font)">For details, please see the instruction manual.</span></div>
-            </div>
-          </div>
+          <figure class="shot"><a href="assets/site/shots/sdlxliff.webp" target="_blank" rel="noopener"><img src="assets/site/shots/sdlxliff.webp" alt="SDLXLIFF source to output reviewer with machine translation previews" width="1600" height="940" loading="lazy" decoding="async"></a><figcaption>The SDLXLIFF reviewer: source, MT preview and the translation, row by row.</figcaption></figure>
+        </div>
+
+        <!-- more desktop screens -->
+        <div class="section-head" style="margin-top:56px">
+          <h2 style="font-size:clamp(1.5rem,3.4vw,2rem)">More of the desktop app.</h2>
+          <p>Every screenshot on this page is the real app, run on demo books written for this site. Click any image to see it full size.</p>
+        </div>
+        <div class="gallery">
+          <figure class="shot"><a href="assets/site/shots/manga-window.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-window.webp" alt="Manga Translator window with settings and the translated page" width="1600" height="1039" loading="lazy" decoding="async"></a><figcaption>The Manga Translator window</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/providers.webp" target="_blank" rel="noopener"><img src="assets/site/shots/providers.webp" alt="Model provider prefixes from the welcome guide" width="1200" height="1213" loading="lazy" decoding="async"></a><figcaption>Provider prefixes in the welcome guide</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/progress-manager.webp" target="_blank" rel="noopener"><img src="assets/site/shots/progress-manager.webp" alt="Progress Manager listing chapters and their status" width="1400" height="730" loading="lazy" decoding="async"></a><figcaption>Progress Manager: retranslate only what you pick</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/reader-raw.webp" target="_blank" rel="noopener"><img src="assets/site/shots/reader-raw.webp" alt="Reader showing the raw Korean chapter with a Translate button" width="1400" height="693" loading="lazy" decoding="async"></a><figcaption>Raw view with in-reader Translate</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/book-page.webp" target="_blank" rel="noopener"><img src="assets/site/shots/book-page.webp" alt="Book page with cover, metadata and chapter list" width="1500" height="629" loading="lazy" decoding="async"></a><figcaption>Book page with chapters and metadata</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/review-full.webp" target="_blank" rel="noopener"><img src="assets/site/shots/review-full.webp" alt="Review generator with prompt profile and summary" width="1200" height="1192" loading="lazy" decoding="async"></a><figcaption>Review generator with editable prompt</figcaption></figure>
         </div>
 
         <!-- compact grid -->
-        <div class="section-head" style="margin-top:48px">
+        <div class="section-head" style="margin-top:56px">
           <h2 style="font-size:clamp(1.5rem,3.4vw,2rem)">And a lot more.</h2>
         </div>
         <div class="grid-cards">
@@ -407,10 +324,60 @@
           <div class="card"><h3><span class="ico">🧠</span>AI Hunter &amp; script ban</h3><p>Detects chapters that come back as copies of earlier ones, and keeps stray foreign scripts out of your output.</p></div>
           <div class="card"><h3><span class="ico">🌐</span>64 target languages</h3><p>Translate into English, Spanish, Vietnamese, Indonesian and many more — the list is yours to extend.</p></div>
           <div class="card"><h3><span class="ico">🔐</span>Subscription logins</h3><p>Already pay for ChatGPT, Claude, Gemini or Grok? Sign in and translate with your plan instead of an API key.</p></div>
-          <div class="card"><h3><span class="ico">📱</span>Background jobs on mobile</h3><p>Long translations keep running in the background, with a notification to accept a new glossary or review results.</p></div>
+          <div class="card"><h3><span class="ico">📱</span>Background jobs on Android</h3><p>Long translations keep running with the screen off, with a notification to stop a job or accept a new glossary. (iOS pauses jobs shortly after you leave the app.)</p></div>
           <div class="card"><h3><span class="ico">💾</span>Safe by default</h3><p>Encrypted keys, automatic config backups and an update checker that verifies every download.</p></div>
           <div class="card"><h3><span class="ico">🤖</span>Self-hosted Discord bot</h3><p>Run your own bot that translates EPUB, TXT and PDF files or extracts glossaries for your server.</p></div>
         </div>
+      </div>
+    </section>
+
+    <!-- ========== MOBILE ========== -->
+    <section class="section-alt" id="mobile">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="kicker">Android &amp; iOS</span>
+          <h2>The same Glossarion, in your pocket.</h2>
+          <p>The phone app is chat-first: paste text or attach a book, check the plan, and let it run. It shares the desktop app's translation engine, so glossaries, QA, the reader, manga and the review generator come along — and it can run small models on the phone itself.</p>
+        </div>
+        <div class="phones">
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-welcome.webp" alt="Mobile welcome screen with sign-in options and on-phone models" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Get started your way</b>Sign in, use a key, or run on the phone</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-chat.webp" alt="Mobile chat home" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Chat-first</b>Paste text or attach a book</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-plan.webp" alt="Plan card before translating a book" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Plan, then start</b>Chapters, model, glossary, output</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-job.webp" alt="A translation job running in the chat" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Jobs keep going</b>With a progress notification on Android</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-library.webp" alt="Mobile library with three translated books" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Library</b>Your books, synced folders, imports</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-reader.webp" alt="Mobile reader showing a translated chapter" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Reader</b>Bilingual view, bookmarks, translate in place</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-glossary.webp" alt="Mobile glossary editor" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Glossary editor</b>The same glossaries as desktop</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-ondevice.webp" alt="On-device model presets that fit the phone" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>On-device models</b>Qwen3.5, Llama, Gemma, LFM2</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="assets/site/shots/m-tools.webp" alt="Mobile tools list" width="540" height="960" loading="lazy" decoding="async"></div>
+            <figcaption><b>Tools</b>QA, review, RPG Maker, SDLXLIFF, manga…</figcaption>
+          </figure>
+        </div>
+        <p class="phone-note">Screens from the Android app. iOS builds are the same app; iOS pauses translations about 30 seconds after you leave it, so keep it open for long books.</p>
       </div>
     </section>
 

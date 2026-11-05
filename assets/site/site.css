@@ -239,60 +239,51 @@ section { padding: 56px 0; }
 }
 .platform-line { margin-top: 14px; font-size: .85rem; color: var(--muted); }
 
-/* mock UI windows */
-.mock {
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  box-shadow: var(--shadow-lg); overflow: hidden; font-size: .86rem;
-}
-.mock-bar { display: flex; align-items: center; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
-.mock-bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
-.mock-bar i:nth-child(1) { background: #f08a8a; } .mock-bar i:nth-child(2) { background: #f2c86b; } .mock-bar i:nth-child(3) { background: #7fcf96; }
-.mock-bar span { margin-left: 8px; color: var(--muted); font-weight: 600; font-size: .8rem; }
-.mock-body { padding: 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+/* small UI bits (hero progress bar, CTA row) */
 .row { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.mock .row { flex-wrap: wrap; gap: 8px; }
-.mock .row .field { flex: 1 1 170px; }
-.field { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; background: var(--bg); color: var(--ink-soft); font-family: var(--mono); font-size: .8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.label { color: var(--muted); font-size: .78rem; font-weight: 700; min-width: 64px; }
-.pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: .74rem; font-weight: 700; background: var(--surface-2); color: var(--ink-soft); white-space: nowrap; }
-.pill.ok { background: var(--ok-soft); color: var(--ok); }
-.pill.warn { background: var(--warn-soft); color: var(--warn); }
-.pill.rose { background: var(--accent-soft); color: var(--accent); }
-.pill.plum { background: var(--plum-soft); color: var(--plum); }
 .bar { height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
 .bar > b { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--accent), var(--plum)); }
-.mock table { width: 100%; border-collapse: collapse; }
-.mock th, .mock td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-.mock th { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
-.mock td { color: var(--ink-soft); }
-.mock tr:last-child td { border-bottom: 0; }
-@media (max-width: 560px) {
-  .mock { font-size: .78rem; }
-  .mock-body { padding: 12px; }
-  .mock th, .mock td { padding: 6px 4px; overflow-wrap: anywhere; }
-  .mock td .pill { white-space: normal; }
-}
-.src { color: var(--muted); }
-.para { color: var(--ink-soft); line-height: 1.7; }
-.para mark { background: var(--accent-soft); color: var(--accent); padding: 0 3px; border-radius: 4px; }
-.bubble { max-width: 86%; padding: 9px 12px; border-radius: 14px; line-height: 1.5; }
-.bubble.me { justify-self: end; background: var(--accent); color: var(--accent-ink); border-bottom-right-radius: 4px; }
-.bubble.ai { background: var(--surface-2); color: var(--ink-soft); border-bottom-left-radius: 4px; }
-.thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.thumb { aspect-ratio: 3/4; border-radius: 10px; background: linear-gradient(160deg, var(--plum-soft), var(--accent-soft)); position: relative; overflow: hidden; border: 1px solid var(--line); }
-.thumb::after { content: attr(data-t); position: absolute; left: 8px; right: 8px; bottom: 8px; font-size: .72rem; font-weight: 700; color: var(--ink); line-height: 1.25; }
-.thumb .prog { position: absolute; left: 0; bottom: 0; height: 4px; background: var(--accent); }
-.manga-page { position: relative; aspect-ratio: 4/3; border-radius: 12px; border: 1px solid var(--line); background:
-  repeating-linear-gradient(135deg, var(--surface-2) 0 10px, var(--bg) 10px 20px); overflow: hidden; }
-.manga-page .sb { position: absolute; background: #fff; color: #222; border: 2px solid #222; border-radius: 50%; display: grid; place-items: center; text-align: center; font-weight: 700; font-size: .74rem; padding: 10px; line-height: 1.2; }
-.manga-page .sb.b1 { left: 7%; top: 10%; width: 38%; height: 36%; }
-.manga-page .sb.b2 { right: 7%; bottom: 10%; width: 40%; height: 38%; }
-.manga-page .box { position: absolute; border: 2px dashed var(--accent); border-radius: 50%; }
-.manga-page .box.b1 { left: 5.5%; top: 7%; width: 41%; height: 42%; }
-.manga-page .box.b2 { right: 5.5%; bottom: 7%; width: 43%; height: 44%; }
-.diff-del { background: color-mix(in srgb, #e05a5a 16%, transparent); text-decoration: line-through; color: var(--muted); border-radius: 4px; padding: 0 3px; }
-.diff-add { background: var(--ok-soft); color: var(--ok); border-radius: 4px; padding: 0 3px; }
-.stars { color: #e7a83a; letter-spacing: 1px; }
+
+/* real screenshots */
+.shot { margin: 0; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow-lg); background: #1e1e1e; }
+.shot a, .shot img { display: block; width: 100%; }
+.shot a { cursor: zoom-in; }
+.shot figcaption { font-size: .82rem; color: var(--muted); padding: 8px 12px; background: var(--surface); border-top: 1px solid var(--line); }
+.shot-stack { display: grid; gap: 14px; }
+.with-phone { position: relative; padding-bottom: 28px; }
+.with-phone .phone { position: absolute; right: -6px; bottom: 0; width: 30%; max-width: 190px; }
+.with-phone .shot figcaption { padding-right: min(34%, 210px); }
+@media (max-width: 560px) { .with-phone .phone { width: 34%; right: 0; } }
+.phone { margin: 0; border-radius: 26px; border: 7px solid #1b1720; background: #1b1720; overflow: hidden; box-shadow: var(--shadow-lg); }
+.phone img { display: block; width: 100%; border-radius: 19px; }
+
+/* manga before / after slider */
+.compare { margin: 0; }
+.compare-box { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow-lg); background: #fff; touch-action: pan-y; }
+.compare-box img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+.compare-box .after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--pos, 50%)); }
+.compare-box .handle { position: absolute; top: 0; bottom: 0; left: var(--pos, 50%); width: 3px; margin-left: -1.5px; background: var(--accent); pointer-events: none; }
+.compare-box .handle::after { content: "⟷"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 800; box-shadow: var(--shadow); }
+.compare-box input[type="range"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
+.compare-box .tag { position: absolute; top: 10px; padding: 4px 10px; border-radius: 999px; font-size: .75rem; font-weight: 800; background: rgba(20, 16, 26, .78); color: #fff; pointer-events: none; }
+.compare-box .tag.l { left: 10px; } .compare-box .tag.r { right: 10px; }
+.compare-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.compare-steps button { font: inherit; font-size: .82rem; font-weight: 700; padding: 8px 6px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); cursor: pointer; }
+.compare-steps button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.compare figcaption { font-size: .82rem; color: var(--muted); margin-top: 8px; text-align: center; }
+
+/* phone gallery */
+.phones { display: flex; gap: 18px; overflow-x: auto; padding: 6px 4px 18px; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
+.phones figure { margin: 0; flex: 0 0 auto; width: min(220px, 62vw); scroll-snap-align: start; }
+.phones figcaption { margin-top: 10px; font-size: .86rem; color: var(--ink-soft); text-align: center; }
+.phones figcaption b { display: block; color: var(--ink); }
+.phone-note { text-align: center; color: var(--muted); font-size: .9rem; margin: 6px auto 0; max-width: 46em; }
+
+/* desktop gallery */
+.gallery { display: grid; gap: 16px; }
+@media (min-width: 640px) { .gallery { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .gallery { grid-template-columns: repeat(3, 1fr); } }
+.gallery .shot img { aspect-ratio: 16 / 10; object-fit: cover; object-position: top left; }
 
 /* compact feature grid */
 .grid-cards { display: grid; gap: 14px; }
