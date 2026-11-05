@@ -179,6 +179,19 @@ def test_a_page_left_before_its_render_is_rendered_from_its_state(editor, monkey
     assert calls == [(editor.tab, editor.page, False)] and editor.renders == []
 
 
+def test_no_change_while_a_batch_runs(editor):
+    """The viewer blocks box edits during a batch: the toolbar neither stores nor re-renders then."""
+    _select(editor, 0)
+    editor.tab._batch_mode_active = True
+    editor.widget.viewer.manga_integration = editor.tab
+    editor.toolbar.bold_btn.click()
+    _pump(editor.app, 0.1)
+    assert _styles(editor) == {} and editor.renders == [] and not editor.toolbar.bold_btn.isChecked()
+    editor.tab._batch_mode_active = False
+    editor.toolbar.bold_btn.click()
+    assert _styles(editor) == {'0': {'bold': True}}
+
+
 def test_shows_the_selected_box_style(editor):
     editor.tab.image_state_manager.set_state(editor.page, {'region_styles': {
         '1': {'bold': True, 'underline': True, 'font_size': 33, 'align': 'left', 'font': str(FONT_PATH)}}})

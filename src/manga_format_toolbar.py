@@ -332,8 +332,19 @@ class MangaFormatToolbar(QObject):
 
     # ---- changes -------------------------------------------------------------------------------------
 
+    def _blocked(self):
+        """A batch is running (the viewer blocks box edits then): no style change, no re-render."""
+        check = getattr(self.preview.viewer, '_is_processing_blocked', None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:
+            return False
+
     def _apply(self, changes=None, *, reset=False):
         if self._updating:
+            return None
+        if self._blocked():
+            self.refresh()  # put the buttons back to the box's stored style
             return None
         indexes = self.indexes()
         if not indexes:
@@ -354,7 +365,7 @@ class MangaFormatToolbar(QObject):
 
     def _on_color(self):
         indexes = self.indexes()
-        if not indexes:
+        if not indexes or self._blocked():
             return None
         current = self.styles().get(indexes[0], {}).get('color')
         if current:
