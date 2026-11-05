@@ -239,6 +239,9 @@ tests/**
 # manga tab, per-page process_image traces, image-diff goldens with a fixed font, local HTTP servers).
 !tests/test_manga_env.py
 !tests/test_manga_editor_core.py
+# Manga editor Format toolbar: per-box font / size / bold / italic / underline / alignment / colour
+!tests/test_manga_text_style.py
+!tests/test_manga_format_toolbar.py
 !tests/test_manga_models.py
 !tests/test_google_vision_rest.py
 # Mobile rewrite (U9): the browser-driver seam (authnd/ + search/gemini on the WebViewBridge), the

@@ -47,7 +47,7 @@ from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
-from glossarion_mobile.ui.tools.manga.common import MangaTab, push, reason_or_chip
+from glossarion_mobile.ui.tools.manga.common import MangaTab, font_choices, push, reason_or_chip
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
 from glossarion_mobile.ui.tools.manga.models import ModelDownloadRow, ModelManagerSheet
 
@@ -1158,18 +1158,7 @@ class SettingsTab(MangaTab):
 
     def available_fonts(self, cfg: dict) -> list:
         """Imported fonts (config ``custom_fonts``) + the font catalog of the shared core when present."""
-        found: list = []
-        catalog = svc.core_attr("manga_settings_defaults", "available_fonts", "list_fonts")
-        if callable(catalog):
-            try:
-                found.extend(str(p) for p in catalog(cfg) or ())
-            except Exception:
-                log.debug("font catalog failed", exc_info=True)
-        for entry in cfg.get("custom_fonts") or []:
-            path = entry.get("path") if isinstance(entry, dict) else entry
-            if path and os.path.isfile(str(path)) and str(path) not in found:
-                found.append(str(path))
-        return found
+        return font_choices(cfg)
 
     def select_font(self, path: str) -> None:
         self.set("manga_font_path", path)

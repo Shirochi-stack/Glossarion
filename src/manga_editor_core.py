@@ -80,6 +80,89 @@ def _import_google_vision():
     return vision
 
 
+def _attach_region_styles(self, image_path, regions):
+    """Give the regions about to be rendered their box's text style (the page state's
+    ``region_styles``: the desktop Format toolbar / the mobile box panel's Style tab).
+
+    Every render path builds its regions from the boxes' translations in box order, so a region
+    belongs to the first box not taken yet whose translation it carries (the open page's live
+    ``_translation_data``, then the page's persisted ``translated_texts``). A page without styles
+    is left exactly as it was. Owner-approved 2026-11-06 (per-box text formatting)."""
+    try:
+        state_manager = getattr(self, 'image_state_manager', None)
+        if not image_path or not state_manager or not regions:
+            return
+        state = state_manager.get_state(image_path) or {}
+        styles = manga_ocr_io.region_styles_from_state(state)
+        if not styles:
+            return
+        texts = {}
+        for index, entry in _persisted_text_maps(state)[3].items():
+            texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
+        current = getattr(getattr(self, 'image_preview_widget', None), 'current_image_path', None)
+        if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(image_path)):
+            for index, entry in (getattr(self, '_translation_data', None) or {}).items():
+                if isinstance(entry, dict):
+                    texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
+        taken = set()
+        for region in regions:
+            text = str(getattr(region, 'translated_text', None) or '').strip()
+            if not text or getattr(region, 'style', None):
+                continue
+            for index in sorted(texts):
+                if index not in taken and text in texts[index]:
+                    taken.add(index)
+                    if index in styles:
+                        region.style = dict(styles[index])
+                    break
+    except Exception as error:
+        print(f"[RENDER] Box text styles skipped: {error}")
+
+
+def _region_text_styles(self, image_path):
+    """The page's per-box text styles by region index ({} without a page or styles)."""
+    state_manager = getattr(self, 'image_state_manager', None)
+    if not image_path or not state_manager:
+        return {}
+    return manga_ocr_io.region_styles_from_state(state_manager.get_state(image_path) or {})
+
+
+def _update_region_styles(self, image_path, indexes, changes=None, *, reset=False):
+    """Change the text style of boxes ``indexes`` on a page and persist it (no render).
+
+    ``changes`` merges into each box's style; a None value (or align "center", size 0) goes back
+    to the Rendering Settings for that entry. ``reset`` drops the boxes' styles. Returns
+    {index: style} as stored."""
+    state_manager = getattr(self, 'image_state_manager', None)
+    if not image_path or not state_manager:
+        return {}
+    state = dict(state_manager.get_state(image_path) or {})
+    styles = manga_ocr_io.region_styles_from_state(state)
+    stored = {}
+    for index in sorted({int(value) for value in indexes or ()}):
+        style = {} if reset else dict(styles.get(index) or {})
+        for key, value in (changes or {}).items():
+            if value is None or value is False:
+                style.pop(key, None)
+            else:
+                style[key] = value
+        stored[index] = manga_ocr_io.set_region_style(state, index, style)
+    state_manager.set_state(image_path, state, save=True)
+    return stored
+
+
+def _clear_region_styles(self, image_path):
+    """Clear Boxes: the page's boxes are gone, so are their text styles."""
+    state_manager = getattr(self, 'image_state_manager', None)
+    if not image_path or not state_manager:
+        return
+    state = state_manager.get_state(image_path) or {}
+    if 'region_styles' in state:
+        state = dict(state)
+        state.pop('region_styles', None)
+        state_manager.set_state(image_path, state, save=True)
+
+
 # ===========================================================================
 # Moved verbatim from ImageRenderer.py (EDITOR_FUNCTIONS; see the module docstring)
 # ===========================================================================
@@ -7094,6 +7177,7 @@ def _render_with_manga_translator(
         
         # Call MangaTranslator's render_translated_text method with filtered regions
         print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
+        _attach_region_styles(self, original_image_path or image_path, regions)
         rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
         print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
         
@@ -8937,7 +9021,8 @@ EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition'
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).
 SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
-                'delay_env')  # 2026-10-21: the API call delay field's min and range max
+                'delay_env',  # 2026-10-21: the API call delay field's min and range max
+                '_attach_region_styles')  # 2026-11-06: per-box text styles (Format toolbar)
 
 
 # ===========================================================================
@@ -9619,6 +9704,7 @@ class MangaEditorSession:
             # maps (a batch Start; a page restored before its texts were persisted) they were empty and
             # the box sheet showed blank OCR / translation fields.
             _rec, saved_recognition, _trans, saved_translation = _persisted_text_maps(state)
+            styles = manga_ocr_io.region_styles_from_state(state)
             for idx, box in enumerate(self.image_preview_widget.viewer.rectangles):
                 record = box.to_dict()
                 record['index'] = idx
@@ -9627,6 +9713,7 @@ class MangaEditorSession:
                                       or (saved_recognition.get(key) or {}).get('text', ''))
                 record['translation'] = ((translation.get(key) or {}).get('translation', '')
                                          or (saved_translation.get(key) or {}).get('translation', ''))
+                record['style'] = dict(styles.get(key) or {})
                 boxes.append(record)
         return {
             'image_path': image_path,
@@ -10057,7 +10144,7 @@ class MangaEditorSession:
         for key in ('recognized_texts', 'translated_texts'):
             if isinstance(state.get(key), list):
                 state[key] = shift_list(state[key])
-        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations'):
+        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations', 'region_styles'):
             if isinstance(state.get(key), dict):
                 state[key] = shift_map(state[key])
         self.image_state_manager.set_state(page, state, save=True)
@@ -10118,6 +10205,7 @@ class MangaEditorSession:
             try:
                 if self.image_state_manager:
                     _clear_saved_page_state(preview)
+                    _clear_region_styles(self, page)
             except Exception:
                 pass
             if include_cleaned:
@@ -10146,6 +10234,19 @@ class MangaEditorSession:
                 _handle_toggle_free_text_region(self, int(index), box)
             self.image_state_manager.flush()
             return box.is_free_text
+
+    def set_box_style(self, index, style=None, *, reset=False):
+        """Per-box text style (the desktop Format toolbar): ``style`` merges into the box's style
+        (a None / False value goes back to the Rendering Settings for that entry: font, font_size,
+        bold, italic, underline, align, color), ``reset`` drops it. Persisted with the page state;
+        call ``save_and_update_overlay`` to re-render. Returns the box's style as stored."""
+        with self._op_lock:
+            box = self._box(index)
+            key = box.region_index if box.region_index is not None else int(index)
+            page = self.image_preview_widget.current_image_path
+            stored = _update_region_styles(self, page, [key], style, reset=reset).get(int(key), {})
+            self.image_state_manager.flush()
+            return stored
 
     def set_box_excluded(self, index, excluded):
         """Exclude from Clean (session-only on the desktop too: never persisted)."""

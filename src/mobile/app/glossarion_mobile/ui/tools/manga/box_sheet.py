@@ -10,6 +10,9 @@ place:
 
 * **Move** — the box's position and size in image pixels: X / Y / W / H fields with **Apply**, and
   nudge buttons (move by the step, W / H smaller / larger) for what a finger cannot place exactly.
+* **Style** — the desktop Format toolbar for this box: font, size (Auto or px), **B** / *I* / U,
+  align left / center / right, text colour and Reset; each change re-renders the page
+  (``MangaEditorSession.set_box_style``, then Save & Update Overlay when the page has translations).
 
 The header row holds the box number, the tabs, the ⋯ menu (Save (no re-render), **Clean this
 box**, the box type (free text / bubble text: the renderer's background and the cleaner's
@@ -25,7 +28,8 @@ translate / clean / re-render as editor jobs).
 from __future__ import annotations
 
 import itertools
-from typing import Any, Callable, Mapping, Optional
+import os
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
@@ -35,18 +39,24 @@ from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.manga.common import push
 
 __all__ = ["BOX_TABS", "BoxPanel", "COMPACT_BUTTON", "GEOMETRY_KEYS", "ITERATION_CHOICES", "NOT_RECOGNIZED",
-           "NUDGE_STEPS", "box_geometry", "box_signature"]
+           "NUDGE_STEPS", "STYLE_ALIGNMENTS", "STYLE_COLORS", "box_geometry", "box_signature", "box_style"]
 
 #: Inpainting iterations: -1 = Auto (the dialog's range is -1..50).
 ITERATION_CHOICES = (-1, 0, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 50)
 _KEYS = itertools.count(1)  # a new key per panel (never a reused id())
 NOT_RECOGNIZED = "Run “OCR this text” (or Recognize) first"
 #: The panel's tabs: (id, label).
-BOX_TABS = (("ocr", "OCR"), ("translated", "Translated"), ("move", "Move"))
+BOX_TABS = (("ocr", "OCR"), ("translated", "Translated"), ("move", "Move"), ("style", "Style"))
 #: The Move tab's fields: (box key, label).
 GEOMETRY_KEYS = (("x", "X"), ("y", "Y"), ("width", "W"), ("height", "H"))
 #: The Move tab's nudge steps (image px); the step button cycles them.
 NUDGE_STEPS = (1, 5, 20)
+#: The Style tab's alignments: (align, icon, tooltip); center is the renderer's default.
+STYLE_ALIGNMENTS = (("left", "FORMAT_ALIGN_LEFT", "Align left"), ("center", "FORMAT_ALIGN_CENTER", "Center"),
+                    ("right", "FORMAT_ALIGN_RIGHT", "Align right"))
+#: The Style tab's text colours: (label, [r, g, b]; None = the Rendering Settings colour).
+STYLE_COLORS = (("Default colour", None), ("Black", [0, 0, 0]), ("White", [255, 255, 255]), ("Red", [200, 0, 0]),
+                ("Blue", [0, 70, 200]), ("Green", [0, 130, 60]), ("Yellow", [240, 200, 0]), ("Purple", [120, 40, 160]))
 
 _BODY = tokens.TYPE_SCALE["body_small"]
 _LABEL = tokens.TYPE_SCALE["label_small"]
@@ -65,10 +75,18 @@ def _iterations(box: Mapping[str, Any]) -> int:
         return -1
 
 
+def box_style(box: Mapping[str, Any]) -> dict:
+    """The box's text style (``manga_ocr_io.normalize_region_style`` keys; {} = Rendering Settings)."""
+    style = box.get("style")
+    return dict(style) if isinstance(style, Mapping) else {}
+
+
 def box_signature(box: Mapping[str, Any], index: int) -> tuple:
     """What a panel shows of a box: a panel is rebuilt only when this changes (typing is kept)."""
+    style = tuple(sorted((key, tuple(value) if isinstance(value, list) else value)
+                         for key, value in box_style(box).items()))
     return (index, str(box.get("ocr_text") or ""), str(box.get("translation") or ""), bool(box.get("free_text")),
-            bool(box.get("exclude_from_clean")), _iterations(box))
+            bool(box.get("exclude_from_clean")), _iterations(box), style)
 
 
 def box_geometry(box: Mapping[str, Any]) -> dict:
@@ -89,17 +107,19 @@ def _field(value: str, label: str, key: str, **kwargs: Any) -> ft.TextField:
 
 class BoxPanel:
     """``on_action(name, index, values)``: ``save`` / ``save_render`` / ``ocr`` / ``translate`` /
-    ``clean`` / ``delete``; ``values`` = what changed (the edited OCR text and translation, a
-    flag), applied first. ``on_iterations(index)`` opens the iterations choice.
+    ``clean`` / ``delete`` / ``style``; ``values`` = what changed (the edited OCR text and
+    translation, a flag, ``style``: the Style tab's change, None = Reset), applied first.
+    ``on_iterations(index)`` opens the iterations choice.
     ``on_geometry(index, {x, y, width, height})`` places the box (the Move tab). ``on_close()``
-    deselects it (✕). ``tab`` is the tab shown first (``ocr`` / ``translated`` / ``move``)."""
+    deselects it (✕). ``tab`` is the tab shown first (``ocr`` / ``translated`` / ``move`` /
+    ``style``). ``fonts``: the font files the Style tab offers."""
 
     def __init__(self, box: Mapping[str, Any], index: int, *, on_action: Callable[[str, int, dict], Any],
                  on_iterations: Optional[Callable[[int], Any]] = None,
                  on_geometry: Optional[Callable[[int, dict], Any]] = None,
                  on_close: Optional[Callable[[], Any]] = None,
                  busy_reason: Optional[str] = None, steps_reason: Optional[str] = None,
-                 tab: str = "translated", step: int = NUDGE_STEPS[1]) -> None:
+                 tab: str = "translated", step: int = NUDGE_STEPS[1], fonts: Sequence[str] = ()) -> None:
         self.box = dict(box)
         self.index = index
         self.on_action = on_action
@@ -163,6 +183,51 @@ class BoxPanel:
                           disabled=busy_reason is not None,
                           on_click=lambda e, dw=dw, dh=dh: self.nudge(dw=dw, dh=dh))
             for text, label, dw, dh in sizes]
+        # ---- Style tab (the desktop Format toolbar)
+        self.style = style = box_style(box)
+        styling = busy_reason is not None
+        font = str(style.get("font") or "")
+        font_paths = [str(path) for path in fonts or ()]
+        if font and font not in font_paths:
+            font_paths.append(font)
+        self.font_dropdown = ft.Dropdown(
+            label="Font", value=font, dense=True, width=168, key="box-style-font", text_style=BODY_TEXT,
+            label_style=LABEL_TEXT, disabled=styling,
+            options=[ft.DropdownOption(key="", text="Default font")] + [
+                ft.DropdownOption(key=path, text=os.path.splitext(os.path.basename(path))[0]) for path in font_paths],
+            on_select=lambda e: self.set_style(font=e.control.value or None))
+        self.size_field = commit_on_blur(
+            ft.TextField(value=str(style.get("font_size") or ""), label="Size", hint_text="Auto", dense=True,
+                         width=64, key="box-style-size", keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT,
+                         label_style=LABEL_TEXT, hint_style=BODY_TEXT, disabled=styling,
+                         content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                         border_radius=tokens.RADII["field"]),
+            lambda text: self.set_size(text), current=lambda: str(self.style.get("font_size") or ""))
+        self.style_toggles = {}
+        for key, icon, label in (("bold", "FORMAT_BOLD", "Bold"), ("italic", "FORMAT_ITALIC", "Italic"),
+                                 ("underline", "FORMAT_UNDERLINED", "Underline")):
+            on = bool(style.get(key))
+            self.style_toggles[key] = ft.IconButton(
+                icon=getattr(ft.Icons, icon), tooltip=label, key=f"box-style-{key}", selected=on,
+                icon_color=ft.Colors.PRIMARY if on else None, size_constraints=HIT_TARGET, disabled=styling,
+                on_click=lambda e, k=key: self.set_style(**{k: not self.style.get(k)}))
+        align = style.get("align") or "center"
+        self.align_buttons = {
+            name: ft.IconButton(icon=getattr(ft.Icons, icon), tooltip=label, key=f"box-style-align-{name}",
+                                selected=name == align, icon_color=ft.Colors.PRIMARY if name == align else None,
+                                size_constraints=HIT_TARGET, disabled=styling,
+                                on_click=lambda e, a=name: self.set_style(align=None if a == "center" else a))
+            for name, icon, label in STYLE_ALIGNMENTS}
+        color = style.get("color")
+        self.color_menu = ft.PopupMenuButton(
+            icon=ft.Icons.FORMAT_COLOR_TEXT, tooltip="Text colour", key="box-style-color", disabled=styling,
+            icon_color=("#%02x%02x%02x" % tuple(color)) if color else None, size_constraints=HIT_TARGET,
+            items=[ft.PopupMenuItem(content=label, checked=value == color,
+                                    on_click=lambda e, v=value: self.set_style(color=v))
+                   for label, value in STYLE_COLORS])
+        self.reset_style_button = ft.TextButton(content="Reset", icon=ft.Icons.FORMAT_CLEAR, key="box-style-reset",
+                                                tooltip="Back to the Rendering Settings", style=COMPACT_BUTTON,
+                                                disabled=styling or not style, on_click=lambda e: self.reset_style())
         # ---- ⋯ menu
         free_text = bool(box.get("free_text"))
         excluded = bool(box.get("exclude_from_clean"))
@@ -194,7 +259,7 @@ class BoxPanel:
             length=len(BOX_TABS), selected_index=names.index(self.tab), on_change=self._on_tab, expand=True,
             content=ft.TabBar(tabs=[ft.Tab(label=label, height=34) for _name, label in BOX_TABS], scrollable=False,
                               label_text_style=LABEL_TEXT, unselected_label_text_style=LABEL_TEXT,
-                              label_padding=ft.Padding.symmetric(horizontal=6),  # three tabs on one line
+                              label_padding=ft.Padding.symmetric(horizontal=6),  # the tabs on one line
                               divider_height=0, key=f"box-tabbar-{n}"),
             key=f"box-tabs-{n}")
         self.ocr_body = ft.Column([
@@ -210,6 +275,12 @@ class BoxPanel:
             ft.Row([*self.nudge_buttons, self.step_button, *self.size_buttons], spacing=0,
                    scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=4, tight=True, visible=self.tab == "move", key=f"box-move-body-{n}")
+        self.style_body = ft.Column([
+            ft.Row([self.font_dropdown, self.size_field, self.reset_style_button], spacing=4,
+                   scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([*self.style_toggles.values(), *self.align_buttons.values(), self.color_menu], spacing=0,
+                   scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=4, tight=True, visible=self.tab == "style", key=f"box-style-body-{n}")
         self.close_button = ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Done", key="box-close",
                                           size_constraints=HIT_TARGET,
                                           on_click=lambda e: on_close() if on_close else None)
@@ -221,6 +292,7 @@ class BoxPanel:
                 self.ocr_body,
                 self.translation_body,
                 self.move_body,
+                self.style_body,
             ], spacing=2, tight=True),
             padding=ft.Padding.only(left=8, right=0, top=0, bottom=4), bgcolor=ft.Colors.SURFACE_CONTAINER,
             border_radius=tokens.RADII["field"], border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
@@ -235,7 +307,7 @@ class BoxPanel:
         self.select_tab(BOX_TABS[max(0, min(index, len(BOX_TABS) - 1))][0])
 
     def select_tab(self, name: str) -> None:
-        """Show the ``ocr`` or ``translated`` tab."""
+        """Show the ``ocr`` / ``translated`` / ``move`` / ``style`` tab."""
         names = [n for n, _label in BOX_TABS]
         if name not in names:
             return
@@ -244,6 +316,7 @@ class BoxPanel:
         self.ocr_body.visible = name == "ocr"
         self.translation_body.visible = name == "translated"
         self.move_body.visible = name == "move"
+        self.style_body.visible = name == "style"
         push(self.control)
 
     # ---- Move ---------------------------------------------------------------------------------------
@@ -318,6 +391,28 @@ class BoxPanel:
 
     def act(self, name: str) -> Any:
         return self.on_action(name, self.index, self.changes())
+
+    # ---- Style --------------------------------------------------------------------------------------
+
+    def set_style(self, **changes: Any) -> Any:
+        """A Style tab change (None / False: back to the Rendering Settings for that entry), saved with
+        any typed text; the editor stores it and re-renders the page."""
+        return self.on_action("style", self.index, {**self.changes(), "style": changes})
+
+    def set_size(self, text: str) -> Any:
+        """The size field: a px value, or empty / 0 for Auto."""
+        text = str(text or "").strip()
+        try:
+            size = int(float(text)) if text else 0
+        except ValueError:
+            self.size_field.error_text = "A number of px, or empty for Auto"
+            push(self.size_field)
+            return None
+        self.size_field.error_text = None
+        return self.set_style(font_size=size if size > 0 else None)
+
+    def reset_style(self) -> Any:
+        return self.on_action("style", self.index, {**self.changes(), "style": None})
 
     def set_flag(self, name: str, value: Any) -> Any:
         """A box flag from the ⋯ menu (free text, exclude, iterations), saved with any typed text."""
