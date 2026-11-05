@@ -135,31 +135,61 @@
         <!-- Manga -->
         <div class="feature flip">
           <div class="feature-copy">
-            <span class="feature-tag">🎌 Manga translation</span>
+            <span class="feature-tag">🎌 Manga &amp; webtoon translation</span>
             <h3>Clean, typeset manga and webtoon pages.</h3>
-            <p>Glossarion finds every speech bubble, reads the text, removes it from the art and letters the translation back in. The AI sees the whole page, so expressions and context shape the wording.</p>
+            <p>Glossarion finds every speech bubble, reads the text, removes it from the art and letters the translation back in. The AI sees the whole page, so expressions and context shape the wording. Tall webtoon strips work the same way.</p>
             <ul class="ticks">
               <li>Bubble detection with RT-DETR and YOLO models</li>
               <li>OCR from your vision model, Google, Azure, RapidOCR, manga-ocr and more</li>
-              <li>Local inpainting (LaMa, AOT, anime) or a cloud image-edit model</li>
-              <li>Fonts, colours, outlines, webtoon mode, a page editor and CBZ output</li>
+              <li>Text removal with local models (LaMa, AOT, anime) or an image-edit model such as Gemini Nano Banana</li>
+              <li>A page editor: draw a box around anything detection missed, like a sound effect, and translate it too</li>
+              <li>Fonts, colours, outlines, webtoon mode and CBZ output</li>
             </ul>
             <p class="platform-line">Desktop NoCuda build · Android · iOS (ONNX and cloud engines)</p>
           </div>
-          <figure class="compare" data-compare>
+          <div>
+            <div class="compare-tabs" role="tablist" aria-label="Example">
+              <button type="button" role="tab" aria-selected="true" data-compare-tab="manga">Manga page</button>
+              <button type="button" role="tab" aria-selected="false" data-compare-tab="webtoon">Webtoon strip</button>
+            </div>
+            <figure class="compare" data-compare data-compare-panel="manga">
               <div class="compare-box">
-                <img class="before" src="assets/site/shots/manga-before.webp" alt="Original Japanese manga page" width="900" height="1276" loading="lazy" decoding="async">
+                <img class="before" src="assets/site/shots/manga-before.webp" alt="Original Japanese manga page with speech bubbles and a sound effect" width="900" height="1276" loading="lazy" decoding="async">
                 <img class="after" src="assets/site/shots/manga-after.webp" alt="The same page translated and lettered in English by Glossarion" width="900" height="1276" loading="lazy" decoding="async">
                 <span class="handle"></span>
                 <span class="tag l">Original</span><span class="tag r">Translated</span>
-                <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the original and translated page">
+                <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the original and translated manga page">
               </div>
               <div class="compare-steps" style="grid-template-columns:1fr 1fr" role="group" aria-label="Compare the translated page with">
                 <button type="button" data-left="assets/site/shots/manga-before.webp" data-label="Original" aria-pressed="true">Original ⟷ Translated</button>
                 <button type="button" data-left="assets/site/shots/manga-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
               </div>
-              <figcaption>A real run of the Manga Translator on a test page made from Halgakos art. Drag to compare.</figcaption>
+              <figcaption>Japanese → English. The “ドキッ” sound effect was boxed by hand in the editor; the text was removed with Gemini Nano Banana.</figcaption>
             </figure>
+            <figure class="compare compare-tall" data-compare data-compare-panel="webtoon" hidden>
+              <div class="compare-scroll">
+                <div class="compare-box">
+                <img class="before" src="assets/site/shots/webtoon-before.webp" alt="Original Korean webtoon strip with five panels" width="600" height="3615" loading="lazy" decoding="async">
+                <img class="after" src="assets/site/shots/webtoon-after.webp" alt="The same webtoon strip translated and lettered in English by Glossarion" width="600" height="3615" loading="lazy" decoding="async">
+                <span class="handle"></span>
+                <span class="tag l">Original</span><span class="tag r">Translated</span>
+                <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the original and translated webtoon">
+              </div>
+              </div>
+              <div class="compare-steps" style="grid-template-columns:1fr 1fr" role="group" aria-label="Compare the translated strip with">
+                <button type="button" data-left="assets/site/shots/webtoon-before.webp" data-label="Original" aria-pressed="true">Original ⟷ Translated</button>
+                <button type="button" data-left="assets/site/shots/webtoon-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
+              </div>
+              <figcaption>Korean → English, narration boxes included. Scroll inside the strip; the “두근!” sound effect was added in the editor.</figcaption>
+            </figure>
+            <p class="phone-note" style="text-align:left;margin-top:10px">Real runs of the Manga Translator on test pages made from Halgakos art.</p>
+          </div>
+        </div>
+        <div class="gallery gallery-2" style="margin:8px 0 24px">
+          <figure class="shot"><a href="assets/site/shots/manga-manual-box.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-manual-box.webp" alt="Manga editor with detected bubbles and a hand-drawn box over a sound effect" width="1600" height="842" loading="lazy" decoding="async"></a><figcaption>1 · Detect, then box anything missed (here the sound effect)</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/manga-context-menu.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-context-menu.webp" alt="Region menu with Mark as Free Text, OCR This Text and Clean This Rectangle" width="1100" height="690" loading="lazy" decoding="async"></a><figcaption>2 · Mark it as free text and OCR just that box</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/image-keys.webp" target="_blank" rel="noopener"><img src="assets/site/shots/image-keys.webp" alt="Image Gen and Edit key pool with an image-edit model" width="1300" height="820" loading="lazy" decoding="async"></a><figcaption>3 · Pick the image-edit model that removes the text</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/manga-window.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-window.webp" alt="Manga Translator showing the translated page with the sound effect lettered" width="1600" height="842" loading="lazy" decoding="async"></a><figcaption>4 · Translate: cleaned, translated and lettered</figcaption></figure>
         </div>
 
         <!-- Glossary -->
@@ -302,7 +332,7 @@
           <p>Every screenshot on this page is the real app, run on demo books written for this site. Click any image to see it full size.</p>
         </div>
         <div class="gallery">
-          <figure class="shot"><a href="assets/site/shots/manga-window.webp" target="_blank" rel="noopener"><img src="assets/site/shots/manga-window.webp" alt="Manga Translator window with settings and the translated page" width="1600" height="1039" loading="lazy" decoding="async"></a><figcaption>The Manga Translator window</figcaption></figure>
+          <figure class="shot"><a href="assets/site/shots/webtoon-window.webp" target="_blank" rel="noopener"><img src="assets/site/shots/webtoon-window.webp" alt="Manga Translator with a webtoon strip and six translated regions" width="1600" height="657" loading="lazy" decoding="async"></a><figcaption>Webtoon mode in the Manga Translator</figcaption></figure>
           <figure class="shot"><a href="assets/site/shots/providers.webp" target="_blank" rel="noopener"><img src="assets/site/shots/providers.webp" alt="Model provider prefixes from the welcome guide" width="1200" height="1213" loading="lazy" decoding="async"></a><figcaption>Provider prefixes in the welcome guide</figcaption></figure>
           <figure class="shot"><a href="assets/site/shots/progress-manager.webp" target="_blank" rel="noopener"><img src="assets/site/shots/progress-manager.webp" alt="Progress Manager listing chapters and their status" width="1400" height="730" loading="lazy" decoding="async"></a><figcaption>Progress Manager: retranslate only what you pick</figcaption></figure>
           <figure class="shot"><a href="assets/site/shots/reader-raw.webp" target="_blank" rel="noopener"><img src="assets/site/shots/reader-raw.webp" alt="Reader showing the raw Korean chapter with a Translate button" width="1400" height="693" loading="lazy" decoding="async"></a><figcaption>Raw view with in-reader Translate</figcaption></figure>

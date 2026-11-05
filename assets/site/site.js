@@ -51,7 +51,24 @@
     detectPlatform();
     loadRelease();
     initCompare();
+    initCompareTabs();
   });
+
+  // ----- manga / webtoon example tabs -----
+  function initCompareTabs() {
+    document.querySelectorAll("[data-compare-tab]").forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        var name = tab.getAttribute("data-compare-tab");
+        var group = tab.parentElement;
+        group.querySelectorAll("[data-compare-tab]").forEach(function (t) {
+          t.setAttribute("aria-selected", t === tab ? "true" : "false");
+        });
+        group.parentElement.querySelectorAll("[data-compare-panel]").forEach(function (panel) {
+          panel.hidden = panel.getAttribute("data-compare-panel") !== name;
+        });
+      });
+    });
+  }
 
   // ----- before / after slider -----
   // The range input sets --pos; the step buttons swap which image sits on the left.
@@ -62,6 +79,14 @@
       var before = fig.querySelector("img.before");
       var leftTag = fig.querySelector(".tag.l");
       if (!box || !range) return;
+      // A failed load (e.g. caught mid-deploy) retries once with a cache-busting query.
+      fig.querySelectorAll("img").forEach(function (img) {
+        img.addEventListener("error", function () {
+          if (img.dataset.retried) return;
+          img.dataset.retried = "1";
+          img.src = img.src.split("?")[0] + "?r=" + Date.now();
+        });
+      });
       function update() { box.style.setProperty("--pos", range.value + "%"); }
       range.addEventListener("input", update);
       update();
