@@ -2082,6 +2082,60 @@ def send_chat_completion_aistudio_key(
 # Used by the  authgem-vertex/  prefix (and legacy  send_chat_completion ).
 # ===========================================================================
 
+def _vertex_hostname(location: str) -> str:
+    """Global and multi-region endpoints use dedicated hostnames; normal regions
+    keep the usual {region}-aiplatform.googleapis.com shape."""
+    location = (location or "global").strip().lower()
+    if location == "global":
+        return "aiplatform.googleapis.com"
+    if location in {"us", "eu"}:
+        return f"aiplatform.{location}.rep.googleapis.com"
+    return f"{location}-aiplatform.googleapis.com"
+
+
+def fetch_vertex_models(
+    access_token: str,
+    timeout: int = 15,
+    account_id: int = 0,
+) -> List[str]:
+    """Return the Gemini publisher models Vertex lists for ``VERTEX_LOCATION``.
+
+    ``publishers.models.list`` is not project-scoped, so this works before a
+    billing project is picked.  Embedding and Live (bidi-only) models are left
+    out because the route only calls ``streamGenerateContent``.
+    """
+    del account_id  # the list is the same for every Google account
+    url = f"https://{_vertex_hostname(VERTEX_LOCATION)}/v1beta1/publishers/google/models"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    models: List[str] = []
+    seen = set()
+    page_token = ""
+    for _page in range(20):
+        params = {"pageSize": 200}
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Vertex model list HTTP {resp.status_code}: {resp.text[:240]}")
+        data = resp.json()
+        for entry in data.get("publisherModels", []) or []:
+            model = str(entry.get("name", "") if isinstance(entry, dict) else "").rsplit("/", 1)[-1].strip()
+            key = model.casefold()
+            if (
+                not key.startswith("gemini-")
+                or "embedding" in key
+                or "-live" in key or key.startswith("gemini-live")
+                or key in seen
+            ):
+                continue
+            seen.add(key)
+            models.append(model)
+        page_token = str(data.get("nextPageToken") or "")
+        if not page_token:
+            break
+    return models
+
+
 def send_chat_completion_vertex(
     access_token: str,
     messages: List[Dict],
@@ -2123,14 +2177,7 @@ def send_chat_completion_vertex(
     if "preview" in model.lower() and "GOOGLE_CLOUD_LOCATION" not in os.environ:
         effective_location = "global"
 
-    # Global and multi-region endpoints use dedicated hostnames; normal regions
-    # keep the usual {region}-aiplatform.googleapis.com shape.
-    if effective_location == "global":
-        hostname = "aiplatform.googleapis.com"
-    elif effective_location in {"us", "eu"}:
-        hostname = f"aiplatform.{effective_location}.rep.googleapis.com"
-    else:
-        hostname = f"{effective_location}-aiplatform.googleapis.com"
+    hostname = _vertex_hostname(effective_location)
 
     if effective_location == "global":
         url = (

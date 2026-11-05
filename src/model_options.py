@@ -756,7 +756,6 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
 
 
 STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
-    "authgem-vertex*/": "Vertex publisher inference resources do not expose a list operation",
     "vertex/": "Vertex catalogs are project and region specific",
     "search/": "Search route is a fixed service rather than a model catalog",
     "perplexity/": "The provider catalog currently lists Agent API models, not this chat route",
@@ -770,7 +769,6 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("local/", "local"),
     ("autharena/", "autharena"),
     ("authchatgpt/", "authchatgpt"),
-    ("authgem-vertex/", "static"),
     ("authgrok/", "authgrok"),
     ("authgem-key/", "static"),
     ("ocagy/", "ocagy"),
@@ -946,7 +944,7 @@ def _authenticated_catalog_target(
 ) -> Optional[Tuple[str, str, int, str]]:
     """Return (cache name, dropdown prefix, account id, route) for auth routes."""
     value = str(active_model or "").strip().lower()
-    match = re.match(r"^(authgpt|authnan|authcd|authgem|authnd|authza)(\d{0,4})/", value)
+    match = re.match(r"^(authgpt|authnan|authcd|authgem-vertex|authgem|authnd|authza)(\d{0,4})/", value)
     if not match:
         return None
     route = match.group(1)
@@ -1487,6 +1485,7 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
         "authgpt": "authgpt_auth",
         "authcd": "authcd_auth",
         "authgem": "authgem_auth",
+        "authgem-vertex": "authgem_auth",
         "authza": "glm_proxy",
     }[route]
     module = __import__(module_name)
@@ -1535,6 +1534,7 @@ def _fetch_authenticated_catalog(
             "authgpt": "authgpt_auth",
             "authcd": "authcd_auth",
             "authgem": "authgem_auth",
+            "authgem-vertex": "authgem_auth",
         }[route]
         module = __import__(module_name)
         store = module.get_store(account_id)
@@ -1545,9 +1545,10 @@ def _fetch_authenticated_catalog(
             store = pool[0][1]
         access_token = store.get_valid_access_token(auto_login=False)
         kwargs = {"timeout": max(1, int(round(timeout)))}
-        if route == "authgem":
+        if route in ("authgem", "authgem-vertex"):
             kwargs["account_id"] = account_id
-        raw_models = module.fetch_available_models(access_token, **kwargs)
+        fetch_models = module.fetch_vertex_models if route == "authgem-vertex" else module.fetch_available_models
+        raw_models = fetch_models(access_token, **kwargs)
 
     models = _deduplicate_models(
         model if str(model).casefold().startswith(prefix.casefold()) else f"{prefix}{model}"
@@ -2004,11 +2005,11 @@ def refresh_provider_model_catalogs(
         built_in_names.update(name for name in failed if name.startswith("authgrok"))
         built_in_names.update(
             name for name in successful
-            if name.split(":", 1)[0] in {"authgpt", "authnan", "authcd", "authgem", "authnd", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authnan", "authcd", "authgem", "authgem-vertex", "authnd", "authza"}
         )
         built_in_names.update(
             name for name in failed
-            if name.split(":", 1)[0] in {"authgpt", "authnan", "authcd", "authgem", "authnd", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authnan", "authcd", "authgem", "authgem-vertex", "authnd", "authza"}
         )
         for name in failed:
             if name in built_in_names:
