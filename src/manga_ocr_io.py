@@ -18,11 +18,85 @@ EDITOR_STATE_KEYS = (
     "translated_texts",
     "overlay_rects",
     "last_render_positions",
+    "region_styles",
 )
+#: Per-box text style (the manual editor's Format toolbar), stored in a page's editor state as
+#: ``region_styles`` = {"<region index>": style} and carried by an exported region as ``style``.
+REGION_STYLE_KEYS = ("font", "font_size", "bold", "italic", "underline", "align", "color")
+REGION_STYLE_MAX_FONT_SIZE = 512
 
 
 class MangaOcrFormatError(ValueError):
     """Raised when a selected file is not a supported manga OCR export."""
+
+
+def normalize_region_style(style: Any) -> Dict[str, Any]:
+    """A box's text style with only valid, non-default entries ({} = render with Rendering Settings).
+
+    ``font``: a font file path; ``font_size``: px (absent = Auto fit); ``bold`` / ``italic`` /
+    ``underline``: True; ``align``: "left" or "right" (absent = centered); ``color``: [r, g, b].
+    """
+    if not isinstance(style, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    font = style.get("font")
+    if isinstance(font, str) and font.strip():
+        out["font"] = font.strip()
+    size = style.get("font_size")
+    if size not in (None, "") and not isinstance(size, bool):
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            out["font_size"] = min(size, REGION_STYLE_MAX_FONT_SIZE)
+    for key in ("bold", "italic", "underline"):
+        if style.get(key) is True:
+            out[key] = True
+    align = str(style.get("align") or "").strip().lower()
+    if align in ("left", "right"):
+        out["align"] = align
+    color = style.get("color")
+    if isinstance(color, (list, tuple)) and len(color) >= 3:
+        try:
+            rgb = [int(channel) for channel in color[:3]]
+        except (TypeError, ValueError):
+            rgb = None
+        if rgb is not None and all(0 <= channel <= 255 for channel in rgb):
+            out["color"] = rgb
+    return out
+
+
+def region_styles_from_state(state: Any) -> Dict[int, Dict[str, Any]]:
+    """The page's per-box styles by region index (empty / invalid entries dropped)."""
+    styles: Dict[int, Dict[str, Any]] = {}
+    raw = state.get("region_styles") if isinstance(state, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return styles
+    for key, value in raw.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        style = normalize_region_style(value)
+        if style and index >= 0:
+            styles[index] = style
+    return styles
+
+
+def set_region_style(state: Dict[str, Any], index: int, style: Any) -> Dict[str, Any]:
+    """Store box ``index``'s style in ``state`` (an empty style removes it); returns the stored style."""
+    styles = {str(key): value for key, value in region_styles_from_state(state).items()}
+    normalized = normalize_region_style(style)
+    if normalized:
+        styles[str(int(index))] = normalized
+    else:
+        styles.pop(str(int(index)), None)
+    if styles:
+        state["region_styles"] = styles
+    else:
+        state.pop("region_styles", None)
+    return normalized
 
 
 def _json_safe(value: Any) -> Any:
@@ -282,6 +356,8 @@ def canonical_regions_from_editor_state(state: Mapping[str, Any]) -> List[Dict[s
         except (TypeError, ValueError):
             continue
 
+    styles = region_styles_from_state(state)
+
     count = max(
         len(bases),
         (max(recognized_by_index) + 1) if recognized_by_index else 0,
@@ -308,6 +384,8 @@ def canonical_regions_from_editor_state(state: Mapping[str, Any]) -> List[Dict[s
 
         if isinstance(translated, dict):
             base["translated_text"] = translated.get("translation")
+        if styles.get(index):
+            base["style"] = styles[index]
         base.setdefault("rect_index", index)
         regions.append(serialize_region(base))
     return regions
@@ -327,8 +405,12 @@ def editor_state_from_page(page: Mapping[str, Any]) -> Dict[str, Any]:
     viewer_rectangles = []
     recognized_texts = []
     translated_texts = []
+    region_styles: Dict[str, Any] = {}
     for index, raw_region in enumerate(page.get("regions") or []):
         region = serialize_region(raw_region)
+        style = normalize_region_style(region.get("style"))
+        if style:
+            region_styles[str(index)] = style
         bbox = list(region.get("bounding_box") or region.get("bbox") or [0, 0, 1, 1])
         if len(bbox) < 4:
             bbox = [0, 0, 1, 1]
@@ -384,6 +466,8 @@ def editor_state_from_page(page: Mapping[str, Any]) -> Dict[str, Any]:
     }
     if translated_texts:
         state["translated_texts"] = translated_texts
+    if region_styles:
+        state["region_styles"] = region_styles
 
     if saved_state:
         # Keep the editor's richer geometry/overlay metadata, while treating the
@@ -422,4 +506,7 @@ def region_record_to_text_region(record: Mapping[str, Any], text_region_class: A
     for key in ("bubble_type", "should_inpaint", "shape", "polygon", "rect_index"):
         if normalized.get(key) is not None:
             setattr(region, key, copy.deepcopy(normalized[key]))
+    style = normalize_region_style(normalized.get("style"))
+    if style:
+        region.style = style
     return region

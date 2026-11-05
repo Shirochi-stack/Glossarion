@@ -118,6 +118,8 @@ jobs:
           tests/test_u7_tool_cores.py \
           tests/test_manga_env.py \
           tests/test_manga_editor_core.py \
+          tests/test_manga_text_style.py \
+          tests/test_manga_format_toolbar.py \
           tests/test_manga_models.py \
           tests/test_hayai_ocr.py \
           tests/test_google_vision_rest.py \

@@ -60,7 +60,7 @@ from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.components.empty_state import faded_mascot
 from glossarion_mobile.ui.tools.common import JobWatch, hint_text
 from glossarion_mobile.ui.tools.manga.box_sheet import COMPACT_BUTTON, ITERATION_CHOICES, BoxPanel, box_signature
-from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, push
+from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, font_choices, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
 __all__ = ["EditorTab", "Geometry", "PageLayout", "TOOLS", "VIEWS", "ViewTransform", "crop_patches", "handle_at",
@@ -832,7 +832,8 @@ class EditorTab(MangaTab):
                          on_iterations=lambda i: self.open_iterations(i),
                          on_geometry=lambda i, values: self.ctx.spawn(self.set_box_geometry(i, values)),
                          on_close=self.deselect, busy_reason=reasons[0], steps_reason=reasons[1],
-                         tab=self.panel_tab, **({"step": self.nudge_step} if self.nudge_step else {}))
+                         tab=self.panel_tab, fonts=self._style_fonts(),
+                         **({"step": self.nudge_step} if self.nudge_step else {}))
         if typing is not None:
             panel.keep_typing(typing)
             panel.set_geometry(box)
@@ -841,6 +842,18 @@ class EditorTab(MangaTab):
         self.panel = panel
         self.ctx.extras["manga_box_panel"] = panel
         self.panel_holder.content = panel.control
+
+    def _style_fonts(self) -> list:
+        """The fonts the box Style tab offers (the Rendering › Font list), read once per editor."""
+        fonts = getattr(self, "_style_font_list", None)
+        if fonts is None:
+            try:
+                fonts = font_choices(self.ctx.config_snapshot())
+            except Exception:
+                log.debug("style font list failed", exc_info=True)
+                fonts = []
+            self._style_font_list = fonts
+        return fonts
 
     def _sync_panel_room(self) -> None:
         """The page frame gets (or gives back) the blank room under the page for the box panel."""
@@ -1723,11 +1736,18 @@ class EditorTab(MangaTab):
                     es.set_box_excluded(index, changes["exclude_from_clean"])
                 if "inpaint_iterations" in changes:
                     es.set_box_iterations(index, changes["inpaint_iterations"])
+                if "style" in changes:  # the Style tab (None: Reset)
+                    es.set_box_style(index, changes["style"], reset=changes["style"] is None)
 
             if not await self._box_call(apply):
                 return None
         if name == "save":
             return None
+        if name == "style":
+            # re-render the page with the box's new style (Save & Update Overlay) once it has a translation
+            if not any(str(box.get("translation") or "").strip() for box in self.boxes):
+                return None
+            return await self.run_step("render")
         if name == "delete":
             self.selected = index
             await self.delete_selected()

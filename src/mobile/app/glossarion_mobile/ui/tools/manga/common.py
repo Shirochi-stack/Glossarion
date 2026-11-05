@@ -14,8 +14,8 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import icon_data
 
-__all__ = ["CHIP_STATUS", "JobEnds", "MangaTab", "TranslationModel", "export_sheet", "option_chip", "push",
-           "reason_or_chip"]
+__all__ = ["CHIP_STATUS", "JobEnds", "MangaTab", "TranslationModel", "export_sheet", "font_choices", "option_chip",
+           "push", "reason_or_chip"]
 
 log = logging.getLogger("glossarion.tools.manga")
 
@@ -42,6 +42,25 @@ def push(*controls: Any) -> None:
             control.update()
         except Exception:  # not mounted (host tests) / detached
             pass
+
+
+def font_choices(cfg: dict) -> list:
+    """Font files a page can render with: the shared core's font catalog (platform folders, src/fonts,
+    imported fonts) + the config's imported ``custom_fonts`` (Rendering › Font, the box Style tab)."""
+    from glossarion_mobile.services import manga as svc
+
+    found: list = []
+    catalog = svc.core_attr("manga_settings_defaults", "available_fonts", "list_fonts")
+    if callable(catalog):
+        try:
+            found.extend(str(p) for p in catalog(cfg) or ())
+        except Exception:
+            log.debug("font catalog failed", exc_info=True)
+    for entry in (cfg or {}).get("custom_fonts") or []:
+        path = entry.get("path") if isinstance(entry, dict) else entry
+        if path and os.path.isfile(str(path)) and str(path) not in found:
+            found.append(str(path))
+    return found
 
 
 class JobEnds:

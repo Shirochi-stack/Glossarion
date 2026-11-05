@@ -1618,6 +1618,14 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                         clean_action.triggered.connect(make_clean_handler(actual_index, rect_item))
                     menu.addAction(clean_action)
                     
+                    # Text format submenu (the preview's Format toolbar: per-box font, size, style, colour)
+                    try:
+                        format_toolbar = getattr(getattr(self, 'image_preview_widget', None), 'format_toolbar', None)
+                        if format_toolbar is not None:
+                            format_toolbar.add_context_menu(menu, actual_index)
+                    except Exception as format_err:
+                        print(f"[FORMAT] Text format menu unavailable: {format_err}")
+                    
                     # Add "Delete Selected" option
                     delete_action = QAction("🗑️ Delete Selected", menu)
                     def make_delete_handler(idx, rect):

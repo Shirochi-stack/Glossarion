@@ -3614,6 +3614,13 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         self.image_preview_widget.export_ocr_clicked.connect(self._export_manual_ocr_text)
         self.image_preview_widget.translate_all_clicked.connect(lambda: ImageRenderer._on_translate_all_clicked(self))
         
+        # Format toolbar (per-box font, size, bold / italic / underline, alignment, colour)
+        try:
+            from manga_format_toolbar import install_format_toolbar
+            install_format_toolbar(self.image_preview_widget, self)
+        except Exception as format_err:
+            print(f"[FORMAT] Format toolbar unavailable: {format_err}")
+        
         # Connect viewer click signal to sync file list selection with current image
         self.image_preview_widget.viewer.viewer_clicked.connect(self._sync_file_selection_to_preview)
         

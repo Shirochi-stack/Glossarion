@@ -237,7 +237,7 @@ def test_box_panel_ocr_and_translated_tabs():
     actions = []
     box = {"ocr_text": "原文", "translation": "Hi", "free_text": False, "exclude_from_clean": False}
     panel = BoxPanel(box, 2, on_action=lambda *a: actions.append(a))
-    assert [label for _name, label in BOX_TABS] == ["OCR", "Translated", "Move"]
+    assert [label for _name, label in BOX_TABS] == ["OCR", "Translated", "Move", "Style"]
     assert panel.translation_field.value == "Hi" and panel.ocr_field.value == "原文"
     assert not panel.ocr_field.read_only and not panel.translate_button.disabled
     assert panel.tab == "translated" and panel.translation_body.visible and not panel.ocr_body.visible
