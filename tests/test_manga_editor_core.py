@@ -226,6 +226,14 @@ EDITS = (
     # a page OpenCV may not decode is not decoded by Pillow either (tests/test_cv2_decode_gate.py)
     ("_render_with_manga_translator",
      "            pil_image = open_image(image_path)\n", "            pil_image = open_page_image(image_path)\n"),
+    # Owner-approved fix (2026-11-06, PR 129): Translate's fallback load of the endpoint-backed
+    # custom image edit runs in-process, as MangaTranslator's shared getter loads it; a worker
+    # process never received the Image Gen/Edit key model (tests/test_manga_image_edit_pool_load.py).
+    ("_load_inpainter_into_pool",
+     "    new_inpainter = LocalInpainter()\n",
+     "    # The endpoint-backed image edit runs in-process, as MangaTranslator's shared getter loads it:\n"
+     "    # a worker process never receives the Image Gen/Edit key model copied into config below.\n"
+     "    new_inpainter = LocalInpainter(enable_worker_process=not is_custom_image_edit)\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen

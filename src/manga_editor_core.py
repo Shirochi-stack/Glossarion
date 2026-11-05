@@ -7,14 +7,15 @@ Overlay (re-render) and the per-image editor state of the desktop manga tab
 Layout
 ------
 * **Moved verbatim from ImageRenderer.py** (module functions that take the manga tab as
-  ``self``): ``EDITOR_FUNCTIONS``. Nine carry listed edits (``EDITED_FUNCTIONS``):
+  ``self``): ``EDITOR_FUNCTIONS``. Ten carry listed edits (``EDITED_FUNCTIONS``):
   Qt-only lines became hooks (``_style_recognized_rectangle``,
   ``_confirm_clean_excluded_rectangle``, ``_schedule_rendered_output_refresh``), the editor
   OCR's ``from google.cloud import vision`` falls back to ``google_vision_rest`` when the SDK
   is missing (``_import_google_vision``), and the six page reads go through
   ``safe_image.cv2_imread`` and the render's page open through ``safe_image.open_page_image``
   (the owner-approved OpenCV decoder gate, 2026-10-08; ImageRenderer imports both, so the
-  re-bound bodies resolve them there).
+  re-bound bodies resolve them there), and Translate's fallback inpainter load runs the custom
+  image edit in-process (owner-approved, 2026-11-06).
   The desktop does not import these as plain names: ``bind_editor_namespace(globals())`` in
   ImageRenderer re-binds the same code objects to ImageRenderer's namespace, so on the desktop
   they still call ImageRenderer's Qt helpers (box drawing, pulses, overlays, button states) and
@@ -8934,7 +8935,7 @@ EDITOR_FUNCTIONS = (
 )
 #: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback, the
 #: safe_image page reads: cv2_imread, open_page_image).
-EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync',)
+EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',)
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).

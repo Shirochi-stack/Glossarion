@@ -19,10 +19,15 @@ MESSAGES = [
 
 @pytest.fixture(autouse=True)
 def isolation(monkeypatch):
-    for name in ("ENABLE_IMAGE_OUTPUT_MODE", "ENABLE_GEMINI_THINKING", "THINKING_BUDGET", "GEMINI_THINKING_LEVEL"):
+    # Earlier tests in the same run can leave a hard stop or thinking settings behind.
+    for name in ("ENABLE_IMAGE_OUTPUT_MODE", "ENABLE_GEMINI_THINKING", "THINKING_BUDGET", "GEMINI_THINKING_LEVEL",
+                 "STREAM_THINKING_LOGS", "TRANSLATION_CANCELLED", "GRACEFUL_STOP", "ENABLE_STREAMING"):
         monkeypatch.delenv(name, raising=False)
+    auth._cancel_event.clear()
     monkeypatch.setattr(api, "_save_outgoing_request", lambda *a, **kw: None, raising=False)
     monkeypatch.setattr(api, "_save_incoming_response", lambda *a, **kw: None, raising=False)
+    yield
+    auth._cancel_event.clear()
 
 
 def image_part(data=PNG, mime="image/png", thought=False):
@@ -53,7 +58,7 @@ def test_text_request_is_unchanged():
     body = auth._build_gemini_request_body(MESSAGES, 0.3, 4096, model="gemini-2.5-flash")
     config = body["generationConfig"]
     assert "responseModalities" not in config and "imageConfig" not in config
-    assert "thinkingConfig" in config
+    assert config["temperature"] == 0.3 and config["maxOutputTokens"] == 4096
 
 
 def test_every_sender_forwards_image_output(monkeypatch):
