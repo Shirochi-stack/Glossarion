@@ -50,7 +50,32 @@
 
     detectPlatform();
     loadRelease();
+    initCompare();
   });
+
+  // ----- before / after slider -----
+  // The range input sets --pos; the step buttons swap which image sits on the left.
+  function initCompare() {
+    document.querySelectorAll("[data-compare]").forEach(function (fig) {
+      var box = fig.querySelector(".compare-box");
+      var range = fig.querySelector("input[type=range]");
+      var before = fig.querySelector("img.before");
+      var leftTag = fig.querySelector(".tag.l");
+      if (!box || !range) return;
+      function update() { box.style.setProperty("--pos", range.value + "%"); }
+      range.addEventListener("input", update);
+      update();
+      fig.querySelectorAll("[data-left]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          before.src = btn.getAttribute("data-left");
+          if (leftTag) leftTag.textContent = btn.getAttribute("data-label");
+          fig.querySelectorAll("[data-left]").forEach(function (b) {
+            b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+          });
+        });
+      });
+    });
+  }
 
   // ----- platform detection -----
   var OS_NAMES = { windows: "Windows", macos: "macOS", linux: "Linux", android: "Android", ios: "iOS" };
