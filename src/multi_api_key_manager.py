@@ -2455,6 +2455,9 @@ class MultiAPIKeyDialog(QDialog):
     API_KEY_TREE_MIN_HEIGHT = 150
     API_KEY_TREE_MAX_HEIGHT = 1200
     API_KEY_TREE_UNBOUNDED_HEIGHT = 16777215
+    # pools whose key list is folded with "▼ Hide keys" ({pool: True}); view state only, the
+    # pool's enable switch is separate
+    API_KEY_POOL_COLLAPSED_CONFIG = 'multi_api_key_collapsed_pools'
 
     @staticmethod
     def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
@@ -2551,6 +2554,15 @@ class MultiAPIKeyDialog(QDialog):
                     self._api_key_tree_heights[str(tree_id)] = self._bounded_api_key_tree_height(height)
                 except Exception:
                     continue
+        configured_collapsed_pools = (
+            getattr(self.translator_gui, 'config', {}) or {}
+        ).get(self.API_KEY_POOL_COLLAPSED_CONFIG, {})
+        self._collapsed_key_pools = (
+            {str(pool) for pool, collapsed in configured_collapsed_pools.items() if collapsed}
+            if isinstance(configured_collapsed_pools, dict) else set()
+        )
+        self._pool_section_bodies = {}
+        self._pool_collapse_buttons = {}
 
         self.key_pool = APIKeyPool("Multi-key manager pool")
 
@@ -2680,15 +2692,20 @@ class MultiAPIKeyDialog(QDialog):
             return
 
         if persist:
-            try:
-                config = getattr(self.translator_gui, 'config', None)
-                if isinstance(config, dict):
-                    config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
-                save_config = getattr(self.translator_gui, 'save_config', None)
-                if callable(save_config):
-                    save_config(show_message=False)
-            except Exception:
-                pass
+            config = getattr(self.translator_gui, 'config', None)
+            if isinstance(config, dict):
+                config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
+            self._save_manager_view_settings()
+
+    def _save_manager_view_settings(self):
+        """Save the config after one of the manager's own view settings (key-tree heights, folded
+        pools) was stored in it."""
+        try:
+            save_config = getattr(self.translator_gui, 'save_config', None)
+            if callable(save_config):
+                save_config(show_message=False)
+        except Exception:
+            pass
 
     def _reset_api_key_tree_height(self, tree, tree_id, persist=True):
         """Remove one saved height and restore layout-managed tree sizing."""
@@ -2711,15 +2728,10 @@ class MultiAPIKeyDialog(QDialog):
             return
 
         if persist:
-            try:
-                config = getattr(self.translator_gui, 'config', None)
-                if isinstance(config, dict):
-                    config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
-                save_config = getattr(self.translator_gui, 'save_config', None)
-                if callable(save_config):
-                    save_config(show_message=False)
-            except Exception:
-                pass
+            config = getattr(self.translator_gui, 'config', None)
+            if isinstance(config, dict):
+                config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
+            self._save_manager_view_settings()
 
     @staticmethod
     def _api_key_tree_resize_event_y(event):
@@ -4472,6 +4484,73 @@ class MultiAPIKeyDialog(QDialog):
             finally:
                 self._initializing = previous
 
+    # ---- folding a pool's key list (▼ Hide keys / ▶ Show keys): view state only, separate from
+    # the pool's enable switch, so hiding a list never switches the pool off
+    def _pool_enable_row(self, pool_name, checkbox, icon, row_layout):
+        """The enable row of a dedicated pool section: spinning icon, enable switch and, on the
+        right, the fold button. The switch takes focus only from a click, so a stray Space typed
+        while tabbing through the dialog cannot flip it."""
+        checkbox.setFocusPolicy(Qt.ClickFocus)
+        row_layout.addWidget(icon)
+        row_layout.addWidget(checkbox)
+        row_layout.addStretch()
+        if getattr(self, 'preview_pool', None):
+            return   # the one-pool view always shows its list
+        button = QPushButton()
+        button.setStyleSheet(
+            "QPushButton { background: transparent; color: #aaa; border: none; "
+            "text-align: right; padding: 2px 8px; font-size: 9pt; }"
+            "QPushButton:hover { color: #ddd; }"
+        )
+        button.setFixedHeight(22)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setAutoDefault(False)
+        button.clicked.connect(
+            lambda _checked=False, p=pool_name: self._set_pool_collapsed(p, not self._pool_collapsed(p)))
+        self._pool_collapse_buttons[pool_name] = button
+        row_layout.addWidget(button)
+
+    def _create_pool_section_body(self, pool_name, frame_layout):
+        """The part of a pool section below its enable row (add-key form and key list), as one
+        widget the fold button hides; returns the layout the section builds into."""
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.addWidget(body)
+        self._pool_section_bodies[pool_name] = body
+        return body_layout
+
+    def _pool_collapsed(self, pool_name):
+        return pool_name in self._collapsed_key_pools and not getattr(self, 'preview_pool', None)
+
+    def _set_pool_collapsed(self, pool_name, collapsed):
+        """Fold or unfold *pool_name*'s key list and remember it; the pool stays as enabled as it was."""
+        if collapsed:
+            self._collapsed_key_pools.add(pool_name)
+        else:
+            self._collapsed_key_pools.discard(pool_name)
+        self._apply_pool_collapse(pool_name)
+        config = getattr(self.translator_gui, 'config', None)
+        if isinstance(config, dict):
+            config[self.API_KEY_POOL_COLLAPSED_CONFIG] = {pool: True for pool in sorted(self._collapsed_key_pools)}
+        self._save_manager_view_settings()
+
+    def _apply_pool_collapse(self, pool_name):
+        """Show the section body when the pool is on and unfolded; the fold button shows only while
+        the pool is on (a switched-off pool has no list to show). Called by every enable handler."""
+        enabled = self._pool_enabled(pool_name)
+        collapsed = self._pool_collapsed(pool_name)
+        body = self._pool_section_bodies.get(pool_name)
+        if body is not None:
+            body.setVisible(enabled and not collapsed)
+        button = self._pool_collapse_buttons.get(pool_name)
+        if button is not None:
+            button.setVisible(enabled)
+            button.setText("▶ Show keys" if collapsed else "▼ Hide keys")
+            button.setToolTip(
+                "Show this pool's add-key form and key list (the pool stays enabled)" if collapsed
+                else "Hide this pool's add-key form and key list (the pool stays enabled)")
+
     def _create_fallback_section(self, parent_layout):
         """Create the fallback keys section at the bottom"""
         # Container that can be hidden
@@ -4535,9 +4614,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_icon.setAlignment(Qt.AlignCenter)
         self.use_fallback_checkbox.toggled.connect(lambda: animate_icon(self.fallback_icon))
 
-        fallback_checkbox_layout.addWidget(self.fallback_icon)
-        fallback_checkbox_layout.addWidget(self.use_fallback_checkbox)
-        fallback_checkbox_layout.addStretch()
+        self._pool_enable_row('fallback', self.use_fallback_checkbox, self.fallback_icon, fallback_checkbox_layout)
 
         fallback_frame_layout.addWidget(fallback_checkbox_container)
 
@@ -4586,7 +4663,8 @@ class MultiAPIKeyDialog(QDialog):
         add_fallback_grid.setColumnStretch(1, 1)
         add_fallback_grid.setColumnStretch(4, 1)
 
-        fallback_frame_layout.addWidget(self.add_fallback_frame)
+        fallback_body_layout = self._create_pool_section_body('fallback', fallback_frame_layout)
+        fallback_body_layout.addWidget(self.add_fallback_frame)
 
         # Row 1: Google Credentials (optional, discretely styled)
         google_creds_label = QLabel("Google Creds:")
@@ -4653,7 +4731,7 @@ class MultiAPIKeyDialog(QDialog):
         self._toggle_fallback_individual_endpoint_fields()
 
         # Fallback keys list
-        self._create_fallback_list(fallback_frame_layout)
+        self._create_fallback_list(fallback_body_layout)
 
         # Add fallback container to parent
         fallback_container_layout.addWidget(fallback_frame)
@@ -5359,6 +5437,7 @@ class MultiAPIKeyDialog(QDialog):
         # Clear selection when disabled
         if hasattr(self, 'fallback_tree') and not enabled:
             self.fallback_tree.clearSelection()
+        self._apply_pool_collapse('fallback')
 
         # === Check if multi-key is also disabled ===
         multikey_enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
@@ -7188,9 +7267,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_icon.setAlignment(Qt.AlignCenter)
         self.use_glossary_keys_checkbox.toggled.connect(lambda: animate_icon(self.glossary_icon))
 
-        glossary_checkbox_layout.addWidget(self.glossary_icon)
-        glossary_checkbox_layout.addWidget(self.use_glossary_keys_checkbox)
-        glossary_checkbox_layout.addStretch()
+        self._pool_enable_row('glossary', self.use_glossary_keys_checkbox, self.glossary_icon, glossary_checkbox_layout)
 
         glossary_frame_layout.addWidget(glossary_checkbox_container)
 
@@ -7225,7 +7302,8 @@ class MultiAPIKeyDialog(QDialog):
         add_glossary_grid.setColumnStretch(1, 1)
         add_glossary_grid.setColumnStretch(4, 1)
 
-        glossary_frame_layout.addWidget(self.add_glossary_frame)
+        glossary_body_layout = self._create_pool_section_body('glossary', glossary_frame_layout)
+        glossary_body_layout.addWidget(self.add_glossary_frame)
 
         # Row 1: Google Credentials
         google_creds_label = QLabel("Google Creds:")
@@ -7289,7 +7367,7 @@ class MultiAPIKeyDialog(QDialog):
         self._toggle_glossary_individual_endpoint_fields()
 
         # Glossary keys list
-        self._create_glossary_list(glossary_frame_layout)
+        self._create_glossary_list(glossary_body_layout)
 
         # Add container to parent
         glossary_container_layout.addWidget(glossary_frame)
@@ -7828,6 +7906,7 @@ class MultiAPIKeyDialog(QDialog):
             self.glossary_action_frame.setVisible(enabled)
         if hasattr(self, 'glossary_tree') and not enabled:
             self.glossary_tree.clearSelection()
+        self._apply_pool_collapse('glossary')
 
         self._show_glossary_status(f"Glossary Keys {'enabled' if enabled else 'disabled'}")
 
@@ -11791,10 +11870,9 @@ class MultiAPIKeyDialog(QDialog):
         icon.setFixedSize(36, 36)
         icon.setAlignment(Qt.AlignCenter)
         checkbox.toggled.connect(lambda _checked=False, icon=icon: animate_icon(icon))
-        toggle_layout.addWidget(icon)
-        toggle_layout.addWidget(checkbox)
-        toggle_layout.addStretch()
+        self._pool_enable_row(pool_name, checkbox, icon, toggle_layout)
         frame_layout.addWidget(toggle_container)
+        body_layout = self._create_pool_section_body(pool_name, frame_layout)
 
         add_frame = QWidget()
         setattr(self, self._dedicated_attr(pool_name, 'add_frame'), add_frame)
@@ -11825,7 +11903,7 @@ class MultiAPIKeyDialog(QDialog):
         add_grid.addWidget(add_btn, 0, 5, Qt.AlignRight)
         add_grid.setColumnStretch(1, 1)
         add_grid.setColumnStretch(4, 1)
-        frame_layout.addWidget(add_frame)
+        body_layout.addWidget(add_frame)
 
         add_grid.addWidget(QLabel("Google Creds:"), 1, 0, Qt.AlignLeft)
         google_entry = QLineEdit()
@@ -11876,7 +11954,7 @@ class MultiAPIKeyDialog(QDialog):
         add_grid.addWidget(api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
         self._dedicated_toggle_endpoint_fields(pool_name)
 
-        self._create_dedicated_key_pool_list(frame_layout, pool_name)
+        self._create_dedicated_key_pool_list(body_layout, pool_name)
         container_layout.addWidget(frame)
         parent_layout.addWidget(container)
         self._dedicated_load_keys(pool_name)
@@ -12248,6 +12326,7 @@ class MultiAPIKeyDialog(QDialog):
         tree = self._dedicated_widget(pool_name, 'tree')
         if tree is not None and not enabled:
             tree.clearSelection()
+        self._apply_pool_collapse(pool_name)
         self.translator_gui.config[spec['toggle_key']] = enabled
         setattr(self.translator_gui, f"use_{pool_name}_keys_var", enabled)
         self._on_pool_enabled_changed(pool_name)
