@@ -261,6 +261,10 @@ def test_text_steps_of_an_image_run_stay_text(monkeypatch, tmp_path, context):
     """translation_pipeline's image glossary calls send_image(context='glossary') with image
     output mode on; the forced image tool would turn its JSON answer into a picture."""
     monkeypatch.setenv("ENABLE_IMAGE_OUTPUT_MODE", "1")
+    # these contexts may route to a dedicated key pool; another test's pool must not leak in (CI order)
+    for pool in ("USE_GLOSSARY_KEYS", "USE_ROLLING_SUMMARY_KEYS", "USE_METADATA_KEYS", "USE_VISION_KEYS",
+                 "USE_FALLBACK_KEYS", "USE_MAIN_KEY_FALLBACK", "USE_MULTI_API_KEYS", "USE_MULTI_KEYS"):
+        monkeypatch.setenv(pool, "0")
     client = make_client(monkeypatch, tmp_path)
     with FakeCodex() as server:
         monkeypatch.setenv("AUTHGPT_BASE_URL", server.base_url)
