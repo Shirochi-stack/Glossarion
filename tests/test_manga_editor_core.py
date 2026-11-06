@@ -227,11 +227,14 @@ EDITS = (
     ("_render_with_manga_translator",
      "            pil_image = open_image(image_path)\n", "            pil_image = open_page_image(image_path)\n"),
     # Owner-approved per-box text formatting (2026-11-06, the Format toolbar): the regions get their
-    # box's style from the page state before the render (_attach_region_styles; no styles: no-op)
+    # box's style from the page state before the render (_attach_region_styles; no styles: no-op),
+    # and the size each box was drawn with goes into the page state after it (owner request
+    # 2026-11-06: the size box shows the real auto size; _record_region_font_sizes)
     ("_render_with_manga_translator",
      "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n",
      "        _attach_region_styles(self, original_image_path or image_path, regions)\n"
-     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"),
+     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"
+     "        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)\n"),
     # Owner-approved fix (2026-11-06, PR 129): Translate's fallback load of the endpoint-backed
     # custom image edit runs in-process, as MangaTranslator's shared getter loads it; a worker
     # process never received the Image Gen/Edit key model (tests/test_manga_image_edit_pool_load.py).
@@ -1452,6 +1455,7 @@ def test_rerender_image_matches_the_frozen_desktop(case, tmp_path):
     assert FONT_PATH.exists(), ("the fixed test font is missing: whitelist tests/fixtures/manga_editor/ "
                                 "in .gitignore so CI checks it out")
     results = {}
+    sizes = {}
     for side in SIDES:
         root = tmp_path / side
         host, page = _render_host(root)
@@ -1459,16 +1463,25 @@ def test_rerender_image_matches_the_frozen_desktop(case, tmp_path):
         assert output and os.path.isfile(output), (side, output, host.logs[-3:])
         rendered = cv2.imread(output)
         source = cv2.imread(page)
+        state = dict(host.image_state_manager.get_state(page))
+        # Owner request 2026-11-06: every render records the size each box was drawn with (the
+        # Format toolbar shows it while the box is on Auto); the frozen desktop has no such key
+        sizes[side] = state.pop('region_font_sizes', None)
         results[side] = (
             _normalize(output, [str(root)]),
             hashlib.sha256(rendered.tobytes()).hexdigest(),
-            _normalize(host.image_state_manager.get_state(page), [str(root)]),
+            _normalize(state, [str(root)]),
             [entry for entry in host.logs if entry[0] != 'debug'],
         )
         assert rendered.shape == source.shape
         assert int(np.count_nonzero(np.any(rendered != source, axis=2))) > 200, "nothing was rendered"
     assert results["desktop"] == results["legacy"]
     assert results["mobile"] == results["legacy"]
+    assert sizes["legacy"] is None
+    assert sizes["desktop"] == sizes["mobile"] and sizes["desktop"]
+    assert all(isinstance(size, (int, float)) and size > 0 for size in sizes["desktop"].values())
+    if case == 'direct':  # box 2 is excluded from the render: no size for it
+        assert set(sizes["desktop"]) == {'0'}
 
 
 # ===========================================================================

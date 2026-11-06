@@ -237,7 +237,8 @@ class TextRegion:
         }
         # Detector metadata is assigned dynamically. Preserve it so imported
         # OCR keeps the same free-text and inpainting behavior as the first run.
-        for key in ('bubble_bounds', 'bubble_type', 'should_inpaint', 'shape', 'polygon', 'rect_index', 'style'):
+        for key in ('bubble_bounds', 'bubble_type', 'should_inpaint', 'shape', 'polygon', 'rect_index', 'style',
+                    'rendered_font_size'):
             value = getattr(self, key, None)
             if value is not None:
                 data[key] = value
@@ -11909,6 +11910,11 @@ class MangaTranslator:
         
         # Get image dimensions for boundary checking
         image_height, image_width = image.shape[:2]
+
+        # The size each region is drawn with (auto fit or a fixed size): the manual editor shows it
+        # (region_font_sizes). A region without a translation draws nothing and records nothing.
+        for region in regions:
+            region.rendered_font_size = None
         
         # OPTIMIZATION: Cache mask creation result
         if not hasattr(self, '_cached_mask') or not hasattr(self, '_cached_mask_regions'):
@@ -12080,6 +12086,7 @@ class MangaTranslator:
                                                                 font_path=style_font_path, font_index=style_font_index)
                 # Fonts
                 font = self._get_font(font_size, font_path=style_font_path, index=style_font_index)
+                region.rendered_font_size = font_size
                 # Mixed font fallback if available (Meiryo for symbols/CJK)
                 # EXCLUDED for custom fonts outside predefined authorized locations
                 # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
@@ -12149,7 +12156,7 @@ class MangaTranslator:
                     
                     # CLIPPING: Ensure text stays within image bounds
                     # Add small padding to account for outline width
-                    ow = max(1, font_size // self.outline_width_factor)
+                    ow = max(1, int(font_size // self.outline_width_factor))  # whole px (a size may be 28.5)
                     padding = ow + 2
                     
                     # Horizontal bounds check
@@ -12347,6 +12354,7 @@ class MangaTranslator:
                 
                 # Load font
                 font = self._get_font(font_size)
+                region.rendered_font_size = font_size
                 
                 # Calculate text layout - use render dimensions
                 # CRITICAL: Use actual text bbox height for accurate positioning
@@ -12398,7 +12406,7 @@ class MangaTranslator:
                     text_y = start_y + i * line_height
                     
                     # CLIPPING: Ensure text stays within image bounds
-                    outline_width = max(1, font_size // self.outline_width_factor)
+                    outline_width = max(1, int(font_size // self.outline_width_factor))
                     padding = outline_width + 2
                     
                     # Horizontal bounds check
@@ -12437,6 +12445,13 @@ class MangaTranslator:
                                             font=font, fill=self.outline_color)
                         draw.text((text_x, text_y), line, font=font, fill=self.text_color)
         
+        # The overlap adjustment drew copies of the regions: give the regions passed in their sizes
+        if adjusted_regions is not regions:
+            for adjusted in adjusted_regions:
+                index = getattr(adjusted, 'original_index', None)
+                if isinstance(index, int) and 0 <= index < len(regions):
+                    regions[index].rendered_font_size = getattr(adjusted, 'rendered_font_size', None)
+
         # Convert back to numpy array
         result_rgb = np.array(pil_image)
         result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
@@ -12925,7 +12940,7 @@ class MangaTranslator:
                     best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     
                     while low <= high:
-                        mid = (low + high) // 2
+                        mid = low if low == high else (low + high) // 2  # a fixed 28.5 is measured at 28.5
                         
                         # Load font at this size
                         try:
@@ -12976,7 +12991,7 @@ class MangaTranslator:
                 best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, _truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
                 
                 while low <= high:
-                    mid = (low + high) // 2
+                    mid = low if low == high else (low + high) // 2  # a fixed 28.5 is measured at 28.5
                     
                     # Load font at this size
                     try:
@@ -13016,7 +13031,7 @@ class MangaTranslator:
             best_wrapped = text
             
             while low <= high:
-                mid = (low + high) // 2
+                mid = low if low == high else (low + high) // 2  # a fixed 28.5 is measured at 28.5
                 
                 # Load font at this size
                 try:
