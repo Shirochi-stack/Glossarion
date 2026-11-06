@@ -1,13 +1,141 @@
 """Completion check for the optional translation glossary gate."""
 
+import hashlib
 import json
 import os
+import re
+
+#: Image inputs; the image-folder glossary keeps one progress file per folder.
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"})
+#: Finish reasons of a reply that was cut off: never an answer, even when it reads as empty.
+_TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens", "truncated"})
+#: JSON wrappers parse_api_response unwraps (``{"entries": [...]}``).
+_JSON_WRAPPER_KEYS = frozenset({"entries", "glossary", "characters", "terms", "data"})
+_THINKING_BLOCK = re.compile(
+    r"<(?:thinking|think|thought)>.*?</(?:thinking|think|thought)>", re.DOTALL | re.IGNORECASE
+)
+_CODE_FENCE = re.compile(r"```[A-Za-z]*\s*(.*?)\s*```", re.DOTALL)
+_COLUMN_NAME = re.compile(r"[a-z_][a-z0-9_ ]*")
+_TABLE_RULE = re.compile(r"[|\s:\-]*-[|\s:\-]*")
+_FENCE_LANGUAGES = frozenset({"csv", "tsv", "text", "txt", "plaintext", "json"})
+
+
+def is_image_source(source_path):
+    return os.path.splitext(str(source_path or ""))[1].lower() in IMAGE_EXTENSIONS
+
+
+def _is_glossary_header_line(line):
+    """``type,raw_name,translated_name[,...]`` (or the name-only header) in any column separator."""
+    line = line.replace("\\x1F", "\x1f").replace("\\x1f", "\x1f")
+    for separator in ("\x1f", "\t", "|", ","):
+        if separator in line:
+            cells = line.split(separator)
+            break
+    else:
+        cells = line.split()
+    names = [cell.strip().strip("\"'`*").strip().lower() for cell in cells]
+    names = [name for name in names if name]
+    if not names or not all(_COLUMN_NAME.fullmatch(name) for name in names):
+        return False
+    return "raw_name" in names and ("type" in names or "translated_name" in names)
+
+
+def is_empty_glossary_answer(response_text, finish_reason=None):
+    """True when a glossary reply means "0 entries": ``[]`` or only the CSV header row.
+
+    An image or chapter without names legitimately has nothing to extract, and the model
+    then answers with the empty list or just the header the prompt asked for. A reply that
+    was cut off (``finish_reason`` "length") is not an answer, and any other text (a
+    refusal, garbage, a partial row) is not empty: those stay failures.
+    """
+    if str(finish_reason or "").strip().lower() in _TRUNCATED_FINISH_REASONS:
+        return False
+    text = _THINKING_BLOCK.sub("", str(response_text or "")).strip()
+    fenced = _CODE_FENCE.fullmatch(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    lines = [line.strip() for line in text.splitlines()]
+    if lines and lines[0].lower() in _FENCE_LANGUAGES:  # "```csv" with the fence already cut off
+        lines = lines[1:]
+    text = "\n".join(lines).strip()
+    if not text:
+        return False
+    try:
+        data = json.loads(text)
+    except ValueError:
+        pass
+    else:
+        if isinstance(data, dict) and data and set(data) <= _JSON_WRAPPER_KEYS:
+            return all(value == [] for value in data.values())
+        return data == []
+    lines = [line for line in lines if line and not line.startswith("#") and not _TABLE_RULE.fullmatch(line)]
+    return bool(lines) and all(_is_glossary_header_line(line) for line in lines)
+
+
+def image_glossary_progress_path(image_path, root):
+    """The ``<folder>_glossary_progress.json`` the image-folder glossary writes for this image.
+
+    Image extraction keeps one progress file per image folder in ``<output>/Glossary`` (an
+    output override) or ``Glossary`` beside the images.
+    """
+    folder = os.path.dirname(os.path.abspath(image_path))
+    name = f"{os.path.basename(folder) or 'images'}_glossary_progress.json"
+    candidates = (
+        os.path.join(root, "Glossary", name),
+        os.path.join(folder, "Glossary", name),
+    )
+    return next((path for path in candidates if os.path.isfile(path)), None)
+
+
+def _image_content_hash(image_path):
+    hasher = hashlib.sha256()
+    with open(image_path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 16), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def image_glossary_complete(progress_path, image_paths):
+    """Return (ready, reason): every image's row in the image-folder progress is done.
+
+    Done is ``completed`` (with any number of entries, 0 included: an image without text
+    is a finished extraction) or a skipped cover. Rows are keyed by the image's content
+    hash, like the extractor's own resume check.
+    """
+    if not progress_path or not os.path.isfile(progress_path):
+        return False, "glossary progress is unavailable"
+    try:
+        with open(progress_path, "r", encoding="utf-8") as stream:
+            progress = json.load(stream)
+    except (OSError, ValueError) as exc:
+        return False, f"glossary progress cannot be read: {exc}"
+    images = progress.get("images") if isinstance(progress, dict) else None
+    if not isinstance(images, dict):
+        images = {}
+    pending = []
+    for image_path in image_paths:
+        name = os.path.basename(image_path)
+        marker = progress.get(f"skip_{name}") if isinstance(progress, dict) else None
+        if isinstance(marker, dict) and marker.get("status") == "skipped":
+            continue
+        try:
+            row = images.get(_image_content_hash(image_path))
+        except OSError:
+            row = None
+        status = str((row or {}).get("status") or "not extracted").lower()
+        if status not in ("completed", "skipped_cover"):
+            pending.append(f"{name}: {status}")
+    if pending:
+        return False, f"image extraction is incomplete ({'; '.join(pending)})"
+    return True, "complete"
 
 
 def progress_path_for_source(source_path, root):
     """Find the progress file written by Balanced/Full extraction."""
     from glossary_paths import get_book_glossary_dir
 
+    if is_image_source(source_path):
+        return image_glossary_progress_path(source_path, root)
     base = os.path.splitext(os.path.basename(source_path))[0]
     shared = os.path.join(root, "Glossary")
     candidates = (
@@ -116,8 +244,15 @@ def refinement_complete(progress, glossary_path, config):
     return True, "complete"
 
 
-def glossary_complete(progress_path, glossary_path, config, *, require_minimal_pass=False, is_epub=False):
-    """Return (ready, reason) using the saved chapter, Minimal and refinement rows."""
+def glossary_complete(progress_path, glossary_path, config, *, require_minimal_pass=False, is_epub=False,
+                      source_path=None):
+    """Return (ready, reason) using the saved chapter, Minimal and refinement rows.
+
+    An image source is checked against its folder's image progress: the image glossary
+    has no chapters, Minimal pass or refinement rows.
+    """
+    if source_path and is_image_source(source_path):
+        return image_glossary_complete(progress_path, [source_path])
     if not progress_path or not os.path.isfile(progress_path):
         return False, "glossary progress is unavailable"
     try:

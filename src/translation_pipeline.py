@@ -1508,6 +1508,7 @@ Important rules:
                             # which handles JSON, CSV with headers, and headerless CSV
                             try:
                                 from extract_glossary_from_epub import parse_api_response
+                                from glossary_translation_gate import is_empty_glossary_answer
                                 parsed_entries = parse_api_response(glossary_json.strip())
                                 entries_for_this_image = []
                                 for entry in parsed_entries:
@@ -1538,6 +1539,16 @@ Important rules:
                                     processed += 1
                                     if all_glossary_entries:
                                         self._save_intermediate_glossary_with_skip(folder_name, all_glossary_entries)
+                                elif is_empty_glossary_answer(
+                                    glossary_json,
+                                    response[1] if isinstance(response, (list, tuple)) and len(response) >= 2 else None,
+                                ):
+                                    # Only the CSV header (or []): an image without names, 0 entries
+                                    self.append_log(f"      ✅ Extracted 0 entries (no names in this image)")
+                                    self.glossary_progress_manager.update(
+                                        image_path, content_hash, status="completed", extracted_data=[]
+                                    )
+                                    processed += 1
                                 else:
                                     raise ValueError("No valid entries found")
                             except Exception:
@@ -1564,6 +1575,11 @@ Important rules:
                     skipped += 1
             
             if not all_glossary_entries:
+                from glossary_translation_gate import image_glossary_complete
+                if image_glossary_complete(self.glossary_progress_manager.PROGRESS_FILE, image_files)[0]:
+                    # Every image finished with 0 entries (no names in them): a completed extraction
+                    self.append_log(f"\n📝 No glossary entries in {len(image_files)} image(s); extraction is complete")
+                    return True
                 self.append_log(f"❌ No glossary entries extracted from any images")
                 return False
             
@@ -4081,6 +4097,7 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                         ),
                         require_minimal_pass=self._glossary_add_minimal_pass_env_value() == '1',
                         is_epub=str(source).lower().endswith('.epub'),
+                        source_path=source,
                     )
                     if not ready:
                         self.append_log(
