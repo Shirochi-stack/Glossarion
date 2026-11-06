@@ -130,6 +130,20 @@ EDITS = {
          "                                    processed += 1\n"
          "                                else:\n"
          '                                    raise ValueError("No valid entries found")\n', 1),
+        # 2026-11-06: a JSON object is unwrapped ({"entries": [...]}, one entry); any other non-list
+        # JSON ({}, {"error": ...}, a quoted sentence) is a failed image, never a 0-entry one
+        ("                            glossary_data = json.loads(glossary_json)\n",
+         "                            glossary_data = json.loads(glossary_json)\n"
+         "                            if isinstance(glossary_data, dict):\n"
+         '                                # {"entries": [...]} (or "glossary", ...) is the list inside; one entry, a list of one\n'
+         "                                glossary_data = next((\n"
+         "                                    value for key, value in glossary_data.items()\n"
+         "                                    if key in ('entries', 'glossary', 'characters', 'terms', 'data')\n"
+         "                                    and isinstance(value, list)\n"
+         "                                ), [glossary_data] if 'raw_name' in glossary_data else glossary_data)\n"
+         "                            if not isinstance(glossary_data, list):\n"
+         '                                # {}, {"error": ...} or a quoted sentence: not a glossary, never "0 entries"\n'
+         '                                raise json.JSONDecodeError("not a JSON glossary array", glossary_json, 0)\n', 1),
         ("            if not all_glossary_entries:\n",
          "            if not all_glossary_entries:\n"
          "                from glossary_translation_gate import image_glossary_complete\n"
@@ -196,7 +210,20 @@ WORKER_EDITS = [
      "                                return\n",
      '                                    "the glossary approval step"\n                                )\n'
      "                                return False\n", 1),
-    # 2026-11-06: an image source is checked against its folder's image glossary progress
+    # 2026-11-06: an image source is checked against its folder's image glossary progress, found in the
+    # image-folder glossary's own folder (beside the first selected file without an output override)
+    ("                    progress_path = progress_path_for_source(source, source_root)\n"
+     "                    base = os.path.splitext(os.path.basename(source))[0]\n",
+     "                    progress_path = progress_path_for_source(\n"
+     "                        source, source_root,\n"
+     "                        # the image-folder glossary's own folder (run_glossary_extraction_direct)\n"
+     "                        image_glossary_dir=os.path.join(\n"
+     "                            os.path.dirname(os.path.abspath(self.selected_files[0])),\n"
+     "                            os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory') or '',\n"
+     '                            "Glossary",\n'
+     "                        ),\n"
+     "                    )\n"
+     "                    base = os.path.splitext(os.path.basename(source))[0]\n", 1),
     ("                        is_epub=str(source).lower().endswith('.epub'),\n",
      "                        is_epub=str(source).lower().endswith('.epub'),\n"
      "                        source_path=source,\n", 1),

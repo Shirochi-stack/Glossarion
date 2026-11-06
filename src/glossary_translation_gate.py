@@ -72,15 +72,18 @@ def is_empty_glossary_answer(response_text, finish_reason=None):
     return bool(lines) and all(_is_glossary_header_line(line) for line in lines)
 
 
-def image_glossary_progress_path(image_path, root):
+def image_glossary_progress_path(image_path, root, image_glossary_dir=None):
     """The ``<folder>_glossary_progress.json`` the image-folder glossary writes for this image.
 
-    Image extraction keeps one progress file per image folder in ``<output>/Glossary`` (an
-    output override) or ``Glossary`` beside the images.
+    Image extraction keeps one progress file per image folder in the run's glossary folder:
+    ``<output>/Glossary`` (an output override), else ``Glossary`` beside the first selected
+    file, which is not beside this image when the images come from several folders. The
+    caller passes that folder as ``image_glossary_dir``; it is looked at first.
     """
     folder = os.path.dirname(os.path.abspath(image_path))
     name = f"{os.path.basename(folder) or 'images'}_glossary_progress.json"
     candidates = (
+        *((os.path.join(image_glossary_dir, name),) if image_glossary_dir else ()),
         os.path.join(root, "Glossary", name),
         os.path.join(folder, "Glossary", name),
     )
@@ -130,12 +133,12 @@ def image_glossary_complete(progress_path, image_paths):
     return True, "complete"
 
 
-def progress_path_for_source(source_path, root):
+def progress_path_for_source(source_path, root, *, image_glossary_dir=None):
     """Find the progress file written by Balanced/Full extraction."""
     from glossary_paths import get_book_glossary_dir
 
     if is_image_source(source_path):
-        return image_glossary_progress_path(source_path, root)
+        return image_glossary_progress_path(source_path, root, image_glossary_dir)
     base = os.path.splitext(os.path.basename(source_path))[0]
     shared = os.path.join(root, "Glossary")
     candidates = (

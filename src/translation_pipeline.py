@@ -1442,6 +1442,16 @@ Important rules:
                             
                             # Parse JSON
                             glossary_data = json.loads(glossary_json)
+                            if isinstance(glossary_data, dict):
+                                # {"entries": [...]} (or "glossary", ...) is the list inside; one entry, a list of one
+                                glossary_data = next((
+                                    value for key, value in glossary_data.items()
+                                    if key in ('entries', 'glossary', 'characters', 'terms', 'data')
+                                    and isinstance(value, list)
+                                ), [glossary_data] if 'raw_name' in glossary_data else glossary_data)
+                            if not isinstance(glossary_data, list):
+                                # {}, {"error": ...} or a quoted sentence: not a glossary, never "0 entries"
+                                raise json.JSONDecodeError("not a JSON glossary array", glossary_json, 0)
                             
                             # Process entries
                             entries_for_this_image = []
@@ -4076,7 +4086,15 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                         and not (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
                         else glossary_root
                     )
-                    progress_path = progress_path_for_source(source, source_root)
+                    progress_path = progress_path_for_source(
+                        source, source_root,
+                        # the image-folder glossary's own folder (run_glossary_extraction_direct)
+                        image_glossary_dir=os.path.join(
+                            os.path.dirname(os.path.abspath(self.selected_files[0])),
+                            os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory') or '',
+                            "Glossary",
+                        ),
+                    )
                     base = os.path.splitext(os.path.basename(source))[0]
                     glossary_path = next((
                         os.path.join(os.path.dirname(progress_path), f'{base}_glossary{ext}')

@@ -215,3 +215,72 @@ def test_gate_reads_the_folder_progress_under_an_output_override(tmp_path):
     progress_path.write_text(json.dumps({"images": {digest: {"status": "skipped_cover"}}}), encoding="utf-8")
     assert progress_path_for_source(str(image), str(out)) == str(progress_path)
     assert image_glossary_complete(str(progress_path), [str(image)]) == (True, "complete")
+
+
+def test_gate_finds_a_second_folders_progress_beside_the_first_selected_file(tmp_path):
+    """Without an output override every image folder's progress goes to Glossary beside the
+    first selected file; the worker passes that folder as ``image_glossary_dir``."""
+    first = tmp_path / "Chikuwa" / "a.png"
+    second = tmp_path / "other" / "Gari" / "b.png"
+    for image in (first, second):
+        image.parent.mkdir(parents=True)
+        image.write_bytes(image.name.encode())
+    glossary_dir = first.parent / "Glossary"
+    glossary_dir.mkdir()
+    import hashlib
+    progress_path = glossary_dir / "Gari_glossary_progress.json"
+    progress_path.write_text(json.dumps({"images": {
+        hashlib.sha256(b"b.png").hexdigest(): {"status": "completed"}}}), encoding="utf-8")
+    cwd_root = str(tmp_path / "cwd")
+    assert progress_path_for_source(str(second), cwd_root) is None
+    found = progress_path_for_source(str(second), cwd_root, image_glossary_dir=str(glossary_dir))
+    assert found == str(progress_path)
+    assert glossary_complete(found, None, {}, source_path=str(second)) == (True, "complete")
+
+
+def test_worker_gate_passes_the_image_glossary_folder():
+    """The pre-translation gate looks where run_glossary_extraction_direct wrote the image progress."""
+    text = (SRC / "translation_pipeline.py").read_text(encoding="utf-8")
+    gate = text[text.index("from glossary_translation_gate import glossary_complete, progress_path_for_source"):]
+    gate = gate[:gate.index("Translation blocked for")]
+    assert "image_glossary_dir=os.path.join(" in gate
+    assert "os.path.dirname(os.path.abspath(self.selected_files[0]))" in gate
+    assert "source_path=source" in gate
+
+
+ENTRY = {"type": "character", "raw_name": "김철수", "translated_name": "Kim Cheolsu", "gender": "Male"}
+
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"entries": [ENTRY]}, ensure_ascii=False),
+    json.dumps({"glossary": [ENTRY]}, ensure_ascii=False),
+    json.dumps(ENTRY, ensure_ascii=False),
+])
+def test_json_object_reply_keeps_its_entries(image_owner, reply):
+    """A wrapped list or a single entry object is the glossary, not an image with 0 entries."""
+    image_owner.replies = [(reply, "stop")]
+    assert image_owner._process_image_folder_for_glossary("Chikuwa", [image_owner.image], image_owner.glossary_dir)
+    log = "\n".join(image_owner.logs)
+    assert "Extracted 1 total entries" in log
+    assert "No glossary entries in" not in log
+    assert _image_rows(image_owner) == ["completed"]
+    glossary = json.loads((Path(image_owner.glossary_dir) / "Chikuwa_glossary.json").read_text(encoding="utf-8"))
+    assert "김철수" in json.dumps(glossary, ensure_ascii=False)
+
+
+def test_empty_wrapped_json_list_is_zero_entries(image_owner, tmp_path):
+    image_owner.replies = [('{"entries": []}', "stop")]
+    assert image_owner._process_image_folder_for_glossary("Chikuwa", [image_owner.image], image_owner.glossary_dir)
+    assert _image_rows(image_owner) == ["completed"]
+    assert _gate(image_owner, tmp_path) == (True, "complete")
+
+
+@pytest.mark.parametrize("reply", ["{}", '{"error": "cannot read the image"}', '"I cannot read any text"', "42"])
+def test_json_that_is_not_a_glossary_stays_a_failure(image_owner, tmp_path, reply):
+    """Before the fix these were "completed with 0 entries", so the folder now counted as done."""
+    image_owner.replies = [(reply, "stop")]
+    assert not image_owner._process_image_folder_for_glossary(
+        "Chikuwa", [image_owner.image], image_owner.glossary_dir)
+    assert "No glossary entries extracted from any images" in "\n".join(image_owner.logs)
+    assert _image_rows(image_owner) == ["error"]
+    assert not _gate(image_owner, tmp_path)[0]
