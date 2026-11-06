@@ -10,6 +10,9 @@
   import round trip (per-region ``style`` and the saved editor state) and ``TextRegion`` records.
 * A: ``manga_editor_core._attach_region_styles`` (styles onto the regions a render path built) and
   ``_update_region_styles`` / ``_clear_region_styles``.
+* Z: the size each region is drawn with (``rendered_font_size``, recorded per box in the page state
+  as ``region_font_sizes`` by ``_record_region_font_sizes`` and by a batch page's editor state) and
+  0.5 px sizes (normalized, drawn, wrapped at that size, exported).
 
 Fixed font: tests/fixtures/manga_editor/DejaVuSans-Latin.ttf (DejaVu Sans, Latin subset).
 """
@@ -530,3 +533,153 @@ def test_style_change_survives_a_render_that_holds_the_page_state(tmp_path):
 
 def test_attach_region_styles_reaches_the_desktop_namespace():
     assert '_attach_region_styles' in core.SHARED_NAMES
+
+
+# ===========================================================================
+# Z: the size each box is rendered at, and 0.5 px sizes (owner requests 2026-11-06)
+# ===========================================================================
+
+def test_render_records_the_size_each_region_was_drawn_with():
+    """Auto fit and fixed sizes alike, on the regions passed in (the overlap adjustment draws copies
+    of them, in parallel); a region without a translation records nothing."""
+    translator = _translator()
+    assert translator.constrain_to_bubble  # the copying path (_adjust_overlapping_regions)
+    regions = _regions([("Hello there friend", None), ("World", {'font_size': 21.5})])
+    translator.render_translated_text(_page(), regions)
+    auto, fixed = regions[0].rendered_font_size, regions[1].rendered_font_size
+    assert isinstance(auto, (int, float)) and 6 <= auto <= 200
+    assert fixed == 21.5
+    assert regions[0].to_dict()['rendered_font_size'] == auto
+    empty = _regions([("", None), ("Hi", None)])
+    empty[0].rendered_font_size = 99  # a stale value from an earlier render
+    translator.render_translated_text(_page(), empty)
+    assert empty[0].rendered_font_size is None and 'rendered_font_size' not in empty[0].to_dict()
+    # one region: no copies; the sequential path
+    single = _regions([("Hi", {'font_size': 30})])
+    translator.render_translated_text(_page(), single)
+    assert single[0].rendered_font_size == 30
+
+
+@pytest.mark.parametrize("emote", (False, True), ids=("primary_font", "mixed_font"))
+def test_a_half_px_size_renders_between_its_neighbours(emote):
+    translator = _translator()
+    if emote:
+        translator._is_truly_custom_font = lambda: False
+        translator._get_emote_fallback_font = lambda size: ImageFont.truetype(str(FONT_PATH), size)
+    widths = {}
+    for size in (40, 40.5, 41):
+        out = _render(translator, [("HHHH", {'font_size': size, 'bold': True, 'underline': True}), ("", None)])
+        x0, _y0, x1, _y1 = _ink_box(_ink(out, BOXES[0]))
+        widths[size] = x1 - x0
+    assert widths[40] <= widths[40.5] <= widths[41] and widths[40] < widths[41]
+    # the outline stays a whole number of px (28.5 // 15 would be 1.0)
+    regions = _regions([("Hi there", {'font_size': 28.5}), ("", None)])
+    translator.render_translated_text(_page(), regions)
+    assert regions[0].rendered_font_size == 28.5
+
+
+def test_a_fixed_half_px_size_is_wrapped_at_that_size(monkeypatch):
+    """The fixed-size wrap measures 28.5, not its floor (the binary search's (low + high) // 2)."""
+    translator = _translator()
+    sizes = []
+    real = ImageFont.truetype
+
+    def truetype(font=None, size=10, *args, **kwargs):
+        sizes.append(size)
+        return real(font, size, *args, **kwargs)
+
+    monkeypatch.setattr(ImageFont, "truetype", truetype)
+    _render(translator, [("Hello there my good friend", {'font_size': 28.5}), ("", None)])
+    assert 28.5 in sizes and 28 not in sizes and 28.0 not in sizes
+
+
+def test_normalize_font_size_half_px_steps():
+    normalize = manga_ocr_io.normalize_font_size
+    assert normalize(28) == 28 and isinstance(normalize(28.0), int) and normalize('24') == 24
+    assert normalize(28.5) == 28.5 and normalize('28.4') == 28.5 and normalize(28.2) == 28
+    assert normalize(0.2) is None and normalize(0) is None and normalize(-3) is None and normalize(True) is None
+    assert normalize('x') is None and normalize(float('nan')) is None and normalize(float('inf')) is None
+    assert normalize(10 ** 6) == manga_ocr_io.REGION_STYLE_MAX_FONT_SIZE
+    assert manga_ocr_io.normalize_region_style({'font_size': 30.5}) == {'font_size': 30.5}
+    assert manga_ocr_io.normalize_region_style({'font_size': '17.25'}) == {'font_size': 17.0}
+
+
+def test_half_px_size_round_trips_through_the_ocr_export(tmp_path):
+    state = _editor_state()
+    state['region_styles'] = {'1': {'font_size': 30.5}}
+    regions = manga_ocr_io.canonical_regions_from_editor_state(state)
+    image = tmp_path / "001.png"
+    image.write_bytes(b"png")
+    page = manga_ocr_io.make_page(str(image), regions, index=1)
+    path = tmp_path / "export.json"
+    manga_ocr_io.write_document(str(path), manga_ocr_io.create_document([page], workflow='manga'))
+    loaded = manga_ocr_io.load_document(str(path))['pages'][0]
+    assert manga_ocr_io.region_styles_from_state(manga_ocr_io.editor_state_from_page(loaded)) == {1: {'font_size': 30.5}}
+    region = manga_ocr_io.region_record_to_text_region(loaded['regions'][1], manga_translator.TextRegion)
+    assert region.style == {'font_size': 30.5}
+
+
+def test_region_font_sizes_in_the_page_state():
+    state = {'region_font_sizes': {'0': 28, '1': '31.25', 'x': 3, '2': 0, '3': None, '4': True}}
+    assert manga_ocr_io.region_font_sizes_from_state(state) == {0: 28, 1: 31.2}
+    assert manga_ocr_io.region_font_sizes_from_state({}) == {} and manga_ocr_io.region_font_sizes_from_state(None) == {}
+
+
+def test_record_region_font_sizes_maps_regions_to_their_boxes(tmp_path):
+    """After a render: the boxes' sizes by the styles' region -> box mapping, also without styles;
+    regions not drawn (an excluded box) and regions without a translation record nothing."""
+    page = str(tmp_path / "001.png")
+    state = {'translated_texts': [
+        {'original': {'text': 'a', 'region_index': 0}, 'translation': 'Same'},
+        {'original': {'text': 'b', 'region_index': 1}, 'translation': 'Other'},
+        {'original': {'text': 'c', 'region_index': 2}, 'translation': 'Same'},
+    ]}
+    host = _host(page, state)
+    regions = _regions([("Same", None), ("Other", None)]) + _regions([("Same", None)])
+    for region, size in zip(regions, (20, 31.5, None)):
+        region.rendered_font_size = size
+    assert core._region_box_indexes(host, page, regions) == [0, 1, 2]
+    core._record_region_font_sizes(host, page, regions, regions[:2])
+    assert host.image_state_manager.get_state(page)['region_font_sizes'] == {'0': 20, '1': 31.5}
+    assert core._region_font_sizes(host, page) == {0: 20, 1: 31.5}
+    # the next render replaces them; one that drew nothing drops them
+    regions[0].rendered_font_size = 22
+    core._record_region_font_sizes(host, page, regions[:1])
+    assert host.image_state_manager.get_state(page)['region_font_sizes'] == {'0': 22}
+    core._record_region_font_sizes(host, page, _regions([("", None)]))
+    assert 'region_font_sizes' not in host.image_state_manager.get_state(page)
+    # Clear Boxes drops them with the styles
+    core._record_region_font_sizes(host, page, regions[:1])
+    core._clear_region_styles(host, page)
+    assert 'region_font_sizes' not in host.image_state_manager.get_state(page)
+    assert '_record_region_font_sizes' in core.SHARED_NAMES
+
+
+def test_a_real_render_records_the_sizes_in_the_page_state(tmp_path):
+    """The renderer and the editor core together (no styles on the page)."""
+    page = str(tmp_path / "001.png")
+    host = _host(page, {'translated_texts': [
+        {'original': {'text': 'a', 'region_index': 0}, 'translation': 'Hello there friend'},
+        {'original': {'text': 'b', 'region_index': 1}, 'translation': 'World'}]})
+    regions = _regions([("Hello there friend", None), ("World", None)])
+    core._attach_region_styles(host, page, regions)
+    _translator().render_translated_text(_page(), regions)
+    core._record_region_font_sizes(host, page, regions, regions)
+    sizes = core._region_font_sizes(host, page)
+    assert set(sizes) == {0, 1} and sizes[0] == regions[0].rendered_font_size
+
+
+def test_a_batch_page_records_the_sizes_in_its_editor_state(tmp_path):
+    """Start (batch): the rendered regions' records carry their size into the page's editor state."""
+    import manga_env
+    image = tmp_path / "001.png"
+    image.write_bytes(b"png")
+    regions = _regions([("Hello", None), ("", None)])
+    regions[0].rendered_font_size = 26.5
+    page = manga_ocr_io.make_page(str(image), regions, index=1)
+    assert page['regions'][0]['rendered_font_size'] == 26.5 and 'rendered_font_size' not in page['regions'][1]
+    owner = types.SimpleNamespace(image_state_manager=_States())
+    owner.image_state_manager.update_state = lambda path, values, save=True: owner.image_state_manager.states.setdefault(
+        path, {}).update(values)
+    manga_env._record_page_editor_state(owner, str(image), page)
+    assert owner.image_state_manager.states[str(image)]['region_font_sizes'] == {'0': 26.5}

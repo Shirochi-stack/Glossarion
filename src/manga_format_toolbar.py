@@ -2,9 +2,11 @@
 """Word-style Format toolbar of the manga editor's image preview (per-box text style).
 
 A row at the top of ``MangaImagePreviewWidget`` (shown while Enable Manual Editing is on): font,
-size (Auto or a fixed px value), Bold / Italic / Underline, align left / center / right, text
-colour and Reset to default. It acts on the selected box(es), shows the first selected box's
-values and is disabled while no box is selected.
+size (Auto or a fixed px value in 0.5 px steps), Bold / Italic / Underline, align left / center /
+right, text colour and Reset to default. It acts on the selected box(es), shows the first selected
+box's values and is disabled while no box is selected. A box on Auto shows the size it was last
+rendered at (the page state's ``region_font_sizes``, "28 px (auto)"); stepping up / down from there
+gives the box that size ± 0.5 px.
 
 A change is stored per box in the page's editor state (``region_styles``, through
 ``manga_editor_core._update_region_styles``) and the page is re-rendered with the preview's own
@@ -14,23 +16,39 @@ with the Rendering Settings as before.
 
 The widget class itself stays as it is (tests/test_manga_editor_core.py pins it): the toolbar is
 installed from outside by ``install_format_toolbar(preview, tab)``. A box's right-click menu gets the
-same changes as a "Text format" submenu (``MangaFormatToolbar.add_context_menu``).
+same changes as a "Text format" submenu (``MangaFormatToolbar.add_context_menu``), with a
+"−  28 px (auto)  +" row that stays open while the size is stepped.
+
+``install_format_toolbar`` also keeps Enter from pressing a push button of the Manga Panel
+Translator window (``guard_enter_key``): a QDialog's push buttons are auto-default, so Enter in a
+spin box or line edit clicked "Add Files" and opened the file explorer.
 """
 
 import os
 
-from PySide6.QtCore import QObject, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import QColorDialog, QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QSpinBox
+from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QDialog, QDoubleSpinBox, QFrame, QHBoxLayout,
+                               QInputDialog, QLabel, QPushButton, QSizePolicy, QWidget, QWidgetAction)
 
 import manga_editor_core
+import manga_ocr_io
 
 #: Debounce of the re-render after a change (a size typed digit by digit renders once).
 RENDER_DELAY_MS = 350
 DEFAULT_FONT_LABEL = "Default font"
 #: Fixed size range (px); 0 is Auto (fit the box, the Rendering Settings sizing).
 SIZE_MAX = 200
+#: A fixed size goes up / down in half px (the spin box arrows, the menu's − / +).
+SIZE_STEP = 0.5
+SIZE_SUFFIX = " px"
+#: The size box's suffix while it shows the size a box on Auto was rendered at.
+AUTO_SIZE_SUFFIX = " px (auto)"
+#: Disabled look of the native size box: the greyed text of the row's other disabled controls. A
+#: colour-only rule keeps the native drawing (box-model rules break a spin box's arrows).
+_SIZE_SPIN_STYLE = "QDoubleSpinBox:disabled { color: #555555; }"
 ALIGNMENTS = (("left", "Align left"), ("center", "Center"), ("right", "Align right"))
+SIZE_TOOLTIP = "Font size of the selected box in px (Auto: fit the box like the Rendering Settings)"
 
 _COMBO_STYLE = """
     QComboBox {
@@ -66,6 +84,97 @@ def _alignment_icon(align, size=18):
         painter.drawLine(x0, y, x0 + length, y)
     painter.end()
     return QIcon(pixmap)
+
+
+def size_text(size):
+    """28 -> "28", 28.5 -> "28.5" (no trailing ".0")."""
+    text = f"{float(size):.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+class SizeSpinBox(QDoubleSpinBox):
+    """The size box: a native QDoubleSpinBox (no box-model style sheet, like Other Settings' GUI
+    Font Scale) in 0.5 px steps that shows "28 px" / "28.5 px" (no trailing ".0"); 0 is "Auto"."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(1)
+        self.setRange(0, SIZE_MAX)
+        self.setSingleStep(SIZE_STEP)
+        self.setSpecialValueText("Auto")
+        self.setSuffix(SIZE_SUFFIX)
+
+    def textFromValue(self, value):
+        text = self.locale().toString(float(value), 'f', 1)
+        zero = self.locale().decimalPoint() + "0"
+        return text[:-len(zero)] if text.endswith(zero) else text
+
+
+class _EnterGuard(QObject):
+    """Enter / Return never presses a push button of ``dialog`` (the Manga Panel Translator window).
+
+    A QDialog's push buttons are auto-default: the first one (Add Files) became the default button
+    and Enter in a spin box or line edit clicked it, as did Enter on a button that had focus. Every
+    push button of the window is made a plain button (now, once the window is built, when it is
+    shown, and when a button made later gets focus), and an Enter the window itself receives (one a
+    field did not take) is dropped. Enter still commits a spin box / line edit; Space still presses
+    the focused button."""
+
+    def __init__(self, dialog):
+        super().__init__(dialog)
+        self.dialog = dialog
+        dialog.installEventFilter(self)
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_focus_changed)
+        self.disarm()
+
+    @staticmethod
+    def _plain(button):
+        if button.autoDefault() or button.isDefault():
+            button.setDefault(False)
+            button.setAutoDefault(False)
+
+    def disarm(self):
+        try:
+            for button in self.dialog.findChildren(QPushButton):
+                # only this window's buttons: a dialog parented to it (Manga Settings' default Save)
+                # keeps its own default button
+                if button.window() is self.dialog:
+                    self._plain(button)
+        except RuntimeError:
+            pass  # the window is gone
+
+    def _on_focus_changed(self, _old, new):
+        try:
+            if isinstance(new, QPushButton) and new.window() is self.dialog:
+                self._plain(new)
+        except RuntimeError:
+            pass
+
+    def eventFilter(self, obj, event):
+        if obj is self.dialog:
+            kind = event.type()
+            if kind == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                event.accept()
+                return True
+            if kind == QEvent.Type.Show:
+                self.disarm()
+        return False
+
+
+def guard_enter_key(dialog):
+    """Keep Enter from pressing a push button of ``dialog`` (see ``_EnterGuard``); one guard per
+    window. Returns the guard (None without a QDialog)."""
+    if not isinstance(dialog, QDialog):
+        return None
+    guard = getattr(dialog, '_glossarion_enter_guard', None)
+    if guard is None:
+        guard = _EnterGuard(dialog)
+        dialog._glossarion_enter_guard = guard
+    else:
+        guard.disarm()
+    return guard
 
 
 def _color_icon(rgb, size=18):
@@ -118,14 +227,16 @@ class MangaFormatToolbar(QObject):
         self.font_combo.currentIndexChanged.connect(self._on_font_changed)
         layout.addWidget(self.font_combo, 1)
 
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(0, SIZE_MAX)
-        self.size_spin.setSpecialValueText("Auto")
-        self.size_spin.setSuffix(" px")
-        self.size_spin.setToolTip("Font size of the selected box (Auto: fit the box like the Rendering Settings)")
-        # No style sheet: the native spin box, like Other Settings' GUI Font Scale (a QSpinBox rule
-        # without ::up-button / ::down-button rules draws broken arrows over the text)
-        self.size_spin.setFixedWidth(84)
+        self._auto_size = None  # the rendered size the size box shows for a box on Auto
+        self.size_spin = SizeSpinBox()
+        self.size_spin.setToolTip(SIZE_TOOLTIP)
+        # The native spin box, like Other Settings' GUI Font Scale: no box-model style sheet (a
+        # spin box rule without ::up-button / ::down-button rules draws broken arrows over the
+        # text), only the disabled text colour of the row's other controls
+        self.size_spin.setStyleSheet(_SIZE_SPIN_STYLE)
+        self.size_spin.setSuffix(AUTO_SIZE_SUFFIX)  # wide enough for "200.5 px (auto)"
+        self.size_spin.setFixedWidth(max(84, self.size_spin.sizeHint().width()))
+        self.size_spin.setSuffix(SIZE_SUFFIX)
         self.size_spin.setKeyboardTracking(False)
         self.size_spin.wheelEvent = lambda event: None
         self.size_spin.valueChanged.connect(self._on_size_changed)
@@ -171,6 +282,11 @@ class MangaFormatToolbar(QObject):
 
         self.controls = [self.font_combo, self.size_spin, self.bold_btn, self.italic_btn, self.underline_btn,
                          *self.align_buttons.values(), self.color_btn, self.reset_btn]
+        # One height for the row: the font and size boxes take the tool buttons' height (the
+        # native spin box was a third shorter than the buttons beside it)
+        for box in (self.font_combo, self.size_spin):
+            box.setSizePolicy(box.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Preferred)
+            box.setMaximumHeight(self.bold_btn.maximumHeight())
         self._shortcuts = []
         for keys, button in (("Ctrl+B", self.bold_btn), ("Ctrl+I", self.italic_btn), ("Ctrl+U", self.underline_btn)):
             shortcut = QShortcut(QKeySequence(keys), preview)
@@ -298,6 +414,21 @@ class MangaFormatToolbar(QObject):
     def styles(self):
         return manga_editor_core._region_text_styles(self.tab, self.image_path())
 
+    def rendered_sizes(self):
+        """The size each box of the page was last rendered at ({} before a render)."""
+        return manga_editor_core._region_font_sizes(self.tab, self.image_path())
+
+    def box_size(self, index, styles=None, rendered=None):
+        """(size, auto) of box ``index``: its own size (auto False), else the size it was rendered
+        at on Auto (auto True; None before a render)."""
+        style = (self.styles() if styles is None else styles).get(index, {})
+        if style.get('font_size'):
+            return style['font_size'], False
+        size = (self.rendered_sizes() if rendered is None else rendered).get(index)
+        if size is None:
+            return None, True
+        return manga_ocr_io.normalize_font_size(size), True  # shown (and stepped) in 0.5 px
+
     def refresh(self, *_args):
         """Show the first selected box's style; disable everything while no box is selected."""
         if self._tab_font_count() != self._tab_fonts:
@@ -306,11 +437,13 @@ class MangaFormatToolbar(QObject):
         enabled = bool(indexes)
         for control in self.controls:
             control.setEnabled(enabled)
-        style = self.styles().get(indexes[0], {}) if indexes else {}
+        styles = self.styles() if indexes else {}
+        style = styles.get(indexes[0], {}) if indexes else {}
+        size, auto = self.box_size(indexes[0], styles) if indexes else (None, True)
         self._updating = True
         try:
             self._select_font(style.get('font'))
-            self.size_spin.setValue(int(style.get('font_size') or 0))
+            self._show_size(size, auto)
             self.bold_btn.setChecked(bool(style.get('bold')))
             self.italic_btn.setChecked(bool(style.get('italic')))
             self.underline_btn.setChecked(bool(style.get('underline')))
@@ -326,6 +459,21 @@ class MangaFormatToolbar(QObject):
             self.selection_label.setText(f"Box {indexes[0] + 1}")
         else:
             self.selection_label.setText(f"{len(indexes)} boxes")
+
+    def _show_size(self, size, auto):
+        """The size box: a box's own size ("28.5 px"), the size a box on Auto was rendered at
+        ("28 px (auto)"), or "Auto" (no box, or not rendered yet)."""
+        self._auto_size = size if auto and size else None
+        self.size_spin.setSuffix(AUTO_SIZE_SUFFIX if self._auto_size else SIZE_SUFFIX)
+        self.size_spin.setValue(float(size or 0))
+        font = self.size_spin.font()
+        font.setItalic(bool(self._auto_size))
+        self.size_spin.setFont(font)
+        if self._auto_size:
+            self.size_spin.setToolTip(f"Auto: the box was rendered at {size_text(size)} px. The arrows (or a "
+                                      f"typed size) give it a fixed size; Reset or 0 goes back to Auto.")
+        else:
+            self.size_spin.setToolTip(SIZE_TOOLTIP)
 
     def set_visible_for_editing(self, enabled):
         self.frame.setVisible(bool(enabled))
@@ -360,7 +508,20 @@ class MangaFormatToolbar(QObject):
         self._apply({'font': self.font_combo.currentData()})
 
     def _on_size_changed(self, value):
-        self._apply({'font_size': int(value) or None})
+        # From "28 px (auto)" the arrows give 28.5 / 27.5; 0 ("Auto") clears the box's own size
+        self._apply({'font_size': manga_ocr_io.normalize_font_size(value)})
+
+    def step_size(self, indexes, delta, base=None):
+        """Box sizes one step up / down (± 0.5 px) from box ``base``'s shown size (its own size, or the
+        size it was rendered at on Auto). Returns the stored styles (None: no size to step from)."""
+        indexes = list(indexes)
+        if not indexes:
+            return None
+        size, _auto = self.box_size(indexes[0] if base is None else base)
+        if size is None:
+            return None
+        new = min(SIZE_MAX, max(SIZE_STEP, float(size) + delta))
+        return self._apply({'font_size': manga_ocr_io.normalize_font_size(new)}, indexes=indexes)
 
     def _on_align(self, align):
         self._apply({'align': None if align == 'center' else align})
@@ -383,12 +544,61 @@ class MangaFormatToolbar(QObject):
     def _on_reset(self):
         return self._apply(reset=True)
 
-    def _on_size_dialog(self, indexes):
-        current = int(self.styles().get(indexes[0], {}).get('font_size') or 0)
-        value, ok = QInputDialog.getInt(self.preview, "Font Size", "Font size in px (0: Auto, fit the box):",
-                                        current, 0, SIZE_MAX)
+    def _on_size_dialog(self, indexes, base=None):
+        size, _auto = self.box_size(indexes[0] if base is None else base)
+        value, ok = QInputDialog.getDouble(self.preview, "Font Size", "Font size in px (0: Auto, fit the box):",
+                                           float(size or 0), 0, SIZE_MAX, 1, Qt.WindowType.Dialog, SIZE_STEP)
         if ok:
-            self._apply({'font_size': int(value) or None}, indexes=indexes)
+            self._apply({'font_size': manga_ocr_io.normalize_font_size(value)}, indexes=indexes)
+
+    def _size_label(self, index):
+        size, auto = self.box_size(index)
+        if size is None:
+            return "Auto"
+        return f"{size_text(size)}{AUTO_SIZE_SUFFIX if auto else SIZE_SUFFIX}"
+
+    def _size_menu_row(self, menu, index, targets):
+        """The menu's "Font size  −  28 px (auto)  +" row: − / + step the size by 0.5 px and the menu
+        stays open (the label follows)."""
+        row = QWidget(menu)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(4)
+        title = QLabel("Font size")
+        layout.addWidget(title)
+        layout.addStretch(1)
+        minus = self.preview._create_tool_button("A−", "Decrease font size (0.5 px)")
+        label = QLabel()
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setMinimumWidth(label.fontMetrics().horizontalAdvance("200.5 px (auto)") + 8)
+        plus = self.preview._create_tool_button("A+", "Increase font size (0.5 px)")
+        for widget in (minus, label, plus):
+            layout.addWidget(widget)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(row)
+        action.on_change = []  # the menu's other size entries follow a step
+
+        def show():
+            text = self._size_label(index)
+            label.setText(text)
+            action.setText(f"Font size: {text}")
+            stepping = sub_enabled and self.box_size(index)[0] is not None
+            minus.setEnabled(stepping)
+            plus.setEnabled(stepping)
+            for update in action.on_change:
+                update()
+
+        def step(delta):
+            self.step_size(targets, delta, base=index)
+            show()
+
+        sub_enabled = bool(self.image_path()) and not self._blocked()
+        minus.clicked.connect(lambda _checked=False: step(-SIZE_STEP))
+        plus.clicked.connect(lambda _checked=False: step(SIZE_STEP))
+        action.step = step  # (tests) the row's buttons
+        action.minus_button, action.plus_button, action.size_label = minus, plus, label
+        show()
+        return action
 
     # ---- right-click menu ----------------------------------------------------------------------------
 
@@ -419,9 +629,16 @@ class MangaFormatToolbar(QObject):
                 {'align': None if a == 'center' else a}, indexes=targets))
         sub.addSeparator()
 
-        size = style.get('font_size')
-        size_action = sub.addAction(f"Font size: {size} px…" if size else "Font size: Auto…")
-        size_action.triggered.connect(lambda: self._on_size_dialog(targets))
+        size_row = self._size_menu_row(sub, region_index, targets)
+        sub.addAction(size_row)
+        size_action = sub.addAction("Font size…")
+        size_action.triggered.connect(lambda: self._on_size_dialog(targets, base=region_index))
+        auto_action = sub.addAction("Auto size (fit the box)")
+        auto_action.setCheckable(True)
+        auto_action.setChecked(not style.get('font_size'))
+        auto_action.triggered.connect(lambda _checked=False: self._apply({'font_size': None}, indexes=targets))
+        size_row.on_change.append(
+            lambda: auto_action.setChecked(not self.styles().get(region_index, {}).get('font_size')))
 
         font_menu = sub.addMenu("Font")
         wanted = os.path.normcase(os.path.abspath(style['font'])) if style.get('font') else None
@@ -481,9 +698,22 @@ class MangaFormatToolbar(QObject):
 
 
 def install_format_toolbar(preview, tab):
-    """Put the Format row at the top of the preview (under its title row) and return the toolbar."""
+    """Put the Format row at the top of the preview (under its title row) and return the toolbar.
+
+    Also guards the manga window's Enter key (``guard_enter_key``): now for the buttons built so
+    far, and again once the window's build has finished."""
     toolbar = MangaFormatToolbar(preview, tab)
     layout = preview.layout()
     layout.insertWidget(1 if layout.count() > 1 else layout.count(), toolbar.frame)
     preview.format_toolbar = toolbar
+    try:
+        # A render finished (the preview then reloads the page: the viewer's image_loaded, connected
+        # by the toolbar): a box on Auto shows the size it was just rendered at
+        # (the bound slot: a toolbar that is gone is disconnected, the main window outlives it)
+        tab.main_gui.refresh_preview_signal.connect(toolbar.refresh)
+    except Exception:
+        pass
+    guard = guard_enter_key(getattr(tab, 'dialog', None))
+    if guard is not None:
+        QTimer.singleShot(0, guard.disarm)
     return toolbar

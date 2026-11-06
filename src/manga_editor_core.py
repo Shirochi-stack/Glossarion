@@ -81,14 +81,46 @@ def _import_google_vision():
     return vision
 
 
-def _attach_region_styles(self, image_path, regions):
-    """Give the regions about to be rendered their box's text style (the page state's
-    ``region_styles``: the desktop Format toolbar / the mobile box panel's Style tab).
+def _region_box_indexes(self, image_path, regions, state=None):
+    """The box (region index) each region about to be rendered belongs to; None for a region that
+    matches no box (no translation, or a text no box carries).
 
     Every render path builds its regions from the boxes' translations in box order, so a region
     belongs to the first box not taken yet whose translation it carries (the open page's live
-    ``_translation_data``, then the page's persisted ``translated_texts``). A page without styles
-    is left exactly as it was. Owner-approved 2026-11-06 (per-box text formatting)."""
+    ``_translation_data``, then the page's persisted ``translated_texts``)."""
+    if state is None:
+        state_manager = getattr(self, 'image_state_manager', None)
+        state = (state_manager.get_state(image_path) or {}) if state_manager and image_path else {}
+    texts = {}
+    for index, entry in _persisted_text_maps(state)[3].items():
+        texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
+    current = getattr(getattr(self, 'image_preview_widget', None), 'current_image_path', None)
+    if current and image_path and (
+            os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(image_path))):
+        for index, entry in (getattr(self, '_translation_data', None) or {}).items():
+            if isinstance(entry, dict):
+                texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
+    taken = set()
+    boxes = []
+    for region in regions or ():
+        text = str(getattr(region, 'translated_text', None) or '').strip()
+        box = None
+        if text:
+            for index in sorted(texts):
+                if index not in taken and text in texts[index]:
+                    taken.add(index)
+                    box = index
+                    break
+        boxes.append(box)
+    return boxes
+
+
+def _attach_region_styles(self, image_path, regions):
+    """Give the regions about to be rendered their box's text style (the page state's
+    ``region_styles``: the desktop Format toolbar / the mobile box panel's Style tab), by the
+    region -> box mapping of ``_region_box_indexes``. A region that already carries a style (an
+    imported record) keeps it. A page without styles is left exactly as it was. Owner-approved
+    2026-11-06 (per-box text formatting)."""
     try:
         state_manager = getattr(self, 'image_state_manager', None)
         if not image_path or not state_manager or not regions:
@@ -97,27 +129,52 @@ def _attach_region_styles(self, image_path, regions):
         styles = manga_ocr_io.region_styles_from_state(state)
         if not styles:
             return
-        texts = {}
-        for index, entry in _persisted_text_maps(state)[3].items():
-            texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
-        current = getattr(getattr(self, 'image_preview_widget', None), 'current_image_path', None)
-        if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(image_path)):
-            for index, entry in (getattr(self, '_translation_data', None) or {}).items():
-                if isinstance(entry, dict):
-                    texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
-        taken = set()
-        for region in regions:
-            text = str(getattr(region, 'translated_text', None) or '').strip()
-            if not text or getattr(region, 'style', None):
-                continue
-            for index in sorted(texts):
-                if index not in taken and text in texts[index]:
-                    taken.add(index)
-                    if index in styles:
-                        region.style = dict(styles[index])
-                    break
+        for region, index in zip(regions, _region_box_indexes(self, image_path, regions, state)):
+            if index in styles and not getattr(region, 'style', None):
+                region.style = dict(styles[index])
     except Exception as error:
         print(f"[RENDER] Box text styles skipped: {error}")
+
+
+def _record_region_font_sizes(self, image_path, regions, rendered=None):
+    """After a render: store the size each box was drawn with (``region.rendered_font_size``, set
+    by ``MangaTranslator.render_translated_text``: the auto fit or the box's own size) in the page
+    state as ``region_font_sizes`` = {"<region index>": px}, by the same region -> box mapping as
+    the styles (also on a page without styles). ``rendered``: the regions actually drawn (an
+    excluded box's region is not). The Format toolbar / the Style tab show it while a box is on
+    Auto. Changed in place, like ``_update_region_styles``."""
+    try:
+        state_manager = getattr(self, 'image_state_manager', None)
+        if not image_path or not state_manager or regions is None:
+            return
+        state = state_manager.get_state(image_path)
+        if not isinstance(state, dict):
+            state = {}
+        drawn = None if rendered is None else {id(region) for region in rendered}
+        sizes = {}
+        for region, index in zip(regions, _region_box_indexes(self, image_path, regions, state)):
+            if drawn is not None and id(region) not in drawn:
+                continue
+            size = manga_ocr_io.normalize_rendered_font_size(getattr(region, 'rendered_font_size', None))
+            if index is not None and size is not None:
+                sizes[str(index)] = size
+        if sizes:
+            state[manga_ocr_io.REGION_FONT_SIZES_KEY] = sizes
+        elif manga_ocr_io.REGION_FONT_SIZES_KEY in state:
+            state.pop(manga_ocr_io.REGION_FONT_SIZES_KEY, None)
+        else:
+            return
+        state_manager.set_state(image_path, state, save=True)
+    except Exception as error:
+        print(f"[RENDER] Box font sizes not recorded: {error}")
+
+
+def _region_font_sizes(self, image_path):
+    """The size each box of a page was last rendered at, by region index ({} before a render)."""
+    state_manager = getattr(self, 'image_state_manager', None)
+    if not image_path or not state_manager:
+        return {}
+    return manga_ocr_io.region_font_sizes_from_state(state_manager.get_state(image_path) or {})
 
 
 def _region_text_styles(self, image_path):
@@ -157,13 +214,15 @@ def _update_region_styles(self, image_path, indexes, changes=None, *, reset=Fals
 
 
 def _clear_region_styles(self, image_path):
-    """Clear Boxes: the page's boxes are gone, so are their text styles."""
+    """Clear Boxes: the page's boxes are gone, so are their text styles and rendered sizes."""
     state_manager = getattr(self, 'image_state_manager', None)
     if not image_path or not state_manager:
         return
     state = state_manager.get_state(image_path)
-    if isinstance(state, dict) and 'region_styles' in state:
-        state.pop('region_styles', None)  # in place, like _update_region_styles
+    keys = ('region_styles', manga_ocr_io.REGION_FONT_SIZES_KEY)
+    if isinstance(state, dict) and any(key in state for key in keys):
+        for key in keys:
+            state.pop(key, None)  # in place, like _update_region_styles
         state_manager.set_state(image_path, state, save=True)
 
 
@@ -7185,6 +7244,7 @@ def _render_with_manga_translator(
         print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
         _attach_region_styles(self, original_image_path or image_path, regions)
         rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
+        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)
         print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
         
         # Convert back to PIL and save
@@ -9028,7 +9088,8 @@ SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_tra
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).
 SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
                 'delay_env',  # 2026-10-21: the API call delay field's min and range max
-                '_attach_region_styles')  # 2026-11-06: per-box text styles (Format toolbar)
+                '_attach_region_styles',  # 2026-11-06: per-box text styles (Format toolbar)
+                '_record_region_font_sizes')  # 2026-11-06: the size each box was rendered at
 
 
 # ===========================================================================
@@ -9711,6 +9772,7 @@ class MangaEditorSession:
             # the box sheet showed blank OCR / translation fields.
             _rec, saved_recognition, _trans, saved_translation = _persisted_text_maps(state)
             styles = manga_ocr_io.region_styles_from_state(state)
+            rendered_sizes = manga_ocr_io.region_font_sizes_from_state(state)
             for idx, box in enumerate(self.image_preview_widget.viewer.rectangles):
                 record = box.to_dict()
                 record['index'] = idx
@@ -9720,6 +9782,7 @@ class MangaEditorSession:
                 record['translation'] = ((translation.get(key) or {}).get('translation', '')
                                          or (saved_translation.get(key) or {}).get('translation', ''))
                 record['style'] = dict(styles.get(key) or {})
+                record['rendered_font_size'] = rendered_sizes.get(key)  # what Auto drew (None: not rendered)
                 boxes.append(record)
         return {
             'image_path': image_path,
@@ -10150,7 +10213,8 @@ class MangaEditorSession:
         for key in ('recognized_texts', 'translated_texts'):
             if isinstance(state.get(key), list):
                 state[key] = shift_list(state[key])
-        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations', 'region_styles'):
+        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations', 'region_styles',
+                    manga_ocr_io.REGION_FONT_SIZES_KEY):
             if isinstance(state.get(key), dict):
                 state[key] = shift_map(state[key])
         self.image_state_manager.set_state(page, state, save=True)

@@ -24,17 +24,38 @@ EDITOR_STATE_KEYS = (
 #: ``region_styles`` = {"<region index>": style} and carried by an exported region as ``style``.
 REGION_STYLE_KEYS = ("font", "font_size", "bold", "italic", "underline", "align", "color")
 REGION_STYLE_MAX_FONT_SIZE = 512
+#: The font size each box was last drawn with (auto fit or its own size), stored in a page's editor
+#: state as ``region_font_sizes`` = {"<region index>": px} by every render, and carried by a
+#: rendered region (``TextRegion.rendered_font_size``) as ``rendered_font_size``.
+REGION_FONT_SIZES_KEY = "region_font_sizes"
 
 
 class MangaOcrFormatError(ValueError):
     """Raised when a selected file is not a supported manga OCR export."""
 
 
+def normalize_font_size(value: Any) -> Optional[Any]:
+    """A px font size in steps of 0.5 (28, 28.5), capped; None when it is not a positive number.
+
+    Whole sizes come back as ``int`` (as before fractional sizes), the others as ``float``."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        size = round(float(value) * 2) / 2
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not size > 0:
+        return None
+    size = min(size, REGION_STYLE_MAX_FONT_SIZE)
+    return int(size) if float(size).is_integer() else size
+
+
 def normalize_region_style(style: Any) -> Dict[str, Any]:
     """A box's text style with only valid, non-default entries ({} = render with Rendering Settings).
 
-    ``font``: a font file path; ``font_size``: px (absent = Auto fit); ``bold`` / ``italic`` /
-    ``underline``: True; ``align``: "left" or "right" (absent = centered); ``color``: [r, g, b].
+    ``font``: a font file path; ``font_size``: px in steps of 0.5 (absent = Auto fit); ``bold`` /
+    ``italic`` / ``underline``: True; ``align``: "left" or "right" (absent = centered); ``color``:
+    [r, g, b].
     """
     if not isinstance(style, Mapping):
         return {}
@@ -42,14 +63,9 @@ def normalize_region_style(style: Any) -> Dict[str, Any]:
     font = style.get("font")
     if isinstance(font, str) and font.strip():
         out["font"] = font.strip()
-    size = style.get("font_size")
-    if size not in (None, "") and not isinstance(size, bool):
-        try:
-            size = int(size)
-        except (TypeError, ValueError):
-            size = 0
-        if size > 0:
-            out["font_size"] = min(size, REGION_STYLE_MAX_FONT_SIZE)
+    size = normalize_font_size(style.get("font_size"))
+    if size is not None:
+        out["font_size"] = size
     for key in ("bold", "italic", "underline"):
         if style.get(key) is True:
             out[key] = True
@@ -82,6 +98,36 @@ def region_styles_from_state(state: Any) -> Dict[int, Dict[str, Any]]:
         if style and index >= 0:
             styles[index] = style
     return styles
+
+
+def region_font_sizes_from_state(state: Any) -> Dict[int, Any]:
+    """The size each box of the page was last rendered at, by region index (``region_font_sizes``)."""
+    sizes: Dict[int, Any] = {}
+    raw = state.get(REGION_FONT_SIZES_KEY) if isinstance(state, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return sizes
+    for key, value in raw.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        size = normalize_rendered_font_size(value)
+        if size is not None and index >= 0:
+            sizes[index] = size
+    return sizes
+
+
+def normalize_rendered_font_size(value: Any) -> Optional[Any]:
+    """A rendered font size as stored (px, one decimal; whole sizes as ``int``); None if invalid."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        size = round(float(value), 1)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not 0 < size < float("inf"):
+        return None
+    return int(size) if size.is_integer() else size
 
 
 def set_region_style(state: Dict[str, Any], index: int, style: Any) -> Dict[str, Any]:
@@ -406,11 +452,15 @@ def editor_state_from_page(page: Mapping[str, Any]) -> Dict[str, Any]:
     recognized_texts = []
     translated_texts = []
     region_styles: Dict[str, Any] = {}
+    region_font_sizes: Dict[str, Any] = {}
     for index, raw_region in enumerate(page.get("regions") or []):
         region = serialize_region(raw_region)
         style = normalize_region_style(region.get("style"))
         if style:
             region_styles[str(index)] = style
+        rendered_size = normalize_rendered_font_size(region.get("rendered_font_size"))
+        if rendered_size is not None:
+            region_font_sizes[str(index)] = rendered_size
         bbox = list(region.get("bounding_box") or region.get("bbox") or [0, 0, 1, 1])
         if len(bbox) < 4:
             bbox = [0, 0, 1, 1]
@@ -468,6 +518,8 @@ def editor_state_from_page(page: Mapping[str, Any]) -> Dict[str, Any]:
         state["translated_texts"] = translated_texts
     if region_styles:
         state["region_styles"] = region_styles
+    if region_font_sizes:
+        state[REGION_FONT_SIZES_KEY] = region_font_sizes
 
     if saved_state:
         # Keep the editor's richer geometry/overlay metadata, while treating the
