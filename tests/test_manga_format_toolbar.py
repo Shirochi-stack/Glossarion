@@ -488,3 +488,28 @@ def test_guard_enter_key_is_installed_once():
     first = guard_enter_key(dialog)
     assert guard_enter_key(dialog) is first
     dialog.deleteLater()
+
+
+def test_guard_enter_key_leaves_child_windows_alone():
+    """A dialog parented to the manga window (Manga Settings: Save is its default button) keeps its
+    default button when the guard disarms the manga window's own buttons (install, Show again)."""
+    from manga_format_toolbar import guard_enter_key
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    dialog = QtWidgets.QDialog()
+    QtWidgets.QVBoxLayout(dialog).addWidget(QtWidgets.QPushButton("Add Files"))
+    own = dialog.findChild(QtWidgets.QPushButton)
+    child = QtWidgets.QDialog(dialog)
+    save = QtWidgets.QPushButton("Save", child)
+    save.setDefault(True)
+    dialog.show()
+    child.show()
+    _pump(app)
+    guard_enter_key(dialog)
+    dialog.hide()
+    dialog.show()
+    _pump(app)
+    assert save.isDefault() and save.autoDefault()
+    assert not own.isDefault() and not own.autoDefault()
+    child.close()
+    dialog.close()
+    dialog.deleteLater()

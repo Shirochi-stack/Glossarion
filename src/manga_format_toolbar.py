@@ -138,7 +138,10 @@ class _EnterGuard(QObject):
     def disarm(self):
         try:
             for button in self.dialog.findChildren(QPushButton):
-                self._plain(button)
+                # only this window's buttons: a dialog parented to it (Manga Settings' default Save)
+                # keeps its own default button
+                if button.window() is self.dialog:
+                    self._plain(button)
         except RuntimeError:
             pass  # the window is gone
 
@@ -706,7 +709,8 @@ def install_format_toolbar(preview, tab):
     try:
         # A render finished (the preview then reloads the page: the viewer's image_loaded, connected
         # by the toolbar): a box on Auto shows the size it was just rendered at
-        tab.main_gui.refresh_preview_signal.connect(lambda *_args: toolbar.refresh())
+        # (the bound slot: a toolbar that is gone is disconnected, the main window outlives it)
+        tab.main_gui.refresh_preview_signal.connect(toolbar.refresh)
     except Exception:
         pass
     guard = guard_enter_key(getattr(tab, 'dialog', None))
