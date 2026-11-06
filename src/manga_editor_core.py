@@ -2811,6 +2811,7 @@ def _run_inpainting_sync(
                         self.update_queue.put(('update_pool_tracker', None))
             except Exception as e:
                 logging.warning(f"⚠️ Failed to return inpainter to pool: {e}")
+            inpainter = None  # Returned: a later error must not take back another thread's checkout of it
             
         else:
             # For cloud/hybrid methods, would need more complex setup

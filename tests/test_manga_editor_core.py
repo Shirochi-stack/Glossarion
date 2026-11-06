@@ -298,6 +298,14 @@ EDITS = (
      "        # Return inpainter to pool on error\n",
      "        # Return inpainter to pool on error\n"
      "        _release_sync_inpainter(self, inpainter)\n"),
+    ("_run_inpainting_sync",
+     "                logging.warning(f\"⚠️ Failed to return inpainter to pool: {e}\")\n"
+     "            \n"
+     "        else:\n",
+     "                logging.warning(f\"⚠️ Failed to return inpainter to pool: {e}\")\n"
+     "            inpainter = None  # Returned: a later error must not take back another thread's checkout of it\n"
+     "            \n"
+     "        else:\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen

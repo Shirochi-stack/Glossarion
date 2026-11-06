@@ -216,6 +216,40 @@ def test_inpainting_sync_returns_its_checkout_on_every_exit(monkeypatch, tmp_pat
 # The Local Model switch refreshes Skip Inpainter's lock at once
 # ---------------------------------------------------------------------------
 
+class _WorkingInpainter(_FailingInpainter):
+    def inpaint(self, image, mask, **kwargs):
+        return image
+
+
+def test_error_after_the_return_leaves_another_checkout_alone(monkeypatch, tmp_path):
+    """The inpainter went back to the pool after a successful inpaint; another thread (Clean on
+    another page) checks the same instance out, then this run's save fails: the error exit must not
+    take that other checkout away (it would unlock Skip Inpainter while that thread still runs)."""
+    page = tmp_path / "page.png"
+    cv2.imwrite(str(page), np.full((32, 32, 3), 255, dtype=np.uint8))
+    model_file = tmp_path / "lama_fp32.onnx"
+    model_file.write_bytes(b"onnx")
+    editor = _editor({
+        "manga_inpaint_method": "local",
+        "manga_local_inpaint_model": "lama_onnx",
+        "manga_lama_onnx_model_path": str(model_file),
+    })
+    monkeypatch.setattr(local_inpainter, "LocalInpainter", _WorkingInpainter)
+    monkeypatch.setattr(_WorkingInpainter, "on_load", None)
+
+    def other_checkout_then_fail(path, image):
+        for rec in MangaTranslator._inpaint_pool.values():
+            rec["checked_out"].append(rec["spares"][0])
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cv2, "imwrite", other_checkout_then_fail)
+
+    result = manga_editor_core._run_inpainting_sync(editor, str(page), [{"bbox": [4, 4, 12, 12], "text": "안녕"}])
+
+    assert result is None
+    assert _checked_out_count() == 1
+
+
 @pytest.fixture(scope="module")
 def qapp():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
