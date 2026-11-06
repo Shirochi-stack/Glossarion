@@ -2523,8 +2523,16 @@ def test_editor_display_mode_button_clean_and_box_tabs(iso, tmp_path, monkeypatc
         _mount(page, screen.get_body())
         tab = screen.editor_tab
         await tab.open_page(0)
-        # one button in the preview toolbar row (first; the ⋯ last), showing the current state
-        assert tab.toolbar.controls[0] is tab.view_button and tab.toolbar.controls[-1] is tab.more_menu
+        # one button in the preview toolbar row (first; Share last, one tap), showing the current state;
+        # the page's other actions are the ⋯ at the end of the page row
+        assert tab.toolbar.controls[0] is tab.view_button and tab.toolbar.controls[-1] is tab.share_button
+        assert tab.pages_row.controls[-1] is tab.more_menu and tab.more_menu not in tab.toolbar.controls
+        assert "me-share" not in [i.key for i in tab.more_menu.items]
+        assert "me-delete-page" in [i.key for i in tab.more_menu.items]
+        # the step row: Update overlay is its icon only (label as tooltip), the others carry small labels
+        render = tab.step_buttons["render"]
+        assert isinstance(render, me.ft.FilledTonalIconButton) and render.tooltip == "Update overlay"
+        assert all(b.content.size == me.STEP_TEXT_SIZE for s, b in tab.step_buttons.items() if s != "render")
         assert tab.view == "translated" and tab.view_emoji.value == "✒️"
         assert tab.view_button.tooltip == "Showing translated output (click to cycle)"
         viewer = tab.interactive
@@ -2548,7 +2556,7 @@ def test_editor_display_mode_button_clean_and_box_tabs(iso, tmp_path, monkeypatc
         monkeypatch.setattr(fake_session, "page_snapshot",
                             lambda path=None: dict(snapshot(path), translated_path=fake_session.cleaned[pages[0]]))
         await tab._apply_snapshot(await tab._snapshot())
-        assert tab.translated_view == "" and tab.share_item.disabled
+        assert tab.translated_view == "" and tab.share_button.disabled
         tab.set_view("translated")
         assert tab.page_image.src == tab.cleaned_view and tab.view_hint.value.startswith("Not translated yet")
         # the box panel: OCR / Translated tabs, each edited in place, ⋯ in the same row
