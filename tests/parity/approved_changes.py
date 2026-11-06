@@ -3056,12 +3056,6 @@ _OCR_PROMPT_ILLEGIBLE_MIGRATE = (
 )
 
 
-# 2026-11-06 Multi API Key Manager: '▼ Hide keys' folds a pool's key list without switching the pool off;
-# the folded pools are remembered in multi_api_key_collapsed_pools (desktop view state, dict)
-_KEY_POOL_COLLAPSE_SCHEMA = [('    # the Multi-Key Manager tree\'s font size (int) and column heights (dict); typed \'secret\' by name\n    "multi_api_key_tree_font_size": "int",\n    "multi_api_key_tree_heights": "dict",\n', '    # the Multi-Key Manager tree\'s font size (int) and column heights (dict), and the pools whose key\n    # list is folded ({pool: True}); typed \'secret\' by name\n    "multi_api_key_tree_font_size": "int",\n    "multi_api_key_tree_heights": "dict",\n    "multi_api_key_collapsed_pools": "dict",\n'), ('     "Key-tree zoom belongs to the desktop Multi-Key Manager tree view."),\n    (r"^enable_gui_yield$|gui_yield", ("mobile",),\n', '     "Key-tree zoom belongs to the desktop Multi-Key Manager tree view."),\n    (r"^multi_api_key_collapsed_pools$", ("mobile",),\n     "Folding a pool\'s key list belongs to the desktop Multi-Key Manager view."),\n    (r"^enable_gui_yield$|gui_yield", ("mobile",),\n')]
-_KEY_POOL_COLLAPSE_SCHEMA_DATA = [("     'ui_tab': 'Models'},\n    'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},\n", "     'ui_tab': 'Models'},\n    'multi_api_key_collapsed_pools': {'type': 'secret', 'ui_sites': ('keys',)},\n    'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},\n")]
-
-
 # 2026-11-06 Manga Glossary Workflow: "Include page images in glossary generation" (manga_glossary_include_images,
 # default on): the glossary requests carry the page images (tall pages chunked like translation) in page batches
 _MANGA_GLOSSARY_PAGE_IMAGES = [
@@ -4776,17 +4770,6 @@ APPROVED = (
                 "(\"no visible / illegible\"); saved prompts with the previous default lines are migrated",
         "source": {
             "src/manga_integration.py": [_OCR_PROMPT_ILLEGIBLE_DEFAULT, _OCR_PROMPT_ILLEGIBLE_MIGRATE],
-        },
-        "values": {},
-    },
-    {
-        "date": "2026-11-06",
-        "what": "Multi API Key Manager: every dedicated pool section gets its own '▼ Hide keys' / '▶ Show keys' "
-                "button, so folding a key list never switches the pool off; the folded pools are remembered in "
-                "multi_api_key_collapsed_pools (desktop-only view state, a dict like multi_api_key_tree_heights)",
-        "source": {
-            "src/settings_schema.py": _KEY_POOL_COLLAPSE_SCHEMA,
-            "src/settings_schema_data.py": _KEY_POOL_COLLAPSE_SCHEMA_DATA,
         },
         "values": {},
     },

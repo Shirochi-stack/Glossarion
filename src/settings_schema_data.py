@@ -8268,7 +8268,6 @@ SETTINGS = {
      'type': 'bool',
      'ui_sites': ('main.model',),
      'ui_tab': 'Models'},
-    'multi_api_key_collapsed_pools': {'type': 'secret', 'ui_sites': ('keys',)},
     'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},
     'multi_api_key_tree_heights': {'type': 'secret', 'ui_sites': ('keys',)},
     'multi_api_keys': {'default': [],

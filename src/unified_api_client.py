@@ -28713,6 +28713,9 @@ class UnifiedClient:
         last_error = None
         label = f"AuthGPT{acct_label}" if 'acct_label' in dir() and acct_label else "AuthGPT"
         print(f"🔐 {label}: Sending request via Codex API (model={actual_model})")
+        # Image output: the Codex backend runs the Responses image_generation tool
+        # (generate, or edit the input image) and returns the image as base64.
+        image_output = self._authgpt_image_output(actual_model)
 
         def _relogin_after_unauthorized(rejected_token: str) -> str:
             print(f"🔐 {label}: 401 received – opening browser login…")
@@ -28787,9 +28790,13 @@ class UnifiedClient:
                     log_fn=print,
                     connect_timeout=_connect_timeout,
                     reasoning=authgpt_reasoning,
+                    image_output=image_output,
                 )
 
                 content = result.get("content", "")
+                images = result.pop("images", None)  # bytes stay out of raw_response (saved as JSON)
+                if images:
+                    content = self._save_route_image(images[0], response_name)
                 finish_reason = result.get("finish_reason", "stop")
                 usage = result.get("usage")
 
@@ -29460,7 +29467,7 @@ class UnifiedClient:
                 content = result.get("content", "")
                 images = result.pop("images", None)  # bytes stay out of raw_response (saved as JSON)
                 if images:
-                    content = self._authgem_save_image(images[0], response_name)
+                    content = self._save_route_image(images[0], response_name)
                 return UnifiedResponse(
                     content=content,
                     finish_reason=result.get("finish_reason", "stop"),
@@ -29583,25 +29590,67 @@ class UnifiedClient:
 
         raise UnifiedClientError(f"{label} request failed after {max_retries} attempts: {last_error}", error_type="api_error")
 
-    def _authgem_image_output(self, actual_model: str):
-        """Image-reply options for an AuthGem request, or None for a text reply.
+    def _route_wants_image_output(self, actual_model: str) -> bool:
+        """Whether a chat route that can return an image (AuthGem, AuthGPT) asks for one.
 
         Same rule as the native Gemini route: never in a vision-only scan, always
         for an image model, otherwise when image output mode is on."""
         if getattr(threading.current_thread(), '_force_vision_mode', False) or self._is_vision_input_only_context():
-            return None
+            return False
         if self._is_image_gen_model(actual_model):
             if not self._is_stop_requested():
                 print(f"[ImageGen] Image output mode auto-enabled for {actual_model}")
-        elif not self._image_output_mode_enabled():
+            return True
+        return self._image_output_mode_enabled()
+
+    def _authgem_image_output(self, actual_model: str):
+        """Image-reply options for an AuthGem request, or None for a text reply."""
+        if not self._route_wants_image_output(actual_model):
             return None
         return {
             "size": self._get_image_output_resolution("1K"),
             "aspect_ratio": self._get_image_output_aspect_ratio("auto"),
         }
 
-    def _authgem_save_image(self, image: dict, response_name) -> str:
-        """Saves an AuthGem image reply like the native Gemini route and returns its marker."""
+    # Request contexts whose reply is read as text even inside an image-output run.
+    _AUTHGPT_TEXT_ONLY_CONTEXTS = frozenset({
+        'glossary', 'glossary_refinement', 'refinement', 'review', 'summary', 'metadata', 'book_title',
+        'batch_toc_translation', 'batch_header_translation', 'qa_truncation', 'truncation',
+    })
+
+    def _authgpt_image_output(self, actual_model: str):
+        """image_generation tool options for an AuthGPT (Codex) request, or None for a text reply.
+
+        Size comes from OPENAI_IMAGE_SIZE (the OpenAI images route's setting) or else
+        the image output aspect ratio; quality from OPENAI_IMAGE_QUALITY.
+
+        The tool is forced (tool_choice), so the text steps an image-output run also
+        makes (image glossary, rolling summary, metadata...) never get it: Gemini can
+        still answer those in text, the Codex image tool would answer with a picture."""
+        context = current_key_context()
+        if context in self._AUTHGPT_TEXT_ONLY_CONTEXTS:
+            if self._image_output_mode_enabled() and not self._is_stop_requested():
+                print(f"🎨 AuthGPT: {context} request is text-only; the image tool is not offered")
+            return None
+        if not self._route_wants_image_output(actual_model):
+            return None
+        size = os.getenv('OPENAI_IMAGE_SIZE', '').strip().lower()
+        if not size:
+            ratio = re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*[:x/]\s*(\d+(?:\.\d+)?)\s*',
+                                 str(self._get_image_output_aspect_ratio("auto") or ''))
+            size = 'auto'
+            if ratio:
+                width, height = float(ratio.group(1)), float(ratio.group(2))
+                size = '1024x1024' if width == height else ('1536x1024' if width > height else '1024x1536')
+        return {
+            "size": size,
+            "quality": os.getenv('OPENAI_IMAGE_QUALITY', 'auto').strip().lower() or 'auto',
+            "output_format": "png",
+        }
+
+    def _save_route_image(self, image: dict, response_name) -> str:
+        """Saves a chat route's image reply (AuthGem, AuthGPT) like the native Gemini route
+        and returns its [GENERATED_IMAGE:path] marker."""
         filepath = self._save_web_chat_image(image, response_name)
         try:
             tls = self._get_thread_local_client()

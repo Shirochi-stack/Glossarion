@@ -66,11 +66,11 @@ jobs:
     - name: Mobile shared-module and backend patch tests (Python 3.10)
       env:
         # tests/conftest.py (which puts src/ on sys.path locally) is not tracked.
-        PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/tests
+        PYTHONPATH: ${{ github.workspace }}/src
         QT_QPA_PLATFORM: offscreen
       run: |
         pip install --no-cache-dir pytest
-        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic -p _none_refs_probe \
+        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
           tests/test_anti_duplicate_wire.py \
           tests/test_mobile_runtime.py \
           tests/test_safe_image.py \
@@ -144,13 +144,13 @@ jobs:
           tests/test_empty_key_pool_disabled.py \
           tests/test_review_prompt_profiles.py \
           tests/test_authgem_image_output.py \
+          tests/test_authgpt_image_output.py \
           tests/test_manga_image_edit_pool_load.py \
           tests/test_manga_bubble_fit.py \
           tests/test_glossary_chunk_tall_images.py \
           tests/test_manga_glossary_page_images.py \
           tests/test_manga_inpaint_wait.py \
           tests/test_auth_pool_dropdowns.py \
-          tests/test_key_pool_collapse.py \
           tests/test_gemini_future_and_br_chapters.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
