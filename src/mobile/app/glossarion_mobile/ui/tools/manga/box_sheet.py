@@ -10,9 +10,11 @@ place:
 
 * **Move** — the box's position and size in image pixels: X / Y / W / H fields with **Apply**, and
   nudge buttons (move by the step, W / H smaller / larger) for what a finger cannot place exactly.
-* **Style** — the desktop Format toolbar for this box: font, size (Auto or px), **B** / *I* / U,
-  align left / center / right, text colour and Reset; each change re-renders the page
-  (``MangaEditorSession.set_box_style``, then Save & Update Overlay when the page has translations).
+* **Style** — the desktop Format toolbar for this box: font, size (Auto or px in 0.5 px steps, with
+  − / + and Auto; a box on Auto shows the size it was last rendered at, ``rendered_font_size``),
+  **B** / *I* / U, align left / center / right, text colour and Reset; each change re-renders the
+  page (``MangaEditorSession.set_box_style``, then Save & Update Overlay when the page has
+  translations).
 
 The header row holds the box number, the tabs, the ⋯ menu (Save (no re-render), **Clean this
 box**, the box type (free text / bubble text: the renderer's background and the cleaner's
@@ -39,7 +41,8 @@ from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.manga.common import push
 
 __all__ = ["BOX_TABS", "BoxPanel", "COMPACT_BUTTON", "GEOMETRY_KEYS", "ITERATION_CHOICES", "NOT_RECOGNIZED",
-           "NUDGE_STEPS", "STYLE_ALIGNMENTS", "STYLE_COLORS", "box_geometry", "box_signature", "box_style"]
+           "NUDGE_STEPS", "SIZE_MAX", "SIZE_STEP", "STYLE_ALIGNMENTS", "STYLE_COLORS", "box_geometry",
+           "box_signature", "box_size", "box_style", "size_text"]
 
 #: Inpainting iterations: -1 = Auto (the dialog's range is -1..50).
 ITERATION_CHOICES = (-1, 0, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 50)
@@ -54,6 +57,9 @@ NUDGE_STEPS = (1, 5, 20)
 #: The Style tab's alignments: (align, icon, tooltip); center is the renderer's default.
 STYLE_ALIGNMENTS = (("left", "FORMAT_ALIGN_LEFT", "Align left"), ("center", "FORMAT_ALIGN_CENTER", "Center"),
                     ("right", "FORMAT_ALIGN_RIGHT", "Align right"))
+#: The Style tab's size: − / + step 0.5 px (the desktop Format toolbar's size box); at most 200 px.
+SIZE_STEP = 0.5
+SIZE_MAX = 200
 #: The Style tab's text colours: (label, [r, g, b]; None = the Rendering Settings colour).
 STYLE_COLORS = (("Default colour", None), ("Black", [0, 0, 0]), ("White", [255, 255, 255]), ("Red", [200, 0, 0]),
                 ("Blue", [0, 70, 200]), ("Green", [0, 130, 60]), ("Yellow", [240, 200, 0]), ("Purple", [120, 40, 160]))
@@ -81,12 +87,46 @@ def box_style(box: Mapping[str, Any]) -> dict:
     return dict(style) if isinstance(style, Mapping) else {}
 
 
+def _half_px(value: Any) -> Optional[float]:
+    """A px size in 0.5 steps (28.4 -> 28.5), at most SIZE_MAX; None when it is not a positive number."""
+    try:
+        size = round(float(value) * 2) / 2
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return min(size, float(SIZE_MAX)) if size > 0 else None
+
+
+def size_text(size: Any) -> str:
+    """28 -> "28", 28.5 -> "28.5" (no trailing ".0"); "" without a size."""
+    if size in (None, "") or isinstance(size, bool):
+        return ""
+    try:
+        text = f"{float(size):.1f}"
+    except (TypeError, ValueError):
+        return ""
+    return text[:-2] if text.endswith(".0") else text
+
+
+def box_size(box: Mapping[str, Any]) -> tuple:
+    """(size, auto) of a box: its own size (auto False), else the size it was last rendered at on Auto
+    (``rendered_font_size``, in 0.5 px; auto True), else (None, True)."""
+    own = _half_px(box_style(box).get("font_size"))
+    if own is not None:
+        return own, False
+    return _half_px(box.get("rendered_font_size")), True
+
+
+def _size_value(size: float) -> Any:
+    """What a style stores: 28 (whole px) or 28.5."""
+    return int(size) if float(size).is_integer() else size
+
+
 def box_signature(box: Mapping[str, Any], index: int) -> tuple:
     """What a panel shows of a box: a panel is rebuilt only when this changes (typing is kept)."""
     style = tuple(sorted((key, tuple(value) if isinstance(value, list) else value)
                          for key, value in box_style(box).items()))
     return (index, str(box.get("ocr_text") or ""), str(box.get("translation") or ""), bool(box.get("free_text")),
-            bool(box.get("exclude_from_clean")), _iterations(box), style)
+            bool(box.get("exclude_from_clean")), _iterations(box), style, box.get("rendered_font_size"))
 
 
 def box_geometry(box: Mapping[str, Any]) -> dict:
@@ -196,13 +236,28 @@ class BoxPanel:
             options=[ft.DropdownOption(key="", text="Default font")] + [
                 ft.DropdownOption(key=path, text=os.path.splitext(os.path.basename(path))[0]) for path in font_paths],
             on_select=lambda e: self.set_style(font=e.control.value or None))
+        # Size: the box's own px value (0.5 px steps); empty = Auto, with the size the box was last
+        # rendered at as the hint ("Auto 28"); − / + step from the shown size, Auto clears it
+        size, auto = box_size(box)
         self.size_field = commit_on_blur(
-            ft.TextField(value=str(style.get("font_size") or ""), label="Size", hint_text="Auto", dense=True,
-                         width=64, key="box-style-size", keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT,
+            ft.TextField(value=size_text(style.get("font_size")), label="Size",
+                         hint_text=f"Auto {size_text(size)}" if auto and size else "Auto", dense=True,
+                         width=76, key="box-style-size", keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT,
                          label_style=LABEL_TEXT, hint_style=BODY_TEXT, disabled=styling,
+                         tooltip=(f"Auto: rendered at {size_text(size)} px" if auto and size else None),
                          content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
                          border_radius=tokens.RADII["field"]),
-            lambda text: self.set_size(text), current=lambda: str(self.style.get("font_size") or ""))
+            lambda text: self.set_size(text), current=lambda: size_text(self.style.get("font_size")))
+        self.size_down_button = ft.IconButton(
+            icon=ft.Icons.REMOVE, tooltip="Smaller (0.5 px)", key="box-style-size-down", size_constraints=HIT_TARGET,
+            disabled=styling or size is None, on_click=lambda e: self.step_size(-SIZE_STEP))
+        self.size_up_button = ft.IconButton(
+            icon=ft.Icons.ADD, tooltip="Larger (0.5 px)", key="box-style-size-up", size_constraints=HIT_TARGET,
+            disabled=styling or size is None, on_click=lambda e: self.step_size(SIZE_STEP))
+        self.size_auto_button = ft.TextButton(
+            content="Auto", key="box-style-size-auto", tooltip="Fit the box (the Rendering Settings size)",
+            style=COMPACT_BUTTON, disabled=styling or not style.get("font_size"),
+            on_click=lambda e: self.set_style(font_size=None))
         self.style_toggles = {}
         for key, icon, label in (("bold", "FORMAT_BOLD", "Bold"), ("italic", "FORMAT_ITALIC", "Italic"),
                                  ("underline", "FORMAT_UNDERLINED", "Underline")):
@@ -276,7 +331,8 @@ class BoxPanel:
                    scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=4, tight=True, visible=self.tab == "move", key=f"box-move-body-{n}")
         self.style_body = ft.Column([
-            ft.Row([self.font_dropdown, self.size_field, self.reset_style_button], spacing=4,
+            ft.Row([self.font_dropdown, self.size_down_button, self.size_field, self.size_up_button,
+                    self.size_auto_button, self.reset_style_button], spacing=0,
                    scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([*self.style_toggles.values(), *self.align_buttons.values(), self.color_menu], spacing=0,
                    scroll=ft.ScrollMode.AUTO, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -400,16 +456,25 @@ class BoxPanel:
         return self.on_action("style", self.index, {**self.changes(), "style": changes})
 
     def set_size(self, text: str) -> Any:
-        """The size field: a px value, or empty / 0 for Auto."""
-        text = str(text or "").strip()
+        """The size field: a px value (0.5 px steps: 28.4 -> 28.5), or empty / 0 for Auto."""
+        text = str(text or "").strip().replace(",", ".")
         try:
-            size = int(float(text)) if text else 0
+            float(text or 0)
         except ValueError:
             self.size_field.error_text = "A number of px, or empty for Auto"
             push(self.size_field)
             return None
         self.size_field.error_text = None
-        return self.set_style(font_size=size if size > 0 else None)
+        size = _half_px(text) if text else None
+        return self.set_style(font_size=_size_value(size) if size else None)
+
+    def step_size(self, delta: float) -> Any:
+        """− / +: the shown size (the box's own, or the one it was rendered at on Auto) ± 0.5 px."""
+        size, _auto = box_size({**self.box, "style": self.style})
+        if size is None:
+            return None
+        new = min(float(SIZE_MAX), max(SIZE_STEP, size + delta))
+        return self.set_style(font_size=_size_value(new))
 
     def reset_style(self) -> Any:
         return self.on_action("style", self.index, {**self.changes(), "style": None})

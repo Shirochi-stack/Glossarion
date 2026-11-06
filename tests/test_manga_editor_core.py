@@ -227,11 +227,14 @@ EDITS = (
     ("_render_with_manga_translator",
      "            pil_image = open_image(image_path)\n", "            pil_image = open_page_image(image_path)\n"),
     # Owner-approved per-box text formatting (2026-11-06, the Format toolbar): the regions get their
-    # box's style from the page state before the render (_attach_region_styles; no styles: no-op)
+    # box's style from the page state before the render (_attach_region_styles; no styles: no-op),
+    # and the size each box was drawn with goes into the page state after it (owner request
+    # 2026-11-06: the size box shows the real auto size; _record_region_font_sizes)
     ("_render_with_manga_translator",
      "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n",
      "        _attach_region_styles(self, original_image_path or image_path, regions)\n"
-     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"),
+     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"
+     "        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)\n"),
     # Owner-approved fix (2026-11-06, PR 129): Translate's fallback load of the endpoint-backed
     # custom image edit runs in-process, as MangaTranslator's shared getter loads it; a worker
     # process never received the Image Gen/Edit key model (tests/test_manga_image_edit_pool_load.py).
@@ -240,6 +243,69 @@ EDITS = (
      "    # The endpoint-backed image edit runs in-process, as MangaTranslator's shared getter loads it:\n"
      "    # a worker process never receives the Image Gen/Edit key model copied into config below.\n"
      "    new_inpainter = LocalInpainter(enable_worker_process=not is_custom_image_edit)\n"),
+    # Owner request (2026-11-06, a first Translate after switching custom-image-edit -> lama_onnx
+    # rendered on the original page while LaMa ONNX downloaded): Translate's render waits for its
+    # concurrent inpainting with every local model, not 30 s (only a force stop ends the wait), and
+    # _run_inpainting_sync returns its pool checkout on the error / force-stop exits too, so a failed
+    # request no longer keeps Skip Inpainter locked (tests/test_manga_inpaint_wait.py).
+    ("_run_translate_background",
+     "        if inpaint_thread is not None:\n"
+     "            inpaint_wait_timeout = 30\n"
+     "            try:\n"
+     "                cfg = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}\n"
+     "                if (\n"
+     "                    str(cfg.get('manga_inpaint_method', 'local') or '').lower() == 'local'\n"
+     "                    and str(cfg.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'\n"
+     "                ):\n"
+     "                    inpaint_wait_timeout = None\n"
+     "            except Exception:\n"
+     "                pass\n"
+     "            if inpaint_wait_timeout is None:\n"
+     "                print(\"[TRANSLATE_CONCURRENT] Waiting for custom-image-edit inpainting before rendering\")\n"
+     "                inpaint_thread.join()\n"
+     "            else:\n"
+     "                inpaint_thread.join(timeout=inpaint_wait_timeout)\n"
+     "\n"
+     "        with inpaint_lock:\n"
+     "            cleaned_image_path = inpaint_result.get('cleaned_path')\n"
+     "            if not inpaint_result['completed']:\n"
+     "                print(f\"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image\")\n"
+     "                self._log(f\"⏱️ Inpainting still running, rendering on original image\", \"info\")\n",
+     "        # Every local model waits, not only the custom image edit: a first run downloads and\n"
+     "        # loads the model inside the inpainting thread, and a fixed 30 s wait rendered the page\n"
+     "        # on the original image. Only a force stop ends the wait early.\n"
+     "        if inpaint_thread is not None:\n"
+     "            _wait_for_concurrent_inpainting(\n"
+     "                self, inpaint_thread,\n"
+     "                lambda: _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1')\n"
+     "\n"
+     "        with inpaint_lock:\n"
+     "            cleaned_image_path = inpaint_result.get('cleaned_path')\n"
+     "            if not inpaint_result['completed']:\n"
+     "                print(f\"[TRANSLATE_CONCURRENT] Stopped before inpainting finished, will use original image\")\n"
+     "                self._log(f\"⏹ Stopped before inpainting finished, rendering on original image\", \"warning\")\n"),
+    ("_run_inpainting_sync",
+     "    temp_translator = None  # Track temporary translator for pool cleanup\n",
+     "    temp_translator = None  # Track temporary translator for pool cleanup\n"
+     "    inpainter = None  # Checked out of the shared pool below; every exit returns it\n"),
+    ("_run_inpainting_sync",
+     "                print(f\"[INPAINT_SYNC] Force-cancelled before inpainting\")\n"
+     "                return None\n",
+     "                print(f\"[INPAINT_SYNC] Force-cancelled before inpainting\")\n"
+     "                _release_sync_inpainter(self, inpainter)\n"
+     "                return None\n"),
+    ("_run_inpainting_sync",
+     "        # Return inpainter to pool on error\n",
+     "        # Return inpainter to pool on error\n"
+     "        _release_sync_inpainter(self, inpainter)\n"),
+    ("_run_inpainting_sync",
+     "                logging.warning(f\"⚠️ Failed to return inpainter to pool: {e}\")\n"
+     "            \n"
+     "        else:\n",
+     "                logging.warning(f\"⚠️ Failed to return inpainter to pool: {e}\")\n"
+     "            inpainter = None  # Returned: a later error must not take back another thread's checkout of it\n"
+     "            \n"
+     "        else:\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen
@@ -1452,6 +1518,7 @@ def test_rerender_image_matches_the_frozen_desktop(case, tmp_path):
     assert FONT_PATH.exists(), ("the fixed test font is missing: whitelist tests/fixtures/manga_editor/ "
                                 "in .gitignore so CI checks it out")
     results = {}
+    sizes = {}
     for side in SIDES:
         root = tmp_path / side
         host, page = _render_host(root)
@@ -1459,16 +1526,25 @@ def test_rerender_image_matches_the_frozen_desktop(case, tmp_path):
         assert output and os.path.isfile(output), (side, output, host.logs[-3:])
         rendered = cv2.imread(output)
         source = cv2.imread(page)
+        state = dict(host.image_state_manager.get_state(page))
+        # Owner request 2026-11-06: every render records the size each box was drawn with (the
+        # Format toolbar shows it while the box is on Auto); the frozen desktop has no such key
+        sizes[side] = state.pop('region_font_sizes', None)
         results[side] = (
             _normalize(output, [str(root)]),
             hashlib.sha256(rendered.tobytes()).hexdigest(),
-            _normalize(host.image_state_manager.get_state(page), [str(root)]),
+            _normalize(state, [str(root)]),
             [entry for entry in host.logs if entry[0] != 'debug'],
         )
         assert rendered.shape == source.shape
         assert int(np.count_nonzero(np.any(rendered != source, axis=2))) > 200, "nothing was rendered"
     assert results["desktop"] == results["legacy"]
     assert results["mobile"] == results["legacy"]
+    assert sizes["legacy"] is None
+    assert sizes["desktop"] == sizes["mobile"] and sizes["desktop"]
+    assert all(isinstance(size, (int, float)) and size > 0 for size in sizes["desktop"].values())
+    if case == 'direct':  # box 2 is excluded from the render: no size for it
+        assert set(sizes["desktop"]) == {'0'}
 
 
 # ===========================================================================

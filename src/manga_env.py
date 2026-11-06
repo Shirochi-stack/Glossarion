@@ -764,7 +764,7 @@ class MangaEnvMixin:
             "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
             "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
             "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
+            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
             "LANGUAGE PRESERVATION:\n"
             "- Korean text → Output in Korean\n"
             "- Japanese text → Output in Japanese\n"
@@ -784,22 +784,33 @@ class MangaEnvMixin:
             "If image has a dot → Output: .\n"
             "If image has two dots → Output: . .\n"
             "If image has text → Output: [that text]\n"
-            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
+            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
         )
 
     @staticmethod
     def _migrate_legacy_manga_ocr_prompt(prompt):
-        """Update only saved prompts with the old empty-response OCR rule."""
+        """Update only saved prompts with an older wording of the empty-response OCR rule.
+
+        2026-11-06 (owner): "no visible text" became "no visible / illegible text" in rule 8 and the last
+        line; saved prompts with the previous default lines get the new lines."""
+        if isinstance(prompt, str):
+            prompt = prompt.replace(
+                "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",
+                "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",
+            ).replace(
+                "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",
+                "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",
+            )
         legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"
         if not isinstance(prompt, str) or legacy_rule not in prompt:
             return prompt
 
         prompt = prompt.replace(
             legacy_rule,
-            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",
+            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",
         ).replace(
             "If image is truly blank → Output: [empty/no response]",
-            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",
+            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",
         )
         detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."
         if detector_note not in prompt:

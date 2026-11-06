@@ -2899,6 +2899,162 @@ _MISSING_BRACKET_SCHEMA = {'src/settings_schema_data.py': [(" 'remove_excessive_
 _MISSING_BRACKET_QA = {'src/QA_Scanner_GUI.py': [("                    'sdlxliff_min_source_paragraph_tags': 20,\n                    'check_invalid_nesting': False,\n                    'cache_enabled': True,\n                    'cache_auto_size': False,\n", "                    'sdlxliff_min_source_paragraph_tags': 20,\n                    'check_invalid_nesting': False,\n                    'check_missing_tag_bracket': True,\n                    'cache_enabled': True,\n                    'cache_auto_size': False,\n"), ('            additional_layout.addWidget(check_invalid_nesting_checkbox)\n\n            # Silent truncation detection (optional, requires heavy deps)\n            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")\n', '            additional_layout.addWidget(check_invalid_nesting_checkbox)\n\n            # Missing tag bracket check (LLM token issue, separate toggle)\n            check_missing_tag_bracket_checkbox = self._create_styled_checkbox("Check for missing tag brackets (<p\\"Hello\\"</p>)")\n            check_missing_tag_bracket_checkbox.setChecked(qa_settings.get(\'check_missing_tag_bracket\', True))\n            additional_layout.addWidget(check_missing_tag_bracket_checkbox)\n\n            # Silent truncation detection (optional, requires heavy deps)\n            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")\n'), ("                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),\n                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),\n                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),\n                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),\n", "                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),\n                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),\n                        'check_missing_tag_bracket': (check_missing_tag_bracket_checkbox, lambda x: x.isChecked()),\n                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),\n                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),\n"), ("                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),\n                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),\n                    ('check_silent_truncation', check_truncation_checkbox, False),\n                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),\n", "                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),\n                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),\n                    ('check_missing_tag_bracket', check_missing_tag_bracket_checkbox, True),\n                    ('check_silent_truncation', check_truncation_checkbox, False),\n                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),\n"), ('                    check_invalid_tag_mismatch_checkbox.setChecked(False)\n                    check_invalid_nesting_checkbox.setChecked(False)\n                    check_truncation_checkbox.setChecked(False)\n                    truncation_cheap_slider.setValue(12)\n', '                    check_invalid_tag_mismatch_checkbox.setChecked(False)\n                    check_invalid_nesting_checkbox.setChecked(False)\n                    check_missing_tag_bracket_checkbox.setChecked(True)\n                    check_truncation_checkbox.setChecked(False)\n                    truncation_cheap_slider.setValue(12)\n')], 'src/qa_scan_runtime.py': [('        "check_invalid_tag_mismatch": False,\n        "check_invalid_nesting": False,\n        "check_silent_truncation": False,\n        "truncation_cheap_threshold": 12,\n', '        "check_invalid_tag_mismatch": False,\n        "check_invalid_nesting": False,\n        "check_missing_tag_bracket": True,\n        "check_silent_truncation": False,\n        "truncation_cheap_threshold": 12,\n'), ('        "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",\n        "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",\n        "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",\n        "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",\n', '        "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",\n        "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",\n        "QA_CHECK_MISSING_TAG_BRACKET": "1" if settings.get("check_missing_tag_bracket", True) else "0",\n        "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",\n        "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",\n')], 'src/scan_html_folder.py': [('from bs4 import BeautifulSoup, Comment, NavigableString\nfrom bs4.element import CData, RubyTextString, RubyParenthesisString\nfrom _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags\nfrom langdetect import detect, LangDetectException\nfrom difflib import SequenceMatcher\n', 'from bs4 import BeautifulSoup, Comment, NavigableString\nfrom bs4.element import CData, RubyTextString, RubyParenthesisString\nfrom _empty_attr_fix import (\n    count_empty_attr_tags,\n    count_missing_tag_brackets,\n    find_empty_attr_tags,\n    find_missing_tag_brackets,\n)\nfrom langdetect import detect, LangDetectException\nfrom difflib import SequenceMatcher\n'), ('        # Detect translation artifacts\n        artifacts = []\n        check_translation_artifacts = qa_settings.get(\'check_translation_artifacts\', False)\n        check_ai_artifacts = qa_settings.get(\'check_ai_artifacts\', False)\n        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)\n        if check_translation_artifacts:\n            artifacts = detect_translation_artifacts(raw_text)\n            \n            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations\n', '        # Detect translation artifacts\n        artifacts = []\n        # Checked in RAW HTML under its own toggle: these tags are not visible text.\n        if raw_file_content and qa_settings.get(\'check_missing_tag_bracket\', True):\n            missing_bracket_count = count_missing_tag_brackets(raw_file_content)\n            if missing_bracket_count:\n                artifacts.append({\n                    \'type\': \'empty_attribute_tags\',\n                    \'count\': missing_bracket_count,\n                    \'examples\': find_missing_tag_brackets(raw_file_content, limit=10),\n                    \'severity\': \'medium\'\n                })\n        check_translation_artifacts = qa_settings.get(\'check_translation_artifacts\', False)\n        check_ai_artifacts = qa_settings.get(\'check_ai_artifacts\', False)\n        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)\n        if check_translation_artifacts:\n            artifacts.extend(detect_translation_artifacts(raw_text))\n            \n            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations\n'), ("            'sdlxliff_min_source_paragraph_tags': 20,\n            'check_invalid_nesting': False,\n            'check_silent_truncation': False,\n            'check_potential_truncation': False,\n", "            'sdlxliff_min_source_paragraph_tags': 20,\n            'check_invalid_nesting': False,\n            'check_missing_tag_bracket': True,\n            'check_silent_truncation': False,\n            'check_potential_truncation': False,\n"), ('        )\n    log(f"   ✓ Invalid nesting check: {\'ENABLED\' if qa_settings.get(\'check_invalid_nesting\', False) else \'DISABLED\'}") \n    log(f"   ✓ Silent truncation check: {\'ENABLED\' if qa_settings.get(\'check_silent_truncation\', False) else \'DISABLED\'}")\n    log(f"   ✓ Potential truncation check: {\'ENABLED\' if qa_settings.get(\'check_potential_truncation\', False) else \'DISABLED\'}")\n', '        )\n    log(f"   ✓ Invalid nesting check: {\'ENABLED\' if qa_settings.get(\'check_invalid_nesting\', False) else \'DISABLED\'}") \n    log(f"   ✓ Missing tag bracket check: {\'ENABLED\' if qa_settings.get(\'check_missing_tag_bracket\', True) else \'DISABLED\'}")\n    log(f"   ✓ Silent truncation check: {\'ENABLED\' if qa_settings.get(\'check_silent_truncation\', False) else \'DISABLED\'}")\n    log(f"   ✓ Potential truncation check: {\'ENABLED\' if qa_settings.get(\'check_potential_truncation\', False) else \'DISABLED\'}")\n')]}
 
 
+# 2026-11-06 Local Model switch: Skip Inpainter's pool lock is refreshed at once (both exits of
+# _on_local_model_change; tests/test_manga_inpaint_wait.py)
+_SKIP_LOCK_SWITCH_IMAGE_EDIT = (
+    "            self._apply_custom_image_edit_ui_state()\n"
+    "            self._save_rendering_settings()\n"
+    "            return\n"
+    "        \n"
+    "        # Check for saved path for this model type\n",
+    "            self._apply_custom_image_edit_ui_state()\n"
+    "            self._sync_skip_inpainter_pool_lock()\n"
+    "            self._save_rendering_settings()\n"
+    "            return\n"
+    "        \n"
+    "        # Check for saved path for this model type\n",
+)
+_SKIP_LOCK_SWITCH_LOCAL = (
+    "            self.local_model_status_label.setStyleSheet(\"color: gray;\")\n"
+    "\n"
+    "        self._apply_custom_image_edit_ui_state()\n"
+    "        \n"
+    "        self._save_rendering_settings()\n",
+    "            self.local_model_status_label.setStyleSheet(\"color: gray;\")\n"
+    "\n"
+    "        self._apply_custom_image_edit_ui_state()\n"
+    "        # Skip Inpainter follows the pool at once, not on the tracker's next 2 s tick\n"
+    "        self._sync_skip_inpainter_pool_lock()\n"
+    "        \n"
+    "        self._save_rendering_settings()\n",
+)
+
+
+# 2026-11-06 Owner: the manga OCR prompt's empty-answer rule also covers illegible text ("no visible / illegible
+# text or symbols"), and saved prompts with the previous default lines are migrated to the new ones.
+_OCR_PROMPT_ILLEGIBLE_DEFAULT = (
+    '    def _default_manga_ocr_prompt(self):\n'
+    '        return (\n'
+    '            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\\n\\n"\n'
+    '            "ABSOLUTE RULES:\\n"\n'
+    '            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\\n"\n'
+    '            "2. NEVER TRANSLATE OR MODIFY\\n"\n'
+    '            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\\n"\n'
+    '            "4. NEVER SAY \\"I can\'t\\" or \\"I cannot\\" or \\"no text\\" or \\"blank image\\"\\n"\n'
+    '            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\\n"\n'
+    '            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\\n"\n'
+    '            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\\n"\n'
+    '            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\\n\\n"\n'
+    '            "LANGUAGE PRESERVATION:\\n"\n'
+    '            "- Korean text → Output in Korean\\n"\n'
+    '            "- Japanese text → Output in Japanese\\n"\n'
+    '            "- Chinese text → Output in Chinese\\n"\n'
+    '            "- English text → Output in English\\n"\n'
+    '            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\\n\\n"\n'
+    '            "FORMATTING:\\n"\n'
+    '            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\\n"\n'
+    '            "- NEVER use \\\\n or line breaks in your output\\n\\n"\n'
+    '            "FORBIDDEN RESPONSES:\\n"\n'
+    '            "- \\"I can see this appears to be...\\"\\n"\n'
+    '            "- \\"I cannot make out any clear text...\\"\\n"\n'
+    '            "- \\"This appears to be blank...\\"\\n"\n'
+    '            "- \\"If there is text present...\\"\\n"\n'
+    '            "- ANY explanatory text\\n\\n"\n'
+    '            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\\n"\n'
+    '            "If image has a dot → Output: .\\n"\n'
+    '            "If image has two dots → Output: . .\\n"\n'
+    '            "If image has text → Output: [that text]\\n"\n'
+    '            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"\n'
+    '        )\n',
+    '    def _default_manga_ocr_prompt(self):\n'
+    '        return (\n'
+    '            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\\n\\n"\n'
+    '            "ABSOLUTE RULES:\\n"\n'
+    '            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\\n"\n'
+    '            "2. NEVER TRANSLATE OR MODIFY\\n"\n'
+    '            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\\n"\n'
+    '            "4. NEVER SAY \\"I can\'t\\" or \\"I cannot\\" or \\"no text\\" or \\"blank image\\"\\n"\n'
+    '            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\\n"\n'
+    '            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\\n"\n'
+    '            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\\n"\n'
+    '            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\\n\\n"\n'
+    '            "LANGUAGE PRESERVATION:\\n"\n'
+    '            "- Korean text → Output in Korean\\n"\n'
+    '            "- Japanese text → Output in Japanese\\n"\n'
+    '            "- Chinese text → Output in Chinese\\n"\n'
+    '            "- English text → Output in English\\n"\n'
+    '            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\\n\\n"\n'
+    '            "FORMATTING:\\n"\n'
+    '            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\\n"\n'
+    '            "- NEVER use \\\\n or line breaks in your output\\n\\n"\n'
+    '            "FORBIDDEN RESPONSES:\\n"\n'
+    '            "- \\"I can see this appears to be...\\"\\n"\n'
+    '            "- \\"I cannot make out any clear text...\\"\\n"\n'
+    '            "- \\"This appears to be blank...\\"\\n"\n'
+    '            "- \\"If there is text present...\\"\\n"\n'
+    '            "- ANY explanatory text\\n\\n"\n'
+    '            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\\n"\n'
+    '            "If image has a dot → Output: .\\n"\n'
+    '            "If image has two dots → Output: . .\\n"\n'
+    '            "If image has text → Output: [that text]\\n"\n'
+    '            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"\n'
+    '        )\n',
+)
+
+_OCR_PROMPT_ILLEGIBLE_MIGRATE = (
+    '    @staticmethod\n'
+    '    def _migrate_legacy_manga_ocr_prompt(prompt):\n'
+    '        """Update only saved prompts with the old empty-response OCR rule."""\n'
+    '        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"\n'
+    '        if not isinstance(prompt, str) or legacy_rule not in prompt:\n'
+    '            return prompt\n'
+    '\n'
+    '        prompt = prompt.replace(\n'
+    '            legacy_rule,\n'
+    '            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '        ).replace(\n'
+    '            "If image is truly blank → Output: [empty/no response]",\n'
+    '            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '        )\n'
+    '        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."\n'
+    '        if detector_note not in prompt:\n'
+    '            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
+    '        return prompt\n',
+    '    @staticmethod\n'
+    '    def _migrate_legacy_manga_ocr_prompt(prompt):\n'
+    '        """Update only saved prompts with an older wording of the empty-response OCR rule.\n'
+    '\n'
+    '        2026-11-06 (owner): "no visible text" became "no visible / illegible text" in rule 8 and the last\n'
+    '        line; saved prompts with the previous default lines get the new lines."""\n'
+    '        if isinstance(prompt, str):\n'
+    '            prompt = prompt.replace(\n'
+    '                "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '                "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '            ).replace(\n'
+    '                "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '                "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '            )\n'
+    '        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"\n'
+    '        if not isinstance(prompt, str) or legacy_rule not in prompt:\n'
+    '            return prompt\n'
+    '\n'
+    '        prompt = prompt.replace(\n'
+    '            legacy_rule,\n'
+    '            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '        ).replace(\n'
+    '            "If image is truly blank → Output: [empty/no response]",\n'
+    '            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '        )\n'
+    '        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."\n'
+    '        if detector_note not in prompt:\n'
+    '            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
+    '        return prompt\n',
+)
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -3987,6 +4143,311 @@ APPROVED = (
         "source": {
             "src/manga_integration.py": [_FORMAT_TOOLBAR_INSTALL],
             "src/ImageRenderer.py": [_FORMAT_CONTEXT_MENU],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga glossary workflow: the OCR-only glossary pass detects a tall webtoon strip chunk by chunk "
+                "(the webtoon path's chunking and overlap de-duplication, now _detect_webtoon_chunk_regions), "
+                "so the regions translation reuses are the chunked ones; the chunk shift also moves "
+                "bubble_bounds and a merged region's original_regions, and the overlap de-duplication "
+                "finds the previous chunk's copy (it skipped every earlier region before)",
+        "source": {
+            "src/manga_translator.py": [
+                (
+                    '            # owns its full translate/render path, so skip that shortcut for\n'
+                    '            # OCR-only and precomputed-region glossary passes.\n'
+                    '            used_precomputed_regions = precomputed_regions is not None\n'
+                    ,
+                    '            # owns its full translate/render path, so skip that shortcut for\n'
+                    '            # OCR-only and precomputed-region glossary passes. An OCR-only pass\n'
+                    '            # still detects a webtoon strip chunk by chunk (same regions as the\n'
+                    '            # webtoon path), and the translation pass reuses those regions.\n'
+                    '            webtoon_chunk_ocr = False\n'
+                    '            used_precomputed_regions = precomputed_regions is not None\n'
+                ),
+                (
+                    "                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')\n"
+                    '                if (not ocr_only and not used_precomputed_regions and\n'
+                    ,
+                    "                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')\n"
+                    '                if (ocr_only and not used_precomputed_regions and\n'
+                    "                        format_info['is_webtoon'] and webtoon_mode in ('auto', 'force')):\n"
+                    '                    self._log("🔄 Webtoon mode active - will OCR in chunks for better OCR")\n'
+                    '                    webtoon_chunk_ocr = True\n'
+                    '                if (not ocr_only and not used_precomputed_regions and\n'
+                ),
+                (
+                    '                    preserve_translations=used_imported_regions,\n'
+                    '                )\n'
+                    '            else:\n'
+                    '                self._log(f"📍 [STEP 1] Text Detection Phase")\n'
+                    ,
+                    '                    preserve_translations=used_imported_regions,\n'
+                    '                )\n'
+                    '            elif webtoon_chunk_ocr:\n'
+                    '                self._log(f"📍 [STEP 1] Text Detection Phase (webtoon chunks)")\n'
+                    '                _, regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)\n'
+                    "                result['format_info']['chunks_processed'] = num_chunks\n"
+                    '                if self._check_stop():\n'
+                    '                    # A stopped chunk OCR returns no regions for the chunks it skipped:\n'
+                    '                    # do not save or hand over that partial page as its OCR.\n'
+                    "                    result['interrupted'] = True\n"
+                    '                    self._log("⏹️ Webtoon chunk OCR stopped", "warning")\n'
+                    '                    return result\n'
+                    '            else:\n'
+                    '                self._log(f"📍 [STEP 1] Text Detection Phase")\n'
+                ),
+                (
+                    '        import cv2\n'
+                    '        import numpy as np\n'
+                    '        from PIL import Image as PILImage\n'
+                    '        \n'
+                    ,
+                    '        import cv2\n'
+                    '        \n'
+                ),
+                (
+                    '            \n'
+                    '            # Load the image\n'
+                    '            image = cv2.imread(image_path)\n'
+                    '            if image is None:\n'
+                    '                pil_image = open_image(image_path)\n'
+                    '                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)\n'
+                    '            \n'
+                    '            height, width = image.shape[:2]\n'
+                    '            \n'
+                    '            # Get chunk settings from config\n'
+                    "            chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)\n"
+                    "            chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)\n"
+                    '            \n'
+                    '            self._log(f"   Image dimensions: {width}x{height}", "info")\n'
+                    '            self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")\n'
+                    '            \n'
+                    '            # Calculate number of chunks needed\n'
+                    '            effective_chunk_height = chunk_height - chunk_overlap\n'
+                    '            num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)\n'
+                    '            \n'
+                    '            self._log(f"   Will process in {num_chunks} chunks", "info")\n'
+                    '            \n'
+                    '            # Process each chunk\n'
+                    '            all_regions = []\n'
+                    '            chunk_offsets = []\n'
+                    '            \n'
+                    '            for i in range(num_chunks):\n'
+                    '                # Calculate chunk boundaries\n'
+                    '                start_y = i * effective_chunk_height\n'
+                    '                end_y = min(start_y + chunk_height, height)\n'
+                    '                \n'
+                    "                # Make sure we don't miss the bottom part\n"
+                    '                if i == num_chunks - 1:\n'
+                    '                    end_y = height\n'
+                    '                \n'
+                    '                self._log(f"\\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")\n'
+                    '                \n'
+                    '                # Extract chunk\n'
+                    '                chunk = image[start_y:end_y, 0:width]\n'
+                    '                \n'
+                    '                # Save chunk temporarily for OCR\n'
+                    '                import tempfile\n'
+                    "                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:\n"
+                    '                    chunk_path = tmp.name\n'
+                    '                    cv2.imwrite(chunk_path, chunk)\n'
+                    '                \n'
+                    '                try:\n'
+                    '                    # Detect text in this chunk\n'
+                    '                    chunk_regions = self.detect_text_regions(chunk_path)\n'
+                    '                    \n'
+                    '                    # Adjust region coordinates to full image space\n'
+                    '                    for region in chunk_regions:\n'
+                    '                        # Adjust bounding box\n'
+                    '                        x, y, w, h = region.bounding_box\n'
+                    '                        region.bounding_box = (x, y + start_y, w, h)\n'
+                    '                        \n'
+                    '                        # Adjust vertices if present\n'
+                    "                        if hasattr(region, 'vertices') and region.vertices:\n"
+                    '                            adjusted_vertices = []\n'
+                    '                            for vx, vy in region.vertices:\n'
+                    '                                adjusted_vertices.append((vx, vy + start_y))\n'
+                    '                            region.vertices = adjusted_vertices\n'
+                    '                        \n'
+                    '                        # Mark which chunk this came from (for deduplication)\n'
+                    '                        region.chunk_index = i\n'
+                    '                        region.chunk_y_range = (start_y, end_y)\n'
+                    '                    \n'
+                    '                    all_regions.extend(chunk_regions)\n'
+                    '                    chunk_offsets.append(start_y)\n'
+                    '                    \n'
+                    '                    self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")\n'
+                    '                    \n'
+                    '                finally:\n'
+                    '                    # Clean up temp file\n'
+                    '                    import os\n'
+                    '                    if os.path.exists(chunk_path):\n'
+                    '                        os.remove(chunk_path)\n'
+                    '            \n'
+                    '            # Remove duplicate regions from overlapping areas\n'
+                    '            self._log(f"\\n   🔍 Deduplicating regions from overlaps...", "info")\n'
+                    '            unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)\n'
+                    '            \n'
+                    '            self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")\n'
+                    '            \n'
+                    ,
+                    '            \n'
+                    '            image, unique_regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)\n'
+                    '            \n'
+                ),
+                (
+                    "            result['errors'].append(error_msg)\n"
+                    '            return result\n'
+                    '\n'
+                    '    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:\n'
+                    ,
+                    "            result['errors'].append(error_msg)\n"
+                    '            return result\n'
+                    '\n'
+                    '    def _detect_webtoon_chunk_regions(self, image_path: str):\n'
+                    '        """Detect the text of a tall webtoon strip chunk by chunk.\n'
+                    '\n'
+                    '        Returns ``(image, regions, num_chunks)``: the loaded BGR page, the regions in\n'
+                    '        full-image coordinates with the overlap duplicates removed, and the chunk count.\n'
+                    '        The webtoon translation path and the glossary OCR-only pass both call this, so the\n'
+                    '        regions a glossary pass hands to translation are the ones translation would detect.\n'
+                    '        """\n'
+                    '        import cv2\n'
+                    '        import numpy as np\n'
+                    '        \n'
+                    '        # Load the image\n'
+                    '        image = cv2.imread(image_path)\n'
+                    '        if image is None:\n'
+                    '            pil_image = open_image(image_path)\n'
+                    '            image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)\n'
+                    '        \n'
+                    '        height, width = image.shape[:2]\n'
+                    '        \n'
+                    '        # Get chunk settings from config\n'
+                    "        chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)\n"
+                    "        chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)\n"
+                    '        \n'
+                    '        self._log(f"   Image dimensions: {width}x{height}", "info")\n'
+                    '        self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")\n'
+                    '        \n'
+                    '        # Calculate number of chunks needed\n'
+                    '        effective_chunk_height = chunk_height - chunk_overlap\n'
+                    '        num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)\n'
+                    '        \n'
+                    '        self._log(f"   Will process in {num_chunks} chunks", "info")\n'
+                    '        \n'
+                    '        # Process each chunk\n'
+                    '        all_regions = []\n'
+                    '        chunk_offsets = []\n'
+                    '        \n'
+                    '        for i in range(num_chunks):\n'
+                    '            # Calculate chunk boundaries\n'
+                    '            start_y = i * effective_chunk_height\n'
+                    '            end_y = min(start_y + chunk_height, height)\n'
+                    '            \n'
+                    "            # Make sure we don't miss the bottom part\n"
+                    '            if i == num_chunks - 1:\n'
+                    '                end_y = height\n'
+                    '            \n'
+                    '            self._log(f"\\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")\n'
+                    '            \n'
+                    '            # Extract chunk\n'
+                    '            chunk = image[start_y:end_y, 0:width]\n'
+                    '            \n'
+                    '            # Save chunk temporarily for OCR\n'
+                    '            import tempfile\n'
+                    "            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:\n"
+                    '                chunk_path = tmp.name\n'
+                    '                cv2.imwrite(chunk_path, chunk)\n'
+                    '            \n'
+                    '            try:\n'
+                    '                # Detect text in this chunk\n'
+                    '                chunk_regions = self.detect_text_regions(chunk_path)\n'
+                    '                \n'
+                    '                # Adjust region coordinates to full image space: the box and polygon of the\n'
+                    "                # region and of a merged region's lines (create_text_mask masks those), and the\n"
+                    '                # RT-DETR bubble it is masked and rendered in\n'
+                    '                shifted_ids = set()\n'
+                    '                for region in chunk_regions:\n'
+                    "                    for shifted in [region] + list(getattr(region, 'original_regions', None) or []):\n"
+                    '                        if id(shifted) in shifted_ids:\n'
+                    '                            continue\n'
+                    '                        shifted_ids.add(id(shifted))\n'
+                    '                        # Adjust bounding box\n'
+                    '                        x, y, w, h = shifted.bounding_box\n'
+                    '                        shifted.bounding_box = (x, y + start_y, w, h)\n'
+                    '                        \n'
+                    '                        # Adjust vertices if present\n'
+                    "                        if hasattr(shifted, 'vertices') and shifted.vertices:\n"
+                    '                            shifted.vertices = [(vx, vy + start_y) for vx, vy in shifted.vertices]\n'
+                    '                    \n'
+                    "                    bubble_bounds = getattr(region, 'bubble_bounds', None)\n"
+                    '                    if bubble_bounds:\n'
+                    '                        bx, by, bw, bh = bubble_bounds\n'
+                    '                        region.bubble_bounds = (bx, by + start_y, bw, bh)\n'
+                    '                    \n'
+                    '                    # Mark which chunk this came from (for deduplication)\n'
+                    '                    region.chunk_index = i\n'
+                    '                    region.chunk_y_range = (start_y, end_y)\n'
+                    '                \n'
+                    '                all_regions.extend(chunk_regions)\n'
+                    '                chunk_offsets.append(start_y)\n'
+                    '                \n'
+                    '                self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")\n'
+                    '                \n'
+                    '            finally:\n'
+                    '                # Clean up temp file\n'
+                    '                import os\n'
+                    '                if os.path.exists(chunk_path):\n'
+                    '                    os.remove(chunk_path)\n'
+                    '        \n'
+                    '        # Remove duplicate regions from overlapping areas\n'
+                    '        self._log(f"\\n   🔍 Deduplicating regions from overlaps...", "info")\n'
+                    '        unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)\n'
+                    '        \n'
+                    '        self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")\n'
+                    '        \n'
+                    '        return image, unique_regions, num_chunks\n'
+                    '\n'
+                    '    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:\n'
+                ),
+                (
+                    '                for j, region2 in enumerate(regions):\n'
+                    '                    if j >= i or j in used_indices:\n'
+                    '                        continue\n'
+                    '                    \n'
+                    ,
+                    '                for j, region2 in enumerate(regions):\n'
+                    '                    # Every earlier region is in used_indices, kept ones too, and OCR jitter can\n'
+                    "                    # sort the previous chunk's copy after this one: compare with all the others.\n"
+                    '                    if j == i:\n'
+                    '                        continue\n'
+                    '                    \n'
+                ),
+            ],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga Translate after switching the Local Model (custom-image-edit -> lama_onnx): the Local Model "
+                "switch refreshes Skip Inpainter's in-use lock at once; Translate waits for its concurrent "
+                "inpainting (first-run download / load) before rendering, and a failed image edit request "
+                "returns its pool checkout (manga_editor_core, test_manga_editor_core EDITS)",
+        "source": {
+            "src/manga_integration.py": [_SKIP_LOCK_SWITCH_IMAGE_EDIT, _SKIP_LOCK_SWITCH_LOCAL],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga OCR prompt: the empty-answer rule (rule 8 and the last example line) covers illegible text too "
+                "(\"no visible / illegible\"); saved prompts with the previous default lines are migrated",
+        "source": {
+            "src/manga_integration.py": [_OCR_PROMPT_ILLEGIBLE_DEFAULT, _OCR_PROMPT_ILLEGIBLE_MIGRATE],
         },
         "values": {},
     },

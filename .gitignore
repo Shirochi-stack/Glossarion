@@ -251,6 +251,7 @@ tests/**
 !tests/test_manga_models.py
 # Manga renderer: auto font size keeps text inside the bubble / box drawn on the page
 !tests/test_manga_bubble_fit.py
+!tests/test_manga_inpaint_wait.py
 !tests/test_google_vision_rest.py
 # Mobile rewrite (U9): the browser-driver seam (authnd/ + search/gemini on the WebViewBridge), the
 # GUI-free release check (update_core, verbatim vs git show) and the schema-built desktop tables

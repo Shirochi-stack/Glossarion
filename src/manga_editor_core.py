@@ -7,7 +7,7 @@ Overlay (re-render) and the per-image editor state of the desktop manga tab
 Layout
 ------
 * **Moved verbatim from ImageRenderer.py** (module functions that take the manga tab as
-  ``self``): ``EDITOR_FUNCTIONS``. Ten carry listed edits (``EDITED_FUNCTIONS``):
+  ``self``): ``EDITOR_FUNCTIONS``. Eleven carry listed edits (``EDITED_FUNCTIONS``):
   Qt-only lines became hooks (``_style_recognized_rectangle``,
   ``_confirm_clean_excluded_rectangle``, ``_schedule_rendered_output_refresh``), the editor
   OCR's ``from google.cloud import vision`` falls back to ``google_vision_rest`` when the SDK
@@ -15,7 +15,9 @@ Layout
   ``safe_image.cv2_imread`` and the render's page open through ``safe_image.open_page_image``
   (the owner-approved OpenCV decoder gate, 2026-10-08; ImageRenderer imports both, so the
   re-bound bodies resolve them there), and Translate's fallback inpainter load runs the custom
-  image edit in-process (owner-approved, 2026-11-06).
+  image edit in-process (owner-approved, 2026-11-06); Translate renders after its concurrent
+  inpainting has finished and its inpainter goes back to the pool on every exit (owner request,
+  2026-11-06: a first run rendered on the original page while LaMa ONNX downloaded).
   The desktop does not import these as plain names: ``bind_editor_namespace(globals())`` in
   ImageRenderer re-binds the same code objects to ImageRenderer's namespace, so on the desktop
   they still call ImageRenderer's Qt helpers (box drawing, pulses, overlays, button states) and
@@ -81,14 +83,46 @@ def _import_google_vision():
     return vision
 
 
-def _attach_region_styles(self, image_path, regions):
-    """Give the regions about to be rendered their box's text style (the page state's
-    ``region_styles``: the desktop Format toolbar / the mobile box panel's Style tab).
+def _region_box_indexes(self, image_path, regions, state=None):
+    """The box (region index) each region about to be rendered belongs to; None for a region that
+    matches no box (no translation, or a text no box carries).
 
     Every render path builds its regions from the boxes' translations in box order, so a region
     belongs to the first box not taken yet whose translation it carries (the open page's live
-    ``_translation_data``, then the page's persisted ``translated_texts``). A page without styles
-    is left exactly as it was. Owner-approved 2026-11-06 (per-box text formatting)."""
+    ``_translation_data``, then the page's persisted ``translated_texts``)."""
+    if state is None:
+        state_manager = getattr(self, 'image_state_manager', None)
+        state = (state_manager.get_state(image_path) or {}) if state_manager and image_path else {}
+    texts = {}
+    for index, entry in _persisted_text_maps(state)[3].items():
+        texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
+    current = getattr(getattr(self, 'image_preview_widget', None), 'current_image_path', None)
+    if current and image_path and (
+            os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(image_path))):
+        for index, entry in (getattr(self, '_translation_data', None) or {}).items():
+            if isinstance(entry, dict):
+                texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
+    taken = set()
+    boxes = []
+    for region in regions or ():
+        text = str(getattr(region, 'translated_text', None) or '').strip()
+        box = None
+        if text:
+            for index in sorted(texts):
+                if index not in taken and text in texts[index]:
+                    taken.add(index)
+                    box = index
+                    break
+        boxes.append(box)
+    return boxes
+
+
+def _attach_region_styles(self, image_path, regions):
+    """Give the regions about to be rendered their box's text style (the page state's
+    ``region_styles``: the desktop Format toolbar / the mobile box panel's Style tab), by the
+    region -> box mapping of ``_region_box_indexes``. A region that already carries a style (an
+    imported record) keeps it. A page without styles is left exactly as it was. Owner-approved
+    2026-11-06 (per-box text formatting)."""
     try:
         state_manager = getattr(self, 'image_state_manager', None)
         if not image_path or not state_manager or not regions:
@@ -97,27 +131,52 @@ def _attach_region_styles(self, image_path, regions):
         styles = manga_ocr_io.region_styles_from_state(state)
         if not styles:
             return
-        texts = {}
-        for index, entry in _persisted_text_maps(state)[3].items():
-            texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
-        current = getattr(getattr(self, 'image_preview_widget', None), 'current_image_path', None)
-        if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(image_path)):
-            for index, entry in (getattr(self, '_translation_data', None) or {}).items():
-                if isinstance(entry, dict):
-                    texts.setdefault(int(index), set()).add(str(entry.get('translation') or '').strip())
-        taken = set()
-        for region in regions:
-            text = str(getattr(region, 'translated_text', None) or '').strip()
-            if not text or getattr(region, 'style', None):
-                continue
-            for index in sorted(texts):
-                if index not in taken and text in texts[index]:
-                    taken.add(index)
-                    if index in styles:
-                        region.style = dict(styles[index])
-                    break
+        for region, index in zip(regions, _region_box_indexes(self, image_path, regions, state)):
+            if index in styles and not getattr(region, 'style', None):
+                region.style = dict(styles[index])
     except Exception as error:
         print(f"[RENDER] Box text styles skipped: {error}")
+
+
+def _record_region_font_sizes(self, image_path, regions, rendered=None):
+    """After a render: store the size each box was drawn with (``region.rendered_font_size``, set
+    by ``MangaTranslator.render_translated_text``: the auto fit or the box's own size) in the page
+    state as ``region_font_sizes`` = {"<region index>": px}, by the same region -> box mapping as
+    the styles (also on a page without styles). ``rendered``: the regions actually drawn (an
+    excluded box's region is not). The Format toolbar / the Style tab show it while a box is on
+    Auto. Changed in place, like ``_update_region_styles``."""
+    try:
+        state_manager = getattr(self, 'image_state_manager', None)
+        if not image_path or not state_manager or regions is None:
+            return
+        state = state_manager.get_state(image_path)
+        if not isinstance(state, dict):
+            state = {}
+        drawn = None if rendered is None else {id(region) for region in rendered}
+        sizes = {}
+        for region, index in zip(regions, _region_box_indexes(self, image_path, regions, state)):
+            if drawn is not None and id(region) not in drawn:
+                continue
+            size = manga_ocr_io.normalize_rendered_font_size(getattr(region, 'rendered_font_size', None))
+            if index is not None and size is not None:
+                sizes[str(index)] = size
+        if sizes:
+            state[manga_ocr_io.REGION_FONT_SIZES_KEY] = sizes
+        elif manga_ocr_io.REGION_FONT_SIZES_KEY in state:
+            state.pop(manga_ocr_io.REGION_FONT_SIZES_KEY, None)
+        else:
+            return
+        state_manager.set_state(image_path, state, save=True)
+    except Exception as error:
+        print(f"[RENDER] Box font sizes not recorded: {error}")
+
+
+def _region_font_sizes(self, image_path):
+    """The size each box of a page was last rendered at, by region index ({} before a render)."""
+    state_manager = getattr(self, 'image_state_manager', None)
+    if not image_path or not state_manager:
+        return {}
+    return manga_ocr_io.region_font_sizes_from_state(state_manager.get_state(image_path) or {})
 
 
 def _region_text_styles(self, image_path):
@@ -157,13 +216,15 @@ def _update_region_styles(self, image_path, indexes, changes=None, *, reset=Fals
 
 
 def _clear_region_styles(self, image_path):
-    """Clear Boxes: the page's boxes are gone, so are their text styles."""
+    """Clear Boxes: the page's boxes are gone, so are their text styles and rendered sizes."""
     state_manager = getattr(self, 'image_state_manager', None)
     if not image_path or not state_manager:
         return
     state = state_manager.get_state(image_path)
-    if isinstance(state, dict) and 'region_styles' in state:
-        state.pop('region_styles', None)  # in place, like _update_region_styles
+    keys = ('region_styles', manga_ocr_io.REGION_FONT_SIZES_KEY)
+    if isinstance(state, dict) and any(key in state for key in keys):
+        for key in keys:
+            state.pop(key, None)  # in place, like _update_region_styles
         state_manager.set_state(image_path, state, save=True)
 
 
@@ -2323,6 +2384,7 @@ def _run_inpainting_sync(
         str: Path to cleaned/translated image, or None if inpainting failed
     """
     temp_translator = None  # Track temporary translator for pool cleanup
+    inpainter = None  # Checked out of the shared pool below; every exit returns it
     try:
         # ===== CANCELLATION CHECK: At start of sync inpainting =====
         # Only abort on FORCE stop — graceful stop should let inpainting finish
@@ -2550,6 +2612,7 @@ def _run_inpainting_sync(
             # ===== CANCELLATION CHECK: Before running inpainting — only abort on force stop =====
             if _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1':
                 print(f"[INPAINT_SYNC] Force-cancelled before inpainting")
+                _release_sync_inpainter(self, inpainter)
                 return None
             
             if inpainter is not None:
@@ -2748,6 +2811,7 @@ def _run_inpainting_sync(
                         self.update_queue.put(('update_pool_tracker', None))
             except Exception as e:
                 logging.warning(f"⚠️ Failed to return inpainter to pool: {e}")
+            inpainter = None  # Returned: a later error must not take back another thread's checkout of it
             
         else:
             # For cloud/hybrid methods, would need more complex setup
@@ -2807,6 +2871,7 @@ def _run_inpainting_sync(
         print(f"[INPAINT_SYNC] Synchronous inpainting failed: {str(e)}")
         print(f"[INPAINT_SYNC] Traceback: {traceback.format_exc()}")
         # Return inpainter to pool on error
+        _release_sync_inpainter(self, inpainter)
         try:
             if temp_translator is not None:
                 temp_translator._return_inpainter_to_pool()
@@ -2816,6 +2881,60 @@ def _run_inpainting_sync(
         except Exception:
             pass
         return None
+
+
+def _release_sync_inpainter(self, inpainter) -> bool:
+    """Return an inpainter ``_run_inpainting_sync`` checked out of the shared pool, if it is still
+    checked out (False otherwise). Its error and force-stop exits used to leave it checked out, so
+    the manga tab's pool tracker kept counting it as in use and kept Skip Inpainter locked, also
+    after the local model was switched to another one (a failed custom image edit request)."""
+    key = getattr(inpainter, '_pool_key', None) if inpainter is not None else None
+    if key is None:
+        return False
+    try:
+        from manga_translator import MangaTranslator
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            checked_out = rec.get('checked_out') if rec else None
+            if not checked_out or inpainter not in checked_out:
+                return False
+            checked_out.remove(inpainter)
+    except Exception as e:
+        print(f"[INPAINT_SYNC] Failed to return inpainter to pool: {e}")
+        return False
+    print(f"[INPAINT_SYNC] Returned inpainter to pool after an early exit ({key[0]})")
+    update_queue = getattr(self, 'update_queue', None)
+    if update_queue is not None:
+        update_queue.put(('update_pool_tracker', None))
+    return True
+
+
+def _wait_for_concurrent_inpainting(self, inpaint_thread, force_stopped, log_every: float = 10.0) -> bool:
+    """Translate renders after its concurrent inpainting thread has finished, however long the
+    inpainter takes to download, load and run, so the page is not rendered on the original image
+    while inpainting is enabled. A progress line is logged every ``log_every`` seconds. Only a force
+    stop (``force_stopped()``) ends the wait early: False then, True once the thread has finished."""
+    import time
+    started = time.monotonic()
+    next_log = log_every
+    logged = False
+    while inpaint_thread.is_alive():
+        inpaint_thread.join(timeout=0.5)
+        if not inpaint_thread.is_alive():
+            break
+        if force_stopped():
+            print("[TRANSLATE_CONCURRENT] Force stop while waiting for inpainting")
+            return False
+        elapsed = time.monotonic() - started
+        if elapsed >= next_log:
+            if not logged:
+                print("[TRANSLATE_CONCURRENT] Translation done, waiting for inpainting before rendering")
+            logged = True
+            self._log(f"⏳ Translation done, waiting for inpainting to finish before rendering ({int(elapsed)}s)...", "info")
+            next_log += log_every
+    if logged:
+        self._log("✅ Inpainting finished, rendering on the cleaned image", "info")
+    return True
 
 
 def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) -> list:
@@ -4222,28 +4341,19 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         # This doesn't block the translation API calls - those already happened above
         # Even if stop was requested, we wait for inpainting since discarding a
         # completed clean is equally wasteful.
+        # Every local model waits, not only the custom image edit: a first run downloads and
+        # loads the model inside the inpainting thread, and a fixed 30 s wait rendered the page
+        # on the original image. Only a force stop ends the wait early.
         if inpaint_thread is not None:
-            inpaint_wait_timeout = 30
-            try:
-                cfg = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
-                if (
-                    str(cfg.get('manga_inpaint_method', 'local') or '').lower() == 'local'
-                    and str(cfg.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'
-                ):
-                    inpaint_wait_timeout = None
-            except Exception:
-                pass
-            if inpaint_wait_timeout is None:
-                print("[TRANSLATE_CONCURRENT] Waiting for custom-image-edit inpainting before rendering")
-                inpaint_thread.join()
-            else:
-                inpaint_thread.join(timeout=inpaint_wait_timeout)
+            _wait_for_concurrent_inpainting(
+                self, inpaint_thread,
+                lambda: _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1')
 
         with inpaint_lock:
             cleaned_image_path = inpaint_result.get('cleaned_path')
             if not inpaint_result['completed']:
-                print(f"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image")
-                self._log(f"⏱️ Inpainting still running, rendering on original image", "info")
+                print(f"[TRANSLATE_CONCURRENT] Stopped before inpainting finished, will use original image")
+                self._log(f"⏹ Stopped before inpainting finished, rendering on original image", "warning")
         
         # NOTE: We intentionally do NOT check cancellation here if we already
         # have results.  The API call consumed quota; discarding the response
@@ -7185,6 +7295,7 @@ def _render_with_manga_translator(
         print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
         _attach_region_styles(self, original_image_path or image_path, regions)
         rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
+        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)
         print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
         
         # Convert back to PIL and save
@@ -9022,13 +9133,17 @@ EDITOR_FUNCTIONS = (
 )
 #: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback, the
 #: safe_image page reads: cv2_imread, open_page_image).
-EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',)
+EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',
+                    '_run_translate_background',)
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).
 SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
                 'delay_env',  # 2026-10-21: the API call delay field's min and range max
-                '_attach_region_styles')  # 2026-11-06: per-box text styles (Format toolbar)
+                '_attach_region_styles',  # 2026-11-06: per-box text styles (Format toolbar)
+                '_record_region_font_sizes',  # 2026-11-06: the size each box was rendered at
+                '_release_sync_inpainter',  # 2026-11-06: Translate's inpainter goes back to the pool
+                '_wait_for_concurrent_inpainting')  # 2026-11-06: Translate renders on the cleaned page
 
 
 # ===========================================================================
@@ -9711,6 +9826,7 @@ class MangaEditorSession:
             # the box sheet showed blank OCR / translation fields.
             _rec, saved_recognition, _trans, saved_translation = _persisted_text_maps(state)
             styles = manga_ocr_io.region_styles_from_state(state)
+            rendered_sizes = manga_ocr_io.region_font_sizes_from_state(state)
             for idx, box in enumerate(self.image_preview_widget.viewer.rectangles):
                 record = box.to_dict()
                 record['index'] = idx
@@ -9720,6 +9836,7 @@ class MangaEditorSession:
                 record['translation'] = ((translation.get(key) or {}).get('translation', '')
                                          or (saved_translation.get(key) or {}).get('translation', ''))
                 record['style'] = dict(styles.get(key) or {})
+                record['rendered_font_size'] = rendered_sizes.get(key)  # what Auto drew (None: not rendered)
                 boxes.append(record)
         return {
             'image_path': image_path,
@@ -10150,7 +10267,8 @@ class MangaEditorSession:
         for key in ('recognized_texts', 'translated_texts'):
             if isinstance(state.get(key), list):
                 state[key] = shift_list(state[key])
-        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations', 'region_styles'):
+        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations', 'region_styles',
+                    manga_ocr_io.REGION_FONT_SIZES_KEY):
             if isinstance(state.get(key), dict):
                 state[key] = shift_map(state[key])
         self.image_state_manager.set_state(page, state, save=True)

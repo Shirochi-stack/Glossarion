@@ -110,7 +110,60 @@ NEW_METHODS = ("_prepare_translation_run", "_translation_worker")
 EDITS = {
     # multi-instance: an instance >= 2 writes its glossary payload folders under Payloads/Instance N
     "_process_image_folder_for_glossary": [('os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")',
-                                            'os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")', 1)],
+                                            'os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")', 1),
+                                           # 2026-11-06: a tall image is chunked like image translation chunks it
+                                           ("                    response = self._call_api_with_interrupt(\n"
+                                            "                        client, messages, image_base64, temperature, max_tokens, context='glossary'\n"
+                                            "                    )\n",
+                                            "                    # A tall image is chunked like image translation chunks it (image_translator).\n"
+                                            "                    from image_translator import send_image_glossary_request\n"
+                                            "                    response = send_image_glossary_request(\n"
+                                            "                        lambda msgs, b64: self._call_api_with_interrupt(\n"
+                                            "                            client, msgs, b64, temperature, max_tokens, context='glossary'\n"
+                                            "                        ),\n"
+                                            "                        messages, image_path, image_base64, log=self.append_log,\n"
+                                            "                        stop_check=lambda: self.stop_requested,\n"
+                                            "                    )\n", 1),
+        # 2026-11-06: an image without names (the reply is only the CSV header, or []) is a completed
+        # image with 0 entries, and a folder whose images all finished that way is a completed extraction
+        ("                                from extract_glossary_from_epub import parse_api_response\n",
+         "                                from extract_glossary_from_epub import parse_api_response\n"
+         "                                from glossary_translation_gate import is_empty_glossary_answer\n", 1),
+        ("                                else:\n"
+         '                                    raise ValueError("No valid entries found")\n',
+         "                                elif is_empty_glossary_answer(\n"
+         "                                    glossary_json,\n"
+         "                                    response[1] if isinstance(response, (list, tuple)) and len(response) >= 2 else None,\n"
+         "                                ):\n"
+         "                                    # Only the CSV header (or []): an image without names, 0 entries\n"
+         '                                    self.append_log(f"      ✅ Extracted 0 entries (no names in this image)")\n'
+         "                                    self.glossary_progress_manager.update(\n"
+         '                                        image_path, content_hash, status="completed", extracted_data=[]\n'
+         "                                    )\n"
+         "                                    processed += 1\n"
+         "                                else:\n"
+         '                                    raise ValueError("No valid entries found")\n', 1),
+        # 2026-11-06: a JSON object is unwrapped ({"entries": [...]}, one entry); any other non-list
+        # JSON ({}, {"error": ...}, a quoted sentence) is a failed image, never a 0-entry one
+        ("                            glossary_data = json.loads(glossary_json)\n",
+         "                            glossary_data = json.loads(glossary_json)\n"
+         "                            if isinstance(glossary_data, dict):\n"
+         '                                # {"entries": [...]} (or "glossary", ...) is the list inside; one entry, a list of one\n'
+         "                                glossary_data = next((\n"
+         "                                    value for key, value in glossary_data.items()\n"
+         "                                    if key in ('entries', 'glossary', 'characters', 'terms', 'data')\n"
+         "                                    and isinstance(value, list)\n"
+         "                                ), [glossary_data] if 'raw_name' in glossary_data else glossary_data)\n"
+         "                            if not isinstance(glossary_data, list):\n"
+         '                                # {}, {"error": ...} or a quoted sentence: not a glossary, never "0 entries"\n'
+         '                                raise json.JSONDecodeError("not a JSON glossary array", glossary_json, 0)\n', 1),
+        ("            if not all_glossary_entries:\n",
+         "            if not all_glossary_entries:\n"
+         "                from glossary_translation_gate import image_glossary_complete\n"
+         "                if image_glossary_complete(self.glossary_progress_manager.PROGRESS_FILE, image_files)[0]:\n"
+         "                    # Every image finished with 0 entries (no names in them): a completed extraction\n"
+         '                    self.append_log(f"\\n📝 No glossary entries in {len(image_files)} image(s); extraction is complete")\n'
+         "                    return True\n", 1)],
     # 2026-11-02: an OPF href is a URL, decoded when read
     "_get_spine_filenames_for_preview": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
     "_get_opf_file_order": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
@@ -170,6 +223,23 @@ WORKER_EDITS = [
      "                                return\n",
      '                                    "the glossary approval step"\n                                )\n'
      "                                return False\n", 1),
+    # 2026-11-06: an image source is checked against its folder's image glossary progress, found in the
+    # image-folder glossary's own folder (beside the first selected file without an output override)
+    ("                    progress_path = progress_path_for_source(source, source_root)\n"
+     "                    base = os.path.splitext(os.path.basename(source))[0]\n",
+     "                    progress_path = progress_path_for_source(\n"
+     "                        source, source_root,\n"
+     "                        # the image-folder glossary's own folder (run_glossary_extraction_direct)\n"
+     "                        image_glossary_dir=os.path.join(\n"
+     "                            os.path.dirname(os.path.abspath(self.selected_files[0])),\n"
+     "                            os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory') or '',\n"
+     '                            "Glossary",\n'
+     "                        ),\n"
+     "                    )\n"
+     "                    base = os.path.splitext(os.path.basename(source))[0]\n", 1),
+    ("                        is_epub=str(source).lower().endswith('.epub'),\n",
+     "                        is_epub=str(source).lower().endswith('.epub'),\n"
+     "                        source_path=source,\n", 1),
     ('                            f"glossary is below 100% ({reason})."\n                        )\n'
      "                        return\n",
      '                            f"glossary is below 100% ({reason})."\n                        )\n'

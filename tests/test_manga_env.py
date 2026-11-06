@@ -1577,7 +1577,11 @@ def _trace_process_image(tmp_path, monkeypatch, module, side, scenario, *, mobil
     regions = result.get("regions") or []
     assert result.get("success") and [r.get("translated_text") for r in regions] == [b[5] for b in PIPELINE_BUBBLES], \
         result
+    # 2026-11-06 (owner request): each rendered region records the size it was drawn with; the
+    # legacy renderer has no such field, the rest of the result is compared as it was
+    rendered_sizes = [r.pop("rendered_font_size", None) for r in regions if isinstance(r, dict)]
     return {
+        "rendered_sizes": rendered_sizes,
         "calls": trace.snapshot(),
         "result": trace.norm({k: v for k, v in result.items() if not k.startswith("_")}),
         "output": _pixels(str(out)),
@@ -1600,6 +1604,8 @@ def test_process_image_trace_matches_the_legacy_pipeline(tmp_path, monkeypatch, 
     new = _trace_process_image(tmp_path, monkeypatch, manga_translator, "new", scenario)
     assert new["calls"] == legacy["calls"]
     assert new["result"] == legacy["result"]
+    assert set(legacy["rendered_sizes"]) == {None}
+    assert new["rendered_sizes"] and all(size and size > 0 for size in new["rendered_sizes"])
     assert new["files"] == legacy["files"]
     assert new["output"] == legacy["output"] and new["output"] is not None
     assert new["cleaned"] == legacy["cleaned"]
@@ -1612,6 +1618,7 @@ def test_process_image_trace_matches_the_legacy_pipeline(tmp_path, monkeypatch, 
     monkeypatch.delenv("GLOSSARION_MOBILE", raising=False)
     mobile = _trace_process_image(tmp_path, monkeypatch, manga_translator, "mobile", scenario, mobile=True)
     assert mobile["calls"] == new["calls"] and mobile["result"] == new["result"]
+    assert mobile["rendered_sizes"] == new["rendered_sizes"]
     assert mobile["output"] == new["output"] and mobile["cleaned"] == new["cleaned"]
     assert mobile["hijacked"] == []  # mobile never replaces builtins.print
 

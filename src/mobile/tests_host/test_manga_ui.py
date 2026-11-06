@@ -2074,6 +2074,11 @@ def test_editor_box_style_tab_on_the_real_editor_session(iso, tmp_path, monkeypa
         assert steps == ["render"] and tab.panel.align_buttons["right"].selected
         state = manga.editor.image_state_manager.get_state(os.path.abspath(pages[0]))
         assert state["region_styles"] == {"0": {"font_size": 30, "align": "right"}}
+        # the size a render drew each box with (region_font_sizes) reaches the box records
+        assert tab.boxes[0]["rendered_font_size"] is None
+        state["region_font_sizes"] = {"0": 24}
+        await tab._apply_snapshot(await tab._snapshot())
+        assert tab.boxes[0]["rendered_font_size"] == 24
         await tab.box_action("style", 0, {"style": None})
         assert tab.boxes[0]["style"] == {} and steps == ["render", "render"]
         screen.dispose()
@@ -2107,6 +2112,43 @@ def test_box_panel_style_tab_controls():
                                                {"font_size": None}, {"color": STYLE_COLORS[3][1]}, {"color": None},
                                                None]
     assert box_signature(box, 1) != box_signature({**box, "style": {}}, 1)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("flet") is None, reason="flet not installed")
+def test_box_panel_style_tab_size_steps():
+    """The Style tab's size (owner request 2026-11-06, like the desktop size box): 0.5 px values; a box
+    on Auto shows the size it was last rendered at (``rendered_font_size``) and − / + step from it;
+    Auto clears the box's own size."""
+    from glossarion_mobile.ui.tools.manga.box_sheet import BoxPanel, box_signature, box_size, size_text
+
+    actions = []
+    auto_box = {"ocr_text": "a", "translation": "Hi", "style": {}, "rendered_font_size": 26}
+    panel = BoxPanel(auto_box, 0, on_action=lambda *a: actions.append(a), tab="style")
+    assert box_size(auto_box) == (26, True) and panel.size_field.hint_text == "Auto 26"
+    assert panel.size_field.value == "" and panel.size_auto_button.disabled
+    assert not panel.size_up_button.disabled and not panel.size_down_button.disabled
+    panel.size_up_button.on_click(None)
+    panel.size_down_button.on_click(None)
+    panel.set_size("28.4")
+    panel.set_size("30,5")
+    panel.set_size("0")
+    assert [a[2]["style"] for a in actions] == [{"font_size": 26.5}, {"font_size": 25.5}, {"font_size": 28.5},
+                                               {"font_size": 30.5}, {"font_size": None}]
+    # a box with its own size steps from it; Auto clears it
+    actions.clear()
+    fixed_box = {"ocr_text": "a", "translation": "Hi", "style": {"font_size": 31.5}, "rendered_font_size": 31.5}
+    panel = BoxPanel(fixed_box, 0, on_action=lambda *a: actions.append(a), tab="style")
+    assert panel.size_field.value == "31.5" and panel.size_field.hint_text == "Auto"
+    assert not panel.size_auto_button.disabled
+    panel.size_up_button.on_click(None)
+    panel.size_auto_button.on_click(None)
+    assert [a[2]["style"] for a in actions] == [{"font_size": 32}, {"font_size": None}]
+    # never rendered and on Auto: nothing to step from
+    panel = BoxPanel({"ocr_text": "a", "style": {}}, 0, on_action=lambda *a: actions.append(a), tab="style")
+    assert panel.size_field.hint_text == "Auto" and panel.size_up_button.disabled and panel.step_size(0.5) is None
+    # a new render (a new rendered size) rebuilds the panel
+    assert box_signature(auto_box, 0) != box_signature({**auto_box, "rendered_font_size": 24}, 0)
+    assert size_text(28.0) == "28" and size_text(28.5) == "28.5" and size_text(None) == ""
 
 
 # ==========================================================================
