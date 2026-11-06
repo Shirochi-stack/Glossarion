@@ -96,9 +96,13 @@ class PreviewZoom(QObject):
             if kind == QEvent.Type.Wheel and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self._on_ctrl_wheel(event)
                 return True
-            if kind == QEvent.Type.NativeGesture and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
-                self._on_pinch(event)
-                return True
+            if kind == QEvent.Type.NativeGesture:
+                gesture = event.gestureType()
+                if gesture == Qt.NativeGestureType.BeginNativeGesture:
+                    self._pinch_rest = 0.0  # a new pinch: no part step left over from the last one
+                elif gesture == Qt.NativeGestureType.ZoomNativeGesture:
+                    self._on_pinch(event)
+                    return True
         return False
 
     def _on_ctrl_wheel(self, event):

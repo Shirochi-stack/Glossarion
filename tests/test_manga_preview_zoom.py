@@ -254,6 +254,36 @@ def test_pinch_gesture_zooms_about_the_fingers(window):
     assert _scale(viewer) == pytest.approx(fit * STEP)  # ln(1.2) is one ln(1.15) step
 
 
+def _gesture(viewport, kind, value=0.0):
+    from PySide6.QtGui import QNativeGestureEvent, QPointingDevice
+
+    pos = QPointF(viewport.rect().center())
+    glob = QPointF(viewport.mapToGlobal(pos.toPoint()))
+    try:
+        return QNativeGestureEvent(kind, QPointingDevice.primaryPointingDevice(), 2, pos, pos, glob, value,
+                                   QPointF(0, 0))
+    except TypeError:
+        pytest.skip("this PySide6 has another QNativeGestureEvent constructor")
+
+
+def test_a_new_pinch_does_not_inherit_the_last_pinchs_part_step(window):
+    viewer = window.viewer
+    viewport = viewer.viewport()
+    fit = _scale(viewer)
+    gesture = Qt.NativeGestureType
+    # A pinch that ends just short of one step zooms nothing
+    QtWidgets.QApplication.sendEvent(viewport, _gesture(viewport, gesture.BeginNativeGesture))
+    QtWidgets.QApplication.sendEvent(viewport, _gesture(viewport, gesture.ZoomNativeGesture, 0.14))
+    QtWidgets.QApplication.sendEvent(viewport, _gesture(viewport, gesture.EndNativeGesture))
+    assert _scale(viewer) == pytest.approx(fit)
+    # ... and the next pinch starts from zero: a small spread is still no step
+    QtWidgets.QApplication.sendEvent(viewport, _gesture(viewport, gesture.BeginNativeGesture))
+    QtWidgets.QApplication.sendEvent(viewport, _gesture(viewport, gesture.ZoomNativeGesture, 0.02))
+    assert _scale(viewer) == pytest.approx(fit)
+    QtWidgets.QApplication.sendEvent(viewport, _gesture(viewport, gesture.ZoomNativeGesture, 0.14))
+    assert _scale(viewer) == pytest.approx(fit * STEP)
+
+
 def test_buttons_name_the_keys(window):
     assert "Ctrl+" in window.widget.zoom_in_btn.toolTip()
     assert "Ctrl+" in window.widget.zoom_out_btn.toolTip()
