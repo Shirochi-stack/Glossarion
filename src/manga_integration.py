@@ -9020,6 +9020,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                 source='manga'
             )
             self._apply_custom_image_edit_ui_state()
+            self._sync_skip_inpainter_pool_lock()
             self._save_rendering_settings()
             return
         
@@ -9050,6 +9051,8 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             self.local_model_status_label.setStyleSheet("color: gray;")
 
         self._apply_custom_image_edit_ui_state()
+        # Skip Inpainter follows the pool at once, not on the tracker's next 2 s tick
+        self._sync_skip_inpainter_pool_lock()
         
         self._save_rendering_settings()
 
