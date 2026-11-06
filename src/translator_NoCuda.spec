@@ -285,6 +285,7 @@ app_files = [
 	('bubble_detector.py', '.'),
 
 	('local_inpainter.py', '.'),	
+	('image_edit_check.py', '.'),	
 	
 	('ocr_manager.py', '.'),
 	('model_options.py', '.'),
@@ -681,6 +682,7 @@ app_modules = [
 	'individual_endpoint_dialog.py',
 	'bubble_detector', 
 	'local_inpainter',  	
+	'image_edit_check',  	
 	'ocr_manager',
 	'model_options',
 	'hyphen_textwrap',

@@ -267,6 +267,15 @@ class HayaiOCR:
 
     def generate(self, image: Any, *, stop: Optional[Callable[[], bool]] = None) -> List[int]:
         """Greedy token ids for a crop (without BOS / EOS)."""
+        return self.generate_scored(image, stop=stop)[0]
+
+    def generate_scored(self, image: Any, *,
+                        stop: Optional[Callable[[], bool]] = None) -> Tuple[List[int], float]:
+        """Greedy token ids for a crop and the model's confidence in them.
+
+        The confidence is the geometric mean of the probability of every chosen token, the
+        closing EOS included (1.0 for a sure read; an upside-down or garbled crop scores low).
+        """
         with self._lock:
             vision, rows, cols = self.encode(image)
             m = rows * cols
@@ -280,9 +289,13 @@ class HayaiOCR:
                 "past": np.zeros((N_KV, 1, KV_HEADS, 0, D_HEAD), dtype=np.float32),
             })
             out: List[int] = []
+            log_probs: List[float] = []
             empty = np.zeros((1, 0, vision.shape[-1]), dtype=np.float32)
             for step in range(1, self.max_new_tokens + 1):
-                token = int(np.argmax(np.asarray(logits).reshape(-1)))
+                row = np.asarray(logits, dtype=np.float64).reshape(-1)
+                token = int(np.argmax(row))
+                # log softmax of the chosen (largest) logit
+                log_probs.append(-float(np.log(np.sum(np.exp(row - row[token])))))
                 if token in (EOS_ID, PAD_ID):
                     break
                 out.append(token)
@@ -298,11 +311,18 @@ class HayaiOCR:
                     "mask": np.zeros((1, 1, 1, length + 1), dtype=np.float32),
                     "past": past,
                 })
-            return out
+            confidence = float(np.exp(np.mean(log_probs))) if log_probs else 0.0
+            return out, confidence
 
     def recognize(self, image: Any, *, stop: Optional[Callable[[], bool]] = None) -> str:
         """The text of a crop (PIL image or RGB array), stripped."""
         return self.tokenizer.decode(self.generate(image, stop=stop)).strip()
+
+    def recognize_scored(self, image: Any, *,
+                         stop: Optional[Callable[[], bool]] = None) -> Tuple[str, float]:
+        """``(text, confidence)`` of a crop; see generate_scored for the confidence."""
+        ids, confidence = self.generate_scored(image, stop=stop)
+        return self.tokenizer.decode(ids).strip(), confidence
 
 
 _CACHE_LOCK = threading.Lock()
