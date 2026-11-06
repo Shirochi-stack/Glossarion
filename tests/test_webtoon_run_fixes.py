@@ -68,7 +68,14 @@ def isolation(monkeypatch, tmp_path):
     auth.reset_cancel()
     monkeypatch.setattr(api, "_save_outgoing_request", lambda *a, **kw: None, raising=False)
     monkeypatch.setattr(api, "_save_incoming_response", lambda *a, **kw: None, raising=False)
+    # A MangaTranslator's print hijack (and its restore, also from __del__) rewrites builtins.print
+    # and unified_api_client's own print: both are put back after the test, as test_manga_env does.
+    import builtins
+    monkeypatch.setattr(builtins, "print", builtins.print)
+    monkeypatch.setitem(vars(api), "print", vars(api).get("print"))
     yield
+    import gc
+    gc.collect()  # a translator's __del__ runs before the monkeypatch teardown restores the prints
     auth.reset_cancel()
 
 
@@ -172,6 +179,26 @@ def test_other_image_output_users_keep_working(monkeypatch, tmp_path):
     assert inpainter._image_output_mode_enabled() is True
 
 
+@pytest.mark.parametrize("text_only, expected", [(True, "chat"), (False, "video")])
+def test_manga_client_ignores_the_video_output_mode_too(monkeypatch, tmp_path, text_only, expected):
+    """Output mode "video" on the main tab sent a manga request to the video endpoint the same way."""
+    monkeypatch.setenv("ENABLE_VIDEO_OUTPUT_MODE", "1")
+    monkeypatch.setenv("ENABLE_IMAGE_OUTPUT_MODE", "0")
+    client = make_client(monkeypatch, tmp_path, model="nan/some-chat-model")
+    client._text_output_only = text_only
+    monkeypatch.setattr(client, "_get_active_request_api_key", lambda: FAKE_KEY)
+    routes = []
+    monkeypatch.setattr(client, "_send_nanogpt_video", lambda *a, **k: routes.append("video"))
+    monkeypatch.setattr(client, "_send_nanogpt_image", lambda *a, **k: routes.append("image"))
+    monkeypatch.setattr(client, "_send_openai_compatible", lambda *a, **k: routes.append("chat"))
+    client._send_nanogpt(MESSAGES, 0.3, 4096, "S01.png")
+    assert routes == [expected]
+    source = (SRC_DIR / "unified_api_client.py").read_text(encoding="utf-8")
+    # every Output mode "video" read goes through the client's own check
+    assert source.count('"ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"') == 1
+    assert "os.environ.get('ENABLE_VIDEO_OUTPUT_MODE')" not in source
+
+
 def test_temporary_retry_clients_inherit_text_only(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     client._text_output_only = True
@@ -236,6 +263,26 @@ def test_editor_state_merge_keeps_the_page_boxes():
     assert [t["text"] for t in merged["recognized_texts"]] == ["띠링", "안녕", "슈우우우욱", "잘 가"]
     assert len(merged["viewer_rectangles"]) == 4
     assert [t["region_index"] for t in merged["recognized_texts"]] == [0, 1, 2, 3]
+
+
+def test_editor_state_merge_drops_the_old_per_box_indices():
+    """A merge numbers the boxes again: the page's rendered positions, overlays and font sizes keyed
+    by the old indices must not land on other boxes (the imported 띠링 is now box 0)."""
+    existing = manga_ocr_io.editor_state_from_page({"regions": [_rec("안녕", (40, 60, 150, 100), "Hello")]})
+    existing["last_render_positions"] = {"0": [40, 60, 150, 100]}
+    existing["overlay_rects"] = [{"x": 40}]
+    existing["region_font_sizes"] = {"0": 18}
+    page = {"regions": [_rec("띠링", (500, 20, 60, 40))]}
+    merged = manga_ocr_io.editor_state_for_import(page, existing, merge=True)
+    assert [t["text"] for t in merged["recognized_texts"]] == ["띠링", "안녕"]
+    assert [(t["original"]["region_index"], t["translation"]) for t in merged["translated_texts"]] == [(1, "Hello")]
+    assert merged["last_render_positions"] == {} and merged["overlay_rects"] == []
+    assert merged["region_font_sizes"] == {}
+    state = dict(existing)
+    state.update(merged)  # how the desktop and the editor session apply it
+    assert state["last_render_positions"] == {}
+    # nothing renumbered (no existing boxes): the imported page's own state as it is
+    assert "last_render_positions" not in manga_ocr_io.editor_state_for_import(page, {}, merge=True)
 
 
 class _ImportState:

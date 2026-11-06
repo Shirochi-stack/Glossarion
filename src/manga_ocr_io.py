@@ -663,7 +663,17 @@ def editor_state_for_import(
     merge: bool = False,
 ) -> Dict[str, Any]:
     """The editor state an Import OCR writes for a matched page: the imported page's own state
-    (replace, the default) or, with ``merge``, the page's existing regions merged with it."""
-    if merge:
-        page = merged_import_page(page, existing_state)
-    return editor_state_from_page(page)
+    (replace, the default) or, with ``merge``, the page's existing regions merged with it.
+
+    A merge numbers the boxes again, so every per-box key of the existing state (its rendered
+    overlays and positions, translations, styles, font sizes) is written too: one the merged
+    page has no value for comes back empty instead of leaving the old indices on other boxes."""
+    if not merge:
+        return editor_state_from_page(page)
+    renumbered = bool(existing_state) and bool(canonical_regions_from_editor_state(existing_state))
+    state = editor_state_from_page(merged_import_page(page, existing_state))
+    if renumbered:
+        for key in EDITOR_STATE_KEYS + (REGION_FONT_SIZES_KEY,):
+            if key not in state and key in existing_state:
+                state[key] = {} if isinstance(existing_state.get(key), Mapping) else []
+    return state

@@ -7168,8 +7168,8 @@ class UnifiedClient:
         """Return True when image output is enabled for this client/request.
 
         ``_force_image_output_mode`` (a custom image edit's own client) always asks for an image.
-        ``_text_output_only`` (text_output_only_client: the manga translator's clients) never takes
-        the main tab's Output mode from the environment: its requests are read as text."""
+        ``_text_output_only`` (the manga translator's clients) never takes the main tab's Output
+        mode from the environment: its requests are read as text."""
         try:
             if bool(getattr(self, '_force_image_output_mode', False)):
                 return True
@@ -7178,6 +7178,18 @@ class UnifiedClient:
         except Exception:
             pass
         return os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+
+    def _video_output_mode_enabled(self) -> bool:
+        """Return True when the main tab's Output mode is video for this client/request.
+
+        A ``_text_output_only`` client (the manga translator's) never takes it, as with image
+        output; a video model still switches to video by its name where the caller checks that."""
+        try:
+            if bool(getattr(self, '_text_output_only', False)):
+                return False
+        except Exception:
+            pass
+        return os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
 
     def _get_image_output_resolution(self, default: str = "1K") -> str:
         try:
@@ -11944,7 +11956,7 @@ class UnifiedClient:
                 if extracted_content:
                     extracted_content_str = str(extracted_content).strip()
                     is_image_mode = self._image_output_mode_enabled()
-                    is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
+                    is_video_mode = self._video_output_mode_enabled()
                     # Fallback: auto-detect from model name when env vars aren't explicitly set
                     effective_model = getattr(self, 'model', '') or ''
                     # Skip image auto-detect if this thread is in vision-only scan mode
@@ -25443,7 +25455,7 @@ class UnifiedClient:
             image_edit_enabled = (not self._should_suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
             output_mode_needs_image_endpoint = (
                 self._image_output_mode_enabled()
-                or os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+                or self._video_output_mode_enabled()
                 or self._is_image_gen_model(effective_model)
                 or self._is_video_gen_model(effective_model)
             )
@@ -26006,7 +26018,7 @@ class UnifiedClient:
                     
                     # Check if image/video output mode is enabled
                     enable_image_output = self._image_output_mode_enabled()
-                    enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+                    enable_video_output = self._video_output_mode_enabled()
 
                     # Force enable for any model whose name indicates image generation
                     # but NOT if this thread is in vision-only scan mode
@@ -31806,7 +31818,7 @@ class UnifiedClient:
 
         # Read the user's output mode selection (env vars are synced in real-time
         # by _set_output_mode whenever the radio button changes).
-        enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+        enable_video_output = self._video_output_mode_enabled()
         enable_image_output = self._image_output_mode_enabled()
 
         # Auto-detect generative models by name so routing is correct
