@@ -151,6 +151,7 @@
             <div class="compare-tabs" role="tablist" aria-label="Example">
               <button type="button" role="tab" aria-selected="true" data-compare-tab="manga">Manga page</button>
               <button type="button" role="tab" aria-selected="false" data-compare-tab="webtoon">Webtoon strip</button>
+              <button type="button" role="tab" aria-selected="false" data-compare-tab="webtoon2">Webtoon strip 2</button>
             </div>
             <figure class="compare" data-compare data-compare-panel="manga">
               <div class="compare-box">
@@ -181,6 +182,22 @@
                 <button type="button" data-left="assets/site/shots/webtoon-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
               </div>
               <figcaption>Korean → English, narration boxes included; scroll inside the strip. The “두근!” sound effect was boxed by hand in the editor, and the first narration box uses a 26 px maximum font size.</figcaption>
+            </figure>
+            <figure class="compare compare-tall" data-compare data-compare-panel="webtoon2" hidden>
+              <div class="compare-scroll">
+                <div class="compare-box">
+                <img class="before" src="assets/site/shots/webtoon2-before.webp" alt="Original Chinese webtoon strip with six panels of Halgakos" width="600" height="4515" loading="lazy" decoding="async">
+                <img class="after" src="assets/site/shots/webtoon2-after.webp" alt="The same webtoon strip translated and lettered in English by Glossarion" width="600" height="4515" loading="lazy" decoding="async">
+                <span class="handle"><span class="knob" aria-hidden="true">⟷</span></span>
+                <span class="tag l">Original</span><span class="tag r">Translated</span>
+                <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the original and translated second webtoon">
+              </div>
+              </div>
+              <div class="compare-steps" style="grid-template-columns:1fr 1fr" role="group" aria-label="Compare the translated strip with">
+                <button type="button" data-left="assets/site/shots/webtoon2-before.webp" data-label="Original" aria-pressed="true">Original ⟷ Translated</button>
+                <button type="button" data-left="assets/site/shots/webtoon2-cleaned.webp" data-label="Text removed">Text removed ⟷ Translated</button>
+              </div>
+              <figcaption>Chinese → English; scroll inside the strip. No font sizes were set by hand: the automatic sizing keeps every line inside its bubble or narration box, and the “哼！” sound effect over the speed lines is lettered as free text.</figcaption>
             </figure>
             <p class="phone-note" style="text-align:left;margin-top:10px">Real runs of the Manga Translator on test pages made from Halgakos art. The original text was removed by Gemini Nano Banana 2.1 (an image-edit model), with the mask limited to each text box, so the artwork around the text is left untouched.</p>
           </div>
