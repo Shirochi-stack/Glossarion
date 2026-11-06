@@ -634,8 +634,14 @@ def test_image_folder_view_matches_frozen_desktop(tmp_path, monkeypatch):
                     rows.append([listbox.item(i).text() for i in range(listbox.count())])
                 widget.hide()
         results.append((rows, pl.tree_snapshot(work, workspace=work)))
-    assert results[0] == results[1]
-    assert results[0][0] == [["📄 Image 001 | a | ✅ Completed", "🖼️ Cover | cover.png | ⏭️ Skipped (cover)"]]
+    # 2026-11-06: the view also lists the folder's untranslated images (b.png), like the text
+    # view's untranslated chapters; everything else is the frozen dialog's
+    legacy, current = results
+    assert current[0] == [["📄 Image 001 | a | ✅ Completed", "🖼️ b.png | ⬜ Not Translated",
+                           "🖼️ Cover | cover.png | ⏭️ Skipped (cover)"]]
+    assert [[t for t in rows if "Not Translated" not in t] for rows in current[0]] == legacy[0]
+    assert current[1] == legacy[1]
+    assert legacy[0] == [["📄 Image 001 | a | ✅ Completed", "🖼️ Cover | cover.png | ⏭️ Skipped (cover)"]]
 
 
 def test_build_matches_frozen_block_oracle(fixture_roots, tmp_path):
@@ -1131,3 +1137,154 @@ def test_percent_encoded_opf_hrefs_match_their_chapters(tmp_path):
         ("Ch.002 · part 002.xhtml", "not_translated"),
     ]
     assert book.stats.completed == 1
+
+
+# ===========================================================================
+# Image Progress Manager: what the image runner (image_job) actually writes
+# ===========================================================================
+
+
+def _image_runner_output(tmp_path, *, generated=True):
+    """One image translated the way ``image_job._process_image_file`` leaves it: output folder
+    ``<app>/<stem>`` holding ``response_001_<stem>.png`` (a generated image) or ``.html`` (+ the
+    source copy), and a nested progress file whose ``output_file`` is relative to the WORKING
+    DIRECTORY the run had (``<stem>\\response_001_<stem>.png``), not to the output folder."""
+    source_dir = tmp_path / "assets"
+    source_dir.mkdir()
+    source = source_dir / "Chikuwa.png"
+    source.write_bytes(b"\x89PNG source")
+    app = tmp_path / "app"
+    out = app / "Chikuwa"
+    out.mkdir(parents=True)
+    name = "response_001_Chikuwa.png" if generated else "response_001_Chikuwa.html"
+    (out / name).write_bytes(b"\x89PNG generated" if generated else b"<html><body>t</body></html>")
+    if not generated:
+        (out / "Chikuwa.png").write_bytes(b"\x89PNG source")  # the runner's reference copy
+    progress = {
+        "images": {"h1": {"name": "Chikuwa.png", "path": str(source).replace("\\", "/"),
+                          "content_hash": "h1", "status": "completed", "last_updated": 1.0,
+                          "output_file": "Chikuwa\\" + name}},
+        "content_hashes": {"h1": {"original_name": "Chikuwa.png", "output_file": "Chikuwa\\" + name}},
+        "version": "1.0",
+    }
+    (out / "translation_progress.json").write_text(json.dumps(progress, indent=2), encoding="utf-8")
+    return source, app, out, name
+
+
+@pytest.mark.parametrize("generated", (True, False))
+def test_image_view_lists_outputs_recorded_relative_to_the_working_directory(generated, tmp_path, monkeypatch):
+    source, app, out, name = _image_runner_output(tmp_path, generated=generated)
+    monkeypatch.chdir(tmp_path)  # the view's working directory is not the run's
+    data, problem = pc.build_image_folder_progress(str(source), {"output_directory": ""}, script_dir=str(app))
+    assert problem is None
+    stem_text = "🖼️ Image 001 | Chikuwa" if generated else "📄 Image 001 | Chikuwa"
+    assert data["rows"] == [f"{stem_text} | ✅ Completed"]  # the source copy is not an output
+    info = data["file_info"][0]
+    assert (info["type"], info["file"], info["hash_key"]) == ("translated", name, "h1")
+    assert os.path.isfile(info["path"])
+
+    # Delete Selected removes the output and its progress entry; the image is then untranslated
+    assert pc.delete_image_folder_items(data["progress_file"], data["progress_data"], data["file_info"], [0]) == 1
+    assert not (out / name).exists() and source.exists()
+    assert json.loads((out / "translation_progress.json").read_text(encoding="utf-8"))["images"] == {}
+    data, problem = pc.build_image_folder_progress(str(source), {"output_directory": ""}, script_dir=str(app))
+    assert problem is None and data["rows"] == ["🖼️ Chikuwa.png | ⬜ Not Translated"]
+    pending = data["file_info"][0]
+    assert (pending["type"], pending["path"], pending["source"]) == ("pending", "", str(source))
+
+    # Delete Selected never touches an untranslated row's source image
+    assert pc.delete_image_folder_items(data["progress_file"], data["progress_data"], data["file_info"], [0]) == 0
+    assert source.read_bytes() == b"\x89PNG source"
+
+    # Mark as Skipped copies the source into images/ (image_job skips images found there)
+    result = pc.mark_image_folder_items_skipped(str(source), data["output_dir"], data["progress_file"],
+                                                data["progress_data"], [(0, pending)], data["file_info"])
+    assert result["moved"] == 1 and result["failed"] == 0
+    assert (out / "images" / "Chikuwa.png").read_bytes() == b"\x89PNG source" and source.exists()
+    data, _ = pc.build_image_folder_progress(str(source), {"output_directory": ""}, script_dir=str(app))
+    assert data["rows"] == ["🖼️ Cover | Chikuwa.png | ⏭️ Skipped (cover)"]
+
+
+def test_image_view_mark_skipped_finds_a_generated_images_source_through_progress(tmp_path, monkeypatch):
+    source, app, out, name = _image_runner_output(tmp_path)
+    monkeypatch.chdir(app)  # the run's working directory
+    data, _ = pc.build_image_folder_progress(str(source), {"output_directory": ""}, script_dir=str(app))
+    result = pc.mark_image_folder_items_skipped(str(source), data["output_dir"], data["progress_file"],
+                                                data["progress_data"], [(0, data["file_info"][0])],
+                                                data["file_info"])
+    assert result["moved"] == 1 and result["displays"] == {0: "🖼️ Skipped | Chikuwa | ⏭️ Moved to images folder"}
+    assert not (out / name).exists() and (out / "images" / "Chikuwa.png").read_bytes() == b"\x89PNG source"
+    assert json.loads((out / "translation_progress.json").read_text(encoding="utf-8"))["images"] == {}
+
+
+def test_image_folder_view_lists_translated_and_untranslated_images(tmp_path, monkeypatch):
+    """A multi-image run: combined output folder ``<cwd>/<folder name>``, outputs recorded
+    relative to the working directory; failed / unstarted images are listed like the text view."""
+    pics = tmp_path / "src" / "Pics"
+    pics.mkdir(parents=True)
+    for name in ("a.png", "b.jpg", "c.png", "d.png", "notes.txt"):
+        (pics / name).write_bytes(b"\x89PNG " + name.encode())
+    app = tmp_path / "app"
+    out = app / "Pics"
+    (out / "images").mkdir(parents=True)
+    (out / "response_001_a.html").write_text("<p>a</p>", encoding="utf-8")
+    (out / "response_002_b.png").write_bytes(b"\x89PNG generated b")
+    images = {
+        "ha": {"name": "a.png", "path": str(pics / "a.png"), "status": "completed",
+               "output_file": "Pics\\response_001_a.html"},
+        "hb": {"name": "b.jpg", "path": str(pics / "b.jpg"), "status": "completed",
+               "output_file": "Pics/response_002_b.png"},
+        "hc": {"name": "c.png", "path": str(pics / "c.png"), "status": "error", "error": "boom"},
+    }
+    (out / "translation_progress.json").write_text(
+        json.dumps({"images": images, "content_hashes": {}, "version": "1.0"}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    data, problem = pc.build_image_folder_progress(str(pics), {"output_directory": ""}, script_dir=str(app))
+    assert problem is None
+    assert data["rows"] == [
+        "📄 Image 001 | a | ✅ Completed",
+        "🖼️ Image 002 | b | ✅ Completed",
+        "🖼️ c.png | ❌ Failed",
+        "🖼️ d.png | ⬜ Not Translated",
+    ]
+    assert [i["hash_key"] for i in data["file_info"]] == ["ha", "hb", "hc", None]
+    assert [i["status"] for i in data["file_info"]] == ["completed", "completed", "failed", "not_translated"]
+    assert pc.image_folder_delete_confirmation(data["file_info"], [1, 2]) == (
+        "This will delete 1 translated image(s) and the progress of 1 untranslated image(s).\n\nContinue?")
+    # Delete Selected: b's generated image goes, c's failed entry is reset, no source is touched
+    assert pc.delete_image_folder_items(data["progress_file"], data["progress_data"], data["file_info"], [1, 2]) == 1
+    assert sorted(json.loads((out / "translation_progress.json").read_text(encoding="utf-8"))["images"]) == ["ha"]
+    assert sorted(p.name for p in pics.iterdir()) == ["a.png", "b.jpg", "c.png", "d.png", "notes.txt"]
+    data, _ = pc.build_image_folder_progress(str(pics), {"output_directory": ""}, script_dir=str(app))
+    assert data["rows"] == ["📄 Image 001 | a | ✅ Completed", "🖼️ b.jpg | ⬜ Not Translated",
+                            "🖼️ c.png | ⬜ Not Translated", "🖼️ d.png | ⬜ Not Translated"]
+
+
+def test_image_progress_manager_dialog_lists_the_runner_output(tmp_path, monkeypatch):
+    """The desktop "Progress Manager - Images" dialog on a single translated image (owner
+    2026-11-06: the list was empty; the refresh that runs at open dropped the output)."""
+    from PySide6.QtWidgets import QListWidget, QPushButton
+
+    source, app, out, name = _image_runner_output(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    module = pl.current_rg()
+    monkeypatch.setattr(module, "_get_app_dir", lambda: str(app))
+    host = pl.make_host(module, {"output_directory": ""})
+    messages = []
+    host._styled_msgbox = lambda *args, **kwargs: messages.append(args)
+    host._force_retranslation_images_folder(str(source))
+    dialog = host._image_retranslation_dialog_cache[os.path.abspath(str(source))]
+    try:
+        listbox = dialog.findChild(QListWidget)
+        refresh = dialog._refresh_button
+        pl.pump(20, until=lambda: not refresh.isEnabled(), timeout=2.0)
+        pl.pump(20, until=refresh.isEnabled, timeout=5.0)
+        rows = [listbox.item(i).text() for i in range(listbox.count())]
+        assert rows == ["🖼️ Image 001 | Chikuwa | ✅ Completed"], rows
+        button = next(b for b in dialog.findChildren(QPushButton) if b.text().strip() == "Select Translated")
+        button.click()
+        assert [listbox.row(item) for item in listbox.selectedItems()] == [0]
+        assert messages == []
+    finally:
+        dialog.hide()
+        host._image_retranslation_dialog_cache.clear()
