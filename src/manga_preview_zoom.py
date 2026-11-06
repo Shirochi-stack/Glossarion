@@ -15,13 +15,21 @@ methods (same 1.15 step, same fit):
 * A touchpad pinch zooms the same way: Windows sends it as Ctrl+wheel, macOS / Linux as a native zoom
   gesture.
 
+It also keeps the zoom and scroll position when the page shown is reloaded (``KeepViewOnReload``): an
+edit of a box (Edit Translation, the Format row, moving / resizing a box, Save & Update Overlay, a
+single-box render, Clean) re-renders the page and the preview loads it again, and
+``CompactImageViewer.setPhoto`` fitted every load (a zoomed webtoon strip jumped back to the whole
+strip, scrolled to the top). A reload of the same page (its cleaned or rendered image included) now
+keeps the view; another page still fits as before.
+
 The widget class itself stays as it is (tests/test_manga_editor_core.py pins it); this is installed
 from outside, by ``manga_format_toolbar.install_format_toolbar``.
 """
 
 import math
+import os
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
                                QWidget)
@@ -76,6 +84,7 @@ class PreviewZoom(QObject):
         if app is not None:
             app.focusChanged.connect(self._on_focus_changed)
             self._on_focus_changed(None, app.focusWidget())
+        self.keep_view = KeepViewOnReload(preview)
 
     # ---- keys ------------------------------------------------------------------------------------------
 
@@ -150,6 +159,109 @@ class PreviewZoom(QObject):
         moved = viewer.mapFromScene(anchor) - point
         viewer.horizontalScrollBar().setValue(viewer.horizontalScrollBar().value() + moved.x())
         viewer.verticalScrollBar().setValue(viewer.verticalScrollBar().value() + moved.y())
+
+
+def page_base(path):
+    """(base name, derived) of an image the preview shows for a page: page ``001.png``'s cleaned
+    image ``001_translated/001_cleaned.png`` and rendered image ``001_translated/001.png`` (also under
+    the output folder) have base ``001`` and derived True, as in ``manga_editor_core``."""
+    folder, name = os.path.split(os.path.normpath(path))
+    stem = os.path.splitext(name)[0]
+    base = stem[:-len('_cleaned')] if stem.lower().endswith('_cleaned') else stem
+    derived = base != stem or os.path.basename(folder).lower().endswith('_translated')
+    return os.path.normcase(base), derived
+
+
+def same_page(path, other):
+    """True when the two image paths are the same page: the same file, or a page and its cleaned /
+    rendered image (the preview's ``current_image_path`` is either, by the caller)."""
+    if not path or not other:
+        return False
+    if os.path.normcase(os.path.normpath(path)) == os.path.normcase(os.path.normpath(other)):
+        return True
+    (base, derived), (other_base, other_derived) = page_base(path), page_base(other)
+    return (derived or other_derived) and base == other_base
+
+
+class KeepViewOnReload(QObject):
+    """Keep the preview's zoom and scroll position when the page it shows is loaded again.
+
+    ``CompactImageViewer.load_image`` emits ``image_loading`` before it sets the new image (the old one
+    is still shown) and ``image_loaded`` after; ``setPhoto`` clears ``user_zoomed`` and schedules a
+    fit. When the reload is of the page shown (``same_page``), the user had zoomed and nothing else
+    replaced the image in between, the view is put back on ``image_loaded`` and that one scheduled fit
+    is skipped. An image of another size (a page rendered at another scale) keeps the same part of the
+    page in view at the same size on screen."""
+
+    def __init__(self, preview):
+        super().__init__(preview)
+        self.preview = preview
+        self.viewer = viewer = preview.viewer
+        self._shown = None  # (page path, pixmap cacheKey) of the image the viewer got by its last load
+        self._view = None  # the view to put back when the image being loaded is set
+        # how many of the fits setPhoto scheduled are for kept views (skipped): two reloads in one event
+        # loop turn (Clean queues a preview update and the button restore together) schedule two
+        self._skip_fit = 0
+        fit = viewer.fitInView
+
+        def fit_in_view():
+            if self._skip_fit:
+                self._skip_fit -= 1
+                return
+            fit()
+
+        # setPhoto schedules self.fitInView: the instance attribute is what its timer calls (as do
+        # Fit to View and a resize, which run the fit as before)
+        viewer.fitInView = fit_in_view
+        viewer.image_loading.connect(self._on_loading)
+        viewer.image_loaded.connect(self._on_loaded)
+
+    def _pixmap(self):
+        return self.viewer.photo.pixmap()
+
+    def _on_loading(self, _path):
+        viewer = self.viewer
+        self._view = None
+        try:
+            shown = self._shown
+            if not (shown and viewer.hasPhoto() and viewer.user_zoomed):
+                return
+            pixmap = self._pixmap()
+            if pixmap.cacheKey() != shown[1] or not same_page(shown[0], self.preview.current_image_path):
+                return
+            center = viewer.mapToScene(viewer.viewport().rect().center())
+            self._view = (viewer.transform(), viewer.horizontalScrollBar().value(),
+                          viewer.verticalScrollBar().value(), pixmap.size(), center, viewer.zoom_level)
+        except RuntimeError:
+            pass  # the preview is gone
+
+    def _on_loaded(self, _path):
+        viewer = self.viewer
+        view, self._view = self._view, None
+        try:
+            pixmap = self._pixmap()
+            self._shown = (self.preview.current_image_path, pixmap.cacheKey())
+            if view is None:
+                return
+            transform, x, y, size, center, zoom_level = view
+            new = pixmap.size()
+            if new == size:
+                if viewer.transform() != transform:
+                    viewer.setTransform(transform)
+                viewer.horizontalScrollBar().setValue(x)
+                viewer.verticalScrollBar().setValue(y)
+            else:
+                viewer.setSceneRect(viewer.photo.boundingRect())
+                viewer.setTransform(transform)
+                ratio = size.width() / new.width() if new.width() else 1.0
+                viewer.scale(ratio, ratio)
+                viewer.centerOn(QPointF(center.x() * new.width() / max(size.width(), 1),
+                                        center.y() * new.height() / max(size.height(), 1)))
+            viewer.user_zoomed = True
+            viewer.zoom_level = zoom_level
+            self._skip_fit += 1
+        except RuntimeError:
+            pass
 
 
 def install_preview_zoom(preview, window=None):
