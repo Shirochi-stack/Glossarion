@@ -553,6 +553,7 @@ class EditorTab(MangaTab):
             on_click = (lambda e, s=step: self.ctx.spawn(self.run_step(s)))
             if step in ICON_ONLY_STEPS:
                 self.step_buttons[step] = ft.FilledTonalIconButton(icon=step_icon, tooltip=label, icon_size=STEP_ICON,
+                                                                   size_constraints=HIT_TARGET,
                                                                    style=STEP_BUTTON_STYLE, key=f"me-step-{step}",
                                                                    on_click=on_click)
             else:
