@@ -111,6 +111,19 @@ EDITS = {
     # multi-instance: an instance >= 2 writes its glossary payload folders under Payloads/Instance N
     "_process_image_folder_for_glossary": [('os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")',
                                             'os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")', 1),
+                                           # 2026-11-06: a tall image is chunked like image translation chunks it
+                                           ("                    response = self._call_api_with_interrupt(\n"
+                                            "                        client, messages, image_base64, temperature, max_tokens, context='glossary'\n"
+                                            "                    )\n",
+                                            "                    # A tall image is chunked like image translation chunks it (image_translator).\n"
+                                            "                    from image_translator import send_image_glossary_request\n"
+                                            "                    response = send_image_glossary_request(\n"
+                                            "                        lambda msgs, b64: self._call_api_with_interrupt(\n"
+                                            "                            client, msgs, b64, temperature, max_tokens, context='glossary'\n"
+                                            "                        ),\n"
+                                            "                        messages, image_path, image_base64, log=self.append_log,\n"
+                                            "                        stop_check=lambda: self.stop_requested,\n"
+                                            "                    )\n", 1),
         # 2026-11-06: an image without names (the reply is only the CSV header, or []) is a completed
         # image with 0 entries, and a folder whose images all finished that way is a completed extraction
         ("                                from extract_glossary_from_epub import parse_api_response\n",
