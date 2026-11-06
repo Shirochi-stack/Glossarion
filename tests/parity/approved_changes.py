@@ -3043,6 +3043,37 @@ _IMAGE_PROGRESS_FOLLOWS_RUN = (
 )
 
 
+# 2026-11-06 Local Model switch: Skip Inpainter's pool lock is refreshed at once (both exits of
+# _on_local_model_change; tests/test_manga_inpaint_wait.py)
+_SKIP_LOCK_SWITCH_IMAGE_EDIT = (
+    "            self._apply_custom_image_edit_ui_state()\n"
+    "            self._save_rendering_settings()\n"
+    "            return\n"
+    "        \n"
+    "        # Check for saved path for this model type\n",
+    "            self._apply_custom_image_edit_ui_state()\n"
+    "            self._sync_skip_inpainter_pool_lock()\n"
+    "            self._save_rendering_settings()\n"
+    "            return\n"
+    "        \n"
+    "        # Check for saved path for this model type\n",
+)
+
+_SKIP_LOCK_SWITCH_LOCAL = (
+    "            self.local_model_status_label.setStyleSheet(\"color: gray;\")\n"
+    "\n"
+    "        self._apply_custom_image_edit_ui_state()\n"
+    "        \n"
+    "        self._save_rendering_settings()\n",
+    "            self.local_model_status_label.setStyleSheet(\"color: gray;\")\n"
+    "\n"
+    "        self._apply_custom_image_edit_ui_state()\n"
+    "        # Skip Inpainter follows the pool at once, not on the tracker's next 2 s tick\n"
+    "        self._sync_skip_inpainter_pool_lock()\n"
+    "        \n"
+    "        self._save_rendering_settings()\n",
+)
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -4151,6 +4182,17 @@ APPROVED = (
             # the image runner lived in translator_gui before U7
             "src/translator_gui.py": [_IMAGE_PROGRESS_FOLLOWS_RUN],
             "src/image_job.py": [_IMAGE_PROGRESS_FOLLOWS_RUN],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga Translate after switching the Local Model (custom-image-edit -> lama_onnx): the Local Model "
+                "switch refreshes Skip Inpainter's in-use lock at once; Translate waits for its concurrent "
+                "inpainting (first-run download / load) before rendering, and a failed image edit request "
+                "returns its pool checkout (manga_editor_core, test_manga_editor_core EDITS)",
+        "source": {
+            "src/manga_integration.py": [_SKIP_LOCK_SWITCH_IMAGE_EDIT, _SKIP_LOCK_SWITCH_LOCAL],
         },
         "values": {},
     },
