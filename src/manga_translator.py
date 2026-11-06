@@ -15559,7 +15559,10 @@ class MangaTranslator:
             
             # Format detection if enabled. Webtoon chunk processing currently
             # owns its full translate/render path, so skip that shortcut for
-            # OCR-only and precomputed-region glossary passes.
+            # OCR-only and precomputed-region glossary passes. An OCR-only pass
+            # still detects a webtoon strip chunk by chunk (same regions as the
+            # webtoon path), and the translation pass reuses those regions.
+            webtoon_chunk_ocr = False
             used_precomputed_regions = precomputed_regions is not None
             used_imported_regions = bool(
                 used_precomputed_regions
@@ -15610,6 +15613,10 @@ class MangaTranslator:
                 
                 # Handle webtoon mode if detected and enabled
                 webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')
+                if (ocr_only and not used_precomputed_regions and
+                        format_info['is_webtoon'] and webtoon_mode in ('auto', 'force')):
+                    self._log("🔄 Webtoon mode active - will OCR in chunks for better OCR")
+                    webtoon_chunk_ocr = True
                 if (not ocr_only and not used_precomputed_regions and
                         format_info['is_webtoon'] and webtoon_mode != 'disabled'):
                     if webtoon_mode == 'auto' or webtoon_mode == 'force':
@@ -15634,6 +15641,10 @@ class MangaTranslator:
                     precomputed_regions or [],
                     preserve_translations=used_imported_regions,
                 )
+            elif webtoon_chunk_ocr:
+                self._log(f"📍 [STEP 1] Text Detection Phase (webtoon chunks)")
+                _, regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)
+                result['format_info']['chunks_processed'] = num_chunks
             else:
                 self._log(f"📍 [STEP 1] Text Detection Phase")
                 regions = self.detect_text_regions(image_path)
@@ -16497,94 +16508,11 @@ class MangaTranslator:
     def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
         """Process webtoon in chunks for better OCR"""
         import cv2
-        import numpy as np
-        from PIL import Image as PILImage
         
         try:
             self._log("📱 Processing webtoon in chunks for better OCR", "info")
             
-            # Load the image
-            image = cv2_imread(image_path)
-            if image is None:
-                pil_image = open_page_image(image_path)
-                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            
-            height, width = image.shape[:2]
-            
-            # Get chunk settings from config
-            chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)
-            chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)
-            
-            self._log(f"   Image dimensions: {width}x{height}", "info")
-            self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")
-            
-            # Calculate number of chunks needed
-            effective_chunk_height = chunk_height - chunk_overlap
-            num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)
-            
-            self._log(f"   Will process in {num_chunks} chunks", "info")
-            
-            # Process each chunk
-            all_regions = []
-            chunk_offsets = []
-            
-            for i in range(num_chunks):
-                # Calculate chunk boundaries
-                start_y = i * effective_chunk_height
-                end_y = min(start_y + chunk_height, height)
-                
-                # Make sure we don't miss the bottom part
-                if i == num_chunks - 1:
-                    end_y = height
-                
-                self._log(f"\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")
-                
-                # Extract chunk
-                chunk = image[start_y:end_y, 0:width]
-                
-                # Save chunk temporarily for OCR
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    chunk_path = tmp.name
-                    cv2.imwrite(chunk_path, chunk)
-                
-                try:
-                    # Detect text in this chunk
-                    chunk_regions = self.detect_text_regions(chunk_path)
-                    
-                    # Adjust region coordinates to full image space
-                    for region in chunk_regions:
-                        # Adjust bounding box
-                        x, y, w, h = region.bounding_box
-                        region.bounding_box = (x, y + start_y, w, h)
-                        
-                        # Adjust vertices if present
-                        if hasattr(region, 'vertices') and region.vertices:
-                            adjusted_vertices = []
-                            for vx, vy in region.vertices:
-                                adjusted_vertices.append((vx, vy + start_y))
-                            region.vertices = adjusted_vertices
-                        
-                        # Mark which chunk this came from (for deduplication)
-                        region.chunk_index = i
-                        region.chunk_y_range = (start_y, end_y)
-                    
-                    all_regions.extend(chunk_regions)
-                    chunk_offsets.append(start_y)
-                    
-                    self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")
-                    
-                finally:
-                    # Clean up temp file
-                    import os
-                    if os.path.exists(chunk_path):
-                        os.remove(chunk_path)
-            
-            # Remove duplicate regions from overlapping areas
-            self._log(f"\n   🔍 Deduplicating regions from overlaps...", "info")
-            unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)
-            
-            self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")
+            image, unique_regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)
             
             if not unique_regions:
                 self._log("⚠️ No text regions detected in webtoon", "warning")
@@ -16637,6 +16565,102 @@ class MangaTranslator:
             self._log(f"❌ {error_msg}", "error")
             result['errors'].append(error_msg)
             return result
+
+    def _detect_webtoon_chunk_regions(self, image_path: str):
+        """Detect the text of a tall webtoon strip chunk by chunk.
+
+        Returns ``(image, regions, num_chunks)``: the loaded BGR page, the regions in
+        full-image coordinates with the overlap duplicates removed, and the chunk count.
+        The webtoon translation path and the glossary OCR-only pass both call this, so the
+        regions a glossary pass hands to translation are the ones translation would detect.
+        """
+        import cv2
+        import numpy as np
+        
+        # Load the image
+        image = cv2_imread(image_path)
+        if image is None:
+            pil_image = open_page_image(image_path)
+            image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        
+        height, width = image.shape[:2]
+        
+        # Get chunk settings from config
+        chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)
+        chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)
+        
+        self._log(f"   Image dimensions: {width}x{height}", "info")
+        self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")
+        
+        # Calculate number of chunks needed
+        effective_chunk_height = chunk_height - chunk_overlap
+        num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)
+        
+        self._log(f"   Will process in {num_chunks} chunks", "info")
+        
+        # Process each chunk
+        all_regions = []
+        chunk_offsets = []
+        
+        for i in range(num_chunks):
+            # Calculate chunk boundaries
+            start_y = i * effective_chunk_height
+            end_y = min(start_y + chunk_height, height)
+            
+            # Make sure we don't miss the bottom part
+            if i == num_chunks - 1:
+                end_y = height
+            
+            self._log(f"\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")
+            
+            # Extract chunk
+            chunk = image[start_y:end_y, 0:width]
+            
+            # Save chunk temporarily for OCR
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                chunk_path = tmp.name
+                cv2.imwrite(chunk_path, chunk)
+            
+            try:
+                # Detect text in this chunk
+                chunk_regions = self.detect_text_regions(chunk_path)
+                
+                # Adjust region coordinates to full image space
+                for region in chunk_regions:
+                    # Adjust bounding box
+                    x, y, w, h = region.bounding_box
+                    region.bounding_box = (x, y + start_y, w, h)
+                    
+                    # Adjust vertices if present
+                    if hasattr(region, 'vertices') and region.vertices:
+                        adjusted_vertices = []
+                        for vx, vy in region.vertices:
+                            adjusted_vertices.append((vx, vy + start_y))
+                        region.vertices = adjusted_vertices
+                    
+                    # Mark which chunk this came from (for deduplication)
+                    region.chunk_index = i
+                    region.chunk_y_range = (start_y, end_y)
+                
+                all_regions.extend(chunk_regions)
+                chunk_offsets.append(start_y)
+                
+                self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")
+                
+            finally:
+                # Clean up temp file
+                import os
+                if os.path.exists(chunk_path):
+                    os.remove(chunk_path)
+        
+        # Remove duplicate regions from overlapping areas
+        self._log(f"\n   🔍 Deduplicating regions from overlaps...", "info")
+        unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)
+        
+        self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")
+        
+        return image, unique_regions, num_chunks
 
     def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:
         """Remove duplicate regions from overlapping chunk areas"""

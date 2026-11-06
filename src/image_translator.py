@@ -399,7 +399,335 @@ def _bad_vision_glossary_finish_reason(finish_reason):
     return reason if reason in bad_reasons else None
 
 
-class ImageTranslator:
+def _image_glossary_response_text(response):
+    """The text of a glossary API response (tuple, object with ``content`` or a string)."""
+    text, _finish_reason = _extract_text_response_and_finish_reason(response)
+    return text
+
+
+def send_image_glossary_request(send_fn, messages, image_path, image_base64, log=print, stop_check=None):
+    """Send the glossary request for one image, chunking a tall image the way translation does.
+
+    ``send_fn(messages, image_base64)`` makes one API call (the glossary pipeline passes its
+    interruptible ``_call_api_with_interrupt``). An image no taller than IMAGE_CHUNK_HEIGHT is
+    one request with the whole file, unchanged. A taller one is cut with the image translator's
+    chunk ranges (ImageChunkPlanner): with SINGLE_API_IMAGE_CHUNKS=1 every chunk goes in one
+    request, as the translator's single-API mode sends them, and that response is returned as is;
+    otherwise each chunk is its own request, the entries of all chunks are merged and
+    de-duplicated (skip_duplicate_entries) and returned as a JSON array. A chunk without
+    entities (empty answer, header-only CSV, empty list) adds nothing; it is not a failure.
+    An immediate stop (``stop_check()``) ends the image before its next chunk request; a graceful
+    stop lets the image finish, since glossary progress is kept per image.
+    """
+    planner = ImageChunkPlanner()
+    try:
+        with open_image(image_path) as img:
+            width, height = img.size
+            if height <= planner.chunk_height:
+                return send_fn(messages, image_base64)
+            if img.mode not in ('RGB', 'RGBA'):
+                img = img.convert('RGB')
+            planner._suppress_image_detail_logs = True
+            chunk_ranges = planner._image_chunk_ranges(height, img)
+            chunks_base64 = [
+                base64.b64encode(planner._image_to_bytes(img.crop((0, start_y, width, end_y)), format='PNG')).decode('utf-8')
+                for start_y, end_y in chunk_ranges
+            ]
+    except Exception as e:
+        log(f"      \u26a0\ufe0f Could not split the image into chunks ({e}); sending it whole")
+        return send_fn(messages, image_base64)
+    if len(chunks_base64) <= 1:
+        return send_fn(messages, image_base64)
+
+    num_chunks = len(chunks_base64)
+    prompt = messages[-1].get("content", "") if messages else ""
+    if os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
+        log(f"      \U0001f4d0 Tall image ({width}x{height}): sending {num_chunks} chunks in one request")
+        content = [{"type": "text", "text": prompt}] if prompt else []
+        content.extend(
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + chunk_base64}}
+            for chunk_base64 in chunks_base64
+        )
+        multi_messages = list(messages[:-1]) + [{"role": "user", "content": content}]
+        return send_fn(multi_messages, None)
+
+    log(f"      \U0001f4d0 Tall image ({width}x{height}): extracting from {num_chunks} chunks")
+    from extract_glossary_from_epub import parse_api_response, skip_duplicate_entries
+
+    entries = []
+    for index, chunk_base64 in enumerate(chunks_base64, start=1):
+        if index > 1 and _force_stop_requested(stop_check):
+            raise UnifiedClientError("Glossary extraction stopped by user")
+        start_y, end_y = chunk_ranges[index - 1]
+        log(f"      \U0001f9e9 Chunk {index}/{num_chunks} (y: {start_y}-{end_y})")
+        chunk_text = _image_glossary_response_text(send_fn(messages, chunk_base64)).strip()
+        chunk_entries = [
+            entry for entry in (parse_api_response(chunk_text) if chunk_text else [])
+            if isinstance(entry, dict) and str(entry.get('raw_name') or '').strip()
+        ]
+        if not chunk_entries:
+            log(f"      \u2139\ufe0f Chunk {index}/{num_chunks}: no entries")
+        entries.extend(chunk_entries)
+    merged = skip_duplicate_entries(entries) if len(entries) > 1 else entries
+    log(f"      \U0001f517 Merged {len(entries)} chunk entries into {len(merged)} unique entries")
+    return json.dumps(merged, ensure_ascii=False)
+
+
+class ImageChunkPlanner:
+    """Tall-image chunk planning shared by image translation and image glossary extraction.
+
+    Reads the image-translation chunk settings: IMAGE_CHUNK_HEIGHT, IMAGE_CHUNK_OVERLAP_PERCENT,
+    IMAGE_CHUNK_MIN_OVERLAP_PIXELS, IMAGE_SMART_CHUNKING (and PNG_COMPRESSION for the chunk bytes).
+    ImageTranslator sets ``chunk_height`` in its own ``__init__``.
+    """
+
+    def __init__(self, chunk_height=None):
+        if chunk_height is None:
+            chunk_height = os.getenv("IMAGE_CHUNK_HEIGHT", "2000")
+        self.chunk_height = int(chunk_height)
+
+    def _image_to_bytes(self, img, format='PNG', quality=None):
+            """Convert PIL Image to bytes with various format options"""
+            img_bytes = io.BytesIO()
+            
+            if format == 'WEBP':
+                # WebP is much better for manga/text images
+                # Ensure RGB mode for WebP (no RGBA in some cases)
+                if img.mode == 'RGBA' and not os.getenv("PRESERVE_TRANSPARENCY", "0") == "1":
+                    # Create white background
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                elif img.mode not in ['RGB', 'L', 'RGBA']:
+                    img = img.convert('RGB')
+                    
+                if quality:
+                    img.save(img_bytes, format='WEBP', quality=quality, method=6)
+                else:
+                    img.save(img_bytes, format='WEBP', lossless=True)
+            elif format == 'JPEG':
+                # JPEG doesn't support transparency, so convert RGBA to RGB
+                if img.mode == 'RGBA':
+                    # Create white background
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Save as JPEG with specified quality
+                if quality:
+                    img.save(img_bytes, format='JPEG', quality=quality, optimize=True, 
+                            progressive=os.getenv("PROGRESSIVE_ENCODING", "1") == "1")
+                else:
+                    img.save(img_bytes, format='JPEG', quality=85, optimize=True)
+            elif format == 'GIF':
+                # GIF format handling
+                if img.mode not in ('P', 'L'):
+                    # Convert to palette mode for GIF
+                    img = img.quantize(colors=256, method=2)  # MEDIANCUT method
+                
+                # Save as GIF
+                img.save(img_bytes, format='GIF', optimize=True)
+            else:
+                # Default PNG format
+                compress_level = int(os.getenv("PNG_COMPRESSION", "6"))
+                img.save(img_bytes, format='PNG', compress_level=compress_level, optimize=True)
+            
+            img_bytes.seek(0)
+            data = img_bytes.read()
+            
+            # Log the size for debugging
+            size_kb = len(data) / 1024
+            if size_kb > 0 and not getattr(self, "_suppress_image_detail_logs", False):  # Log if file is over 0kb
+                print(f"   💾 Image Chunk Size: {size_kb:.1f}KB ")
+            
+            return data
+
+    def _image_chunk_overlap_pixels(self) -> int:
+        try:
+            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '3'))
+            chunk_height = max(1, int(self.chunk_height))
+            overlap = max(0, int(chunk_height * (overlap_percentage / 100)))
+            min_overlap = max(0, int(os.getenv('IMAGE_CHUNK_MIN_OVERLAP_PIXELS', '80')))
+            if min_overlap:
+                overlap = max(overlap, min_overlap)
+            return min(overlap, chunk_height - 1)
+        except Exception:
+            return 100
+
+    def _smart_image_chunking_enabled(self) -> bool:
+        return os.getenv("IMAGE_SMART_CHUNKING", "1").strip().lower() in ("1", "true", "yes", "on")
+
+    def _smart_row_foreground_counts(self, img) -> List[int]:
+        """Count likely foreground/text pixels per row, alpha-aware when possible."""
+        try:
+            import numpy as _np
+            rgba = img.convert("RGBA")
+            arr = _np.asarray(rgba)
+            rgb = arr[:, :, :3].astype(_np.int16)
+            alpha = arr[:, :, 3]
+
+            if alpha.max() > alpha.min():
+                visible = alpha > 16
+                if visible.any():
+                    return visible.sum(axis=1).astype(int).tolist()
+
+            gray = _np.asarray(img.convert("L")).astype(_np.int16)
+            sample = gray.reshape(-1)
+            low = float(_np.percentile(sample, 5))
+            high = float(_np.percentile(sample, 95))
+            median_value = float(_np.median(sample))
+            contrast = high - low
+
+            if contrast < 18:
+                # Very low contrast page; no reliable whitespace map.
+                return [img.width] * img.height
+
+            if median_value >= 128:
+                # Light page: foreground is dark ink.
+                threshold = min(245.0, low + max(25.0, contrast * 0.35))
+                foreground = gray <= threshold
+            else:
+                # Dark page: foreground is light ink.
+                threshold = max(10.0, high - max(25.0, contrast * 0.35))
+                foreground = gray >= threshold
+
+            return foreground.sum(axis=1).astype(int).tolist()
+        except Exception:
+            gray = img.convert("L")
+            width, height = gray.size
+            data = gray.tobytes()
+            counts = []
+            for y in range(height):
+                row = data[y * width:(y + 1) * width]
+                counts.append(sum(1 for value in row if value < 220))
+            return counts
+
+    def _smart_image_chunk_ranges(self, img, height: int) -> List[Tuple[int, int]]:
+        """Return chunk ranges whose cuts land near low-foreground whitespace gaps."""
+        try:
+            target_height = max(1, int(self.chunk_height))
+        except Exception:
+            target_height = 1200
+        try:
+            min_chunk_height = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")))
+        except Exception:
+            min_chunk_height = 600
+        min_chunk_height = min(min_chunk_height, target_height)
+        try:
+            max_foreground_ratio = float(os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01"))
+        except Exception:
+            max_foreground_ratio = 0.01
+        try:
+            min_gap_rows = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12")))
+        except Exception:
+            min_gap_rows = 12
+        try:
+            cut_padding_rows = max(0, int(os.getenv("IMAGE_SMART_CHUNK_CUT_PADDING_ROWS", "4")))
+        except Exception:
+            cut_padding_rows = 4
+
+        width, actual_height = img.size
+        height = min(height, actual_height)
+        if height <= target_height:
+            return [(0, height)]
+
+        foreground_counts = self._smart_row_foreground_counts(img)[:height]
+        max_foreground_pixels = max(0, int(width * max_foreground_ratio))
+        candidates = []
+        in_gap = False
+        gap_start = 0
+
+        for y, foreground_count in enumerate(foreground_counts):
+            if foreground_count <= max_foreground_pixels:
+                if not in_gap:
+                    in_gap = True
+                    gap_start = y
+            elif in_gap:
+                if y - gap_start >= min_gap_rows:
+                    candidates.append((gap_start + y) // 2)
+                in_gap = False
+
+        if in_gap and height - gap_start >= min_gap_rows:
+            candidates.append((gap_start + height) // 2)
+
+        cuts = []
+        last = 0
+        while last + target_height < height:
+            target = last + target_height
+            min_next = last + min_chunk_height
+            reachable = [c for c in candidates if c > min_next]
+            if not reachable:
+                break
+            best = min(
+                reachable,
+                key=lambda c: (
+                    abs(c - target),
+                    max(foreground_counts[max(0, c - cut_padding_rows):min(height, c + cut_padding_rows + 1)] or [width]),
+                ),
+            )
+            if best >= height:
+                break
+            cuts.append(best)
+            last = best
+
+        if not cuts:
+            return []
+
+        ranges = list(zip([0] + cuts, cuts + [height]))
+        for cut in cuts:
+            start = max(0, cut - cut_padding_rows)
+            end = min(height, cut + cut_padding_rows + 1)
+            if any(count > max_foreground_pixels for count in foreground_counts[start:end]):
+                return []
+
+        # A single huge whitespace-picked chunk is usually a bad cut; keep the
+        # older overlap splitter as the fallback for dense or dark pages.
+        max_reasonable_height = max(target_height * 2, target_height + min_chunk_height)
+        if any((end_y - start_y) > max_reasonable_height for start_y, end_y in ranges):
+            return []
+        return ranges
+
+    def _image_chunk_ranges(self, height: int, img=None) -> List[Tuple[int, int]]:
+        """Return tall-image chunk ranges with overlap and a hard max chunk height."""
+        try:
+            chunk_height = max(1, int(self.chunk_height))
+        except Exception:
+            chunk_height = 2000
+        try:
+            height = max(0, int(height))
+        except Exception:
+            height = 0
+        if height <= 0:
+            return []
+
+        if img is not None and self._smart_image_chunking_enabled():
+            try:
+                smart_ranges = self._smart_image_chunk_ranges(img, height)
+                if smart_ranges:
+                    return smart_ranges
+            except Exception as e:
+                print(f"   Smart chunking fallback: {e}")
+
+        overlap = min(self._image_chunk_overlap_pixels(), max(0, chunk_height - 1))
+        ranges = []
+        start_y = 0
+        while start_y < height:
+            end_y = min(height, start_y + chunk_height)
+            ranges.append((start_y, end_y))
+            if end_y >= height:
+                break
+
+            next_start_y = end_y - overlap if overlap else end_y
+            if next_start_y <= start_y:
+                next_start_y = end_y
+            start_y = next_start_y
+
+        return ranges
+
+
+class ImageTranslator(ImageChunkPlanner):
     _vision_ocr_glossary_file_lock = threading.RLock()
 
     def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", 
@@ -3360,64 +3688,6 @@ class ImageTranslator:
         # Default: use existing method without compression
         return self._image_to_bytes(img)
 
-    def _image_to_bytes(self, img, format='PNG', quality=None):
-            """Convert PIL Image to bytes with various format options"""
-            img_bytes = io.BytesIO()
-            
-            if format == 'WEBP':
-                # WebP is much better for manga/text images
-                # Ensure RGB mode for WebP (no RGBA in some cases)
-                if img.mode == 'RGBA' and not os.getenv("PRESERVE_TRANSPARENCY", "0") == "1":
-                    # Create white background
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    background.paste(img, mask=img.split()[3])
-                    img = background
-                elif img.mode not in ['RGB', 'L', 'RGBA']:
-                    img = img.convert('RGB')
-                    
-                if quality:
-                    img.save(img_bytes, format='WEBP', quality=quality, method=6)
-                else:
-                    img.save(img_bytes, format='WEBP', lossless=True)
-            elif format == 'JPEG':
-                # JPEG doesn't support transparency, so convert RGBA to RGB
-                if img.mode == 'RGBA':
-                    # Create white background
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    background.paste(img, mask=img.split()[3])
-                    img = background
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                # Save as JPEG with specified quality
-                if quality:
-                    img.save(img_bytes, format='JPEG', quality=quality, optimize=True, 
-                            progressive=os.getenv("PROGRESSIVE_ENCODING", "1") == "1")
-                else:
-                    img.save(img_bytes, format='JPEG', quality=85, optimize=True)
-            elif format == 'GIF':
-                # GIF format handling
-                if img.mode not in ('P', 'L'):
-                    # Convert to palette mode for GIF
-                    img = img.quantize(colors=256, method=2)  # MEDIANCUT method
-                
-                # Save as GIF
-                img.save(img_bytes, format='GIF', optimize=True)
-            else:
-                # Default PNG format
-                compress_level = int(os.getenv("PNG_COMPRESSION", "6"))
-                img.save(img_bytes, format='PNG', compress_level=compress_level, optimize=True)
-            
-            img_bytes.seek(0)
-            data = img_bytes.read()
-            
-            # Log the size for debugging
-            size_kb = len(data) / 1024
-            if size_kb > 0 and not getattr(self, "_suppress_image_detail_logs", False):  # Log if file is over 0kb
-                print(f"   💾 Image Chunk Size: {size_kb:.1f}KB ")
-            
-            return data
-
     def _vision_ocr_batch_enabled(self) -> bool:
         return os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
 
@@ -3457,188 +3727,6 @@ class ImageTranslator:
             except Exception:
                 pass
         return max(1, requested)
-
-    def _image_chunk_overlap_pixels(self) -> int:
-        try:
-            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '3'))
-            chunk_height = max(1, int(self.chunk_height))
-            overlap = max(0, int(chunk_height * (overlap_percentage / 100)))
-            min_overlap = max(0, int(os.getenv('IMAGE_CHUNK_MIN_OVERLAP_PIXELS', '80')))
-            if min_overlap:
-                overlap = max(overlap, min_overlap)
-            return min(overlap, chunk_height - 1)
-        except Exception:
-            return 100
-
-    def _smart_image_chunking_enabled(self) -> bool:
-        return os.getenv("IMAGE_SMART_CHUNKING", "1").strip().lower() in ("1", "true", "yes", "on")
-
-    def _smart_row_foreground_counts(self, img) -> List[int]:
-        """Count likely foreground/text pixels per row, alpha-aware when possible."""
-        try:
-            import numpy as _np
-            rgba = img.convert("RGBA")
-            arr = _np.asarray(rgba)
-            rgb = arr[:, :, :3].astype(_np.int16)
-            alpha = arr[:, :, 3]
-
-            if alpha.max() > alpha.min():
-                visible = alpha > 16
-                if visible.any():
-                    return visible.sum(axis=1).astype(int).tolist()
-
-            gray = _np.asarray(img.convert("L")).astype(_np.int16)
-            sample = gray.reshape(-1)
-            low = float(_np.percentile(sample, 5))
-            high = float(_np.percentile(sample, 95))
-            median_value = float(_np.median(sample))
-            contrast = high - low
-
-            if contrast < 18:
-                # Very low contrast page; no reliable whitespace map.
-                return [img.width] * img.height
-
-            if median_value >= 128:
-                # Light page: foreground is dark ink.
-                threshold = min(245.0, low + max(25.0, contrast * 0.35))
-                foreground = gray <= threshold
-            else:
-                # Dark page: foreground is light ink.
-                threshold = max(10.0, high - max(25.0, contrast * 0.35))
-                foreground = gray >= threshold
-
-            return foreground.sum(axis=1).astype(int).tolist()
-        except Exception:
-            gray = img.convert("L")
-            width, height = gray.size
-            data = gray.tobytes()
-            counts = []
-            for y in range(height):
-                row = data[y * width:(y + 1) * width]
-                counts.append(sum(1 for value in row if value < 220))
-            return counts
-
-    def _smart_image_chunk_ranges(self, img, height: int) -> List[Tuple[int, int]]:
-        """Return chunk ranges whose cuts land near low-foreground whitespace gaps."""
-        try:
-            target_height = max(1, int(self.chunk_height))
-        except Exception:
-            target_height = 1200
-        try:
-            min_chunk_height = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")))
-        except Exception:
-            min_chunk_height = 600
-        min_chunk_height = min(min_chunk_height, target_height)
-        try:
-            max_foreground_ratio = float(os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01"))
-        except Exception:
-            max_foreground_ratio = 0.01
-        try:
-            min_gap_rows = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12")))
-        except Exception:
-            min_gap_rows = 12
-        try:
-            cut_padding_rows = max(0, int(os.getenv("IMAGE_SMART_CHUNK_CUT_PADDING_ROWS", "4")))
-        except Exception:
-            cut_padding_rows = 4
-
-        width, actual_height = img.size
-        height = min(height, actual_height)
-        if height <= target_height:
-            return [(0, height)]
-
-        foreground_counts = self._smart_row_foreground_counts(img)[:height]
-        max_foreground_pixels = max(0, int(width * max_foreground_ratio))
-        candidates = []
-        in_gap = False
-        gap_start = 0
-
-        for y, foreground_count in enumerate(foreground_counts):
-            if foreground_count <= max_foreground_pixels:
-                if not in_gap:
-                    in_gap = True
-                    gap_start = y
-            elif in_gap:
-                if y - gap_start >= min_gap_rows:
-                    candidates.append((gap_start + y) // 2)
-                in_gap = False
-
-        if in_gap and height - gap_start >= min_gap_rows:
-            candidates.append((gap_start + height) // 2)
-
-        cuts = []
-        last = 0
-        while last + target_height < height:
-            target = last + target_height
-            min_next = last + min_chunk_height
-            reachable = [c for c in candidates if c > min_next]
-            if not reachable:
-                break
-            best = min(
-                reachable,
-                key=lambda c: (
-                    abs(c - target),
-                    max(foreground_counts[max(0, c - cut_padding_rows):min(height, c + cut_padding_rows + 1)] or [width]),
-                ),
-            )
-            if best >= height:
-                break
-            cuts.append(best)
-            last = best
-
-        if not cuts:
-            return []
-
-        ranges = list(zip([0] + cuts, cuts + [height]))
-        for cut in cuts:
-            start = max(0, cut - cut_padding_rows)
-            end = min(height, cut + cut_padding_rows + 1)
-            if any(count > max_foreground_pixels for count in foreground_counts[start:end]):
-                return []
-
-        # A single huge whitespace-picked chunk is usually a bad cut; keep the
-        # older overlap splitter as the fallback for dense or dark pages.
-        max_reasonable_height = max(target_height * 2, target_height + min_chunk_height)
-        if any((end_y - start_y) > max_reasonable_height for start_y, end_y in ranges):
-            return []
-        return ranges
-
-    def _image_chunk_ranges(self, height: int, img=None) -> List[Tuple[int, int]]:
-        """Return tall-image chunk ranges with overlap and a hard max chunk height."""
-        try:
-            chunk_height = max(1, int(self.chunk_height))
-        except Exception:
-            chunk_height = 2000
-        try:
-            height = max(0, int(height))
-        except Exception:
-            height = 0
-        if height <= 0:
-            return []
-
-        if img is not None and self._smart_image_chunking_enabled():
-            try:
-                smart_ranges = self._smart_image_chunk_ranges(img, height)
-                if smart_ranges:
-                    return smart_ranges
-            except Exception as e:
-                print(f"   Smart chunking fallback: {e}")
-
-        overlap = min(self._image_chunk_overlap_pixels(), max(0, chunk_height - 1))
-        ranges = []
-        start_y = 0
-        while start_y < height:
-            end_y = min(height, start_y + chunk_height)
-            ranges.append((start_y, end_y))
-            if end_y >= height:
-                break
-
-            next_start_y = end_y - overlap if overlap else end_y
-            if next_start_y <= start_y:
-                next_start_y = end_y
-            start_y = next_start_y
-
-        return ranges
 
     @staticmethod
     def _canonical_ocr_cache_value(value, kind="str"):

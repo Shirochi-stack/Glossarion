@@ -110,7 +110,20 @@ NEW_METHODS = ("_prepare_translation_run", "_translation_worker")
 EDITS = {
     # multi-instance: an instance >= 2 writes its glossary payload folders under Payloads/Instance N
     "_process_image_folder_for_glossary": [('os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")',
-                                            'os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")', 1)],
+                                            'os.path.join(instance_payloads_dir("Payloads"), "glossary", f"{thread_name}_{thread_id}")', 1),
+                                           # 2026-11-06: a tall image is chunked like image translation chunks it
+                                           ("                    response = self._call_api_with_interrupt(\n"
+                                            "                        client, messages, image_base64, temperature, max_tokens, context='glossary'\n"
+                                            "                    )\n",
+                                            "                    # A tall image is chunked like image translation chunks it (image_translator).\n"
+                                            "                    from image_translator import send_image_glossary_request\n"
+                                            "                    response = send_image_glossary_request(\n"
+                                            "                        lambda msgs, b64: self._call_api_with_interrupt(\n"
+                                            "                            client, msgs, b64, temperature, max_tokens, context='glossary'\n"
+                                            "                        ),\n"
+                                            "                        messages, image_path, image_base64, log=self.append_log,\n"
+                                            "                        stop_check=lambda: self.stop_requested,\n"
+                                            "                    )\n", 1)],
     # 2026-11-02: an OPF href is a URL, decoded when read
     "_get_spine_filenames_for_preview": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
     "_get_opf_file_order": [("href = item.get('href')", "href = unquote(item.get('href') or '')", 1)],
