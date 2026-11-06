@@ -1204,6 +1204,11 @@ class HayaiOCRProvider(OCRProvider):
     The model files come from the manga_models registry and are downloaded on first load."""
 
     PROVIDER = 'hayai-ocr'
+    #: A read the model is less sure of than this (geometric mean token probability) may be
+    #: upside down: the crop is read once more turned 180 degrees.
+    LOW_CONFIDENCE = 0.5
+    #: The turned read replaces the first one only when it is sure and this much surer.
+    ROTATED_MARGIN = 0.2
 
     def __init__(self, log_callback=None):
         super().__init__(log_callback)
@@ -1279,14 +1284,33 @@ class HayaiOCRProvider(OCRProvider):
             else:
                 rgb = image[:, :, 2::-1] if image.shape[2] >= 3 else np.repeat(image[:, :, :1], 3, axis=2)
             h, w = image.shape[:2]
-            text = self.model.recognize(np.ascontiguousarray(rgb), stop=self._check_stop)
+            rgb = np.ascontiguousarray(rgb)
+            scored = getattr(self.model, 'recognize_scored', None)
+            if callable(scored):
+                text, confidence = scored(rgb, stop=self._check_stop)
+                if confidence < self.LOW_CONFIDENCE and not self._check_stop():
+                    # Upside-down text (a fallen sign, a flipped bubble) reads as noise: one
+                    # read of the crop turned 180 degrees, kept only when it is clearly surer
+                    turned, turned_confidence = scored(np.ascontiguousarray(rgb[::-1, ::-1]),
+                                                       stop=self._check_stop)
+                    if (turned and turned_confidence >= self.LOW_CONFIDENCE
+                            and turned_confidence >= confidence + self.ROTATED_MARGIN):
+                        self._log(f"🔄 Read the region upside down ({confidence:.2f} -> "
+                                  f"{turned_confidence:.2f}): {turned[:50]}")
+                        text, confidence = turned, turned_confidence
+            else:  # an engine without scores (tests): the caller's confidence as before
+                text = self.model.recognize(rgb, stop=self._check_stop)
+                confidence, scored = kwargs.get('confidence', 0.7), None
             if text:
-                results.append(OCRResult(
+                result = OCRResult(
                     text=text,
                     bbox=(0, 0, w, h),
-                    confidence=kwargs.get('confidence', 0.7),
+                    confidence=float(confidence),
                     vertices=[(0, 0), (w, 0), (w, h), (0, h)]
-                ))
+                )
+                # The confidence is the model's own score, not the caller's threshold
+                result.confidence_scored = callable(scored)
+                results.append(result)
                 self._log(f"✅ Detected text: {text[:50]}...")
         except Exception as e:
             self._log(f"❌ Error in Hayai OCR: {str(e)}", "error")

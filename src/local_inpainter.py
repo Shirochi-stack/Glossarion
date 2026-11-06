@@ -2741,6 +2741,7 @@ class LocalInpainter:
 
     def _custom_image_edit_inpaint_chunked(self, image, mask, iterations=None):
         """Send one image-edit request per masked crop and assemble the page."""
+        self.last_image_edit_unremoved_mask = None
         if self._custom_image_edit_force_stopped():
             return None
 
@@ -2862,7 +2863,82 @@ class LocalInpainter:
                 result[start:overlap_end] = np.clip(blended, 0, 255).astype(np.uint8)
             result[overlap_end:end] = edited[overlap_end - start:]
             previous_end = end
+        if self._custom_image_edit_force_stopped():
+            return None
+        result = self._custom_image_edit_check_text_removed(image, result, mask, log_crop_progress)
         return None if self._custom_image_edit_force_stopped() else result
+
+    def _register_custom_image_edit_output(self, crop_bgr, out_bgr, crop_mask):
+        """Return the image-edit output aligned to ``crop_bgr`` outside the text mask."""
+        try:
+            from image_edit_check import register_to_source
+            aligned, info = register_to_source(crop_bgr, out_bgr, crop_mask)
+        except Exception as exc:
+            logger.warning(f"Custom image edit alignment skipped: {exc}")
+            return out_bgr
+        if info.get('applied'):
+            self._log(
+                f"📐 Custom image edit output aligned to the source: shift "
+                f"({info['dx']:+.1f}, {info['dy']:+.1f}) px, scale "
+                f"{info['scale_x']:.3f}x{info['scale_y']:.3f} "
+                f"(difference outside text {info['error_before']:.1f} -> {info['error_after']:.1f})",
+                "info",
+            )
+        return aligned
+
+    def _custom_image_edit_check_text_removed(self, image, result, mask, log=None):
+        """Undo the edit where the text inside the mask is still there.
+
+        For each text component whose source lettering is still drawn in ``result``, the
+        area the edit changed around it gets the source art back. That text is then
+        cleaned once by ``_image_edit_local_fallback`` (the configured local inpainter,
+        set by the manga translator) when one is available. Otherwise the text stays as
+        drawn and ``last_image_edit_unremoved_mask`` marks it, so the caller does not
+        letter a translation over it.
+        """
+        log = log or self._log
+        self.last_image_edit_unremoved_mask = None
+        try:
+            from image_edit_check import unremoved_text_mask, edit_footprint
+            failed, stats = unremoved_text_mask(image, result, mask)
+        except Exception as exc:
+            logger.warning(f"Custom image edit text check skipped: {exc}")
+            return result
+        failed_stats = [entry for entry in stats if entry.get('failed')]
+        if not failed_stats:
+            return result
+        for entry in failed_stats:
+            x, y, w, h = entry['bbox']
+            log(
+                f"Custom image edit left the text in place at x={x}, y={y}, {w}x{h} "
+                f"({entry['kept']:.0%} of its ink still drawn)",
+                "warning",
+            )
+        footprint, redo = edit_footprint(image, result, failed, mask)
+        patched = result.copy()
+        patched[footprint] = image[footprint]
+        fallback = getattr(self, '_image_edit_local_fallback', None)
+        if callable(fallback):
+            try:
+                cleaned = fallback(patched, redo)
+            except Exception as exc:
+                log(f"Local inpainter fallback failed: {exc}", "warning")
+                cleaned = None
+            if isinstance(cleaned, np.ndarray) and cleaned.shape == image.shape:
+                area = cv2.dilate(redo, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))) > 0
+                patched[area] = cleaned[area]
+                log(
+                    f"Cleaned {len(failed_stats)} region(s) the image edit missed with the local inpainter",
+                    "info",
+                )
+                return patched
+        self.last_image_edit_unremoved_mask = redo
+        log(
+            f"Kept the original art for {len(failed_stats)} region(s) the image edit missed "
+            "(no local inpainter fallback); they will not be lettered",
+            "warning",
+        )
+        return patched
 
     def _custom_image_edit_inpaint(self, image, mask, iterations=None, _pool_prepared=False):
         """Inpaint through an OpenAI-compatible /images/edits endpoint."""
@@ -3496,6 +3572,11 @@ class LocalInpainter:
                         "info",
                     )
                 out_bgr = cv2.resize(out_bgr, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+
+            # Image-edit models may move or rescale the content inside the returned
+            # image. Align it to the source crop on the pixels outside the text before
+            # any of it is pasted, or bubble outlines break where the patch meets the art.
+            out_bgr = self._register_custom_image_edit_output(crop_bgr, out_bgr, crop_mask)
 
             # Endpoint-backed image edit models can optionally own the whole
             # returned page. The edit-output-area percentage controls how much
