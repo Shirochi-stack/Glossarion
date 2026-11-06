@@ -3055,6 +3055,23 @@ _OCR_PROMPT_ILLEGIBLE_MIGRATE = (
     '        return prompt\n',
 )
 
+# 2026-11-06 the image progress tracker follows each run's output folder (PR 146 review): a second image or
+# folder run of the same session used to write its translation_progress.json into the FIRST run's folder
+_IMAGE_PROGRESS_FOLLOWS_RUN = (
+    '                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, \'translation_progress.json\')}")\n'
+    '            \n'
+    '            # Check for stop request early\n'
+    ,
+    '                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, \'translation_progress.json\')}")\n'
+    "            elif os.path.normcase(os.path.abspath(getattr(self.image_progress_manager, 'output_dir', None) or '')) != os.path.normcase(os.path.abspath(output_dir)):\n"
+    '                # A later run (another image or folder) keeps its progress in its own output folder\n'
+    '                os.makedirs(output_dir, exist_ok=True)\n'
+    '                self.image_progress_manager.set_output_dir(output_dir)\n'
+    '                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, \'translation_progress.json\')}")\n'
+    '            \n'
+    '            # Check for stop request early\n'
+)
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -4448,6 +4465,17 @@ APPROVED = (
                 "(\"no visible / illegible\"); saved prompts with the previous default lines are migrated",
         "source": {
             "src/manga_integration.py": [_OCR_PROMPT_ILLEGIBLE_DEFAULT, _OCR_PROMPT_ILLEGIBLE_MIGRATE],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Image runs: the image progress tracker follows each run's output folder (set_output_dir when it "
+                "changes), so every image / folder output keeps its own translation_progress.json",
+        "source": {
+            # the image runner lived in translator_gui before U7
+            "src/translator_gui.py": [_IMAGE_PROGRESS_FOLLOWS_RUN],
+            "src/image_job.py": [_IMAGE_PROGRESS_FOLLOWS_RUN],
         },
         "values": {},
     },
