@@ -29632,11 +29632,26 @@ class UnifiedClient:
             "aspect_ratio": self._get_image_output_aspect_ratio("auto"),
         }
 
+    # Request contexts whose reply is read as text even inside an image-output run.
+    _AUTHGPT_TEXT_ONLY_CONTEXTS = frozenset({
+        'glossary', 'glossary_refinement', 'refinement', 'review', 'summary', 'metadata', 'book_title',
+        'batch_toc_translation', 'batch_header_translation', 'qa_truncation', 'truncation',
+    })
+
     def _authgpt_image_output(self, actual_model: str):
         """image_generation tool options for an AuthGPT (Codex) request, or None for a text reply.
 
         Size comes from OPENAI_IMAGE_SIZE (the OpenAI images route's setting) or else
-        the image output aspect ratio; quality from OPENAI_IMAGE_QUALITY."""
+        the image output aspect ratio; quality from OPENAI_IMAGE_QUALITY.
+
+        The tool is forced (tool_choice), so the text steps an image-output run also
+        makes (image glossary, rolling summary, metadata...) never get it: Gemini can
+        still answer those in text, the Codex image tool would answer with a picture."""
+        context = current_key_context()
+        if context in self._AUTHGPT_TEXT_ONLY_CONTEXTS:
+            if self._image_output_mode_enabled() and not self._is_stop_requested():
+                print(f"🎨 AuthGPT: {context} request is text-only; the image tool is not offered")
+            return None
         if not self._route_wants_image_output(actual_model):
             return None
         size = os.getenv('OPENAI_IMAGE_SIZE', '').strip().lower()

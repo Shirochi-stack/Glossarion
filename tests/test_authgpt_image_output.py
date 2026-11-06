@@ -256,8 +256,27 @@ def test_inpainter_forced_image_mode_asks_for_an_image(monkeypatch, tmp_path):
     assert client._authgpt_image_output("gpt-6.1-sol") == IMAGE_OPTS
 
 
+@pytest.mark.parametrize("context", ["glossary", "summary", "metadata"])
+def test_text_steps_of_an_image_run_stay_text(monkeypatch, tmp_path, context):
+    """translation_pipeline's image glossary calls send_image(context='glossary') with image
+    output mode on; the forced image tool would turn its JSON answer into a picture."""
+    monkeypatch.setenv("ENABLE_IMAGE_OUTPUT_MODE", "1")
+    client = make_client(monkeypatch, tmp_path)
+    with FakeCodex() as server:
+        monkeypatch.setenv("AUTHGPT_BASE_URL", server.base_url)
+        content, _finish = client.send_image(MESSAGES, "AAAA", temperature=0.3, max_tokens=4096, context=context)
+    assert "tools" not in server.bodies[0]
+    assert content == REFUSAL
+    with FakeCodex() as server:
+        monkeypatch.setenv("AUTHGPT_BASE_URL", server.base_url)
+        content, _finish = client.send_image(MESSAGES, "AAAA", temperature=0.3, max_tokens=4096,
+                                             context="image_translation")
+    assert server.bodies[0]["tools"][0]["type"] == "image_generation"
+    assert content.startswith("[GENERATED_IMAGE:")
+
+
 def test_vision_only_scan_never_asks_for_an_image(monkeypatch, tmp_path):
-    """The glossary step reads the image as text even while image output mode is on."""
+    """OCR / image-scan requests read the image as text even while image output mode is on."""
     monkeypatch.setenv("ENABLE_IMAGE_OUTPUT_MODE", "1")
     client = make_client(monkeypatch, tmp_path)
     monkeypatch.setattr(client, "_is_vision_input_only_context", lambda *a, **kw: True)
