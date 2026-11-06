@@ -200,7 +200,7 @@ class CustomAPIProvider(OCRProvider):
             "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
             "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
             "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
+            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
             "LANGUAGE PRESERVATION:\n"
             "- Korean text → Output in Korean\n"
             "- Japanese text → Output in Japanese\n"
@@ -220,7 +220,7 @@ class CustomAPIProvider(OCRProvider):
             "If image has a dot → Output: .\n"
             "If image has two dots → Output: . .\n"
             "If image has text → Output: [that text]\n"
-            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
+            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
             ))
         
         # Use existing temperature and token settings  
@@ -1314,7 +1314,7 @@ class Qwen2VL(OCRProvider):
             "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
             "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
             "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
+            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
             "LANGUAGE PRESERVATION:\n"
             "- Korean text → Output in Korean\n"
             "- Japanese text → Output in Japanese\n"
@@ -1334,7 +1334,7 @@ class Qwen2VL(OCRProvider):
             "If image has a dot → Output: .\n"
             "If image has two dots → Output: . .\n"
             "If image has text → Output: [that text]\n"
-            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
+            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
         )
     
     def set_ocr_prompt(self, prompt: str):

@@ -683,3 +683,16 @@ def test_a_batch_page_records_the_sizes_in_its_editor_state(tmp_path):
         path, {}).update(values)
     manga_env._record_page_editor_state(owner, str(image), page)
     assert owner.image_state_manager.states[str(image)]['region_font_sizes'] == {'0': 26.5}
+
+
+def test_auto_fit_goes_down_to_the_users_minimum_font_size():
+    """Owner 2026-11-06: text leaked out of its box at 10 px although Minimum Font Size was 8 (a hard 10 px floor)."""
+    from PIL import Image, ImageDraw
+    translator = _translator()
+    translator.max_font_size_limit = 40
+    draw = ImageDraw.Draw(Image.new("RGB", (200, 200), "white"))
+    text = "ADVENTURER CARD NAME: HALGAKOSEU OCCUPATION: TRANSLATOR RANK: F"
+    for minimum in (8, 6, 12):
+        translator.min_readable_size = minimum
+        size, _lines = translator._fit_text_to_region(text, 60, 40, draw, None, use_as_is=True)
+        assert size == minimum  # far too long for the box: it shrinks all the way to the user's minimum, no further

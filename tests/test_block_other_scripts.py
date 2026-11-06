@@ -406,11 +406,6 @@ def test_extract_glossary_may_use_the_characters_of_its_source_only(client, monk
     # an image's glossary has no text to take the characters from
     image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
     assert client._script_ban_request(image, "glossary") == ((), frozenset())
-    # however many names are copied, only what is not in the source is reported
-    client._warn_script_leak(source, "김민준,Kim Minjun\n" * 40, "glossary")
-    assert "another script" not in caplog.text
-    client._warn_script_leak(source, "김민준,金敏俊 Kim Minjun", "glossary")
-    assert "another script" in caplog.text
 
 
 def test_single_pass_translation_may_use_the_characters_of_its_source(client, monkeypatch):
@@ -478,9 +473,9 @@ def test_openai_bias_leaves_the_sources_tokens_out(client, monkeypatch):
     assert calls["exempt_chars"] == frozenset("김")
 
 
-def test_a_leaking_answer_is_kept_and_the_log_says_so(client, monkeypatch, caplog):
+def test_a_leaking_answer_is_kept_and_not_sent_again(client, monkeypatch, caplog):
     """Owner 2026-10-30: a retry with a language instruction only hides the problem; the request is never changed
-    or sent again."""
+    or sent again. Owner 2026-11-06: and the log no longer warns about it."""
     caplog.set_level("INFO")
     _turn_on(monkeypatch)
     monkeypatch.setenv("MAX_RETRIES", "3")
@@ -489,7 +484,7 @@ def test_a_leaking_answer_is_kept_and_the_log_says_so(client, monkeypatch, caplo
                                               request_id="sbtest01")
     assert content == "<p>He 笑了起来 smiled.</p>" and finish == "stop"
     assert len(seen) == 1 and seen[0][-1]["content"] == MESSAGES[-1]["content"]
-    assert "characters of another script" in caplog.text
+    assert "characters of another script" not in caplog.text
 
 
 def test_a_truncated_answer_is_not_sent_again_for_a_leak(client, monkeypatch, caplog):
@@ -501,7 +496,8 @@ def test_a_truncated_answer_is_not_sent_again_for_a_leak(client, monkeypatch, ca
     client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
                           request_id="sbtest01")
     assert len(seen) == 1
-    assert "characters of another script" in caplog.text
+    # owner 2026-11-06: no "no token ban could prevent it" warning for a leak any more
+    assert "characters of another script" not in caplog.text
 
 
 def test_ollama_route_needs_only_the_block_switch(client, monkeypatch):
