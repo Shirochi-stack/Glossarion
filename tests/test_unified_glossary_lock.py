@@ -63,6 +63,17 @@ def _write_lock(path, **owner):
     path.write_text(json.dumps(record), encoding="utf-8")
 
 
+def _read_owner(path):
+    """The lock file's record. _foreign_owner rewrites it with write_text (truncate, then write),
+    so a read can land in between and see an empty or half-written file: read again."""
+    for _attempt in range(100):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, PermissionError):
+            time.sleep(0.01)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _in_thread(target):
     box = {}
 
@@ -173,16 +184,7 @@ def test_live_owner_is_waited_for_not_broken(shared, monkeypatch):
     thread, box = _in_thread(take)
     time.sleep(2.0)  # 20 polls, far beyond _LOCK_STALE_POLLS: the heartbeat keeps it alive
     assert not acquired.is_set()
-    # The owner rewrites the file every 50 ms (truncate, then write), so one read can catch it
-    # empty or half-written; the lock itself treats such a read as "busy", read again likewise.
-    record = {}
-    for _attempt in range(50):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            break
-        except (ValueError, PermissionError):
-            time.sleep(0.01)
-    assert record["token"] == "someone-else"
+    assert _read_owner(path)["token"] == "someone-else"
     release.set()
     owner.join(5)
     thread.join(5)
@@ -243,7 +245,7 @@ def test_stop_while_waiting_raises_and_leaves_the_owner_alone(shared, monkeypatc
     stop["now"] = True
     thread.join(5)
     assert isinstance(box.get("error"), ug._DedupeStopped)
-    assert json.loads(path.read_text(encoding="utf-8"))["token"] == "someone-else"
+    assert _read_owner(path)["token"] == "someone-else"
     release.set()
     owner.join(5)
 

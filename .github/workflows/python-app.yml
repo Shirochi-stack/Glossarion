@@ -144,6 +144,7 @@ jobs:
           tests/test_empty_key_pool_disabled.py \
           tests/test_review_prompt_profiles.py \
           tests/test_authgem_image_output.py \
+          tests/test_authgpt_image_output.py \
           tests/test_manga_image_edit_pool_load.py \
           tests/test_manga_bubble_fit.py \
           tests/test_glossary_chunk_tall_images.py \

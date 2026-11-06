@@ -1221,6 +1221,7 @@ def _build_responses_body(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     reasoning: Optional[Dict[str, Any]] = None,
+    image_output: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     """Build a Codex Responses API request body from standard OpenAI messages.
 
@@ -1233,6 +1234,13 @@ def _build_responses_body(
     max_tokens is sent as max_output_tokens except for gpt-6-astra, which
     rejects it. For other models, the send layer retries without it, with
     an explicit log message, only if the backend rejects the field.
+
+    ``image_output`` (size/quality/output_format) asks for an image reply: the
+    request carries the Responses image_generation tool and requires it, so the
+    model generates (or, given an input image, edits) an image instead of
+    answering that it cannot. Such a request has no "reasoning": the Codex
+    backend passes the effort on to the image model, which fails every value
+    ("Complexity 'low' is not supported for this image model.").
     """
     instructions = ""
     input_items: List[Dict[str, Any]] = []
@@ -1328,10 +1336,52 @@ def _build_responses_body(
     if max_tokens is not None and model.strip().lower() != "gpt-6-astra":
         body["max_output_tokens"] = max_tokens
 
-    if reasoning:
+    if reasoning and image_output is None:
         body["reasoning"] = dict(reasoning)
 
+    if image_output is not None:
+        tool: Dict[str, Any] = {"type": "image_generation"}
+        for key in ("size", "quality", "output_format"):
+            value = str(image_output.get(key) or "").strip().lower()
+            if value:
+                tool[key] = value
+        body["tools"] = [tool]
+        body["tool_choice"] = {"type": "image_generation"}
+
     return body
+
+
+_IMAGE_FORMAT_MIME = {"png": "image/png", "jpeg": "image/jpeg", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
+def _image_from_output_item(item: Any) -> Optional[Dict[str, Any]]:
+    """An image_generation_call output item as {mime, data, ...}, or None.
+
+    The Codex backend returns the image as base64 in the item's ``result``."""
+    if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+        return None
+    encoded = item.get("result")
+    if not encoded or not isinstance(encoded, str):
+        return None
+    try:
+        data = base64.b64decode(encoded)
+    except (ValueError, TypeError):
+        return None
+    output_format = str(item.get("output_format") or "png").lower()
+    return {
+        "mime": _IMAGE_FORMAT_MIME.get(output_format, "image/png"),
+        "data": data,
+        "id": item.get("id"),
+        "action": item.get("action"),
+        "size": item.get("size"),
+        "quality": item.get("quality"),
+    }
+
+
+def _add_image(images: List[Dict[str, Any]], image: Optional[Dict[str, Any]]) -> None:
+    """Appends *image* unless the same output item was already collected."""
+    if image and not any(image.get("id") and seen.get("id") == image.get("id") for seen in images):
+        images.append(image)
 
 
 def _parse_responses_result(data: Dict) -> Dict:
@@ -1340,13 +1390,15 @@ def _parse_responses_result(data: Dict) -> Dict:
     finish_reason = "stop"
     usage = None
     response_id = data.get("id")
+    images: List[Dict[str, Any]] = []
 
-    # The output field contains a list of items; find the message
-    for item in data.get("output", []):
+    # The output field contains a list of items; find the message (and any image)
+    for item in data.get("output", []) or []:
         if item.get("type") == "message":
             for part in item.get("content", []):
                 if part.get("type") == "output_text":
                     content += part.get("text", "")
+        _add_image(images, _image_from_output_item(item))
 
     # Check status
     status = data.get("status", "")
@@ -1375,6 +1427,8 @@ def _parse_responses_result(data: Dict) -> Dict:
         "message_id": response_id,
         "usage": usage,
     }
+    if images:
+        result["images"] = images
     if data.get("error"):
         result["error_details"] = data.get("error")
     return result
@@ -1762,6 +1816,22 @@ def _process_sse_line(
         except Exception:
             pass
 
+    # Image generation tool (image_output requests): progress lines and the image itself
+    if data is not None and event_type.startswith("response.image_generation_call."):
+        if event_type.endswith(".generating") and not state.get("image_generating_logged"):
+            state["image_generating_logged"] = True
+            _log("🎨 AuthGPT: Generating image…")
+        elif event_type.endswith(".partial_image"):
+            _log(f"🎨 AuthGPT: Partial image {int(data.get('partial_image_index', 0) or 0) + 1} received")
+    if data is not None and event_type == "response.output_item.done":
+        item = data.get("item")
+        if isinstance(item, dict) and item.get("type") == "image_generation_call":
+            image = _image_from_output_item(item)
+            if image:
+                _add_image(state["images"], image)
+            else:
+                _log(f"⚠️ AuthGPT: Image generation call ended without an image (status={item.get('status')})")
+
     # Stop signals
     if line.strip() == "data: [DONE]":
         return True
@@ -1803,8 +1873,23 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
         result["thinking_chunks"] = state.get("thinking_chunks", 0)
         result["thinking_text"] = "".join(state.get("thinking_text_parts", []))
 
+    images = list(state.get("images") or [])
+    for image in result.pop("images", None) or []:
+        _add_image(images, image)
+    if images:
+        result["images"] = images
+        first = images[0]
+        _log(
+            f"🖼️ AuthGPT: Image returned ({first.get('action') or 'generate'}, {first.get('size') or '?'}, "
+            f"quality={first.get('quality') or '?'}, {first['mime']}, {len(first['data']) / 1024:.0f} KB)"
+        )
+
+    error = result.get("error_details")
+    if isinstance(error, dict) and (error.get("message") or error.get("code")):
+        _log(f"❌ AuthGPT: Response failed ({error.get('type') or error.get('code')}): {error.get('message', '')}")
+
     content = result.get("content", "")
-    if not content:
+    if not content and not images:
         event_types = sorted(state.get("event_types_seen", []))
         _log(f"⚠️ AuthGPT: Empty content after parsing. Event types seen: {event_types}")
     return result
@@ -1830,6 +1915,8 @@ def _new_stream_state() -> Dict:
         "event_types_seen": set(),
         "event_types_logged": set(),
         "model": None,
+        "images": [],
+        "image_generating_logged": False,
     }
 
 
@@ -1998,6 +2085,7 @@ def send_chat_completion(
     log_fn: Optional[Any] = None,
     connect_timeout: Optional[float] = None,
     reasoning: Optional[Dict[str, Any]] = None,
+    image_output: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     """Send a chat completion request via the ChatGPT Codex Responses API.
 
@@ -2020,12 +2108,16 @@ def send_chat_completion(
         Request timeout in seconds.
     base_url : str or None
         Override the ChatGPT backend base URL.
+    image_output : dict or None
+        ``{"size", "quality", "output_format"}`` asks for an image reply through
+        the Responses image_generation tool (generate, or edit an input image).
 
     Returns
     -------
     dict
         ``{"content": str, "finish_reason": str, "usage": dict|None,
-           "conversation_id": str|None, "message_id": str|None}``
+           "conversation_id": str|None, "message_id": str|None}``, plus
+        ``"images": [{"mime", "data", ...}]`` when the reply carries an image.
 
     Raises
     ------
@@ -2043,6 +2135,7 @@ def send_chat_completion(
         temperature=temperature,
         max_tokens=max_tokens,
         reasoning=reasoning,
+        image_output=image_output,
     )
 
     headers = {
@@ -2054,6 +2147,18 @@ def send_chat_completion(
     _log = log_fn or print
     normalize_none_effort(body, _log)
     logger.info("AuthGPT: POST %s  model=%s", url, model)
+    if image_output is not None:
+        tool = body["tools"][0]
+        _log(
+            f"🎨 AuthGPT: Image output requested; sending the image_generation tool "
+            f"(size={tool.get('size', 'auto')}, quality={tool.get('quality', 'auto')}, "
+            f"format={tool.get('output_format', 'png')}; the Codex backend may choose size and quality itself)"
+        )
+        if reasoning:
+            _log(
+                f"📝 AuthGPT: reasoning_effort={reasoning.get('effort', '?')} is not sent with the image tool "
+                f"(the Codex image model rejects every effort value)"
+            )
     if max_tokens is not None:
         if "max_output_tokens" in body:
             _log(f"📏 AuthGPT max_output_tokens={max_tokens}")
@@ -2098,7 +2203,10 @@ def send_chat_completion(
             raise RuntimeError("AuthGPT: stream cancelled by user")
 
     def _send(request_body):
-        return call_with_reasoning_retry(_send_once, request_body, _log, _check_retry_cancel)
+        result = call_with_reasoning_retry(_send_once, request_body, _log, _check_retry_cancel)
+        if image_output is not None and not result.get("images"):
+            _log("⚠️ AuthGPT: Image output was requested but the reply has no image")
+        return result
 
     try:
         return _send(body)
