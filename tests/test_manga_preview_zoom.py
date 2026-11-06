@@ -435,3 +435,14 @@ def test_same_page():
     assert not same_page(page, os.path.join("book", "ch2", "001.png"))  # another chapter's page 1
     assert not same_page(page, os.path.join("out", "002_translated", "002.png"))
     assert not same_page(page, None)
+
+
+def test_two_reloads_in_one_event_loop_turn_keep_the_view(zoomed):
+    # Clean queues ('preview_update', cleaned page) and ('clean_button_restore'): the update queue runs
+    # both in one tick, so both loads come before the first fit timer of setPhoto
+    for _ in range(2):
+        zoomed.widget.load_image(zoomed.page, preserve_rectangles=True, preserve_text_overlays=True)
+    _pump(zoomed.app, 0.1)
+    _assert_view_kept(zoomed)
+    _reload(zoomed, zoomed.page)  # and a later one too (no skip left over / missing)
+    _assert_view_kept(zoomed)

@@ -199,12 +199,14 @@ class KeepViewOnReload(QObject):
         self.viewer = viewer = preview.viewer
         self._shown = None  # (page path, pixmap cacheKey) of the image the viewer got by its last load
         self._view = None  # the view to put back when the image being loaded is set
-        self._skip_fit = False  # skip the fit setPhoto scheduled for a kept view
+        # how many of the fits setPhoto scheduled are for kept views (skipped): two reloads in one event
+        # loop turn (Clean queues a preview update and the button restore together) schedule two
+        self._skip_fit = 0
         fit = viewer.fitInView
 
         def fit_in_view():
             if self._skip_fit:
-                self._skip_fit = False
+                self._skip_fit -= 1
                 return
             fit()
 
@@ -257,7 +259,7 @@ class KeepViewOnReload(QObject):
                                         center.y() * new.height() / max(size.height(), 1)))
             viewer.user_zoomed = True
             viewer.zoom_level = zoom_level
-            self._skip_fit = True
+            self._skip_fit += 1
         except RuntimeError:
             pass
 
