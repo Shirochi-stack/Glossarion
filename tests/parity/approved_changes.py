@@ -4034,6 +4034,12 @@ APPROVED = (
                     '                self._log(f"📍 [STEP 1] Text Detection Phase (webtoon chunks)")\n'
                     '                _, regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)\n'
                     "                result['format_info']['chunks_processed'] = num_chunks\n"
+                    '                if self._check_stop():\n'
+                    '                    # A stopped chunk OCR returns no regions for the chunks it skipped:\n'
+                    '                    # do not save or hand over that partial page as its OCR.\n'
+                    "                    result['interrupted'] = True\n"
+                    '                    self._log("⏹️ Webtoon chunk OCR stopped", "warning")\n'
+                    '                    return result\n'
                     '            else:\n'
                     '                self._log(f"📍 [STEP 1] Text Detection Phase")\n'
                 ),

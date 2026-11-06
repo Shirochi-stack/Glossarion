@@ -15645,6 +15645,12 @@ class MangaTranslator:
                 self._log(f"📍 [STEP 1] Text Detection Phase (webtoon chunks)")
                 _, regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)
                 result['format_info']['chunks_processed'] = num_chunks
+                if self._check_stop():
+                    # A stopped chunk OCR returns no regions for the chunks it skipped:
+                    # do not save or hand over that partial page as its OCR.
+                    result['interrupted'] = True
+                    self._log("⏹️ Webtoon chunk OCR stopped", "warning")
+                    return result
             else:
                 self._log(f"📍 [STEP 1] Text Detection Phase")
                 regions = self.detect_text_regions(image_path)

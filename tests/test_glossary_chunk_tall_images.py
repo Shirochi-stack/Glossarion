@@ -210,6 +210,31 @@ def test_overlap_dedupe_finds_the_previous_chunk_copy_sorted_after_it(webtoon_tr
     assert kept == [upper]
 
 
+def test_a_stopped_chunk_ocr_is_interrupted_not_a_partial_page(tmp_path, webtoon_translator):
+    translator = webtoon_translator
+    page = tmp_path / "strip.png"
+    _write_strip(page)
+    detect = _fake_detect([])
+    exported = []
+
+    def detect_then_stop(image_path):
+        regions = detect(image_path)
+        translator.cancel_requested = True  # the user stops during the first chunk
+        return regions
+
+    translator.detect_text_regions = detect_then_stop
+    translator.ocr_export_callback = lambda path, regions: exported.append(regions)
+    monkeypatch_env = os.environ.pop("GRACEFUL_STOP", None)
+    try:
+        result = translator.process_image(str(page), str(tmp_path / "out" / "strip.png"), ocr_only=True)
+    finally:
+        translator.cancel_requested = False
+        if monkeypatch_env is not None:
+            os.environ["GRACEFUL_STOP"] = monkeypatch_env
+    assert result.get("interrupted") and not result.get("success")
+    assert "_region_objects" not in result and exported == []
+
+
 def test_translation_pass_reuses_the_chunked_glossary_regions(tmp_path, webtoon_translator):
     translator = webtoon_translator
     page = tmp_path / "strip.png"
