@@ -16626,18 +16626,27 @@ class MangaTranslator:
                 # Detect text in this chunk
                 chunk_regions = self.detect_text_regions(chunk_path)
                 
-                # Adjust region coordinates to full image space
+                # Adjust region coordinates to full image space: the box and polygon of the
+                # region and of a merged region's lines (create_text_mask masks those), and the
+                # RT-DETR bubble it is masked and rendered in
+                shifted_ids = set()
                 for region in chunk_regions:
-                    # Adjust bounding box
-                    x, y, w, h = region.bounding_box
-                    region.bounding_box = (x, y + start_y, w, h)
+                    for shifted in [region] + list(getattr(region, 'original_regions', None) or []):
+                        if id(shifted) in shifted_ids:
+                            continue
+                        shifted_ids.add(id(shifted))
+                        # Adjust bounding box
+                        x, y, w, h = shifted.bounding_box
+                        shifted.bounding_box = (x, y + start_y, w, h)
+                        
+                        # Adjust vertices if present
+                        if hasattr(shifted, 'vertices') and shifted.vertices:
+                            shifted.vertices = [(vx, vy + start_y) for vx, vy in shifted.vertices]
                     
-                    # Adjust vertices if present
-                    if hasattr(region, 'vertices') and region.vertices:
-                        adjusted_vertices = []
-                        for vx, vy in region.vertices:
-                            adjusted_vertices.append((vx, vy + start_y))
-                        region.vertices = adjusted_vertices
+                    bubble_bounds = getattr(region, 'bubble_bounds', None)
+                    if bubble_bounds:
+                        bx, by, bw, bh = bubble_bounds
+                        region.bubble_bounds = (bx, by + start_y, bw, bh)
                     
                     # Mark which chunk this came from (for deduplication)
                     region.chunk_index = i
@@ -16690,7 +16699,9 @@ class MangaTranslator:
                 found_duplicate = False
                 
                 for j, region2 in enumerate(regions):
-                    if j >= i or j in used_indices:
+                    # Every earlier region is in used_indices, kept ones too, and OCR jitter can
+                    # sort the previous chunk's copy after this one: compare with all the others.
+                    if j == i:
                         continue
                     
                     if hasattr(region2, 'chunk_index') and region2.chunk_index == chunk_idx - 1:

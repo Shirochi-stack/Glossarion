@@ -420,22 +420,23 @@ def send_image_glossary_request(send_fn, messages, image_path, image_base64, log
     stop lets the image finish, since glossary progress is kept per image.
     """
     planner = ImageChunkPlanner()
+    chunks_base64 = []
+    # Only the split is guarded: an API error is never answered by sending the image again.
     try:
         with open_image(image_path) as img:
             width, height = img.size
-            if height <= planner.chunk_height:
-                return send_fn(messages, image_base64)
-            if img.mode not in ('RGB', 'RGBA'):
-                img = img.convert('RGB')
-            planner._suppress_image_detail_logs = True
-            chunk_ranges = planner._image_chunk_ranges(height, img)
-            chunks_base64 = [
-                base64.b64encode(planner._image_to_bytes(img.crop((0, start_y, width, end_y)), format='PNG')).decode('utf-8')
-                for start_y, end_y in chunk_ranges
-            ]
+            if height > planner.chunk_height:
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+                planner._suppress_image_detail_logs = True
+                chunk_ranges = planner._image_chunk_ranges(height, img)
+                chunks_base64 = [
+                    base64.b64encode(planner._image_to_bytes(img.crop((0, start_y, width, end_y)), format='PNG')).decode('utf-8')
+                    for start_y, end_y in chunk_ranges
+                ]
     except Exception as e:
         log(f"      \u26a0\ufe0f Could not split the image into chunks ({e}); sending it whole")
-        return send_fn(messages, image_base64)
+        chunks_base64 = []
     if len(chunks_base64) <= 1:
         return send_fn(messages, image_base64)
 

@@ -3994,7 +3994,9 @@ APPROVED = (
         "date": "2026-11-06",
         "what": "Manga glossary workflow: the OCR-only glossary pass detects a tall webtoon strip chunk by chunk "
                 "(the webtoon path's chunking and overlap de-duplication, now _detect_webtoon_chunk_regions), "
-                "so the regions translation reuses are the chunked ones",
+                "so the regions translation reuses are the chunked ones; the chunk shift also moves "
+                "bubble_bounds and a merged region's original_regions, and the overlap de-duplication "
+                "finds the previous chunk's copy (it skipped every earlier region before)",
         "source": {
             "src/manga_translator.py": [
                 (
@@ -4203,18 +4205,27 @@ APPROVED = (
                     '                # Detect text in this chunk\n'
                     '                chunk_regions = self.detect_text_regions(chunk_path)\n'
                     '                \n'
-                    '                # Adjust region coordinates to full image space\n'
+                    '                # Adjust region coordinates to full image space: the box and polygon of the\n'
+                    "                # region and of a merged region's lines (create_text_mask masks those), and the\n"
+                    '                # RT-DETR bubble it is masked and rendered in\n'
+                    '                shifted_ids = set()\n'
                     '                for region in chunk_regions:\n'
-                    '                    # Adjust bounding box\n'
-                    '                    x, y, w, h = region.bounding_box\n'
-                    '                    region.bounding_box = (x, y + start_y, w, h)\n'
+                    "                    for shifted in [region] + list(getattr(region, 'original_regions', None) or []):\n"
+                    '                        if id(shifted) in shifted_ids:\n'
+                    '                            continue\n'
+                    '                        shifted_ids.add(id(shifted))\n'
+                    '                        # Adjust bounding box\n'
+                    '                        x, y, w, h = shifted.bounding_box\n'
+                    '                        shifted.bounding_box = (x, y + start_y, w, h)\n'
+                    '                        \n'
+                    '                        # Adjust vertices if present\n'
+                    "                        if hasattr(shifted, 'vertices') and shifted.vertices:\n"
+                    '                            shifted.vertices = [(vx, vy + start_y) for vx, vy in shifted.vertices]\n'
                     '                    \n'
-                    '                    # Adjust vertices if present\n'
-                    "                    if hasattr(region, 'vertices') and region.vertices:\n"
-                    '                        adjusted_vertices = []\n'
-                    '                        for vx, vy in region.vertices:\n'
-                    '                            adjusted_vertices.append((vx, vy + start_y))\n'
-                    '                        region.vertices = adjusted_vertices\n'
+                    "                    bubble_bounds = getattr(region, 'bubble_bounds', None)\n"
+                    '                    if bubble_bounds:\n'
+                    '                        bx, by, bw, bh = bubble_bounds\n'
+                    '                        region.bubble_bounds = (bx, by + start_y, bw, bh)\n'
                     '                    \n'
                     '                    # Mark which chunk this came from (for deduplication)\n'
                     '                    region.chunk_index = i\n'
@@ -4240,6 +4251,19 @@ APPROVED = (
                     '        return image, unique_regions, num_chunks\n'
                     '\n'
                     '    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:\n'
+                ),
+                (
+                    '                for j, region2 in enumerate(regions):\n'
+                    '                    if j >= i or j in used_indices:\n'
+                    '                        continue\n'
+                    '                    \n'
+                    ,
+                    '                for j, region2 in enumerate(regions):\n'
+                    '                    # Every earlier region is in used_indices, kept ones too, and OCR jitter can\n'
+                    "                    # sort the previous chunk's copy after this one: compare with all the others.\n"
+                    '                    if j == i:\n'
+                    '                        continue\n'
+                    '                    \n'
                 ),
             ],
         },

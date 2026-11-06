@@ -158,10 +158,56 @@ def test_glossary_ocr_pass_chunks_a_webtoon_like_the_translation_path(tmp_path, 
     brief = [(text, box) for text, box, _v in rows]
     assert [(r["text"], tuple(r["bounding_box"])) for r in webtoon["regions"]] == brief
     assert [(r["text"], tuple(r["bounding_box"])) for r in glossary["regions"]] == brief
-    # ... in full-image coordinates, every box of the strip found, in reading order
+    # ... in full-image coordinates, every box of the strip found once (the copies the two chunks of
+    # an overlap both see are de-duplicated), in reading order
     expected = [(f"text-{g}", (x, y, w, h), [(x, y), (x + w - 1, y + h - 1)]) for x, y, w, h, g in STRIP_BOXES]
-    assert sorted(set((t, b, tuple(v)) for t, b, v in rows)) == sorted((t, b, tuple(v)) for t, b, v in expected)
-    assert [box[1] for _t, box, _v in rows] == sorted(box[1] for _t, box, _v in rows)
+    assert rows == expected
+
+
+def test_chunk_regions_shift_bubble_bounds_and_merged_lines(tmp_path, webtoon_translator):
+    """The RT-DETR bubble (mask/render area) and a merged region's lines move to full-image coordinates."""
+    from manga_translator import TextRegion
+
+    translator = webtoon_translator
+    page = tmp_path / "strip.png"
+    _write_strip(page)
+    detect = _fake_detect([])
+
+    def detect_with_bubbles(image_path):
+        regions = detect(image_path)
+        for region in regions:
+            x, y, w, h = region.bounding_box
+            region.bubble_bounds = (x - 5, y - 5, w + 10, h + 10)
+            region.original_regions = [TextRegion(text=region.text, vertices=[(x, y), (x + w, y)],
+                                                  bounding_box=(x, y, w, 10), confidence=0.9,
+                                                  region_type="text_block")]
+        return regions
+
+    translator.detect_text_regions = detect_with_bubbles
+    result = translator.process_image(str(page), str(tmp_path / "out" / "strip.png"), ocr_only=True)
+    regions = result["_region_objects"]
+    assert [r.bounding_box for r in regions] == [(x, y, w, h) for x, y, w, h, _g in STRIP_BOXES]
+    for region in regions:
+        x, y, w, h = region.bounding_box
+        assert region.bubble_bounds == (x - 5, y - 5, w + 10, h + 10)
+        assert [line.bounding_box for line in region.original_regions] == [(x, y, w, 10)]
+        assert region.original_regions[0].vertices == [(x, y), (x + w, y)]
+    assert [tuple(r["bubble_bounds"]) for r in result["regions"]] == [r.bubble_bounds for r in regions]
+
+
+def test_overlap_dedupe_finds_the_previous_chunk_copy_sorted_after_it(webtoon_translator):
+    """OCR jitter can put the lower chunk's copy of an overlap text a pixel above the upper one's."""
+    from manga_translator import TextRegion
+
+    def region(y, chunk_index, chunk_range):
+        r = TextRegion(text="same", vertices=[], bounding_box=(10, y, 50, 20), confidence=0.9,
+                       region_type="text_block")
+        r.chunk_index, r.chunk_y_range = chunk_index, chunk_range
+        return r
+
+    upper, lower = region(921, 0, (0, 1000)), region(920, 1, (900, 1900))
+    kept = webtoon_translator._deduplicate_chunk_regions([upper, lower], 100)
+    assert kept == [upper]
 
 
 def test_translation_pass_reuses_the_chunked_glossary_regions(tmp_path, webtoon_translator):
@@ -293,6 +339,33 @@ def test_short_image_stays_one_request_with_the_whole_file(tmp_path, monkeypatch
     response = send_image_glossary_request(lambda m, b: sent.append((m, b)) or raw,
                                            [{"role": "user", "content": "p"}], short, whole, log=lambda _m: None)
     assert response is raw and len(sent) == 1 and sent[0][1] == whole
+
+
+def test_a_failed_request_is_not_sent_again(tmp_path, monkeypatch):
+    """An API error (or a stop) on the whole-image request propagates; the image is not re-sent."""
+    from image_translator import send_image_glossary_request
+    from unified_api_client import UnifiedClientError
+
+    for key, value in CHUNK_ENV.items():
+        monkeypatch.setenv(key, value)
+    short = _write_png(tmp_path / "short.png", 600)
+    sent = []
+    logs = []
+
+    def send_fn(messages, image_base64):
+        sent.append(image_base64)
+        raise UnifiedClientError("Glossary extraction stopped by user")
+
+    with pytest.raises(UnifiedClientError):
+        send_image_glossary_request(send_fn, [{"role": "user", "content": "p"}], short, "whole", log=logs.append)
+    assert sent == ["whole"] and logs == []
+
+    # an image that cannot be split is still sent whole, once
+    sent.clear()
+    with pytest.raises(UnifiedClientError):
+        send_image_glossary_request(send_fn, [{"role": "user", "content": "p"}], str(tmp_path / "missing.png"),
+                                    "whole", log=logs.append)
+    assert sent == ["whole"] and len(logs) == 1
 
 
 def test_single_api_mode_sends_every_chunk_in_one_request(tmp_path, monkeypatch):
