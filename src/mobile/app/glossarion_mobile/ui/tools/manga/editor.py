@@ -79,6 +79,12 @@ TOOLS = (
 STEP_BUTTONS = (("detect", "Detect", "CENTER_FOCUS_STRONG"), ("clean", "Clean", "CLEANING_SERVICES"),
                 ("recognize", "Recognize", "DOCUMENT_SCANNER"), ("translate", "Translate", "TRANSLATE"),
                 ("translate_all", "Translate all", "LIBRARY_BOOKS"), ("render", "Update overlay", "AUTO_FIX_NORMAL"))
+#: Steps shown as their icon only (the label is the tooltip), so the step row stays short.
+ICON_ONLY_STEPS = ("render",)
+STEP_TEXT_SIZE = 10.0
+STEP_ICON = 14.0
+STEP_BUTTON_STYLE = ft.ButtonStyle(icon_size=STEP_ICON, visual_density=ft.VisualDensity.COMPACT,
+                                   padding=ft.Padding.symmetric(horizontal=6))
 HANDLE = 26.0  # dp on screen: the move (top-left) / resize (bottom-right) handle of the selected box
 HANDLE_REACH = 22.0  # dp on screen from a handle's centre that still grabs it
 RENDER_DELAY = 1.2  # s after the last move / resize before the page is re-rendered (Save & Update Overlay)
@@ -482,8 +488,6 @@ class EditorTab(MangaTab):
         self.next_button = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next page", key="me-next",
                                          size_constraints=HIT_TARGET,
                                          on_click=lambda e: self.ctx.spawn(self.step_page(1)))
-        self.pages_row = ft.Row([self.prev_button, self.page_label, self.next_button, self.strip], spacing=0,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-pages")
         self.tool_buttons: dict = {}
         tool_controls: list = []
         for tool_id, label, icon, reason in TOOLS:
@@ -506,18 +510,18 @@ class EditorTab(MangaTab):
                                           icon_size=TOOL_ICON, style=TOOL_STYLE, padding=0,
                                           size_constraints=TOOL_CONSTRAINTS,
                                           on_click=lambda e: self.ctx.spawn(self.clear_boxes()))
-        self.share_item = ft.PopupMenuItem(content="Share or save the translated page", icon=ft.Icons.IOS_SHARE,
-                                           key="me-share", on_click=lambda e: self.share_translated())
+        # Share is one tap, not a ⋯ item (owner, 2026-11-06)
+        self.share_button = ft.IconButton(icon=ft.Icons.IOS_SHARE, tooltip="Share or save the translated page",
+                                          key="me-share", icon_size=TOOL_ICON, style=PLAIN_TOOL_STYLE, padding=0,
+                                          size_constraints=TOOL_CONSTRAINTS, on_click=lambda e: self.share_translated())
         # the trash: every OCR, clean and translation result of the open page (confirmed first)
         self.delete_page_item = ft.PopupMenuItem(content="Delete page data (OCR, clean, translation)",
                                                  icon=ft.Icons.DELETE_FOREVER, key="me-delete-page",
                                                  on_click=lambda e: self.ctx.spawn(self.delete_page_data()))
+        # the page's other actions: ⋯ at the end of the page row (the toolbar has no room left)
         self.more_menu = ft.PopupMenuButton(
-            icon=ft.Icons.MORE_VERT, tooltip="More editor actions", key="me-more", icon_size=TOOL_ICON,
-            size_constraints=TOOL_CONSTRAINTS, padding=0, style=PLAIN_TOOL_STYLE,
+            icon=ft.Icons.MORE_VERT, tooltip="More page actions", key="me-more", size_constraints=HIT_TARGET,
             items=[
-                self.share_item,
-                ft.PopupMenuItem(),
                 ft.PopupMenuItem(content="Import OCR", icon=ft.Icons.FILE_UPLOAD, key="me-import-ocr",
                                  on_click=lambda e: self.ctx.spawn(self.import_ocr())),
                 ft.PopupMenuItem(content="Export OCR", icon=ft.Icons.FILE_DOWNLOAD, key="me-export-ocr",
@@ -529,23 +533,34 @@ class EditorTab(MangaTab):
                 ft.PopupMenuItem(),
                 self.delete_page_item,
             ])
-        # the preview toolbar: one row, the display-mode button first and the ⋯ last, every button
+        self.pages_row = ft.Row([self.prev_button, self.page_label, self.next_button, self.strip, self.more_menu],
+                                spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-pages")
+        # the preview toolbar: one row, the display-mode button first and Share last, every button
         # TOOL_BUTTON wide so all of them fit a 360 dp phone (no scrolling). Delete box comes right after the tools (the
         # desktop's 🗑 Delete Selected), so it is on screen next to them on a phone, ahead of
         # Exclude from Clean (⊘: it only greys the box out)
         self.tools_row = ft.Row([*tool_controls, ft.VerticalDivider(width=TOOL_DIVIDER), self.delete_button,
                                  self.exclude_button, self.clear_button], spacing=0,
                                 alignment=ft.MainAxisAlignment.SPACE_EVENLY, expand=True, key="me-tools")
-        self.toolbar = ft.Row([self.view_button, self.tools_row, self.more_menu], spacing=0,
+        self.toolbar = ft.Row([self.view_button, self.tools_row, self.share_button], spacing=0,
                               vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-toolbar")
         self.viewer_holder = ft.Container(left=0, top=0, right=0, bottom=0, key="me-viewer-holder")
         self.viewer_area = ft.Stack([self.viewer_holder, self.panel_holder], expand=True, key="me-viewer-area")
+        # the step row, compact (owner, 2026-11-06): smaller labels and icons, Update overlay icon-only
         self.step_buttons: dict = {}
         for step, label, icon in STEP_BUTTONS:
-            self.step_buttons[step] = ft.FilledTonalButton(content=label,
-                                                           icon=getattr(ft.Icons, icon, ft.Icons.PLAY_ARROW),
-                                                           key=f"me-step-{step}", style=COMPACT_BUTTON,
-                                                           on_click=lambda e, s=step: self.ctx.spawn(self.run_step(s)))
+            step_icon = getattr(ft.Icons, icon, ft.Icons.PLAY_ARROW)
+            on_click = (lambda e, s=step: self.ctx.spawn(self.run_step(s)))
+            if step in ICON_ONLY_STEPS:
+                self.step_buttons[step] = ft.FilledTonalIconButton(icon=step_icon, tooltip=label, icon_size=STEP_ICON,
+                                                                   size_constraints=HIT_TARGET,
+                                                                   style=STEP_BUTTON_STYLE, key=f"me-step-{step}",
+                                                                   on_click=on_click)
+            else:
+                self.step_buttons[step] = ft.FilledTonalButton(content=ft.Text(label, size=STEP_TEXT_SIZE,
+                                                                               weight=ft.FontWeight.W_500),
+                                                               icon=step_icon, key=f"me-step-{step}",
+                                                               style=STEP_BUTTON_STYLE, on_click=on_click)
         self.step_status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="me-step-status")
         self.step_bar = ft.ProgressBar(visible=False, key="me-step-progress")
         self.stop_button = ft.TextButton(content="Stop", icon=ft.Icons.STOP, visible=False, key="me-step-stop",
@@ -565,7 +580,7 @@ class EditorTab(MangaTab):
             self.toolbar,
             self.view_hint,
             self.viewer_area,
-            ft.Row(list(self.step_buttons.values()), scroll=ft.ScrollMode.AUTO, spacing=4, key="me-steps"),
+            ft.Row(list(self.step_buttons.values()), scroll=ft.ScrollMode.AUTO, spacing=2, key="me-steps"),
             self.status_row,
             self.step_bar,
         ], expand=True, spacing=tokens.SPACING["xs"], key=self.key)
@@ -781,7 +796,7 @@ class EditorTab(MangaTab):
         self.clear_button.disabled = busy or not has_page or not self.boxes
         self.delete_page_item.disabled = busy or not has_page
         self._render_view_button()
-        self.share_item.disabled = not (has_page and self.translated_view)
+        self.share_button.disabled = not (has_page and self.translated_view)
         hint = self._view_hint_text() if has_page else ""
         self.view_hint.value = hint
         self.view_hint.visible = bool(hint)
