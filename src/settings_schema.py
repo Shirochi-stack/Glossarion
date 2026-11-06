@@ -433,8 +433,6 @@ UNAVAILABLE_RULES = (
      "Mouse-wheel lock has no meaning on touch screens."),
     (r"key_tree.*(zoom|font|height)|tree_zoom|multi_key_tree_font", ("mobile",),
      "Key-tree zoom belongs to the desktop Multi-Key Manager tree view."),
-    (r"^multi_api_key_collapsed_pools$", ("mobile",),
-     "Folding a pool's key list belongs to the desktop Multi-Key Manager view."),
     (r"^enable_gui_yield$|gui_yield", ("mobile",),
      "GUI responsiveness yielding is a desktop Qt event-loop setting; the mobile UI runs on its own loop."),
     (r"^(antigravity|ocagy|ocz|autharena|ollamapull)_|_(antigravity|ocagy|autharena|ollamapull)_", ("mobile",),
@@ -709,11 +707,9 @@ TYPE_OVERRIDES = {
     "glossary_request_merge_count": "int",
     # the Glossary Manager's output token limit entry (QLineEdit, saved as int; -1 = the main limit)
     "glossary_max_output_tokens": "int",
-    # the Multi-Key Manager tree's font size (int) and column heights (dict), and the pools whose key
-    # list is folded ({pool: True}); typed 'secret' by name
+    # the Multi-Key Manager tree's font size (int) and column heights (dict); typed 'secret' by name
     "multi_api_key_tree_font_size": "int",
     "multi_api_key_tree_heights": "dict",
-    "multi_api_key_collapsed_pools": "dict",
     # U9 gap audit, Settings › Reader & Library / Progress Manager: checkboxes stored as booleans and the
     # Glossary Progress refinement temperature (glossary_progress_core: config.get('temperature', 0.1))
     "epub_details_show_special_files": "bool",
