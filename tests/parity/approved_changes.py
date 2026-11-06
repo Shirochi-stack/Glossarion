@@ -3055,6 +3055,328 @@ _OCR_PROMPT_ILLEGIBLE_MIGRATE = (
     '        return prompt\n',
 )
 
+
+# 2026-11-06 Manga Glossary Workflow: "Include page images in glossary generation" (manga_glossary_include_images,
+# default on): the glossary requests carry the page images (tall pages chunked like translation) in page batches
+_MANGA_GLOSSARY_PAGE_IMAGES = [
+    (
+        "        self.manga_glossary_enabled_value = config.get('manga_glossary_enabled', False)\n"
+        "        self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())\n"
+        ,
+        "        self.manga_glossary_enabled_value = config.get('manga_glossary_enabled', False)\n"
+        "        self.manga_glossary_include_images_value = config.get('manga_glossary_include_images', True)\n"
+        "        self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())\n"
+    ),
+    (
+        '                self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())\n'
+        "            if hasattr(self, 'manga_compress_glossary_checkbox'):\n"
+        ,
+        '                self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())\n'
+        "            if hasattr(self, 'manga_glossary_include_images_checkbox'):\n"
+        '                self.manga_glossary_include_images_value = bool(self.manga_glossary_include_images_checkbox.isChecked())\n'
+        "            if hasattr(self, 'manga_compress_glossary_checkbox'):\n"
+    ),
+    (
+        "                self.main_gui.config['manga_glossary_enabled'] = bool(self.manga_glossary_enabled_value)\n"
+        "            if hasattr(self, 'manga_glossary_prompt'):\n"
+        ,
+        "                self.main_gui.config['manga_glossary_enabled'] = bool(self.manga_glossary_enabled_value)\n"
+        "            if hasattr(self, 'manga_glossary_include_images_checkbox'):\n"
+        '                self.manga_glossary_include_images_value = bool(self.manga_glossary_include_images_checkbox.isChecked())\n'
+        "            if hasattr(self, 'manga_glossary_include_images_value'):\n"
+        "                self.main_gui.config['manga_glossary_include_images'] = bool(self.manga_glossary_include_images_value)\n"
+        "            if hasattr(self, 'manga_glossary_prompt'):\n"
+    ),
+    (
+        '        valid_entries_before_dedupe: List[Dict[str, Any]],\n'
+        '    ) -> None:\n'
+        '        """Save optional manga glossary generation debug artifacts."""\n'
+        '        if not self._manga_glossary_debug_ocr_enabled():\n'
+        '            return\n'
+        ,
+        '        valid_entries_before_dedupe: List[Dict[str, Any]],\n'
+        '        image_batches: Optional[List[Dict[str, Any]]] = None,\n'
+        '    ) -> None:\n'
+        '        """Save optional manga glossary generation debug artifacts.\n'
+        '\n'
+        '        ``image_batches`` (the page-image requests, when page images were sent) adds\n'
+        '        image_batches.json: per request the pages and images (whole page / chunk) it carried."""\n'
+        '        if not self._manga_glossary_debug_ocr_enabled():\n'
+        '            return\n'
+    ),
+    (
+        '            "note": "Raw/valid entries are saved before manga glossary deduplication.",\n'
+        '        }\n'
+        '\n'
+        '        written = []\n'
+        ,
+        '            "note": "Raw/valid entries are saved before manga glossary deduplication.",\n'
+        '        }\n'
+        '        image_batches_payload = None\n'
+        '        if image_batches is not None:\n'
+        '            image_batches_payload = [\n'
+        '                {\n'
+        '                    "request": batch.get("request"),\n'
+        '                    "pages": batch.get("pages", []),\n'
+        '                    "images": batch.get("images", []),\n'
+        '                    "response_chars": len(batch.get("response") or ""),\n'
+        '                    "parsed_entries": len(batch.get("entries") or []),\n'
+        '                }\n'
+        '                for batch in image_batches\n'
+        '            ]\n'
+        '            manifest["image_requests"] = len(image_batches_payload)\n'
+        '            manifest["images_sent"] = sum(len(batch["images"]) for batch in image_batches_payload)\n'
+        '\n'
+        '        written = []\n'
+    ),
+    (
+        '                    json.dumps(self._manga_glossary_debug_json_safe(valid_entries_before_dedupe or []), ensure_ascii=False, indent=2),\n'
+        '                )\n'
+        '                self._write_manga_glossary_debug_file(\n'
+        ,
+        '                    json.dumps(self._manga_glossary_debug_json_safe(valid_entries_before_dedupe or []), ensure_ascii=False, indent=2),\n'
+        '                )\n'
+        '                if image_batches_payload is not None:\n'
+        '                    self._write_manga_glossary_debug_file(\n'
+        '                        debug_dir,\n'
+        '                        "image_batches.json",\n'
+        '                        json.dumps(image_batches_payload, ensure_ascii=False, indent=2),\n'
+        '                    )\n'
+        '                self._write_manga_glossary_debug_file(\n'
+    ),
+    (
+        "        return bool(getattr(self, 'manga_glossary_debug_ocr_text_value', self.main_gui.config.get('manga_glossary_debug_ocr_text', False)))\n"
+        ,
+        "        return bool(getattr(self, 'manga_glossary_debug_ocr_text_value', self.main_gui.config.get('manga_glossary_debug_ocr_text', False)))\n"
+        '\n'
+        '    def _manga_glossary_include_images_enabled(self) -> bool:\n'
+        '        """Return True when manga glossary generation should send the page images with the OCR text."""\n'
+        '        try:\n'
+        "            if hasattr(self, 'manga_glossary_include_images_checkbox'):\n"
+        '                return bool(self.manga_glossary_include_images_checkbox.isChecked())\n'
+        '        except Exception:\n'
+        '            pass\n'
+        "        return bool(getattr(self, 'manga_glossary_include_images_value', self.main_gui.config.get('manga_glossary_include_images', True)))\n"
+    ),
+    (
+        "            previous_session_context = getattr(client, 'current_session_context', None)\n"
+        '            try:\n'
+        '                response, _finish_reason, _raw_obj = send_with_interrupt(\n'
+        '                    messages=messages,\n'
+        '                    client=client,\n'
+        '                    temperature=temperature,\n'
+        '                    max_tokens=max_tokens,\n'
+        '                    stop_check_fn=lambda: self.stop_flag.is_set(),\n'
+        "                    context='glossary',\n"
+        '                )\n'
+        '            finally:\n'
+        ,
+        "            previous_session_context = getattr(client, 'current_session_context', None)\n"
+        '            image_batches = None\n'
+        '            try:\n'
+        '                if self._manga_glossary_include_images_enabled():\n'
+        '                    image_batches = self._send_manga_glossary_page_image_batches(ocr_pages, client, temperature, max_tokens)\n'
+        '                if image_batches is None:\n'
+        '                    response, _finish_reason, _raw_obj = send_with_interrupt(\n'
+        '                        messages=messages,\n'
+        '                        client=client,\n'
+        '                        temperature=temperature,\n'
+        '                        max_tokens=max_tokens,\n'
+        '                        stop_check_fn=lambda: self.stop_flag.is_set(),\n'
+        "                        context='glossary',\n"
+        '                    )\n'
+        '            finally:\n'
+    ),
+    (
+        '                    pass\n'
+        '            response_text = self._normalize_manga_api_response_text(response)\n'
+        '            self._log(f"📥 Manga glossary response received ({len(response_text)} chars)", "info")\n'
+        '\n'
+        '            parsed_entries = parse_api_response(response_text)\n'
+        '            entries = []\n'
+        ,
+        '                    pass\n'
+        '            if image_batches is None:\n'
+        '                response_text = self._normalize_manga_api_response_text(response)\n'
+        '                self._log(f"📥 Manga glossary response received ({len(response_text)} chars)", "info")\n'
+        '\n'
+        '                parsed_entries = parse_api_response(response_text)\n'
+        '            else:\n'
+        '                # the entries of every page-image request, merged; validated and de-duplicated below\n'
+        '                response_text = "\\n\\n".join(\n'
+        '                    f"=== REQUEST {batch[\'request\']}/{len(image_batches)} ===\\n{batch[\'response\']}" for batch in image_batches\n'
+        '                )\n'
+        "                parsed_entries = [entry for batch in image_batches for entry in batch['entries']]\n"
+        '            entries = []\n'
+    ),
+    (
+        '                entries,\n'
+        '            )\n'
+        ,
+        '                entries,\n'
+        '                image_batches=image_batches,\n'
+        '            )\n'
+    ),
+    (
+        '            self._restore_manga_glossary_env(previous_env)\n'
+        ,
+        '            self._restore_manga_glossary_env(previous_env)\n'
+        '\n'
+        '    def _send_manga_glossary_page_image_batches(self, ocr_pages: List[Dict[str, Any]], client, temperature, max_tokens) -> Optional[List[Dict[str, Any]]]:\n'
+        '        """Send the manga glossary requests with the page images ("Include page images in glossary generation").\n'
+        '\n'
+        '        The pages go in batches: the glossary Request Merging count when merging is on, otherwise one\n'
+        '        page per request (the image glossary sends one image per request). A request is build_prompt()\n'
+        "        over its pages' OCR text (_build_manga_glossary_input) with their images after it\n"
+        '        (image_translator.image_glossary_page_parts: a page as its own file, a tall page cut into chunks\n'
+        "        the way translation cuts it). The chunks of a tall page share the batch's request only with\n"
+        "        SINGLE_API_IMAGE_CHUNKS=1; otherwise (the default) each chunk is its own request with its page's\n"
+        '        OCR text, as the image glossary sends the chunks of a tall image.\n'
+        '\n'
+        '        Returns ``[{request, pages, images, response, entries}]`` (entries parsed, validated and\n'
+        '        de-duplicated by the caller), or None when the model / route cannot take images: one warning,\n'
+        '        and the caller sends the text-only request instead. A stop ends the run before the next request.\n'
+        '        """\n'
+        '        from extract_glossary_from_epub import build_prompt, parse_api_response\n'
+        '        from image_translator import image_glossary_content, image_glossary_page_parts, is_image_input_unsupported_error\n'
+        '        from TransateKRtoEN import send_with_interrupt\n'
+        '        from unified_api_client import UnifiedClientError\n'
+        '\n'
+        "        config = getattr(self.main_gui, 'config', None) or {}\n"
+        "        chunks_in_one_request = os.getenv('SINGLE_API_IMAGE_CHUNKS', '1') == '1'\n"
+        '        pages_per_request = 1\n'
+        "        if config.get('glossary_request_merging_enabled', False):\n"
+        '            try:\n'
+        "                pages_per_request = max(1, int(config.get('glossary_request_merge_count', 10) or 10))\n"
+        '            except (TypeError, ValueError):\n'
+        '                pages_per_request = 10\n'
+        '        self._log(\n'
+        '            f"🖼️ Manga glossary: sending the page images ({pages_per_request} page(s) per request, tall pages "\n'
+        '            f"in chunks{\' in the same request\' if chunks_in_one_request else \', one request per chunk\'})", "info",\n'
+        '        )\n'
+        '\n'
+        '        batches: List[Dict[str, Any]] = []\n'
+        '        images_accepted = False\n'
+        '        for start in range(0, len(ocr_pages), pages_per_request):\n'
+        '            if self.stop_flag.is_set():\n'
+        '                raise UnifiedClientError("Manga glossary generation stopped by user", error_type="cancelled")\n'
+        '            whole_pages, whole_images, groups = [], [], []\n'
+        '            for page in ocr_pages[start:start + pages_per_request]:\n'
+        '                parts = image_glossary_page_parts(page.get(\'path\', \'\'), log=lambda message: self._log(message, "info"))\n'
+        '                if len(parts) > 1 and not chunks_in_one_request:\n'
+        '                    groups.extend(([page], [(page, label, url)]) for label, url in parts)\n'
+        '                else:\n'
+        '                    whole_pages.append(page)\n'
+        '                    whole_images.extend((page, label, url) for label, url in parts)\n'
+        '            if whole_pages:\n'
+        '                groups.insert(0, (whole_pages, whole_images))\n'
+        '            for group_pages, group_images in groups:\n'
+        '                if self.stop_flag.is_set():\n'
+        '                    raise UnifiedClientError("Manga glossary generation stopped by user", error_type="cancelled")\n'
+        '                request_number = len(batches) + 1\n'
+        '                system_prompt, user_prompt = build_prompt(self._build_manga_glossary_input(group_pages))\n'
+        '                messages = [\n'
+        '                    {"role": "system", "content": system_prompt},\n'
+        '                    {"role": "user", "content": image_glossary_content(user_prompt, [url for _page, _label, url in group_images])},\n'
+        '                ]\n'
+        '                page_numbers = ", ".join(str(page.get(\'index\', \'?\')) for page in group_pages)\n'
+        '                self._log(\n'
+        '                    f"📤 Manga glossary request {request_number}: page(s) {page_numbers}, {len(group_images)} image(s)",\n'
+        '                    "info",\n'
+        '                )\n'
+        '                try:\n'
+        '                    response, _finish_reason, _raw_obj = send_with_interrupt(\n'
+        '                        messages=messages,\n'
+        '                        client=client,\n'
+        '                        temperature=temperature,\n'
+        '                        max_tokens=max_tokens,\n'
+        '                        stop_check_fn=lambda: self.stop_flag.is_set(),\n'
+        "                        context='glossary',\n"
+        '                    )\n'
+        '                except Exception as e:\n'
+        '                    if group_images and not images_accepted and not self.stop_flag.is_set() and is_image_input_unsupported_error(e):\n'
+        '                        self._log(f"⚠️ The model cannot take images ({e}); generating the manga glossary from the OCR text only", "warning")\n'
+        '                        return None\n'
+        '                    raise\n'
+        '                images_accepted = images_accepted or bool(group_images)\n'
+        '                response_text = self._normalize_manga_api_response_text(response)\n'
+        '                self._log(f"📥 Manga glossary response {request_number} received ({len(response_text)} chars)", "info")\n'
+        '                batches.append({\n'
+        "                    'request': request_number,\n"
+        "                    'pages': [\n"
+        "                        {'index': page.get('index'), 'filename': os.path.basename(page.get('path', ''))}\n"
+        '                        for page in group_pages\n'
+        '                    ],\n'
+        "                    'images': [\n"
+        "                        {'page': page.get('index'), 'filename': os.path.basename(page.get('path', '')), 'image': label}\n"
+        '                        for page, label, _url in group_images\n'
+        '                    ],\n'
+        "                    'response': response_text,\n"
+        "                    'entries': parse_api_response(response_text) if response_text else [],\n"
+        '                })\n'
+        '        return batches\n'
+    ),
+    (
+        '            "When enabled, the batch first runs OCR on every selected page, sends all OCR text in one glossary generation request, and then translates each page with that glossary appended to the translation prompt.\\n\\n"\n'
+        '            "The Generate Glossary button runs the OCR and glossary generation step without translating pages."\n'
+        '        ))\n'
+        ,
+        '            "When enabled, the batch first runs OCR on every selected page, sends all OCR text in one glossary generation request, and then translates each page with that glossary appended to the translation prompt.\\n\\n"\n'
+        '            "The Generate Glossary button runs the OCR and glossary generation step without translating pages.\\n\\n"\n'
+        '            "Include page images in glossary generation (on by default): the page images go with the OCR text, so the model "\n'
+        '            "can see who is speaking, genders and what a name refers to, and correct OCR misreads. Tall pages are cut into "\n'
+        '            "chunks the way image translation cuts them, one request per chunk (all in one request only in the Direct "\n'
+        '            "image legacy mode). The pages are sent in batches (the glossary Request Merging count, or one page per "\n'
+        '            "request when merging is off), and the entries of all requests are merged and de-duplicated. "\n'
+        '            "A model that cannot take images falls back to the text-only request. Off: all OCR text in one text-only request."\n'
+        '        ))\n'
+    ),
+    (
+        '        manga_glossary_layout.addWidget(manga_glossary_toggle_frame)\n'
+        '\n'
+        ,
+        '        manga_glossary_layout.addWidget(manga_glossary_toggle_frame)\n'
+        '\n'
+        '        manga_glossary_images_frame = QWidget()\n'
+        '        manga_glossary_images_layout = QHBoxLayout(manga_glossary_images_frame)\n'
+        '        manga_glossary_images_layout.setContentsMargins(20, 0, 0, 0)\n'
+        '        manga_glossary_images_layout.setSpacing(10)\n'
+        '\n'
+        '        self.manga_glossary_include_images_checkbox = self._create_styled_checkbox("Include page images in glossary generation")\n'
+        "        self.manga_glossary_include_images_checkbox.setChecked(bool(getattr(self, 'manga_glossary_include_images_value', self.main_gui.config.get('manga_glossary_include_images', True))))\n"
+        '        self.manga_glossary_include_images_checkbox.setToolTip(\n'
+        '            "Send the page images with the OCR text when generating the manga glossary (Generate Glossary\\n"\n'
+        '            "and the glossary step of a batch run), so the model can see speakers, genders and what a name\\n"\n'
+        '            "refers to, and correct OCR misreads. Tall pages are cut into chunks like image translation\\n"\n'
+        '            "(one request per chunk unless the Direct image legacy mode sends them together).\\n"\n'
+        '            "Pages per request: the glossary Request Merging count, or one page when merging is off.\\n"\n'
+        '            "A model without image input falls back to text only. Off: one text-only request."\n'
+        '        )\n'
+        '        self.manga_glossary_include_images_checkbox.stateChanged.connect(self._on_manga_glossary_include_images_toggle)\n'
+        '        manga_glossary_images_layout.addWidget(self.manga_glossary_include_images_checkbox)\n'
+        '        manga_glossary_images_layout.addStretch()\n'
+        '        manga_glossary_layout.addWidget(manga_glossary_images_frame)\n'
+        '\n'
+    ),
+    (
+        '        self.manga_glossary_enabled_value = enabled\n'
+        '        self._save_rendering_settings()\n'
+        ,
+        '        self.manga_glossary_enabled_value = enabled\n'
+        '        self._save_rendering_settings()\n'
+        '\n'
+        '    def _on_manga_glossary_include_images_toggle(self, state=None):\n'
+        '        """Persist the manga glossary page-images toggle."""\n'
+        '        try:\n'
+        "            enabled = bool(self.manga_glossary_include_images_checkbox.isChecked()) if hasattr(self, 'manga_glossary_include_images_checkbox') else bool(state)\n"
+        '        except Exception:\n'
+        '            enabled = bool(state)\n'
+        '        self.manga_glossary_include_images_value = enabled\n'
+        '        self._save_rendering_settings()\n'
+    ),
+]
+
+
 # 2026-11-06 the image progress tracker follows each run's output folder (PR 146 review): a second image or
 # folder run of the same session used to write its translation_progress.json into the FIRST run's folder
 _IMAGE_PROGRESS_FOLLOWS_RUN = (
@@ -4465,6 +4787,17 @@ APPROVED = (
                 "(\"no visible / illegible\"); saved prompts with the previous default lines are migrated",
         "source": {
             "src/manga_integration.py": [_OCR_PROMPT_ILLEGIBLE_DEFAULT, _OCR_PROMPT_ILLEGIBLE_MIGRATE],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga Glossary Workflow: 'Include page images in glossary generation' (manga_glossary_include_images, "
+                "default on) under Generate Glossary; Generate Glossary and a batch run's glossary step send the page "
+                "images with the OCR text in page batches (tall pages chunked like translation, entries merged and "
+                "de-duplicated); a model without image input falls back to the text-only request",
+        "source": {
+            "src/manga_integration.py": _MANGA_GLOSSARY_PAGE_IMAGES,
         },
         "values": {},
     },

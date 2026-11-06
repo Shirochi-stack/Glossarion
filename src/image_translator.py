@@ -405,6 +405,91 @@ def _image_glossary_response_text(response):
     return text
 
 
+def split_tall_image_for_glossary(image_path, log=print):
+    """Cut a tall image into PNG chunks the way image translation cuts it (ImageChunkPlanner).
+
+    Returns ``((width, height), chunk_ranges, chunks_base64)``. An image no taller than
+    IMAGE_CHUNK_HEIGHT gives no chunks (it is sent whole), and so does one that cannot be read or
+    split (logged): only the split is guarded, an API error is never answered by sending again.
+    """
+    planner = ImageChunkPlanner()
+    size = (0, 0)
+    chunk_ranges = []
+    chunks_base64 = []
+    try:
+        with open_image(image_path) as img:
+            width, height = size = img.size
+            if height > planner.chunk_height:
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+                planner._suppress_image_detail_logs = True
+                chunk_ranges = planner._image_chunk_ranges(height, img)
+                chunks_base64 = [
+                    base64.b64encode(planner._image_to_bytes(img.crop((0, start_y, width, end_y)), format='PNG')).decode('utf-8')
+                    for start_y, end_y in chunk_ranges
+                ]
+    except Exception as e:
+        log(f"      ⚠️ Could not split the image into chunks ({e}); sending it whole")
+        chunks_base64 = []
+    return size, chunk_ranges, chunks_base64
+
+
+def image_glossary_content(prompt, image_urls):
+    """The user content of an image glossary request: the prompt text, then one image_url part per data URL."""
+    content = [{"type": "text", "text": prompt}] if prompt else []
+    content.extend({"type": "image_url", "image_url": {"url": url}} for url in image_urls)
+    return content
+
+
+def image_glossary_page_parts(image_path, log=print):
+    """The images of one page for a multi-page glossary request: ``[(label, data URL)]``.
+
+    Encoded the way the image glossary path sends them: a page no taller than IMAGE_CHUNK_HEIGHT is
+    the file's own bytes (a PNG / JPEG / WebP / GIF file; another format is converted to PNG), a
+    taller page its PNG chunks (split_tall_image_for_glossary). A page that cannot be read gives no
+    images (logged).
+    """
+    _size, chunk_ranges, chunks_base64 = split_tall_image_for_glossary(image_path, log=log)
+    if len(chunks_base64) > 1:
+        return [
+            (f"chunk {index}/{len(chunks_base64)} (y: {start_y}-{end_y})", "data:image/png;base64," + chunk_base64)
+            for index, ((start_y, end_y), chunk_base64) in enumerate(zip(chunk_ranges, chunks_base64), start=1)
+        ]
+    try:
+        with open_image(image_path) as img:
+            width, height = img.size
+            mime = 'image/' + str(img.format or '').lower()
+            if mime in ('image/png', 'image/jpeg', 'image/webp', 'image/gif'):
+                with open(image_path, 'rb') as f:
+                    data = f.read()
+            else:
+                mime = 'image/png'
+                planner = ImageChunkPlanner()
+                planner._suppress_image_detail_logs = True
+                data = planner._image_to_bytes(img if img.mode in ('RGB', 'RGBA') else img.convert('RGB'), format='PNG')
+    except Exception as e:
+        log(f"      ⚠️ Could not read the page image {os.path.basename(str(image_path))} ({e}); sending its text only")
+        return []
+    return [(f"whole page ({width}x{height})", f"data:{mime};base64," + base64.b64encode(data).decode('utf-8'))]
+
+
+#: Provider answers that mean the model / route takes no image input (lower case).
+_IMAGE_INPUT_UNSUPPORTED_PATTERNS = (
+    re.compile(r"(not|n't|un)\s*support\w*\W+(\w+\W+){0,3}?(image|vision|multi-?modal)"),
+    re.compile(r"(image|vision|multi-?modal)\w*\W+(\w+\W+){0,4}?(is |are )?(not|un)\s*support"),
+    re.compile(r"image_url\W+(\w+\W+){0,3}?only supported"),
+    re.compile(r"no endpoints found that support image"),
+    re.compile(r"not a (vision|multi-?modal) model"),
+    re.compile(r"missing data required for image input"),
+)
+
+
+def is_image_input_unsupported_error(error):
+    """True when an API error says the model or route cannot take images (vs. any other failure)."""
+    text = str(error or '').lower()
+    return any(pattern.search(text) for pattern in _IMAGE_INPUT_UNSUPPORTED_PATTERNS)
+
+
 def send_image_glossary_request(send_fn, messages, image_path, image_base64, log=print, stop_check=None):
     """Send the glossary request for one image, chunking a tall image the way translation does.
 
@@ -419,24 +504,7 @@ def send_image_glossary_request(send_fn, messages, image_path, image_base64, log
     An immediate stop (``stop_check()``) ends the image before its next chunk request; a graceful
     stop lets the image finish, since glossary progress is kept per image.
     """
-    planner = ImageChunkPlanner()
-    chunks_base64 = []
-    # Only the split is guarded: an API error is never answered by sending the image again.
-    try:
-        with open_image(image_path) as img:
-            width, height = img.size
-            if height > planner.chunk_height:
-                if img.mode not in ('RGB', 'RGBA'):
-                    img = img.convert('RGB')
-                planner._suppress_image_detail_logs = True
-                chunk_ranges = planner._image_chunk_ranges(height, img)
-                chunks_base64 = [
-                    base64.b64encode(planner._image_to_bytes(img.crop((0, start_y, width, end_y)), format='PNG')).decode('utf-8')
-                    for start_y, end_y in chunk_ranges
-                ]
-    except Exception as e:
-        log(f"      \u26a0\ufe0f Could not split the image into chunks ({e}); sending it whole")
-        chunks_base64 = []
+    (width, height), chunk_ranges, chunks_base64 = split_tall_image_for_glossary(image_path, log=log)
     if len(chunks_base64) <= 1:
         return send_fn(messages, image_base64)
 
@@ -444,11 +512,7 @@ def send_image_glossary_request(send_fn, messages, image_path, image_base64, log
     prompt = messages[-1].get("content", "") if messages else ""
     if os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
         log(f"      \U0001f4d0 Tall image ({width}x{height}): sending {num_chunks} chunks in one request")
-        content = [{"type": "text", "text": prompt}] if prompt else []
-        content.extend(
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + chunk_base64}}
-            for chunk_base64 in chunks_base64
-        )
+        content = image_glossary_content(prompt, ["data:image/png;base64," + chunk_base64 for chunk_base64 in chunks_base64])
         multi_messages = list(messages[:-1]) + [{"role": "user", "content": content}]
         return send_fn(multi_messages, None)
 

@@ -735,6 +735,7 @@ class SettingsTab(MangaTab):
         enabled = bool(svc.effective_setting(cfg, "manga_glossary_enabled", False))
         compress = bool(cfg.get("compress_glossary_prompt", True))  # MangaEnvMixin's read of the shared key
         debug = bool(svc.effective_setting(cfg, "manga_glossary_debug_ocr_text", False))
+        images = bool(svc.effective_setting(cfg, "manga_glossary_include_images", True))
         auto = not bool(svc.effective_setting(cfg, "manga_glossary_auto_load_suppressed", False))
         custom = str(cfg.get("manga_custom_glossary_path") or "")
         generated = str(cfg.get("manga_generated_glossary_path") or "")
@@ -753,6 +754,9 @@ class SettingsTab(MangaTab):
                                      on_click=lambda e: self.ctx.spawn(files_tab.start(glossary_only=True))
                                      if files_tab is not None else None),
             ], wrap=True, spacing=8),
+            switch_row(ft.Switch(value=images, key=self.k("ms-glossary-images"),
+                                 on_change=lambda e: self.set("manga_glossary_include_images", bool(e.control.value))),
+                       "Include page images in glossary generation"),
             switch_row(ft.Switch(value=compress, key=self.k("ms-glossary-compress"),
                                  on_change=lambda e: self.set("compress_glossary_prompt", bool(e.control.value))),
                        "Compress Glossary Prompt (same setting as Glossary Settings)"),

@@ -953,6 +953,15 @@ class MangaEnvMixin:
             pass
         return bool(getattr(self, 'manga_glossary_debug_ocr_text_value', self.main_gui.config.get('manga_glossary_debug_ocr_text', False)))
 
+    def _manga_glossary_include_images_enabled(self) -> bool:
+        """Return True when manga glossary generation should send the page images with the OCR text."""
+        try:
+            if hasattr(self, 'manga_glossary_include_images_checkbox'):
+                return bool(self.manga_glossary_include_images_checkbox.isChecked())
+        except Exception:
+            pass
+        return bool(getattr(self, 'manga_glossary_include_images_value', self.main_gui.config.get('manga_glossary_include_images', True)))
+
     def _manga_glossary_workflow_enabled(self) -> bool:
         """Return True when the new OCR -> glossary -> translation workflow should run."""
         if bool(getattr(self, '_manga_glossary_only_run', False)):
@@ -1140,6 +1149,7 @@ class MangaEnvMixin:
         # every selected page first, generates one glossary from all OCR text,
         # then translates using that generated glossary.
         self.manga_glossary_enabled_value = config.get('manga_glossary_enabled', False)
+        self.manga_glossary_include_images_value = config.get('manga_glossary_include_images', True)
         self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())
         self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')
         self.manga_generated_glossary_path = config.get('manga_generated_glossary_path', '')
@@ -1208,6 +1218,8 @@ class MangaEnvMixin:
                 self.full_page_context_value = bool(self.context_checkbox.isChecked())
             if hasattr(self, 'manga_glossary_checkbox'):
                 self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())
+            if hasattr(self, 'manga_glossary_include_images_checkbox'):
+                self.manga_glossary_include_images_value = bool(self.manga_glossary_include_images_checkbox.isChecked())
             if hasattr(self, 'manga_compress_glossary_checkbox'):
                 self.compress_glossary_prompt_value = bool(self.manga_compress_glossary_checkbox.isChecked())
             if hasattr(self, 'manga_glossary_debug_ocr_checkbox'):
@@ -1433,6 +1445,10 @@ class MangaEnvMixin:
                 self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())
             if hasattr(self, 'manga_glossary_enabled_value'):
                 self.main_gui.config['manga_glossary_enabled'] = bool(self.manga_glossary_enabled_value)
+            if hasattr(self, 'manga_glossary_include_images_checkbox'):
+                self.manga_glossary_include_images_value = bool(self.manga_glossary_include_images_checkbox.isChecked())
+            if hasattr(self, 'manga_glossary_include_images_value'):
+                self.main_gui.config['manga_glossary_include_images'] = bool(self.manga_glossary_include_images_value)
             if hasattr(self, 'manga_glossary_prompt'):
                 self.main_gui.config['manga_glossary_prompt'] = self.manga_glossary_prompt
             if hasattr(self, 'manga_custom_glossary_path'):
@@ -2373,8 +2389,12 @@ class MangaEnvMixin:
         response_text: str,
         parsed_entries: List[Dict[str, Any]],
         valid_entries_before_dedupe: List[Dict[str, Any]],
+        image_batches: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """Save optional manga glossary generation debug artifacts."""
+        """Save optional manga glossary generation debug artifacts.
+
+        ``image_batches`` (the page-image requests, when page images were sent) adds
+        image_batches.json: per request the pages and images (whole page / chunk) it carried."""
         if not self._manga_glossary_debug_ocr_enabled():
             return
 
@@ -2401,6 +2421,20 @@ class MangaEnvMixin:
             "valid_undeduped_entries": len(valid_entries_before_dedupe or []),
             "note": "Raw/valid entries are saved before manga glossary deduplication.",
         }
+        image_batches_payload = None
+        if image_batches is not None:
+            image_batches_payload = [
+                {
+                    "request": batch.get("request"),
+                    "pages": batch.get("pages", []),
+                    "images": batch.get("images", []),
+                    "response_chars": len(batch.get("response") or ""),
+                    "parsed_entries": len(batch.get("entries") or []),
+                }
+                for batch in image_batches
+            ]
+            manifest["image_requests"] = len(image_batches_payload)
+            manifest["images_sent"] = sum(len(batch["images"]) for batch in image_batches_payload)
 
         written = []
         try:
@@ -2422,6 +2456,12 @@ class MangaEnvMixin:
                     "valid_undeduped_entries.json",
                     json.dumps(self._manga_glossary_debug_json_safe(valid_entries_before_dedupe or []), ensure_ascii=False, indent=2),
                 )
+                if image_batches_payload is not None:
+                    self._write_manga_glossary_debug_file(
+                        debug_dir,
+                        "image_batches.json",
+                        json.dumps(image_batches_payload, ensure_ascii=False, indent=2),
+                    )
                 self._write_manga_glossary_debug_file(
                     debug_dir,
                     "manifest.json",
