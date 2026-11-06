@@ -243,6 +243,61 @@ EDITS = (
      "    # The endpoint-backed image edit runs in-process, as MangaTranslator's shared getter loads it:\n"
      "    # a worker process never receives the Image Gen/Edit key model copied into config below.\n"
      "    new_inpainter = LocalInpainter(enable_worker_process=not is_custom_image_edit)\n"),
+    # Owner request (2026-11-06, a first Translate after switching custom-image-edit -> lama_onnx
+    # rendered on the original page while LaMa ONNX downloaded): Translate's render waits for its
+    # concurrent inpainting with every local model, not 30 s (only a force stop ends the wait), and
+    # _run_inpainting_sync returns its pool checkout on the error / force-stop exits too, so a failed
+    # request no longer keeps Skip Inpainter locked (tests/test_manga_inpaint_wait.py).
+    ("_run_translate_background",
+     "        if inpaint_thread is not None:\n"
+     "            inpaint_wait_timeout = 30\n"
+     "            try:\n"
+     "                cfg = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}\n"
+     "                if (\n"
+     "                    str(cfg.get('manga_inpaint_method', 'local') or '').lower() == 'local'\n"
+     "                    and str(cfg.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'\n"
+     "                ):\n"
+     "                    inpaint_wait_timeout = None\n"
+     "            except Exception:\n"
+     "                pass\n"
+     "            if inpaint_wait_timeout is None:\n"
+     "                print(\"[TRANSLATE_CONCURRENT] Waiting for custom-image-edit inpainting before rendering\")\n"
+     "                inpaint_thread.join()\n"
+     "            else:\n"
+     "                inpaint_thread.join(timeout=inpaint_wait_timeout)\n"
+     "\n"
+     "        with inpaint_lock:\n"
+     "            cleaned_image_path = inpaint_result.get('cleaned_path')\n"
+     "            if not inpaint_result['completed']:\n"
+     "                print(f\"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image\")\n"
+     "                self._log(f\"⏱️ Inpainting still running, rendering on original image\", \"info\")\n",
+     "        # Every local model waits, not only the custom image edit: a first run downloads and\n"
+     "        # loads the model inside the inpainting thread, and a fixed 30 s wait rendered the page\n"
+     "        # on the original image. Only a force stop ends the wait early.\n"
+     "        if inpaint_thread is not None:\n"
+     "            _wait_for_concurrent_inpainting(\n"
+     "                self, inpaint_thread,\n"
+     "                lambda: _is_translation_cancelled(self) and os.environ.get('GRACEFUL_STOP') != '1')\n"
+     "\n"
+     "        with inpaint_lock:\n"
+     "            cleaned_image_path = inpaint_result.get('cleaned_path')\n"
+     "            if not inpaint_result['completed']:\n"
+     "                print(f\"[TRANSLATE_CONCURRENT] Stopped before inpainting finished, will use original image\")\n"
+     "                self._log(f\"⏹ Stopped before inpainting finished, rendering on original image\", \"warning\")\n"),
+    ("_run_inpainting_sync",
+     "    temp_translator = None  # Track temporary translator for pool cleanup\n",
+     "    temp_translator = None  # Track temporary translator for pool cleanup\n"
+     "    inpainter = None  # Checked out of the shared pool below; every exit returns it\n"),
+    ("_run_inpainting_sync",
+     "                print(f\"[INPAINT_SYNC] Force-cancelled before inpainting\")\n"
+     "                return None\n",
+     "                print(f\"[INPAINT_SYNC] Force-cancelled before inpainting\")\n"
+     "                _release_sync_inpainter(self, inpainter)\n"
+     "                return None\n"),
+    ("_run_inpainting_sync",
+     "        # Return inpainter to pool on error\n",
+     "        # Return inpainter to pool on error\n"
+     "        _release_sync_inpainter(self, inpainter)\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen
