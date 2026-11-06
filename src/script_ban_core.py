@@ -11,9 +11,8 @@ desktop"). Two users:
   only while Enable Anti-Duplicate Parameters is on; ``unified_api_client``): official OpenAI chat models
   get ``openai_logit_bias`` (the provider caps the map, so it can only push down the most frequent
   tokens), an OpenAI-compatible server that exposes its tokenizer (llama.cpp server, vLLM: ``/tokenize``)
-  gets ``server_logit_bias`` built from its own token ids for ``server_probe_text``, and every route gets
-  the log warning of ``foreign_script_leak``: a translation whose text has characters of a banned script
-  the source does not have is kept, and the log says so (only a ban while sampling can prevent it).
+  gets ``server_logit_bias`` built from its own token ids for ``server_probe_text``. Other routes have no
+  ban while sampling and log nothing about it (owner 2026-11-06: the "no token ban" leak warning is gone).
 
 Decision (``banned_scripts``; ``wants_ban`` is its bool), owner 2026-10-19, widened 2026-10-28:
 
@@ -584,8 +583,7 @@ def openai_logit_bias(model: Any, scripts: Iterable[str], limit: int = OPENAI_LO
                       allow_kaomoji: bool = False, exempt_chars: Iterable[str] = ()) -> Dict[str, int]:
     """``{"<token id>": -100}`` for the most frequent tokens of ``scripts`` in ``model``'s tokenizer, {}
     when the model takes no logit bias, nothing is banned or tiktoken cannot load the encoding. A
-    whole script does not fit in the provider's cap; the output guard (``foreign_script_leak``) covers
-    the rest. ``allow_kaomoji`` leaves the ``KAOMOJI_RANGES`` tokens out."""
+    whole script does not fit in the provider's cap. ``allow_kaomoji`` leaves the ``KAOMOJI_RANGES`` tokens out."""
     name = openai_encoding_name(model)
     wanted = tuple(sorted(set(str(s) for s in scripts or ()) & set(SCRIPTS)))
     if not name or not wanted:
