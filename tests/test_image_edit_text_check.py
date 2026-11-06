@@ -408,7 +408,8 @@ def test_fallback_uses_the_configured_local_model(mt, monkeypatch, tmp_path):
     ("12:00~13:00", "12:00-13:00", False),
     ("12:00", "Noon", False),
     ("12시", "12 o'clock", False),
-    ("...!", "...!", False),
+    ("...!", "...!", True),  # symbol-only text keeps its art too (webtoon QA D4)
+    ("...!", "Huh?!", False),
     ("3/4", "", True),
 ])
 def test_number_only_rule(source, translated, expected):

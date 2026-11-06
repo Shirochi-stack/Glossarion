@@ -313,6 +313,148 @@ def find_font_face(font_path, bold, italic) -> Optional[Tuple[str, int]]:
     return found
 
 
+#: Western quote marks a translation may come wrapped in: opening char -> closing chars.
+_WRAP_QUOTE_PAIRS = {
+    '"': '"', '“': '”', '”': '”', '„': '“”', '`': '`',
+    "'": "'", '‘': '’', '’': '’',
+}
+_SINGLE_QUOTES = "'‘’"
+#: Double-style quote families: one lone mark of a family at either end is a stray.
+_DOUBLE_QUOTE_FAMILIES = ('"', '“”„', '`')
+
+
+_WEBTOON_MODE_ALIASES = {
+    'enabled': 'enabled', 'enable': 'enabled', 'force': 'enabled', 'force_webtoon': 'enabled',
+    'on': 'enabled', 'true': 'enabled', '1': 'enabled',
+    'disabled': 'disabled', 'disable': 'disabled', 'force_manga': 'disabled', 'off': 'disabled',
+    'false': 'disabled', '0': 'disabled', 'none': 'disabled',
+}
+
+
+def _normalize_webtoon_mode(value) -> str:
+    """The Webtoon Mode setting as 'auto', 'enabled' or 'disabled'.
+
+    The settings dialog saves auto / enabled / disabled; older configs hold 'force', the web UI
+    force_webtoon / force_manga, and hand-edited ones a bool.
+    """
+    if isinstance(value, bool):
+        return 'enabled' if value else 'disabled'
+    return _WEBTOON_MODE_ALIASES.get(str(value or 'auto').strip().lower(), 'auto')
+
+
+def _quote_partner_index(text: str, start: int) -> int:
+    """Index of the mark that closes the quote opened at ``start``, or -1.
+
+    A single quote between two letters or digits is an apostrophe (can't, rock'n'roll) and
+    never closes a quote. Curly quotes nest (an inner opening mark needs its own closing one).
+    """
+    opener = text[start]
+    closers = _WRAP_QUOTE_PAIRS.get(opener, '')
+    nests = opener not in closers  # “…” nests, a straight " does not
+    depth = 0
+    for index in range(start + 1, len(text)):
+        char = text[index]
+        if char in _SINGLE_QUOTES and index < len(text) - 1 \
+                and text[index - 1].isalnum() and text[index + 1].isalnum():
+            continue
+        if nests and char == opener:
+            depth += 1
+        elif char in closers:
+            if depth == 0:
+                return index
+            depth -= 1
+    return -1
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    """Remove quote marks that wrap the whole text, and lone stray double quotes at its ends.
+
+    A quote mark that pairs with one inside the text is part of it and stays:
+    ``"Bread" means "sharing"!`` and ``'Praise' → 'Sincerity'`` are unchanged, while
+    ``"Hello"`` becomes ``Hello``. A double quote (", “, ”, `) at either end is a stray only
+    when it is the one mark of its kind in the text; a lone single quote may be an apostrophe
+    (goin', 'cause) and is kept.
+    """
+    while text:
+        before = text
+        first, last = text[0], text[-1]
+        if len(text) >= 2 and first in _WRAP_QUOTE_PAIRS and last in _WRAP_QUOTE_PAIRS[first] \
+                and _quote_partner_index(text, 0) == len(text) - 1:
+            text = text[1:-1].strip()
+        else:
+            for family in _DOUBLE_QUOTE_FAMILIES:
+                if sum(text.count(mark) for mark in family) != 1:
+                    continue
+                if first in family:
+                    text = text[1:].strip()
+                    break
+                if last in family:
+                    text = text[:-1].strip()
+                    break
+        if text == before:
+            break
+    return text
+
+
+#: Words a model puts in brackets in place of a translation it could not make
+#: ("[Illegible upside-down text]", "[Unintelligible text]", "(text unreadable)").
+_UNREADABLE_MARKER_WORDS = (
+    'illegible', 'unintelligible', 'unreadable', 'indecipherable', 'undecipherable', 'garbled',
+    'gibberish', 'untranslatable', 'not readable', 'cannot be read', "can't be read",
+    'cannot read', "can't read", 'unclear text', 'text unclear', 'no readable', 'no text',
+)
+_BRACKETED_RE = None
+
+
+def _is_unreadable_translation(text) -> bool:
+    """True when a translation is a marker instead of text: an API failure placeholder or a
+    bracketed note that the source could not be read. Such a region is not lettered."""
+    global _BRACKETED_RE
+    value = str(text or '').strip()
+    if not value:
+        return False
+    if value.upper() in {'[AI RESPONSE UNAVAILABLE]', '[API RESPONSE UNAVAILABLE]'}:
+        return True
+    try:
+        from unified_api_client import UnifiedClient
+        if UnifiedClient._is_api_error_placeholder(value):
+            return True
+    except Exception:
+        pass
+    if _BRACKETED_RE is None:
+        import re
+        _BRACKETED_RE = re.compile(
+            r'[\[(\uff08\u3010]\s*([^\[\]()\uff08\uff09\u3010\u3011]{1,80}?)\s*[\])\uff09\u3011][.!?\u2026]*')
+    match = _BRACKETED_RE.fullmatch(value)
+    if not match:
+        return False
+    inner = match.group(1).lower()
+    return any(word in inner for word in _UNREADABLE_MARKER_WORDS)
+
+
+#: Model confidence (the OCR model's own score) under which a 1-2 character read of a
+#: region outside any bubble is taken for a detector hit on the art, not text.
+ART_MISREAD_CONFIDENCE = 0.2
+
+
+def _ocr_read_is_art_noise(result, region) -> bool:
+    """A detection on the art: a 1-2 character read the OCR model itself scored very low,
+    in a free-text region (no speech bubble). Needs a provider that scores its reads
+    (``result.confidence_scored``); a threshold echoed back as the confidence never counts."""
+    if not getattr(result, 'confidence_scored', False):
+        return False
+    try:
+        confidence = float(result.confidence)
+    except (TypeError, ValueError):
+        return False
+    if confidence >= ART_MISREAD_CONFIDENCE:
+        return False
+    if len(''.join(str(getattr(region, 'text', '') or '').split())) > 2:
+        return False
+    kind = getattr(region, 'bubble_type', None) or getattr(region, 'region_type', None)
+    return kind == 'free_text'
+
+
 def _region_has_ocr_text(region) -> bool:
     """Only actual OCR text can make a region eligible for inpainting."""
     text = str(getattr(region, 'text', '') or '').strip()
@@ -5896,6 +6038,11 @@ class MangaTranslator:
                             log_func=self._log
                         )
                     
+                    if _ocr_read_is_art_noise(result, region):
+                        self._log(f"   Skipping a detection on the art: '{cleaned_result_text}' "
+                                  f"(OCR confidence {result.confidence:.2f}, outside any bubble)", "info")
+                        continue
+
                     regions.append(region)
                     if not getattr(self, 'concise_logs', False):
                         self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
@@ -9223,20 +9370,10 @@ class MangaTranslator:
             self._log(f"🎯 Preserving punctuation-only text: '{text}'", "debug")
             return text
         
-        # Remove quotes from start/end but PRESERVE CJK quotation marks
-        # CJK quotation marks (「」『』【】《》〈〉) are now rendered with Meiryo font
-        # Only strip Western quotes that don't render well
-        while len(text) > 0:
-            old_len = len(text)
-            
-            # Remove ONLY Western-style quotes from start/end
-            # Preserve CJK quotation marks for proper Meiryo rendering
-            text = text.lstrip('"\'`‘’“”')
-            text = text.rstrip('"\'`‘’“”')
-            
-            # If nothing changed, we're done
-            if len(text) == old_len:
-                break
+        # Remove Western quotes that wrap the whole translation (or a lone stray one at
+        # an end), never one that pairs with a mark inside it ("Bread" means "sharing"!).
+        # CJK quotation marks (「」『』【】《》〈〉) are kept: they render with Meiryo.
+        text = _strip_wrapping_quotes(text)
         
         # Final strip
         text = text.strip()
@@ -11111,6 +11248,53 @@ class MangaTranslator:
             self._log(f"   🩹 Local inpainter fallback: {method} ({os.path.basename(path)})", "info")
             return inp.inpaint(image, mask)
 
+    def _restore_art_of_unreadable_regions(self, source, cleaned, regions) -> int:
+        """Put the source art back, in place in ``cleaned``, where a region's translation is
+        only a placeholder ("[Illegible upside-down text]"): the region is not lettered, so its
+        original text stays as drawn instead of a blank patch. Inpainting runs alongside
+        translation, so the region was cleaned before its translation was known.
+        Returns how many regions were restored."""
+        if not isinstance(source, np.ndarray) or not isinstance(cleaned, np.ndarray) \
+                or source.shape != cleaned.shape:
+            return 0
+        targets = [r for r in regions or [] if _is_unreadable_translation(getattr(r, 'translated_text', ''))]
+        if not targets:
+            return 0
+        from image_edit_check import edit_footprint
+        target_ids = {id(r) for r in targets}
+        others = [r for r in regions if id(r) not in target_ids and not self._region_left_unlettered(r)]
+        keep = self.create_text_mask(source, others) if others else None
+        if keep is not None and np.any(keep):
+            keep = cv2.dilate(keep, np.ones((7, 7), np.uint8))
+        height, width = source.shape[:2]
+        restored = 0
+        for region in targets:
+            boxes = [b for b in (getattr(region, 'bounding_box', None), getattr(region, 'bubble_bounds', None)) if b]
+            if not boxes:
+                continue
+            x0 = min(int(b[0]) for b in boxes)
+            y0 = min(int(b[1]) for b in boxes)
+            x1 = max(int(b[0]) + int(b[2]) for b in boxes)
+            y1 = max(int(b[1]) + int(b[3]) for b in boxes)
+            pad = max(20, int(0.25 * max(x1 - x0, y1 - y0)))
+            wx0, wy0 = max(0, x0 - pad), max(0, y0 - pad)
+            wx1, wy1 = min(width, x1 + pad), min(height, y1 + pad)
+            if wx1 <= wx0 or wy1 <= wy0:
+                continue
+            own = self.create_text_mask(source, [region])[wy0:wy1, wx0:wx1]
+            if not np.any(own):  # no mask of its own (filtered out): its box
+                own = np.zeros((wy1 - wy0, wx1 - wx0), np.uint8)
+                own[max(0, y0 - wy0):y1 - wy0, max(0, x0 - wx0):x1 - wx0] = 255
+            footprint, _redo = edit_footprint(source[wy0:wy1, wx0:wx1], cleaned[wy0:wy1, wx0:wx1], own, own)
+            if keep is not None:
+                footprint &= keep[wy0:wy1, wx0:wx1] == 0  # the regions lettered nearby stay clean
+            cleaned[wy0:wy1, wx0:wx1][footprint] = source[wy0:wy1, wx0:wx1][footprint]
+            restored += 1
+            self._log(
+                f"   ⏭️ Not lettering '{str(region.text)[:20]}': the translation is a placeholder "
+                f"('{str(region.translated_text)[:40]}'), so its art stays as drawn", "warning")
+        return restored
+
     def _remember_text_left_by_image_edit(self, edited, unremoved_mask):
         """Keep the mask of text an image edit left in ``edited`` for the render step."""
         import weakref
@@ -11148,8 +11332,11 @@ class MangaTranslator:
 
     @staticmethod
     def _region_left_unlettered(region) -> bool:
-        """Regions whose art stays as drawn: text the edit left, or unchanged digits (11:59)."""
+        """Regions whose art stays as drawn: text the edit left, unchanged digits (11:59) or
+        symbols, and a translation that is only a placeholder ("[Illegible text]")."""
         if getattr(region, 'image_edit_text_left', False):
+            return True
+        if _is_unreadable_translation(getattr(region, 'translated_text', '')):
             return True
         from image_edit_check import region_needs_no_lettering
         return region_needs_no_lettering(getattr(region, 'text', ''), getattr(region, 'translated_text', ''))
@@ -13583,6 +13770,16 @@ class MangaTranslator:
         half = int(np.minimum(left, right)[top:bottom + 1].max())
         if half < 4 or bottom - top < 8:
             return None
+        # A flat patch that runs out of the window is not closed by an outline: when it leaves
+        # much less room than the text area, art inside it narrowed it (a plain stretch of floor
+        # or curtain behind a sound effect, the clear half of a sign). It is not the text's
+        # container, and the text keeps its whole area. A bubble or box drawn inside the window
+        # is closed by its outline and is always trusted.
+        open_patch = bool(filled[0].any() or filled[-1].any() or filled[:, 0].any() or filled[:, -1].any())
+        text_w = min(ax + aw, x1) - max(ax, x0)
+        text_h = min(ay + ah, y1) - max(ay, y0)
+        if open_patch and (2 * half + 1 < 0.8 * text_w or bottom - top + 1 < 0.8 * text_h):
+            return None
         return {
             'rect': (x0 + cx - half, y0 + top, 2 * half + 1, bottom - top + 1),
             'cx': x0 + cx, 'row0': y0, 'left': left, 'right': right, 'margin': margin,
@@ -15685,7 +15882,11 @@ class MangaTranslator:
                         precomputed_regions = imported_regions
                         used_precomputed_regions = True
                         used_imported_regions = True
-            if self.manga_settings.get('advanced', {}).get('format_detection', False):
+            # Webtoon Mode: 'auto' chunks a page format detection finds to be a webtoon
+            # strip, 'enabled' chunks any page taller than one chunk, 'disabled' never chunks.
+            webtoon_mode = _normalize_webtoon_mode(
+                self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto'))
+            if self.manga_settings.get('advanced', {}).get('format_detection', False) or webtoon_mode == 'enabled':
                 self._log("🔍 Analyzing image format...")
                 img = open_image(image_path)
                 width, height = img.size
@@ -15714,26 +15915,27 @@ class MangaTranslator:
                 result['format_info'] = format_info
                 
                 # Handle webtoon mode if detected and enabled
-                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')
-                if (ocr_only and not used_precomputed_regions and
-                        format_info['is_webtoon'] and webtoon_mode in ('auto', 'force')):
+                if webtoon_mode == 'enabled':
+                    chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)
+                    chunk_webtoon = height > chunk_height
+                else:
+                    chunk_webtoon = webtoon_mode == 'auto' and format_info['is_webtoon']
+                if (ocr_only and not used_precomputed_regions and chunk_webtoon):
                     self._log("🔄 Webtoon mode active - will OCR in chunks for better OCR")
                     webtoon_chunk_ocr = True
-                if (not ocr_only and not used_precomputed_regions and
-                        format_info['is_webtoon'] and webtoon_mode != 'disabled'):
-                    if webtoon_mode == 'auto' or webtoon_mode == 'force':
-                        self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
-                        # Process webtoon in chunks. This specialized path returns
-                        # before the normal OCR callback below, so persist its
-                        # combined region data here.
-                        webtoon_result = self._process_webtoon_chunks(image_path, output_path, result)
-                        export_callback = getattr(self, 'ocr_export_callback', None)
-                        if callable(export_callback):
-                            try:
-                                export_callback(image_path, webtoon_result.get('regions', []))
-                            except Exception as export_error:
-                                self._log(f"WARNING: Could not save OCR text: {export_error}", "warning")
-                        return webtoon_result
+                if (not ocr_only and not used_precomputed_regions and chunk_webtoon):
+                    self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
+                    # Process webtoon in chunks. This specialized path returns
+                    # before the normal OCR callback below, so persist its
+                    # combined region data here.
+                    webtoon_result = self._process_webtoon_chunks(image_path, output_path, result)
+                    export_callback = getattr(self, 'ocr_export_callback', None)
+                    if callable(export_callback):
+                        try:
+                            export_callback(image_path, webtoon_result.get('regions', []))
+                        except Exception as export_error:
+                            self._log(f"WARNING: Could not save OCR text: {export_error}", "warning")
+                    return webtoon_result
             
             # Step 1: Detect text regions using OCR, reuse an explicit prior
             # pass, or resolve regions from a user-imported OCR document.
@@ -16242,6 +16444,7 @@ class MangaTranslator:
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
             # OPTIMIZATION: Skip verbose logging during rendering
+            self._restore_art_of_unreadable_regions(image, inpainted, regions)
             final_image = self.render_translated_text(inpainted, regions)
             
             # Final stop check before saving (aggressive - ignores graceful stop)
@@ -16650,6 +16853,7 @@ class MangaTranslator:
             
             # Render translated text
             self._log(f"✍️ Rendering translated text...", "info")
+            self._restore_art_of_unreadable_regions(image, inpainted, unique_regions)
             final_image = self.render_translated_text(inpainted, unique_regions)
             
             # Save output
@@ -16780,64 +16984,138 @@ class MangaTranslator:
         return image, unique_regions, num_chunks
 
     def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:
-        """Remove duplicate regions from overlapping chunk areas"""
+        """Remove the copies two neighbouring chunks made of one text in their overlap band.
+
+        Text in the band between two chunks is seen by both. Each pair of overlapping regions
+        from neighbouring chunks is one text, settled by which copy the chunk edge cut:
+
+        * A copy is cut when it touches its chunk's edge on the side facing the other chunk
+          and the other copy reaches past that edge (so there really is more of it). A cut
+          copy holds half-glyph OCR noise; when the other copy is whole, the cut one goes.
+        * When both are cut (a text taller than the overlap crosses the seam), they are the
+          two halves of it: they become one region over both boxes, with both readings joined.
+        * When neither is cut, both chunks saw the whole text: the larger box is kept (the
+          earlier chunk's on a tie).
+
+        Regions without chunk information are kept as they are.
+        """
         if not regions:
             return regions
-        
+
         # Sort regions by y position
         regions.sort(key=lambda r: r.bounding_box[1])
-        
-        unique_regions = []
-        used_indices = set()
-        
-        for i, region1 in enumerate(regions):
-            if i in used_indices:
+        edge_tol = 6  # a cut glyph's box ends within a few pixels of the chunk edge
+
+        def chunk_of(region):
+            index = getattr(region, 'chunk_index', None)
+            y_range = getattr(region, 'chunk_y_range', None)
+            if index is None or not y_range:
+                return None
+            return index, y_range[0], y_range[1]
+
+        def overlaps(a, b):
+            ax, ay, aw, ah = a.bounding_box
+            bx, by, bw, bh = b.bounding_box
+            ix = min(ax + aw, bx + bw) - max(ax, bx)
+            iy = min(ay + ah, by + bh) - max(ay, by)
+            if ix <= 0 or iy < 0:
+                return 0.0, 0.0
+            return ix / max(1, min(aw, bw)), (ix * iy) / max(1, min(aw * ah, bw * bh))
+
+        dropped = set()
+        merge_with = {}  # id(lower half) -> upper half region
+        for i, upper in enumerate(regions):
+            upper_chunk = chunk_of(upper)
+            if upper_chunk is None:
                 continue
-            
-            # Check if this region is in an overlap zone
-            x1, y1, w1, h1 = region1.bounding_box
-            chunk_idx = region1.chunk_index if hasattr(region1, 'chunk_index') else 0
-            chunk_y_start, chunk_y_end = region1.chunk_y_range if hasattr(region1, 'chunk_y_range') else (0, float('inf'))
-            
-            # Check if region is near chunk boundary (in overlap zone)
-            in_overlap_zone = (y1 < chunk_y_start + overlap_height) and chunk_idx > 0
-            
-            if in_overlap_zone:
-                # Look for duplicate in previous chunk's regions
-                found_duplicate = False
-                
-                for j, region2 in enumerate(regions):
-                    # Every earlier region is in used_indices, kept ones too, and OCR jitter can
-                    # sort the previous chunk's copy after this one: compare with all the others.
-                    if j == i:
-                        continue
-                    
-                    if hasattr(region2, 'chunk_index') and region2.chunk_index == chunk_idx - 1:
-                        x2, y2, w2, h2 = region2.bounding_box
-                        
-                        # Check if regions are the same (similar position and size)
-                        if (abs(x1 - x2) < 20 and 
-                            abs(y1 - y2) < 20 and 
-                            abs(w1 - w2) < 20 and 
-                            abs(h1 - h2) < 20):
-                            
-                            # Check text similarity
-                            if region1.text == region2.text:
-                                # This is a duplicate
-                                found_duplicate = True
-                                used_indices.add(i)
-                                self._log(f"   Removed duplicate: '{region1.text[:30]}...'", "debug")
-                                break
-                
-                if not found_duplicate:
-                    unique_regions.append(region1)
-                    used_indices.add(i)
-            else:
-                # Not in overlap zone, keep it
-                unique_regions.append(region1)
-                used_indices.add(i)
-        
+            for lower in regions[i + 1:] + regions[:i]:
+                lower_chunk = chunk_of(lower)
+                if lower_chunk is None or lower_chunk[0] != upper_chunk[0] + 1:
+                    continue
+                x_share, area_share = overlaps(upper, lower)
+                if x_share < 0.5:
+                    continue
+                _ux, uy, _uw, uh = upper.bounding_box
+                _lx, ly, _lw, lh = lower.bounding_box
+                upper_end, lower_start = upper_chunk[2], lower_chunk[1]
+                upper_cut = uy + uh >= upper_end - edge_tol and ly + lh > upper_end + edge_tol
+                lower_cut = ly <= lower_start + edge_tol and uy < lower_start - edge_tol
+                if upper_cut and lower_cut:
+                    merge_with.setdefault(id(lower), upper)
+                elif upper_cut:
+                    dropped.add(id(upper))
+                elif lower_cut:
+                    dropped.add(id(lower))
+                elif area_share >= 0.5:
+                    # Both whole: the same text seen twice.
+                    if lh * _lw > uh * _uw:
+                        dropped.add(id(upper))
+                    else:
+                        dropped.add(id(lower))
+
+        unique_regions = []
+        for region in regions:
+            if id(region) in dropped:
+                self._log(f"   Removed chunk-seam copy: '{str(region.text)[:30]}' at {region.bounding_box}", "debug")
+                continue
+            upper = merge_with.get(id(region))
+            while upper is not None and id(upper) in merge_with:  # a text over three chunks
+                upper = merge_with[id(upper)]
+            if upper is not None and id(upper) not in dropped:
+                self._merge_seam_halves(upper, region)
+                self._log(f"   Joined the two chunk halves of '{str(upper.text)[:30]}' at {upper.bounding_box}", "debug")
+                continue
+            unique_regions.append(region)
+        removed = len(regions) - len(unique_regions)
+        if removed:
+            self._log(f"   Chunk seams: {len(dropped)} cut-off copies removed, "
+                      f"{removed - len(dropped)} split texts joined", "info")
         return unique_regions
+
+    @staticmethod
+    def _merge_seam_texts(upper_text: str, lower_text: str) -> str:
+        """One reading of a text from the readings of its upper and lower halves.
+
+        Both halves read the overlap band, so the end of the upper reading usually repeats
+        at the start of the lower one: that repeat is kept once.
+        """
+        upper_text, lower_text = str(upper_text or '').strip(), str(lower_text or '').strip()
+        if not upper_text or lower_text.startswith(upper_text):
+            return lower_text
+        if not lower_text or upper_text.endswith(lower_text):
+            return upper_text
+        for size in range(min(len(upper_text), len(lower_text)), 0, -1):
+            if upper_text.endswith(lower_text[:size]):
+                return upper_text + lower_text[size:]
+        return f"{upper_text} {lower_text}"
+
+    def _merge_seam_halves(self, upper, lower) -> None:
+        """Fold ``lower`` (the lower half of a text cut by a chunk seam) into ``upper``."""
+        import copy
+        upper_part = copy.copy(upper)  # the upper half's own box, for the merged line list
+        ux, uy, uw, uh = upper.bounding_box
+        lx, ly, lw, lh = lower.bounding_box
+        x0, y0 = min(ux, lx), min(uy, ly)
+        x1, y1 = max(ux + uw, lx + lw), max(uy + uh, ly + lh)
+        upper.bounding_box = (x0, y0, x1 - x0, y1 - y0)
+        upper.vertices = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        upper.text = self._merge_seam_texts(upper.text, lower.text)
+        try:
+            upper.confidence = min(float(upper.confidence), float(lower.confidence))
+        except (TypeError, ValueError):
+            pass
+        boxes = [b for b in (getattr(upper, 'bubble_bounds', None), getattr(lower, 'bubble_bounds', None)) if b]
+        if boxes:
+            bx0 = min(b[0] for b in boxes)
+            by0 = min(b[1] for b in boxes)
+            bx1 = max(b[0] + b[2] for b in boxes)
+            by1 = max(b[1] + b[3] for b in boxes)
+            upper.bubble_bounds = (bx0, by0, bx1 - bx0, by1 - by0)
+        upper_lines = list(getattr(upper_part, 'original_regions', None) or [])
+        lower_lines = list(getattr(lower, 'original_regions', None) or [])
+        if upper_lines or lower_lines:
+            # create_text_mask masks a merged region's lines: keep both halves' lines
+            upper.original_regions = (upper_lines or [upper_part]) + (lower_lines or [lower])
 
     def _save_intermediate_image(self, original_path: str, image, stage: str, debug_base_dir: str = None):
         """Save intermediate processing stages under translated_images/debug or provided base dir"""

@@ -243,6 +243,19 @@ def is_number_only_text(text):
     return True
 
 
+#: Marks that are letters to Unicode but read as a line: the katakana long-vowel mark and
+#: wave dashes (a dashed bubble border often reads as one of these).
+_DASH_LETTERS = frozenset('ー〜～ｰ')
+
+
+def is_symbol_only_text(text):
+    """True for text with no letters or digits: punctuation and symbols only (…, ?!, ♡, —, ✉)."""
+    compact = _compact(text)
+    if not compact:
+        return False
+    return all(ch in _DASH_LETTERS or unicodedata.category(ch)[0] in ('P', 'S') for ch in compact)
+
+
 def number_text_unchanged(source_text, translated_text):
     """True when both texts are number-only and the same after NFKC and without spaces."""
     return (is_number_only_text(source_text) and is_number_only_text(translated_text)
@@ -250,9 +263,16 @@ def number_text_unchanged(source_text, translated_text):
 
 
 def region_needs_no_lettering(source_text, translated_text):
-    """A number-only region keeps its art when its translation is missing or unchanged."""
-    if not is_number_only_text(source_text):
-        return False
-    if not str(translated_text or '').strip():
-        return True
-    return number_text_unchanged(source_text, translated_text)
+    """A region with nothing to translate keeps its art when its translation adds nothing.
+
+    Number-only text (11:59) keeps it while the translation is missing or the same digits.
+    Symbol-only text (…, ?!, ♡, a dash read off a dashed border, an icon) keeps it while the
+    translation is missing or symbols only as well: the drawn marks already say the same.
+    """
+    if is_number_only_text(source_text):
+        if not str(translated_text or '').strip():
+            return True
+        return number_text_unchanged(source_text, translated_text)
+    if is_symbol_only_text(source_text):
+        return not str(translated_text or '').strip() or is_symbol_only_text(translated_text)
+    return False
