@@ -364,6 +364,7 @@ app_files = [
     ('manga_settings_dialog.py', '.'),
     ('manga_image_preview.py', '.'),
     ('manga_format_toolbar.py', '.'),
+    ('manga_preview_zoom.py', '.'),
     
     # Dialog animations
     ('dialog_animations.py', '.'),
@@ -650,6 +651,7 @@ app_modules = [
     'manga_settings_dialog',
     'manga_image_preview', # Manga image preview widget
     'manga_format_toolbar', # Manga editor Format toolbar (per-box text style)
+    'manga_preview_zoom', # Manga editor preview Ctrl zoom (keys, Ctrl+wheel, pinch)
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'rotatable_label',     # Rotatable label widget
