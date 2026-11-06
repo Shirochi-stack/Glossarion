@@ -9558,10 +9558,16 @@ class MangaTranslator:
         empty_bubble_count = 0
         free_text_count = 0
         
+        from image_edit_check import region_needs_no_lettering
         for i, region in enumerate(regions):
             if not _region_has_ocr_text(region):
                 regions_skipped += 1
                 self._log(f"   Region {i+1}: SKIPPED (no OCR text)", "debug")
+                continue
+            if region_needs_no_lettering(region.text, getattr(region, 'translated_text', None)):
+                # Digits that translate to themselves (clocks, page numbers) keep their art.
+                regions_skipped += 1
+                self._log(f"   Region {i+1}: SKIPPED (number-only text stays as drawn)", "debug")
                 continue
 
             # CHECK: Should this region be inpainted?
@@ -11067,6 +11073,87 @@ class MangaTranslator:
             return False
 
 
+    #: Local inpainters tried, in this order, for text an image edit left in place: the
+    #: first one whose model file is configured and present is used (ONNX first: no torch).
+    _IMAGE_EDIT_FALLBACK_METHODS = ('anime_onnx', 'lama_onnx', 'aot_onnx', 'anime', 'lama', 'aot', 'mat')
+    _image_edit_fallback_inpainters = {}
+    _image_edit_fallback_lock = threading.Lock()
+
+    def _image_edit_fallback_model(self):
+        """(method, model path) of the configured local inpainter, or (None, None)."""
+        cfg = getattr(getattr(self, 'main_gui', None), 'config', None)
+        if not isinstance(cfg, dict):
+            return None, None
+        inpainting = (cfg.get('manga_settings') or {}).get('inpainting') or {}
+        for method in self._IMAGE_EDIT_FALLBACK_METHODS:
+            for path in (cfg.get(f'manga_{method}_model_path'), inpainting.get(f'{method}_model_path')):
+                if path and os.path.isfile(str(path)):
+                    return method, str(path)
+        return None, None
+
+    def _image_edit_local_fallback(self, image, mask):
+        """Clean ``mask`` with the configured local inpainter; None when there is none."""
+        method, path = self._image_edit_fallback_model()
+        if not method:
+            return None
+        key = (method, os.path.normcase(os.path.abspath(path)))
+        with MangaTranslator._image_edit_fallback_lock:
+            inp = MangaTranslator._image_edit_fallback_inpainters.get(key)
+            if inp is None:
+                from local_inpainter import LocalInpainter
+                inp = LocalInpainter(enable_worker_process=False)
+                inp.load_model(method, path)
+                if not getattr(inp, 'model_loaded', False):
+                    inp = False  # do not reload a model that failed to load for every page
+                MangaTranslator._image_edit_fallback_inpainters[key] = inp
+            if not inp:
+                return None
+            self._log(f"   🩹 Local inpainter fallback: {method} ({os.path.basename(path)})", "info")
+            return inp.inpaint(image, mask)
+
+    def _remember_text_left_by_image_edit(self, edited, unremoved_mask):
+        """Keep the mask of text an image edit left in ``edited`` for the render step."""
+        import weakref
+        store = self.__dict__.setdefault('_image_edit_text_left', {})
+        for key, (ref, _mask) in list(store.items()):
+            if ref() is None:
+                store.pop(key, None)
+        if not isinstance(edited, np.ndarray) or unremoved_mask is None or not np.any(unremoved_mask):
+            return
+        store[id(edited)] = (weakref.ref(edited), unremoved_mask)
+
+    def _mark_regions_with_text_left(self, image, regions):
+        """Flag the regions whose source text is still in ``image`` (not lettered over)."""
+        store = getattr(self, '_image_edit_text_left', None) or {}
+        entry = store.pop(id(image), None)
+        if not entry or entry[0]() is not image:
+            return
+        unremoved = entry[1] > 0
+        height, width = unremoved.shape[:2]
+        for region in regions:
+            try:
+                x, y, w, h = (int(v) for v in region.bounding_box)
+            except Exception:
+                continue
+            x0, y0 = max(0, x), max(0, y)
+            x1, y1 = min(width, x + w), min(height, y + h)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            if float(np.mean(unremoved[y0:y1, x0:x1])) >= 0.3:
+                region.image_edit_text_left = True
+                self._log(
+                    f"   ⏭️ Not lettering '{str(region.text)[:20]}': its text is still in the image",
+                    "warning",
+                )
+
+    @staticmethod
+    def _region_left_unlettered(region) -> bool:
+        """Regions whose art stays as drawn: text the edit left, or unchanged digits (11:59)."""
+        if getattr(region, 'image_edit_text_left', False):
+            return True
+        from image_edit_check import region_needs_no_lettering
+        return region_needs_no_lettering(getattr(region, 'text', ''), getattr(region, 'translated_text', ''))
+
     def inpaint_regions(self, image: np.ndarray, mask: np.ndarray, inpainter=None) -> np.ndarray:
         """Inpaint using configured method (cloud, local, or hybrid)
         
@@ -11136,10 +11223,18 @@ class MangaTranslator:
             self._apply_custom_image_edit_request_config(inp_obj)
             previous_callback = getattr(inp_obj, 'log_callback', None)
             inp_obj.set_log_callback(self._log)
+            # Text the image edit leaves in place is cleaned once by the configured
+            # local inpainter; what stays is reported so it is not lettered over.
+            inp_obj._image_edit_local_fallback = self._image_edit_local_fallback
             try:
-                return inp_obj.inpaint(image, mask, **inpaint_kwargs)
+                edited = inp_obj.inpaint(image, mask, **inpaint_kwargs)
             finally:
+                inp_obj._image_edit_local_fallback = None
                 inp_obj.set_log_callback(previous_callback)
+            self._remember_text_left_by_image_edit(
+                edited, getattr(inp_obj, 'last_image_edit_unremoved_mask', None)
+            )
+            return edited
         
         # Use provided inpainter if available, otherwise get from thread-local pool
         if inpainter is not None:
@@ -11915,7 +12010,11 @@ class MangaTranslator:
         # (region_font_sizes). A region without a translation draws nothing and records nothing.
         for region in regions:
             region.rendered_font_size = None
-        
+        # Text the image edit could not remove is left as drawn rather than lettered over,
+        # and so are digits that translate to themselves. Indexes survive the layout copies.
+        self._mark_regions_with_text_left(image, regions)
+        unlettered_indexes = {i for i, region in enumerate(regions) if self._region_left_unlettered(region)}
+
         # OPTIMIZATION: Cache mask creation result
         if not hasattr(self, '_cached_mask') or not hasattr(self, '_cached_mask_regions'):
             self._cached_mask = None
@@ -11999,6 +12098,8 @@ class MangaTranslator:
             outline_width_factor = self.outline_width_factor
             
             def _render_one(region, idx):
+                if getattr(region, 'original_index', idx) in unlettered_indexes:
+                    return None  # unchanged digits / text the edit left: keep the art
                 # Build a separate overlay for this region
                 from PIL import Image as _PIL
                 overlay = _PIL.new('RGBA', pil_image.size, (0,0,0,0))
