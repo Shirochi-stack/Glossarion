@@ -2523,7 +2523,10 @@ Parent commit (oracles re-frozen there: `legacy/`, `legacy_trace/`, `golden/`): 
    `self.image_progress_manager` only `if not hasattr(self, 'image_progress_manager')` and nothing
    resets it, so every later image run of the same desktop session writes its
    `translation_progress.json` entries into the FIRST image's output folder (and checks resume
-   state there).
+   state there). **Fixed 2026-11-06** (owner-approved, tests/parity/approved_changes.py
+   `_IMAGE_PROGRESS_FOLLOWS_RUN`): when a run's output folder differs from the tracker's, the
+   tracker moves there with its own `set_output_dir` (tests/test_image_job.py
+   `test_image_progress_follows_each_runs_output_folder`).
 2. **Generated video/audio from a prompt are saved as text.** `_run_generative_prompt_mode` only
    recognises `[GENERATED_IMAGE:...]`; the client returns `[GENERATED_VIDEO:...]` /
    `[GENERATED_AUDIO:...]` for video and speech, so those runs save
