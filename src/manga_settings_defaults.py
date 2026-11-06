@@ -267,6 +267,7 @@ MANGA_TOP_LEVEL_DEFAULTS = {
     'manga_font_style': 'Default',
     'manga_full_page_context': True,
     'manga_glossary_enabled': False,
+    'manga_glossary_include_images': True,
     'manga_custom_glossary_path': '',
     'manga_generated_glossary_path': '',
     'manga_glossary_auto_load_suppressed': False,

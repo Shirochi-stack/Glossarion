@@ -4197,13 +4197,39 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         manga_glossary_help_btn.clicked.connect(lambda: self._show_help_dialog(
             "Manga Glossary Workflow",
             "When enabled, the batch first runs OCR on every selected page, sends all OCR text in one glossary generation request, and then translates each page with that glossary appended to the translation prompt.\n\n"
-            "The Generate Glossary button runs the OCR and glossary generation step without translating pages."
+            "The Generate Glossary button runs the OCR and glossary generation step without translating pages.\n\n"
+            "Include page images in glossary generation (on by default): the page images go with the OCR text, so the model "
+            "can see who is speaking, genders and what a name refers to, and correct OCR misreads. Tall pages are cut into "
+            "chunks the way image translation cuts them, one request per chunk (all in one request only in the Direct "
+            "image legacy mode). The pages are sent in batches (the glossary Request Merging count, or one page per "
+            "request when merging is off), and the entries of all requests are merged and de-duplicated. "
+            "A model that cannot take images falls back to the text-only request. Off: all OCR text in one text-only request."
         ))
         manga_glossary_help_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px; }")
         manga_glossary_toggle_layout.addWidget(manga_glossary_help_btn)
         manga_glossary_toggle_layout.addStretch()
 
         manga_glossary_layout.addWidget(manga_glossary_toggle_frame)
+
+        manga_glossary_images_frame = QWidget()
+        manga_glossary_images_layout = QHBoxLayout(manga_glossary_images_frame)
+        manga_glossary_images_layout.setContentsMargins(20, 0, 0, 0)
+        manga_glossary_images_layout.setSpacing(10)
+
+        self.manga_glossary_include_images_checkbox = self._create_styled_checkbox("Include page images in glossary generation")
+        self.manga_glossary_include_images_checkbox.setChecked(bool(getattr(self, 'manga_glossary_include_images_value', self.main_gui.config.get('manga_glossary_include_images', True))))
+        self.manga_glossary_include_images_checkbox.setToolTip(
+            "Send the page images with the OCR text when generating the manga glossary (Generate Glossary\n"
+            "and the glossary step of a batch run), so the model can see speakers, genders and what a name\n"
+            "refers to, and correct OCR misreads. Tall pages are cut into chunks like image translation\n"
+            "(one request per chunk unless the Direct image legacy mode sends them together).\n"
+            "Pages per request: the glossary Request Merging count, or one page when merging is off.\n"
+            "A model without image input falls back to text only. Off: one text-only request."
+        )
+        self.manga_glossary_include_images_checkbox.stateChanged.connect(self._on_manga_glossary_include_images_toggle)
+        manga_glossary_images_layout.addWidget(self.manga_glossary_include_images_checkbox)
+        manga_glossary_images_layout.addStretch()
+        manga_glossary_layout.addWidget(manga_glossary_images_frame)
 
         manga_glossary_compress_frame = QWidget()
         manga_glossary_compress_layout = QHBoxLayout(manga_glossary_compress_frame)
@@ -7053,6 +7079,15 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         except Exception:
             enabled = bool(state)
         self.manga_glossary_enabled_value = enabled
+        self._save_rendering_settings()
+
+    def _on_manga_glossary_include_images_toggle(self, state=None):
+        """Persist the manga glossary page-images toggle."""
+        try:
+            enabled = bool(self.manga_glossary_include_images_checkbox.isChecked()) if hasattr(self, 'manga_glossary_include_images_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self.manga_glossary_include_images_value = enabled
         self._save_rendering_settings()
 
     def _on_manga_compress_glossary_toggle(self, state=None):

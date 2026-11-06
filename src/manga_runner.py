@@ -2058,25 +2058,36 @@ class MangaRunMixin:
             client = self.main_gui.client
             previous_client_context = getattr(client, 'context', None)
             previous_session_context = getattr(client, 'current_session_context', None)
+            image_batches = None
             try:
-                response, _finish_reason, _raw_obj = send_with_interrupt(
-                    messages=messages,
-                    client=client,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stop_check_fn=lambda: self.stop_flag.is_set(),
-                    context='glossary',
-                )
+                if self._manga_glossary_include_images_enabled():
+                    image_batches = self._send_manga_glossary_page_image_batches(ocr_pages, client, temperature, max_tokens)
+                if image_batches is None:
+                    response, _finish_reason, _raw_obj = send_with_interrupt(
+                        messages=messages,
+                        client=client,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stop_check_fn=lambda: self.stop_flag.is_set(),
+                        context='glossary',
+                    )
             finally:
                 try:
                     client.context = previous_client_context
                     client.current_session_context = previous_session_context
                 except Exception:
                     pass
-            response_text = self._normalize_manga_api_response_text(response)
-            self._log(f"📥 Manga glossary response received ({len(response_text)} chars)", "info")
+            if image_batches is None:
+                response_text = self._normalize_manga_api_response_text(response)
+                self._log(f"📥 Manga glossary response received ({len(response_text)} chars)", "info")
 
-            parsed_entries = parse_api_response(response_text)
+                parsed_entries = parse_api_response(response_text)
+            else:
+                # the entries of every page-image request, merged; validated and de-duplicated below
+                response_text = "\n\n".join(
+                    f"=== REQUEST {batch['request']}/{len(image_batches)} ===\n{batch['response']}" for batch in image_batches
+                )
+                parsed_entries = [entry for batch in image_batches for entry in batch['entries']]
             entries = []
             for entry in parsed_entries:
                 try:
@@ -2091,6 +2102,7 @@ class MangaRunMixin:
                 response_text,
                 parsed_entries,
                 entries,
+                image_batches=image_batches,
             )
 
             if entries:
@@ -2159,6 +2171,100 @@ class MangaRunMixin:
             return None
         finally:
             self._restore_manga_glossary_env(previous_env)
+
+    def _send_manga_glossary_page_image_batches(self, ocr_pages: List[Dict[str, Any]], client, temperature, max_tokens) -> Optional[List[Dict[str, Any]]]:
+        """Send the manga glossary requests with the page images ("Include page images in glossary generation").
+
+        The pages go in batches: the glossary Request Merging count when merging is on, otherwise one
+        page per request (the image glossary sends one image per request). A request is build_prompt()
+        over its pages' OCR text (_build_manga_glossary_input) with their images after it
+        (image_translator.image_glossary_page_parts: a page as its own file, a tall page cut into chunks
+        the way translation cuts it). The chunks of a tall page share the batch's request only with
+        SINGLE_API_IMAGE_CHUNKS=1; otherwise (the default) each chunk is its own request with its page's
+        OCR text, as the image glossary sends the chunks of a tall image.
+
+        Returns ``[{request, pages, images, response, entries}]`` (entries parsed, validated and
+        de-duplicated by the caller), or None when the model / route cannot take images: one warning,
+        and the caller sends the text-only request instead. A stop ends the run before the next request.
+        """
+        from extract_glossary_from_epub import build_prompt, parse_api_response
+        from image_translator import image_glossary_content, image_glossary_page_parts, is_image_input_unsupported_error
+        from TransateKRtoEN import send_with_interrupt
+        from unified_api_client import UnifiedClientError
+
+        config = getattr(self.main_gui, 'config', None) or {}
+        chunks_in_one_request = os.getenv('SINGLE_API_IMAGE_CHUNKS', '1') == '1'
+        pages_per_request = 1
+        if config.get('glossary_request_merging_enabled', False):
+            try:
+                pages_per_request = max(1, int(config.get('glossary_request_merge_count', 10) or 10))
+            except (TypeError, ValueError):
+                pages_per_request = 10
+        self._log(
+            f"🖼️ Manga glossary: sending the page images ({pages_per_request} page(s) per request, tall pages "
+            f"in chunks{' in the same request' if chunks_in_one_request else ', one request per chunk'})", "info",
+        )
+
+        batches: List[Dict[str, Any]] = []
+        images_accepted = False
+        for start in range(0, len(ocr_pages), pages_per_request):
+            if self.stop_flag.is_set():
+                raise UnifiedClientError("Manga glossary generation stopped by user", error_type="cancelled")
+            whole_pages, whole_images, groups = [], [], []
+            for page in ocr_pages[start:start + pages_per_request]:
+                parts = image_glossary_page_parts(page.get('path', ''), log=lambda message: self._log(message, "info"))
+                if len(parts) > 1 and not chunks_in_one_request:
+                    groups.extend(([page], [(page, label, url)]) for label, url in parts)
+                else:
+                    whole_pages.append(page)
+                    whole_images.extend((page, label, url) for label, url in parts)
+            if whole_pages:
+                groups.insert(0, (whole_pages, whole_images))
+            for group_pages, group_images in groups:
+                if self.stop_flag.is_set():
+                    raise UnifiedClientError("Manga glossary generation stopped by user", error_type="cancelled")
+                request_number = len(batches) + 1
+                system_prompt, user_prompt = build_prompt(self._build_manga_glossary_input(group_pages))
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": image_glossary_content(user_prompt, [url for _page, _label, url in group_images])},
+                ]
+                page_numbers = ", ".join(str(page.get('index', '?')) for page in group_pages)
+                self._log(
+                    f"📤 Manga glossary request {request_number}: page(s) {page_numbers}, {len(group_images)} image(s)",
+                    "info",
+                )
+                try:
+                    response, _finish_reason, _raw_obj = send_with_interrupt(
+                        messages=messages,
+                        client=client,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stop_check_fn=lambda: self.stop_flag.is_set(),
+                        context='glossary',
+                    )
+                except Exception as e:
+                    if group_images and not images_accepted and not self.stop_flag.is_set() and is_image_input_unsupported_error(e):
+                        self._log(f"⚠️ The model cannot take images ({e}); generating the manga glossary from the OCR text only", "warning")
+                        return None
+                    raise
+                images_accepted = images_accepted or bool(group_images)
+                response_text = self._normalize_manga_api_response_text(response)
+                self._log(f"📥 Manga glossary response {request_number} received ({len(response_text)} chars)", "info")
+                batches.append({
+                    'request': request_number,
+                    'pages': [
+                        {'index': page.get('index'), 'filename': os.path.basename(page.get('path', ''))}
+                        for page in group_pages
+                    ],
+                    'images': [
+                        {'page': page.get('index'), 'filename': os.path.basename(page.get('path', '')), 'image': label}
+                        for page, label, _url in group_images
+                    ],
+                    'response': response_text,
+                    'entries': parse_api_response(response_text) if response_text else [],
+                })
+        return batches
 
     def _handle_manga_translation_result(self, filepath: str, result: Dict[str, Any]) -> None:
         """Apply the normal sequential result handling for glossary workflow pages."""
