@@ -3062,6 +3062,124 @@ _KEY_POOL_COLLAPSE_SCHEMA = [('    # the Multi-Key Manager tree\'s font size (in
 _KEY_POOL_COLLAPSE_SCHEMA_DATA = [("     'ui_tab': 'Models'},\n    'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},\n", "     'ui_tab': 'Models'},\n    'multi_api_key_collapsed_pools': {'type': 'secret', 'ui_sites': ('keys',)},\n    'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},\n")]
 
 
+# 2026-11-06 Image gen/edit key pool used everywhere: export_key_pool_env exports the Image gen/edit
+# and Audio/TTS pool env like the other dedicated pools (translator_gui before U1, key_pools after);
+# the prompt-only generation run sets both pools up like an input image and sends an image request
+# with the 'image_generation' context (unified_api_client routes it to the Image gen/edit pool);
+# image_job keeps that setup in one helper, ImageJobMixin._configure_media_output_key_pools.
+def _media_pool_env(indent, config):
+    pad = " " * indent
+    return (pad + f"os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps({config}.get('truncation_retry_keys', []))\n"
+            + pad[4:] + "except Exception:\n",
+            pad + f"os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps({config}.get('truncation_retry_keys', []))\n"
+            + pad + f"os.environ['USE_INPAINTER_KEYS'] = '1' if {config}.get('use_inpainter_keys', False) else '0'\n"
+            + pad + f"os.environ['INPAINTER_API_KEYS'] = json.dumps({config}.get('inpainter_keys', []))\n"
+            + pad + f"os.environ['USE_TTS_KEYS'] = '1' if {config}.get('use_tts_keys', False) else '0'\n"
+            + pad + f"os.environ['TTS_API_KEYS'] = json.dumps({config}.get('tts_keys', []))\n"
+            + pad[4:] + "except Exception:\n")
+
+
+_MEDIA_POOL_ENV_TG = _media_pool_env(12, "self.config")   # TranslatorGUI._get_environment_variables (pre-U1)
+_MEDIA_POOL_ENV_KEY_POOLS = _media_pool_env(8, "config")  # key_pools.export_key_pool_env
+
+#: The Image gen/edit + Audio/TTS pool setup _process_image_file had inline (12-space indent).
+_MEDIA_POOL_SETUP = (
+    "            # Configure Image Gen/Edit key pool for image output mode requests.\n"
+    "            try:\n"
+    "                from unified_api_client import UnifiedClient\n"
+    "                inpainter_keys_enabled = bool(self.config.get('use_inpainter_keys', False))\n"
+    "                inpainter_keys = self.config.get('inpainter_keys', []) or []\n"
+    "                os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'\n"
+    "                os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)\n"
+    "                if inpainter_keys_enabled and inpainter_keys:\n"
+    "                    UnifiedClient.set_in_memory_inpainter_keys(\n"
+    "                        inpainter_keys,\n"
+    "                        force_rotation=self.config.get('force_key_rotation', True),\n"
+    "                        rotation_frequency=self.config.get('rotation_frequency', 1),\n"
+    "                    )\n"
+    "                    self.append_log(f\"[ImageGenEdit] Key pool ENABLED for image output ({len(inpainter_keys)} keys)\")\n"
+    "                else:\n"
+    "                    UnifiedClient.clear_in_memory_inpainter_keys()\n"
+    "                    if inpainter_keys_enabled:\n"
+    "                        self.append_log(\"[ImageGenEdit] Enabled but no keys configured\")\n"
+    "            except Exception:\n"
+    "                pass\n"
+    "\n"
+    "            # Configure Audio / TTS key pool for audio output mode (context \"tts\").\n"
+    "            try:\n"
+    "                from unified_api_client import UnifiedClient\n"
+    "                tts_keys_enabled = bool(self.config.get('use_tts_keys', False))\n"
+    "                tts_keys = self.config.get('tts_keys', []) or []\n"
+    "                os.environ['USE_TTS_KEYS'] = '1' if tts_keys_enabled else '0'\n"
+    "                os.environ['TTS_API_KEYS'] = json.dumps(tts_keys)\n"
+    "                if tts_keys_enabled and tts_keys:\n"
+    "                    UnifiedClient.set_in_memory_tts_keys(\n"
+    "                        tts_keys,\n"
+    "                        force_rotation=self.config.get('force_key_rotation', True),\n"
+    "                        rotation_frequency=self.config.get('rotation_frequency', 1),\n"
+    "                    )\n"
+    "                    self.append_log(f\"[AudioTTS] Key pool ENABLED for audio output ({len(tts_keys)} keys)\")\n"
+    "                else:\n"
+    "                    UnifiedClient.clear_in_memory_tts_keys()\n"
+    "                    if tts_keys_enabled:\n"
+    "                        self.append_log(\"[AudioTTS] Enabled but no keys configured\")\n"
+    "            except Exception:\n"
+    "                pass\n"
+)
+_MEDIA_POOL_CALL = "            self._configure_media_output_key_pools()\n"
+_GENERATIVE_HEAD = ("            os.environ['NANOGPT_VIDEO_RESOLUTION'] = "
+                    "str(getattr(self, 'nanogpt_video_resolution_var', '720p'))\n"
+                    "\n")
+_GENERATIVE_TAIL = "            # Instantiate a UnifiedClient for this call\n"
+_GENERATIVE_POOLS_COMMENT = "            # Image gen/edit and Audio/TTS key pools, as for an input image\n"
+_GENERATIVE_CONTEXT = (
+    "            # An image request uses the Image gen/edit pool: unified_api_client routes the\n"
+    "            # 'image_generation' context to it while USE_INPAINTER_KEYS is on. Video and audio keep\n"
+    "            # the default context.\n"
+    "            generates_image = os.environ['ENABLE_VIDEO_OUTPUT_MODE'] != '1' and (\n"
+    "                os.environ['ENABLE_IMAGE_OUTPUT_MODE'] == '1' or self._model_is_image_gen(model))\n"
+    "            send_kwargs = {'context': 'image_generation'} if generates_image else {}\n"
+    "\n"
+)
+
+
+def _generative_pools(setup):
+    return (_GENERATIVE_HEAD + _GENERATIVE_TAIL,
+            _GENERATIVE_HEAD + _GENERATIVE_POOLS_COMMENT + setup + _GENERATIVE_CONTEXT + _GENERATIVE_TAIL)
+
+
+_GENERATIVE_SEND = (
+    "            result_text, _finish = client.send(\n"
+    "                messages,\n"
+    "                temperature=temperature,\n"
+    "                max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),\n"
+    "            )\n",
+    "            result_text, _finish = client.send(\n"
+    "                messages,\n"
+    "                temperature=temperature,\n"
+    "                max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),\n"
+    "                **send_kwargs,\n"
+    "            )\n",
+)
+#: image_job only: the runner pins (DEVFIX / U8) get the helper the current module has
+_IMAGE_FILE_POOLS_CALL = (_MEDIA_POOL_SETUP,
+                          "            # Configure the Image gen/edit and Audio/TTS key pools.\n" + _MEDIA_POOL_CALL)
+_MEDIA_POOL_HELPER = (
+    "    def _process_image_file(self, image_path, combined_output_dir=None):\n",
+    "    def _configure_media_output_key_pools(self):\n"
+    "        \"\"\"Set up the Image gen/edit and Audio/TTS key pools from the config (env + in-memory pools).\n"
+    "\n"
+    "        Both runners call it before their request: ``_process_image_file`` (where these lines\n"
+    "        were) and ``_run_generative_prompt_mode``, which sent with the main key before.\n"
+    "        \"\"\"\n"
+    "        import json\n"
+    "\n"
+    + "".join((line[4:] if line else line) + "\n" for line in _MEDIA_POOL_SETUP.rstrip("\n").split("\n"))
+    + "\n"
+    "    def _process_image_file(self, image_path, combined_output_dir=None):\n",
+)
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -4467,6 +4585,22 @@ APPROVED = (
             "src/settings_schema.py": _KEY_POOL_COLLAPSE_SCHEMA,
             "src/settings_schema_data.py": _KEY_POOL_COLLAPSE_SCHEMA_DATA,
         },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Image gen/edit key pool used everywhere: export_key_pool_env also exports USE_INPAINTER_KEYS / "
+                "INPAINTER_API_KEYS and USE_TTS_KEYS / TTS_API_KEYS; Generate from prompt (no input file) sets "
+                "up the Image gen/edit and Audio/TTS pools like an input image and sends an image request with "
+                "the 'image_generation' context, so the pool key is used instead of the main key "
+                "(image_job._configure_media_output_key_pools; test_image_job EDITS)",
+        "source": {
+            "src/translator_gui.py": [_MEDIA_POOL_ENV_TG, _generative_pools(_MEDIA_POOL_SETUP), _GENERATIVE_SEND],
+            "src/key_pools.py": [_MEDIA_POOL_ENV_KEY_POOLS],
+            "src/image_job.py": [_generative_pools(_MEDIA_POOL_CALL), _GENERATIVE_SEND, _IMAGE_FILE_POOLS_CALL,
+                                 _MEDIA_POOL_HELPER],
+        },
+        # new env names only: recorded values of the existing ones do not change
         "values": {},
     },
 )

@@ -114,17 +114,24 @@ def save_config_file(config, path=None, *, backup=True):
 def update_config_file(values, path=None):
     """Write *values* into config.json atomically, keeping the rest of the file as it is on disk.
 
-    No decrypting or encrypting: for callers holding the file's own raw values. Raises, and
-    writes nothing, when the existing file cannot be read: it would otherwise be replaced by
-    *values* alone. A missing file is created.
+    For writers that own a few keys (bubble_detector / local_inpainter model paths): pass only
+    the keys you changed, never a whole config dict read earlier. A copy read before the GUI's
+    last save writes its old settings back (2026-11-06: ``use_inpainter_keys`` and
+    ``active_profile`` reverted whenever a manga model loaded).
+
+    The current file is read and written under the config write lock, so a save from another
+    thread of this process cannot land in between. No decrypting or encrypting: for callers
+    holding the file's own raw values. Raises, and writes nothing, when the existing file
+    cannot be read: it would otherwise be replaced by *values* alone. A missing file is created.
     """
     config_file = _resolve(path)
-    try:
-        current = load_config_retrying(config_file, decrypt=False)
-    except FileNotFoundError:
-        current = {}
-    current.update(values)
-    app_paths._atomic_json_write(config_file, current)
+    with app_paths._ATOMIC_WRITE_LOCK:
+        try:
+            current = load_config_retrying(config_file, decrypt=False)
+        except FileNotFoundError:
+            current = {}
+        current.update(values)
+        app_paths._atomic_json_write(config_file, current)
 
 
 def config_backup_dir(path=None):

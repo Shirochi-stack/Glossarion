@@ -526,12 +526,16 @@ class BubbleDetector:
                 logger.warning(f"Failed to load config: {e}")
         return {}
     
-    def _save_config(self):
-        """Save configuration to file."""
+    def _save_config(self, values):
+        """Remember *values* (keys this detector owns) and write only them into config.json.
+
+        self.config is a copy read when the detector was created: writing it back whole would
+        undo every setting the GUI saved since (key pools, the active profile, ...).
+        """
+        self.config.update(values)
         try:
-            # self.config is {} when the load failed: never let that replace the whole file
             from config_store import update_config_file
-            update_config_file(self.config, self.config_path)
+            update_config_file(values, self.config_path)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
     
@@ -711,8 +715,7 @@ class BubbleDetector:
                                 logger.info("🔻 Quantizing ONNX model weights to INT8 (dynamic)...")
                                 quantize_dynamic(model_input=model_path, model_output=quant_path, weight_type=QuantType.QInt8, op_types_to_quantize=['Conv', 'MatMul'])
                             session_path = quant_path
-                            self.config['last_onnx_quantized_path'] = quant_path
-                            self._save_config()
+                            self._save_config({'last_onnx_quantized_path': quant_path})
                             logger.info(f"✅ Using quantized ONNX model: {quant_path}")
                         except Exception as qe:
                             logger.warning(f"ONNX quantization not applied: {qe}")
@@ -776,9 +779,7 @@ class BubbleDetector:
             
             # Only set loaded if we actually succeeded
             self.model_loaded = True
-            self.config['last_model_path'] = model_path
-            self.config['model_type'] = self.model_type
-            self._save_config()
+            self._save_config({'last_model_path': model_path, 'model_type': self.model_type})
             
             return True
             
@@ -973,9 +974,7 @@ class BubbleDetector:
                 self.rtdetr_loaded = True
                 
                 # Save the model ID that was used
-                self.config['rtdetr_loaded'] = True
-                self.config['rtdetr_model_id'] = repo_id
-                self._save_config()
+                self._save_config({'rtdetr_loaded': True, 'rtdetr_model_id': repo_id})
                 
                 loc = 'CUDA' if gpu_available else 'CPU'
                 logger.info(f"✅ RT-DETR model loaded successfully ({loc})")
@@ -987,8 +986,7 @@ class BubbleDetector:
                     if self.convert_to_onnx('rtdetr', onnx_path):
                         logger.info("🚀 RT-DETR converted to ONNX for faster inference")
                         # Store ONNX path for later use
-                        self.config['rtdetr_onnx_path'] = onnx_path
-                        self._save_config()
+                        self._save_config({'rtdetr_onnx_path': onnx_path})
                         # Optionally quantize ONNX for reduced RAM
                         if self.onnx_quantize_enabled:
                             try:
@@ -997,8 +995,7 @@ class BubbleDetector:
                                 if not os.path.exists(quant_path) or os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true':
                                     logger.info("🔻 Quantizing RT-DETR ONNX to INT8 (dynamic)...")
                                     quantize_dynamic(model_input=onnx_path, model_output=quant_path, weight_type=QuantType.QInt8, op_types_to_quantize=['Conv', 'MatMul'])
-                                self.config['rtdetr_onnx_quantized_path'] = quant_path
-                                self._save_config()
+                                self._save_config({'rtdetr_onnx_quantized_path': quant_path})
                                 logger.info(f"✅ Quantized RT-DETR ONNX saved to: {quant_path}")
                             except Exception as qe:
                                 logger.warning(f"ONNX quantization for RT-DETR skipped: {qe}")

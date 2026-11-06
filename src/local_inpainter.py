@@ -1362,15 +1362,19 @@ class LocalInpainter:
             pass
         return cfg
     
-    def _save_config(self):
-        # Don't save if config is empty (prevents purging)
-        if not getattr(self, 'config', None):
-            return
+    def _save_config(self, values):
+        """Remember *values* (model path keys this inpainter owns) and write only them into config.json.
+
+        self.config is a copy read when the inpainter was created: writing it back whole would
+        undo every setting the GUI saved since (key pools, the active profile, ...).
+        """
+        if isinstance(getattr(self, 'config', None), dict):
+            self.config.update(values)
         try:
-            # A file that cannot be read is not written: it would be replaced by self.config alone
+            # A file that cannot be read is not written: it would be replaced by these values alone
             from config_store import update_config_file
             _cfg_fallback = self.config_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-            update_config_file(self.config, _cfg_fallback)
+            update_config_file(values, _cfg_fallback)
         except Exception as save_err:
             # Never crash on config save, but log for debugging
             logger.debug(f"Config save failed (non-critical): {save_err}")
@@ -3654,9 +3658,8 @@ class LocalInpainter:
             self.use_onnx_cpp = False
             self.is_jit_model = False
             self._qwen_image_edit_model_ref = model_ref
-            self.config['qwen_image_edit_model_path'] = model_ref
-            self.config['manga_qwen_image_edit_model_path'] = model_ref
-            self._save_config()
+            self._save_config({'qwen_image_edit_model_path': model_ref,
+                               'manga_qwen_image_edit_model_path': model_ref})
             logger.info("Qwen-Image-Edit pipeline loaded successfully")
             return True
         except Exception as e:
@@ -4061,9 +4064,8 @@ class LocalInpainter:
                             self.current_method = method
                         # Save with BOTH key formats for compatibility (non-critical - do last)
                         try:
-                            self.config[f'{method}_model_path'] = model_path
-                            self.config[f'manga_{method}_model_path'] = model_path
-                            self._save_config()
+                            self._save_config({f'{method}_model_path': model_path,
+                                               f'manga_{method}_model_path': model_path})
                         except Exception as cfg_err:
                             logger.debug(f"Config save after ONNX load failed (non-critical): {cfg_err}")
                         logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
@@ -4168,9 +4170,8 @@ class LocalInpainter:
                             logger.warning(f"INT8 quantization skipped: {_qe}")
                     
                     # Save with BOTH key formats for compatibility
-                    self.config[f'{method}_model_path'] = model_path
-                    self.config[f'manga_{method}_model_path'] = model_path
-                    self._save_config()
+                    self._save_config({f'{method}_model_path': model_path,
+                                       f'manga_{method}_model_path': model_path})
                     
                     # ONNX CONVERSION (optionally in background)
                     if AUTO_CONVERT_TO_ONNX and self.model_loaded:
@@ -4357,8 +4358,7 @@ class LocalInpainter:
             self.model_loaded = True
             self.current_method = method
             
-            self.config[f'{method}_model_path'] = model_path
-            self._save_config()
+            self._save_config({f'{method}_model_path': model_path})
             
             logger.info(f"✅ {method.upper()} loaded!")
             
@@ -5438,8 +5438,7 @@ class LocalInpainter:
         
         if self.bubble_detector.load_model(model_path):
             self.bubble_model_loaded = True
-            self.config['bubble_model_path'] = model_path
-            self._save_config()
+            self._save_config({'bubble_model_path': model_path})
             logger.info("✅ Bubble detection model loaded")
             return True
         
