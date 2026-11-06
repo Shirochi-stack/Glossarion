@@ -108,6 +108,9 @@ def webtoon_translator(tmp_path, monkeypatch):
             yield translator
         finally:
             translator.restore_print()
+            # pytest keeps the fixture value until after this teardown, so __del__ runs during a
+            # later test; its restore would put the plain print back into unified_api_client there
+            translator.restore_print = lambda: None
             del translator
             gc.collect()
             builtins.print = original_print
