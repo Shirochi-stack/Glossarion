@@ -281,11 +281,12 @@ section { padding: 56px 0; }
 .compare-tabs { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
 .compare-tabs button { font: inherit; font-size: .86rem; font-weight: 700; padding: 7px 14px; border-radius: 999px; border: 0; background: transparent; color: var(--ink-soft); cursor: pointer; }
 .compare-tabs button[aria-selected="true"] { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
-/* a tall webtoon strip scrolls inside a fixed-height window */
-.compare-scroll { max-height: 640px; overflow-y: auto; overscroll-behavior: contain; border-radius: 14px; box-shadow: var(--shadow-lg); }
+/* a tall webtoon strip scrolls inside a window shorter than the screen; at either end of the strip the
+   swipe carries on to the page (no overscroll containment), so a phone can always scroll past it */
+.compare-scroll { --strip-h: min(640px, 65vh); max-height: var(--strip-h); overflow-y: auto; overscroll-behavior-y: auto; border-radius: 14px; box-shadow: var(--shadow-lg); }
 .compare-scroll .compare-box { box-shadow: none; overflow: clip; }  /* clip, not hidden: hidden would capture the sticky knob */
 /* in the tall webtoon the knob stays in view while the strip scrolls */
-.compare-tall .compare-box .knob { position: sticky; top: 298px; left: auto; transform: none; margin-left: -20.5px; }
+.compare-tall .compare-box .knob { position: sticky; top: calc(var(--strip-h) / 2 - 22px); left: auto; transform: none; margin-left: -20.5px; }
 
 /* phone gallery */
 .phones { display: flex; gap: 18px; overflow-x: auto; padding: 6px 4px 18px; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
