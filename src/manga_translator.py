@@ -12033,6 +12033,9 @@ class MangaTranslator:
                     else:
                         # Last resort: use simple bounding box
                         render_x, render_y, render_w, render_h = x, y, w, h
+                    # Keep text inside the bubble / box actually drawn on the page
+                    render_x, render_y, render_w, render_h = self._container_render_area(
+                        image, region, (render_x, render_y, render_w, render_h), regions)
                     # Cache the result
                     region._cached_safe_area = (render_x, render_y, render_w, render_h)
                 else:
@@ -12603,7 +12606,8 @@ class MangaTranslator:
         return ImageFont.load_default()
      
     def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
-                       init_font_size: int, min_font_size: int, draw: ImageDraw, font_index: int = 0) -> Tuple[str, int]:
+                       init_font_size: int, min_font_size: int, draw: ImageDraw, font_index: int = 0,
+                       container: Optional[Dict[str, Any]] = None) -> Tuple[str, int]:
         """Binary search for perfect-fit font sizing.
         
         When strict_text_wrapping is disabled:
@@ -12616,7 +12620,14 @@ class MangaTranslator:
         
         When strict_text_wrapping is enabled:
         - Falls back to original column-based algorithm (legacy behavior)
+
+        With a ``container`` (bubble interior from _find_text_container) every line is fitted to
+        the interior's width at its own height instead (_fit_lines_to_container).
         """
+        if container is not None:
+            wrapped, size, _fits = self._fit_lines_to_container(
+                text, font_path, container, init_font_size, min_font_size, draw, font_index=font_index)
+            return wrapped, size
         # font_index: the face of a font collection (a box's bold / italic face, per-box style)
         def _truetype(path, size):
             if font_index:
@@ -13345,6 +13356,331 @@ class MangaTranslator:
         
         return safe_x, safe_y, safe_width, safe_height
     
+    def _text_ink_pads(self, font_size: int) -> Tuple[int, int, int, int]:
+        """Pixels the outline stroke and the drop shadow add around a line's glyph box.
+
+        Returns (left, top, right, bottom). Mirrors render_translated_text's
+        ow = max(1, font_size // outline_width_factor) and _draw_text_shadow's offset and blur.
+        """
+        try:
+            ow = max(1, int(font_size) // max(1, int(getattr(self, 'outline_width_factor', 15) or 15)))
+        except Exception:
+            ow = 1
+        left = top = right = bottom = ow
+        if getattr(self, 'shadow_enabled', False):
+            try:
+                blur = max(0, int(getattr(self, 'shadow_blur', 0) or 0))
+                sx = int(getattr(self, 'shadow_offset_x', 0) or 0)
+                sy = int(getattr(self, 'shadow_offset_y', 0) or 0)
+            except Exception:
+                blur = sx = sy = 0
+            left, right = max(left, blur - sx), max(right, blur + sx)
+            top, bottom = max(top, blur - sy), max(bottom, blur + sy)
+        return left, top, right, bottom
+
+    def _find_text_container(self, image: np.ndarray, area, clip_bounds=None) -> Optional[Dict[str, Any]]:
+        """Interior of the speech bubble or narration box a region's text sits in, read from the page.
+
+        The (cleaned) page is flood-filled from the middle of ``area`` with the bubble's own fill
+        colour, inside ``area`` united with ``clip_bounds`` (the detector's bubble box). Holes left
+        by leftover text are filled, and the interior is kept a margin away from the bubble outline.
+        Returns None when the middle of the area is not a uniform fill (free text over art).
+
+        Returned dict: ``rect`` (x, y, w, h) to lay text out in (its centre column is the
+        interior's centre), ``cx``, ``row0`` and per-row ``left`` / ``right`` (pixels of interior
+        left/right of ``cx`` on row ``row0 + i``, -1 where ``cx`` is outside it), ``margin``.
+        """
+        if image is None or not hasattr(image, 'shape') or len(image.shape) < 2:
+            return None
+        ih, iw = image.shape[:2]
+        ax, ay, aw, ah = (int(round(float(v))) for v in area)
+        if aw < 8 or ah < 8:
+            return None
+        x0, y0, x1, y1 = ax, ay, ax + aw, ay + ah
+        if clip_bounds:
+            try:
+                bx, by, bw, bh = (int(round(float(v))) for v in clip_bounds)
+                if bw > 0 and bh > 0:
+                    x0, y0 = min(x0, bx), min(y0, by)
+                    x1, y1 = max(x1, bx + bw), max(y1, by + bh)
+            except Exception:
+                pass
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(iw, x1), min(ih, y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        win = image[y0:y1, x0:x1]
+        if win.ndim == 2:
+            win = win[:, :, None]
+        win = win[:, :, :3].astype(np.int16)
+        # Seed: the middle half of the text area, where the cleaned bubble fill is
+        sx0, sx1 = max(ax + aw // 4, x0) - x0, min(ax + aw - aw // 4, x1) - x0
+        sy0, sy1 = max(ay + ah // 4, y0) - y0, min(ay + ah - ah // 4, y1) - y0
+        if sx1 <= sx0 or sy1 <= sy0:
+            return None
+        seed = np.median(win[sy0:sy1, sx0:sx1].reshape(-1, win.shape[2]), axis=0)
+        near = (np.abs(win - seed).max(axis=2) <= 32).astype(np.uint8)
+        if float(near[sy0:sy1, sx0:sx1].mean()) < 0.55:
+            return None  # busy background: free text, no container
+        near = cv2.morphologyEx(near, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # cut 1-2 px leaks
+        count, labels = cv2.connectedComponents(near, connectivity=4)
+        if count <= 1:
+            return None
+        hits = np.bincount(labels[sy0:sy1, sx0:sx1].ravel(), minlength=count)
+        hits[0] = 0
+        label = int(hits.argmax())
+        if hits[label] == 0:
+            return None
+        comp = (labels == label).astype(np.uint8)
+        contours, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled = np.zeros_like(comp)
+        cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill holes (leftover text, specks)
+        # A bubble's interior covers the middle of its text area; a patch between speed lines or
+        # other art strokes does not (free text)
+        if int(filled.sum()) < 0.3 * filled.size or float(filled[sy0:sy1, sx0:sx1].mean()) < 0.9:
+            return None
+        ys, xs = np.nonzero(filled)
+        margin = int(max(3, min(16, round(0.06 * min(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)))))
+        # Margin from the drawn outline only: window edges are not outlines (border value 1)
+        to_outline = cv2.distanceTransform(
+            cv2.copyMakeBorder(filled, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=1), cv2.DIST_L2, 5)[1:-1, 1:-1]
+        to_wall = cv2.distanceTransform(
+            cv2.copyMakeBorder(filled, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0), cv2.DIST_L2, 5)[1:-1, 1:-1]
+        allowed = (to_outline > margin) & (filled > 0)
+        depth = np.where(allowed, to_wall, 0)
+        dmax = float(depth.max())
+        if dmax <= 0:
+            return None
+        # Centre: middle of the deepest ridge (one point for an oval, a line for a wide box)
+        ridge_y, ridge_x = np.nonzero(depth >= dmax * 0.9)
+        cx, cy = int(round(ridge_x.mean())), int(round(ridge_y.mean()))
+        if not allowed[cy, cx]:
+            cy, cx = (int(v) for v in np.unravel_index(int(depth.argmax()), depth.shape))
+
+        def _leading_true(a):
+            return np.where(a.all(axis=1), a.shape[1], a.argmin(axis=1))
+
+        left = (_leading_true(allowed[:, cx::-1]) - 1).astype(np.int32)
+        right = (_leading_true(allowed[:, cx:]) - 1).astype(np.int32)
+        up, down = allowed[cy::-1, cx], allowed[cy:, cx]
+        top = cy - (len(up) if up.all() else int(up.argmin())) + 1
+        bottom = cy + (len(down) if down.all() else int(down.argmin())) - 1
+        half = int(np.minimum(left, right)[top:bottom + 1].max())
+        if half < 4 or bottom - top < 8:
+            return None
+        return {
+            'rect': (x0 + cx - half, y0 + top, 2 * half + 1, bottom - top + 1),
+            'cx': x0 + cx, 'row0': y0, 'left': left, 'right': right, 'margin': margin,
+        }
+
+    def _container_render_area(self, image: np.ndarray, region: TextRegion, area,
+                               source_regions=None) -> Tuple[int, int, int, int]:
+        """Render area for auto-sized text that respects the bubble / box drawn on the page.
+
+        With a container (see _find_text_container) the area becomes its interior, and the
+        container is stored on ``region._fit_container`` for _fit_text_to_region. Without one
+        (free text over art) the area only loses what the outline stroke and shadow add.
+        ``source_regions`` are the regions render_translated_text was given: with several,
+        it lays out _adjust_overlapping_regions' copies, which carry no bubble_bounds.
+        """
+        region._fit_container = None
+        if not getattr(self, 'constrain_to_bubble', True):
+            return area
+        # A safe area the user switched on is an explicit limit: stay inside it
+        clip = None if getattr(self, 'safe_area_enabled', False) else getattr(region, 'bubble_bounds', None)
+        idx = getattr(region, 'original_index', None)
+        if (clip is None and not getattr(self, 'safe_area_enabled', False) and source_regions
+                and isinstance(idx, int) and 0 <= idx < len(source_regions)
+                and tuple(region.bounding_box) == tuple(getattr(region, 'original_bbox', None) or ())):
+            # the copy's own region, unless the overlap adjustment moved the copy off its place
+            clip = getattr(source_regions[idx], 'bubble_bounds', None)
+        try:
+            container = self._find_text_container(image, area, clip)
+        except Exception as e:
+            container = None
+            self._log(f"  ⚠️ Bubble interior detection failed: {e}", "debug")
+        if container is not None:
+            region._fit_container = container
+            return container['rect']
+        x, y, w, h = area
+        try:
+            l, t, r, b = self._text_ink_pads(int(self.max_font_size_limit))
+        except Exception:
+            return area
+        if w - l - r >= 16 and h - t - b >= 16:
+            return x + l, y + t, w - l - r, h - t - b
+        return area
+
+    def _fit_lines_to_container(self, text: str, font_path: str, container: Dict[str, Any],
+                                init_font_size: int, min_font_size: int, draw: ImageDraw,
+                                font_index: int = 0) -> Tuple[str, int, bool]:
+        """Largest font size whose wrapped lines all stay inside a bubble interior.
+
+        Lays the block out the way render_translated_text does (vertically centred in
+        ``container['rect']``, every line centred on its centre column) and checks each line's ink,
+        outline stroke and shadow included, against the interior's width on the rows that line
+        covers, so lines get shorter where an oval narrows. Returns (wrapped_text, size, fits).
+        """
+        import math
+        words = text.split()
+        min_font_size = int(min_font_size)
+        init_font_size = max(int(init_font_size), min_font_size)
+        if not words:
+            return text, min_font_size, True
+        rx, ry, rw, rh = container['rect']
+        cx, row0 = container['cx'], container['row0']
+        left, right = container['left'], container['right']
+        nrows = len(left)
+        try:
+            mixed = not self._is_truly_custom_font()  # the renderer mixes in the emote font then
+        except Exception:
+            mixed = False
+
+        def make(size):
+            try:
+                if not font_path:
+                    font = ImageFont.load_default()
+                elif font_index:  # a box's bold / italic face of a font collection
+                    font = ImageFont.truetype(font_path, size, index=font_index)
+                else:
+                    font = ImageFont.truetype(font_path, size)
+            except Exception:
+                font = ImageFont.load_default()
+            emote = self._get_emote_fallback_font(size) if mixed else None
+            pads = self._text_ink_pads(size)
+            word_cache = {}
+            space_w = self._line_width_emote_mixed(draw, ' ', font, emote) if emote is not None else 0
+
+            def measure(ws):
+                """(left bearing, ink top, ink bottom, render width) of a line."""
+                if emote is None:
+                    bb = draw.textbbox((0, 0), ' '.join(ws), font=font)
+                    return bb[0], bb[1], bb[3], bb[2] - bb[0]
+                parts = []
+                for wd in ws:
+                    part = word_cache.get(wd)
+                    if part is None:
+                        part = word_cache[wd] = (draw.textbbox((0, 0), wd, font=font),
+                                                 self._line_width_emote_mixed(draw, wd, font, emote))
+                    parts.append(part)
+                return (parts[0][0][0], min(p[0][1] for p in parts), max(p[0][3] for p in parts),
+                        sum(p[1] for p in parts) + space_w * (len(ws) - 1))
+
+            def line_height(first):
+                bb = draw.textbbox((0, 0), ' '.join(first) if first else "Ay", font=font)
+                return max(size * 1.2, (bb[3] - bb[1]) * 1.1)
+
+            def fits_at(ws, ty, cap=None):
+                bb0, top, bottom, width = measure(ws)
+                if cap is not None and width > cap:
+                    return False
+                a = int(math.floor(ty + top - pads[1])) - row0
+                b = int(math.ceil(ty + bottom + pads[3])) - row0
+                if a < 0 or b > nrows or b <= a:
+                    return False
+                room_l, room_r = int(left[a:b].min()), int(right[a:b].min())
+                if room_l < 0 or room_r < 0:
+                    return False
+                tx = rx + (rw - width) // 2
+                return (cx - (tx + min(0, bb0) - pads[0]) <= room_l
+                        and (tx + width + max(0, bb0) + pads[2] - 1) - cx <= room_r)
+
+            def wrap(n, lh, cap=None):
+                total = n * lh
+                start = max(ry, min(ry + (rh - total) // 2, ry + rh - total))
+                out, i = [], 0
+                for k in range(n):
+                    if i >= len(words):
+                        return None
+                    ty = start + k * lh
+                    cur = [words[i]]
+                    if not fits_at(cur, ty, cap):
+                        return None
+                    i += 1
+                    # Leave a word for every line still to come: n lines are laid out at the
+                    # n-line positions, so running out of words early is not an (n-1)-line fit
+                    while (i < len(words) - (n - 1 - k)
+                           and fits_at(cur + [words[i]], ty, cap)):
+                        cur.append(words[i])
+                        i += 1
+                    out.append(cur)
+                return out if i >= len(words) else None
+
+            return measure, line_height, wrap, pads
+
+        def orphaned(lines):
+            """A line holding one 1-2 letter word ("I", "A", "IT.") that the other lines left alone."""
+            return len(lines) > 1 and any(
+                len(ws) == 1 and len(ws[0].strip('.,!?~;:"\'')) <= 2 for ws in lines)
+
+        def try_size(size, no_orphans=False):
+            measure, line_height, wrap, pads = make(size)
+            lh = size * 1.2
+            usable = max(1, rw - pads[0] - pads[2])
+            n_lo = max(1, int(math.ceil(measure(words)[3] / usable)))
+            for n in range(n_lo, int(rh // lh) + 1):
+                out = wrap(n, lh)
+                if out is None:
+                    continue
+                real_lh = line_height(out[0])
+                if real_lh > lh:  # the renderer spaces lines by the first line's ink height
+                    lh = real_lh
+                    out = wrap(n, lh)
+                    if out is None or line_height(out[0]) > lh:
+                        lh = size * 1.2
+                        continue
+                if no_orphans and orphaned(out):
+                    continue
+                return out, n, lh
+            return None
+
+        def largest(hi, no_orphans=False):
+            lo, found = min_font_size, None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                out = try_size(mid, no_orphans)
+                if out is not None:
+                    found = (mid,) + out
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            return found
+
+        best = largest(init_font_size)
+        if best is not None and orphaned(best[1]):
+            # Like the rectangle fit, keep short words with a neighbour when that costs little size
+            tidy = largest(best[0], no_orphans=True)
+            if tidy is not None and tidy[0] >= best[0] - max(2, best[0] // 10):
+                best = tidy
+        if best is not None:
+            size, lines, n, lh = best
+            if n > 1:
+                # Balance the lines: the narrowest width cap that still wraps into n lines
+                measure, line_height, wrap, _pads = make(size)
+                lo_cap = max(measure([wd])[3] for wd in words)
+                hi_cap = max(measure(ws)[3] for ws in lines)
+                keep_tidy = not orphaned(lines)
+                while lo_cap < hi_cap:
+                    cap = (lo_cap + hi_cap) // 2
+                    out = wrap(n, lh, cap)
+                    if (out is not None and line_height(out[0]) <= lh
+                            and not (keep_tidy and orphaned(out))):
+                        lines, hi_cap = out, cap
+                    else:
+                        lo_cap = cap + 1
+            return '\n'.join(' '.join(ws) for ws in lines), size, True
+        # Nothing fits even at the minimum size: wrap to the widest line at the minimum size
+        measure, _line_height, _wrap, pads = make(min_font_size)
+        usable = max(1, rw - pads[0] - pads[2])
+        lines, cur = [], []
+        for wd in words:
+            if cur and measure(cur + [wd])[3] > usable:
+                lines.append(cur)
+                cur = [wd]
+            else:
+                cur.append(wd)
+        lines.append(cur)
+        return '\n'.join(' '.join(ws) for ws in lines), min_font_size, False
+
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False, font_path: str = None, font_index: int = 0) -> Tuple[int, List[str]]:
         """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments
 
@@ -13405,6 +13741,9 @@ class MangaTranslator:
         else:
             init_font_size = base_init
         
+        # Bubble interior found by render_translated_text (_container_render_area): fit lines to it
+        container = getattr(region, '_fit_container', None) if (use_as_is and region is not None) else None
+
         # Use comic-translate's pil_word_wrap algorithm
         wrapped_text, final_font_size = self._pil_word_wrap(
             text=text,
@@ -13414,7 +13753,8 @@ class MangaTranslator:
             init_font_size=init_font_size,
             min_font_size=min_font_size,
             draw=draw,
-            font_index=font_index
+            font_index=font_index,
+            container=container
         )
         
         # Convert wrapped text to lines
@@ -13431,20 +13771,25 @@ class MangaTranslator:
             # Check if multiplied size still fits (if constrained)
             if self.constrain_to_bubble:
                 # Re-wrap at target size to check fit
-                test_wrapped, _ = self._pil_word_wrap(
-                    text=text,
-                    font_path=font_path,
-                    roi_width=usable_width,
-                    roi_height=usable_height,
-                    init_font_size=target_size,
-                    min_font_size=target_size,  # Force this size
-                    draw=draw,
-                    font_index=font_index
-                )
+                if container is not None:
+                    test_wrapped, _, test_fits = self._fit_lines_to_container(
+                        text, font_path, container, target_size, target_size, draw, font_index=font_index)
+                else:
+                    test_wrapped, _ = self._pil_word_wrap(
+                        text=text,
+                        font_path=font_path,
+                        roi_width=usable_width,
+                        roi_height=usable_height,
+                        init_font_size=target_size,
+                        min_font_size=target_size,  # Force this size
+                        draw=draw,
+                        font_index=font_index
+                    )
+                    test_fits = None
                 test_lines = test_wrapped.split('\n') if test_wrapped else [text]
                 test_height = len(test_lines) * target_size * 1.2
                 
-                if test_height <= usable_height:
+                if test_fits if test_fits is not None else test_height <= usable_height:
                     final_font_size = target_size
                     lines = test_lines
                 else:

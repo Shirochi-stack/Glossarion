@@ -41,8 +41,9 @@ import manga_editor_core as core  # noqa: E402
 import manga_ocr_io  # noqa: E402
 import manga_translator  # noqa: E402
 
-#: main just before the Format toolbar: the renderer a page without styles must still match.
-BASE_SHA = "8b3cba3466f081e5233cf07b305a464933f645d0"
+#: The renderer without the Format toolbar: the bubble-aware fit (PR 138) at its last commit before it
+#: merged the toolbar. A page without styles must still match it.
+BASE_SHA = "ee2d3ded7041599b9e26033b21df4502a0238a93"
 FONT_PATH = TESTS_DIR / "fixtures" / "manga_editor" / "DejaVuSans-Latin.ttf"
 #: Two boxes on a 400x300 white page: a bubble and a wide caption.
 BOXES = ((30, 30, 150, 110), (40, 180, 320, 90))
