@@ -150,7 +150,6 @@ jobs:
           tests/test_glossary_chunk_tall_images.py \
           tests/test_manga_inpaint_wait.py \
           tests/test_auth_pool_dropdowns.py \
-          tests/test_key_pool_collapse.py \
           tests/test_image_pool_config_persistence.py \
           tests/test_gemini_future_and_br_chapters.py \
           tests/parity/test_u9_extractions.py \

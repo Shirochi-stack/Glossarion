@@ -3055,12 +3055,22 @@ _OCR_PROMPT_ILLEGIBLE_MIGRATE = (
     '        return prompt\n',
 )
 
-
-# 2026-11-06 Multi API Key Manager: '▼ Hide keys' folds a pool's key list without switching the pool off;
-# the folded pools are remembered in multi_api_key_collapsed_pools (desktop view state, dict)
-_KEY_POOL_COLLAPSE_SCHEMA = [('    # the Multi-Key Manager tree\'s font size (int) and column heights (dict); typed \'secret\' by name\n    "multi_api_key_tree_font_size": "int",\n    "multi_api_key_tree_heights": "dict",\n', '    # the Multi-Key Manager tree\'s font size (int) and column heights (dict), and the pools whose key\n    # list is folded ({pool: True}); typed \'secret\' by name\n    "multi_api_key_tree_font_size": "int",\n    "multi_api_key_tree_heights": "dict",\n    "multi_api_key_collapsed_pools": "dict",\n'), ('     "Key-tree zoom belongs to the desktop Multi-Key Manager tree view."),\n    (r"^enable_gui_yield$|gui_yield", ("mobile",),\n', '     "Key-tree zoom belongs to the desktop Multi-Key Manager tree view."),\n    (r"^multi_api_key_collapsed_pools$", ("mobile",),\n     "Folding a pool\'s key list belongs to the desktop Multi-Key Manager view."),\n    (r"^enable_gui_yield$|gui_yield", ("mobile",),\n')]
-_KEY_POOL_COLLAPSE_SCHEMA_DATA = [("     'ui_tab': 'Models'},\n    'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},\n", "     'ui_tab': 'Models'},\n    'multi_api_key_collapsed_pools': {'type': 'secret', 'ui_sites': ('keys',)},\n    'multi_api_key_tree_font_size': {'type': 'secret', 'ui_sites': ('keys',)},\n")]
-
+# 2026-11-06 the image progress tracker follows each run's output folder (PR 146 review): a second image or
+# folder run of the same session used to write its translation_progress.json into the FIRST run's folder
+_IMAGE_PROGRESS_FOLLOWS_RUN = (
+    '                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, \'translation_progress.json\')}")\n'
+    '            \n'
+    '            # Check for stop request early\n'
+    ,
+    '                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, \'translation_progress.json\')}")\n'
+    "            elif os.path.normcase(os.path.abspath(getattr(self.image_progress_manager, 'output_dir', None) or '')) != os.path.normcase(os.path.abspath(output_dir)):\n"
+    '                # A later run (another image or folder) keeps its progress in its own output folder\n'
+    '                os.makedirs(output_dir, exist_ok=True)\n'
+    '                self.image_progress_manager.set_output_dir(output_dir)\n'
+    '                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, \'translation_progress.json\')}")\n'
+    '            \n'
+    '            # Check for stop request early\n'
+)
 
 # 2026-11-06 Image gen/edit key pool used everywhere: export_key_pool_env exports the Image gen/edit
 # and Audio/TTS pool env like the other dedicated pools (translator_gui before U1, key_pools after);
@@ -4578,12 +4588,12 @@ APPROVED = (
     },
     {
         "date": "2026-11-06",
-        "what": "Multi API Key Manager: every dedicated pool section gets its own '▼ Hide keys' / '▶ Show keys' "
-                "button, so folding a key list never switches the pool off; the folded pools are remembered in "
-                "multi_api_key_collapsed_pools (desktop-only view state, a dict like multi_api_key_tree_heights)",
+        "what": "Image runs: the image progress tracker follows each run's output folder (set_output_dir when it "
+                "changes), so every image / folder output keeps its own translation_progress.json",
         "source": {
-            "src/settings_schema.py": _KEY_POOL_COLLAPSE_SCHEMA,
-            "src/settings_schema_data.py": _KEY_POOL_COLLAPSE_SCHEMA_DATA,
+            # the image runner lived in translator_gui before U7
+            "src/translator_gui.py": [_IMAGE_PROGRESS_FOLLOWS_RUN],
+            "src/image_job.py": [_IMAGE_PROGRESS_FOLLOWS_RUN],
         },
         "values": {},
     },

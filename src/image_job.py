@@ -455,6 +455,11 @@ class ImageJobMixin:
                 # Add append_log reference for the progress manager
                 self.image_progress_manager.append_log = self.append_log
                 self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, 'translation_progress.json')}")
+            elif os.path.normcase(os.path.abspath(getattr(self.image_progress_manager, 'output_dir', None) or '')) != os.path.normcase(os.path.abspath(output_dir)):
+                # A later run (another image or folder) keeps its progress in its own output folder
+                os.makedirs(output_dir, exist_ok=True)
+                self.image_progress_manager.set_output_dir(output_dir)
+                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, 'translation_progress.json')}")
             
             # Check for stop request early
             if self.stop_requested:

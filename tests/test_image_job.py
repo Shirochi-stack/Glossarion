@@ -231,6 +231,7 @@ def _git_ok():
 #: 2026-10-24: +17 / +6 lines in the legacy sweep (approved payload cleanup limit), later spans +23.
 #: 2026-11-06: +50 lines in the legacy _run_generative_prompt_mode (approved Image gen/edit pool setup), later
 #: spans +50.
+#: 2026-11-06: +5 lines in the legacy _process_image_file (approved per-run image progress tracker).
 TG_U7_SPANS = (
     (224, 341, 2),       # U9: _fmt_bytes / _sweep_size_capped_dir -> shutdown_utils (imported under the old names)
     (345, 345, 1),       #   _sweep_large_caches docstring
@@ -254,15 +255,15 @@ TG_U7_SPANS = (
     (14682, 14874, 1),   #   ... info_text = provider_info_html() (the HTML moved verbatim)
     (19844, 19868, 0),   # U9: _rename_input_for_existing_workspace_collision moved into run_env.RunEnvMixin
     (23434, 23491, 0),   # U9: _get_pdf_range_entries_for_preview moved into the GlossaryPipelineMixin
-    (23600, 25352, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
+    (23600, 25357, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
     # U7 Integrate: the QA Stop handlers call the qa_scan_runtime stop helpers (tests/test_u7_tool_cores.py
     # pins them against the frozen blocks)
-    (26570, 26569, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)
-    (26573, 26573, 1),   #   if next_phase == 'graceful':
-    (26579, 26590, 4),   #   apply_qa_graceful_stop_flags()
-    (26625, 26626, 2),   #   elif next_phase == 'force':
-    (26636, 26656, 5),   # _do_qa_force_stop: apply_qa_force_stop_flags()
-    (26735, 26740, 2),   # _check_qa_stop_done._delayed_flag_cleanup: clear_qa_stop_flags()
+    (26575, 26574, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)
+    (26578, 26578, 1),   #   if next_phase == 'graceful':
+    (26584, 26595, 4),   #   apply_qa_graceful_stop_flags()
+    (26630, 26631, 2),   #   elif next_phase == 'force':
+    (26641, 26661, 5),   # _do_qa_force_stop: apply_qa_force_stop_flags()
+    (26740, 26745, 2),   # _check_qa_stop_done._delayed_flag_cleanup: clear_qa_stop_flags()
 )
 
 
@@ -615,6 +616,68 @@ def test_the_matrix_reaches_its_paths(tmp_path):
     assert env["NANOGPT_VIDEO_DURATION"] == "10s" and env["NANOGPT_VIDEO_RESOLUTION"] == "1080p"
     r = run("generative_no_prompt")
     assert r["result"] is False and any("No prompt found" in line for line in logs(r))
+
+
+# ---------------------------------------------------------------------------
+# one session, several runs: the progress tracker follows each run's output folder
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("side", ("legacy", "new"))
+def test_image_progress_follows_each_runs_output_folder(side, tmp_path):
+    """PR 146 review: the owner keeps its image progress tracker between runs (the desktop window lives
+    for the session), so a later single-image or folder run wrote its ``translation_progress.json``
+    entries into the FIRST run's folder and its own folder had none (the image Progress Manager then
+    lists nothing for it). Each run's folder now holds its own entries. Both sides: the approved
+    change (tests/parity/approved_changes.py) applies to the legacy desktop method too."""
+    import progress_core as pc
+
+    rp.preimport()
+    root = str((tmp_path / side).resolve())
+    os.makedirs(os.path.join(root, "src"))
+    second, third = PNG_BYTES + b"second", PNG_BYTES + b"third"  # other content hashes
+    rp.write_files(root, {"inputs/first.png": PNG_BYTES, "Pics/second.png": second, "Pics/third.png": third})
+    scenario = _image("two_runs", send_image=("<p>first</p>", "<p>second</p>",
+                                              generated("Generated_Media/third_gen.png")))
+    recorder = rp.Recorder(root)
+    owner_cls = rp.owner_class(side, os.path.join(root, "src", "translator_gui.py"))
+    out = os.path.join(root, "out")
+    with rp._sandbox_process(root, rp.resolve(scenario.env, root)):
+        owner = owner_cls(recorder, rp.resolve(scenario.config, root), rp.resolve(scenario.attrs, root))
+        with rp.recording_backends(recorder, scenario):
+            # run 1: one image -> its own folder <out>/first
+            assert owner._process_image_file(os.path.join(root, "inputs", "first.png")) is True
+            # run 2 (same session): a folder run -> the combined folder <out>/Pics; the second
+            # image comes back as a generated image
+            combined = os.path.join(out, "Pics")
+            os.makedirs(os.path.join(combined, "images"))
+            owner.current_file_index = 0
+            assert owner._process_image_file(os.path.join(root, "Pics", "second.png"), combined) is True
+            owner.current_file_index = 1
+            owner.enable_image_output_mode_var, owner.output_mode_var = True, "image"
+            assert owner._process_image_file(os.path.join(root, "Pics", "third.png"), combined) is True
+        views = {name: pc.build_image_folder_progress(path, {"output_directory": out}, script_dir=root)
+                 for name, path in (("first", os.path.join(root, "inputs", "first.png")),
+                                    ("Pics", os.path.join(root, "Pics")))}
+    logs = [e[1] for e in recorder.events if e[0] == "log"]
+
+    def progress(folder):
+        with open(os.path.join(out, folder, "translation_progress.json"), encoding="utf-8") as fh:
+            return json.load(fh)["images"]
+
+    digest = lambda data: hashlib.sha256(data).hexdigest()  # noqa: E731
+    assert {h: e["status"] for h, e in progress("first").items()} == {digest(PNG_BYTES): "completed"}
+    assert {h: e["status"] for h, e in progress("Pics").items()} == {digest(second): "completed",
+                                                                     digest(third): "completed"}
+    assert [line.replace("\\", "/") for line in logs if "Progress tracking in" in line] == [
+        "📊 Progress tracking in: <ROOT>/out/first/translation_progress.json",
+        "📊 Progress tracking in: <ROOT>/out/Pics/translation_progress.json"]
+    # the image Progress Manager lists each run's own output
+    (first, problem_first), (pics, problem_pics) = views["first"], views["Pics"]
+    assert problem_first is None and problem_pics is None
+    assert first["output_dir"] == os.path.join(out, "first") and pics["output_dir"] == combined
+    assert first["rows"] == ["📄 Image 001 | first | ✅ Completed"]
+    assert sorted(pics["rows"]) == ["📄 Image 001 | second | ✅ Completed", "🖼️ Image 002 | third | ✅ Completed"]
 
 
 # ---------------------------------------------------------------------------
