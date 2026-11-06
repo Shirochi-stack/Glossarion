@@ -10,6 +10,15 @@
 * A4 Import OCR could only replace a page's detection (an SFX-only OCR file dropped all dialogue):
   its merge option keeps the detected / existing regions and adds the imported ones, an imported
   region replacing every region it overlaps by half the smaller box (manga_ocr_io.merge_regions).
+* B1 the loaded glossary's 마왕 = Mawang never reached the prompt of the pages where OCR had glued the
+  word to its neighbours (부록의마왕, 먼저마왕잡으러): the matcher's Hangul word-edge rule assumes spaced
+  prose. Manga compression now matches OCR text with GLOSSARY_MATCH_HANGUL_SPACED=0.
+* B2 the built-in Manga_KR profile said only "Retain honorifics ... in Romaji": it now keeps Korean
+  honorifics and family address terms like the Korean text profiles (saved old defaults migrated).
+* B3 the manga glossary prompt said nothing about the attached page images: it now tells the model to
+  fix OCR from the image, fill gender from the art, keep titles used as names and the story's own names
+  (saved old defaults migrated). And dedupe let an "Unknown" gender outweigh a later "female" copy of
+  the same name (extract_glossary_from_epub._dedup_field_count), which emptied most genders.
 
 Sockets: only loopback connections (the local fake Codex server) are allowed.
 """
@@ -366,3 +375,184 @@ def test_desktop_import_merges_into_the_page_state(monkeypatch):
         assert ok
         state = tab.image_state_manager.states[page_path]
         assert [t["text"] for t in state["recognized_texts"]] == expected, merge
+
+
+# ---------------------------------------------------------------------------- B1
+
+#: Entries of the run's corrected glossary (token-efficient format), trimmed.
+GLOSSARY = (
+    "Glossary Columns: raw_name, translated_name, gender, description\n\n"
+    "=== CHARACTERS ===\n"
+    "* 마왕 = Mawang [Female]: The Mawang (never \"Demon King\").\n"
+    "* 할가코스 = Halgakos [Female]: The protagonist translator.\n\n"
+    "=== TERMS ===\n"
+    "* 짐 = We: The Mawang's royal first person.\n\n"
+    "=== TITLES ===\n"
+    "* 아가씨 = Agassi: Penchok-jipsa's address for Illya.\n"
+)
+
+#: Hayai OCR of the run's lines that came out as "Demon King" (S05, S08, S16, S21 x2, S24).
+OCR_LINES = (
+    "폐하께서는 '뿔달린번역가는마왕에다름아니므로, 체포되어져야한다'라고말씀되어지셨습니다.",
+    "집에가는길은마지막페이지뿐이에용~ 가는길에부록이있는데, 거기마왕님이살아용~",
+    "교관은옛날에마왕한테혼자덤볐다가졌습니다. 그러나희는셋이서싸웁니다. 알겠습니다",
+    "공식의뢰마왕토별 (S급) 1달려와는 '대리와의의오기(기됐詐)임.",
+    "합격입니다! 훌쩍... 직진파티녀석들이먼저마왕잡으러갔습니다! 찾아서데려오십시오!",
+    "부록의마왕.",
+)
+
+
+def _compress(text, **kwargs):
+    from glossary_compressor import compress_glossary
+
+    return compress_glossary(GLOSSARY, text, glossary_format="auto", glossary_path="webtoon_glossary.csv",
+                             chapter_ref={"chapter_num": None, "chapter_file": "S24.png"}, **kwargs)
+
+
+@pytest.fixture
+def match_env(monkeypatch):
+    for name in ("GLOSSARY_MATCH_ENGINE", "GLOSSARY_MATCH_HANGUL_SPACED", "GLOSSARY_MATCH_CJK_BOUNDARY",
+                 "GLOSSARY_MATCH_SHORT_CJK_LEN", "COMPRESS_GLOSSARY_STRICT_MATCHING_MODE",
+                 "COMPRESS_GLOSSARY_PROMPT", "AUTO_GLOSSARY_MODE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("line", OCR_LINES)
+def test_ocr_text_keeps_a_name_glued_to_its_neighbours(match_env, line):
+    from glossary_compressor import OCR_SOURCE_MATCH_SETTINGS
+
+    assert "* 마왕 = Mawang" in _compress(line, settings=OCR_SOURCE_MATCH_SETTINGS)
+
+
+def test_spaced_text_and_short_forms_keep_the_word_edge_rule(match_env):
+    from glossary_compressor import OCR_SOURCE_MATCH_SETTINGS
+
+    # a book's spaced prose: unchanged (a glued 마왕 is part of another word there)
+    assert "* 마왕 =" not in _compress("부록의마왕.")
+    assert "* 마왕 =" in _compress("부록의 마왕.")
+    # OCR text: a one-syllable term and a shortened form (아가씨 minus 씨) still need a word edge
+    ocr = _compress("이삿짐작업이끝났다. 돌아가는길이다.", settings=OCR_SOURCE_MATCH_SETTINGS)
+    assert "* 짐 =" not in ocr and "* 아가씨 =" not in ocr
+    assert "* 짐 =" in _compress("혼자라면, 짐이건네주마.", settings=OCR_SOURCE_MATCH_SETTINGS)
+
+
+def test_manga_translator_matches_the_page_text_as_ocr_text(match_env):
+    import manga_translator
+
+    translator = types.SimpleNamespace(
+        _manga_glossary_compression_enabled=lambda: True, _get_manga_glossary_path=lambda: "webtoon_glossary.csv",
+        _log=lambda *a, **k: None)
+    out = manga_translator.MangaTranslator._compress_manga_glossary_for_source(translator, GLOSSARY, "부록의마왕.",
+                                                                                "S24.png")
+    assert "* 마왕 = Mawang" in out
+
+
+def test_editor_workflow_matches_the_page_text_as_ocr_text(match_env):
+    import manga_editor_core
+
+    tab = types.SimpleNamespace(main_gui=types.SimpleNamespace(config={"compress_glossary_prompt": True}),
+                                manga_generated_glossary_path="webtoon_glossary.csv", _log=lambda *a, **k: None)
+    out = manga_editor_core._compress_loaded_manga_glossary_for_workflow(tab, GLOSSARY, "거기마왕님이살아용~", "S08.png")
+    assert "* 마왕 = Mawang" in out
+
+
+# ---------------------------------------------------------------------------- B2
+
+def _default_prompts():
+    import owner_state
+
+    view = types.SimpleNamespace(default_refinement_system_prompt="")
+    owner_state.ConfigStateMixin._init_default_prompt_profiles(view)
+    return view.default_prompts
+
+
+def test_manga_kr_keeps_korean_honorifics_like_the_korean_text_profiles():
+    prompts = _default_prompts()
+    korean_rules = [line for line in prompts["Korean_html2text"].split("\n")
+                    if line.startswith(("- Retain Korean honorifics", "- Retain Korean familial address terms"))]
+    assert len(korean_rules) == 2
+    manga_kr = prompts["Manga_KR"]
+    for line in korean_rules:
+        assert line in manga_kr.split("\n")
+    assert "Retain honorifics and onomatopoeia in Romaji" not in manga_kr
+    assert "\\n" not in manga_kr  # the quotation-mark line ended in a literal backslash-n pair
+
+
+def test_a_saved_old_manga_kr_default_gets_the_new_lines_and_nothing_else_changes():
+    import prompt_defaults
+
+    new = _default_prompts()["Manga_KR"]
+    old = new
+    for old_lines, new_lines in prompt_defaults.LEGACY_DEFAULT_PROFILE_LINES["Manga_KR"]:
+        old = old.replace(new_lines, old_lines)
+    assert "- Retain honorifics and onomatopoeia in Romaji.\n" in old and old != new
+    edited = old.replace("- Retain honorifics and onomatopoeia in Romaji.\n", "- Retain honorifics.\n")
+    config = {"sanitization_korean_quotes_fixed": True,
+              "prompt_profiles": {"Manga_KR": old, "My_Manga_KR": old, "TEST": "generate an edit of this image"}}
+    assert prompt_defaults.sanitize_prompt_profiles(config) is True
+    assert config["prompt_profiles"] == {"Manga_KR": new, "My_Manga_KR": old, "TEST": "generate an edit of this image"}
+    assert prompt_defaults.sanitize_prompt_profiles(config) is None  # nothing left to migrate
+    dict_profile = {"prompt_profiles": {"Manga_KR": {"prompt": old}}}
+    assert prompt_defaults.sanitize_prompt_profiles(dict_profile) is True
+    assert dict_profile["prompt_profiles"]["Manga_KR"]["prompt"] == new
+    own = {"sanitization_korean_quotes_fixed": True, "prompt_profiles": {"Manga_KR": edited}}
+    assert prompt_defaults.sanitize_prompt_profiles(own) is None and own["prompt_profiles"]["Manga_KR"] == edited
+
+
+# ---------------------------------------------------------------------------- B3
+
+OLD_GLOSSARY_LAST_LINE = "- Keep raw_name exactly in the source script when possible."
+
+
+def test_manga_glossary_prompt_uses_the_page_images_and_the_story_names():
+    import manga_env
+
+    prompt = manga_env.default_manga_glossary_prompt()
+    for rule in ("PAGE IMAGE RULES (when the page images are attached)",
+                 "write raw_name as it is printed there, not as the OCR misread it",
+                 "Fill gender from the art",
+                 "A title or epithet that the story uses instead of a name for one specific character",
+                 "keep the story's own wording",
+                 "Keep honorifics and family address terms romanized",
+                 "follow these manga rules"):
+        assert rule in prompt, rule
+    assert "Halgakos" not in prompt and "마왕" not in prompt  # general, not about the webtoon
+
+
+def test_a_saved_old_glossary_default_gets_the_new_rules(tmp_path, monkeypatch):
+    import manga_env
+    from _headless_env import headless_owner
+
+    new = manga_env.default_manga_glossary_prompt()
+    old = new[:new.index(OLD_GLOSSARY_LAST_LINE) + len(OLD_GLOSSARY_LAST_LINE)]
+    migrate = manga_env.MangaEnvMixin._migrate_legacy_manga_glossary_prompt
+    assert migrate(old, new) == new and migrate(new, new) == new
+    own = old + "\n- My own rule."
+    assert migrate(own, new) == own  # the user's own additions: left alone
+    with headless_owner(tmp_path, monkeypatch, {"model": "gpt-4o-mini", "manga_glossary_prompt": old}) as owner:
+        state = manga_env.HeadlessMangaState(owner)
+        assert state.manga_glossary_prompt == new
+        assert owner.config["manga_glossary_prompt"] == new
+
+
+@pytest.mark.parametrize("custom_fields", ['["description"]', "[]"])
+def test_dedupe_keeps_the_gender_a_later_copy_read(monkeypatch, tmp_path, custom_fields):
+    """The run's glossary: 일리야 / 인주 / 루네 came back "Unknown" from one page chunk and "female" from the
+    next; dedupe kept the first copy, so the glossary had no gender for 17 of its 24 characters."""
+    import extract_glossary_from_epub as eg
+
+    monkeypatch.setenv("GLOSSARY_CUSTOM_FIELDS", custom_fields)
+    monkeypatch.delenv("GLOSSARY_CUSTOM_ENTRY_TYPES", raising=False)
+    entries = [
+        {"type": "character", "raw_name": "인주", "translated_name": "Inju", "gender": "Unknown",
+         "description": "A guild employee identified as the second receptionist."},
+        {"type": "character", "raw_name": "인주", "translated_name": "Injoo", "gender": "female",
+         "description": "The bespectacled black-haired guild receptionist."},
+        {"type": "character", "raw_name": "인주", "translated_name": "Inju", "gender": "Unknown",
+         "description": "A character mentioned later."},
+    ]
+    out = eg.skip_duplicate_entries([dict(e) for e in entries], output_dir=str(tmp_path),
+                                    glossary_path=str(tmp_path / "manga_glossary.json"))
+    assert len(out) == 1
+    assert eg._normalize_gender_value(out[0]["gender"]) == "female"
+    assert out[0]["translated_name"] == "Inju"  # the first kept name stays

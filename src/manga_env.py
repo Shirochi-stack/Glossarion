@@ -840,9 +840,44 @@ class MangaEnvMixin:
             "- Treat all pages as one continuous chapter/scene for name and term consistency.\n"
             "- OCR can contain short bubbles, sound effects, broken line order, and repeated fragments.\n"
             "- Prefer recurring proper nouns and story-specific terms over ordinary dialogue words.\n"
-            "- Keep raw_name exactly in the source script when possible."
+            "- Keep raw_name exactly in the source script when possible.\n"
+            "- Where these manga rules differ from the general rules above, follow these manga rules.\n\n"
+            "PAGE IMAGE RULES (when the page images are attached):\n"
+            "- The OCR text is a machine reading and can be wrong: misread letters, dropped or merged words, missing spaces. "
+            "Check every name and term against the text printed in the image and write raw_name as it is printed there, "
+            "not as the OCR misread it. Never make an entry out of an OCR misreading, a cut-off fragment, or two words the OCR ran together.\n"
+            "- raw_name is the name alone: leave out a particle or grammatical ending the OCR joined to it, and any honorific "
+            "(mention the honorific in the description).\n"
+            "- Fill gender from the art: when the page shows the character, decide it from how they are drawn and how others "
+            "refer to them. Leave gender empty only when the character is never shown and the text gives no clue.\n\n"
+            "NAME RULES:\n"
+            "- A title or epithet that the story uses instead of a name for one specific character (a character the cast "
+            "calls only by a rank, a role or a nickname) is a character entry, even though bare generic roles are rejected "
+            "above; its translated_name follows the same rules as any other name.\n"
+            "- For places, organizations, skills, items and other named terms, translated_name is the name an English edition "
+            "would print: keep the story's own wording, puns and running jokes instead of glossing a compound name word by word, "
+            "and use the story's own spelling when the pages show one (a Latin-script sign, label or logo).\n"
+            "- Keep honorifics and family address terms romanized (for example -nim, -ssi, unnie, oppa, -san, -sama, -kun, "
+            "shifu, gege) in translated_name and descriptions, instead of English titles such as Mr., Lady, Big Sister or Your Majesty."
         )
         return f"{base_prompt}{manga_rules}"
+
+    @staticmethod
+    def _migrate_legacy_manga_glossary_prompt(prompt, default_prompt):
+        """Add the page-image and name rules to a saved manga glossary prompt that still ends the way
+        the older default did (its last line was the raw_name rule).
+
+        2026-11-06 (webtoon run): the generator kept OCR misreadings as names, left most genders empty
+        with the page images on, skipped a title used as a character's name and glossed place and term
+        names word by word. A saved prompt with anything of the user's own after the old last line is
+        left alone."""
+        old_last_line = "- Keep raw_name exactly in the source script when possible."
+        if not isinstance(prompt, str) or not isinstance(default_prompt, str) or old_last_line not in default_prompt:
+            return prompt
+        added_rules = default_prompt[default_prompt.index(old_last_line) + len(old_last_line):]
+        if not added_rules or added_rules.strip() in prompt or not prompt.rstrip().endswith(old_last_line):
+            return prompt
+        return prompt.rstrip() + added_rules
 
     def _get_compress_glossary_prompt_value(self) -> bool:
         """Read the shared glossary compression toggle from live UI/config."""
@@ -1151,6 +1186,12 @@ class MangaEnvMixin:
         self.manga_glossary_enabled_value = config.get('manga_glossary_enabled', False)
         self.manga_glossary_include_images_value = config.get('manga_glossary_include_images', True)
         self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())
+        migrated_glossary_prompt = self._migrate_legacy_manga_glossary_prompt(
+            self.manga_glossary_prompt, self._default_manga_glossary_prompt())
+        if migrated_glossary_prompt != self.manga_glossary_prompt:
+            self.manga_glossary_prompt = migrated_glossary_prompt
+            config['manga_glossary_prompt'] = migrated_glossary_prompt
+            print("[MANGA_INIT] Added the page-image and name rules to the saved manga glossary prompt")
         self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')
         self.manga_generated_glossary_path = config.get('manga_generated_glossary_path', '')
         self.manga_glossary_auto_load_suppressed = config.get('manga_glossary_auto_load_suppressed', False)

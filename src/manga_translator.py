@@ -7517,7 +7517,7 @@ class MangaTranslator:
         if not glossary_text or not source_text or not self._manga_glossary_compression_enabled():
             return glossary_text
         try:
-            from glossary_compressor import compress_glossary
+            from glossary_compressor import compress_glossary, OCR_SOURCE_MATCH_SETTINGS
             glossary_path = self._get_manga_glossary_path()
             chapter_ref = {
                 "chapter_num": None,
@@ -7530,6 +7530,8 @@ class MangaTranslator:
                 glossary_format='auto',
                 glossary_path=glossary_path,
                 chapter_ref=chapter_ref,
+                # the page text is OCR output: its Korean word spacing is unreliable
+                settings=OCR_SOURCE_MATCH_SETTINGS,
             )
             compressed = compressed if isinstance(compressed, str) else str(compressed or "")
             compressed_length = len(compressed)

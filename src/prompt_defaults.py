@@ -125,7 +125,8 @@ def sanitize_prompt_profiles(config):
 
     # Check if already ran
     if config.get('sanitization_korean_quotes_fixed', False):
-        return None
+        # the quote fix ran once; an older built-in default may still need its current lines
+        return True if migrate_legacy_default_profiles(config['prompt_profiles']) else None
 
     updates_made = False
     profiles = config['prompt_profiles']
@@ -157,4 +158,48 @@ def sanitize_prompt_profiles(config):
     # Always set flag to avoid re-running
     config['sanitization_korean_quotes_fixed'] = True
     config['prompt_profiles'] = profiles
-    return updates_made
+    return bool(migrate_legacy_default_profiles(profiles)) or updates_made
+
+
+#: Lines an older built-in profile default saved into config.json -> the current default lines.
+#: 2026-11-06: Manga_KR keeps Korean honorifics and family address terms the way the Korean text
+#: profiles ask (it said "Retain honorifics ... in Romaji"), and its quotation-mark line ends in real
+#: line breaks (it ended in a literal backslash-n pair).
+LEGACY_DEFAULT_PROFILE_LINES = {
+    "Manga_KR": (
+        (
+            "- Retain honorifics and onomatopoeia in Romaji.\n"
+            "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n\\n",
+            "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
+            "- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\n"
+            "- Retain onomatopoeia in Romaji.\n"
+            "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\n\n",
+        ),
+    ),
+}
+
+
+def migrate_legacy_default_profiles(profiles):
+    """Update built-in profiles that still hold an older default's exact lines (LEGACY_DEFAULT_PROFILE_LINES).
+
+    Only the built-in profile of that name, and only lines that are still the old default text:
+    a profile the user edited there, or any profile of their own, is left alone. Returns the names
+    of the profiles changed (in place)."""
+    changed = []
+    if not isinstance(profiles, dict):
+        return changed
+    for name, replacements in LEGACY_DEFAULT_PROFILE_LINES.items():
+        data = profiles.get(name)
+        text = data if isinstance(data, str) else data.get('prompt', '') if isinstance(data, dict) else ''
+        new_text = text
+        for old, new in replacements:
+            if isinstance(new_text, str) and old in new_text:
+                new_text = new_text.replace(old, new)
+        if new_text != text:
+            if isinstance(data, dict):
+                data['prompt'] = new_text
+            else:
+                profiles[name] = new_text
+            changed.append(name)
+            print(f"[Sanitizer] Updated the built-in '{name}' profile to its current default rules")
+    return changed

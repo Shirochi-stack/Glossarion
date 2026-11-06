@@ -5543,6 +5543,9 @@ def _dedup_field_count(entry):
       description in their Custom Fields.  This prevents a leaked AI
       description from giving a newer entry an unfair field-count advantage
       over a manually-reviewed older entry.
+    - a ``gender`` that says nothing ("Unknown", "N/A", "-"): otherwise the
+      first "Unknown" copy of a name outweighs every later copy that read the
+      gender, and the glossary keeps no gender for it.
     """
     count = 0
     for k, v in entry.items():
@@ -5550,6 +5553,8 @@ def _dedup_field_count(entry):
         if k_str.startswith("_"):
             continue
         if not _dedup_description_active_cached() and k_str.strip().lower() == 'description':
+            continue
+        if k_str.strip().lower() == 'gender' and not _gender_is_trackable(_normalize_gender_value(v)):
             continue
         if v and str(v).strip():
             count += 1

@@ -3936,7 +3936,7 @@ def _compress_loaded_manga_glossary_for_workflow(self, glossary_text: str, sourc
     if not glossary_text or not source_text or not _manga_workflow_glossary_compression_enabled(self):
         return glossary_text
     try:
-        from glossary_compressor import compress_glossary
+        from glossary_compressor import compress_glossary, OCR_SOURCE_MATCH_SETTINGS
         glossary_path = ""
         try:
             glossary_path = (
@@ -3959,6 +3959,8 @@ def _compress_loaded_manga_glossary_for_workflow(self, glossary_text: str, sourc
                 "chapter_num": None,
                 "chapter_file": os.path.basename(image_path) if image_path else os.getenv("CURRENT_CHAPTER_FILE", ""),
             },
+            # the page text is OCR output: its Korean word spacing is unreliable
+            settings=OCR_SOURCE_MATCH_SETTINGS,
         )
         compressed = compressed if isinstance(compressed, str) else str(compressed or "")
         reduction_pct = ((original_length - len(compressed)) / original_length * 100) if original_length else 0

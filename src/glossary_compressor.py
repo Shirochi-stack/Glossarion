@@ -53,6 +53,12 @@ from glossary_usage import (
     prepare_translated_output_text,
 )
 
+#: ``settings`` for compress_glossary() when the source text was read by OCR
+#: (manga pages): OCR drops most Korean word spaces, so the matcher's
+#: Hangul word-edge rule must not read a glued neighbour as "same word"
+#: (MatchConfig.hangul_spaced). Other settings still come from the env.
+OCR_SOURCE_MATCH_SETTINGS = {"GLOSSARY_MATCH_HANGUL_SPACED": "0"}
+
 # Serialize glossary compression across translation worker threads.
 # Compression is pure-Python (terms x chapter-text substring scans); when
 # several chunk workers run it concurrently they monopolize the GIL and the

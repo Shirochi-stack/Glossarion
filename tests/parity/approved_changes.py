@@ -3600,6 +3600,165 @@ _OCR_IMPORT_MERGE = [
     ),
 ]
 
+# 2026-11-06 webtoon run (B1): the manga editor workflow matches the loaded glossary against the page's OCR
+# text with the OCR settings (OCR drops most Korean word spaces; GLOSSARY_MATCH_HANGUL_SPACED=0)
+_MANGA_GLOSSARY_OCR_MATCH_EDITOR = [
+    (
+        '    try:\n'
+        '        from glossary_compressor import compress_glossary\n'
+        '        glossary_path = ""\n'
+        ,
+        '    try:\n'
+        '        from glossary_compressor import compress_glossary, OCR_SOURCE_MATCH_SETTINGS\n'
+        '        glossary_path = ""\n'
+    ),
+    (
+        '            },\n'
+        '        )\n'
+        ,
+        '            },\n'
+        '            # the page text is OCR output: its Korean word spacing is unreliable\n'
+        '            settings=OCR_SOURCE_MATCH_SETTINGS,\n'
+        '        )\n'
+    ),
+]
+
+
+# 2026-11-06 webtoon run (B2): the built-in Manga_KR profile keeps Korean honorifics and family address terms
+# like the Korean text profiles, and its quotation-mark line ends in real line breaks
+_MANGA_KR_HONORIFICS = [
+    (
+        '                "- Keep speech patterns consistent with the character\'s appearance and demeanor.\\n"\n'
+        '                "- Retain honorifics and onomatopoeia in Romaji.\\n"\n'
+        '                "- Keep original Korean quotation marks (\\" \\", \' \', 「」, 『』) as-is without converting to English quotes.\\\\n\\\\n"\n'
+        '\n'
+        ,
+        '                "- Keep speech patterns consistent with the character\'s appearance and demeanor.\\n"\n'
+        '                "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\\n"\n'
+        '                "- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\\n"\n'
+        '                "- Retain onomatopoeia in Romaji.\\n"\n'
+        '                "- Keep original Korean quotation marks (\\" \\", \' \', 「」, 『』) as-is without converting to English quotes.\\n\\n"\n'
+        '\n'
+    ),
+]
+
+
+_MANGA_KR_OLD = (
+    'You are a professional Korean to English Manhwa translator.\n'
+    'You have both the image of the Manhwa panel and the extracted text to work with.\n'
+    'Output only English text while following these rules: \n'
+    '\n'
+    'VISUAL CONTEXT:\n'
+    '- Analyze the character’s facial expressions and body language in the image.\n'
+    '- Consider the scene’s mood and atmosphere.\n'
+    '- Note any action or movement depicted.\n'
+    '- Use visual cues to determine the appropriate tone and emotion.\n'
+    '- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n'
+    '\n'
+    'DIALOGUE REQUIREMENTS:\n'
+    "- Match the translation tone to the character's expression.\n"
+    '- If a character looks angry, use appropriately intense language.\n'
+    '- If a character looks shy or embarrassed, reflect that in the translation.\n'
+    "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
+    '- Retain honorifics and onomatopoeia in Romaji.\n'
+    '- Keep original Korean quotation marks (" ", \' \', 「」, 『』) as-is without converting to English quotes.\\n\\nIMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n'
+)
+_MANGA_KR_NEW = (
+    'You are a professional Korean to English Manhwa translator.\n'
+    'You have both the image of the Manhwa panel and the extracted text to work with.\n'
+    'Output only English text while following these rules: \n'
+    '\n'
+    'VISUAL CONTEXT:\n'
+    '- Analyze the character’s facial expressions and body language in the image.\n'
+    '- Consider the scene’s mood and atmosphere.\n'
+    '- Note any action or movement depicted.\n'
+    '- Use visual cues to determine the appropriate tone and emotion.\n'
+    '- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n'
+    '\n'
+    'DIALOGUE REQUIREMENTS:\n'
+    "- Match the translation tone to the character's expression.\n"
+    '- If a character looks angry, use appropriately intense language.\n'
+    '- If a character looks shy or embarrassed, reflect that in the translation.\n'
+    "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
+    '- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n'
+    '- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\n'
+    '- Retain onomatopoeia in Romaji.\n'
+    '- Keep original Korean quotation marks (" ", \' \', 「」, 『』) as-is without converting to English quotes.\n'
+    '\n'
+    'IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n'
+)
+
+
+# 2026-11-06 webtoon run (B3): the manga glossary prompt tells the model to correct OCR from the page image,
+# fill gender from the art, keep titles used as names and the story's own names; saved old defaults migrated
+_MANGA_GLOSSARY_IMAGE_NAME_RULES = [
+    (
+        '            "- Prefer recurring proper nouns and story-specific terms over ordinary dialogue words.\\n"\n'
+        '            "- Keep raw_name exactly in the source script when possible."\n'
+        '        )\n'
+        ,
+        '            "- Prefer recurring proper nouns and story-specific terms over ordinary dialogue words.\\n"\n'
+        '            "- Keep raw_name exactly in the source script when possible.\\n"\n'
+        '            "- Where these manga rules differ from the general rules above, follow these manga rules.\\n\\n"\n'
+        '            "PAGE IMAGE RULES (when the page images are attached):\\n"\n'
+        '            "- The OCR text is a machine reading and can be wrong: misread letters, dropped or merged words, missing spaces. "\n'
+        '            "Check every name and term against the text printed in the image and write raw_name as it is printed there, "\n'
+        '            "not as the OCR misread it. Never make an entry out of an OCR misreading, a cut-off fragment, or two words the OCR ran together.\\n"\n'
+        '            "- raw_name is the name alone: leave out a particle or grammatical ending the OCR joined to it, and any honorific "\n'
+        '            "(mention the honorific in the description).\\n"\n'
+        '            "- Fill gender from the art: when the page shows the character, decide it from how they are drawn and how others "\n'
+        '            "refer to them. Leave gender empty only when the character is never shown and the text gives no clue.\\n\\n"\n'
+        '            "NAME RULES:\\n"\n'
+        '            "- A title or epithet that the story uses instead of a name for one specific character (a character the cast "\n'
+        '            "calls only by a rank, a role or a nickname) is a character entry, even though bare generic roles are rejected "\n'
+        '            "above; its translated_name follows the same rules as any other name.\\n"\n'
+        '            "- For places, organizations, skills, items and other named terms, translated_name is the name an English edition "\n'
+        '            "would print: keep the story\'s own wording, puns and running jokes instead of glossing a compound name word by word, "\n'
+        '            "and use the story\'s own spelling when the pages show one (a Latin-script sign, label or logo).\\n"\n'
+        '            "- Keep honorifics and family address terms romanized (for example -nim, -ssi, unnie, oppa, -san, -sama, -kun, "\n'
+        '            "shifu, gege) in translated_name and descriptions, instead of English titles such as Mr., Lady, Big Sister or Your Majesty."\n'
+        '        )\n'
+    ),
+    (
+        '        return f"{base_prompt}{manga_rules}"\n'
+        '\n'
+        ,
+        '        return f"{base_prompt}{manga_rules}"\n'
+        '\n'
+        '    @staticmethod\n'
+        '    def _migrate_legacy_manga_glossary_prompt(prompt, default_prompt):\n'
+        '        """Add the page-image and name rules to a saved manga glossary prompt that still ends the way\n'
+        '        the older default did (its last line was the raw_name rule).\n'
+        '\n'
+        '        2026-11-06 (webtoon run): the generator kept OCR misreadings as names, left most genders empty\n'
+        "        with the page images on, skipped a title used as a character's name and glossed place and term\n"
+        "        names word by word. A saved prompt with anything of the user's own after the old last line is\n"
+        '        left alone."""\n'
+        '        old_last_line = "- Keep raw_name exactly in the source script when possible."\n'
+        '        if not isinstance(prompt, str) or not isinstance(default_prompt, str) or old_last_line not in default_prompt:\n'
+        '            return prompt\n'
+        '        added_rules = default_prompt[default_prompt.index(old_last_line) + len(old_last_line):]\n'
+        '        if not added_rules or added_rules.strip() in prompt or not prompt.rstrip().endswith(old_last_line):\n'
+        '            return prompt\n'
+        '        return prompt.rstrip() + added_rules\n'
+        '\n'
+    ),
+    (
+        "        self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())\n"
+        "        self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')\n"
+        ,
+        "        self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())\n"
+        '        migrated_glossary_prompt = self._migrate_legacy_manga_glossary_prompt(\n'
+        '            self.manga_glossary_prompt, self._default_manga_glossary_prompt())\n'
+        '        if migrated_glossary_prompt != self.manga_glossary_prompt:\n'
+        '            self.manga_glossary_prompt = migrated_glossary_prompt\n'
+        "            config['manga_glossary_prompt'] = migrated_glossary_prompt\n"
+        '            print("[MANGA_INIT] Added the page-image and name rules to the saved manga glossary prompt")\n'
+        "        self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')\n"
+    ),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5049,6 +5208,35 @@ APPROVED = (
                 "adds the imported ones, an imported region replacing every region it overlaps by half the smaller box",
         "source": {
             "src/manga_integration.py": _OCR_IMPORT_MERGE,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga glossary matching reads the page text as OCR text (its Korean word spacing is unreliable): "
+                "a 2+ syllable glossary term glued to its neighbours (부록의마왕) is in the page",
+        "source": {
+            "src/ImageRenderer.py": _MANGA_GLOSSARY_OCR_MATCH_EDITOR,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Built-in Manga_KR profile keeps Korean honorifics and family address terms in romanized form like the "
+                "Korean text profiles; a saved Manga_KR that still holds the old default lines is migrated",
+        "source": {
+            "src/owner_state.py": _MANGA_KR_HONORIFICS,
+            "src/translator_gui.py": _MANGA_KR_HONORIFICS,
+        },
+        "values": {"Manga_KR": (_MANGA_KR_OLD, _MANGA_KR_NEW)},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga glossary prompt: page-image rules (fix OCR from the image, gender from the art) and name rules "
+                "(titles used as names, the story's own names, romanized honorifics); a saved prompt that still ends "
+                "with the old default's last line gets them",
+        "source": {
+            "src/manga_integration.py": _MANGA_GLOSSARY_IMAGE_NAME_RULES,
         },
         "values": {},
     },

@@ -485,17 +485,24 @@ class MatchConfig:
     __slots__ = (
         "min_tier", "allow_weak_token", "weak_token_max_hits", "cjk_boundary",
         "short_cjk_len", "nfkc", "despaced", "despaced_latin", "honorific",
-        "honorific_min_residual", "derived_forms", "cache_key",
+        "honorific_min_residual", "derived_forms", "hangul_spaced", "cache_key",
     )
 
     def __init__(self, min_tier=TIER_TOKEN, allow_weak_token=True,
                  weak_token_max_hits=3, cjk_boundary=True, short_cjk_len=2,
                  nfkc=True, despaced=True, despaced_latin=False,
-                 honorific=True, honorific_min_residual=2, derived_forms=True):
+                 honorific=True, honorific_min_residual=2, derived_forms=True,
+                 hangul_spaced=True):
         self.min_tier = int(min_tier)
         self.allow_weak_token = bool(allow_weak_token)
         self.weak_token_max_hits = int(weak_token_max_hits)
         self.cjk_boundary = bool(cjk_boundary)
+        # Whether the source spaces its Korean words. The Hangul word-edge
+        # rule reads a neighbouring syllable as "same word"; that only holds
+        # in spaced prose. OCR text (manga) drops most spaces (부록의마왕,
+        # 먼저마왕잡으러), so there a 2+ syllable term counts wherever it
+        # occurs. One-syllable terms keep the edge rule either way.
+        self.hangul_spaced = bool(hangul_spaced)
         self.short_cjk_len = int(short_cjk_len)
         self.nfkc = bool(nfkc)
         self.despaced = bool(despaced)
@@ -539,6 +546,7 @@ class MatchConfig:
             honorific=flag("GLOSSARY_MATCH_HONORIFIC", "1"),
             honorific_min_residual=num("GLOSSARY_MATCH_HONORIFIC_MIN_RESIDUAL", 2),
             derived_forms=flag("GLOSSARY_MATCH_DERIVED_FORMS", "1"),
+            hangul_spaced=flag("GLOSSARY_MATCH_HANGUL_SPACED", "1"),
         )
 
 
@@ -690,7 +698,7 @@ def _right_is_clean(text, end, script, derived=False, term_len=2, relaxed=True):
     return True
 
 
-def _cjk_occurrence_is_clean(text, term, cfg, is_character=False, whole=True):
+def _cjk_occurrence_is_clean(text, term, cfg, is_character=False, whole=True, full_term=True):
     """True when `term` occurs in `text` at least once without being glued
     inside a longer word.
 
@@ -698,11 +706,20 @@ def _cjk_occurrence_is_clean(text, term, cfg, is_character=False, whole=True):
     longer one is rare enough that the recall risk outweighs the precision
     gain. Scans occurrences with early exit, so the cost is proportional to
     the number of hits, not the length of the text.
+
+    ``full_term`` is False for a shortened form of the glossary term (a name
+    part, or the term minus an honorific: 아가씨 -> 아가); unspaced Hangul
+    text never relaxes the edge rule for those (아가 in 돌아가).
     """
     script = term_script(term)
     if script not in _CJK_SCRIPTS:
         return True
     if not cfg.cjk_boundary or len(term) > cfg.short_cjk_len:
+        return term in text
+    if (
+        script == HANGUL and full_term and len(term) >= 2
+        and not getattr(cfg, "hangul_spaced", True)
+    ):
         return term in text
     single, compound = _chinese_surnames() if script == HAN else (frozenset(), frozenset())
     # Verb endings and noun affixes never attach to a person's name, and one of
@@ -751,7 +768,7 @@ def build_term_pattern(term):
     return re.compile(left + re.escape(term) + right)
 
 
-def text_contains_variant(text, variant, cfg, is_character=False, whole=True):
+def text_contains_variant(text, variant, cfg, is_character=False, whole=True, full_term=True):
     """Does `variant` appear in `text` under the script-appropriate rule?"""
     if not variant or not text:
         return False
@@ -759,7 +776,7 @@ def text_contains_variant(text, variant, cfg, is_character=False, whole=True):
         return False
     script = term_script(variant)
     if script in _CJK_SCRIPTS:
-        return _cjk_occurrence_is_clean(text, variant, cfg, is_character, whole)
+        return _cjk_occurrence_is_clean(text, variant, cfg, is_character, whole, full_term)
     # Latin (and anything else): require word boundaries so "Al" stops
     # matching inside "Already".
     return build_term_pattern(variant).search(text) is not None
@@ -982,7 +999,8 @@ def match_term(prepared, term, is_character=False, cfg=None, token_filter=None):
         if _cheap_reject(prepared, variant):
             continue
         found = any(
-            text_contains_variant(hay, variant, cfg, is_character, whole=tier > TIER_TOKEN)
+            text_contains_variant(hay, variant, cfg, is_character, whole=tier > TIER_TOKEN,
+                                  full_term=tier >= TIER_DESPACED)
             for hay in _haystacks(prepared, tier)
         )
         if not found:
