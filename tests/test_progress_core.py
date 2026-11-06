@@ -1260,6 +1260,40 @@ def test_image_folder_view_lists_translated_and_untranslated_images(tmp_path, mo
                             "🖼️ c.png | ⬜ Not Translated", "🖼️ d.png | ⬜ Not Translated"]
 
 
+def test_image_view_same_stem_sources_and_a_generated_image_whose_source_moved(tmp_path, monkeypatch):
+    """a.png's translation does not hide a.jpg (matched through the progress entry's name, not
+    the stem); Mark as Skipped on ``b_generated.png`` whose recorded source path is gone finds
+    ``b.png`` in the selected folder, like an HTML translation's source."""
+    pics = tmp_path / "Pics"
+    pics.mkdir()
+    for name in ("a.png", "a.jpg", "b.png"):
+        (pics / name).write_bytes(b"\x89PNG " + name.encode())
+    app = tmp_path / "app"
+    out = app / "Pics"
+    out.mkdir(parents=True)
+    (out / "response_001_a.html").write_text("<p>a</p>", encoding="utf-8")
+    (out / "b_generated.png").write_bytes(b"\x89PNG generated b")
+    images = {
+        "ha": {"name": "a.png", "path": str(pics / "a.png"), "status": "completed",
+               "output_file": "Pics\\response_001_a.html"},
+        "hb": {"name": "b.png", "path": str(tmp_path / "moved" / "b.png"), "status": "completed",
+               "output_file": "Pics\\b_generated.png"},
+    }
+    (out / "translation_progress.json").write_text(json.dumps({"images": images}), encoding="utf-8")
+    monkeypatch.chdir(app)
+    data, problem = pc.build_image_folder_progress(str(pics), {"output_directory": ""}, script_dir=str(app))
+    assert problem is None
+    assert data["rows"] == ["🖼️ b_generated | ✅ Completed", "📄 Image 001 | a | ✅ Completed",
+                            "🖼️ a.jpg | ⬜ Not Translated"]
+    result = pc.mark_image_folder_items_skipped(str(pics), data["output_dir"], data["progress_file"],
+                                                data["progress_data"], [(0, data["file_info"][0])],
+                                                data["file_info"])
+    assert result["displays"] == {0: "🖼️ Skipped | b | ⏭️ Moved to images folder"}
+    assert (out / "images" / "b.png").read_bytes() == b"\x89PNG b.png"
+    assert not (out / "b_generated.png").exists()
+    assert sorted(json.loads((out / "translation_progress.json").read_text(encoding="utf-8"))["images"]) == ["ha"]
+
+
 def test_image_progress_manager_dialog_lists_the_runner_output(tmp_path, monkeypatch):
     """The desktop "Progress Manager - Images" dialog on a single translated image (owner
     2026-11-06: the list was empty; the refresh that runs at open dropped the output)."""

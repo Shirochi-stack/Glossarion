@@ -7058,7 +7058,17 @@ def scan_image_folder(output_dir, progress_file, source_path=None):
     if sources:
         skipped_names = {name.lower() for name in image_files}
         done_keys = {info['hash_key'] for info in file_info if info['hash_key']}
-        done_stems = {_image_folder_output_stem(info['file']).lower() for info in file_info}
+        # A translated row names its source through its progress entry; only an output
+        # without one is matched by stem (else a.jpg would read as done once a.png is)
+        done_names = set()
+        done_stems = set()
+        for info in file_info:
+            entry = (entries.get(info['hash_key']) or {}) if info['hash_key'] else {}
+            entry_name = str(entry.get('name') or os.path.basename(str(entry.get('path') or '')))
+            if entry_name:
+                done_names.add(entry_name.lower())
+            else:
+                done_stems.add(_image_folder_output_stem(info['file']).lower())
         by_path = {}
         by_name = {}
         for key, value in entries.items():
@@ -7071,7 +7081,8 @@ def scan_image_folder(output_dir, progress_file, source_path=None):
             if name.lower() in skipped_names:
                 continue  # listed as a skipped (images/) row
             key = by_path.get(os.path.normcase(os.path.abspath(source))) or by_name.get(name.lower())
-            if key in done_keys or os.path.splitext(name)[0].lower() in done_stems:
+            if key in done_keys or name.lower() in done_names \
+                    or os.path.splitext(name)[0].lower() in done_stems:
                 continue
             entry_status = str((entries.get(key) or {}).get('status') or '') if key else ''
             file_info.append({
@@ -7193,9 +7204,11 @@ def mark_image_folder_items_skipped(folder_path, output_dir, progress_file, prog
             source = item.get('source') or str((entries.get(item.get('hash_key')) or {}).get('path') or '')
             if not (source and os.path.isfile(source)):
                 source = ''
-                if not match and html_base.lower().endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS):
-                    # A generated image (response_001_<stem>.png): look for <stem>.<ext>
-                    match = _IMAGE_FOLDER_OUTPUT_RE.match(html_base)
+                if not match and html_base.lower().endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS) \
+                        and _is_image_folder_generated_name(html_base):
+                    # A generated image (response_001_<stem>.png, <stem>_generated.png):
+                    # look for <stem>.<ext>
+                    match = re.match(r'^(.+)$', _image_folder_output_stem(html_base))
 
             if source:
                 base_name, ext = os.path.splitext(os.path.basename(source))
@@ -7206,7 +7219,7 @@ def mark_image_folder_items_skipped(folder_path, output_dir, progress_file, prog
                     print(f"Copied {base_name + ext} from {source} to images folder")
                 match = original_found = True
             elif match:
-                base_name = match.group(1) if match.re.groups == 1 else match.group(2)
+                base_name = match.group(1)
                 # Try to find the original image with common extensions
                 original_found = False
 
