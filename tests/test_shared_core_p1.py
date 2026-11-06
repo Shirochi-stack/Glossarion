@@ -275,6 +275,16 @@ def _legacy_key_pool_tries():
     return env_try, mem_try
 
 
+#: Statements export_key_pool_env added after the move (2026-11-06): the Image gen/edit and Audio/TTS
+#: pool env, like the other dedicated pools (the in-memory setup already had both pools).
+KEY_POOL_ENV_ADDED = (
+    "os.environ['USE_INPAINTER_KEYS'] = '1' if config.get('use_inpainter_keys', False) else '0'",
+    "os.environ['INPAINTER_API_KEYS'] = json.dumps(config.get('inpainter_keys', []))",
+    "os.environ['USE_TTS_KEYS'] = '1' if config.get('use_tts_keys', False) else '0'",
+    "os.environ['TTS_API_KEYS'] = json.dumps(config.get('tts_keys', []))",
+)
+
+
 def test_key_pools_is_the_verbatim_get_environment_variables_section():
     import key_pools  # noqa: F401  (import check)
 
@@ -285,7 +295,12 @@ def test_key_pools_is_the_verbatim_get_environment_variables_section():
     new_env_try = [s for s in export_fn.body if isinstance(s, ast.Try)]
     new_mem_try = [s for s in apply_fn.body if isinstance(s, ast.Try)]
     assert len(new_env_try) == len(new_mem_try) == 1
-    assert dump(new_env_try[0]) == dump(renamed(env_try))
+    # the moved try, then the documented additions as its last statements
+    moved_env_try = copy.deepcopy(new_env_try[0])
+    added = moved_env_try.body[-len(KEY_POOL_ENV_ADDED):]
+    assert [ast.unparse(s) for s in added] == list(KEY_POOL_ENV_ADDED)
+    del moved_env_try.body[-len(KEY_POOL_ENV_ADDED):]
+    assert dump(moved_env_try) == dump(renamed(env_try))
     assert dump(new_mem_try[0]) == dump(renamed(mem_try))
     # the desktop builder now delegates (and no longer contains the section); U2 moved the
     # builder itself to run_env.RunEnvMixin, which TranslatorGUI inherits

@@ -30,6 +30,11 @@ Edits made while moving (everything else is byte-for-byte):
   bundled code folder is read-only. ``__file__`` is now image_job.py, which sits in the same
   folder as translator_gui.py (desktop builds ship both side by side).
 
+Edits after the move: the Image gen/edit and Audio/TTS key-pool setup of ``_process_image_file``
+is ``_configure_media_output_key_pools()``, which ``_run_generative_prompt_mode`` calls too; that
+run sends an image request with the ``image_generation`` context, which unified_api_client routes
+to the Image gen/edit pool (before, a prompt-only run always used the main key).
+
 Mobile composition (the job runs the desktop worker, which dispatches here)::
 
     owner._generative_prompt_override = prompt         # "Generate from prompt" only
@@ -132,6 +137,15 @@ class ImageJobMixin:
             os.environ['NANOGPT_VIDEO_DURATION'] = str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'
             os.environ['NANOGPT_VIDEO_RESOLUTION'] = str(getattr(self, 'nanogpt_video_resolution_var', '720p'))
 
+            # Image gen/edit and Audio/TTS key pools, as for an input image
+            self._configure_media_output_key_pools()
+            # An image request uses the Image gen/edit pool: unified_api_client routes the
+            # 'image_generation' context to it while USE_INPAINTER_KEYS is on. Video and audio keep
+            # the default context.
+            generates_image = os.environ['ENABLE_VIDEO_OUTPUT_MODE'] != '1' and (
+                os.environ['ENABLE_IMAGE_OUTPUT_MODE'] == '1' or self._model_is_image_gen(model))
+            send_kwargs = {'context': 'image_generation'} if generates_image else {}
+
             # Instantiate a UnifiedClient for this call
             from unified_api_client import UnifiedClient
             try:
@@ -155,6 +169,7 @@ class ImageJobMixin:
                 messages,
                 temperature=temperature,
                 max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
+                **send_kwargs,
             )
             result_text = (result_text or '').strip()
 
@@ -199,6 +214,56 @@ class ImageJobMixin:
                 import traceback
                 self.append_log(traceback.format_exc())
             return False
+
+    def _configure_media_output_key_pools(self):
+        """Set up the Image gen/edit and Audio/TTS key pools from the config (env + in-memory pools).
+
+        Both runners call it before their request: ``_process_image_file`` (where these lines
+        were) and ``_run_generative_prompt_mode``, which sent with the main key before.
+        """
+        import json
+
+        # Configure Image Gen/Edit key pool for image output mode requests.
+        try:
+            from unified_api_client import UnifiedClient
+            inpainter_keys_enabled = bool(self.config.get('use_inpainter_keys', False))
+            inpainter_keys = self.config.get('inpainter_keys', []) or []
+            os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'
+            os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
+            if inpainter_keys_enabled and inpainter_keys:
+                UnifiedClient.set_in_memory_inpainter_keys(
+                    inpainter_keys,
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+                self.append_log(f"[ImageGenEdit] Key pool ENABLED for image output ({len(inpainter_keys)} keys)")
+            else:
+                UnifiedClient.clear_in_memory_inpainter_keys()
+                if inpainter_keys_enabled:
+                    self.append_log("[ImageGenEdit] Enabled but no keys configured")
+        except Exception:
+            pass
+
+        # Configure Audio / TTS key pool for audio output mode (context "tts").
+        try:
+            from unified_api_client import UnifiedClient
+            tts_keys_enabled = bool(self.config.get('use_tts_keys', False))
+            tts_keys = self.config.get('tts_keys', []) or []
+            os.environ['USE_TTS_KEYS'] = '1' if tts_keys_enabled else '0'
+            os.environ['TTS_API_KEYS'] = json.dumps(tts_keys)
+            if tts_keys_enabled and tts_keys:
+                UnifiedClient.set_in_memory_tts_keys(
+                    tts_keys,
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+                self.append_log(f"[AudioTTS] Key pool ENABLED for audio output ({len(tts_keys)} keys)")
+            else:
+                UnifiedClient.clear_in_memory_tts_keys()
+                if tts_keys_enabled:
+                    self.append_log("[AudioTTS] Enabled but no keys configured")
+        except Exception:
+            pass
 
     def _process_image_file(self, image_path, combined_output_dir=None):
         """Process a single image file using the direct image translation API with progress tracking"""
@@ -624,47 +689,8 @@ class ImageJobMixin:
             except Exception:
                 pass
 
-            # Configure Image Gen/Edit key pool for image output mode requests.
-            try:
-                from unified_api_client import UnifiedClient
-                inpainter_keys_enabled = bool(self.config.get('use_inpainter_keys', False))
-                inpainter_keys = self.config.get('inpainter_keys', []) or []
-                os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'
-                os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
-                if inpainter_keys_enabled and inpainter_keys:
-                    UnifiedClient.set_in_memory_inpainter_keys(
-                        inpainter_keys,
-                        force_rotation=self.config.get('force_key_rotation', True),
-                        rotation_frequency=self.config.get('rotation_frequency', 1),
-                    )
-                    self.append_log(f"[ImageGenEdit] Key pool ENABLED for image output ({len(inpainter_keys)} keys)")
-                else:
-                    UnifiedClient.clear_in_memory_inpainter_keys()
-                    if inpainter_keys_enabled:
-                        self.append_log("[ImageGenEdit] Enabled but no keys configured")
-            except Exception:
-                pass
-
-            # Configure Audio / TTS key pool for audio output mode (context "tts").
-            try:
-                from unified_api_client import UnifiedClient
-                tts_keys_enabled = bool(self.config.get('use_tts_keys', False))
-                tts_keys = self.config.get('tts_keys', []) or []
-                os.environ['USE_TTS_KEYS'] = '1' if tts_keys_enabled else '0'
-                os.environ['TTS_API_KEYS'] = json.dumps(tts_keys)
-                if tts_keys_enabled and tts_keys:
-                    UnifiedClient.set_in_memory_tts_keys(
-                        tts_keys,
-                        force_rotation=self.config.get('force_key_rotation', True),
-                        rotation_frequency=self.config.get('rotation_frequency', 1),
-                    )
-                    self.append_log(f"[AudioTTS] Key pool ENABLED for audio output ({len(tts_keys)} keys)")
-                else:
-                    UnifiedClient.clear_in_memory_tts_keys()
-                    if tts_keys_enabled:
-                        self.append_log("[AudioTTS] Enabled but no keys configured")
-            except Exception:
-                pass
+            # Configure the Image gen/edit and Audio/TTS key pools.
+            self._configure_media_output_key_pools()
             
             # Initialize API client with output_dir to enable multi-key mode from environment
             try:

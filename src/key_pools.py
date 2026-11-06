@@ -7,6 +7,12 @@ multi-key env toggles" + "Configure multi-key list in memory"), with
 environment variables and installs the in-memory pools on
 ``unified_api_client.UnifiedClient`` (avoids the Windows env-var size limit).
 
+Added after the move: ``export_key_pool_env`` also exports the Image gen/edit
+(``USE_INPAINTER_KEYS`` / ``INPAINTER_API_KEYS``) and Audio/TTS (``USE_TTS_KEYS`` /
+``TTS_API_KEYS``) pools, like the other dedicated pools. Without them a run reads an
+old or missing toggle from the environment and sends image / speech requests with the
+main key although the pool is on (the last four statements of its try).
+
 GUI-free; must stay importable on Python 3.10 without Qt.
 """
 
@@ -49,6 +55,10 @@ def export_key_pool_env(config):
         os.environ['ROLLING_SUMMARY_API_KEYS'] = json.dumps(config.get('rolling_summary_keys', []))
         os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1' if config.get('use_truncation_retry_keys', False) else '0'
         os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps(config.get('truncation_retry_keys', []))
+        os.environ['USE_INPAINTER_KEYS'] = '1' if config.get('use_inpainter_keys', False) else '0'
+        os.environ['INPAINTER_API_KEYS'] = json.dumps(config.get('inpainter_keys', []))
+        os.environ['USE_TTS_KEYS'] = '1' if config.get('use_tts_keys', False) else '0'
+        os.environ['TTS_API_KEYS'] = json.dumps(config.get('tts_keys', []))
     except Exception:
         pass
 

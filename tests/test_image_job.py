@@ -55,6 +55,52 @@ from parity.runner_parity import MP4_BYTES, PNG_BYTES, RunnerScenario, generated
 
 MODULE = "image_job"
 
+#: The Image gen/edit and Audio/TTS key-pool setup as _process_image_file had it (12-space indent);
+#: ImageJobMixin._configure_media_output_key_pools holds these lines (8-space indent) since 2026-11-06.
+MEDIA_POOL_BLOCK = (
+    "            # Configure Image Gen/Edit key pool for image output mode requests.\n"
+    "            try:\n"
+    "                from unified_api_client import UnifiedClient\n"
+    "                inpainter_keys_enabled = bool(self.config.get('use_inpainter_keys', False))\n"
+    "                inpainter_keys = self.config.get('inpainter_keys', []) or []\n"
+    "                os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'\n"
+    "                os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)\n"
+    "                if inpainter_keys_enabled and inpainter_keys:\n"
+    "                    UnifiedClient.set_in_memory_inpainter_keys(\n"
+    "                        inpainter_keys,\n"
+    "                        force_rotation=self.config.get('force_key_rotation', True),\n"
+    "                        rotation_frequency=self.config.get('rotation_frequency', 1),\n"
+    "                    )\n"
+    "                    self.append_log(f\"[ImageGenEdit] Key pool ENABLED for image output ({len(inpainter_keys)} keys)\")\n"
+    "                else:\n"
+    "                    UnifiedClient.clear_in_memory_inpainter_keys()\n"
+    "                    if inpainter_keys_enabled:\n"
+    "                        self.append_log(\"[ImageGenEdit] Enabled but no keys configured\")\n"
+    "            except Exception:\n"
+    "                pass\n"
+    "\n"
+    "            # Configure Audio / TTS key pool for audio output mode (context \"tts\").\n"
+    "            try:\n"
+    "                from unified_api_client import UnifiedClient\n"
+    "                tts_keys_enabled = bool(self.config.get('use_tts_keys', False))\n"
+    "                tts_keys = self.config.get('tts_keys', []) or []\n"
+    "                os.environ['USE_TTS_KEYS'] = '1' if tts_keys_enabled else '0'\n"
+    "                os.environ['TTS_API_KEYS'] = json.dumps(tts_keys)\n"
+    "                if tts_keys_enabled and tts_keys:\n"
+    "                    UnifiedClient.set_in_memory_tts_keys(\n"
+    "                        tts_keys,\n"
+    "                        force_rotation=self.config.get('force_key_rotation', True),\n"
+    "                        rotation_frequency=self.config.get('rotation_frequency', 1),\n"
+    "                    )\n"
+    "                    self.append_log(f\"[AudioTTS] Key pool ENABLED for audio output ({len(tts_keys)} keys)\")\n"
+    "                else:\n"
+    "                    UnifiedClient.clear_in_memory_tts_keys()\n"
+    "                    if tts_keys_enabled:\n"
+    "                        self.append_log(\"[AudioTTS] Enabled but no keys configured\")\n"
+    "            except Exception:\n"
+    "                pass\n"
+)
+
 #: documented edits per moved method: (old, new, occurrences)
 EDITS = {
     "_run_generative_prompt_mode": [
@@ -66,6 +112,10 @@ EDITS = {
          "            system_prompt = self._generative_prompt_source()\n", 1),
         ("out_dir = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / 'Generated_Media'",
          "out_dir = pathlib.Path(data_dir(os.path.dirname(os.path.abspath(__file__)))) / 'Generated_Media'", 1),
+        # owner 2026-11-06: a prompt-only run sets up the Image gen/edit and Audio/TTS pools and sends an image
+        # request with the 'image_generation' context (approved_changes.py applies that to the legacy text, with the
+        # pool setup inline); the setup is ImageJobMixin._configure_media_output_key_pools
+        (MEDIA_POOL_BLOCK, "            self._configure_media_output_key_pools()\n", 1),
     ],
     # owner 2026-10-12: a graceful stop keeps the received translation (it only skips the title request)
     "_process_image_file": [
@@ -100,6 +150,11 @@ EDITS = {
          "                        except _SkipTitle:\n"
          "                            translated_title = base_name\n"
          "                        except Exception as e:\n", 1),
+        # owner 2026-11-06: the Image gen/edit and Audio/TTS pool setup is _configure_media_output_key_pools
+        # (the same lines, which _run_generative_prompt_mode calls too)
+        (MEDIA_POOL_BLOCK,
+         "            # Configure the Image gen/edit and Audio/TTS key pools.\n"
+         "            self._configure_media_output_key_pools()\n", 1),
     ],
 }
 
@@ -144,7 +199,8 @@ def test_prompt_source_hook_default_is_the_moved_lines():
     hook = rp.node_text(text, methods["_generative_prompt_source"])
     old = EDITS["_run_generative_prompt_mode"][0][0]
     assert "\n".join(line[4:] for line in old.rstrip("\n").split("\n")) in hook
-    assert set(methods) == {"_generative_prompt_source", "_run_generative_prompt_mode", "_process_image_file"}
+    assert set(methods) == {"_generative_prompt_source", "_run_generative_prompt_mode", "_process_image_file",
+                            "_configure_media_output_key_pools"}
 
 
 def test_translator_gui_no_longer_defines_the_runners():
@@ -173,6 +229,8 @@ def _git_ok():
 #: tests/parity/test_u9_extractions.py, test_u9_gap_moves.py and tests/test_translation_pipeline.py); their
 #: spans are listed too, so the file still changes nowhere else.
 #: 2026-10-24: +17 / +6 lines in the legacy sweep (approved payload cleanup limit), later spans +23.
+#: 2026-11-06: +50 lines in the legacy _run_generative_prompt_mode (approved Image gen/edit pool setup), later
+#: spans +50.
 #: 2026-11-06: +5 lines in the legacy _process_image_file (approved per-run image progress tracker).
 TG_U7_SPANS = (
     (224, 341, 2),       # U9: _fmt_bytes / _sweep_size_capped_dir -> shutdown_utils (imported under the old names)
@@ -197,15 +255,15 @@ TG_U7_SPANS = (
     (14682, 14874, 1),   #   ... info_text = provider_info_html() (the HTML moved verbatim)
     (19844, 19868, 0),   # U9: _rename_input_for_existing_workspace_collision moved into run_env.RunEnvMixin
     (23434, 23491, 0),   # U9: _get_pdf_range_entries_for_preview moved into the GlossaryPipelineMixin
-    (23600, 25307, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
+    (23600, 25357, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
     # U7 Integrate: the QA Stop handlers call the qa_scan_runtime stop helpers (tests/test_u7_tool_cores.py
     # pins them against the frozen blocks)
-    (26525, 26524, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)
-    (26528, 26528, 1),   #   if next_phase == 'graceful':
-    (26534, 26545, 4),   #   apply_qa_graceful_stop_flags()
-    (26580, 26581, 2),   #   elif next_phase == 'force':
-    (26591, 26611, 5),   # _do_qa_force_stop: apply_qa_force_stop_flags()
-    (26690, 26695, 2),   # _check_qa_stop_done._delayed_flag_cleanup: clear_qa_stop_flags()
+    (26575, 26574, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)
+    (26578, 26578, 1),   #   if next_phase == 'graceful':
+    (26584, 26595, 4),   #   apply_qa_graceful_stop_flags()
+    (26630, 26631, 2),   #   elif next_phase == 'force':
+    (26641, 26661, 5),   # _do_qa_force_stop: apply_qa_force_stop_flags()
+    (26740, 26745, 2),   # _check_qa_stop_done._delayed_flag_cleanup: clear_qa_stop_flags()
 )
 
 

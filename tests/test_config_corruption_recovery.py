@@ -290,23 +290,24 @@ def test_a_bubble_detector_that_failed_to_load_does_not_wipe_the_config(config_p
     bubble_detector = pytest.importorskip("bubble_detector")
     config_path.write_text('{"model": "mine", "api_key": "ENC:x"}', encoding="utf-8")
     # The state BubbleDetector._load_config leaves after a failed read, then its model path save.
-    detector = types.SimpleNamespace(config={"bubble_model_path": "m.pt"}, config_path=str(config_path))
-    bubble_detector.BubbleDetector._save_config(detector)
+    detector = types.SimpleNamespace(config={}, config_path=str(config_path))
+    bubble_detector.BubbleDetector._save_config(detector, {"bubble_model_path": "m.pt"})
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "model": "mine", "api_key": "ENC:x", "bubble_model_path": "m.pt"}
+    assert detector.config == {"bubble_model_path": "m.pt"}
     config_path.write_text("half written", encoding="utf-8")
-    bubble_detector.BubbleDetector._save_config(detector)
+    bubble_detector.BubbleDetector._save_config(detector, {"bubble_model_path": "m.pt"})
     assert config_path.read_text(encoding="utf-8") == "half written"
 
 
 def test_an_inpainter_save_does_not_wipe_an_unreadable_config(config_path):
     local_inpainter = pytest.importorskip("local_inpainter")
     config_path.write_text("half written", encoding="utf-8")
-    inpainter = types.SimpleNamespace(config={"inpainter_model": "lama"}, config_path=str(config_path))
-    local_inpainter.LocalInpainter._save_config(inpainter)
+    inpainter = types.SimpleNamespace(config={}, config_path=str(config_path))
+    local_inpainter.LocalInpainter._save_config(inpainter, {"inpainter_model": "lama"})
     assert config_path.read_text(encoding="utf-8") == "half written"
     config_path.write_text('{"model": "mine"}', encoding="utf-8")
-    local_inpainter.LocalInpainter._save_config(inpainter)
+    local_inpainter.LocalInpainter._save_config(inpainter, {"inpainter_model": "lama"})
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"model": "mine", "inpainter_model": "lama"}
 
 
