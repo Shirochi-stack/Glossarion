@@ -313,6 +313,18 @@ def find_font_face(font_path, bold, italic) -> Optional[Tuple[str, int]]:
     return found
 
 
+def _mark_text_output_only(client) -> None:
+    """Manga requests (region / full-page translation, glossary, vision OCR) are read as text, so
+    the main tab's Output mode never turns them into image requests (UnifiedClient
+    ``_text_output_only``). The custom image edit inpainter sends on its own forced-image client."""
+    if client is None:
+        return
+    try:
+        client._text_output_only = True
+    except Exception:
+        pass
+
+
 #: Western quote marks a translation may come wrapped in: opening char -> closing chars.
 _WRAP_QUOTE_PAIRS = {
     '"': '"', '“': '”', '”': '”', '„': '“”', '`': '`',
@@ -503,6 +515,12 @@ def _prepare_precomputed_regions(
             except Exception:
                 pass
     return prepared
+
+
+def _imported_regions_merge(regions) -> bool:
+    """Whether an Import OCR's regions merge with the page's detection (the import's merge
+    option, ``_imported_ocr_merge`` on each region) instead of replacing it."""
+    return any(getattr(region, '_imported_ocr_merge', False) for region in (regions or []))
 
 
 def _regions_requiring_translation(
@@ -983,6 +1001,18 @@ def sort_regions_by_reading_order(regions: List[TextRegion], right_to_left: bool
 class MangaTranslator:
     """Main class for manga translation pipeline using Google Cloud Vision + API Key"""
     
+    @property
+    def client(self):
+        """The translator's UnifiedClient (``main_gui.client`` in a batch run)."""
+        return self.__dict__.get('_client')
+
+    @client.setter
+    def client(self, value):
+        # every client the translator sends on (also one the batch runner swaps in after a
+        # model change) asks for text replies, whatever the main tab's Output mode
+        _mark_text_output_only(value)
+        self.__dict__['_client'] = value
+
     # Global, process-wide registry to make local inpainting init safe across threads
     # Only dictionary operations are locked (microseconds); heavy work happens outside the lock.
     _inpaint_pool_lock = threading.Lock()
@@ -7659,7 +7689,7 @@ class MangaTranslator:
         if not glossary_text or not source_text or not self._manga_glossary_compression_enabled():
             return glossary_text
         try:
-            from glossary_compressor import compress_glossary
+            from glossary_compressor import compress_glossary, OCR_SOURCE_MATCH_SETTINGS
             glossary_path = self._get_manga_glossary_path()
             chapter_ref = {
                 "chapter_num": None,
@@ -7672,6 +7702,8 @@ class MangaTranslator:
                 glossary_format='auto',
                 glossary_path=glossary_path,
                 chapter_ref=chapter_ref,
+                # the page text is OCR output: its Korean word spacing is unreliable
+                settings=OCR_SOURCE_MATCH_SETTINGS,
             )
             compressed = compressed if isinstance(compressed, str) else str(compressed or "")
             compressed_length = len(compressed)
@@ -15696,6 +15728,26 @@ class MangaTranslator:
             except Exception:
                 pass
 
+    def _merge_imported_ocr_regions(self, detected, imported):
+        """Import OCR with merge on: the page's detected regions plus the imported ones, an imported
+        region replacing every detected region it overlaps (``manga_ocr_io.merge_regions``)."""
+        import manga_ocr_io
+
+        imported = _prepare_precomputed_regions(imported or [], preserve_translations=True)
+        merged, replaced = manga_ocr_io.merge_regions(detected or [], imported)
+        for index, region in enumerate(merged):
+            try:
+                region.rect_index = index
+            except Exception:
+                pass
+        self._log(
+            f"📥 Imported OCR merged with detection: {len(imported)} imported + "
+            f"{len(detected or []) - len(replaced)} detected regions "
+            f"({len(replaced)} detected regions replaced by an overlapping imported one)",
+            "info",
+        )
+        return merged
+
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
                      batch_index: int = None, batch_total: int = None,
                      ocr_only: bool = False,
@@ -15894,6 +15946,7 @@ class MangaTranslator:
             # still detects a webtoon strip chunk by chunk (same regions as the
             # webtoon path), and the translation pass reuses those regions.
             webtoon_chunk_ocr = False
+            merge_imported_regions = None
             used_precomputed_regions = precomputed_regions is not None
             used_imported_regions = bool(
                 used_precomputed_regions
@@ -15910,7 +15963,11 @@ class MangaTranslator:
                     except Exception as import_error:
                         imported_regions = None
                         self._log(f"WARNING: Imported OCR could not be resolved: {import_error}", "warning")
-                    if imported_regions is not None:
+                    if imported_regions is not None and _imported_regions_merge(imported_regions):
+                        # Import OCR with merge: the page is still detected below and the
+                        # imported regions join (and replace overlapping) detected ones
+                        merge_imported_regions = imported_regions
+                    elif imported_regions is not None:
                         precomputed_regions = imported_regions
                         used_precomputed_regions = True
                         used_imported_regions = True
@@ -15952,10 +16009,12 @@ class MangaTranslator:
                     chunk_webtoon = height > chunk_height
                 else:
                     chunk_webtoon = webtoon_mode == 'auto' and format_info['is_webtoon']
-                if (ocr_only and not used_precomputed_regions and chunk_webtoon):
+                if ((ocr_only or merge_imported_regions is not None) and not used_precomputed_regions and
+                        chunk_webtoon):
                     self._log("🔄 Webtoon mode active - will OCR in chunks for better OCR")
                     webtoon_chunk_ocr = True
-                if (not ocr_only and not used_precomputed_regions and chunk_webtoon):
+                if (not ocr_only and not used_precomputed_regions and merge_imported_regions is None and
+                        chunk_webtoon):
                     self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
                     # Process webtoon in chunks. This specialized path returns
                     # before the normal OCR callback below, so persist its
@@ -15990,6 +16049,9 @@ class MangaTranslator:
             else:
                 self._log(f"📍 [STEP 1] Text Detection Phase")
                 regions = self.detect_text_regions(image_path)
+            if merge_imported_regions is not None:
+                regions = self._merge_imported_ocr_regions(regions, merge_imported_regions)
+                used_imported_regions = True  # imported translations are reused, detected regions translated
 
             # Save OCR as soon as it exists, before translation/inpainting can
             # fail. The GUI integration attaches this callback per run.

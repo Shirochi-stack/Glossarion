@@ -6059,7 +6059,19 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             hover="#338b5d",
             pressed="#1d5739",
         )
+        # Import OCR's merge option (this session's imports; off = the import replaces detection)
+        self.batch_ocr_import_merge_checkbox = self._create_styled_checkbox("Merge with detection")
+        self.batch_ocr_import_merge_checkbox.setChecked(bool(getattr(self, '_imported_ocr_merge', False)))
+        self.batch_ocr_import_merge_checkbox.setToolTip(
+            "Off: an imported page skips detection and uses only the imported regions.\n"
+            "On: the page is still detected and the imported regions are added; an imported "
+            "region replaces every detected region it overlaps (for example an SFX-only OCR file "
+            "adds its sound effects and keeps the detected dialogue)."
+        )
+        self.batch_ocr_import_merge_checkbox.toggled.connect(
+            lambda checked: setattr(self, '_imported_ocr_merge', bool(checked)))
         ocr_io_layout.addWidget(self.batch_ocr_import_btn, stretch=1)
+        ocr_io_layout.addWidget(self.batch_ocr_import_merge_checkbox)
         ocr_io_layout.addWidget(self.batch_ocr_open_btn, stretch=1)
         control_layout.addWidget(ocr_io_row)
 
@@ -12520,12 +12532,18 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             state_manager = getattr(self, 'image_state_manager', None)
             preview = getattr(self, 'image_preview_widget', None)
             if state_manager is not None:
+                merge = bool(getattr(self, '_imported_ocr_merge', False))
                 for image_path, page in matches.items():
-                    imported_state = (
-                        imported_states.get(image_path)
-                        if imported_states is not None else None
-                    ) or manga_ocr_io.editor_state_from_page(page)
                     existing_state = state_manager.get_state(image_path) or {}
+                    if merge:
+                        # Merge with detection: the page's own boxes stay, except those
+                        # an imported region overlaps
+                        imported_state = manga_ocr_io.editor_state_for_import(page, existing_state, merge=True)
+                    else:
+                        imported_state = (
+                            imported_states.get(image_path)
+                            if imported_states is not None else None
+                        ) or manga_ocr_io.editor_state_from_page(page)
                     existing_state.update(imported_state)
                     state_manager.set_state(image_path, existing_state, save=False)
                 if hasattr(state_manager, 'flush_async'):

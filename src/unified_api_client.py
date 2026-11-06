@@ -7165,13 +7165,31 @@ class UnifiedClient:
         return False
 
     def _image_output_mode_enabled(self) -> bool:
-        """Return True when image output is enabled for this client/request."""
+        """Return True when image output is enabled for this client/request.
+
+        ``_force_image_output_mode`` (a custom image edit's own client) always asks for an image.
+        ``_text_output_only`` (the manga translator's clients) never takes the main tab's Output
+        mode from the environment: its requests are read as text."""
         try:
             if bool(getattr(self, '_force_image_output_mode', False)):
                 return True
+            if bool(getattr(self, '_text_output_only', False)):
+                return False
         except Exception:
             pass
         return os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+
+    def _video_output_mode_enabled(self) -> bool:
+        """Return True when the main tab's Output mode is video for this client/request.
+
+        A ``_text_output_only`` client (the manga translator's) never takes it, as with image
+        output; a video model still switches to video by its name where the caller checks that."""
+        try:
+            if bool(getattr(self, '_text_output_only', False)):
+                return False
+        except Exception:
+            pass
+        return os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
 
     def _get_image_output_resolution(self, default: str = "1K") -> str:
         try:
@@ -8165,6 +8183,7 @@ class UnifiedClient:
             temp._active_key_pool_scope = key_prefix
             temp._active_key_pool_expected_pool = pool
             temp._force_image_output_mode = getattr(self, '_force_image_output_mode', False)
+            temp._text_output_only = getattr(self, '_text_output_only', False)
             temp._forced_image_output_resolution = getattr(self, '_forced_image_output_resolution', None)
             temp._suppress_custom_image_edit_endpoint = getattr(self, '_suppress_custom_image_edit_endpoint', False)
             temp._disable_internal_retry = getattr(self, '_disable_internal_retry', False)
@@ -11937,7 +11956,7 @@ class UnifiedClient:
                 if extracted_content:
                     extracted_content_str = str(extracted_content).strip()
                     is_image_mode = self._image_output_mode_enabled()
-                    is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
+                    is_video_mode = self._video_output_mode_enabled()
                     # Fallback: auto-detect from model name when env vars aren't explicitly set
                     effective_model = getattr(self, 'model', '') or ''
                     # Skip image auto-detect if this thread is in vision-only scan mode
@@ -12724,6 +12743,8 @@ class UnifiedClient:
         # their output routing and stop behavior on that temporary client.
         if getattr(self, '_force_image_output_mode', False):
             temp_client._force_image_output_mode = True
+        if getattr(self, '_text_output_only', False):
+            temp_client._text_output_only = True
         forced_resolution = getattr(self, '_forced_image_output_resolution', None)
         if forced_resolution:
             temp_client._forced_image_output_resolution = forced_resolution
@@ -25434,7 +25455,7 @@ class UnifiedClient:
             image_edit_enabled = (not self._should_suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
             output_mode_needs_image_endpoint = (
                 self._image_output_mode_enabled()
-                or os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+                or self._video_output_mode_enabled()
                 or self._is_image_gen_model(effective_model)
                 or self._is_video_gen_model(effective_model)
             )
@@ -25997,7 +26018,7 @@ class UnifiedClient:
                     
                     # Check if image/video output mode is enabled
                     enable_image_output = self._image_output_mode_enabled()
-                    enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+                    enable_video_output = self._video_output_mode_enabled()
 
                     # Force enable for any model whose name indicates image generation
                     # but NOT if this thread is in vision-only scan mode
@@ -28793,10 +28814,9 @@ class UnifiedClient:
                     image_output=image_output,
                 )
 
-                content = result.get("content", "")
                 images = result.pop("images", None)  # bytes stay out of raw_response (saved as JSON)
-                if images:
-                    content = self._save_route_image(images[0], response_name)
+                content = self._chat_route_reply(result.get("content", ""), images, image_output is not None,
+                                                 response_name, label)
                 finish_reason = result.get("finish_reason", "stop")
                 usage = result.get("usage")
 
@@ -29659,6 +29679,21 @@ class UnifiedClient:
         except Exception:
             pass
         return f"[GENERATED_IMAGE:{filepath}]"
+
+    def _chat_route_reply(self, content: str, images, image_requested: bool, response_name, label: str) -> str:
+        """The content a ChatGPT route (authgpt/, AuthChatGPT) returns when its reply may carry images.
+
+        A request that asked for an image gets the saved image's [GENERATED_IMAGE:path] marker. A request
+        that asked for text keeps the text even when the reply also carries an image (ChatGPT can run its
+        image tool on its own): a text caller (manga region JSON, glossary...) cannot read a picture."""
+        if not images:
+            return content
+        if image_requested:
+            return self._save_route_image(images[0], response_name)
+        if not self._is_stop_requested():
+            print(f"🎨 {label}: the reply also carried an image, but this request asked for text; "
+                  f"the text reply is kept ({len(content or '')} chars)")
+        return content
 
     # ------------------------------------------------------------------
     # authgem/  →  Google AI Studio  +  OAuth Bearer token
@@ -30907,10 +30942,9 @@ class UnifiedClient:
                 cancel_check=cancelled, before_send_callback=before_send,
                 on_delta=stream_delta, on_thinking=stream_thinking, log_fn=print, **(extra or {}),
             )
-            content = result['content']
             images = result.pop('images', None)  # bytes stay out of raw_response (saved as JSON)
-            if images:
-                content = f"[GENERATED_IMAGE:{self._save_web_chat_image(images[0], response_name)}]"
+            content = self._chat_route_reply(result['content'], images, bool((extra or {}).get('image_output')),
+                                             response_name, label)
             return UnifiedResponse(content=content, finish_reason=result['finish_reason'],
                                    usage=result.get('usage'), raw_response=result)
         except route_error as exc:
@@ -31784,7 +31818,7 @@ class UnifiedClient:
 
         # Read the user's output mode selection (env vars are synced in real-time
         # by _set_output_mode whenever the radio button changes).
-        enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+        enable_video_output = self._video_output_mode_enabled()
         enable_image_output = self._image_output_mode_enabled()
 
         # Auto-detect generative models by name so routing is correct

@@ -1152,8 +1152,10 @@ Text to analyze:
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n\\n"
+                "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
+                "- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ), 

@@ -1961,7 +1961,8 @@ class EditorTab(MangaTab):
             path = picked[0].path
         if not self.image_path:  # (from the Files tab) the step runs on a page of the session
             await self.open_page(self.session.page_index)
-        return await self.run_step("import_ocr", images=files, extra={"path": path})
+        return await self.run_step("import_ocr", images=files,
+                                   extra={"path": path, "merge": bool(getattr(self.session, "ocr_import_merge", False))})
 
     async def open_ocr_files(self) -> Any:
         """The auto-saved OCR exports (the OCR Text folder of the output root), newest first."""

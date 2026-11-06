@@ -14,7 +14,8 @@ The adapter only bridges the JobService: page progress becomes ``progress`` even
 reaches ``runner.request_stop`` (graceful / immediate as the JobService decided, a second Stop
 forces), the translated pages and CBZ files become the job's outputs. An OCR JSON imported
 earlier (``params["imported_ocr"]``) is handed to the runner first with
-``manga_env.import_ocr_session``, as the desktop's Import OCR does for the next Start.
+``manga_env.import_ocr_session``, as the desktop's Import OCR does for the next Start
+(``params["imported_ocr_merge"]``: its merge option, the desktop's "Merge with detection").
 
 ``manga_step`` — the editor's Detect / Clean / Recognize / Translate / Translate all / Save &
 Update Overlay buttons, the per-box OCR / Translate / Clean actions and Import OCR (which renders
@@ -129,9 +130,10 @@ def _progress_emitter(ctx: Any, total: int) -> Callable[..., None]:
     return progress
 
 
-def _reuse_imported_ocr(ctx: Any, runner: Any, path: str, files: list) -> int:
+def _reuse_imported_ocr(ctx: Any, runner: Any, path: str, files: list, merge: bool = False) -> int:
     """The desktop's batch OCR import (``manga_env.import_ocr_session``) on the runner: Start then
     reuses the imported OCR for the matching pages ("Imported OCR will be reused for N/M pages").
+    ``merge``: the matching pages are still detected and the imported regions join the detected ones.
     A missing or unreadable file is logged and the run goes on without it."""
     from glossarion_mobile.services import manga as svc
 
@@ -141,7 +143,7 @@ def _reuse_imported_ocr(ctx: Any, runner: Any, path: str, files: list) -> int:
         ctx.log(f"⚠️ Imported OCR not reused: {name} is not available")
         return 0
     try:
-        matches = importer(runner, path, files=list(files))
+        matches = importer(runner, path, files=list(files), merge=bool(merge))
     except Exception as exc:
         ctx.log(f"⚠️ Imported OCR not reused ({name}): {exc}")
         return 0
@@ -256,7 +258,7 @@ def run_batch(ctx: Any) -> dict:
         raise _job_error(f"The manga translator could not start: {exc}") from exc
     imported = str(params.get("imported_ocr") or "")
     if imported:
-        _reuse_imported_ocr(ctx, runner, imported, run_files)
+        _reuse_imported_ocr(ctx, runner, imported, run_files, merge=bool(params.get("imported_ocr_merge")))
 
     def on_stop(mode: str) -> None:
         if mode == "force":
@@ -320,7 +322,8 @@ def _call_step(session: Any, step: str, params: Mapping[str, Any], owner: Any) -
     if step == "rerender_boxes":
         return session.rerender_boxes(params.get("boxes") or (), image, owner=owner)
     if step == "import_ocr":
-        return session.import_ocr(params.get("path"), params.get("images") or None, owner=owner, render=True)
+        return session.import_ocr(params.get("path"), params.get("images") or None, owner=owner, render=True,
+                                  merge=bool(params.get("merge")))
     current = session.current_page
     if image and (not current or os.path.normcase(os.path.abspath(current)) != os.path.normcase(os.path.abspath(image))):
         session.open_page(image)  # a per-box action runs on the step's page
