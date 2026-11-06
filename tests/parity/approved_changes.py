@@ -2899,6 +2899,37 @@ _MISSING_BRACKET_SCHEMA = {'src/settings_schema_data.py': [(" 'remove_excessive_
 _MISSING_BRACKET_QA = {'src/QA_Scanner_GUI.py': [("                    'sdlxliff_min_source_paragraph_tags': 20,\n                    'check_invalid_nesting': False,\n                    'cache_enabled': True,\n                    'cache_auto_size': False,\n", "                    'sdlxliff_min_source_paragraph_tags': 20,\n                    'check_invalid_nesting': False,\n                    'check_missing_tag_bracket': True,\n                    'cache_enabled': True,\n                    'cache_auto_size': False,\n"), ('            additional_layout.addWidget(check_invalid_nesting_checkbox)\n\n            # Silent truncation detection (optional, requires heavy deps)\n            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")\n', '            additional_layout.addWidget(check_invalid_nesting_checkbox)\n\n            # Missing tag bracket check (LLM token issue, separate toggle)\n            check_missing_tag_bracket_checkbox = self._create_styled_checkbox("Check for missing tag brackets (<p\\"Hello\\"</p>)")\n            check_missing_tag_bracket_checkbox.setChecked(qa_settings.get(\'check_missing_tag_bracket\', True))\n            additional_layout.addWidget(check_missing_tag_bracket_checkbox)\n\n            # Silent truncation detection (optional, requires heavy deps)\n            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")\n'), ("                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),\n                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),\n                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),\n                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),\n", "                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),\n                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),\n                        'check_missing_tag_bracket': (check_missing_tag_bracket_checkbox, lambda x: x.isChecked()),\n                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),\n                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),\n"), ("                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),\n                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),\n                    ('check_silent_truncation', check_truncation_checkbox, False),\n                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),\n", "                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),\n                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),\n                    ('check_missing_tag_bracket', check_missing_tag_bracket_checkbox, True),\n                    ('check_silent_truncation', check_truncation_checkbox, False),\n                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),\n"), ('                    check_invalid_tag_mismatch_checkbox.setChecked(False)\n                    check_invalid_nesting_checkbox.setChecked(False)\n                    check_truncation_checkbox.setChecked(False)\n                    truncation_cheap_slider.setValue(12)\n', '                    check_invalid_tag_mismatch_checkbox.setChecked(False)\n                    check_invalid_nesting_checkbox.setChecked(False)\n                    check_missing_tag_bracket_checkbox.setChecked(True)\n                    check_truncation_checkbox.setChecked(False)\n                    truncation_cheap_slider.setValue(12)\n')], 'src/qa_scan_runtime.py': [('        "check_invalid_tag_mismatch": False,\n        "check_invalid_nesting": False,\n        "check_silent_truncation": False,\n        "truncation_cheap_threshold": 12,\n', '        "check_invalid_tag_mismatch": False,\n        "check_invalid_nesting": False,\n        "check_missing_tag_bracket": True,\n        "check_silent_truncation": False,\n        "truncation_cheap_threshold": 12,\n'), ('        "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",\n        "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",\n        "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",\n        "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",\n', '        "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",\n        "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",\n        "QA_CHECK_MISSING_TAG_BRACKET": "1" if settings.get("check_missing_tag_bracket", True) else "0",\n        "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",\n        "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",\n')], 'src/scan_html_folder.py': [('from bs4 import BeautifulSoup, Comment, NavigableString\nfrom bs4.element import CData, RubyTextString, RubyParenthesisString\nfrom _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags\nfrom langdetect import detect, LangDetectException\nfrom difflib import SequenceMatcher\n', 'from bs4 import BeautifulSoup, Comment, NavigableString\nfrom bs4.element import CData, RubyTextString, RubyParenthesisString\nfrom _empty_attr_fix import (\n    count_empty_attr_tags,\n    count_missing_tag_brackets,\n    find_empty_attr_tags,\n    find_missing_tag_brackets,\n)\nfrom langdetect import detect, LangDetectException\nfrom difflib import SequenceMatcher\n'), ('        # Detect translation artifacts\n        artifacts = []\n        check_translation_artifacts = qa_settings.get(\'check_translation_artifacts\', False)\n        check_ai_artifacts = qa_settings.get(\'check_ai_artifacts\', False)\n        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)\n        if check_translation_artifacts:\n            artifacts = detect_translation_artifacts(raw_text)\n            \n            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations\n', '        # Detect translation artifacts\n        artifacts = []\n        # Checked in RAW HTML under its own toggle: these tags are not visible text.\n        if raw_file_content and qa_settings.get(\'check_missing_tag_bracket\', True):\n            missing_bracket_count = count_missing_tag_brackets(raw_file_content)\n            if missing_bracket_count:\n                artifacts.append({\n                    \'type\': \'empty_attribute_tags\',\n                    \'count\': missing_bracket_count,\n                    \'examples\': find_missing_tag_brackets(raw_file_content, limit=10),\n                    \'severity\': \'medium\'\n                })\n        check_translation_artifacts = qa_settings.get(\'check_translation_artifacts\', False)\n        check_ai_artifacts = qa_settings.get(\'check_ai_artifacts\', False)\n        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)\n        if check_translation_artifacts:\n            artifacts.extend(detect_translation_artifacts(raw_text))\n            \n            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations\n'), ("            'sdlxliff_min_source_paragraph_tags': 20,\n            'check_invalid_nesting': False,\n            'check_silent_truncation': False,\n            'check_potential_truncation': False,\n", "            'sdlxliff_min_source_paragraph_tags': 20,\n            'check_invalid_nesting': False,\n            'check_missing_tag_bracket': True,\n            'check_silent_truncation': False,\n            'check_potential_truncation': False,\n"), ('        )\n    log(f"   ✓ Invalid nesting check: {\'ENABLED\' if qa_settings.get(\'check_invalid_nesting\', False) else \'DISABLED\'}") \n    log(f"   ✓ Silent truncation check: {\'ENABLED\' if qa_settings.get(\'check_silent_truncation\', False) else \'DISABLED\'}")\n    log(f"   ✓ Potential truncation check: {\'ENABLED\' if qa_settings.get(\'check_potential_truncation\', False) else \'DISABLED\'}")\n', '        )\n    log(f"   ✓ Invalid nesting check: {\'ENABLED\' if qa_settings.get(\'check_invalid_nesting\', False) else \'DISABLED\'}") \n    log(f"   ✓ Missing tag bracket check: {\'ENABLED\' if qa_settings.get(\'check_missing_tag_bracket\', True) else \'DISABLED\'}")\n    log(f"   ✓ Silent truncation check: {\'ENABLED\' if qa_settings.get(\'check_silent_truncation\', False) else \'DISABLED\'}")\n    log(f"   ✓ Potential truncation check: {\'ENABLED\' if qa_settings.get(\'check_potential_truncation\', False) else \'DISABLED\'}")\n')]}
 
 
+# 2026-11-06 Local Model switch: Skip Inpainter's pool lock is refreshed at once (both exits of
+# _on_local_model_change; tests/test_manga_inpaint_wait.py)
+_SKIP_LOCK_SWITCH_IMAGE_EDIT = (
+    "            self._apply_custom_image_edit_ui_state()\n"
+    "            self._save_rendering_settings()\n"
+    "            return\n"
+    "        \n"
+    "        # Check for saved path for this model type\n",
+    "            self._apply_custom_image_edit_ui_state()\n"
+    "            self._sync_skip_inpainter_pool_lock()\n"
+    "            self._save_rendering_settings()\n"
+    "            return\n"
+    "        \n"
+    "        # Check for saved path for this model type\n",
+)
+_SKIP_LOCK_SWITCH_LOCAL = (
+    "            self.local_model_status_label.setStyleSheet(\"color: gray;\")\n"
+    "\n"
+    "        self._apply_custom_image_edit_ui_state()\n"
+    "        \n"
+    "        self._save_rendering_settings()\n",
+    "            self.local_model_status_label.setStyleSheet(\"color: gray;\")\n"
+    "\n"
+    "        self._apply_custom_image_edit_ui_state()\n"
+    "        # Skip Inpainter follows the pool at once, not on the tracker's next 2 s tick\n"
+    "        self._sync_skip_inpainter_pool_lock()\n"
+    "        \n"
+    "        self._save_rendering_settings()\n",
+)
+
+
 # 2026-11-06 Owner: the manga OCR prompt's empty-answer rule also covers illegible text ("no visible / illegible
 # text or symbols"), and saved prompts with the previous default lines are migrated to the new ones.
 _OCR_PROMPT_ILLEGIBLE_DEFAULT = (
@@ -3023,7 +3054,6 @@ _OCR_PROMPT_ILLEGIBLE_MIGRATE = (
     '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
     '        return prompt\n',
 )
-
 
 APPROVED = (
     {
@@ -4398,6 +4428,17 @@ APPROVED = (
                     '                    \n'
                 ),
             ],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga Translate after switching the Local Model (custom-image-edit -> lama_onnx): the Local Model "
+                "switch refreshes Skip Inpainter's in-use lock at once; Translate waits for its concurrent "
+                "inpainting (first-run download / load) before rendering, and a failed image edit request "
+                "returns its pool checkout (manga_editor_core, test_manga_editor_core EDITS)",
+        "source": {
+            "src/manga_integration.py": [_SKIP_LOCK_SWITCH_IMAGE_EDIT, _SKIP_LOCK_SWITCH_LOCAL],
         },
         "values": {},
     },
