@@ -153,6 +153,7 @@ jobs:
           tests/test_auth_pool_dropdowns.py \
           tests/test_image_pool_config_persistence.py \
           tests/test_gemini_future_and_br_chapters.py \
+          tests/test_webtoon_run_fixes.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \

@@ -562,3 +562,108 @@ def region_record_to_text_region(record: Mapping[str, Any], text_region_class: A
     if style:
         region.style = style
     return region
+
+
+# ---------------------------------------------------------------------------
+# Import OCR "merge": the imported regions join the page's own (detected / existing) regions
+# ---------------------------------------------------------------------------
+
+#: An existing region is replaced by an imported one when their boxes overlap by at least this
+#: share of the smaller box's area (the rule that merged the webtoon's SFX-only OCR files into
+#: the detected dialogue: every replaced box was the detector finding the same sound effect).
+MERGE_OVERLAP_OF_SMALLER = 0.5
+
+
+def region_box(region: Any) -> List[float]:
+    """``[x, y, w, h]`` of a region record (``bounding_box`` / ``bbox``) or a TextRegion."""
+    if isinstance(region, Mapping):
+        box = region.get("bounding_box") or region.get("bbox")
+    else:
+        box = getattr(region, "bounding_box", None)
+    try:
+        values = [float(value) for value in list(box or [])[:4]]
+    except (TypeError, ValueError):
+        values = []
+    return values if len(values) == 4 else [0.0, 0.0, 0.0, 0.0]
+
+
+def overlap_of_smaller(a: Iterable[float], b: Iterable[float]) -> float:
+    """Intersection area of two ``[x, y, w, h]`` boxes over the area of the smaller one."""
+    ax, ay, aw, ah = list(a)[:4]
+    bx, by, bw, bh = list(b)[:4]
+    width = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    height = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    smaller = max(1.0, min(aw * ah, bw * bh))
+    return (width * height) / smaller
+
+
+def merge_regions(
+    existing: Iterable[Any],
+    imported: Iterable[Any],
+    threshold: float = MERGE_OVERLAP_OF_SMALLER,
+):
+    """Merge imported regions into a page's own regions: ``(merged, replaced)``.
+
+    Every imported region is kept. An existing region that overlaps an imported one by
+    ``threshold`` of the smaller box is replaced by it (the imported text is the correction) and
+    listed in ``replaced``; the other existing regions stay. The merged list keeps the existing
+    reading order: an imported region takes the place of the first region it replaces, one that
+    replaces nothing goes before the first kept existing region below its top edge (imported
+    regions keep their own order otherwise). Works on region records and TextRegion objects."""
+    existing = list(existing or [])
+    imported = list(imported or [])
+    imported_boxes = [region_box(region) for region in imported]
+    replaced: List[Any] = []
+    merged: List[Any] = []
+    placed = set()
+    for region in existing:
+        box = region_box(region)
+        hits = [index for index, other in enumerate(imported_boxes)
+                if overlap_of_smaller(box, other) >= threshold]
+        if not hits:
+            merged.append(region)
+            continue
+        replaced.append(region)
+        for index in hits:
+            if index not in placed:
+                placed.add(index)
+                merged.append(imported[index])
+    kept = {id(region) for region in existing} - {id(region) for region in replaced}
+    for index, region in enumerate(imported):
+        if index in placed:
+            continue
+        top = imported_boxes[index][1]
+        position = next((i for i, other in enumerate(merged)
+                         if id(other) in kept and region_box(other)[1] > top), len(merged))
+        merged.insert(position, region)
+    return merged, replaced
+
+
+def merged_import_page(page: Mapping[str, Any], existing_state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The imported *page* merged with a page's editor state (Import OCR with merge on).
+
+    Its regions are the state's regions (``canonical_regions_from_editor_state``) merged with the
+    page's (``merge_regions``), numbered again in their new order; the imported page's own
+    ``editor_state`` is dropped because its indices no longer match. Without existing regions the
+    page comes back as it is."""
+    existing = canonical_regions_from_editor_state(existing_state) if existing_state else []
+    if not existing:
+        return dict(page)
+    imported = [dict(region) for region in (page.get("regions") or []) if isinstance(region, Mapping)]
+    merged, _replaced = merge_regions(existing, imported)
+    out = {key: value for key, value in page.items() if key != "editor_state"}
+    out["regions"] = [dict(serialize_region(region), rect_index=index) for index, region in enumerate(merged)]
+    return out
+
+
+def editor_state_for_import(
+    page: Mapping[str, Any],
+    existing_state: Optional[Mapping[str, Any]] = None,
+    *,
+    merge: bool = False,
+) -> Dict[str, Any]:
+    """The editor state an Import OCR writes for a matched page: the imported page's own state
+    (replace, the default) or, with ``merge``, the page's existing regions merged with it."""
+    if merge:
+        page = merged_import_page(page, existing_state)
+    return editor_state_from_page(page)

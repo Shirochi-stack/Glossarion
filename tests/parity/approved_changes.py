@@ -3512,6 +3512,94 @@ _MEDIA_POOL_HELPER = (
 )
 
 
+# 2026-11-06 manga text requests ignore the main tab's Output mode: the editor's Translate / Translate
+# This Text clients are text-only (UnifiedClient._text_output_only; the run's MangaTranslator marks its own)
+_MANGA_TEXT_ONLY_EDITOR = [
+    (
+        '        client = UnifiedClient(model=model, api_key=api_key)\n'
+        '        # If multi-key desired, ensure pool is initialized/refreshed\n'
+        ,
+        '        client = UnifiedClient(model=model, api_key=api_key)\n'
+        "        client._text_output_only = True  # a text request: the main tab's Output mode is not applied\n"
+        '        # If multi-key desired, ensure pool is initialized/refreshed\n'
+    ),
+    (
+        '        # Create unified client with main GUI config\n'
+        '        unified_client = UnifiedClient(model=model, api_key=api_key)\n'
+        ,
+        '        # Create unified client with main GUI config\n'
+        '        unified_client = UnifiedClient(model=model, api_key=api_key)\n'
+        "        unified_client._text_output_only = True  # a text request: the main tab's Output mode is not applied\n"
+    ),
+]
+# 2026-11-06 Import OCR merge option ("Merge with detection", off by default): the imported regions join the
+# page's detected / existing regions, an imported region replacing every one it overlaps
+_OCR_IMPORT_MERGE = [
+    (
+        '        # Preserve provenance through the glossary workflow\'s OCR-only pass,\n'
+        '        # which forwards these same objects as explicit precomputed regions.\n'
+        '        for region in regions:\n'
+        '            region._imported_ocr_session = True\n'
+        '        return regions\n'
+        ,
+        '        # Preserve provenance through the glossary workflow\'s OCR-only pass,\n'
+        '        # which forwards these same objects as explicit precomputed regions.\n'
+        "        # Import OCR's merge option: the translator still detects the page and\n"
+        '        # the imported regions join (replace overlapping) detected ones.\n'
+        "        merge = bool(getattr(self, '_imported_ocr_merge', False))\n"
+        '        for region in regions:\n'
+        '            region._imported_ocr_session = True\n'
+        '            region._imported_ocr_merge = merge\n'
+        '        if merge and not regions:\n'
+        '            return None  # nothing to merge: the page is detected as usual\n'
+        '        return regions\n'
+    ),
+    (
+        '        ocr_io_layout.addWidget(self.batch_ocr_import_btn, stretch=1)\n'
+        '        ocr_io_layout.addWidget(self.batch_ocr_open_btn, stretch=1)\n'
+        ,
+        "        # Import OCR's merge option (this session's imports; off = the import replaces detection)\n"
+        '        self.batch_ocr_import_merge_checkbox = self._create_styled_checkbox("Merge with detection")\n'
+        "        self.batch_ocr_import_merge_checkbox.setChecked(bool(getattr(self, '_imported_ocr_merge', False)))\n"
+        '        self.batch_ocr_import_merge_checkbox.setToolTip(\n'
+        '            "Off: an imported page skips detection and uses only the imported regions.\\n"\n'
+        '            "On: the page is still detected and the imported regions are added; an imported "\n'
+        '            "region replaces every detected region it overlaps (for example an SFX-only OCR file "\n'
+        '            "adds its sound effects and keeps the detected dialogue)."\n'
+        '        )\n'
+        '        self.batch_ocr_import_merge_checkbox.toggled.connect(\n'
+        "            lambda checked: setattr(self, '_imported_ocr_merge', bool(checked)))\n"
+        '        ocr_io_layout.addWidget(self.batch_ocr_import_btn, stretch=1)\n'
+        '        ocr_io_layout.addWidget(self.batch_ocr_import_merge_checkbox)\n'
+        '        ocr_io_layout.addWidget(self.batch_ocr_open_btn, stretch=1)\n'
+    ),
+    (
+        '            if state_manager is not None:\n'
+        '                for image_path, page in matches.items():\n'
+        '                    imported_state = (\n'
+        '                        imported_states.get(image_path)\n'
+        '                        if imported_states is not None else None\n'
+        '                    ) or manga_ocr_io.editor_state_from_page(page)\n'
+        '                    existing_state = state_manager.get_state(image_path) or {}\n'
+        '                    existing_state.update(imported_state)\n'
+        ,
+        '            if state_manager is not None:\n'
+        "                merge = bool(getattr(self, '_imported_ocr_merge', False))\n"
+        '                for image_path, page in matches.items():\n'
+        '                    existing_state = state_manager.get_state(image_path) or {}\n'
+        '                    if merge:\n'
+        "                        # Merge with detection: the page's own boxes stay, except those\n"
+        '                        # an imported region overlaps\n'
+        '                        imported_state = manga_ocr_io.editor_state_for_import(page, existing_state, merge=True)\n'
+        '                    else:\n'
+        '                        imported_state = (\n'
+        '                            imported_states.get(image_path)\n'
+        '                            if imported_states is not None else None\n'
+        '                        ) or manga_ocr_io.editor_state_from_page(page)\n'
+        '                    existing_state.update(imported_state)\n'
+    ),
+]
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -4944,6 +5032,24 @@ APPROVED = (
                                  _MEDIA_POOL_HELPER],
         },
         # new env names only: recorded values of the existing ones do not change
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga text requests (the editor's Translate / Translate This Text clients) ignore the main tab's "
+                "Output mode: an 'image' Output mode no longer turns a manga translation into an image request",
+        "source": {
+            "src/ImageRenderer.py": _MANGA_TEXT_ONLY_EDITOR,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Import OCR: 'Merge with detection' (off by default) keeps the page's detected / existing regions and "
+                "adds the imported ones, an imported region replacing every region it overlaps by half the smaller box",
+        "source": {
+            "src/manga_integration.py": _OCR_IMPORT_MERGE,
+        },
         "values": {},
     },
 )

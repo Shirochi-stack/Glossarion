@@ -2349,11 +2349,12 @@ def apply_translation_key(owner: Any, params: Mapping[str, Any]) -> Optional[str
 
 def batch_spec(files: MangaFileList, *, title: str = "", output_root: str = "", glossary_only: bool = False,
                editor_session: str = "", imported_ocr: str = "", model_kinds: Optional[Sequence[str]] = None,
-               translation: Optional[Mapping[str, Any]] = None) -> Any:
+               translation: Optional[Mapping[str, Any]] = None, imported_ocr_merge: bool = False) -> Any:
     """The MANGA job for the current Files selection (Start / Generate glossary): every file in
     visible order with the range, skips, folder roots and CBZ jobs (the runner applies them like
     the desktop Start; all process groups run). ``imported_ocr``: the last imported OCR JSON, which
-    the run reuses like the desktop's (``manga_env.import_ocr_session`` before Start).
+    the run reuses like the desktop's (``manga_env.import_ocr_session`` before Start);
+    ``imported_ocr_merge``: its merge option (the pages are still detected, the imported regions join).
     ``model_kinds``: the downloadable models the job fetches before it starts
     (``ensure_run_models``; default: every model the run loads, the detector only for a
     glossary pass). ``translation``: the tool's own model / key (:func:`translation_params`)."""
@@ -2371,6 +2372,7 @@ def batch_spec(files: MangaFileList, *, title: str = "", output_root: str = "", 
         params["model_kinds"] = list(model_kinds)
     params["editor_session"] = editor_session  # the runner updates that session's page state
     params["imported_ocr"] = str(imported_ocr or "")
+    params["imported_ocr_merge"] = bool(imported_ocr and imported_ocr_merge)
     if translation:  # the tool's own model / key (translation_params)
         params.update(dict(translation))
     groups = files.groups()

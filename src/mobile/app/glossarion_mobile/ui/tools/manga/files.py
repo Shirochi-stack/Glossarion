@@ -17,7 +17,9 @@
   Create CBZ at end · Auto consolidate (config switches the runner reads). Start first offers
   the download of a model the run loads that is not on the device yet (``ensure_models``).
   **Import OCR** (the editor's import: pages get their OCR / translations / boxes back) is also
-  the OCR the next Start reuses, as on the desktop ("Imported OCR (N)", clearable).
+  the OCR the next Start reuses, as on the desktop ("Imported OCR (N)", clearable). "Import OCR:
+  merge with detection" (desktop "Merge with detection", off by default): the page keeps its own
+  boxes / is still detected and the imported regions join, each replacing the boxes it overlaps.
 * Output: **Create CBZ** (the translated pages packed in run order; pages of an imported CBZ
   go back into ``<name>_translated.cbz`` next to it) · **Download images** (a ZIP of them)
   through the ExportSheet, the CBZ archives the run or Create CBZ wrote (tap to share / save),
@@ -141,6 +143,9 @@ class FilesTab(MangaTab):
         self.import_ocr_button = ft.TextButton(content="Import OCR", icon=ft.Icons.FILE_UPLOAD, key="mf-import-ocr",
                                                tooltip="Reuse the OCR (and translations) of an exported session",
                                                on_click=lambda e: self.ctx.spawn(self.import_ocr()))
+        self.import_merge_switch = ft.Switch(value=bool(getattr(self.session, "ocr_import_merge", False)),
+                                             on_change=lambda e: self._set_import_merge(bool(e.control.value)),
+                                             key="mf-import-ocr-merge")
         self.imported_row = ft.Row([], wrap=True, spacing=4, visible=False, key="mf-imported-ocr",
                                    vertical_alignment=ft.CrossAxisAlignment.CENTER)
         self.progress = ft.ProgressBar(value=None, visible=False, key="mf-progress")
@@ -172,6 +177,7 @@ class FilesTab(MangaTab):
         run = self.section("Run", [
             ft.Row([self.start_button, self.stop_button, self.import_ocr_button], wrap=True, spacing=8),
             self.imported_row,
+            switch_row(self.import_merge_switch, "Import OCR: merge with detection"),
             self.progress,
             self.run_status,
             switch_row(self.create_cbz_switch, "Create CBZ at end"),
@@ -368,13 +374,19 @@ class FilesTab(MangaTab):
         self.imported_row.visible = bool(path)
         self.imported_row.controls = [
             ft.Icon(ft.Icons.TEXT_SNIPPET_OUTLINED, size=16),
-            hint_text(f"Imported OCR ({info.get('matched', 0)}) · {os.path.basename(path)} · reused by Start"),
+            hint_text(f"Imported OCR ({info.get('matched', 0)}) · {os.path.basename(path)} · reused by Start"
+                      + (" · merged with detection" if getattr(self.session, "ocr_import_merge", False) else "")),
             ft.IconButton(icon=ft.Icons.CLOSE, icon_size=16, tooltip="Do not reuse it", size_constraints=HIT_TARGET,
                           on_click=lambda e: self.clear_imported_ocr(), key=f"mf-imported-clear-{self._build_gen}"),
         ] if path else []
 
     def clear_imported_ocr(self) -> None:
         self.session.imported_ocr = None
+        self.refresh()
+
+    def _set_import_merge(self, merge: bool) -> None:
+        """Import OCR's merge option, for the next import and the Start that reuses it."""
+        self.session.ocr_import_merge = bool(merge)
         self.refresh()
 
     async def import_ocr(self) -> Optional[str]:
@@ -635,6 +647,7 @@ class FilesTab(MangaTab):
             spec = svc.batch_spec(self.session.files, output_root=self.ctx.output_root, glossary_only=glossary_only,
                                   editor_session=self.session.editor_token or "",
                                   imported_ocr=self._imported_ocr_path(),
+                                  imported_ocr_merge=bool(getattr(self.session, "ocr_import_merge", False)),
                                   translation=svc.translation_params(self.ctx.prefs))
         except ValueError as exc:
             self.ctx.say(str(exc))

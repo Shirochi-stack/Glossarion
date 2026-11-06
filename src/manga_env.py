@@ -2697,8 +2697,14 @@ class MangaOcrSessionMixin:
         ]
         # Preserve provenance through the glossary workflow's OCR-only pass,
         # which forwards these same objects as explicit precomputed regions.
+        # Import OCR's merge option: the translator still detects the page and
+        # the imported regions join (replace overlapping) detected ones.
+        merge = bool(getattr(self, '_imported_ocr_merge', False))
         for region in regions:
             region._imported_ocr_session = True
+            region._imported_ocr_merge = merge
+        if merge and not regions:
+            return None  # nothing to merge: the page is detected as usual
         return regions
 
     def _record_automatic_ocr_page(self, image_path: str, regions) -> None:
@@ -3057,16 +3063,20 @@ def default_custom_image_edit_system_prompt():
     return MangaEnvMixin._default_custom_image_edit_system_prompt(None)
 
 
-def import_ocr_session(state, path=None, *, document=None, files=None):
+def import_ocr_session(state, path=None, *, document=None, files=None, merge=False):
     """Load an OCR JSON (``manga_ocr_io``) for reuse by the next batch run on *state*.
 
     The GUI-free core of the desktop's batch OCR import: the document is validated by
     ``manga_ocr_io.load_document`` and matched to *files* (default: the state's selected
     files) with ``_refresh_imported_ocr_page_map``. Returns the ``{image_path: page}``
     matches; an empty result clears the import (the desktop warns "No Matching Pages").
+    ``merge`` (the import's merge option, the desktop's "Merge with detection"): a matched
+    page is still detected and the imported regions join the detected ones, an imported
+    region replacing those it overlaps; off (the default) the import replaces detection.
     """
     if document is None:
         document = manga_ocr_io.load_document(path)
+    state._imported_ocr_merge = bool(merge)
     state._imported_ocr_document = document
     matches = state._refresh_imported_ocr_page_map(files if files is not None else list(state.selected_files))
     if not matches:

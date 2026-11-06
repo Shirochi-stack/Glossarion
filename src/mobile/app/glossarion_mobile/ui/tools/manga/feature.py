@@ -78,6 +78,9 @@ class MangaSession:
         self.last_result: dict = {}
         # the last imported OCR JSON ({"path", "matched", "files"}): the next Start reuses it (desktop)
         self.imported_ocr: Optional[dict] = None
+        # Import OCR's merge option (desktop "Merge with detection"): off, an imported page replaces
+        # the page's boxes / skips detection; on, the imported regions join them
+        self.ocr_import_merge = False
         self.pending: list = []  # paths handed over before the selection was loaded
 
     def config(self) -> dict:

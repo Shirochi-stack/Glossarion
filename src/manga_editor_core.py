@@ -4791,6 +4791,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         # Create fresh UnifiedClient (no caching to avoid environment variable conflicts)
         print(f"[DEBUG] Creating fresh UnifiedClient with model: {model} (multi_key={use_mk})")
         client = UnifiedClient(model=model, api_key=api_key)
+        client._text_output_only = True  # a text request: the main tab's Output mode is not applied
         # If multi-key desired, ensure pool is initialized/refreshed
         try:
             if use_mk and mk_list:
@@ -6352,6 +6353,7 @@ def _translate_this_text_background(self, message: str, region_index: int):
         
         # Create unified client with main GUI config
         unified_client = UnifiedClient(model=model, api_key=api_key)
+        unified_client._text_output_only = True  # a text request: the main tab's Output mode is not applied
         try:
             if use_mk and mk_list:
                 UnifiedClient.setup_multi_key_pool(
@@ -10505,9 +10507,11 @@ class MangaEditorSession:
             path = manga_ocr_io.write_document(destination, document)
             return {'path': path, 'pages': len(pages), 'translated_regions': translated_region_count}
 
-    def import_ocr(self, path, image_paths=None, *, owner=None, render=True):
+    def import_ocr(self, path, image_paths=None, *, owner=None, render=True, merge=False):
         """Import a manga_ocr_io document onto the pages (matched by path / relative path / name);
-        pages with translations are rendered from the imported state when ``render``."""
+        pages with translations are rendered from the imported state when ``render``. ``merge``
+        (Import OCR's merge option): a page keeps its own boxes except those an imported region
+        overlaps (``manga_ocr_io.editor_state_for_import``); off, the import replaces them."""
         with self._op_lock:
             if owner is not None:
                 self.set_owner(owner)
@@ -10516,8 +10520,8 @@ class MangaEditorSession:
             matches = manga_ocr_io.match_document_pages(document, files)
             translated_region_count = 0
             for image_path, page in matches.items():
-                imported_state = manga_ocr_io.editor_state_from_page(page)
                 existing_state = self.image_state_manager.get_state(image_path) or {}
+                imported_state = manga_ocr_io.editor_state_for_import(page, existing_state, merge=merge)
                 existing_state.update(imported_state)
                 self.image_state_manager.set_state(image_path, existing_state, save=False)
                 translated_region_count += sum(

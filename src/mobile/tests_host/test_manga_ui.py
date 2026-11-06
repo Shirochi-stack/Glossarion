@@ -371,6 +371,10 @@ def test_batch_spec_hands_the_runner_the_whole_visible_list(iso, tmp_path):
     assert params["skipped"] == [files.skip_key(files.files[0])] and params["editor_session"] == "es1"
     assert params["imported_ocr"] == ""
     assert svc.batch_spec(files, imported_ocr="/x/ocr.json").params["imported_ocr"] == "/x/ocr.json"
+    # Import OCR's merge option (desktop "Merge with detection") goes with the import, off by default
+    assert params["imported_ocr_merge"] is False
+    assert svc.batch_spec(files, imported_ocr="/x/ocr.json", imported_ocr_merge=True).params["imported_ocr_merge"] is True
+    assert svc.batch_spec(files, imported_ocr_merge=True).params["imported_ocr_merge"] is False
     assert params["cbz_jobs"] and params["cbz_image_to_job"] and params["glossary_only"] is False
     json.dumps(spec.to_dict())  # persisted with the job
     assert svc.batch_spec(files, glossary_only=True).title.startswith("Glossary · ")
@@ -616,13 +620,17 @@ def test_batch_adapter_runs_the_headless_runner_with_the_selection(tmp_path, mon
     # an imported OCR JSON goes to the runner before Start (manga_env.import_ocr_session, desktop batch import)
     imports: list = []
     monkeypatch.setitem(sys.modules, "manga_env", _module(
-        "manga_env", import_ocr_session=lambda state, path=None, *, document=None, files=None:
-        imports.append((state, path, list(files))) or {p: {} for p in files[:1]}))
+        "manga_env", import_ocr_session=lambda state, path=None, *, document=None, files=None, merge=False:
+        imports.append((state, path, list(files), merge)) or {p: {} for p in files[:1]}))
     ocr = tmp_path / "session.json"
     ocr.write_text("{}", encoding="utf-8")
     ctx = FakeCtx(owner, params={"files": pages, "run_files": pages[1:], "imported_ocr": str(ocr)}, inputs=pages)
     manga_kind.run_batch(ctx)
-    assert imports == [(FakeRunner.instances[-1], str(ocr), pages[1:])] and not ctx.logs
+    assert imports == [(FakeRunner.instances[-1], str(ocr), pages[1:], False)] and not ctx.logs
+    ctx = FakeCtx(owner, params={"files": pages, "run_files": pages[1:], "imported_ocr": str(ocr),
+                                 "imported_ocr_merge": True}, inputs=pages)
+    manga_kind.run_batch(ctx)
+    assert imports[-1] == (FakeRunner.instances[-1], str(ocr), pages[1:], True) and not ctx.logs
     ctx = FakeCtx(owner, params={"files": pages, "imported_ocr": str(tmp_path / "gone.json")}, inputs=pages)
     assert manga_kind.run_batch(ctx)["ok"] is True and "Imported OCR not reused" in ctx.logs[0]
     # failures and a refused start
@@ -794,8 +802,9 @@ class FakeEditorSession:
         self._step("rerender_boxes", image_path, owner)
         self.calls.append(("rerender_boxes_indexes", tuple(indexes)))
 
-    def import_ocr(self, path, images=None, *, owner=None, render=True):
+    def import_ocr(self, path, images=None, *, owner=None, render=True, merge=False):
         self._step("import_ocr", path, owner)
+        self.calls.append(("import_ocr_merge", merge))
         return {"matched": 1, "files": len(images or ()), "translated_regions": 2, "rendered": {}}
 
     def ocr_box(self, index, *, owner=None):
@@ -857,6 +866,10 @@ def test_step_adapter_calls_the_session_with_the_job_owner(tmp_path, monkeypatch
     ctx = FakeCtx(owner, params=svc.step_spec("import_ocr", token, page, images=[page], extra={"path": str(ocr)}).params)
     manga_kind.run_step(ctx)
     assert ctx.results["manga_import"] == {"matched": 1, "files": 1, "translated_regions": 2}
+    assert session.calls[-1] == ("import_ocr_merge", False)
+    manga_kind.run_step(FakeCtx(owner, params=svc.step_spec("import_ocr", token, page, images=[page],
+                                                            extra={"path": str(ocr), "merge": True}).params))
+    assert session.calls[-1] == ("import_ocr_merge", True)
     # the session's log lines go to the job log while the step runs, then back
     session._log_callback = None
 
@@ -1691,8 +1704,12 @@ def test_editor_tab_boxes_steps_sheet_and_ocr(iso, tmp_path, monkeypatch):
         assert path and path.startswith(str(iso["Output"])) and fake_session.calls[-1][0] == "export_ocr"
         ocr = tmp_path / "ocr.json"
         ocr.write_text("{}", encoding="utf-8")
+        files_tab = screen.files_tab
+        assert files_tab.import_merge_switch.value is False and manga.ocr_import_merge is False
+        files_tab._set_import_merge(True)  # "Import OCR: merge with detection"
         job_id = await tab.import_ocr()
         assert jobs.specs[-1].params["step"] == "import_ocr" and jobs.specs[-1].params["path"] == str(ocr)
+        assert jobs.specs[-1].params["merge"] is True
         jobs.finish(job_id, result={"manga_step": "import_ocr",
                                     "manga_import": {"matched": 1, "files": 2, "translated_regions": 0}})
         await _settle()
@@ -1702,6 +1719,8 @@ def test_editor_tab_boxes_steps_sheet_and_ocr(iso, tmp_path, monkeypatch):
         files_tab = screen.files_tab
         assert files_tab.imported_row.visible and files_tab._imported_ocr_path() == str(ocr)
         assert svc.batch_spec(manga.files, imported_ocr=files_tab._imported_ocr_path()).params["imported_ocr"] == str(ocr)
+        assert "merged with detection" in files_tab.imported_row.controls[1].value
+        files_tab._set_import_merge(False)
         files_tab.clear_imported_ocr()
         assert manga.imported_ocr is None and not files_tab.imported_row.visible
         await tab.step_page(1)
@@ -2991,7 +3010,7 @@ def test_bindings_match_the_shared_core_contracts():
         "set_box_style": ("index", "style", "reset"),
         "ocr_box": ("index", "owner"), "translate_box": ("index", "owner"), "clean_box": ("index", "owner"),
         "stop": ("force",), "export_ocr": ("destination", "image_paths", "source_root"),
-        "import_ocr": ("path", "image_paths", "owner", "render"), "close": (),
+        "import_ocr": ("path", "image_paths", "owner", "render", "merge"), "close": (),
     }
     for name, args in calls.items():
         assert name in session and _takes(session[name], *args, strict=True), name
@@ -3019,7 +3038,7 @@ def test_bindings_match_the_shared_core_contracts():
     assert {"FileListShim", "_natural_sort_key"} <= set(files_core[""])
     assert {"default_manga_ocr_prompt", "default_full_page_context_prompt", "default_manga_glossary_prompt",
             "default_custom_image_edit_system_prompt"} <= set(env[""])
-    assert _takes(env[""]["import_ocr_session"], "state", "path", "files", strict=True)
+    assert _takes(env[""]["import_ocr_session"], "state", "path", "files", "merge", strict=True)
 
     models = _core_defs("manga_models")
     assert {"get_spec", "specs", "status", "download", "cancel", "delete", "load", "unload", "loaded", "disk_usage",
