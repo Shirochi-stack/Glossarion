@@ -33,7 +33,7 @@ SIZE_MAX = 200
 ALIGNMENTS = (("left", "Align left"), ("center", "Center"), ("right", "Align right"))
 
 _COMBO_STYLE = """
-    QComboBox, QSpinBox {
+    QComboBox {
         background-color: #2d2d2d;
         color: white;
         border: 1px solid #3a3a3a;
@@ -41,7 +41,7 @@ _COMBO_STYLE = """
         padding: 2px 4px;
         min-height: 24px;
     }
-    QComboBox:disabled, QSpinBox:disabled {
+    QComboBox:disabled {
         background-color: #1a1a1a;
         color: #555555;
         border-color: #2a2a2a;
@@ -123,8 +123,9 @@ class MangaFormatToolbar(QObject):
         self.size_spin.setSpecialValueText("Auto")
         self.size_spin.setSuffix(" px")
         self.size_spin.setToolTip("Font size of the selected box (Auto: fit the box like the Rendering Settings)")
-        self.size_spin.setStyleSheet(_COMBO_STYLE)
-        self.size_spin.setFixedWidth(76)
+        # No style sheet: the native spin box, like Other Settings' GUI Font Scale (a QSpinBox rule
+        # without ::up-button / ::down-button rules draws broken arrows over the text)
+        self.size_spin.setFixedWidth(84)
         self.size_spin.setKeyboardTracking(False)
         self.size_spin.wheelEvent = lambda event: None
         self.size_spin.valueChanged.connect(self._on_size_changed)
