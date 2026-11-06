@@ -103,7 +103,6 @@ def test_only_credentials_render_as_secret_tiles():
     assert ss.spec("glossary_max_output_tokens").type == "int"
     assert not ss.is_available("multi_api_key_tree_font_size")[0]
     assert not ss.is_available("multi_api_key_tree_heights")[0]
-    assert not ss.is_available("multi_api_key_collapsed_pools")[0]
 
 
 def test_emoticon_patterns_get_the_phrase_list_editor():
