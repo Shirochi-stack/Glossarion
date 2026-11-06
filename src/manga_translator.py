@@ -401,15 +401,29 @@ def _strip_wrapping_quotes(text: str) -> str:
 _UNREADABLE_MARKER_WORDS = (
     'illegible', 'unintelligible', 'unreadable', 'indecipherable', 'undecipherable', 'garbled',
     'gibberish', 'untranslatable', 'not readable', 'cannot be read', "can't be read",
-    'cannot read', "can't read", 'unclear text', 'text unclear', 'no readable', 'no text',
+    'cannot read', "can't read", 'unclear text', 'text unclear', 'no readable',
 )
+#: In parentheses, which is also how a thought or an aside is translated ("(I can't read
+#: him at all...)"), only these adjectives make a note.
+_UNREADABLE_ADJECTIVES = (
+    'illegible', 'unintelligible', 'unreadable', 'indecipherable', 'undecipherable', 'untranslatable',
+)
+#: A model's note is a few words; a longer bracketed text is a translation.
+_UNREADABLE_NOTE_MAX_WORDS = 6
+#: A source that opens with one of these is bracketed itself (a system window, a thought):
+#: its translation keeps the brackets and is never a note.
+_SOURCE_OPENING_BRACKETS = '[(（【〔「『<〈《'
 _BRACKETED_RE = None
+_NO_TEXT_NOTE_RE = None
 
 
-def _is_unreadable_translation(text) -> bool:
+def _is_unreadable_translation(text, source_text=None) -> bool:
     """True when a translation is a marker instead of text: an API failure placeholder or a
-    bracketed note that the source could not be read. Such a region is not lettered."""
-    global _BRACKETED_RE
+    bracketed note that the source could not be read. Such a region is not lettered.
+
+    ``source_text`` (the OCR text) keeps a bracketed source's bracketed translation
+    ("[Quest: no text messages]" for a system window) from counting as a note."""
+    global _BRACKETED_RE, _NO_TEXT_NOTE_RE
     value = str(text or '').strip()
     if not value:
         return False
@@ -423,13 +437,24 @@ def _is_unreadable_translation(text) -> bool:
         pass
     if _BRACKETED_RE is None:
         import re
+        # (the pattern tested first is set last: another thread may read it meanwhile)
+        _NO_TEXT_NOTE_RE = re.compile(
+            r'no (?:readable |legible |visible )?text(?: (?:found|detected|visible|here|present))?')
         _BRACKETED_RE = re.compile(
             r'[\[(\uff08\u3010]\s*([^\[\]()\uff08\uff09\u3010\u3011]{1,80}?)\s*[\])\uff09\u3011][.!?\u2026]*')
     match = _BRACKETED_RE.fullmatch(value)
     if not match:
         return False
-    inner = match.group(1).lower()
-    return any(word in inner for word in _UNREADABLE_MARKER_WORDS)
+    source = str(source_text or '').strip()
+    if source and source[0] in _SOURCE_OPENING_BRACKETS:
+        return False
+    inner = ' '.join(match.group(1).lower().split())
+    if len(inner.split()) > _UNREADABLE_NOTE_MAX_WORDS:
+        return False
+    if _NO_TEXT_NOTE_RE.fullmatch(inner):
+        return True
+    words = _UNREADABLE_ADJECTIVES if value[0] in '(（' else _UNREADABLE_MARKER_WORDS
+    return any(word in inner for word in words)
 
 
 #: Model confidence (the OCR model's own score) under which a 1-2 character read of a
@@ -9703,6 +9728,11 @@ class MangaTranslator:
                 continue
             if region_needs_no_lettering(region.text, getattr(region, 'translated_text', None)):
                 # Digits that translate to themselves (clocks, page numbers) keep their art.
+                # Inpainting runs alongside translation, so the translation may not be known
+                # yet: remember the art was kept, so a translation that arrives later
+                # ("11:59 AM", "What?!") is not lettered over the uncleaned text.
+                if not str(getattr(region, 'translated_text', None) or '').strip():
+                    region.art_kept_unmasked = True
                 regions_skipped += 1
                 self._log(f"   Region {i+1}: SKIPPED (number-only text stays as drawn)", "debug")
                 continue
@@ -11257,7 +11287,8 @@ class MangaTranslator:
         if not isinstance(source, np.ndarray) or not isinstance(cleaned, np.ndarray) \
                 or source.shape != cleaned.shape:
             return 0
-        targets = [r for r in regions or [] if _is_unreadable_translation(getattr(r, 'translated_text', ''))]
+        targets = [r for r in regions or []
+                   if _is_unreadable_translation(getattr(r, 'translated_text', ''), getattr(r, 'text', ''))]
         if not targets:
             return 0
         from image_edit_check import edit_footprint
@@ -11333,10 +11364,11 @@ class MangaTranslator:
     @staticmethod
     def _region_left_unlettered(region) -> bool:
         """Regions whose art stays as drawn: text the edit left, unchanged digits (11:59) or
-        symbols, and a translation that is only a placeholder ("[Illegible text]")."""
-        if getattr(region, 'image_edit_text_left', False):
+        symbols (also when their translation arrived after the mask kept their art), and a
+        translation that is only a placeholder ("[Illegible text]")."""
+        if getattr(region, 'image_edit_text_left', False) or getattr(region, 'art_kept_unmasked', False):
             return True
-        if _is_unreadable_translation(getattr(region, 'translated_text', '')):
+        if _is_unreadable_translation(getattr(region, 'translated_text', ''), getattr(region, 'text', '')):
             return True
         from image_edit_check import region_needs_no_lettering
         return region_needs_no_lettering(getattr(region, 'text', ''), getattr(region, 'translated_text', ''))
@@ -16444,9 +16476,12 @@ class MangaTranslator:
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
             # OPTIMIZATION: Skip verbose logging during rendering
-            self._restore_art_of_unreadable_regions(image, inpainted, regions)
+            if self._restore_art_of_unreadable_regions(image, inpainted, regions) and cleaned_image_path:
+                # The cleaned image was saved before the translations were known: save it
+                # again with that art back, so the editor shows the same page.
+                _save_cleaned_image_if_changed(inpainted, "placeholder art restored")
             final_image = self.render_translated_text(inpainted, regions)
-            
+
             # Final stop check before saving (aggressive - ignores graceful stop)
             if self.is_globally_cancelled() or (hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set()):
                 result['interrupted'] = True

@@ -199,9 +199,13 @@ def edit_footprint(source, edited, failed_mask, text_mask):
     """Return ``(footprint, redo_text)`` around the failed text components.
 
     ``footprint`` (bool) is every connected area the edit changed that touches a failed
-    component; putting ``source`` back there undoes the edit for that text only.
-    ``redo_text`` (uint8, 255) is the part of ``text_mask`` inside it: the text that then
-    needs cleaning again, including passing components the same area swallowed.
+    component, near that component; putting ``source`` back there undoes the edit for that
+    text only. ``redo_text`` (uint8, 255) is the part of ``text_mask`` inside it: the text
+    that then needs cleaning again.
+
+    A model that returns the whole crop re-encoded changes every pixel of it, so the area is
+    kept within half the failed component's size around it and out of the text components
+    the edit did clean (their edit stays).
     """
     cv2 = _cv2()
     failed = _binary(failed_mask)
@@ -210,8 +214,19 @@ def edit_footprint(source, edited, failed_mask, text_mask):
         changed = np.any(source != edited, axis=2)
     else:
         changed = source != edited
-    changed = (changed | (failed > 0)).astype(np.uint8)
-    changed = cv2.dilate(changed, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    height, width = failed.shape[:2]
+    reach = np.zeros((height, width), bool)
+    count, _labels, boxes, _ = cv2.connectedComponentsWithStats(failed, connectivity=8)
+    for label in range(1, count):
+        x, y, bw, bh = (int(v) for v in boxes[label][:4])
+        pad = max(8, int(0.5 * max(bw, bh)))
+        reach[max(0, y - pad):min(height, y + bh + pad), max(0, x - pad):min(width, x + bw + pad)] = True
+    passed = ((mask > 0) & (failed == 0)).astype(np.uint8)
+    if passed.any():
+        passed = cv2.dilate(passed, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
+    changed = (changed & reach & (passed == 0)) | (failed > 0)
+    changed = cv2.dilate(changed.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    changed[(passed > 0) & (failed == 0)] = 0
     count, labels = cv2.connectedComponents(changed, connectivity=8)
     hit = np.unique(labels[failed > 0])
     hit = hit[hit > 0]

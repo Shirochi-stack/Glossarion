@@ -148,6 +148,28 @@ def test_text_left_without_a_local_inpainter_keeps_the_art_and_is_reported():
     assert _dark_text_pixels(result, 0) == 0  # the bubble the edit did clean stays clean
 
 
+def test_lossy_whole_crop_output_undoes_only_the_missed_bubble():
+    # A model that returns the whole crop re-encoded (every pixel off by a level or two, the
+    # Full-page output / edit-area 100% case) changes one connected area: the missed bubble's
+    # art must come back without undoing the bubble the edit did clean.
+    source, mask = _page()
+
+    def lossy_edit(crop, crop_mask, iterations=None, _pool_prepared=False):
+        edited = _edit_that_misses_bubble_two(crop, crop_mask)
+        return np.clip(edited.astype(np.int16) - 3, 0, 255).astype(np.uint8)
+
+    inpainter = _inpainter()
+    inpainter._custom_image_edit_inpaint = lossy_edit
+    result = inpainter.inpaint(source, mask)
+
+    assert _dark_text_pixels(result, 0) == 0, "the cleaned bubble stays clean"
+    unremoved = inpainter.last_image_edit_unremoved_mask
+    assert unremoved is not None
+    assert (unremoved[_bubble_mask(source.shape, 1) > 0] > 0).all()
+    assert not (unremoved[_bubble_mask(source.shape, 0) > 0] > 0).any(), \
+        "the bubble the edit cleaned is not reported as left (it is lettered)"
+
+
 def test_clean_edit_passes_the_check_untouched():
     source, mask = _page()
     clean, _ = _page(text=False)
@@ -322,6 +344,26 @@ def test_number_sign_with_a_real_translation_is_still_cleaned(mt):
     page = _sign_page()
     noon = _region(CLOCK_BOX, "12:00", "Noon")
     assert _box(mt.create_text_mask(page, [noon]), CLOCK_BOX).any()
+
+
+@pytest.mark.parametrize("source, late_translation", [
+    ("11:59", "11:59 AM"),
+    ("?!", "What?!"),
+])
+def test_translation_arriving_after_the_mask_is_not_lettered_over_kept_art(mt, source, late_translation):
+    # Inpainting runs alongside translation: the mask is made before the translation is in,
+    # keeps the sign's art, and a translation that differs must not be drawn over it.
+    page = _sign_page()
+    sign = _region(CLOCK_BOX, source, None)
+    speech = _region(SPEECH_BOX, "안녕하세요", None)
+    mask = mt.create_text_mask(page, [sign, speech])
+    assert not _box(mask, CLOCK_BOX).any(), "the sign keeps its art"
+    sign.translated_text = late_translation
+    speech.translated_text = "Hello there"
+    rendered = mt.render_translated_text(page.copy(), [sign, speech])
+    assert np.array_equal(_box(rendered, CLOCK_BOX), _box(page, CLOCK_BOX)), \
+        "no translation is lettered over the uncleaned sign"
+    assert not np.array_equal(_box(rendered, SPEECH_BOX), _box(page, SPEECH_BOX))
 
 
 def test_regions_whose_text_the_edit_left_are_not_lettered(mt, monkeypatch):

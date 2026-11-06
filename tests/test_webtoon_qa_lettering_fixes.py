@@ -159,11 +159,27 @@ def test_chunked_detection_keeps_each_seam_text_once_and_whole(tmp_path, webtoon
     ("(She also packed the Brick Bread as a keepsake.)", False),
     ("[Illegible] he wrote, and left.", False),
     ("Hello", False),
+    ("[No text]", True),
+    # thoughts and asides come back in parentheses; system windows in square brackets
+    ("(I can't read him at all...)", False),
+    ("(This is gibberish!)", False),
+    ("(No texts from him all day...)", False),
+    ("[You have no text messages]", False),
+    ("[The letter is old, faded and nearly illegible, but the seal is still bright red]", False),
 ])
 def test_unreadable_translation_markers(text, expected):
     from manga_translator import _is_unreadable_translation
 
     assert _is_unreadable_translation(text) is expected
+
+
+def test_bracketed_source_keeps_its_bracketed_translation():
+    from manga_translator import _is_unreadable_translation
+
+    assert _is_unreadable_translation("[Unreadable]", "읽을 수 없는 글씨") is True
+    # a system window: the source is bracketed too, so the brackets are the translation's own
+    assert _is_unreadable_translation("[Status: Unreadable]", "[상태: 판독 불가]") is False
+    assert _is_unreadable_translation("(Illegible...)", "(알아볼 수가 없어...)") is False
 
 
 def _two_bubble_page():
