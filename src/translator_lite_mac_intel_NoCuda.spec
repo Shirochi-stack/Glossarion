@@ -162,6 +162,7 @@ app_files = [
     ('manga_settings_dialog.py', '.'),
     ('manga_image_preview.py', '.'),
     ('manga_format_toolbar.py', '.'),
+    ('manga_preview_zoom.py', '.'),
     
     # Dialog animations
     ('dialog_animations.py', '.'),
@@ -579,6 +580,7 @@ app_modules = [
     'manga_files_core',
     'manga_image_preview',
     'manga_format_toolbar', # Manga editor Format toolbar (per-box text style)
+    'manga_preview_zoom', # Manga editor preview Ctrl zoom (keys, Ctrl+wheel, pinch)
     'manga_integration',
     'manga_models',
     'hayai_ocr',

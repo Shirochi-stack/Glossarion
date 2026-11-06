@@ -6807,6 +6807,9 @@ def compute_book_summary(source_path, config=None, *, owner=None, output_dir=Non
 # pre-2.1 flat / ``images`` progress layout (DISCREPANCIES U5 desktop bug 3: against a
 # v2.1 ``chapters`` file no hash key is ever found, so nothing is removed from it);
 # its two progress writes now go through ``mutate_progress`` (DISCREPANCIES U7).
+# 2026-11-06: the scan resolves image_job's working-directory-relative outputs, lists
+# generated images and the selection's untranslated images (DISCREPANCIES "Image
+# Progress Manager lists the image runner's outputs").
 # ---------------------------------------------------------------------------
 
 
@@ -6865,27 +6868,119 @@ def image_folder_not_found_message(folder_name, folder_path, script_dir, possibl
         f"Checked locations:\n" + "\n".join(f"- {d}" for d in possible_output_dirs))
 
 
-def scan_image_folder(output_dir, progress_file):
+#: Image extensions the image-folder view lists (sources, generated outputs, skipped images).
+_IMAGE_FOLDER_MEDIA_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+#: ``response_<index>_<image stem>.<ext>``: the name the image runner gives its outputs.
+_IMAGE_FOLDER_OUTPUT_RE = re.compile(r'^response_(\d+)_(.+)\.[^.]+$', re.IGNORECASE)
+
+
+def _image_folder_progress_entries(progress_data):
+    """``{hash: entry}`` of an image progress file: the nested ``images`` dict
+    (``image_job``), else the older flat layout's entries with an ``output_file``."""
+    if not isinstance(progress_data, dict):
+        return {}
+    images_dict = progress_data.get('images', {})
+    if images_dict and isinstance(images_dict, dict):
+        return {key: value for key, value in images_dict.items() if isinstance(value, dict)}
+    return {key: value for key, value in progress_data.items()
+            if isinstance(value, dict) and 'output_file' in value}
+
+
+def _resolve_image_output_file(output_file, output_dir):
+    """``(name, exists)`` of a progress ``output_file`` as the view lists it.
+
+    ``image_job`` records ``os.path.join(output_dir, name)`` with the output folder as
+    the run opened it: relative to the working directory
+    (``<stem>\\response_001_<stem>.png``) unless an absolute output directory is set.
+    The path is tried relative to the output folder (older files), then to the working
+    directory and the output folder's parent (those two only when they land inside the
+    output folder).  ``name`` is relative to the output folder with ``/`` separators when
+    the file is inside it, absolute otherwise; a missing file keeps the recorded form.
+    """
+    if not output_file:
+        return None, False
+    normalized = str(output_file).replace('\\', '/')
+    out_abs = os.path.abspath(output_dir)
+
+    def _inside(candidate):
+        try:
+            rel = os.path.relpath(os.path.abspath(candidate), out_abs)
+        except ValueError:  # another drive (Windows)
+            return None
+        return None if rel == '..' or rel.startswith('..' + os.sep) or rel.startswith('../') else rel
+
+    if os.path.isabs(normalized):
+        if os.path.exists(normalized):
+            rel = _inside(normalized)
+            return (rel.replace('\\', '/') if rel else normalized), True
+        rel = _inside(normalized)
+        return (rel.replace('\\', '/') if rel else normalized), False
+    if os.path.exists(os.path.join(output_dir, normalized)):
+        return normalized, True
+    for candidate in (os.path.abspath(normalized), os.path.join(os.path.dirname(out_abs), normalized)):
+        if os.path.isfile(candidate):
+            rel = _inside(candidate)
+            if rel:
+                return rel.replace('\\', '/'), True
+    return normalized, False
+
+
+def _is_image_folder_generated_name(file_name):
+    """A generated image the runner saved in the output folder (``response_001_<stem>.png``,
+    ``<stem>_generated.png``), not the source copy kept next to an HTML translation."""
+    return bool(_IMAGE_FOLDER_OUTPUT_RE.match(file_name)) or \
+        os.path.splitext(file_name)[0].lower().endswith('_generated')
+
+
+def _image_folder_output_stem(file_name):
+    """The source image stem of an output name (``response_001_a.html`` -> ``a``)."""
+    base = os.path.basename(str(file_name or ''))
+    match = _IMAGE_FOLDER_OUTPUT_RE.match(base)
+    stem = match.group(2) if match else os.path.splitext(base)[0]
+    if stem.lower().endswith('_generated'):
+        stem = stem[:-len('_generated')]
+    return stem
+
+
+def _image_folder_sources(source_path):
+    """The source images of the selection: every image in a folder, or the image itself."""
+    if not source_path:
+        return []
+    source_path = str(source_path)
+    if os.path.isdir(source_path):
+        try:
+            names = sorted(os.listdir(source_path))
+        except OSError:
+            return []
+        return [os.path.join(source_path, name) for name in names
+                if name.lower().endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS)
+                and os.path.isfile(os.path.join(source_path, name))]
+    if os.path.isfile(source_path) and source_path.lower().endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS):
+        return [source_path]
+    return []
+
+
+#: Image progress status -> Progress Manager status of an image without a translation.
+_IMAGE_FOLDER_PENDING_STATUS = {
+    'in_progress': 'in_progress',
+    'error': 'failed',
+    'failed': 'failed',
+    'skipped_cover': 'skipped',
+}
+
+
+def scan_image_folder(output_dir, progress_file, source_path=None):
     """Rescan an image folder's output (RG 25236-25386): ``{'file_info', 'progress_data',
     'html_files', 'image_files'}``; ``file_info`` rows are ``{'type': 'translated' |
-    'cover', 'file', 'path', 'hash_key', 'output_dir'}`` in display order."""
-    def _normalize_output_file(output_file, output_dir):
-        if not output_file:
-            return None
-        # Normalize separators
-        normalized = str(output_file).replace('\\', '/')
-        # If absolute, try to store relative to output_dir when possible
-        if os.path.isabs(normalized):
-            try:
-                rel = os.path.relpath(normalized, output_dir)
-                if not rel.startswith('..'):
-                    return rel.replace('\\', '/')
-            except Exception:
-                pass
-            return normalized
-        # If it's a relative path, keep as-is (preserve subfolders)
-        return normalized
+    'pending' | 'cover', 'status', 'file', 'path', 'hash_key', 'output_dir'}`` in
+    display order.
 
+    Translated rows are the progress outputs found on disk (``image_job``'s
+    working-directory-relative paths included) plus the HTML and generated images in the
+    output folder; ``source_path`` (the selected image folder or image) adds a ``pending``
+    row (``path`` empty, ``source``: the image) for every source image without a
+    translation that is not in ``images/``, like the text view's untranslated chapters.
+    """
     # ALWAYS reload progress data from file to catch deletions
     progress_data = None
     html_files = []
@@ -6896,50 +6991,32 @@ def scan_image_folder(output_dir, progress_file):
             with open(progress_file, 'r', encoding='utf-8') as f:
                 progress_data = json.load(f)
             print(f"🔄 Reloaded progress file from disk")
-
-            # Extract files from progress data (primary source)
-            # Check if this is the newer nested structure with 'images' key
-            images_dict = progress_data.get('images', {})
-            if images_dict:
-                # Newer structure: progress_data['images'][hash] = {entry}
-                for key, value in images_dict.items():
-                    if isinstance(value, dict) and 'output_file' in value:
-                        output_file = _normalize_output_file(value['output_file'], output_dir)
-
-                        # Only include if file actually exists on disk
-                        if output_file and output_file not in html_files:
-                            full_path = output_file if os.path.isabs(output_file) else os.path.join(output_dir, output_file)
-                            if os.path.exists(full_path):
-                                html_files.append(output_file)
-                            else:
-                                #print(f"⚠️ File in progress but not on disk: {output_file}")
-                                pass
-            else:
-                # Older structure: progress_data[hash] = {entry}
-                for key, value in progress_data.items():
-                    if isinstance(value, dict) and 'output_file' in value:
-                        output_file = _normalize_output_file(value['output_file'], output_dir)
-
-                        # Only include if file actually exists on disk
-                        if output_file and output_file not in html_files:
-                            full_path = output_file if os.path.isabs(output_file) else os.path.join(output_dir, output_file)
-                            if os.path.exists(full_path):
-                                html_files.append(output_file)
-                            else:
-                                #print(f"⚠️ File in progress but not on disk: {output_file}")
-                                pass
         except Exception as e:
             print(f"Failed to load progress file: {e}")
             has_progress_tracking = False
 
-    # Also scan directory for any HTML files not in progress (fallback)
+    # Extract files from progress data (primary source): only outputs that exist on disk
+    entries = _image_folder_progress_entries(progress_data)
+    resolved = {}
+    for key, value in entries.items():
+        if 'output_file' not in value:
+            continue
+        output_file, exists = _resolve_image_output_file(value['output_file'], output_dir)
+        resolved[key] = output_file
+        if output_file and exists and output_file not in html_files:
+            html_files.append(output_file)
+
+    # Also scan directory for any HTML files / generated images not in progress (fallback)
     if os.path.exists(output_dir):
         try:
             for file in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, file)
-                if (os.path.isfile(file_path) and 
-                    file.lower().endswith(('.html', '.xhtml', '.htm')) and 
-                    file not in html_files):
+                if not os.path.isfile(file_path) or file in html_files:
+                    continue
+                lower = file.lower()
+                if lower.endswith(('.html', '.xhtml', '.htm')):
+                    html_files.append(file)
+                elif lower.endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS) and _is_image_folder_generated_name(file):
                     html_files.append(file)
         except Exception as e:
             print(f"Error scanning directory: {e}")
@@ -6950,7 +7027,7 @@ def scan_image_folder(output_dir, progress_file):
     if os.path.exists(images_dir):
         try:
             for file in os.listdir(images_dir):
-                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                if file.lower().endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS):
                     image_files.append(file)
         except Exception as e:
             print(f"Error scanning images directory: {e}")
@@ -6960,53 +7037,69 @@ def scan_image_folder(output_dir, progress_file):
 
     # Add translated files (both HTML and generated images)
     for html_file in sorted(set(html_files)):
-        # Determine file type and extract info
-        file_name = os.path.basename(html_file)
-        is_html = file_name.lower().endswith(('.html', '.xhtml', '.htm'))
-        is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
-
-        if is_html:
-            match = re.match(r'response_(\d+)_(.+)\.html', file_name)
-            if match:
-                index = match.group(1)
-                base_name = match.group(2)
-        elif is_image:
-            # For generated images, just use the filename
-            base_name = os.path.splitext(file_name)[0]
-
         # Find hash key if progress tracking exists
         hash_key = None
-        if progress_data:
-            # Check nested structure first
-            images_dict = progress_data.get('images', {})
-            if images_dict:
-                for key, value in images_dict.items():
-                    if isinstance(value, dict) and 'output_file' in value:
-                        output_file = _normalize_output_file(value['output_file'], output_dir)
-                        if output_file and output_file == html_file:
-                            hash_key = key
-                            break
-            else:
-                # Check flat structure
-                for key, value in progress_data.items():
-                    if isinstance(value, dict) and 'output_file' in value:
-                        output_file = _normalize_output_file(value['output_file'], output_dir)
-                        if output_file and output_file == html_file:
-                            hash_key = key
-                            break
+        for key, output_file in resolved.items():
+            if output_file and output_file == html_file:
+                hash_key = key
+                break
 
         file_info.append({
             'type': 'translated',
+            'status': 'completed',
             'file': html_file,
             'path': html_file if os.path.isabs(html_file) else os.path.join(output_dir, html_file),
             'hash_key': hash_key,
             'output_dir': output_dir
         })
 
+    # Source images without a translation (the text view's untranslated rows)
+    sources = _image_folder_sources(source_path)
+    if sources:
+        skipped_names = {name.lower() for name in image_files}
+        done_keys = {info['hash_key'] for info in file_info if info['hash_key']}
+        # A translated row names its source through its progress entry; only an output
+        # without one is matched by stem (else a.jpg would read as done once a.png is)
+        done_names = set()
+        done_stems = set()
+        for info in file_info:
+            entry = (entries.get(info['hash_key']) or {}) if info['hash_key'] else {}
+            entry_name = str(entry.get('name') or os.path.basename(str(entry.get('path') or '')))
+            if entry_name:
+                done_names.add(entry_name.lower())
+            else:
+                done_stems.add(_image_folder_output_stem(info['file']).lower())
+        by_path = {}
+        by_name = {}
+        for key, value in entries.items():
+            if value.get('path'):
+                by_path.setdefault(os.path.normcase(os.path.abspath(str(value['path']))), key)
+            if value.get('name'):
+                by_name.setdefault(str(value['name']).lower(), key)
+        for source in sources:
+            name = os.path.basename(source)
+            if name.lower() in skipped_names:
+                continue  # listed as a skipped (images/) row
+            key = by_path.get(os.path.normcase(os.path.abspath(source))) or by_name.get(name.lower())
+            if key in done_keys or name.lower() in done_names \
+                    or os.path.splitext(name)[0].lower() in done_stems:
+                continue
+            entry_status = str((entries.get(key) or {}).get('status') or '') if key else ''
+            file_info.append({
+                'type': 'pending',
+                'status': _IMAGE_FOLDER_PENDING_STATUS.get(entry_status, 'not_translated'),
+                'file': name,
+                'path': '',
+                'source': source,
+                'hash_key': key,
+                'output_dir': output_dir
+            })
+
     # Add cover images
     for img_file in sorted(image_files):
         file_info.append({
             'type': 'cover',
+            'status': 'skipped',
             'file': img_file,
             'path': os.path.join(images_dir, img_file),
             'hash_key': None,
@@ -7026,7 +7119,7 @@ def image_folder_row_text(info):
         file_name = os.path.basename(info['file'])
         # Check if it's an HTML file or a generated image
         is_html = file_name.lower().endswith(('.html', '.xhtml', '.htm'))
-        is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
+        is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'))
 
         if is_html:
             match = re.match(r'response_(\d+)_(.+)\.html', file_name)
@@ -7037,11 +7130,20 @@ def image_folder_row_text(info):
             else:
                 display = f"📄 {file_name} | ✅ Completed"
         elif is_image:
-            # Generated image file (e.g., Test1.png from imagen)
-            base_name = os.path.splitext(file_name)[0]
-            display = f"🖼️ {base_name} | ✅ Completed"
+            match = _IMAGE_FOLDER_OUTPUT_RE.match(file_name)
+            if match:
+                # Generated image (response_001_<stem>.png)
+                display = f"🖼️ Image {match.group(1)} | {match.group(2)} | ✅ Completed"
+            else:
+                # Generated image file (e.g., Test1_generated.png)
+                base_name = os.path.splitext(file_name)[0]
+                display = f"🖼️ {base_name} | ✅ Completed"
         else:
             display = f"📄 {file_name} | ✅ Completed"
+    elif info['type'] == 'pending':
+        status = info.get('status') or 'not_translated'
+        display = (f"🖼️ {info['file']} | {PM_STATUS_ICONS.get(status, '❓')} "
+                   f"{PM_STATUS_LABELS.get(status, status)}")
     elif info['type'] == 'cover':
         display = f"🖼️ Cover | {info['file']} | ⏭️ Skipped (cover)"
     else:
@@ -7086,6 +7188,7 @@ def mark_image_folder_items_skipped(folder_path, output_dir, progress_file, prog
     # Create images directory if it doesn't exist
     images_dir = os.path.join(output_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
+    entries = _image_folder_progress_entries(progress_data_current)
 
     moved_count = 0
     failed_count = 0
@@ -7097,8 +7200,25 @@ def mark_image_folder_items_skipped(folder_path, output_dir, progress_file, prog
             html_file = item['file']
             html_base = os.path.basename(html_file)
             match = re.match(r'^response_\d+_([^\.]*)\.(?:html?|xhtml|htm)(?:\.xhtml)?$', html_base, re.IGNORECASE)
+            # The source image itself: an untranslated row's, or the one its progress entry names
+            source = item.get('source') or str((entries.get(item.get('hash_key')) or {}).get('path') or '')
+            if not (source and os.path.isfile(source)):
+                source = ''
+                if not match and html_base.lower().endswith(_IMAGE_FOLDER_MEDIA_EXTENSIONS) \
+                        and _is_image_folder_generated_name(html_base):
+                    # A generated image (response_001_<stem>.png, <stem>_generated.png):
+                    # look for <stem>.<ext>
+                    match = re.match(r'^(.+)$', _image_folder_output_stem(html_base))
 
-            if match:
+            if source:
+                base_name, ext = os.path.splitext(os.path.basename(source))
+                dest_path = os.path.join(images_dir, base_name + ext)
+                if not os.path.exists(dest_path):
+                    import shutil
+                    shutil.copy2(source, dest_path)
+                    print(f"Copied {base_name + ext} from {source} to images folder")
+                match = original_found = True
+            elif match:
                 base_name = match.group(1)
                 # Try to find the original image with common extensions
                 original_found = False
@@ -7134,7 +7254,7 @@ def mark_image_folder_items_skipped(folder_path, output_dir, progress_file, prog
                     # Even if source not found, we can still delete the HTML and mark it
 
             # Delete the HTML translation file
-            if os.path.exists(item['path']):
+            if item['path'] and os.path.exists(item['path']):
                 os.remove(item['path'])
                 print(f"Deleted translation: {item['path']}")
 
@@ -7189,6 +7309,7 @@ def image_folder_delete_confirmation(info_list, selected_indices):
     # Count types
     translated_count = sum(1 for i in selected_indices if info_list[i]['type'] == 'translated')
     cover_count = sum(1 for i in selected_indices if info_list[i]['type'] == 'cover')
+    pending_count = sum(1 for i in selected_indices if info_list[i]['type'] == 'pending')
 
     # Build confirmation message
     msg_parts = []
@@ -7196,6 +7317,9 @@ def image_folder_delete_confirmation(info_list, selected_indices):
         msg_parts.append(f"{translated_count} translated image(s)")
     if cover_count > 0:
         msg_parts.append(f"{cover_count} cover image(s)")
+    if pending_count > 0:
+        # nothing on disk: only their progress entries (the source images are kept)
+        msg_parts.append(f"the progress of {pending_count} untranslated image(s)")
 
     confirm_msg = f"This will delete {' and '.join(msg_parts)}.\n\nContinue?"
     return confirm_msg
@@ -7211,6 +7335,11 @@ def delete_image_folder_items(progress_file, progress_data_current, info_list, s
     for idx in selected_indices:
         info = info_list[idx]
         try:
+            if info['type'] == 'pending':
+                # no output on disk (its 'source' is the user's image): reset its progress only
+                if progress_data_current and info.get('hash_key'):
+                    removed_hash_keys.append(info['hash_key'])
+                continue
             if os.path.exists(info['path']):
                 os.remove(info['path'])
                 deleted_count += 1
@@ -7224,7 +7353,7 @@ def delete_image_folder_items(progress_file, progress_data_current, info_list, s
         except Exception as e:
             print(f"Failed to delete {info['path']}: {e}")
     # ALWAYS save progress file after any deletions
-    if deleted_count > 0 and progress_data_current:
+    if (deleted_count > 0 or removed_hash_keys) and progress_data_current:
         try:
             mutate_progress(progress_file, _drop_image_folder_progress_keys(removed_hash_keys, verbose=True))
             print(f"Updated progress tracking file")
@@ -7263,8 +7392,8 @@ def build_image_folder_progress(folder_path, config=None, *, owner=None, script_
         return None, ('info', "Info", image_folder_not_found_message(
             folder_name, folder_path, script_dir, possible_output_dirs))
     progress_file = os.path.join(output_dir, "translation_progress.json")
-    scanned = scan_image_folder(output_dir, progress_file)
-    if not scanned['html_files'] and not scanned['image_files']:
+    scanned = scan_image_folder(output_dir, progress_file, source_path=folder_path)
+    if not scanned['file_info']:
         return None, ('info', "Info",
             f"No translated files found in: {output_dir}\n\n"
             f"Progress tracking: {'Yes' if os.path.exists(progress_file) else 'No'}")

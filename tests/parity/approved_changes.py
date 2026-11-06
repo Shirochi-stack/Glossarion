@@ -2899,6 +2899,132 @@ _MISSING_BRACKET_SCHEMA = {'src/settings_schema_data.py': [(" 'remove_excessive_
 _MISSING_BRACKET_QA = {'src/QA_Scanner_GUI.py': [("                    'sdlxliff_min_source_paragraph_tags': 20,\n                    'check_invalid_nesting': False,\n                    'cache_enabled': True,\n                    'cache_auto_size': False,\n", "                    'sdlxliff_min_source_paragraph_tags': 20,\n                    'check_invalid_nesting': False,\n                    'check_missing_tag_bracket': True,\n                    'cache_enabled': True,\n                    'cache_auto_size': False,\n"), ('            additional_layout.addWidget(check_invalid_nesting_checkbox)\n\n            # Silent truncation detection (optional, requires heavy deps)\n            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")\n', '            additional_layout.addWidget(check_invalid_nesting_checkbox)\n\n            # Missing tag bracket check (LLM token issue, separate toggle)\n            check_missing_tag_bracket_checkbox = self._create_styled_checkbox("Check for missing tag brackets (<p\\"Hello\\"</p>)")\n            check_missing_tag_bracket_checkbox.setChecked(qa_settings.get(\'check_missing_tag_bracket\', True))\n            additional_layout.addWidget(check_missing_tag_bracket_checkbox)\n\n            # Silent truncation detection (optional, requires heavy deps)\n            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")\n'), ("                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),\n                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),\n                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),\n                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),\n", "                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),\n                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),\n                        'check_missing_tag_bracket': (check_missing_tag_bracket_checkbox, lambda x: x.isChecked()),\n                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),\n                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),\n"), ("                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),\n                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),\n                    ('check_silent_truncation', check_truncation_checkbox, False),\n                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),\n", "                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),\n                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),\n                    ('check_missing_tag_bracket', check_missing_tag_bracket_checkbox, True),\n                    ('check_silent_truncation', check_truncation_checkbox, False),\n                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),\n"), ('                    check_invalid_tag_mismatch_checkbox.setChecked(False)\n                    check_invalid_nesting_checkbox.setChecked(False)\n                    check_truncation_checkbox.setChecked(False)\n                    truncation_cheap_slider.setValue(12)\n', '                    check_invalid_tag_mismatch_checkbox.setChecked(False)\n                    check_invalid_nesting_checkbox.setChecked(False)\n                    check_missing_tag_bracket_checkbox.setChecked(True)\n                    check_truncation_checkbox.setChecked(False)\n                    truncation_cheap_slider.setValue(12)\n')], 'src/qa_scan_runtime.py': [('        "check_invalid_tag_mismatch": False,\n        "check_invalid_nesting": False,\n        "check_silent_truncation": False,\n        "truncation_cheap_threshold": 12,\n', '        "check_invalid_tag_mismatch": False,\n        "check_invalid_nesting": False,\n        "check_missing_tag_bracket": True,\n        "check_silent_truncation": False,\n        "truncation_cheap_threshold": 12,\n'), ('        "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",\n        "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",\n        "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",\n        "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",\n', '        "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",\n        "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",\n        "QA_CHECK_MISSING_TAG_BRACKET": "1" if settings.get("check_missing_tag_bracket", True) else "0",\n        "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",\n        "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",\n')], 'src/scan_html_folder.py': [('from bs4 import BeautifulSoup, Comment, NavigableString\nfrom bs4.element import CData, RubyTextString, RubyParenthesisString\nfrom _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags\nfrom langdetect import detect, LangDetectException\nfrom difflib import SequenceMatcher\n', 'from bs4 import BeautifulSoup, Comment, NavigableString\nfrom bs4.element import CData, RubyTextString, RubyParenthesisString\nfrom _empty_attr_fix import (\n    count_empty_attr_tags,\n    count_missing_tag_brackets,\n    find_empty_attr_tags,\n    find_missing_tag_brackets,\n)\nfrom langdetect import detect, LangDetectException\nfrom difflib import SequenceMatcher\n'), ('        # Detect translation artifacts\n        artifacts = []\n        check_translation_artifacts = qa_settings.get(\'check_translation_artifacts\', False)\n        check_ai_artifacts = qa_settings.get(\'check_ai_artifacts\', False)\n        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)\n        if check_translation_artifacts:\n            artifacts = detect_translation_artifacts(raw_text)\n            \n            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations\n', '        # Detect translation artifacts\n        artifacts = []\n        # Checked in RAW HTML under its own toggle: these tags are not visible text.\n        if raw_file_content and qa_settings.get(\'check_missing_tag_bracket\', True):\n            missing_bracket_count = count_missing_tag_brackets(raw_file_content)\n            if missing_bracket_count:\n                artifacts.append({\n                    \'type\': \'empty_attribute_tags\',\n                    \'count\': missing_bracket_count,\n                    \'examples\': find_missing_tag_brackets(raw_file_content, limit=10),\n                    \'severity\': \'medium\'\n                })\n        check_translation_artifacts = qa_settings.get(\'check_translation_artifacts\', False)\n        check_ai_artifacts = qa_settings.get(\'check_ai_artifacts\', False)\n        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)\n        if check_translation_artifacts:\n            artifacts.extend(detect_translation_artifacts(raw_text))\n            \n            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations\n'), ("            'sdlxliff_min_source_paragraph_tags': 20,\n            'check_invalid_nesting': False,\n            'check_silent_truncation': False,\n            'check_potential_truncation': False,\n", "            'sdlxliff_min_source_paragraph_tags': 20,\n            'check_invalid_nesting': False,\n            'check_missing_tag_bracket': True,\n            'check_silent_truncation': False,\n            'check_potential_truncation': False,\n"), ('        )\n    log(f"   ✓ Invalid nesting check: {\'ENABLED\' if qa_settings.get(\'check_invalid_nesting\', False) else \'DISABLED\'}") \n    log(f"   ✓ Silent truncation check: {\'ENABLED\' if qa_settings.get(\'check_silent_truncation\', False) else \'DISABLED\'}")\n    log(f"   ✓ Potential truncation check: {\'ENABLED\' if qa_settings.get(\'check_potential_truncation\', False) else \'DISABLED\'}")\n', '        )\n    log(f"   ✓ Invalid nesting check: {\'ENABLED\' if qa_settings.get(\'check_invalid_nesting\', False) else \'DISABLED\'}") \n    log(f"   ✓ Missing tag bracket check: {\'ENABLED\' if qa_settings.get(\'check_missing_tag_bracket\', True) else \'DISABLED\'}")\n    log(f"   ✓ Silent truncation check: {\'ENABLED\' if qa_settings.get(\'check_silent_truncation\', False) else \'DISABLED\'}")\n    log(f"   ✓ Potential truncation check: {\'ENABLED\' if qa_settings.get(\'check_potential_truncation\', False) else \'DISABLED\'}")\n')]}
 
 
+# 2026-11-06 Owner: the manga OCR prompt's empty-answer rule also covers illegible text ("no visible / illegible
+# text or symbols"), and saved prompts with the previous default lines are migrated to the new ones.
+_OCR_PROMPT_ILLEGIBLE_DEFAULT = (
+    '    def _default_manga_ocr_prompt(self):\n'
+    '        return (\n'
+    '            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\\n\\n"\n'
+    '            "ABSOLUTE RULES:\\n"\n'
+    '            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\\n"\n'
+    '            "2. NEVER TRANSLATE OR MODIFY\\n"\n'
+    '            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\\n"\n'
+    '            "4. NEVER SAY \\"I can\'t\\" or \\"I cannot\\" or \\"no text\\" or \\"blank image\\"\\n"\n'
+    '            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\\n"\n'
+    '            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\\n"\n'
+    '            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\\n"\n'
+    '            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\\n\\n"\n'
+    '            "LANGUAGE PRESERVATION:\\n"\n'
+    '            "- Korean text → Output in Korean\\n"\n'
+    '            "- Japanese text → Output in Japanese\\n"\n'
+    '            "- Chinese text → Output in Chinese\\n"\n'
+    '            "- English text → Output in English\\n"\n'
+    '            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\\n\\n"\n'
+    '            "FORMATTING:\\n"\n'
+    '            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\\n"\n'
+    '            "- NEVER use \\\\n or line breaks in your output\\n\\n"\n'
+    '            "FORBIDDEN RESPONSES:\\n"\n'
+    '            "- \\"I can see this appears to be...\\"\\n"\n'
+    '            "- \\"I cannot make out any clear text...\\"\\n"\n'
+    '            "- \\"This appears to be blank...\\"\\n"\n'
+    '            "- \\"If there is text present...\\"\\n"\n'
+    '            "- ANY explanatory text\\n\\n"\n'
+    '            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\\n"\n'
+    '            "If image has a dot → Output: .\\n"\n'
+    '            "If image has two dots → Output: . .\\n"\n'
+    '            "If image has text → Output: [that text]\\n"\n'
+    '            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"\n'
+    '        )\n',
+    '    def _default_manga_ocr_prompt(self):\n'
+    '        return (\n'
+    '            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\\n\\n"\n'
+    '            "ABSOLUTE RULES:\\n"\n'
+    '            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\\n"\n'
+    '            "2. NEVER TRANSLATE OR MODIFY\\n"\n'
+    '            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\\n"\n'
+    '            "4. NEVER SAY \\"I can\'t\\" or \\"I cannot\\" or \\"no text\\" or \\"blank image\\"\\n"\n'
+    '            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\\n"\n'
+    '            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\\n"\n'
+    '            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\\n"\n'
+    '            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\\n\\n"\n'
+    '            "LANGUAGE PRESERVATION:\\n"\n'
+    '            "- Korean text → Output in Korean\\n"\n'
+    '            "- Japanese text → Output in Japanese\\n"\n'
+    '            "- Chinese text → Output in Chinese\\n"\n'
+    '            "- English text → Output in English\\n"\n'
+    '            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\\n\\n"\n'
+    '            "FORMATTING:\\n"\n'
+    '            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\\n"\n'
+    '            "- NEVER use \\\\n or line breaks in your output\\n\\n"\n'
+    '            "FORBIDDEN RESPONSES:\\n"\n'
+    '            "- \\"I can see this appears to be...\\"\\n"\n'
+    '            "- \\"I cannot make out any clear text...\\"\\n"\n'
+    '            "- \\"This appears to be blank...\\"\\n"\n'
+    '            "- \\"If there is text present...\\"\\n"\n'
+    '            "- ANY explanatory text\\n\\n"\n'
+    '            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\\n"\n'
+    '            "If image has a dot → Output: .\\n"\n'
+    '            "If image has two dots → Output: . .\\n"\n'
+    '            "If image has text → Output: [that text]\\n"\n'
+    '            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"\n'
+    '        )\n',
+)
+
+_OCR_PROMPT_ILLEGIBLE_MIGRATE = (
+    '    @staticmethod\n'
+    '    def _migrate_legacy_manga_ocr_prompt(prompt):\n'
+    '        """Update only saved prompts with the old empty-response OCR rule."""\n'
+    '        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"\n'
+    '        if not isinstance(prompt, str) or legacy_rule not in prompt:\n'
+    '            return prompt\n'
+    '\n'
+    '        prompt = prompt.replace(\n'
+    '            legacy_rule,\n'
+    '            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '        ).replace(\n'
+    '            "If image is truly blank → Output: [empty/no response]",\n'
+    '            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '        )\n'
+    '        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."\n'
+    '        if detector_note not in prompt:\n'
+    '            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
+    '        return prompt\n',
+    '    @staticmethod\n'
+    '    def _migrate_legacy_manga_ocr_prompt(prompt):\n'
+    '        """Update only saved prompts with an older wording of the empty-response OCR rule.\n'
+    '\n'
+    '        2026-11-06 (owner): "no visible text" became "no visible / illegible text" in rule 8 and the last\n'
+    '        line; saved prompts with the previous default lines get the new lines."""\n'
+    '        if isinstance(prompt, str):\n'
+    '            prompt = prompt.replace(\n'
+    '                "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '                "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '            ).replace(\n'
+    '                "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '                "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '            )\n'
+    '        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"\n'
+    '        if not isinstance(prompt, str) or legacy_rule not in prompt:\n'
+    '            return prompt\n'
+    '\n'
+    '        prompt = prompt.replace(\n'
+    '            legacy_rule,\n'
+    '            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '        ).replace(\n'
+    '            "If image is truly blank → Output: [empty/no response]",\n'
+    '            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '        )\n'
+    '        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."\n'
+    '        if detector_note not in prompt:\n'
+    '            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
+    '        return prompt\n',
+)
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -4272,6 +4398,15 @@ APPROVED = (
                     '                    \n'
                 ),
             ],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga OCR prompt: the empty-answer rule (rule 8 and the last example line) covers illegible text too "
+                "(\"no visible / illegible\"); saved prompts with the previous default lines are migrated",
+        "source": {
+            "src/manga_integration.py": [_OCR_PROMPT_ILLEGIBLE_DEFAULT, _OCR_PROMPT_ILLEGIBLE_MIGRATE],
         },
         "values": {},
     },

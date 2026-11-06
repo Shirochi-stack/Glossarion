@@ -235,7 +235,7 @@ def test_client_warns_about_kaomoji_punctuation_while_off(client, monkeypatch, c
     content, _finish = client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000,
                                               context="translation", request_id="kaotest1")
     assert len(seen) == 1 and content == FACE_ANSWER  # kept, never sent again
-    assert "characters of another script" in caplog.text
+    assert "characters of another script" not in caplog.text  # owner 2026-11-06: no leak warning
 
 
 def test_client_accepts_kaomoji_punctuation_while_on(client, monkeypatch, caplog):
@@ -251,7 +251,7 @@ def test_client_accepts_kaomoji_punctuation_while_on(client, monkeypatch, caplog
     seen = _scripted(monkeypatch, client, ["<p>He 笑了起来 smiled.</p>", "<p>He smiled.</p>"])
     client._send_internal(list(MESSAGES), temperature=0.3, max_tokens=1000, context="translation",
                           request_id="kaotest2")
-    assert len(seen) == 1 and "characters of another script" in caplog.text
+    assert len(seen) == 1 and "characters of another script" not in caplog.text  # kept, no warning
 
 
 def test_client_logit_bias_and_on_device_field_follow_the_setting(client, monkeypatch):

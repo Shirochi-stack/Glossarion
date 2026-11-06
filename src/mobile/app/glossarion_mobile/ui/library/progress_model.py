@@ -929,8 +929,8 @@ IMAGE_DELETED = "Deleted {count} file(s).\n\nThey will be retranslated on the ne
 @dataclass(frozen=True)
 class ImageItemVM:
     key: str
-    kind: str  # "translated" | "cover" (``file_info`` row type)
-    status: str  # palette key: completed / skipped
+    kind: str  # "translated" | "pending" | "cover" (``file_info`` row type)
+    status: str  # palette key: completed / skipped / not_translated / in_progress / failed
     title: str
     label: str
     path: str = ""
@@ -953,9 +953,11 @@ def _image_item_vm(index: int, info: Mapping[str, Any], text: str) -> ImageItemV
     title = " | ".join(parts[:-1]) if len(parts) > 1 else str(text or info.get("file") or "")
     label = parts[-1] if len(parts) > 1 else ""
     kind = str(info.get("type") or "translated")
-    return ImageItemVM(key=f"img:{index}:{info.get('file') or ''}", kind=kind,
-                       status="skipped" if kind == "cover" else "completed", title=title, label=label,
-                       path=str(info.get("path") or ""), index=index, raw=info)
+    # the shared row's status (an untranslated "pending" row: not_translated / in_progress / failed)
+    status = str(info.get("status") or ("skipped" if kind == "cover" else "completed"))
+    # an untranslated row has no output: its thumbnail is the source image
+    return ImageItemVM(key=f"img:{index}:{info.get('file') or ''}", kind=kind, status=status, title=title,
+                       label=label, path=str(info.get("path") or info.get("source") or ""), index=index, raw=info)
 
 
 def load_image_folder_view(service: Any, folder: str) -> ImageFolderView:

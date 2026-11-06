@@ -1001,6 +1001,17 @@ IMAGE_ACTIONS = {
     "skip_then_delete": [("Mark as Skipped", lambda t: "| a |" in t),
                          ("Delete Selected", lambda t: "| c |" in t)],
 }
+#: 2026-11-06: the view lists the folder's untranslated images like the text view's untranslated
+#: chapters (the frozen dialog never did): the source whose translation an action deleted.
+IMAGE_UNTRANSLATED_AFTER = {
+    "mark_skipped": [],
+    "delete_selected": ["🖼️ b.png | ⬜ Not Translated"],
+    "skip_then_delete": ["🖼️ c.png | ⬜ Not Translated"],
+}
+
+
+def _untranslated_rows(rows):
+    return [text for text in rows if text.endswith("| ⬜ Not Translated")]
 
 
 @pytest.mark.parametrize("layout", IMAGE_LAYOUTS)
@@ -1009,7 +1020,9 @@ def test_image_folder_actions_match_frozen_desktop(layout, action, image_roots, 
     base = image_roots[layout]
     legacy = _image_run(legacy_rg(), base, tmp_path / "legacy", IMAGE_ACTIONS[action])
     current = _image_run(pl.current_rg(), base, tmp_path / "current", IMAGE_ACTIONS[action])
-    assert current["lists"] == legacy["lists"]
+    assert _untranslated_rows(current["lists"][0]) == []
+    assert _untranslated_rows(current["lists"][-1]) == IMAGE_UNTRANSLATED_AFTER[action]
+    assert [[t for t in rows if t not in _untranslated_rows(rows)] for rows in current["lists"]] == legacy["lists"]
     assert current["messages"] == legacy["messages"]
     assert current["tree"] == legacy["tree"], _diff(legacy["tree"], current["tree"])
     assert legacy["messages"]

@@ -1448,6 +1448,16 @@ Important rules:
                             
                             # Parse JSON
                             glossary_data = json.loads(glossary_json)
+                            if isinstance(glossary_data, dict):
+                                # {"entries": [...]} (or "glossary", ...) is the list inside; one entry, a list of one
+                                glossary_data = next((
+                                    value for key, value in glossary_data.items()
+                                    if key in ('entries', 'glossary', 'characters', 'terms', 'data')
+                                    and isinstance(value, list)
+                                ), [glossary_data] if 'raw_name' in glossary_data else glossary_data)
+                            if not isinstance(glossary_data, list):
+                                # {}, {"error": ...} or a quoted sentence: not a glossary, never "0 entries"
+                                raise json.JSONDecodeError("not a JSON glossary array", glossary_json, 0)
                             
                             # Process entries
                             entries_for_this_image = []
@@ -1514,6 +1524,7 @@ Important rules:
                             # which handles JSON, CSV with headers, and headerless CSV
                             try:
                                 from extract_glossary_from_epub import parse_api_response
+                                from glossary_translation_gate import is_empty_glossary_answer
                                 parsed_entries = parse_api_response(glossary_json.strip())
                                 entries_for_this_image = []
                                 for entry in parsed_entries:
@@ -1544,6 +1555,16 @@ Important rules:
                                     processed += 1
                                     if all_glossary_entries:
                                         self._save_intermediate_glossary_with_skip(folder_name, all_glossary_entries)
+                                elif is_empty_glossary_answer(
+                                    glossary_json,
+                                    response[1] if isinstance(response, (list, tuple)) and len(response) >= 2 else None,
+                                ):
+                                    # Only the CSV header (or []): an image without names, 0 entries
+                                    self.append_log(f"      ✅ Extracted 0 entries (no names in this image)")
+                                    self.glossary_progress_manager.update(
+                                        image_path, content_hash, status="completed", extracted_data=[]
+                                    )
+                                    processed += 1
                                 else:
                                     raise ValueError("No valid entries found")
                             except Exception:
@@ -1570,6 +1591,11 @@ Important rules:
                     skipped += 1
             
             if not all_glossary_entries:
+                from glossary_translation_gate import image_glossary_complete
+                if image_glossary_complete(self.glossary_progress_manager.PROGRESS_FILE, image_files)[0]:
+                    # Every image finished with 0 entries (no names in them): a completed extraction
+                    self.append_log(f"\n📝 No glossary entries in {len(image_files)} image(s); extraction is complete")
+                    return True
                 self.append_log(f"❌ No glossary entries extracted from any images")
                 return False
             
@@ -4066,7 +4092,15 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                         and not (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
                         else glossary_root
                     )
-                    progress_path = progress_path_for_source(source, source_root)
+                    progress_path = progress_path_for_source(
+                        source, source_root,
+                        # the image-folder glossary's own folder (run_glossary_extraction_direct)
+                        image_glossary_dir=os.path.join(
+                            os.path.dirname(os.path.abspath(self.selected_files[0])),
+                            os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory') or '',
+                            "Glossary",
+                        ),
+                    )
                     base = os.path.splitext(os.path.basename(source))[0]
                     glossary_path = next((
                         os.path.join(os.path.dirname(progress_path), f'{base}_glossary{ext}')
@@ -4087,6 +4121,7 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                         ),
                         require_minimal_pass=self._glossary_add_minimal_pass_env_value() == '1',
                         is_epub=str(source).lower().endswith('.epub'),
+                        source_path=source,
                     )
                     if not ready:
                         self.append_log(
