@@ -2698,8 +2698,8 @@ class MultiAPIKeyDialog(QDialog):
             self._save_manager_view_settings()
 
     def _save_manager_view_settings(self):
-        """Save the config after one of the manager's own view settings (key-tree heights, folded
-        pools) was stored in it."""
+        """Save the config after one of the manager's own view settings (key-tree heights and font
+        size, folded pools) was stored in it."""
         try:
             save_config = getattr(self.translator_gui, 'save_config', None)
             if callable(save_config):
@@ -2958,15 +2958,10 @@ class MultiAPIKeyDialog(QDialog):
         self._api_key_trees = live_trees
 
         if persist:
-            try:
-                config = getattr(self.translator_gui, 'config', None)
-                if isinstance(config, dict):
-                    config[self.API_KEY_TREE_FONT_SIZE_CONFIG] = point_size
-                save_config = getattr(self.translator_gui, 'save_config', None)
-                if callable(save_config):
-                    save_config(show_message=False)
-            except Exception:
-                pass
+            config = getattr(self.translator_gui, 'config', None)
+            if isinstance(config, dict):
+                config[self.API_KEY_TREE_FONT_SIZE_CONFIG] = point_size
+            self._save_manager_view_settings()
 
     def _adjust_api_key_tree_font_size(self, delta):
         """Zoom every API-key tree in or out by one point."""
