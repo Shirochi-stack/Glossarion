@@ -105,6 +105,7 @@ jobs:
           tests/test_nanogpt_quiet_stream.py \
           tests/test_missing_tag_bracket.py \
           tests/test_glossary_progress_core.py \
+          tests/test_image_glossary_header_only.py \
           tests/test_glossary_document.py \
           tests/test_glossary_files.py \
           tests/test_parallel_epub_core.py \
