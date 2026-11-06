@@ -15012,7 +15012,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             progress_file = data['progress_file']
             folder_path = data['folder_path']
             
-            scanned = scan_image_folder(output_dir, progress_file)
+            scanned = scan_image_folder(output_dir, progress_file, source_path=folder_path)
             file_info = scanned['file_info']
             progress_data = scanned['progress_data']
             html_files = scanned['html_files']
@@ -15972,81 +15972,15 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         
         print(f"Progress tracking: {has_progress_tracking} at {progress_file}")
         
-        # Find all HTML files in the output directory
-        html_files = []
-        _html_seen = set()
-        image_files = []
-        progress_data = None
+        # The same scan the Refresh button runs: progress outputs (image_job records them
+        # relative to the working directory), HTML / generated images in the output folder,
+        # the selection's untranslated images and the skipped ones in images/
+        scanned = scan_image_folder(output_dir, progress_file, source_path=folder_path)
+        progress_data = scanned['progress_data']
         
-        if has_progress_tracking:
-            # Load progress data for image translations
-            try:
-                with open(progress_file, 'r', encoding='utf-8') as f:
-                    progress_data = json.load(f)
-                    print(f"Loaded progress data with {len(progress_data)} entries")
-                    
-                # Extract files from progress data
-                # The structure appears to use hash keys at the root level
-                for key, value in progress_data.items():
-                    if isinstance(value, dict) and 'output_file' in value:
-                        output_file = value['output_file']
-                        if not output_file:
-                            continue
-                        # Normalize path
-                        output_norm = os.path.normpath(str(output_file))
-                        # If absolute and under output_dir, store as relative
-                        try:
-                            if os.path.isabs(output_norm) and output_dir:
-                                outdir_norm = os.path.normpath(output_dir)
-                                if output_norm.startswith(outdir_norm):
-                                    output_norm = os.path.relpath(output_norm, outdir_norm)
-                        except Exception:
-                            pass
-                        if output_norm in _html_seen:
-                            continue
-                        _html_seen.add(output_norm)
-                        html_files.append(output_norm)
-                        print(f"Found tracked file: {output_norm}")
-            except Exception as e:
-                print(f"Error loading progress file: {e}")
-                import traceback
-                traceback.print_exc()
-                has_progress_tracking = False
+        print(f"Total files found: {len(scanned['html_files'])} translated, {len(scanned['image_files'])} images")
         
-            # Also scan directory for any HTML files not in progress
-            # Include all .html/.xhtml/.htm files plus generated image files
-        try:
-            for file in os.listdir(output_dir):
-                file_path = os.path.join(output_dir, file)
-                # Include HTML files (any name)
-                if (os.path.isfile(file_path) and 
-                    file.lower().endswith(('.html', '.xhtml', '.htm')) and 
-                    file not in html_files and file not in _html_seen):
-                    _html_seen.add(file)
-                    html_files.append(file)
-                    print(f"Found HTML file: {file}")
-                # Also include generated image files (not in images/ subdirectory)
-                elif (os.path.isfile(file_path) and 
-                      file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')) and
-                      file not in html_files):
-                    html_files.append(file)  # Add to html_files for now, will be handled separately
-                    print(f"Found generated image file: {file}")
-        except Exception as e:
-            print(f"Error scanning directory: {e}")
-        
-        # Check for images subdirectory (cover images)
-        images_dir = os.path.join(output_dir, "images")
-        if os.path.exists(images_dir):
-            try:
-                for file in os.listdir(images_dir):
-                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
-                        image_files.append(file)
-            except Exception as e:
-                print(f"Error scanning images directory: {e}")
-        
-        print(f"Total files found: {len(html_files)} HTML, {len(image_files)} images")
-        
-        if not html_files and not image_files:
+        if not scanned['file_info']:
             self._styled_msgbox(QMessageBox.Information, self, "Info", 
                 f"No translated files found in: {output_dir}\n\n"
                 f"Progress tracking: {'Yes' if has_progress_tracking else 'No'}")
@@ -16087,59 +16021,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         dialog_layout.addWidget(listbox)
         
         # Keep track of file info
-        file_info = []
-        
-        progress_data_current = progress_data
-        
-        # Add translated HTML files
-        for html_file in sorted(set(html_files)):  # Use set to avoid duplicates
-            display_name = os.path.basename(html_file)
-            # Extract original image name from HTML filename
-            # Expected format: response_001_imagename.html
-            match = re.match(r'response_(\d+)_(.+)\.html', display_name)
-            if match:
-                index = match.group(1)
-                base_name = match.group(2)
-                display = f"📄 Image {index} | {base_name} | ✅ Completed"
-            else:
-                display = f"📄 {display_name} | ✅ Completed"
-            
-            self._add_compact_inline_list_item(listbox, display)
-            
-            # Find the hash key for this file if progress tracking exists
-            hash_key = None
-            if progress_data_current:
-                for key, value in progress_data_current.items():
-                    if isinstance(value, dict) and 'output_file' in value:
-                        outp = str(value.get('output_file') or '')
-                        if html_file == outp or display_name == os.path.basename(outp) or html_file in outp:
-                            hash_key = key
-                            break
-            
-            # Build absolute path (preserve subfolders if present)
-            if os.path.isabs(html_file):
-                abs_path = html_file
-            else:
-                abs_path = os.path.join(output_dir, html_file)
-            file_info.append({
-                'type': 'translated',
-                'file': html_file,  # may include subfolders relative to output_dir
-                'path': abs_path,
-                'hash_key': hash_key,
-                'output_dir': output_dir  # Store for later use
-            })
-        
-        # Add cover images
-        for img_file in sorted(image_files):
-            display = f"🖼️ Cover | {img_file} | ⏭️ Skipped (cover)"
-            self._add_compact_inline_list_item(listbox, display)
-            file_info.append({
-                'type': 'cover',
-                'file': img_file,
-                'path': os.path.join(images_dir, img_file),
-                'hash_key': None,
-                'output_dir': output_dir
-            })
+        file_info = scanned['file_info']
+        for info in file_info:
+            self._add_compact_inline_list_item(listbox, image_folder_row_text(info))
         
         # Selection count label
         selection_count_label = QLabel("Selected: 0")

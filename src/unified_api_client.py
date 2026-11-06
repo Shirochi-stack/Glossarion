@@ -3848,8 +3848,7 @@ class UnifiedClient:
         """``{"logit_bias": {...}}`` pushing down the banned scripts' tokens: official OpenAI chat models
         get their most frequent ones (tiktoken knows the tokenizer: ``script_ban_core.openai_logit_bias``),
         an OpenAI-compatible server with ``/tokenize`` (llama.cpp server, vLLM) gets ids from its own
-        tokenizer (``_server_script_ban_bias``); {} for every other route, which relies on the output
-        warning (``_warn_script_leak``)."""
+        tokenizer (``_server_script_ban_bias``); {} for every other route."""
         if use_responses_api:
             return {}
         scripts, exempt = self._script_ban_request(messages, getattr(self, 'context', None))
@@ -3886,24 +3885,6 @@ class UnifiedClient:
         if presets:
             self._log_once(f"🎯 Logit bias: {len(presets)} preset tokens at {next(iter(presets.values()))} for {model}")
         return {"logit_bias": {**presets, **ban}}
-
-    def _warn_script_leak(self, messages, content, context=None) -> None:
-        """Say so in the log when an answer has text in a script the target does not use
-        (``script_ban_core.foreign_script_leak``; runs also found in the request, such as kept names, are
-        ignored). The answer is kept: only a ban while sampling can prevent this, and a route without one has
-        none to offer."""
-        scripts, exempt = self._script_ban_request(messages, context)
-        if not scripts or not isinstance(content, str) or not content.strip():
-            return
-        import script_ban_core
-        if exempt:  # names copied on purpose: every character of the source is fine, however many
-            content = "".join(ch for ch in content if ch not in exempt)
-        leak = script_ban_core.foreign_script_leak(content, scripts, "" if exempt else messages,
-                                                   allow_kaomoji=self._script_ban_allow_kaomoji())
-        if leak:
-            shown = ", ".join(f"{name} {count}" for name, count in leak['scripts'].items())
-            print(f"⚠️ Answer contains {leak['chars']} characters of another script ({shown}: {leak['sample']}); "
-                  f"this route has no token ban that could prevent it")
 
     def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
         """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
@@ -11691,7 +11672,6 @@ class UnifiedClient:
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
 
                 extracted_content, finish_reason = self._trim_forced_truncation(extracted_content, finish_reason, context)
-                self._warn_script_leak(messages, extracted_content, context)
 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)

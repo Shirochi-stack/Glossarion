@@ -13742,8 +13742,9 @@ class MangaTranslator:
             usable_width = int(max_width * margin)
             usable_height = int(max_height * margin)
         
-        # Font size limits (GUI settings with algorithm adjustments)
-        min_font_size = max(10, self.min_readable_size)
+        # Font size limits (GUI settings with algorithm adjustments). The user's Minimum Font Size is the floor
+        # (owner 2026-11-06: a hard 10 px floor ignored a minimum of 8 and let text leak out of its box).
+        min_font_size = max(1, int(self.min_readable_size))
         
         # Adjust initial font size based on algorithm and prefer_larger
         base_init = min(40, self.max_font_size_limit)

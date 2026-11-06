@@ -2930,6 +2930,131 @@ _SKIP_LOCK_SWITCH_LOCAL = (
 )
 
 
+# 2026-11-06 Owner: the manga OCR prompt's empty-answer rule also covers illegible text ("no visible / illegible
+# text or symbols"), and saved prompts with the previous default lines are migrated to the new ones.
+_OCR_PROMPT_ILLEGIBLE_DEFAULT = (
+    '    def _default_manga_ocr_prompt(self):\n'
+    '        return (\n'
+    '            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\\n\\n"\n'
+    '            "ABSOLUTE RULES:\\n"\n'
+    '            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\\n"\n'
+    '            "2. NEVER TRANSLATE OR MODIFY\\n"\n'
+    '            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\\n"\n'
+    '            "4. NEVER SAY \\"I can\'t\\" or \\"I cannot\\" or \\"no text\\" or \\"blank image\\"\\n"\n'
+    '            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\\n"\n'
+    '            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\\n"\n'
+    '            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\\n"\n'
+    '            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\\n\\n"\n'
+    '            "LANGUAGE PRESERVATION:\\n"\n'
+    '            "- Korean text → Output in Korean\\n"\n'
+    '            "- Japanese text → Output in Japanese\\n"\n'
+    '            "- Chinese text → Output in Chinese\\n"\n'
+    '            "- English text → Output in English\\n"\n'
+    '            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\\n\\n"\n'
+    '            "FORMATTING:\\n"\n'
+    '            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\\n"\n'
+    '            "- NEVER use \\\\n or line breaks in your output\\n\\n"\n'
+    '            "FORBIDDEN RESPONSES:\\n"\n'
+    '            "- \\"I can see this appears to be...\\"\\n"\n'
+    '            "- \\"I cannot make out any clear text...\\"\\n"\n'
+    '            "- \\"This appears to be blank...\\"\\n"\n'
+    '            "- \\"If there is text present...\\"\\n"\n'
+    '            "- ANY explanatory text\\n\\n"\n'
+    '            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\\n"\n'
+    '            "If image has a dot → Output: .\\n"\n'
+    '            "If image has two dots → Output: . .\\n"\n'
+    '            "If image has text → Output: [that text]\\n"\n'
+    '            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"\n'
+    '        )\n',
+    '    def _default_manga_ocr_prompt(self):\n'
+    '        return (\n'
+    '            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\\n\\n"\n'
+    '            "ABSOLUTE RULES:\\n"\n'
+    '            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\\n"\n'
+    '            "2. NEVER TRANSLATE OR MODIFY\\n"\n'
+    '            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\\n"\n'
+    '            "4. NEVER SAY \\"I can\'t\\" or \\"I cannot\\" or \\"no text\\" or \\"blank image\\"\\n"\n'
+    '            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\\n"\n'
+    '            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\\n"\n'
+    '            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\\n"\n'
+    '            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\\n\\n"\n'
+    '            "LANGUAGE PRESERVATION:\\n"\n'
+    '            "- Korean text → Output in Korean\\n"\n'
+    '            "- Japanese text → Output in Japanese\\n"\n'
+    '            "- Chinese text → Output in Chinese\\n"\n'
+    '            "- English text → Output in English\\n"\n'
+    '            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\\n\\n"\n'
+    '            "FORMATTING:\\n"\n'
+    '            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\\n"\n'
+    '            "- NEVER use \\\\n or line breaks in your output\\n\\n"\n'
+    '            "FORBIDDEN RESPONSES:\\n"\n'
+    '            "- \\"I can see this appears to be...\\"\\n"\n'
+    '            "- \\"I cannot make out any clear text...\\"\\n"\n'
+    '            "- \\"This appears to be blank...\\"\\n"\n'
+    '            "- \\"If there is text present...\\"\\n"\n'
+    '            "- ANY explanatory text\\n\\n"\n'
+    '            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\\n"\n'
+    '            "If image has a dot → Output: .\\n"\n'
+    '            "If image has two dots → Output: . .\\n"\n'
+    '            "If image has text → Output: [that text]\\n"\n'
+    '            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"\n'
+    '        )\n',
+)
+
+_OCR_PROMPT_ILLEGIBLE_MIGRATE = (
+    '    @staticmethod\n'
+    '    def _migrate_legacy_manga_ocr_prompt(prompt):\n'
+    '        """Update only saved prompts with the old empty-response OCR rule."""\n'
+    '        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"\n'
+    '        if not isinstance(prompt, str) or legacy_rule not in prompt:\n'
+    '            return prompt\n'
+    '\n'
+    '        prompt = prompt.replace(\n'
+    '            legacy_rule,\n'
+    '            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '        ).replace(\n'
+    '            "If image is truly blank → Output: [empty/no response]",\n'
+    '            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '        )\n'
+    '        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."\n'
+    '        if detector_note not in prompt:\n'
+    '            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
+    '        return prompt\n',
+    '    @staticmethod\n'
+    '    def _migrate_legacy_manga_ocr_prompt(prompt):\n'
+    '        """Update only saved prompts with an older wording of the empty-response OCR rule.\n'
+    '\n'
+    '        2026-11-06 (owner): "no visible text" became "no visible / illegible text" in rule 8 and the last\n'
+    '        line; saved prompts with the previous default lines get the new lines."""\n'
+    '        if isinstance(prompt, str):\n'
+    '            prompt = prompt.replace(\n'
+    '                "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '                "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '            ).replace(\n'
+    '                "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '                "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '            )\n'
+    '        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"\n'
+    '        if not isinstance(prompt, str) or legacy_rule not in prompt:\n'
+    '            return prompt\n'
+    '\n'
+    '        prompt = prompt.replace(\n'
+    '            legacy_rule,\n'
+    '            "8. IF THERE ARE NO VISIBLE / illegible CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",\n'
+    '        ).replace(\n'
+    '            "If image is truly blank → Output: [empty/no response]",\n'
+    '            "If image has no visible / illegible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",\n'
+    '        )\n'
+    '        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."\n'
+    '        if detector_note not in prompt:\n'
+    '            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\\n\\n"\n'
+    '            prompt = prompt.replace(intro, intro + detector_note + "\\n\\n", 1) if intro in prompt else detector_note + "\\n\\n" + prompt\n'
+    '        return prompt\n',
+)
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -4029,6 +4154,15 @@ APPROVED = (
                 "returns its pool checkout (manga_editor_core, test_manga_editor_core EDITS)",
         "source": {
             "src/manga_integration.py": [_SKIP_LOCK_SWITCH_IMAGE_EDIT, _SKIP_LOCK_SWITCH_LOCAL],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
+        "what": "Manga OCR prompt: the empty-answer rule (rule 8 and the last example line) covers illegible text too "
+                "(\"no visible / illegible\"); saved prompts with the previous default lines are migrated",
+        "source": {
+            "src/manga_integration.py": [_OCR_PROMPT_ILLEGIBLE_DEFAULT, _OCR_PROMPT_ILLEGIBLE_MIGRATE],
         },
         "values": {},
     },

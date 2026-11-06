@@ -21,7 +21,8 @@ same changes as a "Text format" submenu (``MangaFormatToolbar.add_context_menu``
 
 ``install_format_toolbar`` also keeps Enter from pressing a push button of the Manga Panel
 Translator window (``guard_enter_key``): a QDialog's push buttons are auto-default, so Enter in a
-spin box or line edit clicked "Add Files" and opened the file explorer.
+spin box or line edit clicked "Add Files" and opened the file explorer. It also installs the
+preview's Ctrl zoom (``manga_preview_zoom.install_preview_zoom``).
 """
 
 import os
@@ -701,7 +702,13 @@ def install_format_toolbar(preview, tab):
     """Put the Format row at the top of the preview (under its title row) and return the toolbar.
 
     Also guards the manga window's Enter key (``guard_enter_key``): now for the buttons built so
-    far, and again once the window's build has finished."""
+    far, and again once the window's build has finished. The preview's Ctrl zoom (Ctrl + / - / 0,
+    Ctrl+wheel, pinch: ``manga_preview_zoom``) is installed here too, before the row."""
+    try:
+        from manga_preview_zoom import install_preview_zoom
+        install_preview_zoom(preview, getattr(tab, 'dialog', None))
+    except Exception as zoom_err:
+        print(f"[ZOOM] Preview zoom keys unavailable: {zoom_err}")
     toolbar = MangaFormatToolbar(preview, tab)
     layout = preview.layout()
     layout.insertWidget(1 if layout.count() > 1 else layout.count(), toolbar.frame)

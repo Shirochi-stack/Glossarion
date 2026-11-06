@@ -1098,6 +1098,25 @@ def test_real_image_folder_view_mark_skipped_and_delete(tmp_path, monkeypatch):
     assert gone.error_title == "Info" and gone.error.startswith("No translation output found for 'Nothing'.")
 
 
+def test_real_image_folder_view_lists_untranslated_images(tmp_path, monkeypatch):
+    folder, out = _image_workspace(tmp_path)
+    (out / "response_002_b.html").unlink()
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(tmp_path / "Output"))
+    monkeypatch.chdir(tmp_path)
+    service = _image_service(tmp_path)
+    from glossarion_mobile.ui.library import progress_model as pm
+
+    view = pm.load_image_folder_view(service, str(folder))
+    assert [(i.kind, i.status, i.title, i.label) for i in view.items] == [
+        ("translated", "completed", "📄 Image 001 | a", "✅ Completed"),
+        ("pending", "not_translated", "🖼️ b.png", "⬜ Not Translated"),
+        ("cover", "skipped", "🖼️ Cover | cover.png", "⏭️ Skipped (cover)")]
+    assert view.items[1].path == str(folder / "b.png")  # the thumbnail: the source image
+    # Delete Selected on it keeps the source image (nothing on disk to delete)
+    pm.image_folder_action(service, view, "delete", [view.items[1]])
+    assert (folder / "b.png").read_bytes() == b"\x89PNGb"
+
+
 def test_image_folder_confirmations_match_the_desktop_view():
     from glossarion_mobile.ui.library import chapters_tab as ct
 
@@ -1400,11 +1419,14 @@ def test_chapters_tab_image_folder_grid_selection_and_actions(tmp_path, monkeypa
         assert message == "Deleted 2 file(s).\n\nThey will be retranslated on the next run."
         assert not (out / "response_001_a.html").exists() and not (out / "response_002_b.html").exists()
         assert tab.image_selected == set() and tab.last_message[0] == "Success"
-        assert len(tab.image_grid.controls) == 1  # only the cover is left
+        # a and b are listed again as untranslated (their source images), then the cover
+        assert [(i.kind, i.status) for i in tab.image_view.items] == [
+            ("pending", "not_translated"), ("pending", "not_translated"), ("cover", "skipped")]
+        assert len(tab.image_grid.controls) == 3
         tab.clear_images()
         assert await tab.run_image_action("mark_skipped") is None
         assert ctx.notes[-1] == "Please select at least one image to mark as skipped."
-        tab.select_all_images()
+        tab.toggle_image(tab.image_view.items[-1].key)
         assert await tab.run_image_action("mark_skipped") is None  # only the cover: already skipped
         assert ctx.notes[-1] == "Selected items are already in the images folder (skipped)."
 

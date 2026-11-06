@@ -105,6 +105,7 @@ jobs:
           tests/test_nanogpt_quiet_stream.py \
           tests/test_missing_tag_bracket.py \
           tests/test_glossary_progress_core.py \
+          tests/test_image_glossary_header_only.py \
           tests/test_glossary_document.py \
           tests/test_glossary_files.py \
           tests/test_parallel_epub_core.py \
@@ -120,6 +121,7 @@ jobs:
           tests/test_manga_editor_core.py \
           tests/test_manga_text_style.py \
           tests/test_manga_format_toolbar.py \
+          tests/test_manga_preview_zoom.py \
           tests/test_manga_models.py \
           tests/test_hayai_ocr.py \
           tests/test_google_vision_rest.py \
