@@ -4496,3 +4496,30 @@ the self-test suite `background` (`ci/android_smoke.sh` presses HOME while it wa
   - R4 (mobile only): Android back on the chat while a job runs or waits calls the extension's new
     `move_task_to_back` (`Activity.moveTaskToBack(true)`) instead of finishing the Activity (`AppShell`: the root
     View's `can_pop` follows the Jobs badge; the drawer the menu button opened closes first). Not shared code.
+
+## Image Progress Manager lists the image runner's outputs (2026-11-06, owner: "the progress manager for images seems to not display images"; desktop + mobile, shared `progress_core`)
+
+- **Root cause.** `image_job._process_image_file` records `output_file` as `os.path.join(output_dir, name)` with
+  the output folder as the run opened it: relative to the working directory (`<stem>\response_001_<stem>.png`)
+  unless an absolute output directory is set. `progress_core.scan_image_folder` (the refresh the dialog runs
+  0 ms after opening, U7 desktop bug 2 above) joined that path to the output folder again
+  (`<app>/<stem>/<stem>/response_001_<stem>.png`), found nothing and dropped the entry, and its directory
+  fallback only took HTML files, so a generated image (`response_001_<stem>.png`, the AuthChatGPT / image-edit
+  output) was never listed: an empty "Progress Manager - Images". HTML outputs were listed by the directory
+  fallback but without their progress hash key, so Delete Selected left the entry behind.
+- **Change.** `scan_image_folder(output_dir, progress_file, source_path=None)` resolves `output_file` relative to
+  the output folder (older files), the working directory and the output folder's parent (those two only inside
+  the output folder); the directory fallback also takes generated images (`response_NNN_*`, `*_generated.*`,
+  not the source copy kept next to an HTML translation). With `source_path` (the dialog's folder / image, the
+  mobile `build_image_folder_progress` folder) every source image without a translation and not in `images/`
+  is a `pending` row (`🖼️ b.png | ⬜ Not Translated`, `🔄 In Progress` / `❌ Failed` from its progress entry),
+  like the text view's untranslated chapters; rows carry `status`. The dialog's list at open is now that scan
+  (it was replaced by it 0 ms later anyway). Delete Selected on a pending row only drops its progress entry
+  (never the source); Mark as Skipped copies the source named by the row / its progress entry (`path`), and
+  finds a generated image's `<stem>.<ext>` like an HTML's. Row text of `response_001_<stem>.png`:
+  `🖼️ Image 001 | <stem> | ✅ Completed`.
+- **Parity.** `test_image_folder_view_matches_frozen_desktop` / `test_image_folder_actions_match_frozen_desktop`
+  compare with the frozen dialog after removing the new "Not Translated" rows and assert those rows exactly;
+  trees and messages are unchanged. The v2.1 `chapters` shape is still not read (U5 desktop bug 3).
+- **Mobile.** `ImageItemVM.status` comes from the row (`pending` rows use the palette's not_translated /
+  in_progress / failed); a pending tile's thumbnail is its source image.
