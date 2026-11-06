@@ -4148,6 +4148,291 @@ APPROVED = (
     },
     {
         "date": "2026-11-06",
+        "what": "Manga glossary workflow: the OCR-only glossary pass detects a tall webtoon strip chunk by chunk "
+                "(the webtoon path's chunking and overlap de-duplication, now _detect_webtoon_chunk_regions), "
+                "so the regions translation reuses are the chunked ones; the chunk shift also moves "
+                "bubble_bounds and a merged region's original_regions, and the overlap de-duplication "
+                "finds the previous chunk's copy (it skipped every earlier region before)",
+        "source": {
+            "src/manga_translator.py": [
+                (
+                    '            # owns its full translate/render path, so skip that shortcut for\n'
+                    '            # OCR-only and precomputed-region glossary passes.\n'
+                    '            used_precomputed_regions = precomputed_regions is not None\n'
+                    ,
+                    '            # owns its full translate/render path, so skip that shortcut for\n'
+                    '            # OCR-only and precomputed-region glossary passes. An OCR-only pass\n'
+                    '            # still detects a webtoon strip chunk by chunk (same regions as the\n'
+                    '            # webtoon path), and the translation pass reuses those regions.\n'
+                    '            webtoon_chunk_ocr = False\n'
+                    '            used_precomputed_regions = precomputed_regions is not None\n'
+                ),
+                (
+                    "                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')\n"
+                    '                if (not ocr_only and not used_precomputed_regions and\n'
+                    ,
+                    "                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')\n"
+                    '                if (ocr_only and not used_precomputed_regions and\n'
+                    "                        format_info['is_webtoon'] and webtoon_mode in ('auto', 'force')):\n"
+                    '                    self._log("🔄 Webtoon mode active - will OCR in chunks for better OCR")\n'
+                    '                    webtoon_chunk_ocr = True\n'
+                    '                if (not ocr_only and not used_precomputed_regions and\n'
+                ),
+                (
+                    '                    preserve_translations=used_imported_regions,\n'
+                    '                )\n'
+                    '            else:\n'
+                    '                self._log(f"📍 [STEP 1] Text Detection Phase")\n'
+                    ,
+                    '                    preserve_translations=used_imported_regions,\n'
+                    '                )\n'
+                    '            elif webtoon_chunk_ocr:\n'
+                    '                self._log(f"📍 [STEP 1] Text Detection Phase (webtoon chunks)")\n'
+                    '                _, regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)\n'
+                    "                result['format_info']['chunks_processed'] = num_chunks\n"
+                    '                if self._check_stop():\n'
+                    '                    # A stopped chunk OCR returns no regions for the chunks it skipped:\n'
+                    '                    # do not save or hand over that partial page as its OCR.\n'
+                    "                    result['interrupted'] = True\n"
+                    '                    self._log("⏹️ Webtoon chunk OCR stopped", "warning")\n'
+                    '                    return result\n'
+                    '            else:\n'
+                    '                self._log(f"📍 [STEP 1] Text Detection Phase")\n'
+                ),
+                (
+                    '        import cv2\n'
+                    '        import numpy as np\n'
+                    '        from PIL import Image as PILImage\n'
+                    '        \n'
+                    ,
+                    '        import cv2\n'
+                    '        \n'
+                ),
+                (
+                    '            \n'
+                    '            # Load the image\n'
+                    '            image = cv2.imread(image_path)\n'
+                    '            if image is None:\n'
+                    '                pil_image = open_image(image_path)\n'
+                    '                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)\n'
+                    '            \n'
+                    '            height, width = image.shape[:2]\n'
+                    '            \n'
+                    '            # Get chunk settings from config\n'
+                    "            chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)\n"
+                    "            chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)\n"
+                    '            \n'
+                    '            self._log(f"   Image dimensions: {width}x{height}", "info")\n'
+                    '            self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")\n'
+                    '            \n'
+                    '            # Calculate number of chunks needed\n'
+                    '            effective_chunk_height = chunk_height - chunk_overlap\n'
+                    '            num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)\n'
+                    '            \n'
+                    '            self._log(f"   Will process in {num_chunks} chunks", "info")\n'
+                    '            \n'
+                    '            # Process each chunk\n'
+                    '            all_regions = []\n'
+                    '            chunk_offsets = []\n'
+                    '            \n'
+                    '            for i in range(num_chunks):\n'
+                    '                # Calculate chunk boundaries\n'
+                    '                start_y = i * effective_chunk_height\n'
+                    '                end_y = min(start_y + chunk_height, height)\n'
+                    '                \n'
+                    "                # Make sure we don't miss the bottom part\n"
+                    '                if i == num_chunks - 1:\n'
+                    '                    end_y = height\n'
+                    '                \n'
+                    '                self._log(f"\\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")\n'
+                    '                \n'
+                    '                # Extract chunk\n'
+                    '                chunk = image[start_y:end_y, 0:width]\n'
+                    '                \n'
+                    '                # Save chunk temporarily for OCR\n'
+                    '                import tempfile\n'
+                    "                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:\n"
+                    '                    chunk_path = tmp.name\n'
+                    '                    cv2.imwrite(chunk_path, chunk)\n'
+                    '                \n'
+                    '                try:\n'
+                    '                    # Detect text in this chunk\n'
+                    '                    chunk_regions = self.detect_text_regions(chunk_path)\n'
+                    '                    \n'
+                    '                    # Adjust region coordinates to full image space\n'
+                    '                    for region in chunk_regions:\n'
+                    '                        # Adjust bounding box\n'
+                    '                        x, y, w, h = region.bounding_box\n'
+                    '                        region.bounding_box = (x, y + start_y, w, h)\n'
+                    '                        \n'
+                    '                        # Adjust vertices if present\n'
+                    "                        if hasattr(region, 'vertices') and region.vertices:\n"
+                    '                            adjusted_vertices = []\n'
+                    '                            for vx, vy in region.vertices:\n'
+                    '                                adjusted_vertices.append((vx, vy + start_y))\n'
+                    '                            region.vertices = adjusted_vertices\n'
+                    '                        \n'
+                    '                        # Mark which chunk this came from (for deduplication)\n'
+                    '                        region.chunk_index = i\n'
+                    '                        region.chunk_y_range = (start_y, end_y)\n'
+                    '                    \n'
+                    '                    all_regions.extend(chunk_regions)\n'
+                    '                    chunk_offsets.append(start_y)\n'
+                    '                    \n'
+                    '                    self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")\n'
+                    '                    \n'
+                    '                finally:\n'
+                    '                    # Clean up temp file\n'
+                    '                    import os\n'
+                    '                    if os.path.exists(chunk_path):\n'
+                    '                        os.remove(chunk_path)\n'
+                    '            \n'
+                    '            # Remove duplicate regions from overlapping areas\n'
+                    '            self._log(f"\\n   🔍 Deduplicating regions from overlaps...", "info")\n'
+                    '            unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)\n'
+                    '            \n'
+                    '            self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")\n'
+                    '            \n'
+                    ,
+                    '            \n'
+                    '            image, unique_regions, num_chunks = self._detect_webtoon_chunk_regions(image_path)\n'
+                    '            \n'
+                ),
+                (
+                    "            result['errors'].append(error_msg)\n"
+                    '            return result\n'
+                    '\n'
+                    '    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:\n'
+                    ,
+                    "            result['errors'].append(error_msg)\n"
+                    '            return result\n'
+                    '\n'
+                    '    def _detect_webtoon_chunk_regions(self, image_path: str):\n'
+                    '        """Detect the text of a tall webtoon strip chunk by chunk.\n'
+                    '\n'
+                    '        Returns ``(image, regions, num_chunks)``: the loaded BGR page, the regions in\n'
+                    '        full-image coordinates with the overlap duplicates removed, and the chunk count.\n'
+                    '        The webtoon translation path and the glossary OCR-only pass both call this, so the\n'
+                    '        regions a glossary pass hands to translation are the ones translation would detect.\n'
+                    '        """\n'
+                    '        import cv2\n'
+                    '        import numpy as np\n'
+                    '        \n'
+                    '        # Load the image\n'
+                    '        image = cv2.imread(image_path)\n'
+                    '        if image is None:\n'
+                    '            pil_image = open_image(image_path)\n'
+                    '            image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)\n'
+                    '        \n'
+                    '        height, width = image.shape[:2]\n'
+                    '        \n'
+                    '        # Get chunk settings from config\n'
+                    "        chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)\n"
+                    "        chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)\n"
+                    '        \n'
+                    '        self._log(f"   Image dimensions: {width}x{height}", "info")\n'
+                    '        self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")\n'
+                    '        \n'
+                    '        # Calculate number of chunks needed\n'
+                    '        effective_chunk_height = chunk_height - chunk_overlap\n'
+                    '        num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)\n'
+                    '        \n'
+                    '        self._log(f"   Will process in {num_chunks} chunks", "info")\n'
+                    '        \n'
+                    '        # Process each chunk\n'
+                    '        all_regions = []\n'
+                    '        chunk_offsets = []\n'
+                    '        \n'
+                    '        for i in range(num_chunks):\n'
+                    '            # Calculate chunk boundaries\n'
+                    '            start_y = i * effective_chunk_height\n'
+                    '            end_y = min(start_y + chunk_height, height)\n'
+                    '            \n'
+                    "            # Make sure we don't miss the bottom part\n"
+                    '            if i == num_chunks - 1:\n'
+                    '                end_y = height\n'
+                    '            \n'
+                    '            self._log(f"\\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")\n'
+                    '            \n'
+                    '            # Extract chunk\n'
+                    '            chunk = image[start_y:end_y, 0:width]\n'
+                    '            \n'
+                    '            # Save chunk temporarily for OCR\n'
+                    '            import tempfile\n'
+                    "            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:\n"
+                    '                chunk_path = tmp.name\n'
+                    '                cv2.imwrite(chunk_path, chunk)\n'
+                    '            \n'
+                    '            try:\n'
+                    '                # Detect text in this chunk\n'
+                    '                chunk_regions = self.detect_text_regions(chunk_path)\n'
+                    '                \n'
+                    '                # Adjust region coordinates to full image space: the box and polygon of the\n'
+                    "                # region and of a merged region's lines (create_text_mask masks those), and the\n"
+                    '                # RT-DETR bubble it is masked and rendered in\n'
+                    '                shifted_ids = set()\n'
+                    '                for region in chunk_regions:\n'
+                    "                    for shifted in [region] + list(getattr(region, 'original_regions', None) or []):\n"
+                    '                        if id(shifted) in shifted_ids:\n'
+                    '                            continue\n'
+                    '                        shifted_ids.add(id(shifted))\n'
+                    '                        # Adjust bounding box\n'
+                    '                        x, y, w, h = shifted.bounding_box\n'
+                    '                        shifted.bounding_box = (x, y + start_y, w, h)\n'
+                    '                        \n'
+                    '                        # Adjust vertices if present\n'
+                    "                        if hasattr(shifted, 'vertices') and shifted.vertices:\n"
+                    '                            shifted.vertices = [(vx, vy + start_y) for vx, vy in shifted.vertices]\n'
+                    '                    \n'
+                    "                    bubble_bounds = getattr(region, 'bubble_bounds', None)\n"
+                    '                    if bubble_bounds:\n'
+                    '                        bx, by, bw, bh = bubble_bounds\n'
+                    '                        region.bubble_bounds = (bx, by + start_y, bw, bh)\n'
+                    '                    \n'
+                    '                    # Mark which chunk this came from (for deduplication)\n'
+                    '                    region.chunk_index = i\n'
+                    '                    region.chunk_y_range = (start_y, end_y)\n'
+                    '                \n'
+                    '                all_regions.extend(chunk_regions)\n'
+                    '                chunk_offsets.append(start_y)\n'
+                    '                \n'
+                    '                self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")\n'
+                    '                \n'
+                    '            finally:\n'
+                    '                # Clean up temp file\n'
+                    '                import os\n'
+                    '                if os.path.exists(chunk_path):\n'
+                    '                    os.remove(chunk_path)\n'
+                    '        \n'
+                    '        # Remove duplicate regions from overlapping areas\n'
+                    '        self._log(f"\\n   🔍 Deduplicating regions from overlaps...", "info")\n'
+                    '        unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)\n'
+                    '        \n'
+                    '        self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")\n'
+                    '        \n'
+                    '        return image, unique_regions, num_chunks\n'
+                    '\n'
+                    '    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:\n'
+                ),
+                (
+                    '                for j, region2 in enumerate(regions):\n'
+                    '                    if j >= i or j in used_indices:\n'
+                    '                        continue\n'
+                    '                    \n'
+                    ,
+                    '                for j, region2 in enumerate(regions):\n'
+                    '                    # Every earlier region is in used_indices, kept ones too, and OCR jitter can\n'
+                    "                    # sort the previous chunk's copy after this one: compare with all the others.\n"
+                    '                    if j == i:\n'
+                    '                        continue\n'
+                    '                    \n'
+                ),
+            ],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-06",
         "what": "Manga Translate after switching the Local Model (custom-image-edit -> lama_onnx): the Local Model "
                 "switch refreshes Skip Inpainter's in-use lock at once; Translate waits for its concurrent "
                 "inpainting (first-run download / load) before rendering, and a failed image edit request "

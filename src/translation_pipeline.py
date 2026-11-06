@@ -1392,8 +1392,14 @@ Important rules:
                     self.append_log(f"      🌐 Extracting glossary from image...")
                     
                     # API call with interrupt support (use 'glossary' context so empty responses are handled correctly)
-                    response = self._call_api_with_interrupt(
-                        client, messages, image_base64, temperature, max_tokens, context='glossary'
+                    # A tall image is chunked like image translation chunks it (image_translator).
+                    from image_translator import send_image_glossary_request
+                    response = send_image_glossary_request(
+                        lambda msgs, b64: self._call_api_with_interrupt(
+                            client, msgs, b64, temperature, max_tokens, context='glossary'
+                        ),
+                        messages, image_path, image_base64, log=self.append_log,
+                        stop_check=lambda: self.stop_requested,
                     )
                     
                     # If the user requested stop *after* this API call returned:
