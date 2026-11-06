@@ -146,6 +146,7 @@ jobs:
           tests/test_authgem_image_output.py \
           tests/test_manga_image_edit_pool_load.py \
           tests/test_manga_bubble_fit.py \
+          tests/test_glossary_chunk_tall_images.py \
           tests/test_manga_inpaint_wait.py \
           tests/test_auth_pool_dropdowns.py \
           tests/test_key_pool_collapse.py \

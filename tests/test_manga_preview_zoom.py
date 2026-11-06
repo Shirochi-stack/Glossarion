@@ -295,3 +295,154 @@ def test_installed_once():
 
     preview = types.SimpleNamespace(preview_zoom="installed")
     assert install_preview_zoom(preview) == "installed"
+
+
+# ---- keep the view when the page shown is re-rendered ------------------------------------------------
+# Owner report: "please prevent my zoom from resetting whenever i change my changes in the text bubble,
+# it is very annoying in webtoons". Every box edit re-renders the page and the preview loads it again
+# (MangaImagePreviewWidget.load_image(page, preserve_rectangles=True, ...)), and the viewer's setPhoto
+# fitted each load: the zoomed strip jumped back to the whole strip, scrolled to the top.
+
+def _save_strip(path, shade, size=(800, 8000)):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    strip = QPixmap(*size)
+    strip.fill(QColor(shade, shade, shade))
+    assert strip.save(path)
+    return path
+
+
+def _reload(env, path, preserve=True, settle=0.1):
+    """Load ``path`` into the preview as the edit / render paths do, then let setPhoto's fit timer run."""
+    env.widget.load_image(path, preserve_rectangles=preserve, preserve_text_overlays=preserve)
+    _pump(env.app, settle)
+
+
+@pytest.fixture
+def zoomed(window):
+    """The strip page loaded from disk, zoomed in three button steps and scrolled down the strip, a box
+    selected."""
+    widget, viewer = window.widget, window.viewer
+    widget.source_display_mode = 'original'  # show the file loaded (no output folder lookups)
+    _save_strip(window.page, 200)
+    _reload(window, window.page, preserve=False)  # a page opened: its boxes come from its saved state
+    if window.rect not in viewer.rectangles:
+        viewer.scene().addItem(window.rect)
+        viewer.rectangles.append(window.rect)
+    window.fit = _scale(viewer)
+    for _ in range(3):
+        widget._zoom_in()
+    window.app.processEvents()
+    viewer.centerOn(300, 5200)
+    window.app.processEvents()
+    window.rect.setSelected(True)
+    window.view = (viewer.transform(), viewer.horizontalScrollBar().value(), viewer.verticalScrollBar().value())
+    assert window.view[2] > 0
+    return window
+
+
+def _assert_view_kept(env):
+    viewer = env.viewer
+    transform, x, y = env.view
+    assert viewer.transform() == transform
+    assert viewer.horizontalScrollBar().value() == x
+    assert viewer.verticalScrollBar().value() == y
+    assert viewer.user_zoomed  # a later resize keeps the zoom too
+
+
+def test_rerender_of_the_page_keeps_zoom_and_scroll(zoomed):
+    _save_strip(zoomed.page, 120)  # the page rendered again with the edit
+    _reload(zoomed, zoomed.page)
+    assert zoomed.viewer.photo.pixmap().toImage().pixelColor(5, 5) == QColor(120, 120, 120)  # the new render
+    _assert_view_kept(zoomed)
+    assert zoomed.rect.isSelected()
+    # Save & Update Overlay reloads again after 0.5 / 1.5 / 3 s: each one keeps it
+    _reload(zoomed, zoomed.page)
+    _reload(zoomed, zoomed.page)
+    _assert_view_kept(zoomed)
+
+
+def test_cleaned_and_rendered_images_of_the_page_keep_the_view(zoomed, tmp_path):
+    folder = tmp_path / "001_translated"
+    _reload(zoomed, _save_strip(str(folder / "001_cleaned.png"), 150))  # after Clean
+    _assert_view_kept(zoomed)
+    _reload(zoomed, _save_strip(str(folder / "001.png"), 90))  # the rendered output
+    _assert_view_kept(zoomed)
+    _reload(zoomed, zoomed.page)  # and back to the page itself
+    _assert_view_kept(zoomed)
+
+
+def test_another_page_still_fits(zoomed, tmp_path):
+    _reload(zoomed, _save_strip(str(tmp_path / "002.png"), 100), preserve=False)
+    viewer = zoomed.viewer
+    assert _scale(viewer) == pytest.approx(zoomed.fit)
+    assert not viewer.user_zoomed
+    # ... also when it is loaded the way Translate All returns to its first page (boxes kept)
+    viewer.scale(2, 2)
+    viewer.user_zoomed = True
+    _reload(zoomed, _save_strip(str(tmp_path / "003.png"), 110))
+    assert _scale(viewer) == pytest.approx(zoomed.fit)
+
+
+def test_a_page_at_fit_still_fits(window):
+    window.widget.source_display_mode = 'original'
+    _save_strip(window.page, 200)
+    _reload(window, window.page, preserve=False)
+    fit = _scale(window.viewer)
+    _reload(window, _save_strip(window.page, 120, size=(400, 4000)))
+    assert _scale(window.viewer) == pytest.approx(2 * fit)  # the half-size render fits the view
+    assert not window.viewer.user_zoomed
+
+
+def test_fit_to_view_after_a_kept_reload_still_fits(zoomed):
+    _reload(zoomed, zoomed.page)
+    _assert_view_kept(zoomed)
+    _key(zoomed, Qt.Key.Key_0)
+    assert _scale(zoomed.viewer) == pytest.approx(zoomed.fit)
+    assert not zoomed.viewer.user_zoomed
+
+
+def test_a_render_of_another_size_keeps_the_same_part_in_view(zoomed):
+    viewer = zoomed.viewer
+    center = viewer.mapToScene(viewer.viewport().rect().center())
+    _reload(zoomed, _save_strip(zoomed.page, 120, size=(1600, 16000)))  # rendered at twice the size
+    assert _scale(viewer) == pytest.approx(zoomed.view[0].m11() / 2)
+    now = viewer.mapToScene(viewer.viewport().rect().center())
+    pixel = 1 / _scale(viewer)  # centerOn lands on whole scroll bar steps
+    assert abs(now.x() - 2 * center.x()) <= 2 * pixel and abs(now.y() - 2 * center.y()) <= 2 * pixel
+    assert viewer.user_zoomed
+
+
+def test_a_cleared_preview_fits_the_next_load(zoomed):
+    viewer = zoomed.viewer
+    viewer.rectangles.remove(zoomed.rect)
+    viewer.scene().removeItem(zoomed.rect)  # kept alive for the fixture's teardown
+    viewer.clear_scene()
+    viewer.scene().addItem(zoomed.rect)
+    viewer.rectangles.append(zoomed.rect)
+    _reload(zoomed, zoomed.page, preserve=False)
+    assert _scale(viewer) == pytest.approx(zoomed.fit)
+
+
+def test_same_page():
+    from manga_preview_zoom import same_page
+
+    page = os.path.join("book", "ch1", "001.png")
+    assert same_page(page, os.path.join("book", "ch1", "001.png"))
+    assert same_page(page, os.path.join("book", "ch1", "001_translated", "001_cleaned.png"))
+    assert same_page(page, os.path.join("out", "001_translated", "001.png"))
+    assert same_page(os.path.join("out", "001_translated", "001_cleaned.png"), page)
+    assert not same_page(page, os.path.join("book", "ch1", "002.png"))
+    assert not same_page(page, os.path.join("book", "ch2", "001.png"))  # another chapter's page 1
+    assert not same_page(page, os.path.join("out", "002_translated", "002.png"))
+    assert not same_page(page, None)
+
+
+def test_two_reloads_in_one_event_loop_turn_keep_the_view(zoomed):
+    # Clean queues ('preview_update', cleaned page) and ('clean_button_restore'): the update queue runs
+    # both in one tick, so both loads come before the first fit timer of setPhoto
+    for _ in range(2):
+        zoomed.widget.load_image(zoomed.page, preserve_rectangles=True, preserve_text_overlays=True)
+    _pump(zoomed.app, 0.1)
+    _assert_view_kept(zoomed)
+    _reload(zoomed, zoomed.page)  # and a later one too (no skip left over / missing)
+    _assert_view_kept(zoomed)
