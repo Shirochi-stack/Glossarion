@@ -1,7 +1,133 @@
-# TurboLite, Lite and Standard builds: size diagnosis (v9.15.14)
+# TurboLite, Lite and Standard builds: size diagnosis and slimming (v9.15.14)
 
-This is a diagnosis only. No spec was changed. It follows on from the NoCuda slimming
-(`docs/nocuda_bloat_report.md`, PR 162) and uses the same method:
+Section 0 has the result: the low-risk items from section 5 are applied to the three specs and
+measured on rebuilt exes. Sections 1-7 are the original diagnosis, kept as the reasoning behind
+each item. This work follows on from the NoCuda slimming (`docs/nocuda_bloat_report.md`, PR 162).
+
+## 0. Applied and measured
+
+### 0.1 Sizes
+
+"Before" is the unchanged origin/main specs (33fb2276), built in the same worktree and Python
+3.12.9 / PyInstaller 6.19 environment as "after", so the only difference is the spec edits. The
+before exes are about 40 KB bigger than the v9.15.14 release assets because of code merged after
+the release.
+
+| Build | Before (bytes) | After (bytes) | Saved | PYZ modules | PKG entries | Extracted per launch (u MiB) |
+|---|---:|---:|---:|---|---|---|
+| TurboLite | 102,355,055 | 96,040,105 | **6.3 MB (6.2%)** | 6,506 -> 6,002 | 1,944 -> 1,285 | 176.5 -> 170.3 |
+| Lite | 151,138,994 | 122,996,072 | **28.1 MB (18.6%)**, and PDF export now works | 8,121 -> 7,834 | 2,179 -> 1,451 | 254.6 -> 194.0 |
+| Standard | 383,600,743 | 271,976,625 | **111.6 MB (29.1%)** | 9,404 -> 8,367 | 5,329 -> 1,662 | 809.5 -> 513.7 |
+
+The estimates in section 5 were about 95 / 108 / 253 MB for the same set of items. Lite and
+Standard came out lower than that: the measured savings are 28.1 and 111.6 MB, against estimates of
+about 21 (net) and 94-104 MB.
+
+### 0.2 What changed
+
+All the edits are filtering: `excludes`, the MSYS2 `binaries` list, a hidden-import filter, the
+`collect_all` list and a post-Analysis filter on `a.binaries` / `a.datas`. `app_files`,
+`app_modules`, the `EXE()` block and the console settings are untouched.
+
+The NoCuda helpers (`_msys2_weasyprint_dlls`, `_slim_unused`, `_pyside6_unreachable_qt_dlls`) now
+live in `src/spec_slim.py`, which every spec imports from `SPEC_DIR` the same way it imports
+`windows_version_info`. `translator_NoCuda.spec` imports them from there instead of keeping its own
+copy. The function bodies are unchanged (an AST comparison against the old spec shows them
+identical), and a NoCuda rebuild was checked against PR 162's slim exe (0.4). `slim_analysis(a,
+label, extra=...)` runs the NoCuda rules plus an optional per-spec predicate, then the Qt6 DLL PE
+closure. `pyside6_unused_bindings([...])` builds that predicate from PySide6-relative names.
+
+| Item | TurboLite | Lite | Standard | Measured saving (c MiB) |
+|---|---|---|---|---|
+| L0: allow `fontTools` back (WeasyPrint needs it) | n/a | yes | already shipped | Lite +1.3 |
+| S2/L1: MSYS2 = WeasyPrint PE closure (29 DLLs instead of 101) | n/a | yes | yes | 23.3 each |
+| S1: WebEngine DevTools + `.debug` resources | n/a | n/a | yes | 27.7 |
+| S3 + S5: `qml/` tree, then the 101 Qt6 DLLs nothing left links | already filtered | already filtered | yes | 8.8 + about 22 |
+| S4 + S6: Chromium locales except en-US, Qt `.qm` translations | already filtered | already filtered | yes | 13.3 |
+| S9: QtOpenGL/QtQuick/QtQml/QtPositioning/QtQuickWidgets `.pyd`, pyside6qml, `plugins/qmltooling`, `plugins/position`, `plugins/platforminputcontexts` | n/a | n/a | yes | about 3 (in the PySide6 figure) |
+| L5/T3: QtMultimedia(Widgets)/QtWebSockets `.pyd`, `plugins/multimedia`, swscale, the qpdf and virtual-keyboard plugins (their Qt6 DLLs were already filtered out) | yes | yes | n/a (the media player is shipped) | 1.0 |
+| S10: `pygments`, `rich`, `redis`, `ttkbootstrap` (and ttkbootstrap out of `collect_all`) | already | already | yes | 3.0 |
+| S13: `onnxruntime_extensions` | n/a | already | yes | 0.8 |
+| S11/L3/T1: stray manga modules + `doctr` | yes | yes | yes | about 1.5 |
+| S12/L4/T2: `mcp`, `werkzeug` | yes | yes | yes | about 1.0 |
+| L6/T4: `xhtml2pdf`, `svglib`, `asn1crypto`, `arabic_reshaper` (reportlab is already excluded there) | yes | yes | not applied (S8) | 0.5 |
+| S14/L7/T5: hidden imports `pytz`, `sqlite3`, `_sqlite3`, `lru` (with sqlite3.dll, pytz/zoneinfo) | yes | yes | yes | 1.3 (Lite/Standard also drop MSYS2's libsqlite3) |
+
+The diagnosis put `setuptools`/`pkg_resources` in S14. They stay, because cffi pulls them in
+regardless of the hidden import, and `pyi_rth_pkgres` needs `pkg_resources`.
+
+The set differences between the before and after TOCs contain only what the items above name and
+the packages reachable only through them. Every removed top-level package was checked against
+the before build's xref graph:
+
+- `google.cloud.vision*` (34 modules) and `azure.ai.vision.imageanalysis` (18 modules) were reached
+  only from `manga_translator`, `manga_editor_core` and `ocr_manager`. So the diagnosis was wrong
+  to mark vision_v1 as "used" in these tiers: no shipped non-manga module imports it.
+- `pywintypes`/`win32` and `anyio.streams.*` came from `mcp.os.win32`.
+- `markupsafe` and `code` came from `werkzeug`.
+- `cProfile`/`pstats` and `bidi` came from `xhtml2pdf`.
+- `pyclipper`, `validators` and `rapidocr_onnxruntime` came from `doctr` / `ocr_manager`.
+- `markdown_it`, `mdurl` and `pty` came from `rich`.
+- `cryptography.x509.ocsp` came from `redis`.
+
+numpy, grpc, google.genai, lxml, PIL, the API SDKs and (Standard) QtWebEngine, QtMultimedia +
+FFmpeg, Qt6Pdf, PyMuPDF and pdfminer are unchanged.
+
+### 0.3 Smoke tests (after exes, isolated profile)
+
+`GLOSSARION_APP_DIR`, `USERPROFILE`, `HOME`, `APPDATA` and `LOCALAPPDATA` pointed into a scratch
+folder. Every test process was killed afterwards.
+
+| Test | TurboLite | Lite | Standard |
+|---|---|---|---|
+| GUI starts and stays up for 3+ minutes (UI Automation) | pass (9 s to main window) | pass | pass |
+| Dialogs open and close: Other Settings, Glossary Settings, QA Scanner Settings, Multi API Key Manager, Async Translator (its "No File Selected" prompt), Direct Text Translation, Glossarion Library, Assistant Prompt | all pass | all pass | all pass |
+| `--run-chapter-extraction` on a 3-chapter Korean EPUB with an image | pass | pass | pass |
+| `--run-pdf-worker` (WeasyPrint, Korean + English + images) | "WeasyPrint not installed", as designed | **pass**: 3 pages, 3 images, Korean and English extract back (the before exe fails with "WeasyPrint not installed") | pass |
+| `--run-pdf-extraction` fast_semantic + pdfplumber | n/a | n/a | pass |
+| `--autharena-qt-browser` offscreen: DevTools endpoint, CDP attach/navigate/evaluate, `navigator.language` = ko with only en-US.pak | n/a | n/a | pass |
+
+Not exercised interactively:
+
+- The EPUB reader view: the CDP test covers QtWebEngine.
+- The media player: its Qt6Multimedia, FFmpeg and plugin files are all still shipped, and the Qt
+  closure keeps whatever the plugins link.
+- A real Vertex request.
+
+tests/test_mobile_runtime.py (spec tiers) passes. Of the other tests that read the specs, only 4
+in test_sdlxliff_support.py fail, and they fail the same way on a clean tree.
+
+### 0.4 NoCuda check
+
+`translator_NoCuda.spec`, now built through `spec_slim`, gives 582,559,337 bytes.
+
+- Its PKG entry set equals PR 162's slim exe, apart from the onnxscript dist-info.
+- Its PYZ adds only `onnxscript`, `onnx_ir`, `onnxslim` (and `wcwidth`). PR 162's review commit
+  be2e0bbd restored those after that exe was built.
+- So the extraction leaves the NoCuda output unchanged.
+
+### 0.5 Needs owner decision (not applied)
+
+- **Vertex SDK (S7 / L2 / T0)** needs a code change in `unified_api_client._send_vertex_model_garden`
+  and `splash_utils`, not only a spec edit. It would save 13.4 MiB in Lite and Standard and make
+  Vertex Model Garden work in TurboLite.
+- **Lite PDF policy.** Lite now makes PDFs, as help/index.html implies ("TurboLite ... also drops
+  ... PDF generation"). `run_specs_parallel.bat` says "Lite ... no PDF", though. Dropping
+  WeasyPrint from Lite the way TurboLite does would save about another 11 MiB (the 29 MSYS2 DLLs,
+  weasyprint, fontTools, pyphen and their CSS/zopfli/brotli helpers).
+- **S8: the xhtml2pdf fallback chain in Standard** (about 4.2 MiB). It runs only when WeasyPrint
+  fails, and PyMuPDF is the next fallback.
+- **S15 / L8 / T6: the loose `app_files` .py copies** (about 4.1-4.2 MiB each). This edits
+  `app_files`, which the desktop-manga-console branch also changes, and autharena needs three of
+  the files.
+- **S16: opengl32sw.dll in Standard** (7.3 MiB). It is the software-GL fallback for the EPUB
+  reader on VMs and RDP sessions.
+- **E1: build machine.** Uninstall caldav, niquests and urllib3-future, then reinstall urllib3
+  (about 2.4 MiB per build, and requests goes back to stock urllib3).
+
+---
+
+The original diagnosis follows. It uses this method:
 
 - The exes are the v9.15.14 release builds in `src/dist`. Their byte sizes match the draft-release assets.
 - The CArchive and PYZ tables of contents were read with PyInstaller 6.19.
@@ -295,3 +421,11 @@ not in the repo:
   json taken from `BUILD_JSON`.
 - `weasy_lite_check.py <spec> <out.pdf> [allow...]` renders a PDF with a spec's excludes hidden.
 - `nocuda/smoke.py <exe> <workdir> pdf pdfx web` runs the worker-flag smoke tests with an isolated profile.
+
+The slimming pass (section 0) adds these, in `.../scratchpad/slim3/`:
+
+- `build.sh <tag> <spec>` builds into `src/dist/<tag>` with its own `PYINSTALLER_CONFIG_DIR`.
+- `setdiff.py` / `gone.py` compare the before and after TOCs (removed or added packages and files).
+- `guismoke.py <exe> <workdir> <secs> open:<button>...` is the UI Automation GUI smoke test.
+- `epubsmoke.py <exe> <workdir>` runs the `--run-chapter-extraction` EPUB import.
+- `nocuda_equiv.py` is the AST check of the extracted helpers.

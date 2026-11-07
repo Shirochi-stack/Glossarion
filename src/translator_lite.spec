@@ -80,7 +80,11 @@ print(f"  Selected MSYS2 bin: {msys2_bin}")
 
 # Add MSYS2 DLLs for WeasyPrint (PDF generation)
 if msys2_bin and os.path.exists(msys2_bin):  # Enabled in Lite
-    dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
+    # Only the DLLs WeasyPrint loads (their PE closure), not all of mingw64/bin
+    from spec_slim import msys2_weasyprint_dlls
+    dll_list = msys2_weasyprint_dlls(msys2_bin)
+    if dll_list is None:
+        dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
     for dll in dll_list:
         binaries.append((dll, '.'))
     print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
@@ -1217,6 +1221,13 @@ hiddenimports = list(set(hiddenimports))
 # websocket-client: cdp_browser (authchatgpt, authds) and opera_aria import it inside functions
 hiddenimports.append('websocket')
 
+# SLIM (docs/lite_builds_bloat_report.md): hidden imports nothing in the app
+# imports (no src module uses pytz, sqlite3 or lru; PyInstaller still collects
+# any of them a shipped package really imports). setuptools/pkg_resources stay:
+# cffi pulls them in anyway, and pyi_rth_pkgres needs pkg_resources.
+_SLIM_UNUSED_HIDDEN = {'pytz', 'sqlite3', '_sqlite3', 'lru'}
+hiddenimports = [h for h in hiddenimports if h not in _SLIM_UNUSED_HIDDEN]
+
 excludes = [
     # POE (no longer needed; imports guarded by try/except)
     'poe_api_wrapper', 'poe_api_wrapper.*',
@@ -1415,11 +1426,11 @@ excludes = [
 
 
     # ============================================================================
-    # PDF STACK â€” Lite has no PDF output or viewing
+    # PDF STACK - Lite writes PDFs with WeasyPrint only (it needs fontTools,
+    # so that stays); no PDF reading/viewing (PyMuPDF, pdfminer) or xhtml2pdf
     # ============================================================================
     'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
     'reportlab', 'reportlab.*',
-    'fontTools', 'fontTools.*',
     'pypdf', 'pypdf.*',
     'pdfminer', 'pdfminer.*',
     'pyhanko', 'pyhanko.*',
@@ -1449,6 +1460,20 @@ excludes = [
 
 
 
+    # ============================================================================
+    # SLIM (docs/lite_builds_bloat_report.md): reached only through optional or
+    # lazy imports this tier never runs
+    # ============================================================================
+    # Manga stack modules PyInstaller follows from try-guarded lazy imports in
+    # stop_control, translator_gui and translation_pipeline (no manga in this tier)
+    'manga_translator', 'ocr_manager', 'bubble_detector', 'local_inpainter',
+    'ImageRenderer', 'manga_editor_core', 'manga_env', 'manga_runner',
+    'manga_settings_dialog', 'doctr', 'doctr.*',
+    # google.genai's optional MCP support (try-guarded); websockets' optional router
+    'mcp', 'mcp.*', 'werkzeug', 'werkzeug.*',
+    # xhtml2pdf fallback: reportlab is excluded above, so it can never run
+    'xhtml2pdf', 'xhtml2pdf.*', 'svglib', 'svglib.*',
+    'asn1crypto', 'asn1crypto.*', 'arabic_reshaper', 'arabic_reshaper.*',
 ]
 
 # ============================================================================
@@ -1570,11 +1595,10 @@ a.pure = [p for p in a.pure if not any([
 
 
 
-    # ---- Lite: PDF stack (not used, WeasyPrint excluded) ----
+    # ---- Lite: PDF reading stack (WeasyPrint + fontTools are kept for PDF export) ----
     str(p[0]).startswith('pymupdf'),
     str(p[0]).startswith('fitz'),
     str(p[0]).startswith('reportlab'),
-    str(p[0]).startswith('fontTools'),
     str(p[0]).startswith('pypdf'),
     str(p[0]).startswith('pdfminer'),
     str(p[0]).startswith('pyhanko'),
@@ -1594,6 +1618,19 @@ a.pure = [p for p in a.pure if not any([
     # pkg_resources unconditionally before any user code runs â†’ stripping it
     # causes "No module named 'pkg_resources'" and the exe won't launch.
 ])]
+
+# ============================================================================
+# SLIM (docs/lite_builds_bloat_report.md)
+# ============================================================================
+# QtMultimedia(Widgets) and QtWebSockets cannot load here: their Qt6 DLLs are
+# filtered out above (the media player shows its "unavailable" label, autharena/
+# refuses without WebEngine). Same for the FFmpeg scaler, the Qt Pdf image plugin
+# and the virtual-keyboard input plugin.
+from spec_slim import slim_analysis, pyside6_unused_bindings
+slim_analysis(a, 'LITE', extra=pyside6_unused_bindings([
+    'QtMultimedia.pyd', 'QtMultimediaWidgets.pyd', 'QtWebSockets.pyd', 'swscale-8.dll',
+    'plugins/multimedia/', 'plugins/imageformats/qpdf.dll', 'plugins/platforminputcontexts/',
+]))
 
 # ============================================================================
 # PYZ (Python Zip archive)
