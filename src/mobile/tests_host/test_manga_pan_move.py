@@ -113,12 +113,13 @@ def test_a_drag_on_a_box_moves_it_and_a_drag_on_the_empty_page_is_the_viewers(is
         # Pan / move: the viewer pans and pinches; the full-page surface has no drag or tap recognizer
         # (it would win every drag against the viewer), only long-press
         assert viewer.pan_enabled and viewer.scale_enabled
-        assert (surface.on_pan_start, surface.on_tap_down) == (None, None)
+        assert (surface.on_horizontal_drag_start, surface.on_vertical_drag_start, surface.on_tap_down) == (None,) * 3
         areas = list(tab.hit_areas)
         assert tab.stack.controls == [tab.page_image, tab.canvas, surface, *areas]  # the top children
         assert [_rect(a) for a in areas] == [(20, 40, 80, 120), (20, 300, 80, 60)]
-        assert all(a.on_pan_start and a.on_pan_update and a.on_pan_end and a.on_tap_down and a.on_long_press_start
-                   for a in areas)
+        assert all(a.on_horizontal_drag_start and a.on_horizontal_drag_update and a.on_horizontal_drag_end
+                   and a.on_vertical_drag_start and a.on_vertical_drag_update and a.on_vertical_drag_end
+                   and a.on_tap_down and a.on_long_press_start for a in areas)
         # a drag on the empty page: no hit area there, so only the viewer sees it; it pans / zooms the page
         # and no box moves
         calls = len(fake.calls)
@@ -131,13 +132,13 @@ def test_a_drag_on_a_box_moves_it_and_a_drag_on_the_empty_page_is_the_viewers(is
         assert tab.selected is None
         # a drag that starts on box 1 moves it (and selects it), live while the finger moves
         area = areas[1]
-        await _fire(session, area, "pan_start", 40, 30)  # page (60, 330) = image (30, 165)
+        await _fire(session, area, "horizontal_drag_start", 40, 30)  # page (60, 330) = image (30, 165)
         assert tab.drag["mode"] == "move" and tab.selected == 1
         assert area in tab.hit_areas  # the area under the finger stays (the drag goes on)
-        await _fire(session, area, "pan_update", 60, 50)  # +20 dp = +10 px each way
+        await _fire(session, area, "horizontal_drag_update", 60, 50)  # +20 dp = +10 px each way
         assert (tab.boxes[1]["x"], tab.boxes[1]["y"]) == (20.0, 160.0)
         assert area in tab.hit_areas
-        await _fire(session, area, "pan_end", 60, 50)
+        await _fire(session, area, "horizontal_drag_end", 60, 50)
         await mu._settle()
         assert fake.calls[-1] == ("update_box", 1, 20.0, 160.0, 40.0, 30.0, False) and tab.selected == 1
         # the areas follow the moved box; the selected box's handles get their own (2 x 22 dp at 2x zoom)
@@ -146,10 +147,10 @@ def test_a_drag_on_a_box_moves_it_and_a_drag_on_the_empty_page_is_the_viewers(is
         assert rects[2:] == [(40 - 11, 320 - 11, 22, 22), (120 - 11, 380 - 11, 22, 22)]
         # the resize handle resizes
         handle = tab.hit_areas[3]
-        await _fire(session, handle, "pan_start", 11, 11)
+        await _fire(session, handle, "vertical_drag_start", 11, 11)
         assert tab.drag["mode"] == "resize"
-        await _fire(session, handle, "pan_update", 21, 31)
-        await _fire(session, handle, "pan_end", 21, 31)
+        await _fire(session, handle, "vertical_drag_update", 21, 31)
+        await _fire(session, handle, "vertical_drag_end", 21, 31)
         await mu._settle()
         assert fake.calls[-1] == ("update_box", 1, 20.0, 160.0, 45.0, 40.0, False)
         screen.dispose()
@@ -174,7 +175,7 @@ def test_a_tap_on_a_box_selects_it_and_long_press_opens_its_panel(iso, tmp_path,
         tab.set_tool("box")
         assert tab.hit_areas == [] and not tab.interactive.pan_enabled and tab.selected is None
         assert tab.stack.controls == [tab.page_image, tab.canvas, tab.gestures]  # the surface on top
-        assert tab.gestures.on_pan_start is not None
+        assert tab.gestures.on_horizontal_drag_start is not None
         tab.set_tool("pan")
         assert len(tab.hit_areas) == 2 and tab.interactive.pan_enabled
         screen.dispose()
@@ -195,6 +196,31 @@ def test_no_hit_areas_while_a_step_runs(iso, tmp_path, monkeypatch):
         jobs.finish(job_id, result={"manga_step": "translate"})
         await mu._settle()
         assert not tab.busy and len(tab.hit_areas) == 2
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_editor_drags_never_use_a_pan_recognizer(iso, tmp_path, monkeypatch):
+    """The manga screen's TabBarView swipes between tabs with a horizontal drag recognizer (18 dp slop);
+    a pan recognizer (36 dp) lost every sideways drag to it on the emulator (Box and move drags did
+    nothing, the tabs twitched). Box areas and the drawing surface use axis drag recognizers."""
+    async def scenario():
+        me, fake, pages, session, screen, tab = _open(tmp_path, monkeypatch)
+        await _page_with_boxes(tab, fake, pages)
+        surfaces = list(tab.hit_areas)
+        tab.set_tool("box")
+        surfaces.append(tab.gestures)
+        for control in surfaces:
+            assert (control.on_pan_start, control.on_pan_update, control.on_pan_end) == (None, None, None)
+            assert control.on_horizontal_drag_start and control.on_vertical_drag_start
+        # a vertical drag on the drawing surface draws, like a horizontal one
+        await _fire(session, tab.gestures, "vertical_drag_start", 100, 100)
+        await _fire(session, tab.gestures, "vertical_drag_update", 140, 180)
+        await _fire(session, tab.gestures, "vertical_drag_end", 140, 180)
+        await mu._settle()
+        assert fake.calls[-1][0] == "add_box"
         screen.dispose()
 
     asyncio.run(scenario())

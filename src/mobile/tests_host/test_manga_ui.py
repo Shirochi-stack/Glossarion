@@ -2525,7 +2525,8 @@ def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, mo
         assert tab.tool == "pan" and viewer.pan_enabled and viewer.scale_enabled
         # no pan recognizer over the viewer in Pan mode (it would win the gesture arena and swallow
         # one-finger panning); a long-press still opens the box sheet
-        assert (surface.on_pan_start, surface.on_pan_update, surface.on_pan_end, surface.on_tap_down) == (
+        assert (surface.on_horizontal_drag_start, surface.on_vertical_drag_start, surface.on_pan_start,
+                surface.on_pan_update, surface.on_pan_end, surface.on_tap_down) == (None, None,
             None, None, None, None)
         assert surface.on_long_press_start is not None
         # pinch zoom with a boundary margin; the boxes are drawn in the same transformed stack as the page
@@ -2544,12 +2545,12 @@ def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, mo
         tab.set_tool("box")
         assert tab.interactive is viewer and not viewer.pan_enabled and not viewer.scale_enabled
         assert tab.gestures is not surface and tab.gestures.key != surface.key
-        assert tab.gestures.on_pan_start is not None and tab.stack.controls[-1] is tab.gestures
+        assert tab.gestures.on_horizontal_drag_start is not None and tab.stack.controls[-1] is tab.gestures
         editing = tab.gestures
         tab.refresh()
         assert tab.gestures is editing
         tab.set_tool("pan")
-        assert tab.interactive is viewer and viewer.pan_enabled and tab.gestures.on_pan_start is None
+        assert tab.interactive is viewer and viewer.pan_enabled and tab.gestures.on_vertical_drag_start is None
         await tab.step_page(1)  # another page: another viewer
         assert tab.interactive is not viewer
         # the display modes only change the image under the boxes: same viewer (and zoom)

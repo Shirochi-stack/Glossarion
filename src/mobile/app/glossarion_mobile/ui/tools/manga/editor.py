@@ -66,7 +66,8 @@ from glossarion_mobile.ui.tools.manga.box_sheet import COMPACT_BUTTON, ITERATION
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, font_choices, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
-__all__ = ["EditorTab", "Geometry", "PageLayout", "TOOLS", "VIEWS", "ViewTransform", "crop_patches", "handle_at",
+__all__ = ["EditorTab", "Geometry", "PageLayout", "TOOLS", "VIEWS", "ViewTransform", "crop_patches", "drag_handlers",
+           "handle_at",
            "hit_test", "lasso_bounds", "next_view", "normalize_rect", "place_box"]
 
 log = logging.getLogger("glossarion.tools.manga")
@@ -389,6 +390,18 @@ def crop_patches(translated: str, background: str, rect: tuple, image_size: tupl
         except Exception:
             return (None, None)
     return tuple(out)
+
+
+def drag_handlers(start: Any, update: Any, end: Any) -> dict:
+    """GestureDetector handlers for a drag in any direction: a horizontal and a vertical drag
+    recognizer, never a pan one. The manga screen's ``TabBarView`` swipes between its tabs with a
+    horizontal drag recognizer that accepts after kTouchSlop (18 dp), a pan recognizer only after
+    kPanSlop (36 dp), so every drag with a sideways start went to the tabs (seen on the emulator:
+    a diagonal Box / move drag never reached the editor). The deeper axis recognizers accept at the
+    same slop and first, so the editor keeps the drag; the events carry the full local position,
+    whichever axis won."""
+    return {f"on_{axis}_drag_{phase}": fn for axis in ("horizontal", "vertical")
+            for phase, fn in (("start", start), ("update", update), ("end", end))}
 
 
 def lasso_bounds(points: Sequence[tuple]) -> Optional[tuple]:
@@ -1142,11 +1155,11 @@ class EditorTab(MangaTab):
         a taller one pans vertically. The floating box panel never resizes it.
 
         Pan / move: the viewer pans and zooms, and the surface only takes long-presses (box panel):
-        a pan recognizer there would win Flutter's gesture arena against the viewer's own and
+        a drag recognizer there would win Flutter's gesture arena against the viewer's own and
         swallow one-finger panning. Each gesture is routed by where it starts: over every box (and
         the selected box's handles) sits a small hit area (``_sync_hits``, the stack's top children) with its
-        own tap / long-press / drag recognizers, which win the arena for a pointer that went down
-        on them (the deepest recognizer accepts first); a pointer that went down on the empty page
+        own tap / long-press / drag recognizers (``drag_handlers``), which win the arena for a
+        pointer that went down on them (the deepest recognizer accepts first); a pointer that went down on the empty page
         only reaches the surface and the viewer, which pans it (and pinches with two fingers).
         Drawing tools: the viewer holds the zoom Pan / move left, the surface takes taps and drags
         and there are no hit areas. The viewer is kept (same objects, same keys, updated in place)
@@ -1275,8 +1288,8 @@ class EditorTab(MangaTab):
         self._surface_mode = editing
         handlers: dict = {"on_long_press_start": self._on_long_press}
         if editing:
-            handlers.update(on_tap_down=self._on_tap, on_pan_start=self._on_pan_start,
-                            on_pan_update=self._on_pan_update, on_pan_end=self._on_pan_end)
+            handlers.update(on_tap_down=self._on_tap,
+                            **drag_handlers(self._on_pan_start, self._on_pan_update, self._on_pan_end))
         self.gestures = ft.GestureDetector(
             content=ft.Container(bgcolor=ft.Colors.TRANSPARENT), drag_interval=DRAG_INTERVAL,
             left=0, top=0, right=0, bottom=0, key=f"me-gestures-{self._gen}", **handlers)
@@ -1323,9 +1336,7 @@ class EditorTab(MangaTab):
             left=left, top=top, width=width, height=height, key=f"me-hit-{self._gen}-{self._hit_serial}",
             on_tap_down=lambda e: self.tap_at(*at(e)),
             on_long_press_start=lambda e: self.long_press_at(*at(e)),
-            on_pan_start=lambda e: self.pan_start(*at(e)),
-            on_pan_update=lambda e: self.pan_update(*at(e)),
-            on_pan_end=self._on_pan_end)
+            **drag_handlers(lambda e: self.pan_start(*at(e)), lambda e: self.pan_update(*at(e)), self._on_pan_end))
 
     def _sync_hits(self, push_now: bool = True) -> bool:
         """Lay the Pan / move hit areas over the boxes (the top children of the page stack) as they
