@@ -17,10 +17,10 @@ the release.
 |---|---:|---:|---:|---|---|---|
 | TurboLite | 102,355,055 | 96,040,105 | **6.3 MB (6.2%)** | 6,506 -> 6,002 | 1,944 -> 1,285 | 176.5 -> 170.3 |
 | Lite | 151,138,994 | 122,996,072 | **28.1 MB (18.6%)**, and PDF export now works | 8,121 -> 7,834 | 2,179 -> 1,451 | 254.6 -> 194.0 |
-| Standard | 383,600,743 | 271,976,625 | **111.6 MB (29.1%)** | 9,404 -> 8,367 | 5,329 -> 1,662 | 809.5 -> 513.7 |
+| Standard | 383,600,743 | 274,315,950 | **109.3 MB (28.5%)** | 9,404 -> 8,842 | 5,329 -> 1,662 | 809.5 -> 513.7 |
 
 The estimates in section 5 were about 95 / 108 / 253 MB for the same set of items. Lite and
-Standard came out lower than that: the measured savings are 28.1 and 111.6 MB, against estimates of
+Standard came out lower than that: the measured savings are 28.1 and 109.3 MB, against estimates of
 about 21 (net) and 94-104 MB.
 
 ### 0.2 What changed
@@ -46,7 +46,7 @@ closure. `pyside6_unused_bindings([...])` builds that predicate from PySide6-rel
 | S4 + S6: Chromium locales except en-US, Qt `.qm` translations | already filtered | already filtered | yes | 13.3 |
 | S9: QtOpenGL/QtQuick/QtQml/QtPositioning/QtQuickWidgets `.pyd`, pyside6qml, `plugins/qmltooling`, `plugins/position`, `plugins/platforminputcontexts` | n/a | n/a | yes | about 3 (in the PySide6 figure) |
 | L5/T3: QtMultimedia(Widgets)/QtWebSockets `.pyd`, `plugins/multimedia`, swscale, the qpdf and virtual-keyboard plugins (their Qt6 DLLs were already filtered out) | yes | yes | n/a (the media player is shipped) | 1.0 |
-| S10: `pygments`, `rich`, `redis`, `ttkbootstrap` (and ttkbootstrap out of `collect_all`) | already | already | yes | 3.0 |
+| S10: `redis`, `ttkbootstrap` (and ttkbootstrap out of `collect_all`). `rich` and `pygments` were dropped at first and restored in review: `poe_api_wrapper/__init__` imports `.example`, which imports `rich.markdown` (then `rich.syntax`, then `pygments`), so the Poe route Standard ships failed with "poe-api-wrapper not installed" | already | already | yes | 0.7 (2.3 MB of the first 3.0 came back) |
 | S13: `onnxruntime_extensions` | n/a | already | yes | 0.8 |
 | S11/L3/T1: stray manga modules + `doctr` | yes | yes | yes | about 1.5 |
 | S12/L4/T2: `mcp`, `werkzeug` | yes | yes | yes | about 1.0 |
@@ -105,6 +105,24 @@ in test_sdlxliff_support.py fail, and they fail the same way on a clean tree.
 - Its PYZ adds only `onnxscript`, `onnx_ir`, `onnxslim` (and `wcwidth`). PR 162's review commit
   be2e0bbd restored those after that exe was built.
 - So the extraction leaves the NoCuda output unchanged.
+
+### 0.4a Review pass
+
+- Every package that left each PYZ was checked three ways: static importers among the shipped
+  modules, string-named imports (`import_module`/`find_spec`/`__import__`) in shipped sources, and
+  importing each of the 122 third-party targets `src/*.py` names on host Python with the removed
+  packages blocked. The only shipped feature that broke was Poe in Standard (rich/pygments, now
+  restored and rebuilt). The other failures (easyocr, rapidocr, transformers) are excluded in all
+  three tiers anyway.
+- PE imports of every binary in the three slim PKGs resolve against shipped files or System32,
+  and the mingw runtime exports match. WeasyPrint's six `dlopen` names are shipped in Lite and
+  Standard.
+- QtMultimedia/QtWebSockets/qpdf in Lite and TurboLite: their Qt6 DLLs were absent before, so they
+  never loaded. The Standard Qt bindings that were removed are not named by any shipped `.pyd`.
+  `platforminputcontexts` holds only the virtual-keyboard plugin; Windows IME goes through qwindows.
+- `pyi_rth_pywintypes` went with `mcp`. `win32api`/`win32evtlog` are still shipped, but only
+  `logging.handlers.NTEventLogHandler` reaches them, which nothing in the app uses (and it catches
+  ImportError).
 
 ### 0.5 Needs owner decision (not applied)
 

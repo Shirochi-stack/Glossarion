@@ -1442,9 +1442,11 @@ excludes = [
     'manga_settings_dialog', 'doctr', 'doctr.*',
     # google.genai's optional MCP support (try-guarded); websockets' optional router
     'mcp', 'mcp.*', 'werkzeug', 'werkzeug.*',
-    # markdown2's optional highlighter, a terminal printer, a Redis client and the
-    # old tkinter theme (tkinter is excluded above); the Lite tiers drop them too
-    'pygments', 'pygments.*', 'rich', 'rich.*', 'redis', 'redis.*',
+    # A Redis client (datasketch's optional storage) and the old tkinter theme
+    # (tkinter is excluded above); the Lite tiers drop them too. rich and pygments
+    # stay: poe_api_wrapper/__init__ imports .example, which imports rich.markdown
+    # (-> rich.syntax -> pygments), and Standard ships the Poe route.
+    'redis', 'redis.*',
     'ttkbootstrap', 'ttkbootstrap.*',
     # onnxruntime is excluded above, so its extensions can never load
     'onnxruntime_extensions', 'onnxruntime_extensions.*',
