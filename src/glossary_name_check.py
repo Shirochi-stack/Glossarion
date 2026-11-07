@@ -937,6 +937,21 @@ def ner_status(use_ner=True):
         return "missing"
 
 
+#: The "Check glossary names" toggle's text for each ``ner_status`` (desktop QA Scanner settings and the
+#: mobile QA Scanner Settings tile): it says whether NER does the check (owner 2026-10-27)
+NER_TOGGLE_LABELS = {
+    "installed": "Check glossary names with NER (Experimental)",
+    "missing": "Check glossary names (Experimental) — NER not installed (downloads on first use)",
+    "unsupported": "Check glossary names (Experimental) — NER not supported in this build",
+    "off": "Check glossary names (Experimental) — NER off",
+}
+
+
+def ner_toggle_label(use_ner=True):
+    """The "Check glossary names" toggle text for "Use Named Entity Recognition model (NER)" = ``use_ner``."""
+    return NER_TOGGLE_LABELS[ner_status(use_ner)]
+
+
 _ner_notes = set()
 _ner_lock = threading.Lock()
 
