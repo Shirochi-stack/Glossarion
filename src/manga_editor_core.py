@@ -1964,9 +1964,11 @@ def _run_clean_background(self, image_path: str, regions: list):
         # Get inpainting settings from manga integration config
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
-        is_custom_image_edit = inpaint_method == 'local' and str(local_model or '').lower() == 'custom-image-edit'
+        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter
+            local_model = 'custom-image-edit'
+        is_custom_image_edit = inpaint_method in ('local', 'api') and str(local_model or '').lower() == 'custom-image-edit'
         
-        if inpaint_method == 'local':
+        if inpaint_method in ('local', 'api'):
             # Use local inpainter with the same method as manga_translator
             self._log(f"🖼️ Using local inpainter: {local_model}", "info")
             
@@ -2637,9 +2639,11 @@ def _run_inpainting_sync(
         # Get inpainting settings from manga integration config
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter
+            local_model = 'custom-image-edit'
         
         is_custom_image_edit = False
-        if inpaint_method == 'local':
+        if inpaint_method in ('local', 'api'):
             # Use local inpainter with the same method as manga_translator
             print(f"[INPAINT_SYNC] Using local inpainter: {local_model}")
             
@@ -5966,8 +5970,10 @@ def _preload_shared_inpainter(self):
         # Get current inpainting settings
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter
+            local_model = 'custom-image-edit'
 
-        if inpaint_method != 'local':
+        if inpaint_method not in ('local', 'api'):
             print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")
             return None
         
@@ -6077,10 +6083,12 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
         # Get inpainting settings from manga integration config (same as _run_clean_background)
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter
+            local_model = 'custom-image-edit'
         
         print(f"[INPAINT_REGION] Using method: {inpaint_method}, model: {local_model}")
         
-        if inpaint_method == 'local':
+        if inpaint_method in ('local', 'api'):
             # Get model path from config (same way as _run_clean_background)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
             is_custom_image_edit = str(local_model or '').lower() == 'custom-image-edit'
@@ -7811,8 +7819,8 @@ def _run_translate_all_background(self, image_paths: list):
                         self._log(f"🚫 [{idx}/{total}] Skip Inpainter enabled — skipping cleaning", "info")
                         image_path_for_rendering = image_path
                         self._cleaned_image_path = None
-                    # Only run inpainting if method is not 'none' and is 'local' or 'hybrid'
-                    elif inpaint_method in ['local', 'hybrid']:
+                    # Only run inpainting if method is not 'none' and is 'local', 'api' or 'hybrid'
+                    elif inpaint_method in ['local', 'api', 'hybrid']:
                         self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")
                         clean_regions = _regions_with_ocr_text(regions, recognized_texts)
                         cleaned_path = _run_inpainting_sync(self, image_path, clean_regions) if clean_regions else None

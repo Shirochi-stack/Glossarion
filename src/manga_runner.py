@@ -845,11 +845,13 @@ class MangaRunMixin:
                     self._log("🚫 Skip Inpainter enabled — skipping panel inpainter preload", "info")
                 elif (
                     effective_workers > 1
-                    and inpaint_method == 'local'
+                    and inpaint_method in ('local', 'api')
                     and hasattr(self, 'translator')
                     and self.translator
                 ):
                     local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
+                    if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter
+                        local_method = 'custom-image-edit'
                     model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
                     if not model_path:
                         model_path = self.main_gui.config.get(f'{local_method}_model_path', '')

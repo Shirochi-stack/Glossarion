@@ -1931,7 +1931,7 @@ class MangaTranslator:
         if (
             not skip_inpainter_init
             and not getattr(self, 'skip_inpainting', False)
-            and self.manga_settings.get('inpainting', {}).get('method') == 'local'
+            and self.manga_settings.get('inpainting', {}).get('method') in ('local', 'api')
         ):
             self._initialize_local_inpainter()
         elif getattr(self, 'skip_inpainting', False):
@@ -10419,12 +10419,8 @@ class MangaTranslator:
                                 current_method = local_method  # Default to the method we're preloading
                                 if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
                                     try:
-                                        mg = self.main_gui.manga_translator
-                                        # Prefer combo text if available (most live)
-                                        if hasattr(mg, 'local_model_combo'):
-                                            current_method = mg.local_model_combo.currentText()
-                                        else:
-                                            current_method = mg.local_model_type_value
+                                        # Live dropdown value; the API method reads as custom-image-edit
+                                        current_method = self._get_live_local_inpaint_method()
                                     except Exception:
                                         current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 else:
@@ -10558,11 +10554,8 @@ class MangaTranslator:
             current_method = local_method  # Default to the method we're preloading
             if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
                 try:
-                    mg = self.main_gui.manga_translator
-                    if hasattr(mg, 'local_model_combo'):
-                        current_method = mg.local_model_combo.currentText()
-                    else:
-                        current_method = mg.local_model_type_value
+                    # Live dropdown value; the API method reads as custom-image-edit
+                    current_method = self._get_live_local_inpaint_method()
                 except Exception:
                     current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
             else:
@@ -10685,11 +10678,8 @@ class MangaTranslator:
                                 current_method = local_method  # Default to the method we're preloading
                                 if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
                                     try:
-                                        mg = self.main_gui.manga_translator
-                                        if hasattr(mg, 'local_model_combo'):
-                                            current_method = mg.local_model_combo.currentText()
-                                        else:
-                                            current_method = mg.local_model_type_value
+                                        # Live dropdown value; the API method reads as custom-image-edit
+                                        current_method = self._get_live_local_inpaint_method()
                                     except Exception:
                                         current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
                                 else:
@@ -10982,7 +10972,10 @@ class MangaTranslator:
                     if endpoint:
                         self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint
             saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
-            
+            if str(saved_inpaint_method or '').lower() == 'api':
+                # API (Recommended) is the custom-image-edit inpainter
+                saved_local_method = 'custom-image-edit'
+
             # MIGRATION: Ensure manga_ prefixed model path keys exist for ONNX methods
             # This fixes compatibility where model paths were saved without manga_ prefix
             for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx', 'custom-image-edit']:
@@ -11005,8 +10998,8 @@ class MangaTranslator:
             
             # Now get the values (they'll be correct now)
             inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
-            
-            if inpaint_method == 'local':
+
+            if inpaint_method in ('local', 'api'):
                 # This will now get the correct saved value
                 local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
                 
@@ -15008,6 +15001,18 @@ class MangaTranslator:
 
     def _get_live_local_inpaint_method(self) -> str:
         """Return the live local inpaint method from MangaIntegration dropdown if available."""
+        # The API inpaint method is the custom-image-edit inpainter (it has no dropdown)
+        try:
+            mg = getattr(self, 'main_gui', None) and getattr(self.main_gui, 'manga_translator', None)
+            method = getattr(mg, 'inpaint_method_value', None) if mg else None
+            if not method and getattr(self, 'main_gui', None) is not None:
+                method = self.main_gui.config.get('manga_inpaint_method', '')
+            if not method:
+                method = (self.manga_settings.get('inpainting', {}) or {}).get('method', '')
+            if str(method or '').strip().lower() == 'api':
+                return 'custom-image-edit'
+        except Exception:
+            pass
         # Prefer the live MangaIntegration GUI (dropdown)
         try:
             mg = getattr(self, 'main_gui', None) and getattr(self.main_gui, 'manga_translator', None)

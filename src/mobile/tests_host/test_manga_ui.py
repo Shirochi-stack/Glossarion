@@ -221,11 +221,15 @@ def test_value_rules_come_from_the_schema_and_never_apply_on_desktop():
     assert svc.value_reason("manga_settings.ocr.detector_type", "rtdetr_onnx", mobile=True) is None
     # U12 item 1: what can never run on mobile is not listed at all (the stored value still round-trips)
     rows = {r.value: r for r in svc.local_model_rows(mobile=True)}
-    assert list(rows) == ["aot_onnx", "lama_onnx", "anime_onnx", "custom-image-edit"]
+    assert list(rows) == ["aot_onnx", "lama_onnx", "anime_onnx"]  # custom-image-edit is the API method
     assert not any(r.disabled for r in rows.values())
     detectors = {r.value for r in svc.detector_rows(mobile=True)}
     assert "rtdetr_onnx" in detectors and not detectors & {"rtdetr", "yolo", "custom"}
     assert "hybrid" not in [r.value for r in svc.inpaint_method_rows(mobile=True)]
+    assert [(r.value, r.label) for r in svc.inpaint_method_rows(mobile=True)] == [
+        ("skip", "Skip"), ("cloud", "Replicate (Bad)"), ("local", "Local (Light-weight)"), ("api", "API (Recommended)")]
+    assert [r.label for r in svc.inpaint_method_rows(mobile=False)][1:] == [
+        "Replicate (Bad)", "Local (Light-weight)", "API (Recommended)", "Hybrid (Trash)"]
     assert svc.chip_text("x" * 40).endswith("…") and len(svc.chip_text("x" * 40)) <= 32
 
 
@@ -284,6 +288,35 @@ def test_inpaint_status_and_choice_writes(monkeypatch):
     assert svc.inpaint_choice_updates("skip") == {"manga_skip_inpainting": True}
     # desktop migration of the old local model name
     assert svc.current_inpaint_choice({"manga_local_inpaint_model": "qwen_image_edit"})[1] == "custom-image-edit"
+
+
+def test_custom_image_edit_is_the_api_method_and_old_configs_migrate():
+    """Owner: Local and API are separate radios; an old 'local' + 'custom-image-edit' config is the API one."""
+    old = {"manga_inpaint_method": "local", "manga_local_inpaint_model": "custom-image-edit",
+           "manga_settings": {"inpainting": {"method": "local", "local_method": "custom-image-edit"}}}
+    assert svc.current_inpaint_choice(old) == ("api", "custom-image-edit")
+    assert svc.inpaint_migration_updates(old) == {
+        "manga_inpaint_method": "api", ("manga_settings", "inpainting", "method"): "api"}
+    migrated = {"manga_inpaint_method": "api", "manga_local_inpaint_model": "custom-image-edit",
+                "manga_settings": {"inpainting": {"method": "api", "local_method": "custom-image-edit"}}}
+    assert svc.inpaint_migration_updates(migrated) == {}
+    # a real local model stays on Local; Replicate keeps its stored model
+    lama = {"manga_inpaint_method": "local", "manga_local_inpaint_model": "lama_onnx"}
+    assert svc.current_inpaint_choice(lama) == ("local", "lama_onnx") and svc.inpaint_migration_updates(lama) == {}
+    cloud = {"manga_inpaint_method": "cloud", "manga_local_inpaint_model": "custom-image-edit"}
+    assert svc.current_inpaint_choice(cloud)[0] == "cloud" and svc.inpaint_migration_updates(cloud) == {}
+    # Skip stays on, the method underneath still moves
+    skipped = dict(old, manga_skip_inpainting=True)
+    assert svc.current_inpaint_choice(skipped) == ("skip", "custom-image-edit")
+    assert svc.inpaint_migration_updates(skipped)["manga_inpaint_method"] == "api"
+    # picking API writes the custom-image-edit model with it
+    assert svc.inpaint_choice_updates("api") == {
+        "manga_skip_inpainting": False, "manga_inpaint_method": "api", ("manga_settings", "inpainting", "method"): "api",
+        "manga_local_inpaint_model": "custom-image-edit",
+        ("manga_settings", "inpainting", "local_method"): "custom-image-edit"}
+    status = svc.inpaint_status({"manga_inpaint_method": "api", "custom_image_edit_endpoint": "http://h/v1"}, mobile=True)
+    assert (status.label, status.status, status.detail) == ("Custom image edit endpoint", "ready", "http://h/v1")
+    assert svc.inpaint_status({"manga_inpaint_method": "api"}, mobile=True).chip == "Needs key"
 
 
 @pytest.mark.skipif(not (_has("manga_settings_defaults") and _has("manga_models")), reason="manga cores missing")
@@ -1895,16 +1928,22 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
         assert "ms-rapidocr-det" not in _by_key(tab.ocr_card) and tab._model_status("rapidocr") is None
         assert tab.select_inpaint("cloud")
         assert {"ms-replicate-key", "ms-inpaint-quality"} <= set(_by_key(tab.inpaint_card))
-        assert tab.select_inpaint("local", "custom-image-edit")
+        assert tab.select_inpaint("api")
+        assert store.get("manga_inpaint_method") == "api"
+        assert store.get("manga_local_inpaint_model") == "custom-image-edit"
         inpaint = _by_key(tab.inpaint_card)
+        assert not any(k.startswith("ms-local-") for k in inpaint) and "ms-model-info" not in inpaint  # no model list
         assert inpaint["ms-edit-batch"].value is True
         shared_test = callable(svc.core_attr("manga_env", "test_custom_image_edit_endpoint"))
         assert inpaint["ms-edit-test"].disabled is (not shared_test)  # the shared desktop test (manga_env)
         assert "ms-edit-keys" in inpaint  # Image keys -> the inpainter key pool
         inpaint["ms-edit-keys"].on_click(None)
         assert ctx.navigated[-1][:2] == ("settings.keys.pool", {"pool": "inpainter"})
-        # U9: Model information ⓘ, the mask presets of the desktop dialog (B&W Manga / Colored / Uniform)
-        assert {"ms-model-info", "ms-mask-bw_manga", "ms-mask-colored", "ms-mask-uniform"} <= set(inpaint)
+        # U9: Model information ⓘ (Local), the mask presets of the desktop dialog (B&W Manga / Colored / Uniform)
+        assert {"ms-mask-bw_manga", "ms-mask-colored", "ms-mask-uniform"} <= set(inpaint)
+        assert tab.select_inpaint("local")  # from API: the phone model, never custom-image-edit
+        assert store.get("manga_local_inpaint_model") == svc.phone_local_model()
+        assert "ms-model-info" in _by_key(tab.inpaint_card) and "ms-edit-test" not in _by_key(tab.inpaint_card)
         assert tab.show_model_info("aot")
         assert tab.apply_mask_preset("uniform")
         assert store.get(("manga_settings", "mask_dilation")) == 0
@@ -1939,6 +1978,39 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
         assert tab._gen == gen
         tab._on_config_changed("manga_bg_style")
         assert tab._gen == gen + 1
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+@pytest.mark.skipif(not _has("settings_schema"), reason="settings_schema not importable")
+def test_settings_tab_moves_an_old_custom_image_edit_config_to_the_api_method(iso, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.settings.context import SettingsContext
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    monkeypatch.setenv("GLOSSARION_MOBILE", "1")
+    monkeypatch.setitem(sys.modules, "manga_models", FakeModels())
+    store, schema = _settings_store(tmp_path)
+    store.set("manga_inpaint_method", "local")
+    store.set("manga_local_inpaint_model", "custom-image-edit")
+    store.set(("manga_settings", "inpainting", "method"), "local")
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        settings = SettingsContext(page=page, store=store, schema=schema)
+        ctx = _ctx(page, store, settings=settings, output_root=str(iso["Output"]))
+        screen = MangaScreen(parse_route("/tools/manga?tab=settings"), ctx, session=_session(tmp_path, {}))
+        _mount(page, screen.get_body())
+        tab = screen.settings_tab
+        assert store.get("manga_inpaint_method") == "api"  # saved that way
+        assert store.get(("manga_settings", "inpainting", "method")) == "api"
+        assert store.get("manga_local_inpaint_model") == "custom-image-edit"
+        inpaint = _by_key(tab.inpaint_card)
+        assert "ms-edit-endpoint" in inpaint and "ms-edit-prompt" in inpaint
+        assert not any(k.startswith("ms-local-") for k in inpaint)
         screen.dispose()
 
     asyncio.run(scenario())

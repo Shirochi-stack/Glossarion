@@ -188,7 +188,11 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
     _preload_in_progress = False
     _preload_lock = threading.RLock()
     _preload_completed_models = set()  # Track which models have been loaded
-    
+
+    # Inpainting > Local (Light-weight) model dropdown. 'custom-image-edit' is not listed: it is
+    # the API (Recommended) method (manga_inpaint_method 'api').
+    LOCAL_INPAINT_MODEL_CHOICES = ('aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local')
+
     def __init__(self, parent_widget, main_gui, dialog, scroll_area=None):
         """Initialize manga translation interface
         
@@ -448,7 +452,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             return False
         inpaint_settings = self.main_gui.config.get('manga_settings', {}).get('inpainting', {})
         inpainting_method = inpaint_settings.get('method', 'local')
-        return inpainting_method == 'local'
+        return inpainting_method in ('local', 'api')  # 'api' = the custom-image-edit inpainter
 
     def _record_inpainter_preload_result(self, result, source: str = "preload", error: str = ""):
         """Record whether a local inpainter preload actually produced a usable model."""
@@ -762,7 +766,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
         skip_inpainting = self.main_gui.config.get('manga_skip_inpainting', False)
         inpainting_method = inpaint_settings.get('method', 'local')
-        inpainting_enabled = not skip_inpainting and inpainting_method == 'local'
+        inpainting_enabled = not skip_inpainting and inpainting_method in ('local', 'api')
         
         # Check if models need loading
         try:
@@ -801,8 +805,10 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             
             if inpainting_enabled:
                 # Check top-level config first (manga_local_inpaint_model), then nested config
-                local_method = self.main_gui.config.get('manga_local_inpaint_model', 
+                local_method = self.main_gui.config.get('manga_local_inpaint_model',
                                                         inpaint_settings.get('local_method', 'anime_onnx'))
+                if inpainting_method == 'api':
+                    local_method = 'custom-image-edit'
                 model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
                 # Fallback to non-prefixed key if not found
                 if not model_path:
@@ -4510,13 +4516,20 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         method_selection_layout.setContentsMargins(0, 0, 0, 0)
         method_selection_layout.setSpacing(10)
 
-        self.inpaint_method_value = self.main_gui.config.get('manga_inpaint_method', 'local')
+        # The custom image edit endpoint used to be the 'local' method with the local model
+        # 'custom-image-edit'; such configs move to the 'api' method here (saved with the next save).
+        from manga_models import migrate_inpaint_method, normalize_inpaint_method
+        migrate_inpaint_method(self.main_gui.config)
+        self.inpaint_method_value = normalize_inpaint_method(
+            self.main_gui.config.get('manga_inpaint_method', 'local'),
+            self.main_gui.config.get('manga_local_inpaint_model', ''),
+        )
         self.inpaint_method_group = QButtonGroup()
 
         # Set smaller font for radio buttons
         radio_font = QFont('Arial', 9)
-        
-        cloud_radio = QRadioButton("Replicate API")
+
+        cloud_radio = QRadioButton("Replicate (Bad)")
         cloud_radio.setFont(radio_font)
         cloud_radio.setToolTip(
             "Use Replicate for cloud inpainting with the configured Replicate API key and cloud inpaint model.\n"
@@ -4527,22 +4540,32 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         self.inpaint_method_group.addButton(cloud_radio, 0)
         method_selection_layout.addWidget(cloud_radio)
 
-        local_radio = QRadioButton("Local / API Model")
+        local_radio = QRadioButton("Local (Light-weight)")
         local_radio.setFont(radio_font)
         local_radio.setToolTip(
-            "For best local performance, select anime_onnx from the model dropdown.\n"
-            "For best results, select custom-image-edit and use a modern image edit model.\n"
-            "Recommended for image edit models such as Nano Banana 2 and Wan 2.6 Image Edit."
+            "Run a local inpainting model on this computer.\n"
+            "For best local performance, select anime_onnx from the model dropdown."
         )
         local_radio.setChecked(self.inpaint_method_value == 'local')
         local_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(local_radio, 1)
         method_selection_layout.addWidget(local_radio)
 
-        hybrid_radio = QRadioButton("Hybrid")
+        api_radio = QRadioButton("API (Recommended)")
+        api_radio.setFont(radio_font)
+        api_radio.setToolTip(
+            "Clean the text with an image edit model through the custom image edit endpoint.\n"
+            "Recommended for image edit models such as Nano Banana 2 and Wan 2.6 Image Edit."
+        )
+        api_radio.setChecked(self.inpaint_method_value == 'api')
+        api_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
+        self.inpaint_method_group.addButton(api_radio, 3)
+        method_selection_layout.addWidget(api_radio)
+
+        hybrid_radio = QRadioButton("Hybrid (Trash)")
         hybrid_radio.setFont(radio_font)
         hybrid_radio.setToolTip(
-            "Show and use both cloud and local/API inpainting settings.\n"
+            "Show and use both cloud and local inpainting settings.\n"
             "Experimental and not recommended for normal use."
         )
         hybrid_radio.setChecked(self.inpaint_method_value == 'hybrid')
@@ -4553,6 +4576,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         # Store references to radio buttons
         self.cloud_radio = cloud_radio
         self.local_radio = local_radio
+        self.api_radio = api_radio
         self.hybrid_radio = hybrid_radio
         
         inpaint_method_layout.addWidget(method_selection_frame)
@@ -4666,9 +4690,17 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                 endpoint = self.main_gui.config.get('custom_image_edit_endpoint', '')
                 if endpoint:
                     self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint
+        # The Local radio lists the local inpainting models only; the API radio is the
+        # custom-image-edit inpainter and has no dropdown.
+        local_choices = list(self.LOCAL_INPAINT_MODEL_CHOICES)
+        if self.local_model_type_value not in local_choices:
+            self.local_model_type_value = 'anime_onnx'
+        local_model_choice = self.local_model_type_value
+        if self.inpaint_method_value == 'api':
+            self.local_model_type_value = 'custom-image-edit'
         local_model_combo = QComboBox()
-        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'custom-image-edit', 'mat', 'ollama', 'sd_local'])
-        local_model_combo.setCurrentText(self.local_model_type_value)
+        local_model_combo.addItems(local_choices)
+        local_model_combo.setCurrentText(local_model_choice)
         local_model_combo.setMinimumWidth(150)
         local_model_combo.setMaximumWidth(150)
         local_combo_font = QFont('Arial', 9)
@@ -4758,15 +4790,16 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             'lama_onnx': 'LaMa ONNX (Optimized)',
             'custom-image-edit': 'Custom OpenAI-compatible image edit endpoint (.gguf)',
         }
-        self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))
+        self.model_desc_label = QLabel(model_desc.get(local_model_choice, ''))
         desc_font = QFont('Arial', 8)
         self.model_desc_label.setFont(desc_font)
         self.model_desc_label.setStyleSheet("color: gray;")
         self.model_desc_label.setMaximumWidth(420)
         local_model_layout.addWidget(self.model_desc_label)
         local_model_layout.addStretch()
-        
+
         local_inpaint_layout.addWidget(local_model_frame)
+        self.local_model_frame = local_model_frame
 
         custom_image_edit_controls_frame = QWidget()
         custom_image_edit_controls_layout = QHBoxLayout(custom_image_edit_controls_frame)
@@ -4923,7 +4956,8 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         model_info_btn.clicked.connect(self._show_model_info)
         model_info_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
         local_inpaint_layout.addWidget(model_info_btn)
-        
+        self.model_info_btn = model_info_btn
+
         # Add local_inpaint_frame to inpaint_group
         inpaint_group_layout.addWidget(self.local_inpaint_frame)
         
@@ -8631,7 +8665,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                 try:
                     if not self.skip_inpainting_value and not getattr(self, '_shutting_down', False):
                         method = str(getattr(self, 'inpaint_method_value', '') or '').lower()
-                        if method == 'local':
+                        if method in ('local', 'api'):
                             self._trigger_inpainter_preload_after_toggle()
                 except Exception as _pre_err:
                     print(f"⚠️ Failed to schedule inpainter preload after toggle: {_pre_err}")
@@ -8700,26 +8734,51 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             method = 'cloud'
         elif self.local_radio.isChecked():
             method = 'local'
+        elif getattr(self, 'api_radio', None) is not None and self.api_radio.isChecked():
+            method = 'api'
         elif self.hybrid_radio.isChecked():
             method = 'hybrid'
         else:
             method = 'local'  # Default fallback
-        
+
         # Update the stored value
         self.inpaint_method_value = method
-        
+
+        # API (Recommended) is the custom-image-edit inpainter; the other methods use the
+        # Local Model dropdown's model.
+        previous_model = str(getattr(self, 'local_model_type_value', '') or '')
+        if method == 'api':
+            model = 'custom-image-edit'
+        else:
+            model = self.local_model_combo.currentText() if hasattr(self, 'local_model_combo') else previous_model
+
         # Show/hide frames based on method
         # Cloud frame: visible for cloud and hybrid
-        # Local frame: visible for local and hybrid
+        # Local frame: visible for local, api and hybrid (api hides the model dropdown)
         if method == 'cloud':
             self.cloud_inpaint_frame.show()
             self.local_inpaint_frame.hide()
-        elif method == 'local':
+        elif method in ('local', 'api'):
             self.cloud_inpaint_frame.hide()
             self.local_inpaint_frame.show()
         elif method == 'hybrid':
             self.cloud_inpaint_frame.show()
             self.local_inpaint_frame.show()
+        if hasattr(self, 'local_model_frame'):
+            self.local_model_frame.setVisible(method != 'api')
+        if hasattr(self, 'model_info_btn'):
+            self.model_info_btn.setVisible(method != 'api')
+
+        if model and model != previous_model:
+            if getattr(self, '_initializing', False) or method == 'cloud':
+                # nothing to load: Replicate does not use the local model
+                self.local_model_type_value = model
+                self._apply_custom_image_edit_ui_state()
+            else:
+                # Same path as picking the model in the dropdown: load / endpoint state, then save
+                self.local_model_type_value = model
+                self._on_local_model_change(model)
+                return
         
         # Force layout update
         if hasattr(self, 'parent_widget') and self.parent_widget:

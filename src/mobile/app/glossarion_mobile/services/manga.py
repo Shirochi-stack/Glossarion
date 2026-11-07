@@ -129,6 +129,7 @@ __all__ = [
     "importable",
     "inpaint_choice_updates",
     "inpaint_method_rows",
+    "inpaint_migration_updates",
     "inpaint_status",
     "list_ocr_files",
     "local_model_rows",
@@ -386,13 +387,18 @@ OCR_PROVIDERS = (
     ("doctr", "📄 DocTR"),
 )
 
-#: Inpainting method radio buttons (+ the Skip Inpainter toggle shown as the first choice).
+#: Inpainting method radio buttons in desktop order (+ the Skip Inpainter toggle shown as the first
+#: choice). 'api' is the custom image edit endpoint (the desktop local model 'custom-image-edit').
 INPAINT_METHODS = (
     ("skip", "Skip"),
-    ("local", "Local / API Model"),
-    ("cloud", "Replicate API"),
-    ("hybrid", "Hybrid"),
+    ("cloud", "Replicate (Bad)"),
+    ("local", "Local (Light-weight)"),
+    ("api", "API (Recommended)"),
+    ("hybrid", "Hybrid (Trash)"),
 )
+#: The local model of the API method (``manga_local_inpaint_model``), not listed under Local.
+IMAGE_EDIT_MODEL = "custom-image-edit"
+IMAGE_EDIT_LABEL = "Custom image edit endpoint"
 #: Local model combo (desktop order).
 LOCAL_INPAINT_MODELS = (
     ("aot", "AOT (Torch JIT)"),
@@ -401,7 +407,6 @@ LOCAL_INPAINT_MODELS = (
     ("lama_onnx", "LaMa ONNX"),
     ("anime", "Anime (Torch JIT)"),
     ("anime_onnx", "Anime ONNX"),
-    ("custom-image-edit", "Custom image edit endpoint"),
     ("mat", "MAT (Torch JIT)"),
     ("ollama", "Ollama"),
     ("sd_local", "Stable Diffusion (local)"),
@@ -663,19 +668,39 @@ def local_model_rows(*, mobile: Optional[bool] = None) -> list:
     return rows
 
 
-def current_inpaint_choice(config: Mapping[str, Any]) -> tuple:
-    """(method, local model) as the inpainting group shows them: Skip wins (``manga_skip_inpainting``).
-    On a phone the local model is the one a run loads (``run_model_view``)."""
+def _stored_inpaint_choice(config: Mapping[str, Any]) -> tuple:
+    """(stored method, local model), Skip aside. The old 'local' + 'custom-image-edit' pair reads as
+    the API method (desktop ``manga_models.migrate_inpaint_method``), whose local model is always
+    'custom-image-edit'. On a phone the local model is the one a run loads (``run_model_view``)."""
     cfg = run_model_view(config) if _is_mobile() else (config or {})
-    if bool(effective_setting(cfg, K_SKIP_INPAINT, False)):
-        method = "skip"
-    else:
-        method = str(cfg.get(K_INPAINT_METHOD) or effective_setting(cfg, P_INPAINT_METHOD, "local") or "local")
     # the tab reads manga_local_inpaint_model (default 'anime_onnx'; the phone default on mobile)
     local = str(effective_setting(cfg, K_LOCAL_MODEL, "anime_onnx") or "anime_onnx")
     if local == "qwen_image_edit":  # desktop migration: qwen_image_edit became custom-image-edit
-        local = "custom-image-edit"
+        local = IMAGE_EDIT_MODEL
+    method = str(cfg.get(K_INPAINT_METHOD) or effective_setting(cfg, P_INPAINT_METHOD, "local") or "local")
+    if method == "api" or (method == "local" and local == IMAGE_EDIT_MODEL):
+        method, local = "api", IMAGE_EDIT_MODEL
     return method, local
+
+
+def current_inpaint_choice(config: Mapping[str, Any]) -> tuple:
+    """(method, local model) as the inpainting group shows them: Skip wins (``manga_skip_inpainting``)."""
+    method, local = _stored_inpaint_choice(config)
+    if bool(effective_setting(config or {}, K_SKIP_INPAINT, False)):
+        method = "skip"
+    return method, local
+
+
+def inpaint_migration_updates(config: Mapping[str, Any]) -> dict:
+    """The writes that move an old 'local' + 'custom-image-edit' config to the API method (both
+    copies of the method and the model; the Skip toggle is left alone); {} when nothing changes."""
+    cfg = config or {}
+    if _stored_inpaint_choice(cfg)[0] != "api":
+        return {}
+    wanted = {K_INPAINT_METHOD: "api", P_INPAINT_METHOD: "api", K_LOCAL_MODEL: IMAGE_EDIT_MODEL,
+              P_LOCAL_METHOD: IMAGE_EDIT_MODEL}
+    return {key: value for key, value in wanted.items()
+            if (cfg.get(key) if isinstance(key, str) else _lookup(cfg, key)) != value}
 
 
 def inpaint_choice_updates(method: str, local: Optional[str] = None) -> dict:
@@ -686,6 +711,8 @@ def inpaint_choice_updates(method: str, local: Optional[str] = None) -> dict:
         updates[K_SKIP_INPAINT] = True
         return updates
     updates[K_SKIP_INPAINT] = False
+    if method == "api":  # the API method is the custom-image-edit inpainter
+        local = IMAGE_EDIT_MODEL
     updates[K_INPAINT_METHOD] = method
     updates[P_INPAINT_METHOD] = method
     if local:
@@ -709,14 +736,14 @@ def inpaint_status(config: Mapping[str, Any], *, model_status: Optional[Callable
         ok = bool(str(cfg.get(K_REPLICATE_KEY) or "").strip())
         return OptionRow("cloud", "Replicate API", "ready" if ok else "needs_key", "Ready" if ok else "Needs key",
                          None, "Cloud API configured" if ok else "Cloud API not configured")
+    if method == "api":
+        endpoint = str(cfg.get(K_EDIT_ENDPOINT) or cfg.get("manga_custom-image-edit_model_path") or "").strip()
+        return OptionRow(local, IMAGE_EDIT_LABEL, "ready" if endpoint else "needs_key",
+                         "Ready" if endpoint else "Needs key", None, endpoint or "Endpoint URL needed")
     reason = value_reason(K_LOCAL_MODEL, local, mobile=mobile)
     label = dict(LOCAL_INPAINT_MODELS).get(local, local)
     if reason:
         return OptionRow(local, label, "unavailable", chip_text(reason), reason)
-    if local == "custom-image-edit":
-        endpoint = str(cfg.get(K_EDIT_ENDPOINT) or cfg.get("manga_custom-image-edit_model_path") or "").strip()
-        return OptionRow(local, label, "ready" if endpoint else "needs_key", "Ready" if endpoint else "Needs key",
-                         None, endpoint or "Endpoint URL needed")
     status = model_status(local) if model_status is not None else None
     if status is None:
         return OptionRow(local, label, "ready", "Ready")

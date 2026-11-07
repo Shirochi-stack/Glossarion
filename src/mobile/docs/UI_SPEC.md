@@ -1746,7 +1746,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
   - background, font sizing, constraints, wrap, caps;
   - font style + import, colour / shadow;
   - presets Manga / Manhwa / Large Text, reset (the desktop values, measured off the UI loop; U9).
-- **Inpainting (U9):** mask presets B&W Manga / Colored / Uniform; Local / API model ⓘ (Model Information) and "Import model file…"; Image keys next to the custom image edit Test.
+- **Inpainting (U9):** mask presets B&W Manga / Colored / Uniform; Local (Light-weight) model ⓘ (Model Information) and "Import model file…"; API (Recommended) is the custom image edit endpoint, with Image keys next to its Test.
 - **Advanced:**
   - preprocessing, HD strategy, mask, OCR params, merging, batching/ROI;
   - debug, parallel panel, memory cap, experimental brush/eraser;
