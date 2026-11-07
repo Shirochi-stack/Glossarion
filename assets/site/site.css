@@ -263,7 +263,7 @@ section { padding: 56px 0; }
 
 /* manga before / after slider */
 .compare { margin: 0; }
-.compare-box { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow-lg); background: #fff; touch-action: pan-y; }
+.compare-box { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow-lg); background: var(--surface-2); touch-action: pan-y; }
 .compare-box img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
 .compare-box .after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--pos, 50%)); }
 .compare-box .handle { position: absolute; top: 0; bottom: 0; left: var(--pos, 50%); width: 3px; margin-left: -1.5px; background: var(--accent); pointer-events: none; }
@@ -451,7 +451,7 @@ details > div p:last-child { margin-bottom: 0; }
 .webtoon-jump select { width: 100%; max-width: 380px; font: inherit; font-size: .88rem; font-weight: 600; padding: 7px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-overflow: ellipsis; }
 .webtoon-lang { flex: none; margin: 0; }
 .webtoon-lang button[aria-pressed="true"] { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
-.webtoon-reader { max-width: 800px; margin: 0 auto; background: #fff; }
+.webtoon-reader { max-width: 800px; margin: 0 auto; background: var(--surface-2); }
 .webtoon-reader img { display: block; width: 100%; height: auto; }
 .webtoon-reader [id] { scroll-margin-top: 40px; }  /* on top of html's scroll-padding: clears header + bar */
 .webtoon-chapter { margin: 0; padding: 14px 16px; text-align: center; font-size: 1rem; font-weight: 800; letter-spacing: -.01em; color: var(--ink); background: var(--surface-2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -462,3 +462,27 @@ details > div p:last-child { margin-bottom: 0; }
   .btn { transition: none; }
   .btn:hover { transform: none; }
 }
+
+/* Webtoon promotion: nav badge, hero announcement, landing-page feature */
+.new-badge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: .68rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; vertical-align: 2px; line-height: 1.5; }
+.nav a.nav-new { white-space: nowrap; color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.nav a.nav-new:hover, .nav a.nav-new[aria-current="page"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--accent-soft)); }
+.mobile-nav a.nav-new { color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 1060px) { .nav a.nav-new .new-badge { margin-left: 4px; padding: 0 5px; font-size: .6rem; } }
+@media (max-width: 999px) { .nav a.nav-new .new-badge { display: none; } }
+.announce { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; padding: 6px 14px 6px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--ink); font-weight: 600; font-size: .92rem; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.announce .new-badge { margin-left: 0; }
+.announce:hover { text-decoration: none; border-color: var(--accent); }
+.announce:hover span[aria-hidden] { transform: translateX(3px); }
+.announce span[aria-hidden] { color: var(--accent); transition: transform .15s; }
+.webtoon-feature { background:
+    radial-gradient(520px 340px at 85% 40%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
+    radial-gradient(460px 300px at 10% 80%, color-mix(in srgb, var(--plum) 12%, transparent), transparent 70%); }
+.webtoon-feature h2 { font-size: clamp(1.7rem, 4vw, 2.4rem); line-height: 1.15; margin: 0 0 14px; }
+.webtoon-feature p { color: var(--ink-soft); }
+.feature-split { display: grid; gap: 28px; align-items: center; }
+.feature-split .compare { max-width: 460px; width: 100%; justify-self: center; margin: 0; }
+@media (min-width: 900px) { .feature-split { grid-template-columns: 1.05fr .95fr; gap: 48px; } }
+
+/* Image placeholder: the spinning Halgakos (Glossarion's loading icon) until the image has loaded (site.js) */
+img.is-loading { background: var(--surface-2) url("loading-halgakos.svg") no-repeat; background-size: 64px 64px; background-position: center min(50%, 140px); }

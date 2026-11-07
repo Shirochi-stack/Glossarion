@@ -27,7 +27,7 @@
         <a href="#mobile">Mobile</a>
         <a href="#free">Free</a>
         <a href="#download">Download</a>
-        <a href="webtoons/">Webtoons</a>
+        <a class="nav-new" href="webtoons/">Webtoons<span class="new-badge">New</span></a>
         <a href="help/">Help</a>
         <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
         <a href="help/donate/">Donate</a>
@@ -43,7 +43,7 @@
       <a href="#mobile">Mobile</a>
       <a href="#free">Free</a>
       <a href="#download">Download</a>
-      <a href="webtoons/">Webtoons</a>
+      <a class="nav-new" href="webtoons/">Webtoons<span class="new-badge">New</span></a>
       <a href="help/">Help</a>
       <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
       <a href="help/donate/">Donate</a>
@@ -56,6 +56,7 @@
       <div class="wrap">
         <div class="hero-grid">
           <div>
+            <a class="announce" href="webtoons/"><span class="new-badge">New</span>Read <i>A Book Fell from the Sky</i>, a webtoon translated by Glossarion<span aria-hidden="true">→</span></a>
             <span class="eyebrow"><span class="dot"></span>Free &amp; open source<span data-release-shown hidden>&nbsp;· latest <b data-release-tag></b></span></span>
             <h1>Translate novels, manga &amp; more with <span class="grad">any AI you like</span>.</h1>
             <p class="lede">Glossarion is a complete AI translation studio for light novels, web novels, manga, subtitles and games. Bring your own API key or run a model on your own device — there is nothing to buy, no word limits and no account.</p>
@@ -87,6 +88,37 @@
           <div class="stat"><b>40+</b><span>AI providers, plus any OpenAI-compatible endpoint</span></div>
           <div class="stat"><b>64</b><span>target languages, and you can add more</span></div>
           <div class="stat"><b>5</b><span>platforms: desktop and mobile</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== WEBTOON ========== -->
+    <section class="webtoon-feature" id="webtoon">
+      <div class="wrap">
+        <div class="feature-split">
+          <div>
+            <span class="kicker">New · Webtoon</span>
+            <h2>Read a webtoon translated by Glossarion.</h2>
+            <p><i>A Book Fell from the Sky</i> is a 31-strip Korean webtoon starring Halgakos, the Glossarion mascot. The English edition was made with Glossarion's manga translator: text detection, OCR, a glossary of the cast and terms, translation with the page images, text removal and lettering.</p>
+            <p>Switch between the Korean original and the English translation at any point while you read.</p>
+            <div class="hero-cta">
+              <a class="btn btn-primary" href="webtoons/">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5zM4 21.5V5.5"/></svg>
+                Read the webtoon
+              </a>
+              <a class="btn btn-ghost" href="#manga">How manga translation works</a>
+            </div>
+          </div>
+          <figure class="compare" data-compare>
+            <div class="compare-box">
+              <img class="before" src="assets/site/webtoons/halgakos/feature-ko.webp" alt="A panel of the webtoon in the Korean original" width="800" height="1020" loading="lazy" decoding="async">
+              <img class="after" src="assets/site/webtoons/halgakos/feature-en.webp" alt="The same panel translated and lettered in English by Glossarion" width="800" height="1020" loading="lazy" decoding="async">
+              <span class="handle"><span class="knob" aria-hidden="true">⟷</span></span>
+              <span class="tag l">한국어</span><span class="tag r">English</span>
+              <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the Korean and English panel">
+            </div>
+            <figcaption>Strip 3: Illya and Tsubakieh introduce themselves. Drag to compare.</figcaption>
+          </figure>
         </div>
       </div>
     </section>
@@ -135,7 +167,7 @@
         </div>
 
         <!-- Manga -->
-        <div class="feature flip">
+        <div class="feature flip" id="manga">
           <div class="feature-copy">
             <span class="feature-tag">🎌 Manga &amp; webtoon translation</span>
             <h3>Clean, typeset manga and webtoon pages.</h3>

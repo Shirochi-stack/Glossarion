@@ -12,6 +12,17 @@
     } catch (e) { return null; }
   }
 
+  // ----- image placeholders -----
+  // An image that hasn't loaded yet shows the spinning Halgakos (img.is-loading in site.css) instead of
+  // an empty or white box; the class goes once it has loaded.
+  function markLoading(img) {
+    if (img.complete && img.naturalWidth) { img.classList.remove("is-loading"); return; }
+    img.classList.add("is-loading");
+    if (img.hasAttribute("data-ph")) return;
+    img.setAttribute("data-ph", "");
+    img.addEventListener("load", function () { img.classList.remove("is-loading"); });
+  }
+
   // ----- theme -----
   var saved = store("glossarion-theme");
   if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
@@ -23,6 +34,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("main img").forEach(markLoading);
     var toggle = document.querySelector("[data-theme-toggle]");
     if (toggle) {
       toggle.addEventListener("click", function () {
@@ -104,6 +116,7 @@
         if (img.getAttribute("src") !== next) {
           img.removeAttribute("data-retried");
           img.setAttribute("src", next);
+          markLoading(img);
         }
       });
       labels.forEach(function (el) { el.textContent = el.getAttribute("data-" + lang); });
