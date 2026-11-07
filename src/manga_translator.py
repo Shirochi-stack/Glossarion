@@ -13891,13 +13891,36 @@ class MangaTranslator:
             'cx': x0 + cx, 'row0': y0, 'left': left, 'right': right, 'margin': margin,
         }, not open_patch
 
+    @staticmethod
+    def _region_classed_free_text(region, source_regions=None) -> bool:
+        """True when the detector (or the editor's box) labels the region free text.
+
+        Only the explicit label counts (``bubble_type`` / ``region_type``), never a guess from the
+        box's shape. A copy made by _adjust_overlapping_regions is looked up in ``source_regions``.
+        """
+        def labelled(r):
+            for key in ('bubble_type', 'region_type'):
+                kind = getattr(r, key, None)
+                if isinstance(kind, str) and kind.strip().lower().replace('-', '_').replace(' ', '_') == 'free_text':
+                    return True
+            return False
+
+        if labelled(region):
+            return True
+        idx = getattr(region, 'original_index', None)
+        return bool(source_regions and isinstance(idx, int) and 0 <= idx < len(source_regions)
+                    and labelled(source_regions[idx]))
+
     def _container_render_area(self, image: np.ndarray, region: TextRegion, area,
                                source_regions=None) -> Tuple[int, int, int, int]:
         """Render area for auto-sized text that respects the bubble / box drawn on the page.
 
         With a container (see _find_text_container) the area becomes its interior, and the
         container is stored on ``region._fit_container`` for _fit_text_to_region. Without one
-        (free text over art) the area only loses what the outline stroke and shadow add.
+        (free text over art) the area only loses what the outline stroke and shadow add. Text the
+        detector classed as free text has no bubble to look for: plain background boxed in by art
+        (white page between locks of black hair) would be taken for one, and the text, fitted to
+        that patch, came out small and pinned to the top of its box.
         ``source_regions`` are the regions render_translated_text was given: with several,
         it lays out _adjust_overlapping_regions' copies, which carry no bubble_bounds.
 
@@ -13922,11 +13945,14 @@ class MangaTranslator:
                 clip = getattr(source_regions[idx], 'bubble_bounds', None)
             dx, dy = orig[0] - region.bounding_box[0], orig[1] - region.bounding_box[1]
             find_area = (area[0] + dx, area[1] + dy, area[2], area[3])
-        try:
-            container = self._find_text_container(image, find_area, clip)
-        except Exception as e:
+        if self._region_classed_free_text(region, source_regions):
             container = None
-            self._log(f"  ⚠️ Bubble interior detection failed: {e}", "debug")
+        else:
+            try:
+                container = self._find_text_container(image, find_area, clip)
+            except Exception as e:
+                container = None
+                self._log(f"  ⚠️ Bubble interior detection failed: {e}", "debug")
         if container is not None:
             region._fit_container = container
             return container['rect']
