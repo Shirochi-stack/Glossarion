@@ -16602,7 +16602,55 @@ def _create_debug_controls_section(self, parent_frame):
             )
         
         button_layout.addWidget(debug_toggle_btn)
-        
+
+        # Show CMD: compiled builds open their console at runtime (console_window). A toggle button styled like
+        # Debug Mode, in the same row (owner, 2026-11-07).
+        show_cmd_on = bool(getattr(self, 'config', {}).get('show_cmd', False))
+        show_cmd_btn = QPushButton()
+        show_cmd_btn.setCheckable(True)
+        show_cmd_btn.setMinimumHeight(45)
+        show_cmd_btn.setMinimumWidth(180)
+        show_cmd_btn.setToolTip(
+            "Compiled builds only (running from source always has its terminal).\n"
+            "On: a console window is always shown.\n"
+            "Off: the console appears only while the manga translator runs."
+        )
+
+        def _style_show_cmd_btn(on):
+            show_cmd_btn.setText("🖥️ Show CMD: ON" if on else "🖥️ Show CMD: OFF")
+            show_cmd_btn.setStyleSheet((
+                "QPushButton { "
+                f"  background-color: {'#dc3545' if on else '#6c757d'}; "
+                "  color: white; "
+                "  padding: 10px 20px; "
+                "  font-size: 11pt; "
+                "  font-weight: bold; "
+                "  border-radius: 6px; "
+                "  border: none; "
+                "} "
+                f"QPushButton:hover {{ background-color: {'#c82333' if on else '#5a6268'}; }}"
+                f"QPushButton:pressed {{ background-color: {'#bd2130' if on else '#545b62'}; }}"
+            ))
+
+        def _toggle_show_cmd(checked):
+            try:
+                if not hasattr(self, 'config'):
+                    self.config = {}
+                self.config['show_cmd'] = bool(checked)
+                self.save_config(show_message=False)
+                _style_show_cmd_btn(bool(checked))
+                import console_window
+                console_window.set_show_cmd(bool(checked))
+            except Exception as e:
+                self.append_log(f"❌ [DEBUG MODE] Failed to toggle Show CMD: {e}")
+
+        show_cmd_btn.setChecked(show_cmd_on)
+        _style_show_cmd_btn(show_cmd_on)
+        show_cmd_btn.toggled.connect(_toggle_show_cmd)
+        button_layout.addSpacing(12)
+        button_layout.addWidget(show_cmd_btn)
+        self._show_cmd_btn = show_cmd_btn
+
         # Debug Action Button (only visible when debug mode is on)
         debug_action_btn = QPushButton("🔍 Check Environment Variables")
         debug_action_btn.clicked.connect(_run_debug_check)
@@ -16631,28 +16679,6 @@ def _create_debug_controls_section(self, parent_frame):
         
         debug_layout.addLayout(button_layout)
 
-        # Show CMD: compiled builds open their console at runtime (console_window)
-        def _toggle_show_cmd(checked):
-            try:
-                if not hasattr(self, 'config'):
-                    self.config = {}
-                self.config['show_cmd'] = bool(checked)
-                self.save_config(show_message=False)
-                import console_window
-                console_window.set_show_cmd(bool(checked))
-            except Exception as e:
-                self.append_log(f"❌ [DEBUG MODE] Failed to toggle Show CMD: {e}")
-
-        show_cmd_cb = self._create_styled_checkbox("Show CMD")
-        show_cmd_cb.setChecked(bool(getattr(self, 'config', {}).get('show_cmd', False)))
-        show_cmd_cb.setToolTip(
-            "Compiled builds only (running from source always has its terminal).\n"
-            "On: a console window is always shown.\n"
-            "Off: the console appears only while the manga translator runs."
-        )
-        show_cmd_cb.toggled.connect(_toggle_show_cmd)
-        debug_layout.addWidget(show_cmd_cb)
-        self._show_cmd_cb = show_cmd_cb
 
         # Store references for potential future use
         self._debug_toggle_btn = debug_toggle_btn

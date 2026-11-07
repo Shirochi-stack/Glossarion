@@ -950,6 +950,7 @@ VISIBLE_IF = {
 # Labels for settings the generator found no widget text for (curated, short).
 LABEL_OVERRIDES = {
     "payload_cleanup_limit_mb": "Payload cleanup limit (MB)",  # desktop: slider + field, "MB" after it
+    "show_cmd": "Show CMD",  # desktop: an ON/OFF toggle button whose text is set at runtime (2026-11-07)
     "model": "Model",
     "api_key": "API key",
     "active_profile": "Prompt profile",
