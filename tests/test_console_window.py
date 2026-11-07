@@ -312,18 +312,65 @@ def test_manga_start_and_reset_toggle_it():
     assert "console_window.set_manga_running(running)" in helper
 
 
-def test_show_cmd_checkbox_sits_at_the_bottom_of_the_debug_section():
+def test_show_cmd_is_a_toggle_button_next_to_debug_mode():
+    """Owner, 2026-11-07: a Debug Mode-style ON/OFF button in the same row (second column), not a checkbox."""
     source = _read("other_settings.py")
     tree = ast.parse(source)
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_create_debug_controls_section")
     body = ast.get_source_segment(source, fn)
-    assert '_create_styled_checkbox("Show CMD")' in body
+    assert '_create_styled_checkbox("Show CMD")' not in body
+    assert "show_cmd_btn.setCheckable(True)" in body
+    assert '"🖥️ Show CMD: ON" if on else "🖥️ Show CMD: OFF"' in body
+    assert "#dc3545" in body and "#6c757d" in body              # Debug Mode's ON / OFF colours
     assert ".get('show_cmd', False)" in body
     assert "self.config['show_cmd'] = bool(checked)" in body
     assert "self.save_config(show_message=False)" in body
     assert "console_window.set_show_cmd(bool(checked))" in body
     assert "Compiled builds only" in body
-    assert body.index("Show CMD") > body.index("debug_layout.addLayout(button_layout)")
+    # same row as Debug Mode, right after it with a small gap, before the layout is added
+    i_debug = body.index("button_layout.addWidget(debug_toggle_btn)")
+    i_gap = body.index("button_layout.addSpacing(12)")
+    i_btn = body.index("button_layout.addWidget(show_cmd_btn)")
+    assert i_debug < i_gap < i_btn < body.index("debug_layout.addLayout(button_layout)")
+
+
+def test_show_cmd_button_toggles_the_setting_and_its_style(monkeypatch, tmp_path):
+    """Offscreen: clicking the button saves show_cmd, tells console_window and restyles ON/OFF."""
+    pytest.importorskip("PySide6")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
+    app = QApplication.instance() or QApplication([])
+    import other_settings
+    calls = []
+    monkeypatch.setattr(console_window, "set_show_cmd", lambda on: calls.append(on))
+
+    class Owner:
+        config = {"show_cmd": False}
+        saved = 0
+
+        def save_config(self, show_message=False):
+            Owner.saved += 1
+
+        def append_log(self, msg):
+            pass
+
+        def __getattr__(self, name):
+            return getattr(other_settings, name).__get__(self) if hasattr(other_settings, name) else None
+
+    owner = Owner()
+    parent = QWidget()
+    parent.setLayout(QGridLayout())   # the Other Settings page is a grid
+    other_settings._create_debug_controls_section(owner, parent)
+    btn = owner._show_cmd_btn
+    assert btn.text() == "🖥️ Show CMD: OFF" and "#6c757d" in btn.styleSheet()
+    btn.click()
+    assert owner.config["show_cmd"] is True and calls == [True] and Owner.saved == 1
+    assert btn.text() == "🖥️ Show CMD: ON" and "#dc3545" in btn.styleSheet()
+    btn.click()
+    assert owner.config["show_cmd"] is False and calls == [True, False]
+    assert btn.text() == "🖥️ Show CMD: OFF"
+    parent.deleteLater()
+    app.processEvents()
 
 
 def test_show_cmd_schema_is_a_desktop_only_debug_bool():
