@@ -264,3 +264,114 @@ def test_fit_is_fast(mt):
     for _ in range(10):
         mt._find_text_container(page, (186, 26, 528, 288), (186, 26, 528, 288))
     assert (time.perf_counter() - t0) / 10 < 0.1
+
+
+# Owner report 2026-11-08: a row of five tall oval bubbles on a colour page whose detector boxes
+# overlap. The short "SO STOP..." line came out near the maximum size and ran out of its bubble,
+# the long line in the bubble next to it came out far smaller than its bubble allows.
+ROW_TEXTS = [
+    "And stop putting your feelings in parentheses. Go on, say it.",
+    "So stop trying to look cool...",
+    "Besides, we're inside a heart inside a dream. Nobody's listening to how you really feel.",
+    "And trying to look cool whenever you're backed into a corner is a bad habit, you know?",
+    "I don't approve of you throwing away your conclusion like that.",
+]
+ROW_OVALS = [(150, 380, 120, 250), (390, 360, 105, 210), (640, 380, 125, 260),
+             (900, 380, 125, 260), (1150, 380, 115, 240)]
+
+
+def _row_page():
+    page = _busy(760, 1300, seed=5)
+    insides = []
+    for cx, cy, ax, ay in ROW_OVALS:
+        cv2.ellipse(page, (cx, cy), (ax, ay), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(page, (cx, cy), (ax, ay), 0, 0, 360, (20, 20, 20), 4)
+        inside = np.zeros(page.shape[:2], np.uint8)
+        cv2.ellipse(inside, (cx, cy), (ax - 2, ay - 2), 0, 0, 360, 1, -1)
+        insides.append(inside.astype(bool))
+    bubbles = [(cx - ax, cy - ay, 2 * ax, 2 * ay) for cx, cy, ax, ay in ROW_OVALS]
+    boxes = list(bubbles)
+    x, y, w, h = boxes[0]
+    boxes[0] = (x, y, w + 120, h)  # the first detector box reaches far into the second bubble
+    return page, insides, bubbles, boxes
+
+
+@pytest.mark.parametrize("order", ["left_to_right", "right_to_left"])
+def test_overlapping_detector_boxes_keep_each_text_in_its_bubble(mt, order):
+    """Left to right, _adjust_overlapping_regions moves the second copy a box width to the right:
+    its text was fitted to that moved box, across the outline. The first box, reaching into the
+    second bubble, found no bubble at all and got the rectangle fit of the whole box."""
+    page, insides, _bubbles, boxes = _row_page()
+    idx = list(range(5)) if order == "left_to_right" else list(range(4, -1, -1))
+    regions = [_region(boxes[i], ROW_TEXTS[i]) for i in idx]
+    ink = _ink(page, _render(mt, page, regions))
+    union = np.logical_or.reduce(insides)
+    assert not (ink & ~union).any(), "text crosses a bubble outline"
+    for inside in insides:
+        assert (ink & inside).sum() > 500, "a bubble was left without its text"
+
+
+def test_overlapping_detector_boxes_do_not_change_the_sizes(mt):
+    """Each bubble gets the size its text gets in that bubble alone, from a box on the bubble."""
+    page, _insides, bubbles, boxes = _row_page()
+    alone = []
+    for bubble, text in zip(bubbles, ROW_TEXTS):
+        region = _region(bubble, text)
+        _render(mt, page, [region])
+        alone.append(region.rendered_font_size)
+    regions = [_region(box, text) for box, text in zip(boxes, ROW_TEXTS)]
+    _render(mt, page, regions)
+    assert [r.rendered_font_size for r in regions] == alone
+    assert all(mt.min_readable_size <= s <= mt.max_font_size_limit for s in alone)
+    # the short line is larger than the long ones, and the long ones are alike
+    assert alone[1] > max(alone[0], alone[2], alone[3], alone[4])
+    assert max(alone[0], alone[2], alone[3], alone[4]) - min(alone[0], alone[2], alone[3], alone[4]) <= 4
+
+
+@pytest.mark.parametrize("dx", [-40, 40])
+def test_detector_box_off_centre_still_finds_its_bubble(mt, dx):
+    """A box shifted off its bubble cuts the bubble open: it is looked for in a larger window."""
+    page, inside, box = _oval_page()
+    centred = mt._find_text_container(page, box, box)
+    x, y, w, h = box
+    shifted = (x + dx, y, w, h)
+    found = mt._find_text_container(page, shifted, shifted)
+    assert found is not None and found["rect"] == centred["rect"]
+    out = _render(mt, page, [_region(shifted, LONG)])
+    assert not (_ink(page, out) & ~inside).any()
+
+
+def test_moved_copy_is_fitted_in_its_own_bubble(mt):
+    """_container_render_area on a copy the overlap adjustment moved looks where the region is."""
+    page, insides, bubbles, boxes = _row_page()
+    source = [_region(boxes[0], ROW_TEXTS[0]), _region(boxes[1], ROW_TEXTS[1])]
+    copies = mt._adjust_overlapping_regions(source, page.shape[1], page.shape[0])
+    moved = copies[1]
+    assert tuple(moved.bounding_box) != tuple(boxes[1])
+    area = mt._container_render_area(page, moved, tuple(moved.bounding_box), source)
+    expected = mt._container_render_area(page, _region(bubbles[1], ROW_TEXTS[1]), bubbles[1])
+    assert area == expected and moved._fit_container is not None
+
+
+def test_detector_box_narrower_than_bubble_uses_the_bubble(mt):
+    """A box over the right 60 % of a tall bubble: the patch it cut out of the bubble was taken for
+    the container, so the long line came out at half the size the bubble gives it."""
+    page, _insides, bubbles, _boxes = _row_page()
+    x, y, w, h = bubbles[0]
+    narrow = (x + 96, y, int(w * 0.6), h)
+    whole = _region(bubbles[0], ROW_TEXTS[0])
+    _render(mt, page, [whole])
+    region = _region(narrow, ROW_TEXTS[0])
+    _render(mt, page, [region])
+    assert region.rendered_font_size == whole.rendered_font_size
+    assert region._cached_safe_area == whole._cached_safe_area
+
+
+def test_free_text_on_a_plain_panel_does_not_grow_to_the_panel(mt):
+    """The larger window only takes a bubble the box covers part of, not a whole plain panel."""
+    page = np.zeros((900, 1200, 3), np.uint8)
+    page[:] = 40
+    cv2.rectangle(page, (40, 40), (1160, 860), (255, 255, 255), -1)  # a big blank panel
+    box = (500, 400, 200, 100)
+    found = mt._find_text_container(page, box, box)
+    assert found is None or (found["rect"][2] <= 200 and found["rect"][3] <= 100)
