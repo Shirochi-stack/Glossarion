@@ -52,7 +52,97 @@
     loadRelease();
     initCompare();
     initCompareTabs();
+    initWebtoon();
   });
+
+  // ----- webtoon reader: Korean / English switch -----
+  // Both languages have strips of the same size, so swapping every src keeps the layout. The strip at the
+  // reading line (just under the sticky bar) is re-pinned afterwards in case anything moved.
+  function initWebtoon() {
+    var reader = document.querySelector("[data-webtoon]");
+    if (!reader) return;
+    var imgs = Array.prototype.slice.call(reader.querySelectorAll("img[data-ko][data-en]"));
+    var labels = document.querySelectorAll("[data-webtoon-jump] option, .webtoon-chapter");
+    var buttons = document.querySelectorAll("[data-webtoon-lang]");
+    var bar = document.querySelector("[data-webtoon-bar]");
+    var jump = document.querySelector("[data-webtoon-jump]");
+    var headings = reader.querySelectorAll(".webtoon-chapter");
+
+    // A failed load (e.g. caught mid-deploy) retries once with a cache-busting query.
+    imgs.forEach(function (img) {
+      img.addEventListener("error", function () {
+        if (img.dataset.retried) return;
+        img.dataset.retried = "1";
+        img.src = img.src.split("?")[0] + "?r=" + Date.now();
+      });
+    });
+
+    function readingLine() { return bar ? bar.getBoundingClientRect().bottom : 0; }
+
+    function scrollToY(y) {
+      try { window.scrollTo({ top: y, left: 0, behavior: "instant" }); } catch (e) { window.scrollTo(0, y); }
+    }
+
+    // the first strip that reaches below the reading line, and how far into it the line falls
+    function anchor() {
+      var line = readingLine();
+      for (var i = 0; i < imgs.length; i++) {
+        var r = imgs[i].getBoundingClientRect();
+        if (r.bottom > line) {
+          if (r.top > line) return null;  // above the reader or on a chapter heading: nothing to keep
+          return { img: imgs[i], frac: (line - r.top) / (r.height || 1) };
+        }
+      }
+      return null;
+    }
+
+    function setLang(lang, keepPlace) {
+      if (lang !== "ko" && lang !== "en") lang = "en";
+      var a = keepPlace ? anchor() : null;
+      imgs.forEach(function (img) {
+        var next = img.getAttribute("data-" + lang);
+        if (img.getAttribute("src") !== next) {
+          img.removeAttribute("data-retried");
+          img.setAttribute("src", next);
+        }
+      });
+      labels.forEach(function (el) { el.textContent = el.getAttribute("data-" + lang); });
+      buttons.forEach(function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-webtoon-lang") === lang ? "true" : "false");
+      });
+      reader.setAttribute("lang", lang);
+      if (a) {
+        var r = a.img.getBoundingClientRect();
+        var shift = r.top + a.frac * r.height - readingLine();
+        if (Math.abs(shift) >= 1) scrollToY(window.pageYOffset + shift);
+      }
+      store("glossarion-webtoon-lang", lang);
+    }
+
+    buttons.forEach(function (b) {
+      b.addEventListener("click", function () { setLang(b.getAttribute("data-webtoon-lang"), true); });
+    });
+    setLang(store("glossarion-webtoon-lang") || "en", false);
+
+    // chapter menu: jump on change, and follow the chapter being read
+    if (jump) {
+      jump.addEventListener("change", function () {
+        var target = document.getElementById(jump.value);
+        if (target) target.scrollIntoView({ block: "start" });
+      });
+      var ticking = false;
+      window.addEventListener("scroll", function () {
+        if (ticking) return;
+        ticking = true;
+        window.requestAnimationFrame(function () {
+          ticking = false;
+          var line = readingLine() + 2, current = null;
+          headings.forEach(function (h) { if (h.getBoundingClientRect().top <= line) current = h.id; });
+          if (current && jump.value !== current) jump.value = current;
+        });
+      }, { passive: true });
+    }
+  }
 
   // ----- manga / webtoon example tabs -----
   function initCompareTabs() {
