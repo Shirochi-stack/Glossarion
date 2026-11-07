@@ -1597,7 +1597,9 @@ excludes = [
     #   win32ui/Pythonwin: win32com makepy, never run
     #   gradio: huggingface_hub webhooks server (app.py is not in this spec)
     #   _pytest/py: anyio's pytest plugin
-    #   onnxscript/onnx_ir/onnxslim: ONNX export only; the app only loads models
+    # onnxscript/onnx_ir/onnxslim stay: the manga "auto_convert_to_onnx" setting
+    # runs torch.onnx.export (bubble_detector, local_inpainter), which defaults to
+    # the dynamo exporter (onnxscript + onnx_ir) on torch >= 2.9.
     'polars', 'polars.*',
     'av', 'av.*',
     'pyarrow', 'pyarrow.*',
@@ -1615,9 +1617,6 @@ excludes = [
     'gradio_client', 'gradio_client.*',
     'emoji', 'emoji.*',
     '_pytest', '_pytest.*', 'py',
-    'onnxscript', 'onnxscript.*',
-    'onnx_ir', 'onnx_ir.*',
-    'onnxslim', 'onnxslim.*',
 ]
 
 # ============================================================================

@@ -31,7 +31,7 @@ Applied (ranks from section 4):
 | 13 | exclude `win32ui`, `win32uiole`, `dde`, `pythonwin` | 2.9 |
 | 14 | drop `torchvision/python312.dll`, `torch/bin/protoc.exe`, `vfcompat.dll`, `appverifUI.dll` | 3.6 |
 | 15 | drop PySide6 `translations/*.qm` | (in translations) |
-| 16 | exclude `gradio`, `gradio_client`, `emoji`, `_pytest`, `py`, `onnxscript`, `onnx_ir`, `onnxslim` | 3.4 |
+| 16 | exclude `gradio`, `gradio_client`, `emoji`, `_pytest`, `py` (`onnxscript`, `onnx_ir`, `onnxslim` restored in review, see below) | about 2.2 |
 
 Bug found and fixed on the way: **PDF export via WeasyPrint was broken in the NoCuda exe.** The
 spec's explicit binaries list ships `src/libwinpthread-1.dll` (an older mingw runtime for the C++
@@ -39,7 +39,11 @@ inpainter), and it won over MSYS2's newer copy in the bundle root. libpango then
 with `error 0x7f` (procedure not found: `clock_gettime64`, `nanosleep64`, ...), so
 `--run-pdf-worker` returned `{"success": false, "error": "cannot load library ...libpango-1.0-0.dll"}`
 on the unmodified build. The spec now drops the src/ copies of any DLL MSYS2 also provides
-(libwinpthread-1, libgcc_s_seh-1, libstdc++-6); MSYS2's export a superset. The v9.15.14 release
+(libwinpthread-1, libgcc_s_seh-1, libstdc++-6). MSYS2's copies are not a strict export superset
+(5 libwinpthread and 211 libstdc++ names differ), but no shipped binary imports any of the
+missing names: `onnx_inpainter.dll` uses the MSVC runtime and `libonnx_inpainter.dll` is
+statically linked, and a PE scan of every BINARY/EXTENSION in the slim PKG resolves all its
+mingw-runtime imports against the MSYS2 copies. The v9.15.14 release
 exe was built from the same spec and files, so it very likely has the same failure.
 
 Smoke tests of the new exe (isolated profile: `GLOSSARION_APP_DIR`, `USERPROFILE`, `HOME`,
@@ -63,6 +67,21 @@ Smoke tests of the new exe (isolated profile: `GLOSSARION_APP_DIR`, `USERPROFILE
   manga_ocr and the app's manga/PDF/EPUB modules import; `quantize_dynamic` + `quantize_static`
   run, a YOLO (yaml) predict, an RT-DETR v2 forward + post-process, a VisionEncoderDecoder
   generate and RapidOCR with its bundled models all run.
+
+Adversarial review (second pass):
+
+- `onnxscript`, `onnx_ir` and `onnxslim` are restored (about 1.2 MiB). The manga setting
+  `auto_convert_to_onnx` (and `AUTO_CONVERT_RTDETR_ONNX`) runs `torch.onnx.export` in
+  `local_inpainter` / `bubble_detector`; on torch 2.11 that defaults to the dynamo exporter, which
+  imports onnxscript + onnx_ir. (On the build host that export already fails with an onnx_ir
+  version mismatch, so the feature needs a matching onnxscript/onnx_ir pair either way.)
+- Every third-party import in `src/*.py` (126 dotted names) imports the same with the excludes
+  blocked as without; no string-based `import_module`/`find_spec` target is excluded.
+- No slim binary has a normal or delay-load import of a DLL that is neither shipped nor in
+  System32 (so no pruned Qt6 or MSYS2 DLL is linked by anything left).
+- Removed modules that shipped code still imports at module level: only
+  `imageio.plugins.pyav` (av) and `onnxruntime.quantization.matmul_nbits_quantizer` (onnx_ir, now
+  restored); the app uses neither imageio nor MatMulNBits.
 
 Not covered: a full manga page run (needs API keys), the EPUB reader opened on a real book, the
 QtMultimedia video player, and an autharena/ login against the live site.
