@@ -3,6 +3,14 @@ if __name__ == '__main__':
     import multiprocessing
     import sys as _early_sys
 
+    # Compiled Windows builds: a multiprocessing child shows its output in the GUI's console
+    # (when one is open) instead of nowhere; console_window does nothing in other processes.
+    try:
+        import console_window as _console_window
+        _console_window.attach_worker()
+    except Exception:
+        pass
+
     try:
         multiprocessing.freeze_support()
     except OSError:

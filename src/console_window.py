@@ -19,7 +19,10 @@ removed (``_disable_close_button``); "Show CMD" off hides it instead.
 
 Only frozen Windows builds are affected: running from source keeps the terminal it was started
 from, and "Show CMD" does nothing there. Helper processes (the same exe started with a ``--run-...``
-or another helper flag) never open, hide or show a console.
+or another helper flag) never open, hide or show a console. The exe is a windowed program, so its
+multiprocessing children (the manga inpainting worker, process pools) do not inherit the GUI's
+console: ``attach_worker`` attaches such a child to its parent's console when the parent has one,
+so their output shows there too, as it did in the old console builds.
 """
 
 import io
@@ -245,6 +248,21 @@ def _redirect_c_stdio(kernel32):
     kernel32.SetStdHandle.argtypes = (wintypes.DWORD, wintypes.HANDLE)
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     invalid = wintypes.HANDLE(-1).value
+    # The C stdout/stderr streams of the shared UCRT start unattached in a windowed process.
+    # Reopened first: freopen closes the stream's old descriptor, which can be fd 1 / 2 itself.
+    try:
+        ucrt = _loaded_ucrt(kernel32)
+        ucrt.__acrt_iob_func.restype = ctypes.c_void_p
+        ucrt.__acrt_iob_func.argtypes = (ctypes.c_uint,)
+        ucrt._wfreopen.restype = ctypes.c_void_p
+        ucrt._wfreopen.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_void_p)
+        ucrt.setvbuf.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_size_t)
+        for index in (1, 2):
+            stream = ucrt.__acrt_iob_func(index)
+            if ucrt._wfreopen("CONOUT$", "w", stream):
+                ucrt.setvbuf(stream, None, 4, 0)   # _IONBF, like console stdio
+    except Exception:
+        pass
     for std, fd in ((STD_OUTPUT_HANDLE, 1), (STD_ERROR_HANDLE, 2)):
         handle = kernel32.CreateFileW("CONOUT$", GENERIC_READ | GENERIC_WRITE,
                                       FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None)
@@ -262,20 +280,6 @@ def _redirect_c_stdio(kernel32):
             continue
         os.close(new_fd)   # closes `handle`; fd 1/2 hold their own duplicate
         kernel32.SetStdHandle(std & 0xFFFFFFFF, msvcrt.get_osfhandle(fd))
-    # the C stdout/stderr streams of the shared UCRT start unattached in a windowed process
-    try:
-        ucrt = _loaded_ucrt(kernel32)
-        ucrt.__acrt_iob_func.restype = ctypes.c_void_p
-        ucrt.__acrt_iob_func.argtypes = (ctypes.c_uint,)
-        ucrt._wfreopen.restype = ctypes.c_void_p
-        ucrt._wfreopen.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_void_p)
-        ucrt.setvbuf.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_size_t)
-        for index in (1, 2):
-            stream = ucrt.__acrt_iob_func(index)
-            if ucrt._wfreopen("CONOUT$", "w", stream):
-                ucrt.setvbuf(stream, None, 4, 0)   # _IONBF, like console stdio
-    except Exception:
-        pass
 
 
 def _allocate():
@@ -291,17 +295,22 @@ def _allocate():
             kernel32.SetConsoleTitleW(CONSOLE_TITLE)
         except Exception:
             pass
-        _install_ctrl_handler(kernel32)
         _disable_close_button(_console_hwnd())
-        _redirect_c_stdio(kernel32)
-        for stream in _streams:
-            try:
-                stream.target = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
-            except OSError:
-                stream.target = None
+        _connect(kernel32)
         return True
     except Exception:
         return False
+
+
+def _connect(kernel32):
+    """This process just got a console (opened or attached): send stdout / stderr to it."""
+    _install_ctrl_handler(kernel32)
+    _redirect_c_stdio(kernel32)
+    for stream in _streams:
+        try:
+            stream.target = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        except OSError:
+            stream.target = None
 
 
 def _apply():
@@ -358,6 +367,59 @@ def startup(config_path=None, argv=None):
         _install_streams()
         _state["show_cmd"] = read_show_cmd(config_path)
         return _apply()
+
+
+def _std_output_is_redirected(kernel32):
+    """True when the std output handle is a pipe or a file a parent passed on purpose."""
+    from ctypes import wintypes
+    FILE_TYPE_DISK, FILE_TYPE_PIPE = 1, 3
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetStdHandle.argtypes = (wintypes.DWORD,)
+    kernel32.GetFileType.argtypes = (wintypes.HANDLE,)
+    for std in (-11, -12):
+        handle = kernel32.GetStdHandle(std & 0xFFFFFFFF)
+        if handle and handle != wintypes.HANDLE(-1).value:
+            if kernel32.GetFileType(handle) in (FILE_TYPE_DISK, FILE_TYPE_PIPE):
+                return True
+    return False
+
+
+def attach_worker(argv=None):
+    """A multiprocessing child of the compiled GUI (``--multiprocessing-fork parent_pid=N``, before
+    ``freeze_support`` runs it): attach to the parent's console when the parent has opened one, so
+    the child's print and native output show there. Never opens, hides or shows a console, and
+    leaves a child whose output a parent redirected to a pipe or file alone."""
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        return False
+    args = list(sys.argv if argv is None else argv)[1:]
+    if "--multiprocessing-fork" not in args:
+        return False
+    parent = 0
+    for arg in args:
+        if arg.startswith("parent_pid="):
+            try:
+                parent = int(arg.split("=", 1)[1])
+            except ValueError:
+                parent = 0
+    if parent <= 0:
+        return False
+    with _lock:
+        if _state["allocated"]:
+            return True
+        try:
+            kernel32 = _win("kernel32")
+            if kernel32.GetConsoleWindow() or _std_output_is_redirected(kernel32):
+                return False
+            from ctypes import wintypes
+            kernel32.AttachConsole.argtypes = (wintypes.DWORD,)
+            if not kernel32.AttachConsole(parent):
+                return False
+            _state["allocated"] = True
+            _install_streams()
+            _connect(kernel32)
+            return True
+        except Exception:
+            return False
 
 
 def set_show_cmd(enabled):

@@ -204,6 +204,80 @@ def test_no_console_window_means_nothing_to_show(monkeypatch):
     assert console_window._disable_close_button(0) is False
 
 
+class _AttachKernel:
+    """kernel32 stand-in for attach_worker: records AttachConsole."""
+
+    def __init__(self, has_console=0, attach_ok=True, redirected=False):
+        self.attached, self.has_console, self.attach_ok, self.redirected = [], has_console, attach_ok, redirected
+
+        def attach_console(pid):   # a plain function: the code under test sets .argtypes on it
+            self.attached.append(pid)
+            return self.attach_ok
+
+        self.AttachConsole = attach_console
+
+    def GetConsoleWindow(self):
+        return self.has_console
+
+
+@pytest.fixture
+def attach(monkeypatch):
+    kernel = _AttachKernel()
+    calls = []
+    monkeypatch.setattr(console_window, "_state",
+                        {"started": False, "show_cmd": False, "manga": False, "allocated": False})
+    monkeypatch.setattr(console_window, "_win", lambda name: kernel)
+    monkeypatch.setattr(console_window, "_std_output_is_redirected", lambda k: k.redirected)
+    monkeypatch.setattr(console_window, "_install_streams", lambda: calls.append("streams"))
+    monkeypatch.setattr(console_window, "_connect", lambda k: calls.append("connect"))
+    monkeypatch.setattr(console_window, "_allocate", lambda: calls.append("alloc") or True)
+    monkeypatch.setattr(console_window, "_show", lambda cmd: calls.append(cmd) or True)
+    monkeypatch.setattr(sys, "platform", "win32")
+    return kernel, calls
+
+
+MP_CHILD = ("Glossarion.exe", "--multiprocessing-fork", "parent_pid=4242", "pipe_handle=528")
+
+
+def test_multiprocessing_child_attaches_to_the_gui_console(monkeypatch, attach):
+    kernel, calls = attach
+    _frozen(monkeypatch, MP_CHILD)
+    assert console_window.attach_worker() is True
+    assert kernel.attached == [4242]
+    assert calls == ["streams", "connect"]          # never opens, shows or hides one
+
+
+def test_multiprocessing_child_without_a_parent_console_stays_without(monkeypatch, attach):
+    kernel, calls = attach
+    kernel.attach_ok = False
+    _frozen(monkeypatch, MP_CHILD)
+    assert console_window.attach_worker() is False
+    assert kernel.attached == [4242] and calls == []
+
+
+@pytest.mark.parametrize("case", ["source", "gui", "run_helper", "no_pid", "has_console", "piped"])
+def test_attach_worker_leaves_everything_else_alone(monkeypatch, attach, case):
+    kernel, calls = attach
+    argv = list(MP_CHILD)
+    if case == "source":
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    else:
+        if case == "gui":
+            argv = ["Glossarion.exe"]
+        elif case == "run_helper":
+            argv = ["Glossarion.exe", "--run-pdf-worker", "parent_pid=4242"]
+        elif case == "no_pid":
+            argv = ["Glossarion.exe", "--multiprocessing-fork", "pipe_handle=528"]
+        elif case == "has_console":
+            kernel.has_console = 77
+        elif case == "piped":
+            kernel.redirected = True
+        _frozen(monkeypatch, argv)
+    assert console_window.attach_worker() is False
+    assert kernel.attached == [] and calls == []
+
+
 # --- wiring -----------------------------------------------------------------------------------
 
 def _read(name, enc="utf-8-sig"):
@@ -219,6 +293,8 @@ def test_gui_starts_it_after_every_helper_dispatch_and_before_the_gui_imports():
         assert text.index(flag) < start, flag
     assert start < text.index("import dpi_setup")
     assert "hide_at_startup" not in text
+    # multiprocessing children attach to the GUI's console before freeze_support runs them
+    assert text.index("_console_window.attach_worker()") < text.index("multiprocessing.freeze_support()")
 
 
 def test_manga_start_and_reset_toggle_it():
