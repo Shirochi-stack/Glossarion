@@ -285,6 +285,17 @@ def _is_free_text_region_metadata(region=None, rect_item=None) -> bool:
     return any(_normalize_region_kind(value) in ('free_text', 'text_free', 'freetext') for value in candidates)
 
 
+def _image_edit_redraws_free_text(self) -> bool:
+    """A translate image edit prompt is active (MangaTranslator._image_edit_translates_text, the Translate
+    SFX profiles): the free text is left to the model's redraw, out of the mask (the renderer does not
+    letter it either), as in the batch run."""
+    translator = getattr(self, 'translator', None)
+    try:
+        return bool(translator is not None and translator._image_edit_translates_text())
+    except Exception:
+        return False
+
+
 def _preserve_free_text_inpaint_enabled(self) -> bool:
     values = []
     try:
@@ -2452,6 +2463,7 @@ def _run_inpainting_sync(
         excluded_count = 0
         free_text_skipped_count = 0
         preserve_free_text = _preserve_free_text_inpaint_enabled(self)
+        redraw_free_text = _image_edit_redraws_free_text(self)
         
         print(f"[INPAINT_SYNC] Processing {len(regions)} regions for inpainting")
         for i, region in enumerate(regions):
@@ -2462,7 +2474,7 @@ def _run_inpainting_sync(
                 excluded_count += 1
                 print(f"[INPAINT_SYNC] Skipping region {region_index} (excluded from clean)")
                 continue
-            if preserve_free_text and _is_free_text_region_metadata(region):
+            if (preserve_free_text or redraw_free_text) and _is_free_text_region_metadata(region):
                 free_text_skipped_count += 1
                 print(f"[INPAINT_SYNC] Skipping region {i} (free text preserved)")
                 continue
@@ -9191,7 +9203,8 @@ SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
                 '_release_sync_inpainter',  # 2026-11-06: Translate's inpainter goes back to the pool
                 '_wait_for_concurrent_inpainting',  # 2026-11-06: Translate renders on the cleaned page
                 '_is_user_drawn_region',  # 2026-11-07: boxes the user drew are cleaned without OCR text
-                '_blank_user_drawn_regions')
+                '_blank_user_drawn_regions',
+                '_image_edit_redraws_free_text')  # 2026-11-07: a translate prompt redraws the free text
 
 
 # ===========================================================================

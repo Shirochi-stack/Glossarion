@@ -8863,8 +8863,9 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             "Edit prompts sent only to the custom-image-edit inpainter request. "
             "Use {target_lang} where the selected target language should be inserted. "
             "A prompt with {target_lang} asks the model to draw translated text (Translate SFX profiles): "
-            "the whole crop is sent and kept, not only the detected text boxes, so sound effects and "
-            "background text the detector missed are translated too."
+            "the whole crop is sent, not only the detected text boxes, so sound effects and "
+            "background text the detector missed are translated too. Only what the model redrew is kept "
+            "(the source art elsewhere), and Glossarion letters only the speech bubbles and captions."
         )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)

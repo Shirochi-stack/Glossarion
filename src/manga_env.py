@@ -3112,8 +3112,10 @@ def default_custom_image_edit_system_prompt():
 # ``{target_lang}`` is the placeholder the translation prompt profiles use: the image edit request
 # fills it with the output language the text translation uses (local_inpainter, OUTPUT_LANGUAGE).
 # A prompt that contains it asks the model to draw translated text, so the image edit treats it as a
-# translate prompt (LocalInpainter._custom_image_edit_translates_text): the whole crop is sent and
-# used, not only the detected text boxes, and the leftover-text check is off.
+# translate prompt (LocalInpainter._custom_image_edit_translates_text): the whole crop is sent, not only
+# the detected text boxes; the edit is kept in the bubble / caption mask and where the model redrew text
+# (image_edit_check.redrawn_text_mask), and the free text (outside bubbles) is neither masked nor
+# lettered by Glossarion (MangaTranslator._image_edit_translates_text).
 
 _IMAGE_EDIT_DIALOGUE_RULE = (
     "1. Dialogue and narration: remove all written text inside speech bubbles, thought bubbles, caption boxes "

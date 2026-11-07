@@ -8,7 +8,9 @@
   (offscreen Qt) and the selected profile's prompts become the ones the runs read.
 * R: the request that reaches the image edit model carries the selected profile's prompt with
   ``{target_lang}`` (the translation prompt profiles' placeholder) replaced by the configured output
-  language; a translate prompt sends and keeps the whole crop and skips the leftover-text check.
+  language; a translate prompt sends the whole crop, keeps its output in the text mask and where it
+  redrew text (the source art elsewhere); its mask holds only bubbles / captions (the free text is
+  left out by the pipeline), which the leftover-text check still judges.
 * B: a box the user drew with no OCR text is still in the inpaint / image edit mask (Translate),
   detector boxes without OCR text still are not.
 
@@ -449,7 +451,11 @@ def test_translate_prompt_failed_textless_crop_keeps_source_and_overlap_is_a_har
             if fill is None:
                 return types.SimpleNamespace(status_code=500, text="blocked", json=lambda: {})
             crop = cv2.imdecode(np.frombuffer(kwargs["files"]["image"][1], np.uint8), cv2.IMREAD_COLOR)
-            ok, png = cv2.imencode(".png", np.full_like(crop, fill))
+            # each crop redraws the sign that lies in the overlap (page rows 385-415) in its own colour
+            top = ranges[len(calls) - 1][0]
+            out = crop.copy()
+            cv2.rectangle(out, (50, 385 - top), (250, 415 - top), fill, -1)
+            ok, png = cv2.imencode(".png", out)
             return types.SimpleNamespace(status_code=200, text="", json=lambda: {
                 "data": [{"b64_json": base64.b64encode(png.tobytes()).decode("ascii")}]})
 
@@ -461,22 +467,25 @@ def test_translate_prompt_failed_textless_crop_keeps_source_and_overlap_is_a_har
     assert len(ranges) == 2 and ranges[1][0] < ranges[0][1]  # the two crops overlap
 
     # both crops come back: the overlap is the first crop's top half and the second crop's bottom half
-    calls = endpoint(lambda n: 50 if n == 1 else 200)
+    red, blue = (0, 0, 200), (200, 0, 0)
+    calls = endpoint(lambda n: red if n == 1 else blue)
     result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
     assert len(calls) == 2 and result is not None
-    assert set(np.unique(result)) <= {50, 200}  # no cross-faded rows
     cut = ranges[1][0] + (ranges[0][1] - ranges[1][0]) // 2
-    assert (result[:cut] == 50).all() and (result[cut:] == 200).all()
+    assert 390 < cut < 410
+    sign = result[388:413, 70:230]
+    above, below = sign[:cut - 388], sign[cut - 388:]
+    assert (above == red).all() and (below == blue).all()  # no cross-faded rows
 
     # the text-free bottom crop fails: the page is kept, with the bottom crop's source art
-    calls = endpoint(lambda n: 50 if n == 1 else None)
+    calls = endpoint(lambda n: red if n == 1 else None)
     inpainter = _inpainter(**owner.config)
     result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
     assert len(calls) == 2 and result is not None
     assert np.array_equal(result[ranges[0][1]:], page[ranges[0][1]:])
 
     # the crop with the detected dialogue fails: the page fails as before
-    calls = endpoint(lambda n: None if n == 1 else 200)
+    calls = endpoint(lambda n: None if n == 1 else blue)
     inpainter = _inpainter(**owner.config)
     assert inpainter._custom_image_edit_inpaint_chunked(page, mask) is None
 
@@ -662,3 +671,120 @@ def test_drawn_box_is_marked_user_drawn_and_reaches_the_regions():
     finally:
         widget.deleteLater()
         app.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# PR 170 round 2: a translate prompt keeps the model's output only where it redrew text
+# ---------------------------------------------------------------------------
+
+def _art_page_and_redraw(seed=7):
+    """A page with art (shapes on a gradient), a bubble at the top and the sound effect "KWANG" in the art;
+    the model's output: bubble emptied, "BOOM" redrawn over the art where KWANG was, and the whole crop
+    resampled (softened) with per-pixel noise, as Nano Banana returns it."""
+    height, width = 520, 320
+    ramp = np.linspace(90, 200, height, dtype=np.float32)[:, None, None]
+    art = np.broadcast_to(ramp * np.array([0.9, 1.0, 0.8], np.float32), (height, width, 3)).astype(np.uint8).copy()
+    cv2.circle(art, (70, 190), 40, (40, 120, 60), -1)
+    cv2.rectangle(art, (200, 160), (290, 230), (150, 60, 40), -1)
+    cv2.circle(art, (240, 450), 50, (60, 60, 160), -1)
+    page = art.copy()
+    cv2.ellipse(page, (160, 70), (120, 45), 0, 0, 360, (255, 255, 255), -1)
+    cv2.ellipse(page, (160, 70), (120, 45), 0, 0, 360, (0, 0, 0), 3)
+    cv2.putText(page, "HI", (130, 85), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 3)
+    cv2.putText(page, "KWANG", (30, 330), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (20, 20, 160), 7)
+    mask = np.zeros(page.shape[:2], np.uint8)
+    cv2.rectangle(mask, (70, 40), (250, 100), 255, -1)
+
+    out = art.copy()
+    cv2.ellipse(out, (160, 70), (120, 45), 0, 0, 360, (255, 255, 255), -1)
+    cv2.ellipse(out, (160, 70), (120, 45), 0, 0, 360, (0, 0, 0), 3)
+    cv2.putText(out, "BOOM", (40, 335), cv2.FONT_HERSHEY_SIMPLEX, 2.2, (10, 200, 250), 8)
+    redraw = out.copy()
+    out = cv2.GaussianBlur(out, (3, 3), 0)
+    noise = np.random.default_rng(seed).normal(0, 22, out.shape)
+    out = np.clip(out.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    return page, mask, out, redraw
+
+
+@pytest.mark.parametrize("profile", ["Default", SFX, SFX_BG])
+def test_translate_prompt_keeps_redrawn_text_and_source_art_elsewhere(monkeypatch, profile):
+    """Live test: keeping a translate prompt's whole output softened the art (0.9-2.2 % of the pixels outside
+    the text changed by more than 40 levels). Now the output is kept in the text mask and where the model
+    redrew text (image_edit_check.redrawn_text_mask): the redrawn sound effect stays, the noise / softening
+    elsewhere is rejected (the source art is kept). The Default prompt is unchanged (mask only)."""
+    page, mask, out, redraw = _art_page_and_redraw()
+    owner = _owner()
+    manga_env.ImageEditPromptProfiles(owner).select(profile)
+    _fake_endpoint(monkeypatch, out)
+    inpainter = _inpainter(**owner.config)
+    inpainter._register_custom_image_edit_output = lambda crop, edited, crop_mask: edited  # (see the R test)
+
+    result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
+
+    assert result is not None and result.shape == page.shape
+    letters = (np.abs(redraw.astype(int) - page.astype(int)).max(axis=2) > 60)
+    letters[:150] = False  # the redrawn sound effect's changed pixels (BOOM over KWANG)
+    bubble = np.zeros(mask.shape, np.uint8)
+    cv2.ellipse(bubble, (160, 70), (124, 49), 0, 0, 360, 1, -1)  # the bubble and its outline
+    near_text = cv2.dilate(((mask > 0) | letters | (bubble > 0)).astype(np.uint8), np.ones((61, 61), np.uint8)) > 0
+    changed = np.abs(result.astype(int) - page.astype(int)).max(axis=2) > 40
+    assert not np.any(changed & ~near_text), "the art away from the text is the source's"
+    sfx_kept = np.abs(result.astype(int) - out.astype(int)).max(axis=2)[letters]
+    if profile == "Default":
+        assert np.array_equal(result[260:360], page[260:360]), "Default keeps only the mask"
+    else:
+        assert np.mean(sfx_kept <= 3) > 0.97, "the translated sound effect is kept"
+
+
+def test_redrawn_text_mask_rejects_noise_and_moved_art():
+    """image_edit_check.redrawn_text_mask: per-pixel noise, softening and art the model moved a few pixels
+    are not text it redrew; a replaced word is."""
+    from image_edit_check import redrawn_text_mask
+
+    page, _mask, out, _redraw = _art_page_and_redraw(seed=3)
+    noisy = np.clip(page.astype(np.float32) + np.random.default_rng(3).normal(0, 22, page.shape), 0, 255)
+    noisy = cv2.GaussianBlur(noisy.astype(np.uint8), (3, 3), 0)
+    moved = noisy.copy()
+    moved[380:500, 180:300] = page[372:492, 180:300]  # the circle drawn 8 px lower
+    keep, stats = redrawn_text_mask(page, moved)
+    assert keep is not None and not keep.any() and not stats
+
+    keep, stats = redrawn_text_mask(page, out)
+    assert keep[300:335, 40:250].mean() > 0.9, "the replaced word is kept"
+    assert not keep[400:].any() and not keep[150:250].any()
+
+
+def test_translate_prompt_bubble_the_model_left_is_judged_like_the_default(monkeypatch):
+    """Round 2 live test (S21, top crop): the model left the Korean in the bubbles and Glossarion lettered
+    English over it, because a translate prompt switched the leftover-text check off. The mask now holds
+    only bubbles / captions (free text is left out by the pipeline), so the check runs: the bubble it left
+    is reported (not lettered) and the redrawn sound effect outside it stays."""
+    page, mask = _page()
+    out = page.copy()  # bubble untouched ("HI" left in place)
+    cv2.rectangle(out, (30, 240), (290, 320), (230, 230, 230), -1)
+    cv2.putText(out, "BOOM", (50, 300), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (20, 20, 160), 6)
+    owner = _owner()
+    manga_env.ImageEditPromptProfiles(owner).select(SFX)
+    _fake_endpoint(monkeypatch, out)
+    inpainter = _inpainter(**owner.config)
+    inpainter._register_custom_image_edit_output = lambda crop, edited, crop_mask: edited
+
+    result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
+
+    assert result is not None
+    assert inpainter.last_image_edit_unremoved_mask is not None and inpainter.last_image_edit_unremoved_mask[80, 150]
+    sfx_area = (slice(260, 310), slice(50, 280))
+    assert np.abs(result[sfx_area].astype(int) - out[sfx_area].astype(int)).mean() < 3
+
+
+def test_redrawn_text_mask_keeps_new_lettering_on_a_flat_background():
+    """A sound effect redrawn on a flat sky is not "explained" by shifting in plain background: the shift
+    test runs both ways (the edit's letters appear nowhere in the source)."""
+    from image_edit_check import redrawn_text_mask
+
+    sky = np.full((420, 300, 3), (230, 180, 90), np.uint8)
+    redrawn = sky.copy()
+    cv2.putText(redrawn, "WHOOSH", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (40, 220, 250), 6)
+    keep, stats = redrawn_text_mask(sky, redrawn)
+    assert stats and (keep[195:225, 30:250] > 0).mean() > 0.9
+    assert not keep[:120].any() and not keep[320:].any()

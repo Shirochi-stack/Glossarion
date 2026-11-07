@@ -14,6 +14,9 @@ This module holds the measurements the manga pipeline uses on that output:
   removed.
 * ``edit_footprint`` gives the area the edit changed around such components, so the
   caller can put the source art back there (or hand it to another inpainter once).
+* ``redrawn_text_mask`` finds where a translate prompt (Translate SFX) redrew text, apart
+  from the resampling / softening / local drift the model adds everywhere, so only that
+  and the text mask are taken from the edit.
 * ``is_number_only_text`` / ``number_text_unchanged`` describe regions such as clocks
   (11:59) whose translation is the same digits: they need no cleaning and no lettering.
 
@@ -233,6 +236,159 @@ def edit_footprint(source, edited, failed_mask, text_mask):
     footprint = np.isin(labels, hit) if hit.size else np.zeros(failed.shape, bool)
     redo = ((mask > 0) & footprint).astype(np.uint8) * 255
     return footprint, redo
+
+
+# ---------------------------------------------------------------------------
+# text a translate prompt redrew
+# ---------------------------------------------------------------------------
+
+#: Colour levels (any channel) between source and edit for a pixel to count as changed.
+REDRAW_DIFF = 40
+#: Opening kernel (px): drops the 1-2 px edge differences a resampled / softened copy has
+#: along every line, keeps the strokes of letters (small sign text included).
+REDRAW_OPEN = 3
+#: Closing kernel (px): joins the strokes of one word / sound effect into a single area.
+REDRAW_CLOSE = 11
+#: Smallest area (px, after closing) and side (px) of a redrawn piece of text.
+REDRAW_MIN_AREA = 200
+REDRAW_MIN_SIDE = 12
+#: Share of an area's pixels that must be changed strokes (not just closed-over gaps).
+REDRAW_MIN_DENSITY = 0.15
+#: Local alignment search: blocks of this size (px) whose changes a shift of the edit by
+#: up to ``REDRAW_SHIFT_REACH`` px explains (best shift leaves at most
+#: ``REDRAW_SHIFT_EXPLAINED`` of the changed pixels) are art the model moved or stretched,
+#: not text it redrew.
+REDRAW_SHIFT_BLOCK = 32
+REDRAW_SHIFT_REACH = 40
+REDRAW_SHIFT_EXPLAINED = 0.3
+#: A kept area takes in the changed strokes joined to it only while they stay within this many
+#: times its own area.
+REDRAW_JOIN_GROWTH = 2.0
+#: A kept area larger than this share of the crop is not a word but art the model stretched or
+#: restyled (a whole floor redrawn lower); it is dropped.
+REDRAW_MAX_SHARE = 0.12
+#: Margin (px) added around each redrawn area: the caller's feather (Gaussian, sigma 5) then fades the
+#: edit out outside the letters, not across their edges.
+REDRAW_GROW = 12
+
+
+def _shift_explained_blocks(source, edited, changed, *, block=REDRAW_SHIFT_BLOCK, reach=REDRAW_SHIFT_REACH,
+                            explained=REDRAW_SHIFT_EXPLAINED, threshold=REDRAW_DIFF):
+    """Bool mask of the blocks whose changed pixels a local shift of ``edited`` explains.
+
+    Image-edit models return the crop resampled and often locally moved or stretched (a figure
+    a few pixels lower, a face slightly larger). Those areas differ a lot pixel by pixel but
+    match after a shift; redrawn text matches under no shift. Searched on a quarter-size copy.
+    """
+    cv2 = _cv2()
+    height, width = changed.shape[:2]
+    factor = 4 if min(height, width) >= 4 * block else 1
+    small_w, small_h = max(1, width // factor), max(1, height // factor)
+    src = cv2.resize(source, (small_w, small_h), interpolation=cv2.INTER_AREA).astype(np.int16)
+    out = cv2.resize(edited, (small_w, small_h), interpolation=cv2.INTER_AREA).astype(np.int16)
+    if src.ndim == 2:
+        src, out = src[:, :, None], out[:, :, None]
+    cell = max(1, block // factor)
+    radius = max(1, reach // factor)
+    rows, cols = -(-small_h // cell), -(-small_w // cell)
+    pad_h, pad_w = rows * cell - small_h, cols * cell - small_w
+
+    def per_block(diff):
+        counts = np.pad((np.max(diff, axis=2) > threshold).astype(np.float32), ((0, pad_h), (0, pad_w)))
+        return counts.reshape(rows, cell, cols, cell).sum(axis=(1, 3))
+
+    base = per_block(np.abs(src - out))
+    best = base.copy()
+    out_padded = np.pad(out, ((radius, radius), (radius, radius), (0, 0)), mode='edge')
+    src_padded = np.pad(src, ((radius, radius), (radius, radius), (0, 0)), mode='edge')
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx or dy:
+                # Both ways: the edit shifted matches the source, and the source shifted back matches
+                # the edit. New lettering on a flat background passes only the first (a shift brings
+                # in plain background); the edit's letters appear nowhere in the source.
+                out_shifted = out_padded[radius + dy:radius + dy + small_h, radius + dx:radius + dx + small_w]
+                src_shifted = src_padded[radius - dy:radius - dy + small_h, radius - dx:radius - dx + small_w]
+                both = np.maximum(per_block(np.abs(src - out_shifted)), per_block(np.abs(out - src_shifted)))
+                np.minimum(best, both, out=best)
+    blocks = (base > 0) & (best <= explained * base)
+    grid = np.repeat(np.repeat(blocks, cell, axis=0), cell, axis=1)[:small_h, :small_w].astype(np.uint8)
+    return cv2.resize(grid, (width, height), interpolation=cv2.INTER_NEAREST) > 0
+
+
+def redrawn_text_mask(source, edited):
+    """Return ``(mask, stats)``: where ``edited`` redrew text, as opposed to drifted art.
+
+    A translate image edit prompt (Translate SFX) asks the model to redraw sound effects and
+    background text translated, but the model returns the whole crop resampled, softened and
+    partly moved. This keeps the areas that clearly changed like text: pixels that differ by
+    more than ``REDRAW_DIFF``, without the thin edge differences (opening), outside blocks a
+    local shift explains, joined per word (closing), large and dense enough. Each kept area then
+    takes in the changed strokes joined to it within half its size around it, also those a shift
+    explained (a redrawn word in the same style as the source word can match it in places), unless
+    that more than ``REDRAW_JOIN_GROWTH`` times its area (moved art around it); an area larger
+    than ``REDRAW_MAX_SHARE`` of the crop is dropped (stretched art). The rest is
+    filled to its convex hull (the whole word, its letters' gaps included) and grown by
+    ``REDRAW_GROW`` px. ``mask`` is uint8 (255 = keep the edit); ``stats`` lists the kept
+    areas' boxes.
+    """
+    cv2 = _cv2()
+    stats = []
+    if source is None or edited is None or source.shape != edited.shape:
+        return None, stats
+    height, width = source.shape[:2]
+    keep = np.zeros((height, width), np.uint8)
+    if height < REDRAW_MIN_SIDE or width < REDRAW_MIN_SIDE:
+        return keep, stats
+    diff = np.abs(source.astype(np.int16) - edited.astype(np.int16))
+    if diff.ndim == 3:
+        diff = np.max(diff, axis=2)
+    changed = (diff > REDRAW_DIFF).astype(np.uint8)
+
+    def kernel(size):
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+    strokes = cv2.morphologyEx(changed, cv2.MORPH_OPEN, kernel(REDRAW_OPEN))
+    if not strokes.any():
+        return keep, stats
+    all_joined = cv2.morphologyEx(strokes, cv2.MORPH_CLOSE, kernel(REDRAW_CLOSE))
+    _all_count, all_labels = cv2.connectedComponents(all_joined, connectivity=8)
+    strokes[_shift_explained_blocks(source, edited, strokes)] = 0
+    joined = cv2.morphologyEx(strokes, cv2.MORPH_CLOSE, kernel(REDRAW_CLOSE))
+    count, labels, boxes, _ = cv2.connectedComponentsWithStats(joined, connectivity=8)
+    for label in range(1, count):
+        x, y, bw, bh, area = (int(v) for v in boxes[label])
+        if area < REDRAW_MIN_AREA or min(bw, bh) < REDRAW_MIN_SIDE:
+            continue
+        component = labels[y:y + bh, x:x + bw] == label
+        if float(np.mean(strokes[y:y + bh, x:x + bw][component])) < REDRAW_MIN_DENSITY:
+            continue
+        pad_x, pad_y = bw // 2, bh // 2
+        x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+        x1, y1 = min(width, x + bw + pad_x), min(height, y + bh + pad_y)
+        near = all_labels[y0:y1, x0:x1]
+        joined_to = np.unique(all_labels[y:y + bh, x:x + bw][component])
+        area_mask = np.isin(near, joined_to[joined_to > 0]).astype(np.uint8)
+        if np.count_nonzero(area_mask) > REDRAW_JOIN_GROWTH * area:
+            area_mask[:] = 0  # joined to a large area (art the model moved): the word alone
+        area_mask[y - y0:y - y0 + bh, x - x0:x - x0 + bw][component] = 1
+        hull = None
+        for candidate in (area_mask, None):
+            if candidate is None:  # the grown area is too large: the word alone
+                candidate = np.zeros_like(area_mask)
+                candidate[y - y0:y - y0 + bh, x - x0:x - x0 + bw][component] = 1
+            points = cv2.findNonZero(candidate)
+            hull = cv2.convexHull(points + np.array([x0, y0], dtype=points.dtype))
+            if cv2.contourArea(hull) <= REDRAW_MAX_SHARE * height * width:
+                break
+            hull = None
+        if hull is None:
+            continue  # a large part of the crop moved or restyled (stretched art), not a word
+        cv2.fillConvexPoly(keep, hull, 255)
+        stats.append({'bbox': (x, y, bw, bh), 'area': area})
+    if stats:
+        keep = cv2.dilate(keep, kernel(2 * REDRAW_GROW + 1))
+    return keep, stats
 
 
 # ---------------------------------------------------------------------------

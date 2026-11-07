@@ -362,6 +362,15 @@ EDITS = (
      "                inpainter._image_edit_unchecked_mask = None\n"
      "                if is_custom_image_edit:\n"
      "                    inpainter.set_log_callback(previous_inpainter_log_callback)\n"),
+    # PR 170 round 2: a translate image edit prompt (Translate SFX) redraws the free text itself; it is left
+    # out of the mask as the batch run's create_text_mask does (_image_edit_redraws_free_text).
+    ("_run_inpainting_sync",
+     "        preserve_free_text = _preserve_free_text_inpaint_enabled(self)\n",
+     "        preserve_free_text = _preserve_free_text_inpaint_enabled(self)\n"
+     "        redraw_free_text = _image_edit_redraws_free_text(self)\n"),
+    ("_run_inpainting_sync",
+     "            if preserve_free_text and _is_free_text_region_metadata(region):\n",
+     "            if (preserve_free_text or redraw_free_text) and _is_free_text_region_metadata(region):\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen

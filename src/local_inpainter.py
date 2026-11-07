@@ -659,6 +659,13 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
             raise RuntimeError(f"FFC block failed: {e}")
 
 
+def custom_image_edit_prompt_translates(system_prompt, user_prompt=''):
+    """True when a custom image edit prompt asks the model to draw translated text: it uses the
+    ``{target_lang}`` placeholder (manga_env's Translate SFX profiles). The manga pipeline then leaves
+    the text outside speech bubbles to the model's redraw (MangaTranslator._image_edit_translates_text)."""
+    return '{target_lang}' in str(system_prompt or '') or '{target_lang}' in str(user_prompt or '')
+
+
 class LocalInpainter:
     """Local inpainter with full backward compatibility"""
     
@@ -2756,13 +2763,32 @@ class LocalInpainter:
 
     def _custom_image_edit_translates_text(self):
         """True when the prompt asks the model to draw text in the target language: it uses ``{target_lang}``
-        like the translation prompt profiles (manga_env's Translate SFX profiles). Such an edit owns the whole
-        crop: crops without a detected text box are sent too, the model gets the whole crop as its edit area and
-        its output is kept everywhere (sound effects and background text are mostly outside the detected
-        boxes), and the leftover-text check is off (redrawn translated lettering is new ink where the source
-        ink was, which the check would read as text the edit left)."""
-        system, user = self._custom_image_edit_prompt_templates()
-        return '{target_lang}' in str(system or '') or '{target_lang}' in str(user or '')
+        like the translation prompt profiles (manga_env's Translate SFX profiles). Such an edit works on the
+        whole crop: crops without a detected text box are sent too and the model gets the whole crop as its
+        edit area (sound effects and background text are mostly outside the detected boxes). Its output is
+        kept in the text mask and where it redrew text (``_custom_image_edit_redrawn_text``), the source art
+        elsewhere. The manga pipeline leaves the free text (outside bubbles) out of the mask, so the
+        leftover-text check still judges the bubbles / captions the model must empty."""
+        return custom_image_edit_prompt_translates(*self._custom_image_edit_prompt_templates())
+
+    def _custom_image_edit_redrawn_text(self, crop_bgr, out_bgr):
+        """Mask (uint8, 255) of where a translate prompt's output redrew text (image_edit_check
+        ``redrawn_text_mask``), or None when it cannot be measured (the whole output is then limited
+        to the text mask like the default prompt)."""
+        try:
+            from image_edit_check import redrawn_text_mask
+            redrawn, stats = redrawn_text_mask(crop_bgr, out_bgr)
+        except Exception as exc:
+            logger.warning(f"Custom image edit redrawn-text mask failed: {exc}")
+            return None
+        if redrawn is not None:
+            self._log(
+                f"🖼️ Custom image edit translate prompt: keeping {len(stats)} redrawn text area(s) "
+                f"({100.0 * np.count_nonzero(redrawn) / max(1, redrawn.size):.1f}% of the crop) and the text mask; "
+                "source art elsewhere",
+                "info",
+            )
+        return redrawn
 
     @staticmethod
     def _custom_image_edit_target_language(config):
@@ -2828,8 +2854,9 @@ class LocalInpainter:
             return image.copy()
         if translate_text:
             log_crop_progress(
-                "Custom image edit prompt translates text ({target_lang}): every crop is sent and the model's "
-                "whole output is kept (sound effects / background text outside the detected boxes)"
+                "Custom image edit prompt translates text ({target_lang}): every crop is sent; the model's output "
+                "is kept in the text mask and where it redrew text (sound effects / background text outside the "
+                "detected boxes), the source art elsewhere"
             )
 
         enabled = self._bool_config_value(self.config.get('manga_batch_image_requests_enabled', True), True)
@@ -2916,8 +2943,8 @@ class LocalInpainter:
             edited = edited_crops[range_index]
             overlap_end = min(previous_end, end)
             if overlap_end > start and translate_text:
-                # A translate prompt keeps each crop's whole output, and two redraws of the same rows differ:
-                # a cross-fade would show the art twice. Cut in the middle of the overlap (a text-free gap).
+                # A translate prompt keeps each crop's redrawn text, and two redraws of the same rows differ:
+                # a cross-fade would show the text twice. Cut in the middle of the overlap (a text-free gap).
                 overlap_end = start + (overlap_end - start) // 2
             elif overlap_end > start:
                 count = overlap_end - start
@@ -2929,8 +2956,9 @@ class LocalInpainter:
             previous_end = end
         if self._custom_image_edit_force_stopped():
             return None
-        if not translate_text:
-            result = self._custom_image_edit_check_text_removed(image, result, mask, log_crop_progress)
+        # A translate prompt too: its mask holds only the bubbles / captions (the free text it redraws is
+        # left out by the manga pipeline), which it must empty like the default prompt.
+        result = self._custom_image_edit_check_text_removed(image, result, mask, log_crop_progress)
         return None if self._custom_image_edit_force_stopped() else result
 
     def _register_custom_image_edit_output(self, crop_bgr, out_bgr, crop_mask):
@@ -3682,10 +3710,12 @@ class LocalInpainter:
                     except (ValueError, TypeError):
                         _raw_area_pct = 10
             edit_area_pct = max(0, min(100, _raw_area_pct))
+            redrawn = None
             if translate_text and edit_area_pct < 100:
-                # The translated sound effects / background text lie outside the text mask: keep all of it.
-                self._log("🖼️ Custom image edit translate prompt: keeping the whole returned crop", "info")
-                edit_area_pct = 100
+                # The translated sound effects / background text lie outside the text mask, but the model's
+                # copy of the rest is resampled, softened and partly moved: take the edit only in the text
+                # mask and where it redrew text, keep the source art everywhere else.
+                redrawn = self._custom_image_edit_redrawn_text(crop_bgr, out_bgr)
 
             if (
                 edit_area_pct >= 100
@@ -3717,6 +3747,8 @@ class LocalInpainter:
                     f"(dilation={dilation_px}px, kernel={kernel_size}x{kernel_size})",
                     "info"
                 )
+            if redrawn is not None:
+                mask_for_blend = cv2.bitwise_or(mask_for_blend, redrawn)
 
             mask_float = mask_for_blend.astype(np.float32) / 255.0
             mask_float = cv2.GaussianBlur(mask_float, (21, 21), 5)
