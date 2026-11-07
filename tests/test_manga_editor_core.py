@@ -306,6 +306,27 @@ EDITS = (
      "            inpainter = None  # Returned: a later error must not take back another thread's checkout of it\n"
      "            \n"
      "        else:\n"),
+    # Owner request (2026-11-07, image edit prompt profiles): a box the user drew (user_drawn) is cleaned /
+    # image-edited even when OCR reads no text in it, so a sound effect or sign the detector missed can be
+    # boxed for the Translate SFX prompts (tests/test_image_edit_prompt_profiles.py).
+    ("_regions_with_ocr_text",
+     "            isinstance(region, dict) and tuple(region.get('bbox') or ()) in valid_boxes\n"
+     "        ):\n",
+     "            isinstance(region, dict) and tuple(region.get('bbox') or ()) in valid_boxes\n"
+     "        ) and not _is_user_drawn_region(region):\n"),
+    ("_run_translate_background",
+     "                    regions.append(region_dict)\n"
+     "\n"
+     "                cleaned_image_path = _run_inpainting_sync(self, image_path, regions)\n",
+     "                    regions.append(region_dict)\n"
+     "                # The boxes the user drew are cleaned even when OCR read no text in them.\n"
+     "                regions.extend(_blank_user_drawn_regions(self, recognized_texts))\n"
+     "\n"
+     "                cleaned_image_path = _run_inpainting_sync(self, image_path, regions)\n"),
+    ("_run_inpainting_sync",
+     "            if isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip():\n",
+     "            if (isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip()\n"
+     "                    and not _is_user_drawn_region(region)):\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen

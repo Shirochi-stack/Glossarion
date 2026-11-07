@@ -66,6 +66,120 @@ def _halgakos_arrow_style(size=14):
     return f'QComboBox::down-arrow {{ image: url({icon_path}); width: {size}px; height: {size}px; }}'
 
 
+# ─── Prompt profile row (shared: the review dialog, the manga Custom Image Edit Prompt dialog) ──────
+
+#: (key, label, fixed width, background, border, hover, hover border, pressed): the Glossary Manager
+#: prompt profile row buttons.
+PROMPT_PROFILE_ROW_BUTTONS = (
+    ('new', "+ New Profile", None, '#2d5a2d', '#3a7a3a', '#3a7a3a', '#4a9a4a', '#1e3e1e'),
+    ('save', "💾 Save Profile", 120, '#2f5f8f', '#4a78a8', '#3f78ad', '#5a91c8', '#244766'),
+    ('delete', "🗑 Delete Profile", 128, '#6f2f2f', '#944545', '#8a3a3a', '#b65252', '#512424'),
+)
+
+
+def build_prompt_profile_row(label, object_prefix, tooltip, actions, on_select):
+    """Profile dropdown + New / Save / Delete (Reset for built-ins), styled like the Glossary Manager's prompt
+    profile rows. ``actions`` maps 'new' / 'save' / 'delete' to callbacks; ``on_select(name)`` runs when a
+    profile is picked (or Enter is pressed in the editable name). Object names: ``<prefix>_prompt_profile_combo``
+    and ``<prefix>_profile_<key>_button``. Returns ``(row, combo, buttons)``."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 6)
+    layout.setSpacing(8)
+    layout.addWidget(QLabel(label))
+
+    combo = QComboBox()
+    combo.setObjectName(f"{object_prefix}_prompt_profile_combo")
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.NoInsert)
+    combo.setCompleter(None)
+    combo.setMinimumWidth(220)
+    combo.setMaximumWidth(420)
+    combo.lineEdit().setPlaceholderText("Profile name")
+    combo.setToolTip(tooltip)
+    combo.setFocusPolicy(Qt.StrongFocus)
+    combo.wheelEvent = lambda e: e.ignore()
+    combo.setStyleSheet(_halgakos_arrow_style(16) + """
+        QComboBox { padding-right: 4px; }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 18px;
+            border-left: 1px solid #4a5568;
+        }
+    """)
+    layout.addWidget(combo)
+
+    buttons = {}
+    for key, text, width, background, border, hover, hover_border, pressed in PROMPT_PROFILE_ROW_BUTTONS:
+        button = QPushButton(text)
+        button.setObjectName(f"{object_prefix}_profile_{key}_button")
+        button.setAutoDefault(False)
+        button.setFixedHeight(28)
+        if width is not None:
+            button.setFixedWidth(width)
+        button.setStyleSheet(f"""
+            QPushButton {{ background-color: {background}; color: #ffffff;
+                font-size: 11px; font-weight: bold; border: 1px solid {border};
+                border-radius: 4px; padding: 0px 8px; }}
+            QPushButton:hover {{ background-color: {hover}; border-color: {hover_border}; }}
+            QPushButton:pressed {{ background-color: {pressed}; }}
+        """)
+        button.clicked.connect(lambda _checked=False, action=actions[key]: action())
+        layout.addWidget(button)
+        buttons[key] = button
+    layout.addStretch()
+
+    combo.currentIndexChanged.connect(
+        lambda index: on_select(combo.itemText(index)) if index >= 0 else None)
+    combo.lineEdit().returnPressed.connect(lambda: on_select(combo.currentText()))
+    return row, combo, buttons
+
+
+def refresh_prompt_profile_row(combo, buttons, profiles, reset_tooltip, delete_tooltip):
+    """Show ``profiles`` (a ``prompt_profiles.PromptSetProfiles``) in the row: its names with the Halgakos
+    icon, the selected one, and Delete as ↺ Reset for a built-in (``reset_tooltip`` takes ``{name}``)."""
+    selected = profiles.selected_name()
+    blocked = combo.blockSignals(True)
+    try:
+        combo.clear()
+        combo.addItems(profiles.names)
+        combo.setCurrentIndex(max(0, combo.findText(selected)))
+        combo.setEditText(selected)
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path):
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            for index in range(combo.count()):
+                combo.setItemIcon(index, icon)
+            combo.setIconSize(QSize(18, 18))
+    finally:
+        combo.blockSignals(blocked)
+    button = buttons.get('delete')
+    if button is not None:
+        builtin = profiles.is_builtin(selected)
+        button.setText("↺ Reset Profile" if builtin else "🗑 Delete Profile")
+        button.setToolTip(reset_tooltip.format(name=selected) if builtin else delete_tooltip)
+
+
+def confirm_prompt_profile_action(parent, title, text):
+    """The profile rows' Yes/No question (No is the default)."""
+    from PySide6.QtWidgets import QMessageBox
+    confirmation = QMessageBox(parent)
+    confirmation.setWindowTitle(title)
+    confirmation.setIcon(QMessageBox.Question)
+    confirmation.setText(text)
+    confirmation.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+    confirmation.setDefaultButton(QMessageBox.No)
+    button_box = confirmation.findChild(QDialogButtonBox)
+    if button_box is not None:
+        button_box.setCenterButtons(True)
+        button_box.layout().setSpacing(12)
+        for button in button_box.buttons():
+            button.setMinimumWidth(button.sizeHint().width() + 12)
+    return confirmation.exec() == QMessageBox.Yes
+
+
 def _natural_path_key(path: str):
     """Case-insensitive natural key, so Volume 2 sorts before Volume 10."""
     name = os.path.basename(os.fspath(path))
@@ -1402,67 +1516,15 @@ class ReviewDialog(QDialog):
         """Profile dropdown + New / Save / Delete (Reset for the built-in Default and On-device), like the
         Glossary Manager's prompt profile rows. A profile holds the review prompt (this editor) and the
         Full Review Mode final prompt (📝 Final Prompt); edit the name and save to rename it."""
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 6)
-        layout.setSpacing(8)
-        layout.addWidget(QLabel("Profile:"))
-
-        combo = QComboBox()
-        combo.setObjectName("review_prompt_profile_combo")
-        combo.setEditable(True)
-        combo.setInsertPolicy(QComboBox.NoInsert)
-        combo.setCompleter(None)
-        combo.setMinimumWidth(220)
-        combo.setMaximumWidth(420)
-        combo.lineEdit().setPlaceholderText("Profile name")
-        combo.setToolTip("Select a review prompt profile, or edit its name and save to rename it.\n"
-                         "Each profile stores the review prompt and the Full Review Mode final prompt.")
-        combo.setFocusPolicy(Qt.StrongFocus)
-        combo.wheelEvent = lambda e: e.ignore()
-        combo.setStyleSheet(_halgakos_arrow_style(16) + """
-            QComboBox { padding-right: 4px; }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 18px;
-                border-left: 1px solid #4a5568;
-            }
-        """)
-        layout.addWidget(combo)
+        row, combo, buttons = build_prompt_profile_row(
+            "Profile:", "review",
+            "Select a review prompt profile, or edit its name and save to rename it.\n"
+            "Each profile stores the review prompt and the Full Review Mode final prompt.",
+            {'new': self._new_review_profile, 'save': self._save_review_profile,
+             'delete': self._delete_or_reset_review_profile},
+            self._select_review_profile)
         self._review_profile_combo = combo
-
-        self._review_profile_buttons = {}
-        actions = (
-            ('new', "+ New Profile", self._new_review_profile, None,
-             '#2d5a2d', '#3a7a3a', '#3a7a3a', '#4a9a4a', '#1e3e1e'),
-            ('save', "💾 Save Profile", self._save_review_profile, 120,
-             '#2f5f8f', '#4a78a8', '#3f78ad', '#5a91c8', '#244766'),
-            ('delete', "🗑 Delete Profile", self._delete_or_reset_review_profile, 128,
-             '#6f2f2f', '#944545', '#8a3a3a', '#b65252', '#512424'),
-        )
-        for key, label, callback, width, background, border, hover, hover_border, pressed in actions:
-            button = QPushButton(label)
-            button.setObjectName(f"review_profile_{key}_button")
-            button.setAutoDefault(False)
-            button.setFixedHeight(28)
-            if width is not None:
-                button.setFixedWidth(width)
-            button.setStyleSheet(f"""
-                QPushButton {{ background-color: {background}; color: #ffffff;
-                    font-size: 11px; font-weight: bold; border: 1px solid {border};
-                    border-radius: 4px; padding: 0px 8px; }}
-                QPushButton:hover {{ background-color: {hover}; border-color: {hover_border}; }}
-                QPushButton:pressed {{ background-color: {pressed}; }}
-            """)
-            button.clicked.connect(lambda _checked=False, action=callback: action())
-            layout.addWidget(button)
-            self._review_profile_buttons[key] = button
-        layout.addStretch()
-
-        combo.currentIndexChanged.connect(
-            lambda index: self._select_review_profile(combo.itemText(index)) if index >= 0 else None)
-        combo.lineEdit().returnPressed.connect(lambda: self._select_review_profile(combo.currentText()))
+        self._review_profile_buttons = buttons
         return row
 
     def _load_review_profiles(self):
@@ -1498,29 +1560,9 @@ class ReviewDialog(QDialog):
         profiles = getattr(self, '_review_profiles', None)
         if combo is None or profiles is None:
             return
-        selected = profiles.selected_name()
-        blocked = combo.blockSignals(True)
-        try:
-            combo.clear()
-            combo.addItems(profiles.names)
-            combo.setCurrentIndex(max(0, combo.findText(selected)))
-            combo.setEditText(selected)
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-            if os.path.exists(icon_path):
-                from PySide6.QtCore import QSize
-                icon = QIcon(icon_path)
-                for index in range(combo.count()):
-                    combo.setItemIcon(index, icon)
-                combo.setIconSize(QSize(18, 18))
-        finally:
-            combo.blockSignals(blocked)
-        button = getattr(self, '_review_profile_buttons', {}).get('delete')
-        if button is not None:
-            builtin = profiles.is_builtin(selected)
-            button.setText("↺ Reset Profile" if builtin else "🗑 Delete Profile")
-            button.setToolTip(
-                f"Restore the built-in '{selected}' review and final prompts" if builtin
-                else "Delete the selected review prompt profile")
+        refresh_prompt_profile_row(
+            combo, getattr(self, '_review_profile_buttons', {}), profiles,
+            "Restore the built-in '{name}' review and final prompts", "Delete the selected review prompt profile")
 
     def _apply_review_profile_texts(self):
         """Show the selected profile: its review prompt in the editor, its final prompt for 📝 Final Prompt."""
@@ -1570,20 +1612,7 @@ class ReviewDialog(QDialog):
         return box
 
     def _confirm_review_profile(self, title, text):
-        from PySide6.QtWidgets import QMessageBox
-        confirmation = QMessageBox(self)
-        confirmation.setWindowTitle(title)
-        confirmation.setIcon(QMessageBox.Question)
-        confirmation.setText(text)
-        confirmation.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        confirmation.setDefaultButton(QMessageBox.No)
-        button_box = confirmation.findChild(QDialogButtonBox)
-        if button_box is not None:
-            button_box.setCenterButtons(True)
-            button_box.layout().setSpacing(12)
-            for button in button_box.buttons():
-                button.setMinimumWidth(button.sizeHint().width() + 12)
-        return confirmation.exec() == QMessageBox.Yes
+        return confirm_prompt_profile_action(self, title, text)
 
     def _new_review_profile(self):
         box = self._review_profiles.new()

@@ -2410,7 +2410,7 @@ class MangaImagePreviewWidget(QWidget):
                         'height': r.height(),
                         'shape': getattr(rect_item, 'shape_type', 'rect')
                     }
-                    for key in ('bubble_type', 'region_type', 'bubble_bounds'):
+                    for key in ('bubble_type', 'region_type', 'bubble_bounds', 'user_drawn'):
                         value = getattr(rect_item, key, None)
                         if value is not None:
                             entry[key] = value
@@ -3001,6 +3001,8 @@ class MangaImagePreviewWidget(QWidget):
             try:
                 rect_item.region_index = idx
                 rect_item.is_recognized = False
+                # Drawn by the user: cleaned / image-edited even when OCR reads no text in it
+                rect_item.user_drawn = True
             except Exception:
                 pass
             # Attach context menu via integration if available

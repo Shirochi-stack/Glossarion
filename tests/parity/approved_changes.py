@@ -3819,6 +3819,264 @@ _CONSOLE_WINDOW_MANGA = [
 ]
 
 
+# 2026-11-07 image edit prompt profiles: the manga Custom Image Edit Prompt dialog gets the review dialog's
+# shared profile row over manga_env.ImageEditPromptProfiles (Default, Translate SFX, Translate SFX +
+# background text); boxes the user draws in the editor are marked user_drawn and saved with that mark
+_IMAGE_EDIT_PROMPT_DIALOG_OLD = (
+    '    def _edit_custom_image_edit_prompt(self):\n'
+    '        """Open dialog to edit the prompt used by manga custom-image-edit inpainting."""\n'
+    '        dialog = QDialog(self.dialog)\n'
+    '        dialog.setWindowTitle("Custom Image Edit Prompt")\n'
+    '        screen = QApplication.primaryScreen().geometry()\n'
+    '        dialog.setMinimumSize(int(screen.width() * 0.42), int(screen.height() * 0.45))\n'
+    '\n'
+    '        layout = QVBoxLayout(dialog)\n'
+    '        instructions = QLabel(\n'
+    '            "Edit prompts sent only to the custom-image-edit inpainter request. "\n'
+    '            "Use {target_lang} where the selected target language should be inserted."\n'
+    '        )\n'
+    '        instructions.setWordWrap(True)\n'
+    '        layout.addWidget(instructions)\n'
+    '\n'
+    '        system_label = QLabel("System Prompt:")\n'
+    '        layout.addWidget(system_label)\n'
+    '        system_prompt_editor = QTextEdit()\n'
+    '        system_prompt_editor.setPlainText(\n'
+    "            getattr(self, 'custom_image_edit_system_prompt_value', '')\n"
+    "            or self.main_gui.config.get('custom_image_edit_system_prompt', '')\n"
+    "            or self.main_gui.config.get('custom_image_edit_prompt', '')\n"
+    '            or self._default_custom_image_edit_system_prompt()\n'
+    '        )\n'
+    '        layout.addWidget(system_prompt_editor)\n'
+    '\n'
+    '        user_label = QLabel("User Prompt (optional):")\n'
+    '        layout.addWidget(user_label)\n'
+    '        user_prompt_editor = QTextEdit()\n'
+    '        user_prompt_editor.setPlaceholderText("Optional extra instruction for this image edit request")\n'
+    '        user_prompt_editor.setPlainText(\n'
+    "            getattr(self, 'custom_image_edit_user_prompt_value', '')\n"
+    "            or self.main_gui.config.get('custom_image_edit_user_prompt', '')\n"
+    '        )\n'
+    '        layout.addWidget(user_prompt_editor)\n'
+    '\n'
+    '        button_layout = QHBoxLayout()\n'
+    '\n'
+    '        def save_prompt():\n'
+    '            system_prompt = system_prompt_editor.toPlainText().strip() or self._default_custom_image_edit_system_prompt()\n'
+    '            user_prompt = user_prompt_editor.toPlainText().strip()\n'
+    "            self._sync_custom_image_edit_prompt(system_prompt=system_prompt, user_prompt=user_prompt, source='manga')\n"
+    '            self._save_rendering_settings()\n'
+    '            self._log("Updated custom image edit prompts", "success")\n'
+    '            dialog.accept()\n'
+    '\n'
+    '        def reset_prompt():\n'
+    '            reply = QMessageBox.question(\n'
+    '                dialog,\n'
+    '                "Reset Custom Image Edit Prompts",\n'
+    '                "Reset the custom image edit system prompt to the default and clear the optional user prompt?",\n'
+    '                QMessageBox.Yes | QMessageBox.No,\n'
+    '                QMessageBox.No\n'
+    '            )\n'
+    '            if reply != QMessageBox.Yes:\n'
+    '                return\n'
+    '            system_prompt_editor.setPlainText(self._default_custom_image_edit_system_prompt())\n'
+    '            user_prompt_editor.clear()\n'
+    '\n'
+    '        save_btn = QPushButton("Save")\n'
+    '        save_btn.clicked.connect(save_prompt)\n'
+    '        button_layout.addWidget(save_btn)\n'
+    '\n'
+    '        reset_btn = QPushButton("Reset to Default")\n'
+    '        reset_btn.clicked.connect(reset_prompt)\n'
+    '        button_layout.addWidget(reset_btn)\n'
+    '\n'
+    '        cancel_btn = QPushButton("Cancel")\n'
+    '        cancel_btn.clicked.connect(dialog.reject)\n'
+    '        button_layout.addWidget(cancel_btn)\n'
+    '        button_layout.addStretch()\n'
+    '\n'
+    '        layout.addLayout(button_layout)\n'
+    '        dialog.exec()\n'
+    '\n'
+)
+_IMAGE_EDIT_PROMPT_DIALOG_NEW = (
+    '    def _edit_custom_image_edit_prompt(self):\n'
+    '        """Open dialog to edit the prompt used by manga custom-image-edit inpainting.\n'
+    '\n'
+    "        A profile row like the review / glossary prompt profiles (review_dialog's shared row over\n"
+    '        manga_env.ImageEditPromptProfiles): Default (the prompt used before profiles), the built-in\n'
+    "        Translate SFX and Translate SFX + background text, and the user's own profiles. The selected\n"
+    '        profile\'s prompts are the ones the image edit requests send."""\n'
+    '        from review_dialog import build_prompt_profile_row, refresh_prompt_profile_row, confirm_prompt_profile_action\n'
+    '        from manga_env import ImageEditPromptProfiles\n'
+    '\n'
+    '        dialog = QDialog(self.dialog)\n'
+    '        dialog.setWindowTitle("Custom Image Edit Prompt")\n'
+    '        screen = QApplication.primaryScreen().geometry()\n'
+    '        dialog.setMinimumSize(int(screen.width() * 0.42), int(screen.height() * 0.45))\n'
+    '\n'
+    '        layout = QVBoxLayout(dialog)\n'
+    '        instructions = QLabel(\n'
+    '            "Edit prompts sent only to the custom-image-edit inpainter request. "\n'
+    '            "Use {target_lang} where the selected target language should be inserted. "\n'
+    '            "A prompt with {target_lang} asks the model to draw translated text (Translate SFX profiles): "\n'
+    '            "the whole crop is sent and kept, not only the detected text boxes, so sound effects and "\n'
+    '            "background text the detector missed are translated too."\n'
+    '        )\n'
+    '        instructions.setWordWrap(True)\n'
+    '        layout.addWidget(instructions)\n'
+    '\n'
+    '        system_label = QLabel("System Prompt:")\n'
+    '        system_prompt_editor = QTextEdit()\n'
+    '        user_label = QLabel("User Prompt (optional):")\n'
+    '        user_prompt_editor = QTextEdit()\n'
+    '        user_prompt_editor.setPlaceholderText("Optional extra instruction for this image edit request")\n'
+    '\n'
+    '        def persist():\n'
+    '            try:\n'
+    '                return self.main_gui.save_config(show_message=False)\n'
+    '            except Exception:\n'
+    '                return False\n'
+    '\n'
+    '        def write_runtime(texts):\n'
+    "            # The selected profile's prompts are what the runs read (tab values, main GUI vars, config).\n"
+    '            self._sync_custom_image_edit_prompt(\n'
+    "                system_prompt=texts.get('system', ''), user_prompt=texts.get('user', ''), source='save')\n"
+    '\n'
+    '        profiles = ImageEditPromptProfiles(\n'
+    '            self.main_gui, persist=persist, log=lambda message: self._log(message, "info"), on_runtime=write_runtime)\n'
+    '        dialog._image_edit_prompt_profiles = profiles\n'
+    '\n'
+    '        def editor_texts():\n'
+    "            return {'system': system_prompt_editor.toPlainText(), 'user': user_prompt_editor.toPlainText()}\n"
+    '\n'
+    '        def show_selected():\n'
+    '            texts = profiles.texts\n'
+    "            system_prompt_editor.setPlainText(texts.get('system') or self._default_custom_image_edit_system_prompt())\n"
+    "            user_prompt_editor.setPlainText(texts.get('user', ''))\n"
+    '            refresh_prompt_profile_row(\n'
+    '                combo, buttons, profiles,\n'
+    '                "Restore the built-in \'{name}\' image edit prompts", "Delete the selected image edit prompt profile")\n'
+    '\n'
+    '        def show_box(box):\n'
+    '            if box:\n'
+    '                QMessageBox.warning(dialog, box[0], box[1])\n'
+    '            return box\n'
+    '\n'
+    '        def select_profile(name):\n'
+    "            name = str(name or '').strip()\n"
+    '            if not name or name == profiles.selected_name() or profiles.profile_texts(name) is None:\n'
+    '                return\n'
+    '            # Unsaved edits stay with the profile they were made in.\n'
+    '            profiles.stage(profiles.selected_name(), editor_texts())\n'
+    '            if profiles.select(name) is None:\n'
+    '                return\n'
+    '            show_selected()\n'
+    '            persist()\n'
+    '\n'
+    '        def new_profile():\n'
+    '            profiles.stage(profiles.selected_name(), editor_texts())\n'
+    '            box = profiles.new()\n'
+    '            show_selected()\n'
+    '            show_box(box)\n'
+    '\n'
+    '        def save_profile():\n'
+    '            box = profiles.save(combo.currentText(), editor_texts())\n'
+    '            if show_box(box):\n'
+    '                return False\n'
+    '            show_selected()\n'
+    '            self._save_rendering_settings()\n'
+    '            self._log("Updated custom image edit prompts", "success")\n'
+    '            return True\n'
+    '\n'
+    '        def delete_or_reset_profile():\n'
+    '            name = profiles.selected_name()\n'
+    '            if profiles.is_builtin(name):\n'
+    '                if not confirm_prompt_profile_action(\n'
+    '                        dialog, "Reset Profile",\n'
+    '                        f"Reset the built-in \'{name}\' image edit prompt profile to its shipped prompts?"):\n'
+    '                    return\n'
+    '                box = profiles.reset(name)\n'
+    '            else:\n'
+    '                box = profiles.delete(name, confirm=lambda n: confirm_prompt_profile_action(\n'
+    '                    dialog, "Delete Profile", f"Delete image edit prompt profile \'{n}\'?"))\n'
+    '            show_selected()\n'
+    '            show_box(box)\n'
+    '\n'
+    '        row, combo, buttons = build_prompt_profile_row(\n'
+    '            "Profile:", "image_edit",\n'
+    '            "Select an image edit prompt profile, or edit its name and save to rename it.\\n"\n'
+    '            "Each profile stores the system prompt and the optional user prompt.",\n'
+    "            {'new': new_profile, 'save': save_profile, 'delete': delete_or_reset_profile},\n"
+    '            select_profile)\n'
+    '        dialog._image_edit_profile_combo = combo\n'
+    '        dialog._image_edit_profile_buttons = buttons\n'
+    '        layout.addWidget(row)\n'
+    '        layout.addWidget(system_label)\n'
+    '        layout.addWidget(system_prompt_editor)\n'
+    '        layout.addWidget(user_label)\n'
+    '        layout.addWidget(user_prompt_editor)\n'
+    '        dialog._image_edit_prompt_editors = (system_prompt_editor, user_prompt_editor)\n'
+    '        show_selected()\n'
+    '\n'
+    '        button_layout = QHBoxLayout()\n'
+    '\n'
+    '        def save_prompt():\n'
+    '            if save_profile():\n'
+    '                dialog.accept()\n'
+    '\n'
+    '        def reset_prompt():\n'
+    '            name = profiles.selected_name()\n'
+    "            shipped = profiles.builtin_texts(name) or profiles.builtin_texts('Default')\n"
+    '            reply = QMessageBox.question(\n'
+    '                dialog,\n'
+    '                "Reset Custom Image Edit Prompts",\n'
+    '                f"Reset the editors to the shipped prompts of \'{name}\'"\n'
+    '                + ("" if profiles.is_builtin(name) else " (the default prompt)") + "? Save to keep them.",\n'
+    '                QMessageBox.Yes | QMessageBox.No,\n'
+    '                QMessageBox.No\n'
+    '            )\n'
+    '            if reply != QMessageBox.Yes:\n'
+    '                return\n'
+    "            system_prompt_editor.setPlainText(shipped.get('system', '') or self._default_custom_image_edit_system_prompt())\n"
+    "            user_prompt_editor.setPlainText(shipped.get('user', ''))\n"
+    '\n'
+    '        save_btn = QPushButton("Save")\n'
+    '        save_btn.clicked.connect(save_prompt)\n'
+    '        button_layout.addWidget(save_btn)\n'
+    '\n'
+    '        reset_btn = QPushButton("Reset to Default")\n'
+    '        reset_btn.clicked.connect(reset_prompt)\n'
+    '        button_layout.addWidget(reset_btn)\n'
+    '\n'
+    '        cancel_btn = QPushButton("Cancel")\n'
+    '        cancel_btn.clicked.connect(dialog.reject)\n'
+    '        button_layout.addWidget(cancel_btn)\n'
+    '        button_layout.addStretch()\n'
+    '\n'
+    '        layout.addLayout(button_layout)\n'
+    '        dialog.exec()\n'
+    '\n'
+)
+_IMAGE_EDIT_PROMPT_PROFILES = [(_IMAGE_EDIT_PROMPT_DIALOG_OLD, _IMAGE_EDIT_PROMPT_DIALOG_NEW)]
+_USER_DRAWN_BOXES_PREVIEW = [
+    (
+        '                rect_item.is_recognized = False\n'
+        '            except Exception:\n'
+        '                pass\n'
+        '            # Attach context menu via integration if available\n',
+        '                rect_item.is_recognized = False\n'
+        '                # Drawn by the user: cleaned / image-edited even when OCR reads no text in it\n'
+        '                rect_item.user_drawn = True\n'
+        '            except Exception:\n'
+        '                pass\n'
+        '            # Attach context menu via integration if available\n',
+    ),
+    ("                    for key in ('bubble_type', 'region_type', 'bubble_bounds'):\n",
+     "                    for key in ('bubble_type', 'region_type', 'bubble_bounds', 'user_drawn'):\n"),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5323,6 +5581,19 @@ APPROVED = (
                 '            }\n',
                 "            ner_labels = name_check.NER_TOGGLE_LABELS  # mobile's QA Scanner Settings tile shows the same text\n",
             )],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-07",
+        "what": "Manga Custom Image Edit Prompt dialog: a prompt profile row like the review / glossary prompt "
+                "profiles (review_dialog's shared row over manga_env.ImageEditPromptProfiles): Default (the prompt "
+                "used before profiles; a saved custom prompt stays in it), the built-in Translate SFX and Translate "
+                "SFX + background text, and the user's own. Boxes the user draws in the editor are marked "
+                "user_drawn (saved with the box) and Translate cleans / image-edits them without OCR text",
+        "source": {
+            "src/manga_integration.py": _IMAGE_EDIT_PROMPT_PROFILES,
+            "src/manga_image_preview.py": _USER_DRAWN_BOXES_PREVIEW,
         },
         "values": {},
     },

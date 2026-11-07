@@ -2739,11 +2739,51 @@ class LocalInpainter:
 
         return ranges
 
+    def _custom_image_edit_prompt_templates(self):
+        """``(system, user)`` prompt templates the custom image edit request sends ({target_lang} unfilled)."""
+        system = (
+            getattr(self, '_custom_image_edit_request_system_prompt', None)
+            or self.config.get('custom_image_edit_system_prompt')
+            or self.config.get('custom_image_edit_prompt')
+            or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
+            or (
+                "Remove the written text from this image. Redraw only the areas it covered to match their immediate surroundings. "
+                "Keep speech-bubble outlines, text-box borders, panel frames, other artwork, and image dimensions unchanged. "
+                "Do not add text. Return only the edited image."
+            )
+        )
+        return system, self.config.get('custom_image_edit_user_prompt', '')
+
+    def _custom_image_edit_translates_text(self):
+        """True when the prompt asks the model to draw text in the target language: it uses ``{target_lang}``
+        like the translation prompt profiles (manga_env's Translate SFX profiles). Such an edit owns the whole
+        crop: crops without a detected text box are sent too, the model gets the whole crop as its edit area and
+        its output is kept everywhere (sound effects and background text are mostly outside the detected
+        boxes), and the leftover-text check is off (redrawn translated lettering is new ink where the source
+        ink was, which the check would read as text the edit left)."""
+        system, user = self._custom_image_edit_prompt_templates()
+        return '{target_lang}' in str(system or '') or '{target_lang}' in str(user or '')
+
+    @staticmethod
+    def _custom_image_edit_target_language(config):
+        """The language ``{target_lang}`` becomes: the output language the text translation uses (the
+        translation prompt profiles fill it from OUTPUT_LANGUAGE), then the config's."""
+        return (
+            os.environ.get('OUTPUT_LANGUAGE')
+            or config.get('output_language')
+            or os.environ.get('GLOSSARY_TARGET_LANGUAGE')
+            or os.environ.get('TARGET_LANGUAGE')
+            or os.environ.get('TARGET_LANG')
+            or config.get('glossary_target_language')
+            or 'English'
+        )
+
     def _custom_image_edit_inpaint_chunked(self, image, mask, iterations=None):
         """Send one image-edit request per masked crop and assemble the page."""
         self.last_image_edit_unremoved_mask = None
         if self._custom_image_edit_force_stopped():
             return None
+        translate_text = self._custom_image_edit_translates_text()
 
         def log_crop_progress(message, level="info"):
             # The image-edit request trace is printed to the console; keep crop
@@ -2767,13 +2807,13 @@ class LocalInpainter:
         if len(mask.shape) == 3:
             mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
         if image.shape[0] <= chunk_height:
-            request_count = int(np.any(mask))
+            request_count = int(translate_text or np.any(mask))
             request_label = f"{request_count} crop request{'s' if request_count != 1 else ''}"
             log_crop_progress(f"Custom image edit: {request_label} for {image.shape[0]}px page")
             ranges = [(0, image.shape[0])]
         else:
             ranges = self._custom_image_edit_chunk_ranges(mask, chunk_height, overlap)
-            request_count = sum(bool(np.any(mask[start:end])) for start, end in ranges)
+            request_count = sum(bool(translate_text or np.any(mask[start:end])) for start, end in ranges)
             request_label = f"{request_count} crop request{'s' if request_count != 1 else ''}"
             log_crop_progress(
                 f"Custom image edit: {request_label} for {image.shape[0]}px page "
@@ -2786,6 +2826,11 @@ class LocalInpainter:
                 )
         if not request_count:
             return image.copy()
+        if translate_text:
+            log_crop_progress(
+                "Custom image edit prompt translates text ({target_lang}): every crop is sent and the model's "
+                "whole output is kept (sound effects / background text outside the detected boxes)"
+            )
 
         enabled = self._bool_config_value(self.config.get('manga_batch_image_requests_enabled', True), True)
         raw_workers = (
@@ -2807,7 +2852,7 @@ class LocalInpainter:
         self._sync_inpainter_key_pool_from_config()
         jobs = []
         for range_index, (start, end) in enumerate(ranges):
-            if np.any(mask[start:end]):
+            if translate_text or np.any(mask[start:end]):
                 jobs.append((range_index, len(jobs) + 1, start, end))
 
         def edit_crop(job):
@@ -2865,7 +2910,8 @@ class LocalInpainter:
             previous_end = end
         if self._custom_image_edit_force_stopped():
             return None
-        result = self._custom_image_edit_check_text_removed(image, result, mask, log_crop_progress)
+        if not translate_text:
+            result = self._custom_image_edit_check_text_removed(image, result, mask, log_crop_progress)
         return None if self._custom_image_edit_force_stopped() else result
 
     def _register_custom_image_edit_output(self, crop_bgr, out_bgr, crop_mask):
@@ -2951,7 +2997,8 @@ class LocalInpainter:
             else:
                 mask_gray = mask.copy()
             _, mask_gray = cv2.threshold(mask_gray, 0, 255, cv2.THRESH_BINARY)
-            if np.count_nonzero(mask_gray) == 0:
+            translate_text = self._custom_image_edit_translates_text()
+            if np.count_nonzero(mask_gray) == 0 and not translate_text:
                 return image.copy()
             if self._custom_image_edit_force_stopped():
                 return None
@@ -3056,37 +3103,15 @@ class LocalInpainter:
             crop_bgr = image[top:bottom, left:right].copy()
             crop_mask = mask_gray[top:bottom, left:right].copy()
             proc_bgr = crop_bgr
-            proc_mask = crop_mask
+            # A translate prompt edits the whole crop (sound effects / background text lie outside the boxes).
+            proc_mask = np.full_like(crop_mask, 255) if translate_text else crop_mask
 
-            system_prompt_template = (
-                getattr(self, '_custom_image_edit_request_system_prompt', None)
-                or self.config.get('custom_image_edit_system_prompt')
-                or self.config.get('custom_image_edit_prompt')
-                or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
-                or (
-                    "Remove the written text from this image. Redraw only the areas it covered to match their immediate surroundings. "
-                    "Keep speech-bubble outlines, text-box borders, panel frames, other artwork, and image dimensions unchanged. "
-                    "Do not add text. Return only the edited image."
-                )
-            )
-            user_prompt_template = self.config.get('custom_image_edit_user_prompt', '')
-            target_lang = (
-                os.environ.get('GLOSSARY_TARGET_LANGUAGE')
-                or os.environ.get('OUTPUT_LANGUAGE')
-                or os.environ.get('TARGET_LANGUAGE')
-                or os.environ.get('TARGET_LANG')
-                or self.config.get('output_language')
-                or self.config.get('glossary_target_language')
-                or 'English'
-            )
-            try:
-                system_prompt = system_prompt_template.format(target_lang=target_lang)
-            except Exception:
-                system_prompt = str(system_prompt_template).replace('{target_lang}', str(target_lang))
-            try:
-                user_prompt = str(user_prompt_template or '').format(target_lang=target_lang).strip()
-            except Exception:
-                user_prompt = str(user_prompt_template or '').replace('{target_lang}', str(target_lang)).strip()
+            system_prompt_template, user_prompt_template = self._custom_image_edit_prompt_templates()
+            # {target_lang} is filled the way the translation prompt profiles fill it (TransateKRtoEN
+            # build_system_prompt: the output language, plain text replacement).
+            target_lang = str(self._custom_image_edit_target_language(self.config))
+            system_prompt = str(system_prompt_template).replace('{target_lang}', target_lang)
+            user_prompt = str(user_prompt_template or '').replace('{target_lang}', target_lang).strip()
             prompt = system_prompt
             if user_prompt:
                 prompt = f"{system_prompt}\n\nUser prompt:\n{user_prompt}"
@@ -3607,6 +3632,10 @@ class LocalInpainter:
                     except (ValueError, TypeError):
                         _raw_area_pct = 10
             edit_area_pct = max(0, min(100, _raw_area_pct))
+            if translate_text and edit_area_pct < 100:
+                # The translated sound effects / background text lie outside the text mask: keep all of it.
+                self._log("🖼️ Custom image edit translate prompt: keeping the whole returned crop", "info")
+                edit_area_pct = 100
 
             if (
                 edit_area_pct >= 100

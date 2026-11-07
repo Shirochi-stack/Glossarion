@@ -168,14 +168,20 @@ class ReviewProfileSource:
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
 
-    def open(self) -> Any:
-        import copy
-        import types
-
+    def profiles_class(self) -> Any:
+        """The shared ``prompt_profiles.PromptSetProfiles`` subclass this source opens (other prompt profile
+        rows subclass the source and name theirs: Manga › Settings' image edit prompt profiles)."""
         rg = _review_generator()
         cls = getattr(rg, "ReviewPromptProfiles", None) if rg is not None else None
         if cls is None:
             raise RuntimeError("review_generator.ReviewPromptProfiles is not in this build")
+        return cls
+
+    def open(self) -> Any:
+        import copy
+        import types
+
+        cls = self.profiles_class()
         owner = types.SimpleNamespace(config=copy.deepcopy(self.ctx.config_snapshot()))
         holder: dict = {}
         profiles = cls(owner, persist=lambda: self.persist(holder["profiles"]))
@@ -200,7 +206,7 @@ class ReviewProfileSource:
                 for key, value in updates.items():
                     self.ctx.set_cfg(key, value)
         except Exception:
-            log.exception("saving the review prompt profiles failed")
+            log.exception("saving the %s failed", getattr(self, "noun", "review prompt profiles"))
             return False
         return True
 
