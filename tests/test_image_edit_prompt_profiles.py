@@ -786,5 +786,6 @@ def test_redrawn_text_mask_keeps_new_lettering_on_a_flat_background():
     redrawn = sky.copy()
     cv2.putText(redrawn, "WHOOSH", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (40, 220, 250), 6)
     keep, stats = redrawn_text_mask(sky, redrawn)
-    assert stats and (keep[195:225, 30:250] > 0).mean() > 0.9
+    letters = np.any(redrawn != sky, axis=2)  # (glyph widths differ between OpenCV builds)
+    assert stats and (keep[letters] > 0).mean() > 0.99
     assert not keep[:120].any() and not keep[320:].any()
