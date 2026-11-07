@@ -41,6 +41,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui.components.instance_pickers import InstancePickers
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.sheet import fitted_column, sheet_frame
 from glossarion_mobile.ui.components.switch_row import switch_row
@@ -155,13 +156,15 @@ class TranslateSheet:
         # Multi-instance translation (design §6): with the Translation keys on 2+ instances, each book gets an
         # instance (prefilled from the saved instance_file_map, else round-robin) and Start queues one job per
         # instance with only its books; otherwise the one job of today (``instances`` stays empty).
-        self.instances: list = []
-        self.assignment: dict = {}  # {source: instance}
-        self.instance_pickers: dict = {}  # source -> Dropdown
         finder = getattr(service, "instance_assignment", None)
         multi = finder(self.ready_sources) if callable(finder) and len(self.ready_sources) > 1 else None
-        if multi is not None:
-            self.instances, self.assignment = list(multi[0]), dict(multi[1])
+        self.instance_view = InstancePickers(multi[0] if multi else (), multi[1] if multi else {}, self.ready_sources,
+                                             picker_key="translate-instance", text_key="translate-instances",
+                                             push=lambda *controls: self.ctx.push(*controls))
+        self.instances: list = self.instance_view.instances
+        self.assignment: dict = self.instance_view.assignment  # {source: instance}
+        self.instance_pickers: dict = self.instance_view.pickers  # source -> Dropdown
+        self.instance_text = self.instance_view.text
         rows: list[ft.Control] = []
         for index, (book, source) in enumerate(zip(self.books, self.sources)):
             name = str(book.get("name") or os.path.basename(source or ""))
@@ -236,9 +239,6 @@ class TranslateSheet:
         self.start_reason = self.base_reason or (self.model_block[0] if self.model_block is not None else None)
         self.start_button = ft.FilledButton(content="Start", icon=ft.Icons.PLAY_ARROW, on_click=self._on_start,
                                             disabled=self.start_reason is not None, key="start")
-        self.instance_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
-                                     visible=bool(self.assignment), key="translate-instances")
-        self._refresh_instances(push=False)
         chat_handler = self._chat_handler()
         self.chat_reason = None
         if chat_handler is None:
@@ -315,47 +315,16 @@ class TranslateSheet:
     # ---- multi-instance assignment -----------------------------------------------------------------------
 
     def _instance_picker(self, index: int, source: str) -> ft.Dropdown:
-        """A book row's instance dropdown (the desktop assignment dialog's per-file combo)."""
-        picker = ft.Dropdown(value=str(self.assignment[source]), dense=True, width=150,
-                             options=[ft.DropdownOption(key=str(n), text=f"Instance {n}") for n in self.instances],
-                             on_select=lambda e, s=source: self.set_instance(s, e.control.value),
-                             key=f"translate-instance-{index}")
-        self.instance_pickers[source] = picker
-        return picker
+        """A book row's instance dropdown (``InstancePickers.picker``)."""
+        return self.instance_view.picker(index, source)
 
     def instance_groups(self) -> dict:
         """{instance: [sources]} of the current assignment (``instance_plan.plan``); {} for a single-instance run."""
-        if not self.assignment:
-            return {}
-        import instance_plan
-
-        return instance_plan.plan(self.ready_sources, self.assignment)
+        return self.instance_view.groups()
 
     def set_instance(self, source: str, value: Any) -> int:
         """A picker changed: ``source`` runs in instance ``value`` (an instance with keys; others are refused)."""
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            number = 0
-        if number not in self.instances:
-            number = self.assignment.get(source, self.instances[0] if self.instances else 1)
-        self.assignment[source] = number
-        picker = self.instance_pickers.get(source)
-        if picker is not None:
-            picker.value = str(number)
-        self._refresh_instances()
-        return number
-
-    def _refresh_instances(self, *, push: bool = True) -> None:
-        """The jobs line over the books: "2 parallel jobs · Instance 1: 1 book · Instance 2: 1 book" (one line on a
-        phone, so Start stays in view; the key editor explains instances)."""
-        plan = self.instance_groups()
-        if plan:
-            parts = [f"Instance {n}: {len(files)} book{'s' if len(files) != 1 else ''}" for n, files in plan.items()]
-            lead = f"{len(plan)} parallel jobs" if len(plan) > 1 else f"1 job on Instance {next(iter(plan))}'s keys"
-            self.instance_text.value = " · ".join([lead, *parts])
-        if push:
-            self.ctx.push(self.instance_text, *self.instance_pickers.values())
+        return self.instance_view.set(source, value)
 
     def _review_changed(self, e: Any = None) -> None:
         if self.review_hint is not None:

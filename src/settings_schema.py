@@ -956,7 +956,8 @@ LABEL_OVERRIDES = {
     "auto_glossary_mode": "Glossary mode",
     "glossary_name_check_mode": "Glossary name check mode",
     # the QA scanner's toggle text says whether NER is installed (picked at runtime, 2026-10-27)
-    "check_glossary_names": "Check glossary names with NER (Experimental)",
+    # (nested under qa_scanner_settings: the full key, or the label fell back to "Check glossary names")
+    "qa_scanner_settings.check_glossary_names": "Check glossary names with NER (Experimental)",
     # the name check toggles Other Settings and the QA scanner build with one shared row (2026-10-28)
     "glossary_name_check_use_ner": "Use Named Entity Recognition model (NER)",
     "glossary_name_check_match_numbers": "Names keep their numbers",

@@ -148,6 +148,44 @@ def test_a_hidden_tile_leaves_no_gap_in_its_column(tap_away_installed):
     assert region.visible is True
 
 
+def test_a_dropdown_in_a_card_rebuilt_around_it_still_opens_and_closes(tap_away_installed):
+    """Owner 2026-11-07 (phone, Run options' Output token limit): "Error running app: Frozen controls cannot be
+    updated" from ``tap_away``'s ``on_change``. The region is built once per tile and re-added by every repaint;
+    a card rebuilt around it under the same key, with its rows shifted, makes Flet's keyed diff mark the region
+    frozen, and the next open / close of the tile set ``enabled`` on a frozen control."""
+    from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
+
+    TF = _load("test_ui_foundations.py", "_glossarion_tf_helpers_tap_away_frozen")
+
+    async def scenario():
+        _conn, session = TF._fake_session("android")
+        page = session.page
+        tile = ft.ExpansionTile(title="Run options", key="plan-run-options",
+                                controls=[ft.TextField(label="Output token limit", key="max-output-tokens")])
+
+        def card(rows):
+            return ft.Container(key="job-1", content=ft.Column([ft.Text(r) for r in rows] + [closes_on_tap_away(tile)]))
+
+        slot = ft.Column([card(["facts"])])
+        page.add(slot)
+        region = closes_on_tap_away(tile)
+        tile.on_change(_event("true"))
+        assert region.enabled is True
+        slot.controls = [card(["library", "facts"])]  # the card is rebuilt with one more row above the options
+        slot.update()
+        assert hasattr(region, "_frozen")  # what Flet 1.0.3 does to the re-added region
+        tile.on_change(_event("false"))  # raised RuntimeError("Frozen controls cannot be updated.")
+        assert region.enabled is False
+        tile.on_change(_event("true"))
+        slot.controls = [card(["library", "facts", "conversion"])]
+        slot.update()
+        tile.expanded = True
+        region.on_tap_away(None)
+        assert region.enabled is False and tile.expanded is False
+
+    asyncio.run(scenario())
+
+
 def test_every_dropdown_of_the_response_card_closes_on_a_tap_away(tap_away_installed):
     from glossarion_mobile.ui.chat.cards import JobCard
 

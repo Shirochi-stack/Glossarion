@@ -3753,12 +3753,7 @@ class QAScannerMixin:
             # the label says whether NER does the check (owner 2026-10-27: ✓ when its model is installed); it
             # follows "Use Named Entity Recognition model (NER)" below as that changes (owner 2026-10-28)
             import glossary_name_check as name_check
-            ner_labels = {
-                "installed": "Check glossary names with NER (Experimental)",
-                "missing": "Check glossary names (Experimental) — NER not installed (downloads on first use)",
-                "unsupported": "Check glossary names (Experimental) — NER not supported in this build",
-                "off": "Check glossary names (Experimental) — NER off",
-            }
+            ner_labels = name_check.NER_TOGGLE_LABELS  # mobile's QA Scanner Settings tile shows the same text
             check_glossary_names_checkbox = self._create_styled_checkbox(ner_labels["installed"])
             check_glossary_names_checkbox.setChecked(qa_settings.get('check_glossary_names', False))
             check_glossary_names_checkbox.setToolTip(

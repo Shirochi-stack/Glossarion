@@ -422,6 +422,28 @@ class JobsAdapter:
             result = await result
         return result
 
+    async def submit_instances(self, kind: str, groups: list, params: Mapping[str, Any],
+                               origin: Optional[Mapping[str, Any]] = None) -> list:
+        """A multi-instance Start (``groups``: ``[(instance, title, inputs), ...]``): one job per instance, queued on
+        that instance (the jobs feature's ``submit_instances``: one preflight and background preparation for the
+        run; else ``submit(spec, instance=N)`` each). Returns the job ids (None for a job that was not queued)."""
+        if self.jobs is None:
+            raise RuntimeError("The job service is not running")
+        pairs = [(number, self.build_spec(kind, title, inputs, params, origin)) for number, title, inputs in groups]
+        many = getattr(self.jobs, "submit_instances", None)
+        if callable(many):
+            result = many(pairs)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return list(result or [])
+        out = []
+        for number, spec in pairs:
+            result = self.jobs.submit(spec, instance=number)
+            if asyncio.iscoroutine(result):
+                result = await result
+            out.append(result)
+        return out
+
     def request_stop(self, force: bool = False, job_id: Any = None) -> Any:
         """Stop the running job, or the job ``job_id`` (a book's job a Result card shows)."""
         if self.jobs is None:

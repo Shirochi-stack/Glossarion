@@ -81,6 +81,7 @@ __all__ = [
     "DelayRangeTile",
     "DropdownTile",
     "EffectiveConfig",
+    "GlossaryNamesTile",
     "IMPLIED_WRITES",
     "JsonTile",
     "ListSettingTile",
@@ -1102,6 +1103,49 @@ class StreamingTile(SwitchTile):
         return "\n\n".join(line.strip() for line in lines if line.strip())
 
 
+#: QA Scanner Settings › "Check glossary names" (nested under qa_scanner_settings) and the NER toggle it follows
+GLOSSARY_NAMES_KEY = "qa_scanner_settings.check_glossary_names"
+_USE_NER_KEY = "glossary_name_check_use_ner"
+
+
+class GlossaryNamesTile(SwitchTile):
+    """"Check glossary names": the desktop QA Scanner settings' text for whether NER does the check
+    (``glossary_name_check.ner_toggle_label``: with NER / not installed / not supported / off, following
+    "Use Named Entity Recognition model (NER)"), and switching it on while the NER model is not on the
+    device asks to download it (``qa_glossary_names.offer_ner_download``, the manga model question)."""
+
+    def use_ner(self) -> bool:
+        value = self.store.effective((_USE_NER_KEY,))
+        return True if value is None else bool(value)
+
+    def refresh(self, push: bool = True) -> None:
+        try:
+            import glossary_name_check as name_check
+
+            self.label = name_check.ner_toggle_label(self.use_ner())
+        except Exception:
+            log.debug("NER status for the glossary name check failed", exc_info=True)
+        self.title_text.value = self.label
+        super().refresh(push=push)
+
+    def apply(self, raw: Any) -> bool:
+        turned_on = bool(raw) and not bool(self.value())
+        applied = super().apply(raw)
+        if applied and turned_on and self.use_ner():
+            from glossarion_mobile.ui.tools.qa_glossary_names import ner_needs_download, offer_ner_download
+
+            if ner_needs_download():
+                self.ctx.spawn(self._offer_download(offer_ner_download))
+        return applied
+
+    async def _offer_download(self, offer: Any) -> None:
+        try:
+            await offer(self.ctx)
+        except Exception:
+            log.exception("the NER model download question failed")
+        self.refresh()
+
+
 def _foreign_value_reason(tile: "SettingTile") -> Optional[str]:
     """A text / prompt tile over a stored value that is not text (a dict the profile bar wrote, a
     number a spin box stored): writing the field back would replace it with a string."""
@@ -1403,6 +1447,8 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> Setti
         cls = ContextModeTile
     elif key == STREAMING_KEY and getattr(spec, "virtual", "") == "streaming":
         cls = StreamingTile
+    elif key == GLOSSARY_NAMES_KEY:
+        cls = GlossaryNamesTile
     elif key == PROFILE_KEY and len(config_path(spec)) == 1:
         cls = ProfileTile
     elif key in DELAY_RANGE_KEYS:  # '5' or a range '5-7'

@@ -1267,7 +1267,7 @@ class ModelsKeysFeature:
             copy_text=getattr(app, "_copy_text", None),
             read_clipboard=getattr(getattr(app, "clipboard", None), "get", None),
             run_io=self.run_io, spawn=self.spawn, sign_in=self.sign_in, signed_in_keys=self.signed_in_keys,
-            test_key=self.test_key, tablet=self._tablet, next_slot=self.next_slot,
+            test_key=self.test_key, add_key=self.add_key, tablet=self._tablet, next_slot=self.next_slot,
             gemini_status=self.gemini_status, gcp_project_picker=self.gcp_project_picker,
             open_local_models=self.open_local_models, local_engine=self.local_engine,
         ))
@@ -1557,15 +1557,16 @@ class ModelsKeysFeature:
             log.debug("next_slot failed for %s", route, exc_info=True)
             return 1
 
-    def sign_in(self, route: str, account: int = 0) -> Any:
+    def sign_in(self, route: str, account: int = 0, on_done: Optional[Callable[[dict], Any]] = None) -> Any:
         """A sign-in chip / row: the Accounts LoginSheet for that provider and slot (OAuthBridge);
-        the U3 ChatGPT sheet or the Accounts screen when the provider flow is not available."""
+        the U3 ChatGPT sheet or the Accounts screen when the provider flow is not available.
+        ``on_done(status)`` runs after a finished sign-in (a ModelSheet row then selects its model)."""
         oauth = self._oauth()
         if oauth is not None:
             try:
                 from glossarion_mobile.ui.screens.accounts import LoginSheet
 
-                sheet = LoginSheet(oauth, provider=route, account_id=int(account or 0),
+                sheet = LoginSheet(oauth, provider=route, account_id=int(account or 0), on_done=on_done,
                                    copy_text=getattr(self.app, "_copy_text", None))
                 sheet.show(self.page)
                 return sheet
@@ -1579,6 +1580,19 @@ class ModelsKeysFeature:
         if navigate is not None:
             navigate("settings.accounts")
         return None
+
+    def add_key(self, model: str, on_saved: Optional[Callable[[dict], Any]] = None) -> Any:
+        """A ModelSheet row's "Add key": the Multi-Key Manager's Add key editor (Translation Keys) over
+        the current screen, pre-filled with that row's model; ``on_saved(entry)`` after a save."""
+        from glossarion_mobile.ui.screens.keys import open_key_editor
+        from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+        if self.ctx is None:
+            return None
+        return open_key_editor(self.keys, "main", ctx=self.ctx, io=self.run_io,
+                               prefill=self.keys.new_entry("main", model=str(model)), sheet_env=sheet_env(),
+                               read_clipboard=getattr(getattr(self.app, "clipboard", None), "get", None),
+                               copy_text=getattr(self.app, "_copy_text", None), on_saved=on_saved)
 
     async def test_key(self, api_key: str, model: str) -> dict:
         entry = {"api_key": api_key, "model": model}

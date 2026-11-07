@@ -5309,6 +5309,23 @@ APPROVED = (
         },
         "values": {},
     },
+    {
+        "date": "2026-11-07",
+        "what": "QA Scanner settings: the 'Check glossary names' label texts moved into glossary_name_check."
+                "NER_TOGGLE_LABELS (same text), shared with Glossarion Mobile's QA Scanner Settings tile",
+        "source": {
+            "src/QA_Scanner_GUI.py": [(
+                '            ner_labels = {\n'
+                '                "installed": "Check glossary names with NER (Experimental)",\n'
+                '                "missing": "Check glossary names (Experimental) — NER not installed (downloads on first use)",\n'
+                '                "unsupported": "Check glossary names (Experimental) — NER not supported in this build",\n'
+                '                "off": "Check glossary names (Experimental) — NER off",\n'
+                '            }\n',
+                "            ner_labels = name_check.NER_TOGGLE_LABELS  # mobile's QA Scanner Settings tile shows the same text\n",
+            )],
+        },
+        "values": {},
+    },
 )
 
 
