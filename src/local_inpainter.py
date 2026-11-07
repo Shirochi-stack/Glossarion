@@ -2932,6 +2932,36 @@ class LocalInpainter:
             )
         return aligned
 
+    def _without_unchecked_regions(self, mask):
+        """``mask`` without the mask components that touch ``_image_edit_unchecked_mask``.
+
+        The editor sets that mask to the boxes the user drew that OCR read no text in (a sound effect or
+        sign the detector missed): there is no recognized text to look for there, and such a box usually
+        holds drawn art (a poster's picture, a character) that the leftover-text check would count as ink
+        the edit left, putting the source art back over a good edit. Whole components are dropped, so a
+        detected box merged with the user's box, and the mask margin around it, are not judged either.
+        """
+        skip = getattr(self, '_image_edit_unchecked_mask', None)
+        if skip is None or mask is None:
+            return mask
+        try:
+            gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY) if mask.ndim == 3 else mask
+            skip = cv2.cvtColor(skip, cv2.COLOR_BGR2GRAY) if skip.ndim == 3 else skip
+            if skip.shape[:2] != gray.shape[:2] or not np.any(skip):
+                return mask
+            binary = (gray > 0).astype(np.uint8)
+            _count, labels = cv2.connectedComponents(binary, connectivity=8)
+            touched = np.unique(labels[(skip > 0) & (binary > 0)])
+            touched = touched[touched > 0]
+            if not touched.size:
+                return mask
+            kept = gray.copy()
+            kept[np.isin(labels, touched)] = 0
+            return kept
+        except Exception as exc:
+            logger.warning(f"Custom image edit unchecked regions ignored: {exc}")
+            return mask
+
     def _custom_image_edit_check_text_removed(self, image, result, mask, log=None):
         """Undo the edit where the text inside the mask is still there.
 
@@ -2944,6 +2974,7 @@ class LocalInpainter:
         """
         log = log or self._log
         self.last_image_edit_unremoved_mask = None
+        mask = self._without_unchecked_regions(mask)
         try:
             from image_edit_check import unremoved_text_mask, edit_footprint
             failed, stats = unremoved_text_mask(image, result, mask)

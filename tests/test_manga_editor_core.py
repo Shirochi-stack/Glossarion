@@ -327,6 +327,41 @@ EDITS = (
      "            if isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip():\n",
      "            if (isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip()\n"
      "                    and not _is_user_drawn_region(region)):\n"),
+    # Live test (2026-11-07, S21 wanted poster): the leftover-text check read the art inside the user's blank
+    # box as text the image edit left and put the source back; those boxes go to the inpainter as
+    # _image_edit_unchecked_mask (LocalInpainter._without_unchecked_regions).
+    ("_run_inpainting_sync",
+     "            regions_to_inpaint.append((region_index, region))\n"
+     "        \n"
+     "        print(f\"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions",
+     "            regions_to_inpaint.append((region_index, region))\n"
+     "        \n"
+     "        # Boxes the user drew that OCR read no text in: cleaned, but not judged by the image edit's\n"
+     "        # leftover-text check (LocalInpainter._without_unchecked_regions).\n"
+     "        unchecked_mask = np.zeros_like(mask)\n"
+     "        print(f\"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions"),
+    ("_run_inpainting_sync",
+     "                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)\n"
+     "\n"
+     "        if not np.any(mask):\n",
+     "                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)\n"
+     "            if _is_user_drawn_region(region) and not (\n"
+     "                    isinstance(region, dict) and str(_manga_output_text(region.get('text'))).strip()):\n"
+     "                cv2.rectangle(unchecked_mask, (x1, y1), (x2, y2), 255, -1)\n"
+     "\n"
+     "        if not np.any(mask):\n"),
+    ("_run_inpainting_sync",
+     "                cleaned_image = inpainter.inpaint(\n",
+     "                inpainter._image_edit_unchecked_mask = unchecked_mask if np.any(unchecked_mask) else None\n"
+     "                cleaned_image = inpainter.inpaint(\n"),
+    ("_run_inpainting_sync",
+     "            finally:\n"
+     "                if is_custom_image_edit:\n"
+     "                    inpainter.set_log_callback(previous_inpainter_log_callback)\n",
+     "            finally:\n"
+     "                inpainter._image_edit_unchecked_mask = None\n"
+     "                if is_custom_image_edit:\n"
+     "                    inpainter.set_log_callback(previous_inpainter_log_callback)\n"),
 )
 
 #: ImageRenderer functions that stayed on the desktop but carry a listed edit: (function, frozen
@@ -1882,6 +1917,8 @@ def test_session_per_box_actions(tmp_path, fakes):
 
     box = session.add_box(10, 200, 60, 40, shape='polygon', polygon=[[10, 200], [70, 210], [40, 240]])
     assert box.region_index == 2 and state()['viewer_rectangles'][2]['polygon']
+    # a box the session adds is the user's own (cleaned / image-edited even without OCR text)
+    assert box.user_drawn is True and state()['viewer_rectangles'][2]['user_drawn'] is True
     assert session.ocr_box(2) == ''  # nothing to read there (crop width not in the fixture map)
     revision = session.output_revision
     assert session.update_box(1, 230, 175, 140, 85) is not None

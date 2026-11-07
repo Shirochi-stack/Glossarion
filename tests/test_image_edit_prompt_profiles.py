@@ -480,6 +480,7 @@ def test_ocr_filter_keeps_user_drawn_boxes():
 
 class _RecordingInpainter:
     masks = []
+    unchecked = []
 
     def __init__(self, enable_worker_process=True, **kwargs):
         self.config = {}
@@ -495,6 +496,7 @@ class _RecordingInpainter:
 
     def inpaint(self, image, mask, **kwargs):
         _RecordingInpainter.masks.append(mask.copy())
+        _RecordingInpainter.unchecked.append(getattr(self, "_image_edit_unchecked_mask", None))
         return image
 
 
@@ -512,6 +514,7 @@ def test_inpainting_mask_covers_a_blank_user_box(monkeypatch, tmp_path):
                       "manga_lama_onnx_model_path": str(model_file)})
     monkeypatch.setattr(local_inpainter, "LocalInpainter", _RecordingInpainter)
     monkeypatch.setattr(_RecordingInpainter, "masks", [])
+    monkeypatch.setattr(_RecordingInpainter, "unchecked", [])
     regions = [{"bbox": DIALOGUE_BOX, "text": "안녕"},
                {"bbox": SFX_BOX, "text": "", "user_drawn": True},  # the user's box, OCR read nothing
                {"bbox": DETECTED_BLANK_BOX, "text": ""}]  # a detector box OCR read nothing in
@@ -524,6 +527,44 @@ def test_inpainting_mask_covers_a_blank_user_box(monkeypatch, tmp_path):
         return bool(mask[y + h // 2, x + w // 2])
 
     assert covered(DIALOGUE_BOX) and covered(SFX_BOX) and not covered(DETECTED_BLANK_BOX)
+    # only the user's blank box is left out of the image edit's leftover-text check
+    unchecked = _RecordingInpainter.unchecked[0]
+    assert unchecked is not None
+    x, y, w, h = SFX_BOX
+    assert unchecked[y + h // 2, x + w // 2] and not unchecked[DIALOGUE_BOX[1] + 5, DIALOGUE_BOX[0] + 5]
+
+
+def test_leftover_check_keeps_the_edit_in_a_blank_user_box_with_art():
+    """Live test 2026-11-07 (S21 wanted poster): the user's blank box held the poster's picture; the model
+    removed the letters, but the leftover-text check counted the picture as text left and put the source art
+    back. Components touching the user's blank box are not judged; other text still is."""
+    from local_inpainter import LocalInpainter
+
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {}
+    inpainter._log = lambda *a, **k: None
+    inpainter._image_edit_local_fallback = None
+    source = np.full((200, 200, 3), 235, dtype=np.uint8)
+    cv2.circle(source, (60, 70), 22, (30, 30, 30), 4)          # drawn art inside the user's box
+    cv2.putText(source, "AB", (36, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)  # its letters
+    cv2.putText(source, "CD", (130, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)  # detected text
+    edited = source.copy()
+    edited[100:130, 30:90] = 235                               # the model removed "AB", kept the art
+    mask = np.zeros((200, 200), np.uint8)
+    mask[30:135, 25:100] = 255                                  # the user's blank box
+    mask[35:70, 120:180] = 255                                  # a detected box the model missed
+    user_box = np.zeros_like(mask)
+    user_box[30:135, 25:100] = 255
+
+    inpainter._image_edit_unchecked_mask = None
+    reverted = inpainter._custom_image_edit_check_text_removed(source, edited.copy(), mask)
+    assert np.array_equal(reverted[100:130, 30:90], source[100:130, 30:90])  # the old behaviour
+
+    inpainter._image_edit_unchecked_mask = user_box
+    kept = inpainter._custom_image_edit_check_text_removed(source, edited.copy(), mask)
+    assert np.array_equal(kept[100:130, 30:90], edited[100:130, 30:90])
+    left = inpainter.last_image_edit_unremoved_mask
+    assert left is not None and left[50, 150] and not left[115, 60]  # "CD" is still judged and flagged
 
 
 def test_drawn_box_is_marked_user_drawn_and_reaches_the_regions():

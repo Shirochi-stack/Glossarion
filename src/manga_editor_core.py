@@ -2473,6 +2473,9 @@ def _run_inpainting_sync(
             
             regions_to_inpaint.append((region_index, region))
         
+        # Boxes the user drew that OCR read no text in: cleaned, but not judged by the image edit's
+        # leftover-text check (LocalInpainter._without_unchecked_regions).
+        unchecked_mask = np.zeros_like(mask)
         print(f"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions ({excluded_count} excluded, {free_text_skipped_count} free-text preserved)")
         for region_index, region in regions_to_inpaint:
             # Handle both dictionary format (from detect) and object format (from translator)
@@ -2517,6 +2520,9 @@ def _run_inpainting_sync(
             else:
                 # Draw filled rectangle on mask
                 cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            if _is_user_drawn_region(region) and not (
+                    isinstance(region, dict) and str(_manga_output_text(region.get('text'))).strip()):
+                cv2.rectangle(unchecked_mask, (x1, y1), (x2, y2), 255, -1)
 
         if not np.any(mask):
             print("[INPAINT_SYNC] No eligible text regions; skipping inpainting")
@@ -2766,6 +2772,7 @@ def _run_inpainting_sync(
                     getattr(inpainter, 'config', {}).get('manga_disable_inpaint_performance_mode', False)
                     if hasattr(inpainter, 'config') else False
                 )
+                inpainter._image_edit_unchecked_mask = unchecked_mask if np.any(unchecked_mask) else None
                 cleaned_image = inpainter.inpaint(
                     image,
                     mask,
@@ -2773,6 +2780,7 @@ def _run_inpainting_sync(
                     _skip_tiling=disable_performance_mode,
                 )
             finally:
+                inpainter._image_edit_unchecked_mask = None
                 if is_custom_image_edit:
                     inpainter.set_log_callback(previous_inpainter_log_callback)
                 if old_mp_enabled is not None:
@@ -10194,6 +10202,9 @@ class MangaEditorSession:
             idx = len(boxes) - 1
             box.region_index = idx
             box.is_recognized = False
+            # Drawn by the user (manga_image_preview marks its drawn rectangles the same way): cleaned /
+            # image-edited even when OCR reads no text in it.
+            box.user_drawn = True
             _add_context_menu_to_rectangle(self, box, idx)
             self.image_preview_widget._persist_rectangles_state()
             self.image_state_manager.flush()
