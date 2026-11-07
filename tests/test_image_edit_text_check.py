@@ -3,8 +3,8 @@
 * C1: the image-edit model sometimes returns a crop with the text still in it, and English was
   lettered over the Korean. After the edit, each text-mask component is checked against the
   source (share of the source ink strokes still drawn); a failed one gets the source art back
-  and is cleaned once by the configured local inpainter, or is left un-lettered when there is
-  no local inpainter.
+  and is left un-lettered. No local inpainter (LaMa) cleans it instead (owner, 2026-11-07: "lama
+  should have not been triggered at all when the custom-image-edit model was selected").
 * C2: the model returns the crop at its own size (656x1640 for 800x2000) with the content
   moved or rescaled; the resized output was pasted without registration and broke bubble
   outlines. The output is now aligned to the source (ECC outside the text mask) first.
@@ -106,30 +106,26 @@ def _edit_that_misses_bubble_two(crop, crop_mask, iterations=None, _pool_prepare
     return edited
 
 
-def test_text_left_by_the_edit_is_cleaned_once_by_the_local_inpainter():
+def test_text_left_by_the_edit_never_goes_to_a_local_inpainter():
+    """Owner report 2026-11-07: a LaMa fallback (anime_onnx) wiped a region of the image edit. Even
+    when a caller still hands the inpainter a fallback, the image edit path never calls it: the text
+    the edit left keeps its source art and is reported (not lettered)."""
     source, mask = _page()
     inpainter = _inpainter()
     inpainter._custom_image_edit_inpaint = _edit_that_misses_bubble_two
     calls = []
-
-    def local_inpaint(image, redo_mask):
-        calls.append(redo_mask.copy())
-        cleaned = image.copy()
-        cleaned[redo_mask > 0] = 255
-        return cleaned
-
-    inpainter._image_edit_local_fallback = local_inpaint
+    inpainter._image_edit_local_fallback = lambda image, redo_mask: calls.append(1) or image
     result = inpainter.inpaint(source, mask)
 
     assert _dark_text_pixels(source, 1) > 200
     assert _dark_text_pixels(result, 0) == 0
-    assert _dark_text_pixels(result, 1) == 0, "the Korean the edit left must not stay under the lettering"
-    assert len(calls) == 1, "one fallback request for the page, not a retry loop"
-    redo = calls[0] > 0
-    assert redo[_bubble_mask(source.shape, 1) > 0].all()
-    assert not redo[_bubble_mask(source.shape, 0) > 0].any()
-    assert inpainter.last_image_edit_unremoved_mask is None
+    assert not calls, "no local inpainter with the custom image edit"
+    bubble_two = _bubble_mask(source.shape, 1) > 0
+    assert np.array_equal(result[bubble_two], source[bubble_two])
+    unremoved = inpainter.last_image_edit_unremoved_mask
+    assert unremoved is not None and (unremoved[bubble_two] > 0).all()
     assert any("left the text in place" in message for _level, message in inpainter.logs)
+    assert any("no local inpainter fallback" in message for _level, message in inpainter.logs)
 
 
 def test_text_left_without_a_local_inpainter_keeps_the_art_and_is_reported():
@@ -395,53 +391,22 @@ def test_regions_whose_text_the_edit_left_are_not_lettered(mt, monkeypatch):
     fake = FakeImageEdit()
     edited = mt.inpaint_regions(page, text_mask, inpainter=fake)
 
-    assert callable(seen["fallback"]), "the image edit gets the local inpainter fallback"
-    assert getattr(fake, "_image_edit_local_fallback", None) is None
+    assert seen["fallback"] is None, "the image edit gets no local inpainter fallback"
     rendered = mt.render_translated_text(edited, [left, speech])
     assert np.array_equal(_box(rendered, left.bounding_box), _box(edited, left.bounding_box))
     assert not np.array_equal(_box(rendered, SPEECH_BOX), _box(edited, SPEECH_BOX))
 
 
-def test_fallback_uses_the_configured_local_model(mt, monkeypatch, tmp_path):
-    import local_inpainter
+def test_manga_translator_has_no_image_edit_local_fallback(mt, tmp_path):
+    """The LaMa / AOT fallback for text an image edit left is gone (owner, 2026-11-07), also with a local
+    model configured."""
     import manga_translator
 
     model = tmp_path / "lama-manga.onnx"
     model.write_bytes(b"onnx")
-    mt.main_gui.config = dict(mt.main_gui.config)
-    for method in manga_translator.MangaTranslator._IMAGE_EDIT_FALLBACK_METHODS:
-        mt.main_gui.config.pop(f"manga_{method}_model_path", None)
-    mt.main_gui.config["manga_settings"] = {"inpainting": {}}
-    assert mt._image_edit_fallback_model() == (None, None)
-    assert mt._image_edit_local_fallback(np.zeros((8, 8, 3), np.uint8), np.zeros((8, 8), np.uint8)) is None
-
-    mt.main_gui.config["manga_aot_onnx_model_path"] = str(model)
-    assert mt._image_edit_fallback_model() == ("aot_onnx", str(model))
-    loads = []
-
-    class FakeLocal:
-        def __init__(self, enable_worker_process=None):
-            self.model_loaded = False
-
-        def load_model(self, method, path, force_reload=False):
-            loads.append((method, path))
-            self.model_loaded = True
-            return True
-
-        def inpaint(self, image, mask, **_kwargs):
-            out = image.copy()
-            out[mask > 0] = 255
-            return out
-
-    monkeypatch.setattr(local_inpainter, "LocalInpainter", FakeLocal)
-    monkeypatch.setattr(manga_translator.MangaTranslator, "_image_edit_fallback_inpainters", {})
-    image = np.zeros((8, 8, 3), np.uint8)
-    mask = np.zeros((8, 8), np.uint8)
-    mask[2:4, 2:4] = 255
-    out = mt._image_edit_local_fallback(image, mask)
-    assert (out[2:4, 2:4] == 255).all() and not out[5:, 5:].any()
-    mt._image_edit_local_fallback(image, mask)
-    assert loads == [("aot_onnx", str(model))], "the fallback model is loaded once"
+    mt.main_gui.config = dict(mt.main_gui.config, manga_anime_onnx_model_path=str(model))
+    for name in ("_image_edit_local_fallback", "_image_edit_fallback_model", "_IMAGE_EDIT_FALLBACK_METHODS"):
+        assert not hasattr(manga_translator.MangaTranslator, name), name
 
 
 @pytest.mark.parametrize("source, translated, expected", [

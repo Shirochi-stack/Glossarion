@@ -615,7 +615,6 @@ def test_leftover_check_keeps_the_edit_in_a_blank_user_box_with_art():
     inpainter = object.__new__(LocalInpainter)
     inpainter.config = {}
     inpainter._log = lambda *a, **k: None
-    inpainter._image_edit_local_fallback = None
     source = np.full((200, 200, 3), 235, dtype=np.uint8)
     cv2.circle(source, (60, 70), 22, (30, 30, 30), 4)          # drawn art inside the user's box
     cv2.putText(source, "AB", (36, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)  # its letters
