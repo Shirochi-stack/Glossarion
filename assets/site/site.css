@@ -470,11 +470,12 @@ details > div p:last-child { margin-bottom: 0; }
 .mobile-nav a.nav-new { color: var(--accent); background: var(--accent-soft); }
 @media (max-width: 1060px) { .nav a.nav-new .new-badge { margin-left: 4px; padding: 0 5px; font-size: .6rem; } }
 @media (max-width: 999px) { .nav a.nav-new .new-badge { display: none; } }
-.announce { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; padding: 6px 14px 6px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--ink); font-weight: 600; font-size: .92rem; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); }
-.announce .new-badge { margin-left: 0; }
+.announce { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; margin-bottom: 14px; padding: 6px 16px 6px 6px; border-radius: 22px; background: var(--accent-soft); color: var(--ink); font-weight: 600; font-size: .92rem; line-height: 1.35; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.announce .new-badge { flex: none; margin-left: 0; }
+.announce-text { min-width: 0; }
+.announce-arrow { flex: none; color: var(--accent); transition: transform .15s; }
 .announce:hover { text-decoration: none; border-color: var(--accent); }
-.announce:hover span[aria-hidden] { transform: translateX(3px); }
-.announce span[aria-hidden] { color: var(--accent); transition: transform .15s; }
+.announce:hover .announce-arrow { transform: translateX(3px); }
 .webtoon-feature { background:
     radial-gradient(520px 340px at 85% 40%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
     radial-gradient(460px 300px at 10% 80%, color-mix(in srgb, var(--plum) 12%, transparent), transparent 70%); }
