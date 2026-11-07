@@ -1,6 +1,86 @@
 # NoCuda build: size diagnosis (v9.15.14)
 
-Diagnosis only. No spec has been changed yet. All numbers come from the v9.15.14 release exe
+## 0. Applied on branch nocuda-slim (measured)
+
+`src/translator_NoCuda.spec` now drops what no NoCuda feature loads. Both builds were made from
+the same worktree with host Python 3.12.9 and PyInstaller 6.19 (`python -m PyInstaller
+translator_NoCuda.spec`, separate `--distpath`/`--workpath` for before and after).
+
+| Build | Bytes | MB |
+|---|---:|---:|
+| Before (origin/main spec) | 861,334,309 | 861.3 |
+| After (this branch) | 581,296,237 | 581.3 |
+| **Saved** | **280,038,072** | **280.0 (32.5%)** |
+
+Applied (ranks from section 4):
+
+| Rank | Change | Measured saving (MiB, compressed) |
+|---|---|---:|
+| 1 | exclude `polars` | 37.3 |
+| 2 | exclude `av` (and av.libs) | 29.6 |
+| 3 | drop WebEngine DevTools frontend + `*.debug.pak` / `*.debug.bin` | 27.7 |
+| 4 | exclude `pyarrow` | 24.0 |
+| 5 | MSYS2: ship the PE closure of WeasyPrint's dlopen names + libcairo/pixman (29 DLLs instead of 122) | in `<root>` 22.7 |
+| 6 | drop `cv2/opencv_videoio_ffmpeg*.dll` | 21.7 |
+| 7 | exclude `pythainlp` | 17.9 |
+| 8 | exclude `pandas`, `sqlalchemy`, `datasets`, `multiprocess`, `joblib` (excludes only; `collect_all('onnxruntime')` was left as is) | 13.1 |
+| 9 | keep only `en-US.pak` of `qtwebengine_locales` | in translations 13.3 |
+| 10 | drop `onnxruntime/capi/DirectML.dll` | 8.9 |
+| 11 | exclude `yt_dlp`, `curl_cffi`, `Cryptodome` | 8.1 |
+| 12 | drop `PySide6/qml/**` and the 98 Qt6 DLLs no shipped .pyd / plugin / QtWebEngineProcess.exe links (closure computed in the spec at build time) | 8.8 + 21.8 |
+| 13 | exclude `win32ui`, `win32uiole`, `dde`, `pythonwin` | 2.9 |
+| 14 | drop `torchvision/python312.dll`, `torch/bin/protoc.exe`, `vfcompat.dll`, `appverifUI.dll` | 3.6 |
+| 15 | drop PySide6 `translations/*.qm` | (in translations) |
+| 16 | exclude `gradio`, `gradio_client`, `emoji`, `_pytest`, `py`, `onnxscript`, `onnx_ir`, `onnxslim` | 3.4 |
+
+Bug found and fixed on the way: **PDF export via WeasyPrint was broken in the NoCuda exe.** The
+spec's explicit binaries list ships `src/libwinpthread-1.dll` (an older mingw runtime for the C++
+inpainter), and it won over MSYS2's newer copy in the bundle root. libpango then failed to load
+with `error 0x7f` (procedure not found: `clock_gettime64`, `nanosleep64`, ...), so
+`--run-pdf-worker` returned `{"success": false, "error": "cannot load library ...libpango-1.0-0.dll"}`
+on the unmodified build. The spec now drops the src/ copies of any DLL MSYS2 also provides
+(libwinpthread-1, libgcc_s_seh-1, libstdc++-6); MSYS2's export a superset. The v9.15.14 release
+exe was built from the same spec and files, so it very likely has the same failure.
+
+Smoke tests of the new exe (isolated profile: `GLOSSARION_APP_DIR`, `USERPROFILE`, `HOME`,
+`APPDATA`, `LOCALAPPDATA` under a scratch folder; the owner's config untouched):
+
+- GUI starts, main window and welcome dialog come up, and the window stays up (several minutes, closed by us).
+- Background manga import succeeds; the warm-up logs `YOLO: Available`, `ONNX: Available`,
+  `RT-DETR: Available` and `ANIME_ONNX ONNX loaded` (the LaMa ONNX model was downloaded into the
+  isolated home and an ORT session created).
+- "Manga Translator" opens the Manga Panel Translator window with its OCR / translation settings.
+- "Library" opens the Glossarion Library window.
+- `--run-pdf-worker`: WeasyPrint PDF, 3 pages, images embedded, English and Korean text extracted back (fails on the before build, see above).
+- `--run-pdf-extraction`: `fast_semantic` and `pdfplumber` modes both succeed on that PDF.
+- `--autharena-qt-browser` (offscreen, `QTWEBENGINE_REMOTE_DEBUGGING`, `--lang=ko`): DevTools
+  websocket comes up, `/json/version` answers, CDP `Target.attachToTarget` + `Page.navigate` +
+  `Runtime.evaluate` return the page title and Korean text; `navigator.language` is `ko` even
+  though only en-US.pak ships. So CDP works without the DevTools frontend .pak.
+- Host Python with every excluded package hidden (`sys.modules[name] = None`): torch,
+  torchvision, transformers, ultralytics, easyocr, doctr, onnxruntime(.quantization), accelerate,
+  rapidocr, cv2, scipy, aiplatform, vertexai, google.genai, Vision, pdfplumber, fitz, weasyprint,
+  manga_ocr and the app's manga/PDF/EPUB modules import; `quantize_dynamic` + `quantize_static`
+  run, a YOLO (yaml) predict, an RT-DETR v2 forward + post-process, a VisionEncoderDecoder
+  generate and RapidOCR with its bundled models all run.
+
+Not covered: a full manga page run (needs API keys), the EPUB reader opened on a real book, the
+QtMultimedia video player, and an autharena/ login against the live site.
+
+Left for the owner (not applied):
+
+- Rank 17 `opengl32sw.dll` (7.3): needed on VMs / RDP / broken GPU drivers.
+- Rank 18 root C++ inpainter DLL set (4.2): only if `enable_onnx_cpp_backend` is retired.
+- Ranks 19-20 (torch/transformers as PYZ only, pruning transformers.models): need model runs to test.
+- Narrowing `collect_all('onnxruntime')` (rank 8, second half): small gain, skipped.
+- The same Qt/MSYS2/winpthread changes would apply to translator.spec and translatoronefileoff.spec
+  (about 100 MB each); this branch only touches NoCuda. Of the other specs only
+  translator_Heavy.spec also lists `libwinpthread-1.dll`, so Heavy probably has the same PDF bug.
+- Build-machine cleanup (section 6): uninstall onnxruntime-directml / onnxruntime-gpu and one of the two OpenCV wheels.
+
+## Original diagnosis
+
+Diagnosis only at the time. All numbers below come from the v9.15.14 release exe
 (`src/dist/N_Glossarion_NoCuda v9.15.14.exe`, 861,211,156 bytes, the same size as the draft-release
 asset `N_Glossarion_NoCuda.v9.15.14.exe`). The CArchive and PYZ tables of contents were read with
 PyInstaller 6.19's `CArchiveReader` / `ZlibArchiveReader`. Nothing was extracted to disk.
