@@ -1144,7 +1144,7 @@ class EditorTab(MangaTab):
         Pan / move: the viewer pans and zooms, and the surface only takes long-presses (box panel):
         a pan recognizer there would win Flutter's gesture arena against the viewer's own and
         swallow one-finger panning. Each gesture is routed by where it starts: over every box (and
-        the selected box's handles) sits a small hit area (``_sync_hits``, the top layer) with its
+        the selected box's handles) sits a small hit area (``_sync_hits``, the stack's top children) with its
         own tap / long-press / drag recognizers, which win the arena for a pointer that went down
         on them (the deepest recognizer accepts first); a pointer that went down on the empty page
         only reaches the surface and the viewer, which pans it (and pinches with two fingers).
@@ -1173,7 +1173,7 @@ class EditorTab(MangaTab):
         image = ft.Image(src=background, fit=ft.BoxFit.FILL, gapless_playback=True, left=0, top=0, right=0,
                          bottom=0, key=f"me-image-{self._gen}")
         self.page_image = image
-        self.hit_layer = ft.Stack([], left=0, top=0, right=0, bottom=0, key=f"me-hits-{self._gen}")
+        self.hit_areas = []  # Pan / move: the boxes' hit areas, the top children of the stack
         self._hits = {}
         self.stack = ft.Stack([image, self.canvas], key=f"me-stack-{self._gen}")
         self.frame = ft.Container(content=self.stack, alignment=ft.Alignment.TOP_CENTER, key=f"me-frame-{self._gen}")
@@ -1280,7 +1280,7 @@ class EditorTab(MangaTab):
         self.gestures = ft.GestureDetector(
             content=ft.Container(bgcolor=ft.Colors.TRANSPARENT), drag_interval=DRAG_INTERVAL,
             left=0, top=0, right=0, bottom=0, key=f"me-gestures-{self._gen}", **handlers)
-        self.stack.controls = [self.page_image, self.canvas, self.gestures, self.hit_layer]
+        self.stack.controls = [self.page_image, self.canvas, self.gestures, *self.hit_areas]
         self.interactive.pan_enabled = not editing
         self.interactive.scale_enabled = not editing
 
@@ -1328,12 +1328,13 @@ class EditorTab(MangaTab):
             on_pan_end=self._on_pan_end)
 
     def _sync_hits(self, push_now: bool = True) -> bool:
-        """Lay the Pan / move hit areas over the boxes as they are now. An area whose rectangle did
+        """Lay the Pan / move hit areas over the boxes (the top children of the page stack) as they
+        are now. An area whose rectangle did
         not change is the same control (same key), so Flutter keeps its recognizers; nothing changes
         while a drag runs (a replaced area would cancel the drag under the finger). True when the
         layer changed."""
-        layer = getattr(self, "hit_layer", None)
-        if layer is None or self.drag is not None:
+        stack = getattr(self, "stack", None)
+        if stack is None or getattr(self, "gestures", None) is None or self.drag is not None:
             return False
         kept: dict = {}
         controls: list = []
@@ -1344,12 +1345,15 @@ class EditorTab(MangaTab):
                 control = self._hit_area(*rect[2:])
             kept[signature] = control
             controls.append(control)
-        if len(controls) == len(layer.controls) and all(a is b for a, b in zip(controls, layer.controls)):
+        if len(controls) == len(self.hit_areas) and all(a is b for a, b in zip(controls, self.hit_areas)):
             return False
         self._hits = kept
-        layer.controls = controls
+        self.hit_areas = controls
+        # the areas are the stack's own top children (no wrapper layer over the surface: a drawing
+        # tool's surface stays the top child, exactly as before)
+        stack.controls = [self.page_image, self.canvas, self.gestures, *controls]
         if push_now:
-            push(layer)
+            push(stack)
         return True
 
     def _steps_reason(self) -> Optional[str]:

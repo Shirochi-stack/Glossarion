@@ -114,8 +114,8 @@ def test_a_drag_on_a_box_moves_it_and_a_drag_on_the_empty_page_is_the_viewers(is
         # (it would win every drag against the viewer), only long-press
         assert viewer.pan_enabled and viewer.scale_enabled
         assert (surface.on_pan_start, surface.on_tap_down) == (None, None)
-        assert tab.stack.controls[-1] is tab.hit_layer
-        areas = list(tab.hit_layer.controls)
+        areas = list(tab.hit_areas)
+        assert tab.stack.controls == [tab.page_image, tab.canvas, surface, *areas]  # the top children
         assert [_rect(a) for a in areas] == [(20, 40, 80, 120), (20, 300, 80, 60)]
         assert all(a.on_pan_start and a.on_pan_update and a.on_pan_end and a.on_tap_down and a.on_long_press_start
                    for a in areas)
@@ -133,19 +133,19 @@ def test_a_drag_on_a_box_moves_it_and_a_drag_on_the_empty_page_is_the_viewers(is
         area = areas[1]
         await _fire(session, area, "pan_start", 40, 30)  # page (60, 330) = image (30, 165)
         assert tab.drag["mode"] == "move" and tab.selected == 1
-        assert area in tab.hit_layer.controls  # the area under the finger stays (the drag goes on)
+        assert area in tab.hit_areas  # the area under the finger stays (the drag goes on)
         await _fire(session, area, "pan_update", 60, 50)  # +20 dp = +10 px each way
         assert (tab.boxes[1]["x"], tab.boxes[1]["y"]) == (20.0, 160.0)
-        assert area in tab.hit_layer.controls
+        assert area in tab.hit_areas
         await _fire(session, area, "pan_end", 60, 50)
         await mu._settle()
         assert fake.calls[-1] == ("update_box", 1, 20.0, 160.0, 40.0, 30.0, False) and tab.selected == 1
         # the areas follow the moved box; the selected box's handles get their own (2 x 22 dp at 2x zoom)
-        rects = [_rect(a) for a in tab.hit_layer.controls]
+        rects = [_rect(a) for a in tab.hit_areas]
         assert rects[:2] == [(20, 40, 80, 120), (40, 320, 80, 60)]
         assert rects[2:] == [(40 - 11, 320 - 11, 22, 22), (120 - 11, 380 - 11, 22, 22)]
         # the resize handle resizes
-        handle = tab.hit_layer.controls[3]
+        handle = tab.hit_areas[3]
         await _fire(session, handle, "pan_start", 11, 11)
         assert tab.drag["mode"] == "resize"
         await _fire(session, handle, "pan_update", 21, 31)
@@ -162,7 +162,7 @@ def test_a_tap_on_a_box_selects_it_and_long_press_opens_its_panel(iso, tmp_path,
     async def scenario():
         me, fake, pages, session, screen, tab = _open(tmp_path, monkeypatch)
         await _page_with_boxes(tab, fake, pages)
-        first, second = tab.hit_layer.controls
+        first, second = tab.hit_areas
         await _fire(session, first, "tap_down", 5, 5)
         assert tab.selected == 0 and tab.panel is not None and tab.panel.index == 0
         assert [s for s in tab.canvas.shapes if isinstance(s, me.cv.Circle)]  # its handles show
@@ -172,10 +172,11 @@ def test_a_tap_on_a_box_selects_it_and_long_press_opens_its_panel(iso, tmp_path,
         assert tab.selected == 1 and tab.panel.index == 1
         # a drawing tool: no hit areas (the surface draws), the viewer holds still; back: areas again
         tab.set_tool("box")
-        assert tab.hit_layer.controls == [] and not tab.interactive.pan_enabled and tab.selected is None
+        assert tab.hit_areas == [] and not tab.interactive.pan_enabled and tab.selected is None
+        assert tab.stack.controls == [tab.page_image, tab.canvas, tab.gestures]  # the surface on top
         assert tab.gestures.on_pan_start is not None
         tab.set_tool("pan")
-        assert len(tab.hit_layer.controls) == 2 and tab.interactive.pan_enabled
+        assert len(tab.hit_areas) == 2 and tab.interactive.pan_enabled
         screen.dispose()
 
     asyncio.run(scenario())
@@ -188,12 +189,12 @@ def test_no_hit_areas_while_a_step_runs(iso, tmp_path, monkeypatch):
         jobs = mu.FakeJobs()
         me, fake, pages, session, screen, tab = _open(tmp_path, monkeypatch, jobs=jobs)
         await _page_with_boxes(tab, fake, pages)
-        assert len(tab.hit_layer.controls) == 2
+        assert len(tab.hit_areas) == 2
         job_id = await tab.run_step("translate")
-        assert tab.busy and tab.hit_layer.controls == []
+        assert tab.busy and tab.hit_areas == []
         jobs.finish(job_id, result={"manga_step": "translate"})
         await mu._settle()
-        assert not tab.busy and len(tab.hit_layer.controls) == 2
+        assert not tab.busy and len(tab.hit_areas) == 2
         screen.dispose()
 
     asyncio.run(scenario())

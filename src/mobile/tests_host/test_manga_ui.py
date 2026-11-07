@@ -2532,8 +2532,8 @@ def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, mo
         assert (viewer.min_scale, viewer.max_scale) == (me.MIN_ZOOM, me.MAX_ZOOM) and me.MAX_ZOOM > 1
         assert viewer.boundary_margin is not None
         # (the Pan / move hit areas of the boxes on top: none here, the page has no boxes)
-        assert tab.stack.controls == [tab.page_image, tab.canvas, surface, tab.hit_layer]
-        assert viewer.content.content is tab.stack and tab.hit_layer.controls == []
+        assert tab.stack.controls == [tab.page_image, tab.canvas, surface] and tab.hit_areas == []
+        assert viewer.content.content is tab.stack
         # a refresh (box picked, step done) keeps the same viewer, so its zoom stays
         tab.selected = None
         tab.refresh()
@@ -2544,8 +2544,7 @@ def test_editor_pan_mode_leaves_panning_and_zoom_to_the_viewer(iso, tmp_path, mo
         tab.set_tool("box")
         assert tab.interactive is viewer and not viewer.pan_enabled and not viewer.scale_enabled
         assert tab.gestures is not surface and tab.gestures.key != surface.key
-        assert tab.gestures.on_pan_start is not None and tab.stack.controls[-2] is tab.gestures
-        assert tab.stack.controls[-1] is tab.hit_layer and tab.hit_layer.controls == []
+        assert tab.gestures.on_pan_start is not None and tab.stack.controls[-1] is tab.gestures
         editing = tab.gestures
         tab.refresh()
         assert tab.gestures is editing
