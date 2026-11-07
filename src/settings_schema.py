@@ -441,6 +441,8 @@ UNAVAILABLE_RULES = (
      "Claude Code / Grok CLI credential import reads desktop CLI stores (excluded on mobile)."),
     (r"(process_priority|cpu_affinity|priority_class)", ("mobile",),
      "Process priority / CPU affinity cannot be changed by mobile apps."),
+    (r"^show_cmd$", ("mobile",),
+     "Show CMD opens the console window of the compiled Windows builds (desktop only)."),
     # Worker-process settings the backend ignores when mobile_runtime.processes_available()
     # is False: pdf_fast_extractor forces 1 worker, TransateKRtoEN skips async PDF extraction,
     # local_inpainter never starts its worker process.
@@ -719,6 +721,8 @@ TYPE_OVERRIDES = {
     "sdlxliff_one_row_layout": "bool",
     "sdlxliff_two_column_layout": "bool",
     "temperature": "float",
+    # Other Settings › Debug Controls › Show CMD (console_window; checkbox stored as a boolean)
+    "show_cmd": "bool",
 }
 
 # U9: settings mobile shows but never edits in a plain tile: structured stores a dedicated surface

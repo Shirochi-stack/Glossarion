@@ -3,6 +3,14 @@ if __name__ == '__main__':
     import multiprocessing
     import sys as _early_sys
 
+    # Compiled Windows builds: a multiprocessing child shows its output in the GUI's console
+    # (when one is open) instead of nowhere; console_window does nothing in other processes.
+    try:
+        import console_window as _console_window
+        _console_window.attach_worker()
+    except Exception:
+        pass
+
     try:
         multiprocessing.freeze_support()
     except OSError:
@@ -108,6 +116,15 @@ if __name__ == '__main__':
                 "error": f"Gemini Free is not available in this build: {_gemini_free_exc}",
             }, separators=(",", ":")), flush=True)
             raise SystemExit(1)
+
+    # Compiled Windows builds have no console: console_window opens one at runtime, from
+    # startup when Other Settings > "Show CMD" is on, otherwise only while manga runs.
+    # The helper processes dispatched above never get here.
+    try:
+        import console_window as _console_window
+        _console_window.startup()
+    except Exception:
+        pass
 
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys

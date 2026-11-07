@@ -16630,7 +16630,30 @@ def _create_debug_controls_section(self, parent_frame):
         button_layout.addStretch()
         
         debug_layout.addLayout(button_layout)
-        
+
+        # Show CMD: compiled builds open their console at runtime (console_window)
+        def _toggle_show_cmd(checked):
+            try:
+                if not hasattr(self, 'config'):
+                    self.config = {}
+                self.config['show_cmd'] = bool(checked)
+                self.save_config(show_message=False)
+                import console_window
+                console_window.set_show_cmd(bool(checked))
+            except Exception as e:
+                self.append_log(f"❌ [DEBUG MODE] Failed to toggle Show CMD: {e}")
+
+        show_cmd_cb = self._create_styled_checkbox("Show CMD")
+        show_cmd_cb.setChecked(bool(getattr(self, 'config', {}).get('show_cmd', False)))
+        show_cmd_cb.setToolTip(
+            "Compiled builds only (running from source always has its terminal).\n"
+            "On: a console window is always shown.\n"
+            "Off: the console appears only while the manga translator runs."
+        )
+        show_cmd_cb.toggled.connect(_toggle_show_cmd)
+        debug_layout.addWidget(show_cmd_cb)
+        self._show_cmd_cb = show_cmd_cb
+
         # Store references for potential future use
         self._debug_toggle_btn = debug_toggle_btn
         self._debug_action_btn = debug_action_btn

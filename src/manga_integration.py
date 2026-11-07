@@ -12239,6 +12239,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         # Stop/cancellation flags are cleared later in MangaStartHeavy, after any
         # stale worker has actually finished.
         self.is_running = True
+        self._set_console_visible(True)
         
         # Log start directly to GUI
         try:
@@ -12991,6 +12992,15 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         )
         return False
 
+    def _set_console_visible(self, running):
+        """Compiled builds: console_window shows the console while a manga run is active
+        (always when Other Settings > Show CMD is on)."""
+        try:
+            import console_window
+            console_window.set_manga_running(running)
+        except Exception:
+            pass
+
     def _reset_ui_state(self, expected_start_token=None):
         """Reset UI to ready state - with widget existence checks (PySide6)"""
         if not _translation_run_token_matches(
@@ -13016,6 +13026,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         try:
             # Reset running flag and graceful stop state
             self.is_running = False
+            self._set_console_visible(False)
             self._graceful_stop_pending = False
             self._translation_startup_pending = False
             self._translation_start_cancel_requested = False

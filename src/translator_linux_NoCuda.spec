@@ -176,6 +176,7 @@ app_files = [
     ('api_key_encryption.py', '.'),
     ('http_logger.py', '.'),
     ('shutdown_utils.py', '.'),
+    ('console_window.py', '.'),
 
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -481,6 +482,7 @@ app_modules = [
     'api_key_encryption',
     'http_logger',
     'shutdown_utils',
+    'console_window',
     'async_api_processor',
     'metadata_batch_translator',
     'translate_headers_standalone',

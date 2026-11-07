@@ -163,6 +163,7 @@ tests/**
 !tests/test_auth_pool_dropdowns.py
 !tests/test_gemini_future_and_br_chapters.py
 !tests/test_webtoon_run_fixes.py
+!tests/test_console_window.py
 !tests/test_openai_token_compatibility.py
 !tests/test_antigravity_proxy.py
 !tests/test_ocagy_cli.py

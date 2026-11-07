@@ -35,7 +35,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 
 APP_NAME = get_spec_app_name("translator_NoCuda.spec")
 APP_ICON = 'Halgakos.ico'
-ENABLE_CONSOLE = True  # Console disabled for production
+ENABLE_CONSOLE = False  # No console in the exe: console_window opens one at runtime (Show CMD, manga runs)
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True         # Single executable vs folder distribution
 
@@ -276,6 +276,7 @@ app_files = [
     ('api_key_encryption.py', '.'), 
     ('http_logger.py', '.'),
     ('shutdown_utils.py', '.'),
+    ('console_window.py', '.'),
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -710,6 +711,7 @@ app_modules = [
     'api_key_encryption',
 	'http_logger',
 	'shutdown_utils',
+	'console_window',
 	'async_api_processor',
 	'metadata_batch_translator',
 	'translate_headers_standalone',
