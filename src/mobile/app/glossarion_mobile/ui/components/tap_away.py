@@ -6,6 +6,13 @@ on the phone app, the bare tile on the desktop and web clients of ``flet run``, 
 
 Only a dropdown the user opened closes this way: the running card's Requests list opens by itself for the user
 to watch, and stays open until the user has toggled it. The region is armed by the tile's own ``on_change``.
+
+The region (and its tile) is built once and re-added by every repaint of its card. When a card is rebuilt around it
+under the same key (a new Plan card, a Result card whose rows changed), Flet diffs the keyed pair as frozen and
+marks the region it meets at a new place in that card frozen for good; setting ``enabled`` then raised "Frozen
+controls cannot be updated", which Flet reports as a crashed app (owner 2026-11-07: the numeric keyboard of
+Run options' Output token limit). The handlers lift that marker first, as ``dialogs.close_dialog`` does for a
+keyed sheet and Flet's own ``use_dialog`` hook does for its dialogs.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from typing import Any, Optional
 import flet as ft
 
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.dialogs import _unmark
 from glossarion_mobile.ui.components.drag_sheet import native_widget_class
 
 __all__ = ["closes_on_tap_away", "install_tap_away"]
@@ -28,6 +36,12 @@ def install_tap_away(page: Any) -> None:
     """Look up the extension's control for ``page``'s client; once, at app start."""
     global _region_class
     _region_class = native_widget_class(page, "TapAway")
+
+
+def _thaw(*controls: Any) -> None:
+    """Lift the frozen marker a keyed rebuild of the card left (see the module docstring)."""
+    for control in controls:
+        _unmark(control, "_frozen")
 
 
 def _push(control: ft.Control) -> None:
@@ -49,10 +63,12 @@ def closes_on_tap_away(tile: ft.ExpansionTile) -> ft.Control:
         call_handler(own_change, e)
         opened = str(getattr(e, "data", "")).strip().lower() == "true"
         if region.enabled != opened:
+            _thaw(region)
             region.enabled = opened
             _push(region)
 
     def on_tap_away(_e: Any = None) -> None:
+        _thaw(region, tile)
         region.enabled = False
         tile.expanded = False
         _push(region)

@@ -53,6 +53,10 @@ class SettingsContext:
             return await dispatcher.run_in_thread(fn, *args, name="gl-settings-io")
         return await asyncio.to_thread(fn, *args)
 
+    async def io(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """``run_io`` under the Tools context's name (the model download rows a settings tile shows use it)."""
+        return await self.run_io(fn, *args)
+
     def spawn(self, coro: Any) -> Any:
         dispatcher = self.dispatcher
         if dispatcher is not None and getattr(dispatcher, "bound", False):

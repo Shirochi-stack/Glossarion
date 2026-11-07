@@ -93,6 +93,21 @@ def ner_needs_download() -> bool:
     return ner_names.runtime_available() and not ner_names.model_installed()
 
 
+async def offer_ner_download(ctx: Any, manager: Any = None) -> bool:
+    """Switching "Check glossary names" on while the NER model is not on the device: the model download
+    question the manga tools ask (``ensure_models``: Download now with the Models sheet's row, Download in
+    the run = on first use, or Cancel). True when the model is there or will download with the scan."""
+    if not ner_needs_download():
+        return True
+    import manga_models
+
+    from glossarion_mobile.services import manga as svc
+    from glossarion_mobile.ui.tools.manga.models import ensure_models
+
+    return await ensure_models(ctx, manager or svc.ModelManager(), {}, model_ids=(manga_models.NER_MODEL_KEY,),
+                               action="Check glossary names")
+
+
 def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
                 state: Optional[dict] = None, layer_settings: Optional[dict] = None, chosen: int = 0) -> list:
     """Review every folder on a worker thread; ``state`` gets the progress text and fraction

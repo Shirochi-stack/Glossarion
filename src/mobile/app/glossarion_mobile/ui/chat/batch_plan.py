@@ -8,7 +8,9 @@ re-walked with the desktop's supported extensions: ``plan_model.batch_files``), 
 (PlanGlossarySheet with "Map glossaries…"), the same Run options as a single Plan card, and
 **Start** / **Clear**. One Start submits one ``translate`` job with every file
 (``job_kinds/translate`` runs the desktop multi-file pipeline), so the outputs land in the output
-root like the desktop "Run Translation" over a file list.
+root like the desktop "Run Translation" over a file list. A multi-instance run (``instance_plan``: the
+Translation keys on 2+ instances, 2+ files) lists each file with its instance (``InstancePickers``, the
+desktop assignment dialog) and Start queues one job per instance.
 """
 
 from __future__ import annotations
@@ -43,9 +45,11 @@ class BatchPlanCard(ft.Container):
         run_options: Any = None,
         on_action: Optional[Callable[..., Any]] = None,
         start_reason: Optional[str] = None,
+        instances: Any = None,
         key: Any = "batch-plan",
     ) -> None:
         super().__init__(key=key)
+        self.instances = instances  # InstancePickers of a multi-instance run, else None
         self.files = [str(p) for p in files]
         self.folder = str(folder or "")
         self.include_subfolders = bool(include_subfolders)
@@ -98,6 +102,18 @@ class BatchPlanCard(ft.Container):
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Text(meta, theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.Row(chips, wrap=True, spacing=6, run_spacing=6, key="batch-files"),
+        ]
+        if instances is not None and instances.assignment:
+            # multi-instance (design §6): which instance translates which file, like the desktop assignment dialog
+            rows: list = [instances.text]
+            for index, path in enumerate(self.files):
+                if path in instances.assignment and path not in instances.pickers:
+                    rows.append(ft.Row([ft.Text(os.path.basename(path), max_lines=1, expand=True,
+                                                overflow=ft.TextOverflow.ELLIPSIS, tooltip=path),
+                                        instances.picker(index, path)],
+                                       spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER))
+            controls.append(ft.Column(rows, spacing=4, tight=True, key="batch-instances"))
+        controls += [
             self.subfolders_switch,
             ft.Row([self.glossary_chip, self.map_button], wrap=True, spacing=6),
         ]

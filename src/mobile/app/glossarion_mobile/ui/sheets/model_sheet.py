@@ -220,6 +220,8 @@ class SheetEnv:
     sign_in: Optional[Callable[[str, int], Any]] = None  # (route, account) -> opens the LoginSheet
     signed_in_keys: Optional[Callable[[], Any]] = None  # -> set of "authgpt", "authgpt2", ...
     test_key: Optional[Callable[..., Any]] = None  # async (api_key, model) -> result dict
+    # (model, on_saved) -> the Add key editor pre-filled with that model; on_saved(entry) after a save
+    add_key: Optional[Callable[..., Any]] = None
     tablet: Callable[[], bool] = field(default=lambda: False)
     # U9: (route) -> the next free account slot ("+ Add account": OAuthBridge.next_slot)
     next_slot: Optional[Callable[[str], int]] = None
@@ -699,7 +701,7 @@ class ModelSheet:
         elif state == "add_key":
             dot = _dot(semantic("warning"), "Needs an API key")
             chip = None
-            trailing = ft.TextButton(content=action, on_click=lambda e: self._nav("settings.keys"))
+            trailing = ft.TextButton(content=action, on_click=lambda e, m=model: self._add_key(m))
         else:
             dot = _dot(semantic("success"), "Ready")
             chip = None
@@ -1726,11 +1728,27 @@ class ModelSheet:
         else:
             known = self.signed_in_slots(route)
             slot = (max(known) + 1) if known else 1
-        self._sign_in_route(route, slot)
+        current = str(self.current.get("model") or "")
+        rest = current.split("/", 1)[1] if "/" in current else ""
+        alias = (f"{route}{slot}/{rest}" if slot else f"{route}/{rest}") if rest else ""
+        # signed in, the new slot's alias of the current model is used (as its "#N · alias" item does)
+        self._sign_in_route(route, slot, then_select=alias or None)
 
     def _sign_in(self, model: str) -> None:
+        """A row's "Sign in": that model's sign-in; once it finishes, the model is selected (a close
+        without signing in leaves the model as it was)."""
         route, account = mc.login_route(model)
-        self._sign_in_route(route or "authgpt", account)
+        self._sign_in_route(route or "authgpt", account, then_select=model)
+
+    def _add_key(self, model: str) -> None:
+        """A row's "Add key": the Add key editor for that model over the current screen; saving it
+        selects the model (closing the editor leaves the model as it was). Without the editor hook,
+        the Multi-Key Manager."""
+        if self.env.add_key is None:
+            self._nav("settings.keys")
+            return
+        self.close()
+        call_handler(self.env.add_key, model, lambda entry, m=model: self.select("model", m))
 
     def open_auth_menu(self, current: str, account: int = 0) -> ActionSheet:
         """The route row's sign-in chip (U11 item 7): switch between sign-ins without the login page. Each
@@ -1756,7 +1774,8 @@ class ModelSheet:
                 items.append(ActionItem(f"{title} ✓{mark}", None, icon="ACCOUNT_CIRCLE", key=f"auth-menu-{route}",
                                         disabled_reason="Poll providers to list its models"))
             else:
-                items.append(ActionItem(f"{title} · Sign in{mark}", lambda r=route: self._sign_in_route(r, 0),
+                items.append(ActionItem(f"{title} · Sign in{mark}",
+                                        lambda r=route, m=best: self._sign_in_route(r, 0, then_select=m),
                                         icon="LOGIN", key=f"auth-menu-{route}"))
         items.append(self._deepseek_item(models))
         title = mc.LOGIN_TITLES.get(current, current)
@@ -1798,10 +1817,15 @@ class ModelSheet:
         if page is not None:
             show_deepseek_sign_in(page, run_io=self.env.run_io, on_signed_in=lambda: self.select("model", model))
 
-    def _sign_in_route(self, route: str, account: int = 0) -> None:
+    def _sign_in_route(self, route: str, account: int = 0, then_select: Optional[str] = None) -> None:
+        """``then_select``: the model to select once the sign-in finished (the LoginSheet's on_done)."""
         self.close()
         if self.env.sign_in is not None:
-            call_handler(self.env.sign_in, route, account)
+            if then_select:
+                call_handler(self.env.sign_in, route, account,
+                             lambda status, m=then_select: self.select("model", m))
+            else:
+                call_handler(self.env.sign_in, route, account)
         elif self.on_sign_in is not None:
             call_handler(self.on_sign_in)
         else:

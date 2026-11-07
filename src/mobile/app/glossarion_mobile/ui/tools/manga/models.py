@@ -28,9 +28,11 @@ _SHEETS = itertools.count(1)  # a new key per sheet (never a reused id())
 
 
 async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, kinds: Optional[Sequence[str]] = None,
-                        action: str = "This run", in_run: bool = False) -> bool:
+                        action: str = "This run", in_run: bool = False,
+                        model_ids: Optional[Sequence[str]] = None) -> bool:
     """Before a run or an editor step: the models it loads (``manga_models.missing_models`` for the
-    config, limited to ``kinds``) that are not on the device yet. The first use asks — Download
+    config, limited to ``kinds``; or the registry keys ``model_ids``, e.g. the glossary name check's NER
+    model) that are not on the device yet. The first use asks — Download
     (now, with progress in the model sheet), Download in the run (the job downloads them first,
     verified and resumable, with its progress and Stop: ``services.manga.ensure_run_models``) or
     Cancel. ``in_run`` (Files › Run, owner 2026-10-21): the run downloads them all; the question only
@@ -38,7 +40,10 @@ async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, ki
     if not manager.available:
         return True
     try:
-        missing = list(await ctx.io(manager.required, dict(config or {})))
+        if model_ids is not None:
+            missing = [m for m in model_ids if manager.status(m).status in ("missing", "error")]
+        else:
+            missing = list(await ctx.io(manager.required, dict(config or {})))
     except Exception:
         log.debug("checking the required models failed", exc_info=True)
         return True
