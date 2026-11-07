@@ -13763,6 +13763,11 @@ class MangaTranslator:
         by leftover text are filled, and the interior is kept a margin away from the bubble outline.
         Returns None when the middle of the area is not a uniform fill (free text over art).
 
+        Detector boxes are often not centred on their bubble: one reaches into the neighbouring
+        bubble, or covers only part of its own. The bubble holding most of the middle of the area
+        is the text's container when its outline closes it, and when the window cuts the bubble
+        open, it is looked for again in a window grown by its own size on every side.
+
         Returned dict: ``rect`` (x, y, w, h) to lay text out in (its centre column is the
         interior's centre), ``cx``, ``row0`` and per-row ``left`` / ``right`` (pixels of interior
         left/right of ``cx`` on row ``row0 + i``, -1 where ``cx`` is outside it), ``margin``.
@@ -13785,6 +13790,28 @@ class MangaTranslator:
         x0, y0, x1, y1 = max(0, x0), max(0, y0), min(iw, x1), min(ih, y1)
         if x1 - x0 < 8 or y1 - y0 < 8:
             return None
+        found, closed = self._text_container_in_window(image, (ax, ay, aw, ah), (x0, y0, x1, y1))
+        if closed is None or closed:
+            return found  # no uniform fill to look further for, or a bubble closed by its outline
+        gx, gy = x1 - x0, y1 - y0
+        grown = (max(0, x0 - gx), max(0, y0 - gy), min(iw, x1 + gx), min(ih, y1 + gy))
+        if grown != (x0, y0, x1, y1):
+            again, closed = self._text_container_in_window(image, (ax, ay, aw, ah), grown)
+            # a bubble the box covers part of, not a whole panel of plain background around free text
+            if again is not None and closed and again['rect'][2] <= 2 * gx and again['rect'][3] <= 2 * gy:
+                return again
+        return found
+
+    def _text_container_in_window(self, image: np.ndarray, area, window):
+        """_find_text_container's search inside one window (x0, y0, x1, y1) of the page.
+
+        Returns (container or None, closed): ``closed`` is True when the bubble found is closed by
+        its outline inside the window, False when the window cut it open (or no bubble was
+        accepted, so a larger window may still find one), None when the middle of the area is
+        not a uniform fill at all (free text over art: no window will find a container).
+        """
+        ax, ay, aw, ah = area
+        x0, y0, x1, y1 = window
         win = image[y0:y1, x0:x1]
         if win.ndim == 2:
             win = win[:, :, None]
@@ -13793,28 +13820,34 @@ class MangaTranslator:
         sx0, sx1 = max(ax + aw // 4, x0) - x0, min(ax + aw - aw // 4, x1) - x0
         sy0, sy1 = max(ay + ah // 4, y0) - y0, min(ay + ah - ah // 4, y1) - y0
         if sx1 <= sx0 or sy1 <= sy0:
-            return None
+            return None, None
         seed = np.median(win[sy0:sy1, sx0:sx1].reshape(-1, win.shape[2]), axis=0)
         near = (np.abs(win - seed).max(axis=2) <= 32).astype(np.uint8)
         if float(near[sy0:sy1, sx0:sx1].mean()) < 0.55:
-            return None  # busy background: free text, no container
+            return None, None  # busy background: free text, no container
         near = cv2.morphologyEx(near, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # cut 1-2 px leaks
         count, labels = cv2.connectedComponents(near, connectivity=4)
         if count <= 1:
-            return None
+            return None, None
         hits = np.bincount(labels[sy0:sy1, sx0:sx1].ravel(), minlength=count)
         hits[0] = 0
         label = int(hits.argmax())
         if hits[label] == 0:
-            return None
+            return None, None
         comp = (labels == label).astype(np.uint8)
         contours, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         filled = np.zeros_like(comp)
         cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill holes (leftover text, specks)
+        open_patch = bool(filled[0].any() or filled[-1].any() or filled[:, 0].any() or filled[:, -1].any())
         # A bubble's interior covers the middle of its text area; a patch between speed lines or
-        # other art strokes does not (free text)
-        if int(filled.sum()) < 0.3 * filled.size or float(filled[sy0:sy1, sx0:sx1].mean()) < 0.9:
-            return None
+        # other art strokes does not (free text). A bubble closed by its outline only needs most
+        # of the middle's fill and a fair share of the area: the rest of the middle is the
+        # neighbouring bubble, or the gap between the two, when the box reaches into it
+        closed_bubble = (not open_patch and 2 * int(hits[label]) >= int(hits.sum())
+                         and int(filled.sum()) >= 0.3 * aw * ah)
+        if not closed_bubble and (int(filled.sum()) < 0.3 * filled.size
+                                  or float(filled[sy0:sy1, sx0:sx1].mean()) < 0.9):
+            return None, False
         ys, xs = np.nonzero(filled)
         margin = int(max(3, min(16, round(0.06 * min(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)))))
         # Margin from the drawn outline only: window edges are not outlines (border value 1)
@@ -13826,7 +13859,7 @@ class MangaTranslator:
         depth = np.where(allowed, to_wall, 0)
         dmax = float(depth.max())
         if dmax <= 0:
-            return None
+            return None, False
         # Centre: middle of the deepest ridge (one point for an oval, a line for a wide box)
         ridge_y, ridge_x = np.nonzero(depth >= dmax * 0.9)
         cx, cy = int(round(ridge_x.mean())), int(round(ridge_y.mean()))
@@ -13843,21 +13876,20 @@ class MangaTranslator:
         bottom = cy + (len(down) if down.all() else int(down.argmin())) - 1
         half = int(np.minimum(left, right)[top:bottom + 1].max())
         if half < 4 or bottom - top < 8:
-            return None
+            return None, False
         # A flat patch that runs out of the window is not closed by an outline: when it leaves
         # much less room than the text area, art inside it narrowed it (a plain stretch of floor
         # or curtain behind a sound effect, the clear half of a sign). It is not the text's
         # container, and the text keeps its whole area. A bubble or box drawn inside the window
         # is closed by its outline and is always trusted.
-        open_patch = bool(filled[0].any() or filled[-1].any() or filled[:, 0].any() or filled[:, -1].any())
         text_w = min(ax + aw, x1) - max(ax, x0)
         text_h = min(ay + ah, y1) - max(ay, y0)
         if open_patch and (2 * half + 1 < 0.8 * text_w or bottom - top + 1 < 0.8 * text_h):
-            return None
+            return None, False
         return {
             'rect': (x0 + cx - half, y0 + top, 2 * half + 1, bottom - top + 1),
             'cx': x0 + cx, 'row0': y0, 'left': left, 'right': right, 'margin': margin,
-        }
+        }, not open_patch
 
     def _container_render_area(self, image: np.ndarray, region: TextRegion, area,
                                source_regions=None) -> Tuple[int, int, int, int]:
@@ -13868,20 +13900,30 @@ class MangaTranslator:
         (free text over art) the area only loses what the outline stroke and shadow add.
         ``source_regions`` are the regions render_translated_text was given: with several,
         it lays out _adjust_overlapping_regions' copies, which carry no bubble_bounds.
+
+        A copy the overlap adjustment moved off its place (its detector box overlaps a
+        neighbour's) still looks for its bubble where the region really is: the bubbles'
+        outlines keep the two texts apart, and the moved box would straddle the neighbour's
+        outline. Only text without a bubble (free text) is laid out at the moved place.
         """
         region._fit_container = None
         if not getattr(self, 'constrain_to_bubble', True):
             return area
         # A safe area the user switched on is an explicit limit: stay inside it
-        clip = None if getattr(self, 'safe_area_enabled', False) else getattr(region, 'bubble_bounds', None)
+        safe_area = getattr(self, 'safe_area_enabled', False)
+        clip = None if safe_area else getattr(region, 'bubble_bounds', None)
         idx = getattr(region, 'original_index', None)
-        if (clip is None and not getattr(self, 'safe_area_enabled', False) and source_regions
-                and isinstance(idx, int) and 0 <= idx < len(source_regions)
-                and tuple(region.bounding_box) == tuple(getattr(region, 'original_bbox', None) or ())):
-            # the copy's own region, unless the overlap adjustment moved the copy off its place
-            clip = getattr(source_regions[idx], 'bubble_bounds', None)
+        orig = tuple(getattr(region, 'original_bbox', None) or ())
+        find_area = area
+        if (clip is None and source_regions and isinstance(idx, int) and 0 <= idx < len(source_regions)
+                and len(orig) == 4):
+            # the copy's own region; a moved copy is looked up at the region's place
+            if not safe_area:
+                clip = getattr(source_regions[idx], 'bubble_bounds', None)
+            dx, dy = orig[0] - region.bounding_box[0], orig[1] - region.bounding_box[1]
+            find_area = (area[0] + dx, area[1] + dy, area[2], area[3])
         try:
-            container = self._find_text_container(image, area, clip)
+            container = self._find_text_container(image, find_area, clip)
         except Exception as e:
             container = None
             self._log(f"  ⚠️ Bubble interior detection failed: {e}", "debug")
