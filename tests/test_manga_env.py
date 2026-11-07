@@ -92,7 +92,8 @@ NEW_METHODS = {
     "MangaHooksMixin": {"_log", "_reset_ui_state", "_monitor_translation_output", "_update_manga_image_range_display",
                         "_add_manga_file_item", "_rebuild_manga_file_listbox"},
     "MangaEnvMixin": {"_init_manga_run_state", "_init_manga_prompt_state", "_reset_manga_graceful_stop_env",
-                      "_prepare_manga_run_env", "_apply_manga_batch_env", "_manga_pool_api_key"},
+                      "_prepare_manga_run_env", "_apply_manga_batch_env", "_manga_pool_api_key",
+                      "_manga_pool_models"},
 }
 #: Module-level names moved out of manga_integration (re-exported there).
 MOVED_MODULE_NAMES = {
@@ -297,8 +298,12 @@ def _inline_start_translation_heavy(text):
     replace(["            self._reset_manga_graceful_stop_env()"], _indent(graceful, 8))
     prep = _body_lines(env["_prepare_manga_run_env"])
     assert prep[0] == "    import os" and prep[-1] == "    return ocr_config, api_key, model, needs_new_client"
-    prep = [re.sub(r"^(\s+)return None$", r"\1return", line) for line in prep[1:-1]
-            if line != POOL_KEY_LINE]  # the one owner-requested addition (not in the legacy method)
+    prep = "\n".join(prep)
+    for legacy_text, now_text in KEYLESS_POOL_EDITS:  # owner-requested edits (not in the legacy method)
+        assert prep.count(now_text) == 1
+        prep = prep.replace(now_text, legacy_text)
+    prep = [re.sub(r"^(\s+)return None$", r"\1return", line) for line in prep.split("\n")[1:-1]
+            if line != POOL_KEY_LINE]  # owner-requested addition (not in the legacy method)
     replace(["            prepared = self._prepare_manga_run_env(start_token)",
              "            if prepared is None:",
              "                return",
@@ -311,6 +316,56 @@ def _inline_start_translation_heavy(text):
 #: Owner request (2026-10-11): an empty main API key falls back to the translation key pools
 #: (``_manga_pool_api_key``) before "API key not found".
 POOL_KEY_LINE = "    api_key = api_key or self._manga_pool_api_key(model)  # a key from the translation key pools"
+
+#: Owner request (2026-11-08): a multi-key pool entry with a sign-in model and no API key (authgpt/...)
+#: counts as valid (``UnifiedClient._key_data_is_usable``), and the client log names the pool's model(s)
+#: instead of the main tab's model. (legacy text, now) in ``_prepare_manga_run_env``'s body lines.
+KEYLESS_POOL_EDITS = (
+    ("    if not hasattr(self.main_gui, 'client') or not self.main_gui.client:\n"
+     "        needs_new_client = True\n"
+     "        self._log(f\"\U0001f6e0 Creating new API client with model: {model}\", \"info\")\n"
+     "    elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:\n"
+     "        needs_new_client = True\n"
+     "        self._log(f\"\U0001f6e0 Model changed from {self.main_gui.client.model} to {model}, creating new client\", \"info\")",
+     "    # With the translation key pool on, requests go to its keys, so name the pool's model(s)\n"
+     "    pool_models = self._manga_pool_models()\n"
+     "    model_label = f\"{', '.join(pool_models)} (translation key pool)\" if pool_models else model\n"
+     "    if not hasattr(self.main_gui, 'client') or not self.main_gui.client:\n"
+     "        needs_new_client = True\n"
+     "        self._log(f\"\U0001f6e0 Creating new API client with model: {model_label}\", \"info\")\n"
+     "    elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:\n"
+     "        needs_new_client = True\n"
+     "        self._log(f\"\U0001f6e0 Model changed from {self.main_gui.client.model} to {model_label}, creating new client\", \"info\")"),
+    ("                # Validate multi-key configuration before applying\n"
+     "                valid_keys = 0\n"
+     "                for key_data in mk_list:\n"
+     "                    if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):\n"
+     "                        valid_keys += 1\n",
+     "                # Validate multi-key configuration before applying: an entry needs a model, and a key\n"
+     "                # unless its model signs in without one (authgpt/, authcd/, authgem/...)\n"
+     "                from unified_api_client import UnifiedClient as _UC\n"
+     "                valid_keys = sum(1 for key_data in mk_list if _UC._key_data_is_usable(key_data))\n"),
+    ("                    self._log(\"   Each key must have both 'api_key' and 'model' fields.\", \"error\")",
+     "                    self._log(\"   Each key needs a model, and an API key unless the model signs in without one.\", \"error\")"),
+)
+
+#: The run log lines those edits change, mapped to their legacy text for the start comparison.
+_KEYLESS_POOL_LOG_EDITS = {
+    "   Each key needs a model, and an API key unless the model signs in without one.":
+        "   Each key must have both 'api_key' and 'model' fields.",
+}
+
+
+def _legacy_log_text(events):
+    out = []
+    for event in events:
+        if isinstance(event, (list, tuple)) and len(event) == 3 and event[0] == "log":
+            text = _KEYLESS_POOL_LOG_EDITS.get(event[2], event[2])
+            if text.startswith("\U0001f6e0 Creating new API client with model: "):
+                text = "\U0001f6e0 Creating new API client with model: <model>"
+            event = type(event)([event[0], event[1], text])
+        out.append(event)
+    return out
 
 
 def test_split_out_methods_have_exactly_the_documented_edits():
@@ -655,6 +710,10 @@ def make_fake_client(rec):
             return real._model_needs_api_key(model)
 
         @classmethod
+        def _key_data_is_usable(cls, key_data):
+            return real._key_data_is_usable(key_data)
+
+        @classmethod
         def set_global_cancellation(cls, value):
             rec.add("UnifiedClient.set_global_cancellation", value)
 
@@ -947,7 +1006,7 @@ def test_run_start_matches_the_legacy_start(tmp_path, monkeypatch, name):
     legacy = _run_start(tmp_path, monkeypatch, scenario, "legacy")
     monkeypatch.undo()
     new = _run_start(tmp_path, monkeypatch, scenario, "new")
-    assert new["events"] == legacy["events"]
+    assert _legacy_log_text(new["events"]) == _legacy_log_text(legacy["events"])
     assert new["env"] == legacy["env"]
     assert new["config"] == legacy["config"]
     assert new["queue"] == legacy["queue"]
@@ -1972,3 +2031,27 @@ def test_empty_main_key_runs_on_a_sign_in_model_in_the_key_pool():
     assert mixin({"use_multi_api_keys": True, "multi_api_keys": disabled})._manga_pool_api_key("x") == ""
     keyed = [{"api_key": "k1", "model": "gpt-4o"}, {"api_key": "k2", "model": "gemini-2.5-flash"}]
     assert mixin({"use_multi_api_keys": True, "multi_api_keys": keyed})._manga_pool_api_key("gemini-2.5-flash") == "k2"
+
+
+def test_start_translation_accepts_a_keyless_sign_in_model_in_the_multi_key_pool(monkeypatch):
+    """Owner (2026-11-08): Start Translation stopped with "Multi-key mode is enabled but no valid keys
+    are configured" for a pool holding only authgpt/gpt-6.1-terra with no API key, and logged the
+    main tab's model (authchatgpt/auto) instead of the pool's. The pool is checked like UnifiedClient
+    does (``_key_data_is_usable``) and its models are named."""
+    import manga_env
+    from unified_api_client import UnifiedClient
+
+    pool = [{"api_key": "", "model": "authgpt/gpt-6.1-terra", "enabled": True},
+            {"api_key": "", "model": "authgpt/gpt-6.1-terra", "enabled": True},
+            {"api_key": "", "model": "gpt-4o", "enabled": True}]  # needs a key: not usable
+    assert [UnifiedClient._key_data_is_usable(entry) for entry in pool] == [True, True, False]
+
+    obj = manga_env.MangaEnvMixin.__new__(manga_env.MangaEnvMixin)
+    obj.main_gui = types.SimpleNamespace(config={"use_multi_api_keys": True, "multi_api_keys": pool})
+    assert obj._manga_pool_models() == ["authgpt/gpt-6.1-terra"]
+    obj.main_gui.config["use_multi_api_keys"] = False
+    assert obj._manga_pool_models() == []
+
+    source = (SRC / "manga_env.py").read_text(encoding="utf-8")
+    assert "key_data.get('api_key') and key_data.get('model')" not in source
+    assert "for key_data in mk_list if _UC._key_data_is_usable(key_data)" in source

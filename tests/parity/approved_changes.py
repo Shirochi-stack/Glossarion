@@ -5697,6 +5697,15 @@ APPROVED = (
         },
         "values": {},
     },
+    {
+        "date": "2026-11-08",
+        "what": "Manga runs no longer show the console (owner: 'just remove it'); only Other Settings Show CMD "
+                "opens it. The 2026-11-07 start / reset toggles and _set_console_visible are removed again",
+        "source": {
+            "src/manga_integration.py": [(new, old) for old, new in _CONSOLE_WINDOW_MANGA],
+        },
+        "values": {},
+    },
 )
 
 
