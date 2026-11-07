@@ -11126,6 +11126,13 @@ SETTINGS = {
     'sdlxliff_one_row_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'sdlxliff_two_column_layout': {'type': 'str', 'ui_sites': ('progress',)},
     'selected_files': {'type': 'str', 'ui_sites': ('progress',)},
+    'show_cmd': {'label': 'Show CMD',
+     'tooltip': 'Compiled builds only (running from source always has its terminal).\n'
+                'On: a console window is always shown.\n'
+                'Off: the console appears only while the manga translator runs.',
+     'type': 'str',
+     'ui_group': '🔧 Debug Controls',
+     'ui_sites': ('other.debug',)},
     'show_debug_buttons': {'default': False,
      'default_source': 'env:startup',
      'env': (('DEBUG_MODE', 'startup', False),

@@ -109,6 +109,15 @@ if __name__ == '__main__':
             }, separators=(",", ":")), flush=True)
             raise SystemExit(1)
 
+    # Compiled Windows builds have no console: console_window opens one at runtime, from
+    # startup when Other Settings > "Show CMD" is on, otherwise only while manga runs.
+    # The helper processes dispatched above never get here.
+    try:
+        import console_window as _console_window
+        _console_window.startup()
+    except Exception:
+        pass
+
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
 import os

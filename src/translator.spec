@@ -35,7 +35,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 
 APP_NAME = get_spec_app_name("translator.spec")
 APP_ICON = 'Halgakos.ico'
-ENABLE_CONSOLE = False  # Console disabled for production
+ENABLE_CONSOLE = False  # No console in the exe: console_window opens one at runtime (Show CMD, manga runs)
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True         # Single executable vs folder distribution
 
@@ -192,6 +192,7 @@ app_files = [
     ('api_key_encryption.py', '.'), 
     ('http_logger.py', '.'),
     ('shutdown_utils.py', '.'),
+    ('console_window.py', '.'),
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -451,6 +452,7 @@ app_modules = [
     'api_key_encryption',
 	'http_logger',
 	'shutdown_utils',
+	'console_window',
 	'async_api_processor',
 	'metadata_batch_translator',
 	'translate_headers_standalone',
@@ -1572,7 +1574,7 @@ Build Instructions:
 Optimization Tips:
 - Set ENABLE_UPX = True for smaller file size (but slower startup)
 - Set ONE_FILE = False for faster startup but folder distribution
-- Set ENABLE_CONSOLE = True for debugging
+- Other Settings > Debug Controls > Show CMD opens a console at runtime (console_window)
 
 This build includes:
 - Datasketch for enhanced QA scanning performance

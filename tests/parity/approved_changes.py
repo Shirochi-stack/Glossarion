@@ -3759,6 +3759,66 @@ _MANGA_GLOSSARY_IMAGE_NAME_RULES = [
 ]
 
 
+_CONSOLE_WINDOW_MANGA = [
+    (
+        '        self.is_running = True\n'
+        '        \n'
+        ,
+        '        self.is_running = True\n'
+        '        self._set_console_visible(True)\n'
+        '        \n'
+    ),
+    (
+        '                    pass\n'
+        '    \n'
+        '    def _reset_ui_state(self, expected_start_token=None):\n'
+        '        """Reset UI to ready state - with widget existence checks (PySide6)"""\n'
+        ,
+        '                    pass\n'
+        '    \n'
+        '    def _set_console_visible(self, running):\n'
+        '        """Compiled builds: console_window shows the console while a manga run is active\n'
+        '        (always when Other Settings > Show CMD is on)."""\n'
+        '        try:\n'
+        '            import console_window\n'
+        '            console_window.set_manga_running(running)\n'
+        '        except Exception:\n'
+        '            pass\n'
+        '\n'
+        '    def _reset_ui_state(self, expected_start_token=None):\n'
+        '        """Reset UI to ready state - with widget existence checks (PySide6)"""\n'
+    ),
+    (
+        '        return False\n'
+        '\n'
+        '    def _reset_ui_state(self, expected_start_token=None):\n'
+        '        """Reset UI to ready state - with widget existence checks (PySide6)"""\n'
+        ,
+        '        return False\n'
+        '\n'
+        '    def _set_console_visible(self, running):\n'
+        '        """Compiled builds: console_window shows the console while a manga run is active\n'
+        '        (always when Other Settings > Show CMD is on)."""\n'
+        '        try:\n'
+        '            import console_window\n'
+        '            console_window.set_manga_running(running)\n'
+        '        except Exception:\n'
+        '            pass\n'
+        '\n'
+        '    def _reset_ui_state(self, expected_start_token=None):\n'
+        '        """Reset UI to ready state - with widget existence checks (PySide6)"""\n'
+    ),
+    (
+        '            self.is_running = False\n'
+        '            self._graceful_stop_pending = False\n'
+        ,
+        '            self.is_running = False\n'
+        '            self._set_console_visible(False)\n'
+        '            self._graceful_stop_pending = False\n'
+    ),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5237,6 +5297,15 @@ APPROVED = (
                 "with the old default's last line gets them",
         "source": {
             "src/manga_integration.py": _MANGA_GLOSSARY_IMAGE_NAME_RULES,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-07",
+        "what": "Compiled Windows builds have no console: the manga tab shows console_window's runtime console "
+                "while a run is active (start) and hides it when the run resets (Other Settings Show CMD keeps it)",
+        "source": {
+            "src/manga_integration.py": _CONSOLE_WINDOW_MANGA,
         },
         "values": {},
     },
