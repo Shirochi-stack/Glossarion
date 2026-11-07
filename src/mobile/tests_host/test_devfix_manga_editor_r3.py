@@ -183,7 +183,8 @@ def test_toolbar_fits_a_360_and_412_dp_phone(mobile, tmp_path, monkeypatch):
 def _check_toolbar(me, tab):
     buttons = [tab.view_button, *tab.tool_buttons.values(), tab.delete_button, tab.exclude_button,
                tab.clear_button, tab.share_button]
-    assert len(buttons) == 10 and tab.exclude_button in buttons
+    # (nine since Select / move was merged into Pan / move, owner 2026-11-07)
+    assert len(buttons) == 9 and tab.exclude_button in buttons
     for button in buttons:
         c = button.size_constraints
         assert c.max_width == me.TOOL_BUTTON and c.min_width == me.TOOL_BUTTON, button.key
