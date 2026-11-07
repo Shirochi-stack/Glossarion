@@ -326,6 +326,9 @@ def test_selected_profile_prompt_reaches_the_request_with_the_target_language(mo
     monkeypatch.setenv("OUTPUT_LANGUAGE", "Spanish")
     monkeypatch.setenv("GLOSSARY_TARGET_LANGUAGE", "English")  # set by the manga run env as well
     inpainter = _inpainter(**owner.config)
+    # The output alignment (ECC) is not under test here: on the Linux CI OpenCV build it shifted the
+    # synthetic redrawn SFX (it lies outside the text mask), locally it does not.
+    inpainter._register_custom_image_edit_output = lambda crop, out, crop_mask: out
 
     result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
 
@@ -430,7 +433,7 @@ def test_translate_prompt_failed_textless_crop_keeps_source_and_overlap_is_a_har
     page = np.vstack([top, bottom])
     mask = np.vstack([top_mask, np.zeros(bottom.shape[:2], np.uint8)])
     settings = {"manga_settings": {"preprocessing": {"chunk_height": 420, "chunk_overlap": 40}},
-                "manga_batch_image_requests_enabled": False}
+                "manga_batch_image_requests_enabled": False, "batch_size": 1}  # one crop at a time: calls in order
     owner = _owner(settings)
     manga_env.ImageEditPromptProfiles(owner).select(SFX)
     monkeypatch.setenv("CUSTOM_IMAGE_EDIT_MODEL", "fake-edit-model")
