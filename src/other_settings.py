@@ -16613,7 +16613,7 @@ def _create_debug_controls_section(self, parent_frame):
         show_cmd_btn.setToolTip(
             "Compiled builds only (running from source always has its terminal).\n"
             "On: a console window is always shown.\n"
-            "Off: the console appears only while the manga translator runs."
+            "Off: no console window."
         )
 
         def _style_show_cmd_btn(on):

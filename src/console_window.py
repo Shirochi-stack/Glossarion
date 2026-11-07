@@ -4,8 +4,9 @@
 Every Windows spec builds the exe without a console (``console=False``). The GUI process opens
 one itself with AllocConsole (owner request, 2026-11-07):
 
-* always, from startup, when Other Settings > Debug Controls > "Show CMD" (``show_cmd``) is on;
-* otherwise only while a manga translation runs: shown when the run starts, hidden when it ends.
+* only when Other Settings > Debug Controls > "Show CMD" (``show_cmd``) is on, from startup or as soon
+  as it is switched on. Manga runs no longer open it (owner, 2026-11-08: "the user doesn't really need
+  to see the CMD, if they want to, they can enable the CMD toggle in other settings").
 
 Once opened the console is kept and only hidden / shown again, because worker processes started
 meanwhile may be attached to it. Python's ``print`` and the C-level output of native libraries
@@ -55,7 +56,7 @@ _HELPER_FLAGS = (
 )
 
 _lock = threading.RLock()
-_state = {"started": False, "show_cmd": False, "manga": False, "allocated": False}
+_state = {"started": False, "show_cmd": False, "allocated": False}
 _streams = []          # the stand-in streams startup put on sys.stdout / sys.stderr
 _ctrl_handler = None   # keeps the ctypes callback alive
 _libs = {}
@@ -318,7 +319,7 @@ def _apply():
     with _lock:
         if not _state["started"]:
             return False
-        if _state["show_cmd"] or _state["manga"]:
+        if _state["show_cmd"]:
             if not _allocate():
                 return False
             return _show(SW_SHOWNOACTIVATE)
@@ -428,9 +429,3 @@ def set_show_cmd(enabled):
         _state["show_cmd"] = bool(enabled)
         return _apply()
 
-
-def set_manga_running(running):
-    """Show the console while a manga run is active and hide it again when it ends."""
-    with _lock:
-        _state["manga"] = bool(running)
-        return _apply()

@@ -1517,8 +1517,11 @@ class CompactImageViewer(QGraphicsView):
         """Forward keyboard events to parent widget for navigation"""
         from PySide6.QtCore import Qt
         
-        # Forward left/right arrow keys to parent for image navigation
-        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+        # Forward left/right arrow keys to parent for image navigation; Delete too (deletes the
+        # selected box there), unless a box's text is being typed into
+        scene = self.scene()
+        typing = scene is not None and scene.focusItem() is not None
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) or (event.key() == Qt.Key.Key_Delete and not typing):
             if self.parent():
                 # Forward to parent widget
                 self.parent().keyPressEvent(event)
@@ -1856,7 +1859,8 @@ class MangaImagePreviewWidget(QWidget):
             hover="#2d7696",
             pressed="#19475d",
         )
-        self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # Fill the toolbar row's height instead of sitting short in it
+        self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.import_ocr_btn.setFixedWidth(86)
         self.import_ocr_btn.setMinimumHeight(32)
         self.import_ocr_btn.setToolTip("Import an OCR and translated-text editing session")
@@ -1870,7 +1874,8 @@ class MangaImagePreviewWidget(QWidget):
             hover="#338b5d",
             pressed="#1d5739",
         )
-        self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # Fill the toolbar row's height instead of sitting short in it
+        self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.export_ocr_btn.setFixedWidth(86)
         self.export_ocr_btn.setMinimumHeight(32)
         self.export_ocr_btn.setToolTip("Export OCR text, translated text, and region mappings")
@@ -3150,6 +3155,12 @@ class MangaImagePreviewWidget(QWidget):
         # Right arrow key - next image
         elif event.key() == Qt.Key.Key_Right:
             self._navigate_to_next_image()
+            event.accept()
+            return
+
+        # Delete key - the 🗑 Delete Selected button's action (shown while manual editing is on)
+        elif event.key() == Qt.Key.Key_Delete and self.manual_editing_enabled:
+            self.viewer.delete_selected_rectangle()
             event.accept()
             return
         

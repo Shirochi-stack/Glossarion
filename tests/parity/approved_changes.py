@@ -4164,6 +4164,51 @@ _INPAINT_API_EDITOR = [
 ]
 
 
+_DEL_KEY_IMPORT_EXPORT_PREVIEW = [
+    (
+        '        self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)\n'
+        ,
+        "        # Fill the toolbar row's height instead of sitting short in it\n"
+        '        self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)\n'
+    ),
+    (
+        '        self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)\n'
+        ,
+        "        # Fill the toolbar row's height instead of sitting short in it\n"
+        '        self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)\n'
+    ),
+    (
+        '        # Forward left/right arrow keys to parent for image navigation\n'
+        '        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):\n'
+        ,
+        '        # Forward left/right arrow keys to parent for image navigation; Delete too (deletes the\n'
+        "        # selected box there), unless a box's text is being typed into\n"
+        '        scene = self.scene()\n'
+        '        typing = scene is not None and scene.focusItem() is not None\n'
+        '        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) or (event.key() == Qt.Key.Key_Delete and not typing):\n'
+    ),
+    (
+        '            self._navigate_to_next_image()\n'
+        '            event.accept()\n'
+        '            return\n'
+        '        \n'
+        '        # Pass other keys to parent\n'
+        ,
+        '            self._navigate_to_next_image()\n'
+        '            event.accept()\n'
+        '            return\n'
+        '\n'
+        "        # Delete key - the 🗑 Delete Selected button's action (shown while manual editing is on)\n"
+        '        elif event.key() == Qt.Key.Key_Delete and self.manual_editing_enabled:\n'
+        '            self.viewer.delete_selected_rectangle()\n'
+        '            event.accept()\n'
+        '            return\n'
+        '        \n'
+        '        # Pass other keys to parent\n'
+    ),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5694,6 +5739,25 @@ APPROVED = (
         "source": {
             "src/manga_integration.py": _INPAINT_API_MANGA_INTEGRATION + _INPAINT_API_RUNNER,
             "src/ImageRenderer.py": _INPAINT_API_EDITOR,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-08",
+        "what": "Manga runs no longer show the console (owner: 'just remove it'); only Other Settings Show CMD "
+                "opens it. The 2026-11-07 start / reset toggles and _set_console_visible are removed again",
+        "source": {
+            "src/manga_integration.py": [(new, old) for old, new in _CONSOLE_WINDOW_MANGA],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-08",
+        "what": "Manga preview: Del deletes the selected box while Manual Editing is on (the Delete "
+                "Selected button's action, not while typing in a box); Import / Export fill the toolbar "
+                "row's height",
+        "source": {
+            "src/manga_image_preview.py": _DEL_KEY_IMPORT_EXPORT_PREVIEW,
         },
         "values": {},
     },

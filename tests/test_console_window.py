@@ -63,9 +63,8 @@ def test_source_runs_never_touch_the_console(monkeypatch, win):
     monkeypatch.delattr(sys, "frozen", raising=False)
     _set_show_cmd(config, True)
     assert console_window.startup(config_path=str(config)) is False
-    console_window.set_manga_running(True)
     console_window.set_show_cmd(True)
-    console_window.set_manga_running(False)
+    console_window.set_show_cmd(False)
     assert calls == []
 
 
@@ -75,28 +74,26 @@ def test_off_windows_nothing_is_managed(monkeypatch, win):
     assert console_window.managed() is False
 
 
-def test_no_console_at_startup_and_one_only_while_manga_runs(monkeypatch, win):
+def test_no_console_unless_show_cmd_is_on(monkeypatch, win):
+    """Owner, 2026-11-08: manga runs no longer open the console; only the Show CMD toggle does."""
     calls, config = win
     _frozen(monkeypatch)
     assert console_window.startup(config_path=str(config)) is False
     assert calls == ["streams"]                       # nothing allocated at startup
-    console_window.set_manga_running(True)
-    console_window.set_manga_running(False)
-    console_window.set_manga_running(True)
-    console_window.set_manga_running(False)
+    assert not hasattr(console_window, "set_manga_running")
+    console_window.set_show_cmd(True)
+    console_window.set_show_cmd(False)
+    console_window.set_show_cmd(True)
     # allocated once, then hidden / shown again instead of freed
-    assert calls == ["streams", "alloc", SHOW, HIDE, SHOW, HIDE]
+    assert calls == ["streams", "alloc", SHOW, HIDE, SHOW]
 
 
-def test_show_cmd_opens_it_at_startup_and_keeps_it_after_manga(monkeypatch, win):
+def test_show_cmd_opens_it_at_startup(monkeypatch, win):
     calls, config = win
     _frozen(monkeypatch)
     _set_show_cmd(config, True)
     assert console_window.startup(config_path=str(config)) is True
-    console_window.set_manga_running(True)
-    console_window.set_manga_running(False)
-    assert calls == ["streams", "alloc", SHOW, SHOW, SHOW]
-    assert HIDE not in calls
+    assert calls == ["streams", "alloc", SHOW]
 
 
 def test_toggling_show_cmd_takes_effect_immediately(monkeypatch, win):
@@ -106,12 +103,6 @@ def test_toggling_show_cmd_takes_effect_immediately(monkeypatch, win):
     console_window.set_show_cmd(True)
     console_window.set_show_cmd(False)
     assert calls == ["streams", "alloc", SHOW, HIDE]
-    # turning it off during a manga run keeps the console until the run ends
-    del calls[:]
-    console_window.set_manga_running(True)
-    console_window.set_show_cmd(False)
-    console_window.set_manga_running(False)
-    assert calls == [SHOW, SHOW, HIDE]
 
 
 def test_turning_show_cmd_off_before_any_console_does_nothing(monkeypatch, win):
@@ -140,7 +131,6 @@ def test_helper_processes_never_open_or_toggle_a_console(monkeypatch, win, flag)
     _frozen(monkeypatch, ["Glossarion.exe", flag, "job.json"])
     _set_show_cmd(config, True)
     assert console_window.startup(config_path=str(config)) is False
-    console_window.set_manga_running(True)
     console_window.set_show_cmd(True)
     assert calls == []
 
@@ -150,7 +140,7 @@ def test_failed_allocation_shows_nothing(monkeypatch, win):
     _frozen(monkeypatch)
     console_window.startup(config_path=str(config))
     monkeypatch.setattr(console_window, "_allocate", lambda: False)
-    assert console_window.set_manga_running(True) is False
+    assert console_window.set_show_cmd(True) is False
     assert calls == ["streams"]
 
 
@@ -297,19 +287,11 @@ def test_gui_starts_it_after_every_helper_dispatch_and_before_the_gui_imports():
     assert text.index("_console_window.attach_worker()") < text.index("multiprocessing.freeze_support()")
 
 
-def test_manga_start_and_reset_toggle_it():
+def test_manga_runs_do_not_open_the_console():
+    """Owner, 2026-11-08: "just remove it" (the console a manga run opened)."""
     source = _read("manga_integration.py")
-    tree = ast.parse(source)
-    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-
-    def toggles(name):
-        return [c.args[0].value for c in ast.walk(funcs[name]) if isinstance(c, ast.Call)
-                and getattr(c.func, "attr", "") == "_set_console_visible"]
-
-    assert toggles("_start_translation") == [True]
-    assert toggles("_reset_ui_state") == [False]
-    helper = ast.get_source_segment(source, funcs["_set_console_visible"])
-    assert "console_window.set_manga_running(running)" in helper
+    assert "_set_console_visible" not in source
+    assert "set_manga_running" not in source
 
 
 def test_show_cmd_is_a_toggle_button_next_to_debug_mode():

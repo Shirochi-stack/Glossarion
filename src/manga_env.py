@@ -185,6 +185,20 @@ class MangaEnvMixin:
             return str(entry.get('api_key') or '').strip() or 'own-auth'
         return ''
 
+    def _manga_pool_models(self):
+        """Models of the usable translation key pool entries (in pool order, no repeats) when the
+        multi-key pool is on; [] when it is off or has no usable entry."""
+        config = getattr(self.main_gui, 'config', None) or {}
+        if not config.get('use_multi_api_keys'):
+            return []
+        try:
+            from unified_api_client import UnifiedClient as _UC
+            models = [str(entry.get('model')).strip() for entry in (config.get('multi_api_keys') or [])
+                      if _UC._key_data_is_usable(entry)]
+        except Exception:
+            return []
+        return list(dict.fromkeys(models))
+
     def _prepare_manga_run_env(self, start_token=None):
         """Run start: thread limits, OCR config + credentials, API client and key pools,
         Vision keys, custom-api OCR env (split verbatim from ``_start_translation_heavy``, U8).
@@ -434,12 +448,15 @@ class MangaEnvMixin:
         needs_new_client = False
         self._log("🔎 Checking API client...", "debug")
         
+        # With the translation key pool on, requests go to its keys, so name the pool's model(s)
+        pool_models = self._manga_pool_models()
+        model_label = f"{', '.join(pool_models)} (translation key pool)" if pool_models else model
         if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
             needs_new_client = True
-            self._log(f"🛠 Creating new API client with model: {model}", "info")
+            self._log(f"🛠 Creating new API client with model: {model_label}", "info")
         elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
             needs_new_client = True
-            self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
+            self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model_label}, creating new client", "info")
         else:
             self._log("♻️ Reusing existing API client", "debug")
         
@@ -450,15 +467,14 @@ class MangaEnvMixin:
                 use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
                 mk_list = self.main_gui.config.get('multi_api_keys', [])
                 if use_mk and mk_list:
-                    # Validate multi-key configuration before applying
-                    valid_keys = 0
-                    for key_data in mk_list:
-                        if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):
-                            valid_keys += 1
-                    
+                    # Validate multi-key configuration before applying: an entry needs a model, and a key
+                    # unless its model signs in without one (authgpt/, authcd/, authgem/...)
+                    from unified_api_client import UnifiedClient as _UC
+                    valid_keys = sum(1 for key_data in mk_list if _UC._key_data_is_usable(key_data))
+
                     if valid_keys == 0:
                         self._log("❌ Multi-key mode is enabled but no valid keys are configured!", "error")
-                        self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
+                        self._log("   Each key needs a model, and an API key unless the model signs in without one.", "error")
                         self._log("   Please check your multi-key configuration in Settings.", "error")
                         self._stop_startup_heartbeat()
                         self._reset_ui_state(start_token)
