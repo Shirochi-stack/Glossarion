@@ -59,7 +59,7 @@
             <li>Every strip went through Glossarion's manga translator: it found the speech bubbles and captions, read the Korean, removed it from the art and lettered the English back in.</li>
             <li>The translation used a glossary of the cast's names and the story's terms (drafted by Glossarion's glossary generator from the strips, then corrected by hand), sent the page images along with the text, and ran on <code>gpt-6.1-sol</code> with the <code>Manga_KR</code> prompt. Text removal used Gemini Nano Banana.</li>
             <li>The sound-effect boxes were loaded with the editor's Import OCR, since several are drawn into the art; everything else was found by Glossarion's own bubble detection.</li>
-            <li>76 lines were then corrected by hand in Glossarion's editor (missing text, mistranslations, glossary terms and character voices) and the pages were rendered again there. Everything else is the tool's output.</li>
+            <li>76 lines were then corrected by hand in Glossarion's editor (missing text, mistranslations, glossary terms and character voices), and a second hand pass rewrote 194 lines for natural English and each character's voice. Both passes were rendered again in the editor. Everything else is the tool's output.</li>
             <li>Sound effects stay in romanized Korean, as the <code>Manga_KR</code> prompt asks. Some lettering is smaller than its bubble allows, and a few bubbles show faint traces of the removed text.</li>
           </ul>
         </div>
