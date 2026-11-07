@@ -11,6 +11,7 @@ Run from src/mobile (mobile venv):
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import time
@@ -81,7 +82,8 @@ def test_the_progress_line_shows_the_prompt_being_read_then_the_tokens_written(m
     reading = [line for line in beats if "processing" in line]
     written = [line for line in beats if "tokens written" in line]
     assert reading and written and beats.index(reading[-1]) < beats.index(written[0])
-    assert not any("0 tokens" in line or "0.0 tok/s" in line for line in reading)
+    # whole numbers only: a real rate such as "(2910.0 tok/s)" ends in "0.0 tok/s" (CI run 42379983826)
+    assert not any(re.search(r"(?<![\d,.])0 tokens|(?<![\d,.])0\.0 tok/s", line) for line in reading)
     assert any("of ~1,536 tokens" in line for line in reading)  # the prompt's progress, not "0 tokens"
     assert all(line.endswith("4 threads, CPUs 0-7, cpuset /moderate") for line in beats)
     assert "4 tokens written" in written[-1]

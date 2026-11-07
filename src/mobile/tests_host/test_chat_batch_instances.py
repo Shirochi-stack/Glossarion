@@ -128,7 +128,11 @@ def test_chat_batch_maps_files_to_instances_and_starts_one_job_each(desktop_stor
             assert jobs.instances == [1, 2]
             assert [tuple(spec.inputs) for spec in jobs.submitted] == [(files[0],), (files[1], files[2])]
             assert library.saved == [{files[0]: 1, files[1]: 2, files[2]: 2}]
-            text = chat.adapter.messages("2")[-1][1]
+            # The history save (debounced, 10 ms here) externalises an assistant body into
+            # ``Chat Messages/NNNNNN-response.md`` and blanks the inline text, so read the card's body the
+            # way the transcript does (``message_text``), after a save so the file path is the one checked.
+            chat.adapter.flush()
+            text = chat.adapter.message_text("2", len(chat.adapter.messages("2")) - 1)
             assert "**Instance 1:** a.epub" in text and "**Instance 2:** b.epub, c.epub" in text
             assert "2 parallel jobs" in text
         finally:

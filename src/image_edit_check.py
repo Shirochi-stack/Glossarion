@@ -39,6 +39,15 @@ INNER_MARGIN = 0.15
 INK_CONTRAST = 48
 #: Window of the local-background median (wider than a glyph stroke).
 BACKGROUND_WINDOW = 21
+#: Translate prompts (``same_lettering``): the source lettering counts as still drawn only when the
+#: edit's pixels there match the source's (normalised cross-correlation, best of the shifts within
+#: ``LETTERING_SHIFT`` px, both softened by ``LETTERING_BLUR``) at least this well. Text the model left
+#: in place keeps 0.9-1.0 even resampled and softened; text it redrew translated (new letters over the
+#: old ones' place, whose ink overlaps the old strokes) scores about 0.3 (the owner's adventurer card), up
+#: to about 0.55 for lines of Latin letters on the same baselines.
+SAME_LETTERING_SIMILARITY = 0.75
+LETTERING_SHIFT = 3
+LETTERING_BLUR = 1.5
 
 
 def _cv2():
@@ -152,13 +161,41 @@ def register_to_source(source, edited, text_mask, *, max_shift_fraction=0.08, ma
 # text left in place
 # ---------------------------------------------------------------------------
 
+def lettering_similarity(source, edited, box, *, shift=LETTERING_SHIFT, blur=LETTERING_BLUR):
+    """How well ``edited`` still shows the lettering ``source`` has in ``box`` (x, y, w, h): the best
+    normalised cross-correlation of the two grey crops over shifts of up to ``shift`` px, both softened
+    by a Gaussian of ``blur`` px (the model's resampling). 1.0 = the same letters; a redraw in other
+    letters (a translation) or an emptied area scores low. None when the box is too small or flat."""
+    cv2 = _cv2()
+    x, y, w, h = (int(v) for v in box)
+    height, width = source.shape[:2]
+    x0, y0 = max(0, x - shift), max(0, y - shift)
+    x1, y1 = min(width, x + w + shift), min(height, y + h + shift)
+    if x1 - x0 <= 2 * shift + 4 or y1 - y0 <= 2 * shift + 4:
+        return None
+    src = cv2.GaussianBlur(_gray(source)[y0:y1, x0:x1].astype(np.float32), (0, 0), blur)
+    out = cv2.GaussianBlur(_gray(edited)[y0:y1, x0:x1].astype(np.float32), (0, 0), blur)
+    template = src[shift:-shift, shift:-shift]
+    if float(template.std()) < 1.0:
+        return None
+    if float(out.std()) < 1.0:
+        return 0.0  # emptied
+    return float(cv2.matchTemplate(out, template, cv2.TM_CCOEFF_NORMED).max())
+
+
 def unremoved_text_mask(source, edited, text_mask, *, kept_threshold=KEPT_INK_THRESHOLD,
-                        min_stroke_pixels=MIN_STROKE_PIXELS):
+                        min_stroke_pixels=MIN_STROKE_PIXELS, same_lettering=False):
     """Return ``(failed_mask, stats)`` for the text-mask components whose ink is still there.
 
     ``failed_mask`` is a uint8 mask (255 = component whose text the edit left). ``stats`` lists
     one dict per judged component: ``bbox`` (x, y, w, h), ``strokes``, ``kept`` (share of
     source strokes still drawn) and ``failed``.
+
+    ``same_lettering`` (a translate image edit prompt, which asks the model to redraw some text in
+    the target language): ink in the component's place is not enough, the source's own letters must
+    still be drawn there (``lettering_similarity`` at least ``SAME_LETTERING_SIMILARITY``, added to
+    the stats as ``similarity``). A card whose Korean the model replaced with English keeps most of
+    its ink where the old strokes were, but not the same letters, so it passes.
     """
     cv2 = _cv2()
     mask = _binary(text_mask)
@@ -192,9 +229,18 @@ def unremoved_text_mask(source, edited, text_mask, *, kept_threshold=KEPT_INK_TH
         kept = int(np.count_nonzero(kept_px[y:y + bh, x:x + bw] & strokes[y:y + bh, x:x + bw] & judged))
         share = kept / float(stroke_count)
         is_failed = share >= kept_threshold
+        entry = {'bbox': (x, y, bw, bh), 'strokes': stroke_count, 'kept': share}
+        if is_failed and same_lettering:
+            ys, xs = np.nonzero(judged)
+            inner_box = (x + int(xs.min()), y + int(ys.min()),
+                         int(xs.max() - xs.min()) + 1, int(ys.max() - ys.min()) + 1)
+            similarity = lettering_similarity(source, edited, inner_box)
+            entry['similarity'] = similarity
+            is_failed = similarity is None or similarity >= SAME_LETTERING_SIMILARITY
         if is_failed:
             failed[y:y + bh, x:x + bw][component] = 255
-        stats.append({'bbox': (x, y, bw, bh), 'strokes': stroke_count, 'kept': share, 'failed': is_failed})
+        entry['failed'] = is_failed
+        stats.append(entry)
     return failed, stats
 
 

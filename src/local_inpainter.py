@@ -3013,18 +3013,21 @@ class LocalInpainter:
         """Undo the edit where the text inside the mask is still there.
 
         For each text component whose source lettering is still drawn in ``result``, the
-        area the edit changed around it gets the source art back. That text is then
-        cleaned once by ``_image_edit_local_fallback`` (the configured local inpainter,
-        set by the manga translator) when one is available. Otherwise the text stays as
-        drawn and ``last_image_edit_unremoved_mask`` marks it, so the caller does not
-        letter a translation over it.
+        area the edit changed around it gets the source art back, and
+        ``last_image_edit_unremoved_mask`` marks it so the caller does not letter a
+        translation over it. No local inpainter (LaMa / AOT / ...) cleans it instead: the
+        owner wants the image edit's quality everywhere, so a text the image edit missed stays
+        as drawn. Under a translate prompt (``{target_lang}``) the check looks for the source's
+        own letters, not for ink: a sign or card the model redrew translated has new ink where
+        the old letters were and is kept (``unremoved_text_mask(same_lettering=True)``).
         """
         log = log or self._log
         self.last_image_edit_unremoved_mask = None
         mask = self._without_unchecked_regions(mask)
         try:
             from image_edit_check import unremoved_text_mask, edit_footprint
-            failed, stats = unremoved_text_mask(image, result, mask)
+            failed, stats = unremoved_text_mask(
+                image, result, mask, same_lettering=self._custom_image_edit_translates_text())
         except Exception as exc:
             logger.warning(f"Custom image edit text check skipped: {exc}")
             return result
@@ -3041,25 +3044,10 @@ class LocalInpainter:
         footprint, redo = edit_footprint(image, result, failed, mask)
         patched = result.copy()
         patched[footprint] = image[footprint]
-        fallback = getattr(self, '_image_edit_local_fallback', None)
-        if callable(fallback):
-            try:
-                cleaned = fallback(patched, redo)
-            except Exception as exc:
-                log(f"Local inpainter fallback failed: {exc}", "warning")
-                cleaned = None
-            if isinstance(cleaned, np.ndarray) and cleaned.shape == image.shape:
-                area = cv2.dilate(redo, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))) > 0
-                patched[area] = cleaned[area]
-                log(
-                    f"Cleaned {len(failed_stats)} region(s) the image edit missed with the local inpainter",
-                    "info",
-                )
-                return patched
         self.last_image_edit_unremoved_mask = redo
         log(
             f"Kept the original art for {len(failed_stats)} region(s) the image edit missed "
-            "(no local inpainter fallback); they will not be lettered",
+            "(no local inpainter fallback with the image edit); they will not be lettered",
             "warning",
         )
         return patched

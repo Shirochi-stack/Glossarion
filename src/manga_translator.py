@@ -11318,44 +11318,6 @@ class MangaTranslator:
             return False
 
 
-    #: Local inpainters tried, in this order, for text an image edit left in place: the
-    #: first one whose model file is configured and present is used (ONNX first: no torch).
-    _IMAGE_EDIT_FALLBACK_METHODS = ('anime_onnx', 'lama_onnx', 'aot_onnx', 'anime', 'lama', 'aot', 'mat')
-    _image_edit_fallback_inpainters = {}
-    _image_edit_fallback_lock = threading.Lock()
-
-    def _image_edit_fallback_model(self):
-        """(method, model path) of the configured local inpainter, or (None, None)."""
-        cfg = getattr(getattr(self, 'main_gui', None), 'config', None)
-        if not isinstance(cfg, dict):
-            return None, None
-        inpainting = (cfg.get('manga_settings') or {}).get('inpainting') or {}
-        for method in self._IMAGE_EDIT_FALLBACK_METHODS:
-            for path in (cfg.get(f'manga_{method}_model_path'), inpainting.get(f'{method}_model_path')):
-                if path and os.path.isfile(str(path)):
-                    return method, str(path)
-        return None, None
-
-    def _image_edit_local_fallback(self, image, mask):
-        """Clean ``mask`` with the configured local inpainter; None when there is none."""
-        method, path = self._image_edit_fallback_model()
-        if not method:
-            return None
-        key = (method, os.path.normcase(os.path.abspath(path)))
-        with MangaTranslator._image_edit_fallback_lock:
-            inp = MangaTranslator._image_edit_fallback_inpainters.get(key)
-            if inp is None:
-                from local_inpainter import LocalInpainter
-                inp = LocalInpainter(enable_worker_process=False)
-                inp.load_model(method, path)
-                if not getattr(inp, 'model_loaded', False):
-                    inp = False  # do not reload a model that failed to load for every page
-                MangaTranslator._image_edit_fallback_inpainters[key] = inp
-            if not inp:
-                return None
-            self._log(f"   🩹 Local inpainter fallback: {method} ({os.path.basename(path)})", "info")
-            return inp.inpaint(image, mask)
-
     def _restore_art_of_unreadable_regions(self, source, cleaned, regions) -> int:
         """Put the source art back, in place in ``cleaned``, where a region's translation is
         only a placeholder ("[Illegible upside-down text]"): the region is not lettered, so its
@@ -11523,13 +11485,11 @@ class MangaTranslator:
             self._apply_custom_image_edit_request_config(inp_obj)
             previous_callback = getattr(inp_obj, 'log_callback', None)
             inp_obj.set_log_callback(self._log)
-            # Text the image edit leaves in place is cleaned once by the configured
-            # local inpainter; what stays is reported so it is not lettered over.
-            inp_obj._image_edit_local_fallback = self._image_edit_local_fallback
+            # Text the image edit leaves in place keeps its source art (no local inpainter
+            # fallback with the image edit); it is reported so it is not lettered over.
             try:
                 edited = inp_obj.inpaint(image, mask, **inpaint_kwargs)
             finally:
-                inp_obj._image_edit_local_fallback = None
                 inp_obj.set_log_callback(previous_callback)
             self._remember_text_left_by_image_edit(
                 edited, getattr(inp_obj, 'last_image_edit_unremoved_mask', None)
@@ -17021,7 +16981,13 @@ class MangaTranslator:
                 output_path = f"{base}_translated{ext}"
             
             cv2.imwrite(output_path, final_image)
-            
+
+            # The cleaned page beside it, as the single-page path saves it: the editor renders an edited
+            # box on this run's cleaned page (the image edit's redraw), not on an older Clean's.
+            cleaned_image_path = self._save_webtoon_cleaned_image(image, inpainted, output_path)
+            if cleaned_image_path:
+                result['cleaned_image_path'] = cleaned_image_path
+
             result['output_path'] = output_path
             result['regions'] = [r.to_dict() for r in unique_regions]
             result['success'] = True
@@ -17036,6 +17002,30 @@ class MangaTranslator:
             self._log(f"❌ {error_msg}", "error")
             result['errors'].append(error_msg)
             return result
+
+    def _save_webtoon_cleaned_image(self, image, inpainted, output_path):
+        """Save the webtoon run's cleaned page as ``<output>_cleaned<ext>`` (the path the single-page run
+        uses and the editor's ``_resolve_cleaned_image_for_render`` finds); returns it, or None when
+        nothing was cleaned (no file is written or removed then)."""
+        if not output_path or not isinstance(inpainted, np.ndarray):
+            return None
+        base, ext = os.path.splitext(output_path)
+        cleaned_path = f"{base}_cleaned{ext}"
+        try:
+            if inpainted.shape == image.shape and np.array_equal(inpainted, image):
+                return None
+            params = {'.png': [cv2.IMWRITE_PNG_COMPRESSION, 0], '.jpg': [cv2.IMWRITE_JPEG_QUALITY, 100],
+                      '.jpeg': [cv2.IMWRITE_JPEG_QUALITY, 100], '.webp': [cv2.IMWRITE_WEBP_QUALITY, 100]}
+            ok, encoded = cv2.imencode(ext or '.png', inpainted, params.get(ext.lower(), []))
+            if not ok:
+                return None
+            with open(cleaned_path, 'wb') as handle:  # also a non-ASCII path (cv2.imwrite is not)
+                handle.write(encoded.tobytes())
+            self._log(f"Saved cleaned image (webtoon): {os.path.basename(cleaned_path)}", "info")
+            return cleaned_path
+        except Exception as exc:
+            self._log(f"WARNING: Failed to save webtoon cleaned image: {exc}", "warning")
+            return None
 
     def _detect_webtoon_chunk_regions(self, image_path: str):
         """Detect the text of a tall webtoon strip chunk by chunk.

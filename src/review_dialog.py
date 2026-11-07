@@ -93,8 +93,8 @@ def build_prompt_profile_row(label, object_prefix, tooltip, actions, on_select):
     combo.setEditable(True)
     combo.setInsertPolicy(QComboBox.NoInsert)
     combo.setCompleter(None)
-    combo.setMinimumWidth(220)
-    combo.setMaximumWidth(420)
+    combo.setMinimumWidth(PROMPT_PROFILE_COMBO_MIN_WIDTH)
+    combo.setMaximumWidth(PROMPT_PROFILE_COMBO_MAX_WIDTH)
     combo.lineEdit().setPlaceholderText("Profile name")
     combo.setToolTip(tooltip)
     combo.setFocusPolicy(Qt.StrongFocus)
@@ -136,6 +136,24 @@ def build_prompt_profile_row(label, object_prefix, tooltip, actions, on_select):
     return row, combo, buttons
 
 
+#: The profile combo's width bounds (px): ``fit_prompt_profile_combo_width`` sizes it to its longest name.
+PROMPT_PROFILE_COMBO_MIN_WIDTH = 220
+PROMPT_PROFILE_COMBO_MAX_WIDTH = 420
+
+
+def fit_prompt_profile_combo_width(combo):
+    """Give the profile combo a minimum width that shows its longest name whole ("Translate SFX + background
+    text" was cut off at the left in the editable name field): the text, the item icon, the drop-down
+    arrow and the frame / padding, within ``PROMPT_PROFILE_COMBO_MIN_WIDTH``..``PROMPT_PROFILE_COMBO_MAX_WIDTH``."""
+    metrics = combo.fontMetrics()
+    names = [combo.itemText(index) for index in range(combo.count())] + [combo.currentText()]
+    text = max((metrics.horizontalAdvance(name) for name in names if name), default=0)
+    icon = combo.iconSize().width() + 6 if any(not combo.itemIcon(i).isNull() for i in range(combo.count())) else 0
+    width = text + icon + 18 + 36  # drop-down arrow (style sheet: 18 px) + frame, padding and caret room
+    combo.setMinimumWidth(max(PROMPT_PROFILE_COMBO_MIN_WIDTH, min(PROMPT_PROFILE_COMBO_MAX_WIDTH, width)))
+    return combo.minimumWidth()
+
+
 def refresh_prompt_profile_row(combo, buttons, profiles, reset_tooltip, delete_tooltip):
     """Show ``profiles`` (a ``prompt_profiles.PromptSetProfiles``) in the row: its names with the Halgakos
     icon, the selected one, and Delete as ↺ Reset for a built-in (``reset_tooltip`` takes ``{name}``)."""
@@ -153,6 +171,7 @@ def refresh_prompt_profile_row(combo, buttons, profiles, reset_tooltip, delete_t
             for index in range(combo.count()):
                 combo.setItemIcon(index, icon)
             combo.setIconSize(QSize(18, 18))
+        fit_prompt_profile_combo_width(combo)
     finally:
         combo.blockSignals(blocked)
     button = buttons.get('delete')
