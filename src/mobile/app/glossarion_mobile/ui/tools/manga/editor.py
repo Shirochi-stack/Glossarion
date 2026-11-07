@@ -15,11 +15,14 @@ same code the desktop preview runs):
 * The page sits in an ``InteractiveViewer`` (pinch zoom 1-8x, pan) with its box overlay in the
   same transformed ``Stack(Image, canvas.Canvas, GestureDetector)``, so the boxes stay on the
   image at every zoom; the viewer (and its zoom) is kept across the tools. The page is always the
-  viewer's full width and does not move at 1x unless it is taller than the viewer. **Pan** mode:
-  the viewer pans and zooms. **Edit** modes (the zoom stays where Pan left it): Select/Move (drag
-  a box or its top-left move handle; its bottom-right handle resizes; the handles show in this
-  tool only), Box, Circle and Lasso; Delete and Exclude from Clean act on the selected box. A
-  box stays selected until another box is picked, ✕ / Back, or Select/Move is left. A moved
+  viewer's full width and does not move at 1x unless it is taller than the viewer. **Pan / move**
+  (the default tool; owner 2026-11-07: one tool instead of Pan / zoom + Select / move, since a box
+  is only touched to move it): a drag that starts on a box (or on the selected box's top-left move
+  / bottom-right resize handle) moves / resizes that box, a drag on the empty page pans it and a
+  pinch zooms (the viewer's own gestures), a tap on a box selects it; the handles show in this
+  tool only. **Drawing** tools (the zoom stays where Pan / move left it): Box, Circle and Lasso;
+  Delete and Exclude from Clean act on the selected box. A box stays selected until another box
+  is picked, ✕ / Back, or Pan / move is left for a drawing tool. A moved
   translated box carries its rendered text along at once (a deleted one's text is covered at
   once); the page is re-rendered a moment after the last move / delete (the desktop's
   rectangle-moved auto save, ``rerender_boxes``: the moved boxes at their new places).
@@ -29,7 +32,7 @@ same code the desktop preview runs):
   the job thread. Box edits (add, move, resize, delete, texts, flags) are session calls on the
   io pool; editing waits while a step runs (the session runs one step at a time). A step that
   loads a model not on the device yet (detector / ONNX inpainter) offers its download first.
-* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` pinned to the
+* **The selected box** (tap or long-press it) → ``BoxPanel`` pinned to the
   bottom of the viewer, just above the step row (a box the panel would cover is scrolled up above
   it; a box at the bottom of the page gets blank room under the page; the page keeps its size): OCR and
   Translated tabs, each text edited in place, and Move (exact position / size, nudges). The toolbar's ⋯ holds Share, Import OCR
@@ -63,19 +66,21 @@ from glossarion_mobile.ui.tools.manga.box_sheet import COMPACT_BUTTON, ITERATION
 from glossarion_mobile.ui.tools.manga.common import JobEnds, MangaTab, export_sheet, font_choices, push
 from glossarion_mobile.ui.tools.manga.models import ensure_models
 
-__all__ = ["EditorTab", "Geometry", "PageLayout", "TOOLS", "VIEWS", "ViewTransform", "crop_patches", "handle_at",
+__all__ = ["EditorTab", "Geometry", "PageLayout", "TOOLS", "VIEWS", "ViewTransform", "crop_patches", "drag_handlers",
+           "handle_at",
            "hit_test", "lasso_bounds", "next_view", "normalize_rect", "place_box"]
 
 log = logging.getLogger("glossarion.tools.manga")
 
 #: (tool id, label, icon, disabled reason)
 TOOLS = (
-    ("pan", "Pan / zoom", "PAN_TOOL", None),
-    ("select", "Select / move", "OPEN_WITH", None),
+    ("pan", "Pan / move", "PAN_TOOL", None),
     ("box", "Box", "CROP_SQUARE", None),
     ("circle", "Circle", "CIRCLE_OUTLINED", None),
     ("lasso", "Lasso", "GESTURE", None),
 )
+#: Tool ids of earlier builds and what they are now: Select / move was merged into Pan / move.
+LEGACY_TOOLS = {"select": "pan"}
 STEP_BUTTONS = (("detect", "Detect", "CENTER_FOCUS_STRONG"), ("clean", "Clean", "CLEANING_SERVICES"),
                 ("recognize", "Recognize", "DOCUMENT_SCANNER"), ("translate", "Translate", "TRANSLATE"),
                 ("translate_all", "Translate all", "LIBRARY_BOOKS"), ("render", "Update overlay", "AUTO_FIX_NORMAL"))
@@ -123,7 +128,7 @@ PANEL_H = 200.0  # dp: the box panel's height until it reports its own (it only 
 #: s a programmatic pan waits after the page frame changed height: InteractiveViewer.pan clamps to
 #: the laid-out child, so a pan sent before Flutter lays out the frame with the panel's room is lost
 PAN_SETTLE = 0.15
-#: The preview toolbar's buttons (display mode, five tools, Delete / Exclude / Clear, ⋯): ten
+#: The preview toolbar's buttons (display mode, four tools, Delete / Exclude / Clear, Share): nine
 #: TOOL_BUTTON-wide buttons and a TOOL_DIVIDER fit the 356 dp a 360 dp phone leaves (GUTTER), so
 #: none scrolls off the right edge (a 48 dp hit target each needed 488 dp).
 TOOL_BUTTON = 34.0
@@ -387,6 +392,18 @@ def crop_patches(translated: str, background: str, rect: tuple, image_size: tupl
     return tuple(out)
 
 
+def drag_handlers(start: Any, update: Any, end: Any) -> dict:
+    """GestureDetector handlers for a drag in any direction: a horizontal and a vertical drag
+    recognizer, never a pan one. The manga screen's ``TabBarView`` swipes between its tabs with a
+    horizontal drag recognizer that accepts after kTouchSlop (18 dp), a pan recognizer only after
+    kPanSlop (36 dp), so every drag with a sideways start went to the tabs (seen on the emulator:
+    a diagonal Box / move drag never reached the editor). The deeper axis recognizers accept at the
+    same slop and first, so the editor keeps the drag; the events carry the full local position,
+    whichever axis won."""
+    return {f"on_{axis}_drag_{phase}": fn for axis in ("horizontal", "vertical")
+            for phase, fn in (("start", start), ("update", update), ("end", end))}
+
+
 def lasso_bounds(points: Sequence[tuple]) -> Optional[tuple]:
     """((x, y, w, h), polygon) of a lasso stroke in image px; None for a stroke too small to keep."""
     if len(points) < 3:
@@ -445,7 +462,11 @@ class EditorTab(MangaTab):
         # the page viewer kept across refreshes, display-mode switches and tool changes while the
         # page stays the same, so the InteractiveViewer keeps its zoom and pan
         self._source_cache: Optional[tuple] = None  # (signature, control)
-        self._surface_mode: Optional[bool] = None  # the gesture surface's mode (True: an edit tool)
+        self._surface_mode: Optional[bool] = None  # the gesture surface's mode (True: a drawing tool)
+        # Pan / move: the hit areas over the boxes and the selected box's handles, {signature: control}
+        # (kept while a box stays where it is, so a drag that started on one is never cut off)
+        self._hits: dict = {}
+        self._hit_serial = 0
         self.view_transform = ViewTransform()  # the viewer's pan / zoom (from its gestures)
         self.layout: Optional[PageLayout] = None
         self._viewport: Optional[tuple] = None  # the viewer's reported (width, height)
@@ -1082,7 +1103,7 @@ class EditorTab(MangaTab):
                     shapes.append(cv.Oval(x, y, w, h, paint=paint))
                 else:
                     shapes.append(cv.Rect(x, y, w, h, paint=paint))
-            if index == self.selected and self.tool == "select":
+            if index == self.selected and self.tool == "pan":
                 shapes.extend(self._handle_shapes(x, y, x + w, y + h))
         drag = self.drag or {}
         paint = ft.Paint(color=DRAW_COLOR, stroke_width=2, style=ft.PaintingStyle.STROKE)
@@ -1097,7 +1118,7 @@ class EditorTab(MangaTab):
         return shapes
 
     def _handle_shapes(self, left: float, top: float, right: float, bottom: float) -> list:
-        """The selected box's handles (Select / move tool only): a move icon (four arrows) on the
+        """The selected box's handles (Pan / move tool only): a move icon (four arrows) on the
         top-left corner, a resize icon (a diagonal double arrow) on the bottom-right one, the same
         size on screen at every zoom."""
         r = HANDLE / 2 / max(self.view_transform.scale, 1e-6)
@@ -1133,13 +1154,18 @@ class EditorTab(MangaTab):
         height, with no boundary margin: a page that fits does not move until it is pinch-zoomed,
         a taller one pans vertically. The floating box panel never resizes it.
 
-        Pan mode: the viewer pans and zooms, and the surface only takes long-presses (box panel):
-        a pan recognizer there would win Flutter's gesture arena against the viewer's own and
-        swallow one-finger panning. Edit modes: the viewer holds the zoom Pan left, and the surface
-        takes taps and drags. The viewer is kept (same objects, same keys, updated in place) while
-        the page stays the same, so a refresh, a display-mode switch and a tool change keep the
-        zoom; only the gesture surface is swapped (under a new key) when the mode changes. A new
-        page rebuilds it under new keys (Flet freezes a subtree re-created under an old key)."""
+        Pan / move: the viewer pans and zooms, and the surface only takes long-presses (box panel):
+        a drag recognizer there would win Flutter's gesture arena against the viewer's own and
+        swallow one-finger panning. Each gesture is routed by where it starts: over every box (and
+        the selected box's handles) sits a small hit area (``_sync_hits``, the stack's top children) with its
+        own tap / long-press / drag recognizers (``drag_handlers``), which win the arena for a
+        pointer that went down on them (the deepest recognizer accepts first); a pointer that went down on the empty page
+        only reaches the surface and the viewer, which pans it (and pinches with two fingers).
+        Drawing tools: the viewer holds the zoom Pan / move left, the surface takes taps and drags
+        and there are no hit areas. The viewer is kept (same objects, same keys, updated in place)
+        while the page stays the same, so a refresh, a display-mode switch and a tool change keep
+        the zoom; only the gesture surface is swapped (under a new key) when the mode changes. A
+        new page rebuilds it under new keys (Flet freezes a subtree re-created under an old key)."""
         geometry = self.geometry
         aspect = (geometry.image_w / geometry.image_h) if geometry.image_w and geometry.image_h else 0.7
         editing = self.tool != "pan"
@@ -1151,13 +1177,17 @@ class EditorTab(MangaTab):
             if self.page_image.src != background:  # another display mode: same viewer, same zoom
                 self.page_image.src = background
             self._set_surface(editing)
+            self._sync_hits(push_now=False)
             return cached[1]
-        # every layer fills the page-sized stack: image, shapes, then the gesture surface on top
+        # every layer fills the page-sized stack: image, shapes, the gesture surface, then the hit
+        # areas of the boxes on top
         self.canvas = cv.Canvas(shapes=[], on_resize=self._on_canvas_resize, left=0, top=0, right=0,
                                 bottom=0, key=f"me-canvas-{self._gen}")
         image = ft.Image(src=background, fit=ft.BoxFit.FILL, gapless_playback=True, left=0, top=0, right=0,
                          bottom=0, key=f"me-image-{self._gen}")
         self.page_image = image
+        self.hit_areas = []  # Pan / move: the boxes' hit areas, the top children of the stack
+        self._hits = {}
         self.stack = ft.Stack([image, self.canvas], key=f"me-stack-{self._gen}")
         self.frame = ft.Container(content=self.stack, alignment=ft.Alignment.TOP_CENTER, key=f"me-frame-{self._gen}")
         self.interactive = ft.InteractiveViewer(
@@ -1172,6 +1202,7 @@ class EditorTab(MangaTab):
         self.canvas.shapes = self._shapes()
         self._surface_mode = None
         self._set_surface(editing)
+        self._sync_hits(push_now=False)
         # the viewer's size: reported by this (not positioned) container; a size listener on the
         # positioned holder breaks the Stack's layout (Flutter's grey error box on the device)
         container = ft.Container(content=self.interactive, on_size_change=self._on_viewport_size,
@@ -1250,21 +1281,91 @@ class EditorTab(MangaTab):
             self._redraw()
 
     def _set_surface(self, editing: bool) -> None:
-        """The gesture surface for the Pan / Edit mode (a new one, under a new key, when the mode
-        changes) and the viewer's own pan / zoom (Pan mode only)."""
+        """The gesture surface for Pan / move or a drawing tool (a new one, under a new key, when the
+        mode changes) and the viewer's own pan / zoom (Pan / move only)."""
         if self._surface_mode is editing:
             return
         self._surface_mode = editing
         handlers: dict = {"on_long_press_start": self._on_long_press}
         if editing:
-            handlers.update(on_tap_down=self._on_tap, on_pan_start=self._on_pan_start,
-                            on_pan_update=self._on_pan_update, on_pan_end=self._on_pan_end)
+            handlers.update(on_tap_down=self._on_tap,
+                            **drag_handlers(self._on_pan_start, self._on_pan_update, self._on_pan_end))
         self.gestures = ft.GestureDetector(
             content=ft.Container(bgcolor=ft.Colors.TRANSPARENT), drag_interval=DRAG_INTERVAL,
             left=0, top=0, right=0, bottom=0, key=f"me-gestures-{self._gen}", **handlers)
-        self.stack.controls = [self.page_image, self.canvas, self.gestures]
+        self.stack.controls = [self.page_image, self.canvas, self.gestures, *self.hit_areas]
         self.interactive.pan_enabled = not editing
         self.interactive.scale_enabled = not editing
+
+    def _hit_rects(self) -> list:
+        """Pan / move: where a press grabs a box, in page dp (the stack's coordinates), bottom to top:
+        every box (the last drawn on top, as ``hit_test`` picks it), then the selected box's move
+        and resize handles (``handle_at``'s square reach, the same size on screen at every zoom).
+        None while a step runs (the page still pans then) or in a drawing tool."""
+        if self.tool != "pan" or not self.image_path or self.session.editor is None or self.busy:
+            return []
+        scale = self.geometry.scale
+        rects: list = []
+        for index, box in enumerate(self.boxes):
+            x, y = float(box.get("x", 0)) * scale, float(box.get("y", 0)) * scale
+            w, h = float(box.get("width", 0)) * scale, float(box.get("height", 0)) * scale
+            if w > 0 and h > 0:
+                rects.append(("box", index, x, y, w, h))
+        if self.selected is not None and 0 <= self.selected < len(self.boxes):
+            box = self.boxes[self.selected]
+            reach = HANDLE_REACH / max(self.view_transform.scale, 1e-6)
+            left, top = float(box.get("x", 0)) * scale, float(box.get("y", 0)) * scale
+            right = left + float(box.get("width", 0)) * scale
+            bottom = top + float(box.get("height", 0)) * scale
+            for name, (cx, cy) in (("move", (left, top)), ("resize", (right, bottom))):
+                rects.append((name, self.selected, cx - reach, cy - reach, 2 * reach, 2 * reach))
+        return rects
+
+    def _hit_area(self, left: float, top: float, width: float, height: float) -> ft.Control:
+        """One hit area: its local positions plus its own place are page positions, handed to the
+        same tap / long-press / drag code the drawing tools' surface uses. It never moves while a
+        drag runs (only the canvas follows the finger), so the local positions stay true."""
+
+        def at(e: Any) -> tuple:
+            lx, ly = self._local(e)
+            return (left + lx, top + ly)
+
+        self._hit_serial += 1
+        return ft.GestureDetector(
+            content=ft.Container(bgcolor=ft.Colors.TRANSPARENT), drag_interval=DRAG_INTERVAL,
+            left=left, top=top, width=width, height=height, key=f"me-hit-{self._gen}-{self._hit_serial}",
+            on_tap_down=lambda e: self.tap_at(*at(e)),
+            on_long_press_start=lambda e: self.long_press_at(*at(e)),
+            **drag_handlers(lambda e: self.pan_start(*at(e)), lambda e: self.pan_update(*at(e)), self._on_pan_end))
+
+    def _sync_hits(self, push_now: bool = True) -> bool:
+        """Lay the Pan / move hit areas over the boxes (the top children of the page stack) as they
+        are now. An area whose rectangle did
+        not change is the same control (same key), so Flutter keeps its recognizers; nothing changes
+        while a drag runs (a replaced area would cancel the drag under the finger). True when the
+        layer changed."""
+        stack = getattr(self, "stack", None)
+        if stack is None or getattr(self, "gestures", None) is None or self.drag is not None:
+            return False
+        kept: dict = {}
+        controls: list = []
+        for rect in self._hit_rects():
+            signature = tuple(round(v, 2) if isinstance(v, float) else v for v in rect)
+            control = self._hits.get(signature) or kept.get(signature)
+            if control is None:
+                control = self._hit_area(*rect[2:])
+            kept[signature] = control
+            controls.append(control)
+        if len(controls) == len(self.hit_areas) and all(a is b for a, b in zip(controls, self.hit_areas)):
+            return False
+        self._hits = kept
+        self.hit_areas = controls
+        # the areas are the stack's own top children (no wrapper layer over the surface: a drawing
+        # tool's surface stays the top child, exactly as before)
+        stack.controls = [self.page_image, self.canvas, self.gestures, *controls]
+        if push_now:
+            push(stack)
+        return True
 
     def _steps_reason(self) -> Optional[str]:
         if not self.ctx.has_kind(svc.KIND_STEP):
@@ -1334,12 +1435,13 @@ class EditorTab(MangaTab):
         return mode if mode in VIEW_MODES else ""
 
     def set_tool(self, tool: str) -> None:
+        tool = LEGACY_TOOLS.get(tool, tool)
         reason = {t: r for t, _l, _i, r in TOOLS}.get(tool)
         if reason:
             self.ctx.say(reason)
             return
-        if self.tool == "select" and tool != "select":
-            self.selected = None  # leaving Select / move ends the box being moved
+        if self.tool == "pan" and tool != "pan":
+            self.selected = None  # leaving Pan / move for a drawing tool ends the box being moved
         self.tool = tool
         self.drag = None
         self.refresh()
@@ -1362,6 +1464,7 @@ class EditorTab(MangaTab):
         if canvas is not None:
             canvas.shapes = self._shapes()
             push(canvas)
+            self._sync_hits()  # (the boxes' places on screen changed: not while a drag runs)
 
     def _can_edit(self) -> bool:
         return bool(self.image_path) and self.session.editor is not None and not self.busy and not self._editing
@@ -1369,9 +1472,10 @@ class EditorTab(MangaTab):
     # ---- gestures (display coords in, image px stored) --------------------------------------------------
 
     def tap_at(self, dx: float, dy: float) -> Optional[int]:
-        """Tap in an edit tool: a box is selected; a tap beside every box keeps the selection (it
-        ends with ✕, Back, another box or leaving Select / move)."""
-        if not self.image_path or self.tool == "pan":
+        """Tap a box (any tool; in Pan / move only a box's hit area takes taps): it is selected; a
+        tap beside every box keeps the selection (it ends with ✕, Back, another box or leaving Pan /
+        move)."""
+        if not self.image_path:
             return None
         ix, iy = self.geometry.to_image(dx, dy)
         index = hit_test(self.boxes, ix, iy)
@@ -1403,14 +1507,16 @@ class EditorTab(MangaTab):
         return HANDLE_REACH / max(self.geometry.scale * self.view_transform.scale, 1e-6)
 
     def pan_start(self, dx: float, dy: float) -> None:
-        if self.tool == "pan" or not self._can_edit():
+        """A drag starts at page point (dx, dy): a drawing tool draws; Pan / move (a drag that started
+        on a box's hit area: one on the empty page is the viewer's pan) moves or resizes the box."""
+        if not self._can_edit():
             return
         self._render_token += 1  # a pending re-render waits for this edit
         if self.tool in ("box", "circle"):
             self.drag = {"mode": "draw", "start": (dx, dy), "current": (dx, dy)}
         elif self.tool == "lasso":
             self.drag = {"mode": "lasso", "points": [(dx, dy)]}
-        elif self.tool == "select":
+        elif self.tool == "pan":
             ix, iy = self.geometry.to_image(dx, dy)
             selected = self.selected
             if selected is not None and 0 <= selected < len(self.boxes):

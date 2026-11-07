@@ -1755,8 +1755,8 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 
 **Editor**
 - A page strip, and a Source / Translated segmented control (side by side on tablet).
-- **Pan mode:** `InteractiveViewer`.
-- **Edit mode:** `Stack(Image, canvas.Canvas, GestureDetector(drag_interval=24))`, with tools Select/Move · Box · Circle · Lasso · Brush · Eraser.
+- **Pan / move (the default tool):** `InteractiveViewer` around `Stack(Image, canvas.Canvas, GestureDetector, hit areas)`. A gesture is routed by where it starts: a drag on a box (or on the selected box's move / resize handle) moves / resizes it, a drag on the empty page pans, a pinch zooms, a tap on a box selects it (owner 2026-11-07: Pan / zoom and Select / move merged).
+- **Drawing tools:** the same stack's `GestureDetector(drag_interval=24)` takes the drags (the viewer holds still), with tools Box · Circle · Lasso · Brush · Eraser.
   - Brush and Eraser are **Excluded** (disabled with a ReasonChip): the desktop's experimental mask painting stays desktop only.
   - Clear boxes (toolbar, confirm): the desktop Clear Boxes (`manga_editor_core._delete_translated_outputs` / `_clear_saved_page_state`, U9).
 - **Workflow buttons:** Detect · Clean · Recognize · Translate · Translate all (MANGA_STEP jobs).
