@@ -93,12 +93,61 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
+def _msys2_weasyprint_dlls(bin_dir):
+    """The MSYS2 DLLs WeasyPrint can load: the PE import closure of the names its
+    text/ffi.py dlopen()s, plus libcairo-2 (cairocffi/cairosvg, if present).
+
+    The whole mingw64/bin folder also holds GTK3, librsvg, Tcl/Tk, gcc's isl,
+    libpython3.14 and so on (about 23 MB in the exe) that nothing in this
+    build loads. Returns None when the closure cannot be computed, so the
+    caller falls back to the full glob.
+    """
+    try:
+        from PyInstaller.depend import bindepend
+    except Exception:
+        return None
+    roots = [
+        'libgobject-2.0-0.dll', 'libpango-1.0-0.dll', 'libharfbuzz-0.dll',
+        'libharfbuzz-subset-0.dll', 'libfontconfig-1.dll', 'libpangoft2-1.0-0.dll',
+        'libcairo-2.dll', 'libpixman-1-0.dll',
+    ]
+    present = {os.path.basename(p).lower(): p for p in glob.glob(os.path.join(bin_dir, '*.dll'))}
+    if 'libpango-1.0-0.dll' not in present or 'libgobject-2.0-0.dll' not in present:
+        return None
+    need = set()
+    stack = [r.lower() for r in roots if r.lower() in present]
+    try:
+        while stack:
+            name = stack.pop()
+            if name in need:
+                continue
+            need.add(name)
+            for imp_name, _resolved in bindepend.get_imports(present[name]):
+                base = os.path.basename(imp_name).lower()
+                if base in present and base not in need:
+                    stack.append(base)
+    except Exception as exc:
+        print(f"  WARNING: MSYS2 closure failed ({exc}); shipping the whole folder")
+        return None
+    return [present[n] for n in sorted(need)]
+
+
 if msys2_bin and os.path.exists(msys2_bin):
-    dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
-    print(f"  Found {len(dll_list)} DLL files in {msys2_bin}")
+    dll_list = _msys2_weasyprint_dlls(msys2_bin)
+    if dll_list is None:
+        dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
+    print(f"  Using {len(dll_list)} DLL files from {msys2_bin}")
     if dll_list:
         # Print first few DLLs for verification
         print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
+        # The mingw runtime copies in src/ (libwinpthread-1, libgcc_s_seh-1,
+        # libstdc++-6, for the C++ inpainter) are older than MSYS2's. An older
+        # libwinpthread-1.dll in the bundle root made libpango fail to load
+        # (error 0x7f, missing clock_gettime64 & co.), so PDF export via
+        # WeasyPrint failed. The MSYS2 copies export a superset: use them.
+        _msys_names = {os.path.basename(d).lower() for d in dll_list}
+        binaries[:] = [b for b in binaries
+                       if not (os.path.basename(b[0]) == b[0] and b[0].lower() in _msys_names)]
         for dll in dll_list:
             binaries.append((dll, '.'))
         print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
@@ -1534,6 +1583,40 @@ excludes = [
     
     # Web frameworks
     'tornado', 'flask', 'django', 'fastapi', 'uvicorn',
+
+    # Pulled in only through optional/lazy imports that no NoCuda feature
+    # reaches (docs/nocuda_bloat_report.md, section 3.2):
+    #   polars: ultralytics to_df()/export/trainer; datasets; gradio
+    #   av, yt_dlp, curl_cffi: transformers.video_utils, ultralytics loaders
+    #   pyarrow: lazy in google.cloud.aiplatform (Lite/full ship Vertex without it)
+    #   pythainlp, emoji: optional XLM/BERTweet tokenizer helpers
+    #   pandas, sqlalchemy, datasets, multiprocess, joblib: collect_all('onnxruntime')
+    #     pulls onnxruntime.transformers.* / matmul_nbits_quantizer; quantize_dynamic
+    #     and quantize_static do not need them
+    #   Cryptodome: yt_dlp/py7zr; token_encryption uses `Crypto`
+    #   win32ui/Pythonwin: win32com makepy, never run
+    #   gradio: huggingface_hub webhooks server (app.py is not in this spec)
+    #   _pytest/py: anyio's pytest plugin
+    # onnxscript/onnx_ir/onnxslim stay: the manga "auto_convert_to_onnx" setting
+    # runs torch.onnx.export (bubble_detector, local_inpainter), which defaults to
+    # the dynamo exporter (onnxscript + onnx_ir) on torch >= 2.9.
+    'polars', 'polars.*',
+    'av', 'av.*',
+    'pyarrow', 'pyarrow.*',
+    'pythainlp', 'pythainlp.*',
+    'pandas', 'pandas.*',
+    'sqlalchemy', 'sqlalchemy.*',
+    'datasets', 'datasets.*',
+    'multiprocess', 'multiprocess.*',
+    'joblib', 'joblib.*',
+    'yt_dlp', 'yt_dlp.*',
+    'curl_cffi', 'curl_cffi.*',
+    'Cryptodome', 'Cryptodome.*',
+    'win32ui', 'win32uiole', 'dde', 'pythonwin',
+    'gradio', 'gradio.*',
+    'gradio_client', 'gradio_client.*',
+    'emoji', 'emoji.*',
+    '_pytest', '_pytest.*', 'py',
 ]
 
 # ============================================================================
@@ -1698,6 +1781,101 @@ for data in a.datas:
 
 a.datas = cleaned_datas
 print(f"\nData files: {original_count} -> {len(a.datas)} (removed {original_count - len(a.datas)})")
+
+# ============================================================================
+# SLIM: DROP FILES NO NOCUDA FEATURE LOADS (docs/nocuda_bloat_report.md)
+# ============================================================================
+
+def _slim_norm(dest):
+    return str(dest).replace('\\', '/').lower()
+
+
+def _slim_unused(dest):
+    n = _slim_norm(dest)
+    base = n.rsplit('/', 1)[-1]
+    # cv2's FFmpeg video I/O plugins: no VideoCapture/VideoWriter anywhere in src
+    if n.startswith('cv2/') and base.startswith('opencv_videoio_ffmpeg'):
+        return True
+    # Left by an onnxruntime-directml wheel; the CPU onnxruntime.dll never loads it
+    if n == 'onnxruntime/capi/directml.dll':
+        return True
+    # A second python3xx.dll inside a package folder (torchvision); the root one is used
+    if '/' in n and base.startswith('python3') and base.endswith('.dll'):
+        return True
+    # Build / test tooling and Application Verifier leftovers
+    if n.startswith('torch/bin/protoc') or n in ('vfcompat.dll', 'appverifui.dll'):
+        return True
+    if n.startswith('pyside6/'):
+        rest = n[len('pyside6/'):]
+        # WebEngine DevTools inspector frontend and the debug-build resources.
+        # CDP over QTWEBENGINE_REMOTE_DEBUGGING (autharena/) is served by the core DLL.
+        if rest.startswith('resources/') and ('devtools_resources' in base or '.debug.' in base):
+            return True
+        # Chromium falls back to en-US for its context-menu / error-page strings
+        if rest.startswith('translations/qtwebengine_locales/'):
+            return base != 'en-us.pak'
+        # Qt's own .qm translations: no QTranslator in the app
+        if rest.startswith('translations/') and rest.count('/') == 1 and base.endswith('.qm'):
+            return True
+        # QML import tree: the app has no QML (WebEngine widgets do not import QML modules)
+        if rest.startswith('qml/'):
+            return True
+    return False
+
+
+def _pyside6_unreachable_qt_dlls(entries):
+    """Root PySide6/Qt6*.dll files that no shipped PySide6 module, plugin or
+    QtWebEngineProcess.exe links (directly or indirectly). After the qml/ tree is
+    gone these are the Quick3D/Charts/Graphs/Location/QuickControls2... DLLs only
+    QML plugins used. Returns an empty set if the PE scan fails."""
+    try:
+        from PyInstaller.depend import bindepend
+    except Exception:
+        return set()
+    root_dlls = {}
+    roots = []
+    for dest, src, _typ in entries:
+        n = _slim_norm(dest)
+        if not n.startswith('pyside6/') or not n.endswith(('.dll', '.pyd', '.exe')):
+            continue
+        rest = n[len('pyside6/'):]
+        if '/' not in rest and rest.endswith('.dll'):
+            root_dlls[rest] = src
+        else:
+            roots.append(src)
+    need = set()
+    stack = list(roots)
+    seen = set()
+    try:
+        while stack:
+            path = stack.pop()
+            key = os.path.normcase(str(path))
+            if key in seen or not os.path.exists(path):
+                continue
+            seen.add(key)
+            for imp_name, _resolved in bindepend.get_imports(path):
+                base = os.path.basename(imp_name).lower()
+                if base in root_dlls and base not in need:
+                    need.add(base)
+                    stack.append(root_dlls[base])
+    except Exception as exc:
+        print(f"  WARNING: PySide6 closure failed ({exc}); keeping all Qt DLLs")
+        return set()
+    return {name for name in root_dlls if name.startswith('qt6') and name not in need}
+
+
+print("\n" + "="*60)
+print("SLIM: REMOVING FILES NO NOCUDA FEATURE LOADS...")
+print("="*60)
+_before = (len(a.binaries), len(a.datas))
+a.binaries = [e for e in a.binaries if not _slim_unused(e[0])]
+a.datas = [e for e in a.datas if not _slim_unused(e[0])]
+_qt_unreachable = _pyside6_unreachable_qt_dlls(list(a.binaries) + list(a.datas))
+if _qt_unreachable:
+    print(f"  Qt DLLs only QML plugins linked ({len(_qt_unreachable)}): {sorted(_qt_unreachable)}")
+    a.binaries = [e for e in a.binaries if _slim_norm(e[0])[len('pyside6/'):] not in _qt_unreachable
+                  or not _slim_norm(e[0]).startswith('pyside6/')]
+print(f"  Binaries: {_before[0]} -> {len(a.binaries)}, data files: {_before[1]} -> {len(a.datas)}")
 
 # DON'T remove torch or transformers from pure modules - we want to keep them!
 print("\n" + "="*60)
