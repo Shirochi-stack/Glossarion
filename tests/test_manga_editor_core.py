@@ -233,8 +233,22 @@ EDITS = (
     ("_render_with_manga_translator",
      "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n",
      "        _attach_region_styles(self, original_image_path or image_path, regions)\n"
+     # 2026-11-07 (owner report after PR 170): each region gets its box's detector class, so an
+     # editor re-render under a translate image edit prompt leaves the free text to the model's
+     # redraw as the batch run does (_attach_region_detector_metadata)
+     "        _attach_region_detector_metadata(self, original_image_path or image_path, regions)\n"
      "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"
      "        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)\n"),
+    # 2026-11-07 (owner: moving a text box re-rendered on an older cleaned page): the newest cleaned
+    # page of the page wins over a stale state / cached path (_newest_cleaned_image_candidate)
+    ("_resolve_cleaned_image_for_render",
+     "    try:\n"
+     "        current_base = os.path.splitext(os.path.basename(current_image))[0].replace('_cleaned', '')\n",
+     "    try:\n"
+     "        newest = _newest_cleaned_image_candidate(self, current_image)\n"
+     "        if newest:\n"
+     "            return newest\n"
+     "        current_base = os.path.splitext(os.path.basename(current_image))[0].replace('_cleaned', '')\n"),
     # Owner-approved fix (2026-11-06, PR 129): Translate's fallback load of the endpoint-backed
     # custom image edit runs in-process, as MangaTranslator's shared getter loads it; a worker
     # process never received the Image Gen/Edit key model (tests/test_manga_image_edit_pool_load.py).

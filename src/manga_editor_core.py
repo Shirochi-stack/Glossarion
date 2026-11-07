@@ -140,6 +140,100 @@ def _attach_region_styles(self, image_path, regions):
         print(f"[RENDER] Box text styles skipped: {error}")
 
 
+def _attach_region_detector_metadata(self, image_path, regions):
+    """Give the regions about to be re-rendered their box's detector class (``bubble_type``: text bubble,
+    empty bubble, free text), by the region -> box mapping of ``_region_box_indexes``: from the open
+    page's boxes, else the page state's ``viewer_rectangles`` / ``detection_regions``. The editor builds
+    its regions from the boxes' translations only, so without this the renderer guessed the class from
+    the box shape (``create_text_mask``'s fallback) and lettered free text a translate image edit prompt
+    (Translate SFX) left to the model's redraw, which the batch run does not letter
+    (``MangaTranslator._mark_regions_left_to_image_edit``). A region that has a class keeps it."""
+    try:
+        if not image_path or not regions:
+            return
+        state_manager = getattr(self, 'image_state_manager', None)
+        state = (state_manager.get_state(image_path) or {}) if state_manager else {}
+        rects = []
+        current = getattr(getattr(self, 'image_preview_widget', None), 'current_image_path', None)
+        if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(image_path)):
+            rects = list(getattr(getattr(self.image_preview_widget, 'viewer', None), 'rectangles', None) or [])
+
+        def box_class(index):
+            if index is None:
+                return None
+            if 0 <= index < len(rects) and getattr(rects[index], 'bubble_type', None):
+                return getattr(rects[index], 'bubble_type')
+            for key in ('viewer_rectangles', 'detection_regions'):
+                entries = state.get(key) or []
+                if 0 <= index < len(entries) and isinstance(entries[index], dict) and entries[index].get('bubble_type'):
+                    return entries[index]['bubble_type']
+            return None
+
+        for region, index in zip(regions, _region_box_indexes(self, image_path, regions, state)):
+            if getattr(region, 'bubble_type', None):
+                continue
+            kind = box_class(index)
+            if kind:
+                region.bubble_type = kind
+    except Exception as error:
+        print(f"[RENDER] Box detector classes skipped: {error}")
+
+
+def _newest_cleaned_image_candidate(self, current_image):
+    """The newest cleaned page of ``current_image`` (by file time) among the page state's
+    ``cleaned_image_path``, the editor's ``_cleaned_image_path`` and ``<name>_translated/<name>_cleaned<ext>``
+    under the output-directory override and the source folder; None when there is none.
+
+    Owner report 2026-11-07: after a run, moving a text box re-rendered the page on an older cleaned page
+    (an earlier Clean's) because the state still named it; the latest run's cleaning / image edit redraw was
+    lost. When a newer candidate wins, the state and ``_cleaned_image_path`` are repaired to it, so the
+    renderer's pre-clear of moved boxes (``_pending_clear_rects``) reads the same page."""
+    try:
+        if not current_image:
+            return None
+        current_base = os.path.splitext(os.path.basename(current_image))[0].replace('_cleaned', '')
+        ext = os.path.splitext(current_image)[1]
+        state_manager = getattr(self, 'image_state_manager', None)
+        saved = None
+        candidates = []
+        if state_manager:
+            saved = (state_manager.get_state(current_image) or {}).get('cleaned_image_path')
+            candidates.append(saved)
+        candidates.append(getattr(self, '_cleaned_image_path', None))
+        override_dir = ''
+        try:
+            override_dir = getattr(self.main_gui, 'config', {}).get('output_directory', '') or ''
+        except Exception:
+            pass
+        override_dir = override_dir or os.environ.get('OUTPUT_DIRECTORY', '')
+        for root in ([override_dir] if override_dir else []) + [os.path.dirname(current_image)]:
+            candidates.append(os.path.join(root, f"{current_base}_translated", f"{current_base}_cleaned{ext}"))
+        valid = []
+        for path in candidates:
+            if not path or not os.path.isfile(path):
+                continue
+            if os.path.splitext(os.path.basename(path))[0].replace('_cleaned', '') != current_base:
+                continue
+            valid.append((os.path.getmtime(path), path))
+        if not valid:
+            return None
+        newest = max(valid, key=lambda item: item[0])[1]
+        if saved != newest and state_manager:
+            try:
+                state_manager.update_state(current_image, {'cleaned_image_path': newest})
+                print(f"[CLEAN_RESOLVE] Newest cleaned image: {os.path.basename(newest)} (state named an older one)")
+            except Exception:
+                pass
+        cached = getattr(self, '_cleaned_image_path', None)
+        if cached and cached != newest and (
+                os.path.splitext(os.path.basename(cached))[0].replace('_cleaned', '') == current_base):
+            self._cleaned_image_path = newest
+        return newest
+    except Exception as error:
+        print(f"[CLEAN_RESOLVE] Newest cleaned image lookup failed: {error}")
+        return None
+
+
 def _record_region_font_sizes(self, image_path, regions, rendered=None):
     """After a render: store the size each box was drawn with (``region.rendered_font_size``, set
     by ``MangaTranslator.render_translated_text``: the auto fit or the box's own size) in the page
@@ -6610,6 +6704,9 @@ def _resolve_cleaned_image_for_render(self, current_image: str):
     Returns the cleaned image path or None.
     """
     try:
+        newest = _newest_cleaned_image_candidate(self, current_image)
+        if newest:
+            return newest
         current_base = os.path.splitext(os.path.basename(current_image))[0].replace('_cleaned', '')
         
         # 1. Check state manager
@@ -7352,6 +7449,7 @@ def _render_with_manga_translator(
         # Call MangaTranslator's render_translated_text method with filtered regions
         print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
         _attach_region_styles(self, original_image_path or image_path, regions)
+        _attach_region_detector_metadata(self, original_image_path or image_path, regions)
         rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
         _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)
         print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
@@ -9192,7 +9290,7 @@ EDITOR_FUNCTIONS = (
 #: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback, the
 #: safe_image page reads: cv2_imread, open_page_image).
 EDITED_FUNCTIONS = ('_regions_with_ocr_text', '_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',
-                    '_run_translate_background',)
+                    '_run_translate_background', '_resolve_cleaned_image_for_render',)
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).
@@ -9204,7 +9302,9 @@ SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
                 '_wait_for_concurrent_inpainting',  # 2026-11-06: Translate renders on the cleaned page
                 '_is_user_drawn_region',  # 2026-11-07: boxes the user drew are cleaned without OCR text
                 '_blank_user_drawn_regions',
-                '_image_edit_redraws_free_text')  # 2026-11-07: a translate prompt redraws the free text
+                '_image_edit_redraws_free_text',  # 2026-11-07: a translate prompt redraws the free text
+                '_attach_region_detector_metadata',  # 2026-11-07: editor re-renders classify boxes like the run
+                '_newest_cleaned_image_candidate')  # 2026-11-07: re-render on the newest cleaned page
 
 
 # ===========================================================================
