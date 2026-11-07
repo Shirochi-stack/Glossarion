@@ -1,0 +1,47 @@
+# GitHub Pages (legacy Jekyll build from main) publishes the whole repository unless told otherwise.
+# The site is only index.html, help/, webtoons/ and assets/site/; everything else is excluded so the
+# deploy stays small (it timed out at ~300 MB on 2026-11-07, three times, at "syncing_files").
+# A new top-level folder or a new file directly in assets/ needs a line here too.
+exclude:
+  - LICENSE
+  - README.md
+  - build_msix.bat
+  - docs
+  - extension
+  - install_requirements.bat
+  - requirements-macos.txt
+  - requirements.txt
+  - requirements_Cuda.txt
+  - requirements_NoCuda.txt
+  - src
+  - tests
+  - tools
+  - assets/Chikuwa
+  - assets/Halgakos.png
+  - assets/Halgakos_NoChibi.png
+  - assets/Halgakos_NoChibi_WhereIsMyOutput.png
+  - assets/Halgakos_NoChibi_angry_blushing.png
+  - assets/Halgakos_NoChibi_angry_transparent.png
+  - assets/Halgakos_NoChibi_blushing_transparent.png
+  - assets/Halgakos_NoChibi_crying_blushing.png
+  - assets/Halgakos_NoChibi_crying_transparent.png
+  - assets/Halgakos_NoChibi_deadeyes_transparent.png
+  - assets/Halgakos_NoChibi_deadinside_blushing.png
+  - assets/Halgakos_NoChibi_happy_blushing.png
+  - assets/Halgakos_NoChibi_happy_transparent.png
+  - assets/Halgakos_NoChibi_normal_blushing.png
+  - assets/Halgakos_NoChibi_sad_blushing.png
+  - assets/Halgakos_NoChibi_sad_transparent.png
+  - assets/Halgakos_NoChibi_smug_blushing.png
+  - assets/Halgakos_NoChibi_smug_no_reflection.png
+  - assets/Halgakos_NoChibi_smug_transparent.png
+  - assets/Halgakos_NoChibi_smug_transparent_copy.png
+  - assets/Halgakos_NoChibi_surprise_blushing.png
+  - assets/Halgakos_NoChibi_surprise_blushing_2025.png
+  - assets/Halgakos_NoChibi_surprise_transparent.png
+  - assets/Halgakos_NoChibi_yandere_blushing.png
+  - assets/Halgakos_NoChibi_yandere_transparent.png
+  - assets/Halgakos_Sus.png
+  - assets/Rune
+  - assets/Tsubakieh
+  - assets/illya

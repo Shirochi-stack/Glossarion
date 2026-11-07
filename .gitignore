@@ -14,6 +14,7 @@
 
 # GitHub Pages site (landing page, help pages and the webtoon reader; styles and images live in assets/site)
 !index.html
+!_config.yml
 !help/
 !help/**
 !webtoons/
