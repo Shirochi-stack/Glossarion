@@ -875,7 +875,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 38 | Inpaint method: custom-image-edit (OpenAI-compatible image edit endpoint) | Inpainting (endpoint, prompt, batch) |  |
 | 39 | Test custom image edit endpoint | Inpainting › Test (the desktop check and texts, `manga_env.test_custom_image_edit_endpoint`) · Image keys (`inpainter` pool) |  |
 | 40 | Inpaint method: Hybrid | Inpainting method list: Hybrid row (disabled row + ReasonChip) | **Excluded**: depends on torch models |
-| 41 | Local model file Browse / Load / Download / Model Info / status | Inpainting › Local / API model ⓘ (the desktop Model Information text, `manga_models.MODEL_INFO`) · "Import model file…" (`manga_<type>_model_path`, a private copy) · Model manager (download, delete) | Adapted: Browse is Import model file (U9) |
+| 41 | Local model file Browse / Load / Download / Model Info / status | Inpainting › Local (Light-weight) model ⓘ (the desktop Model Information text, `manga_models.MODEL_INFO`) · "Import model file…" (`manga_<type>_model_path`, a private copy) · Model manager (download, delete) | Adapted: Browse is Import model file (U9) |
 | 42 | Disable Performance Mode (local inpaint) | Inpainting |  |
 | 43 | Inpainter preload / pool tracker | Inpainting method row status chip (Preloaded / Loading / Not downloaded / Needs key) | Adapted |
 | 44 | Background settings (opacity, size, style Box/Circle/Wrap, preserve free text) | Settings › Rendering |  |

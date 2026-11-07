@@ -4078,6 +4078,92 @@ _USER_DRAWN_BOXES_PREVIEW = [
 ]
 
 
+# 2026-11-07: Inpainting > Inpaint Method: Replicate (Bad) / Local (Light-weight) / API (Recommended) /
+# Hybrid (Trash). API is the custom-image-edit inpainter (manga_inpaint_method 'api'); the run path treats
+# 'api' like 'local' + 'custom-image-edit'. Pairs generated from the real diff hunks (editor functions
+# frozen in ImageRenderer, the batch runner's worker frozen in manga_integration).
+_INPAINT_API_MANGA_INTEGRATION = [
+    ('    _preload_completed_models = set()  # Track which models have been loaded\n    \n    def __init__(self, parent_widget, main_gui, dialog, scroll_area=None):\n',
+     "    _preload_completed_models = set()  # Track which models have been loaded\n\n    # Inpainting > Local (Light-weight) model dropdown. 'custom-image-edit' is not listed: it is\n    # the API (Recommended) method (manga_inpaint_method 'api').\n    LOCAL_INPAINT_MODEL_CHOICES = ('aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local')\n\n    def __init__(self, parent_widget, main_gui, dialog, scroll_area=None):\n"),
+    ("        inpainting_method = inpaint_settings.get('method', 'local')\n        return inpainting_method == 'local'\n\n",
+     "        inpainting_method = inpaint_settings.get('method', 'local')\n        return inpainting_method in ('local', 'api')  # 'api' = the custom-image-edit inpainter\n\n"),
+    ("        inpainting_method = inpaint_settings.get('method', 'local')\n        inpainting_enabled = not skip_inpainting and inpainting_method == 'local'\n        \n",
+     "        inpainting_method = inpaint_settings.get('method', 'local')\n        inpainting_enabled = not skip_inpainting and inpainting_method in ('local', 'api')\n        \n"),
+    ("                # Check top-level config first (manga_local_inpaint_model), then nested config\n                local_method = self.main_gui.config.get('manga_local_inpaint_model', \n                                                        inpaint_settings.get('local_method', 'anime_onnx'))\n",
+     "                # Check top-level config first (manga_local_inpaint_model), then nested config\n                local_method = self.main_gui.config.get('manga_local_inpaint_model',\n                                                        inpaint_settings.get('local_method', 'anime_onnx'))\n"),
+    ("                                                        inpaint_settings.get('local_method', 'anime_onnx'))\n                model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')\n",
+     "                                                        inpaint_settings.get('local_method', 'anime_onnx'))\n                if inpainting_method == 'api':\n                    local_method = 'custom-image-edit'\n                model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')\n"),
+    ("\n        self.inpaint_method_value = self.main_gui.config.get('manga_inpaint_method', 'local')\n        self.inpaint_method_group = QButtonGroup()\n",
+     "\n        # The custom image edit endpoint used to be the 'local' method with the local model\n        # 'custom-image-edit'; such configs move to the 'api' method here (saved with the next save).\n        from manga_models import migrate_inpaint_method, normalize_inpaint_method\n        migrate_inpaint_method(self.main_gui.config)\n        self.inpaint_method_value = normalize_inpaint_method(\n            self.main_gui.config.get('manga_inpaint_method', 'local'),\n            self.main_gui.config.get('manga_local_inpaint_model', ''),\n        )\n        self.inpaint_method_group = QButtonGroup()\n"),
+    ('        radio_font = QFont(\'Arial\', 9)\n        \n        cloud_radio = QRadioButton("Replicate API")\n        cloud_radio.setFont(radio_font)\n',
+     '        radio_font = QFont(\'Arial\', 9)\n\n        cloud_radio = QRadioButton("Replicate (Bad)")\n        cloud_radio.setFont(radio_font)\n'),
+    ('\n        local_radio = QRadioButton("Local / API Model")\n        local_radio.setFont(radio_font)\n',
+     '\n        local_radio = QRadioButton("Local (Light-weight)")\n        local_radio.setFont(radio_font)\n'),
+    ('        local_radio.setToolTip(\n            "For best local performance, select anime_onnx from the model dropdown.\\n"\n            "For best results, select custom-image-edit and use a modern image edit model.\\n"\n            "Recommended for image edit models such as Nano Banana 2 and Wan 2.6 Image Edit."\n        )\n',
+     '        local_radio.setToolTip(\n            "Run a local inpainting model on this computer.\\n"\n            "For best local performance, select anime_onnx from the model dropdown."\n        )\n'),
+    ('\n        hybrid_radio = QRadioButton("Hybrid")\n        hybrid_radio.setFont(radio_font)\n',
+     '\n        api_radio = QRadioButton("API (Recommended)")\n        api_radio.setFont(radio_font)\n        api_radio.setToolTip(\n            "Clean the text with an image edit model through the custom image edit endpoint.\\n"\n            "Recommended for image edit models such as Nano Banana 2 and Wan 2.6 Image Edit."\n        )\n        api_radio.setChecked(self.inpaint_method_value == \'api\')\n        api_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)\n        self.inpaint_method_group.addButton(api_radio, 3)\n        method_selection_layout.addWidget(api_radio)\n\n        hybrid_radio = QRadioButton("Hybrid (Trash)")\n        hybrid_radio.setFont(radio_font)\n'),
+    ('        hybrid_radio.setToolTip(\n            "Show and use both cloud and local/API inpainting settings.\\n"\n            "Experimental and not recommended for normal use."\n',
+     '        hybrid_radio.setToolTip(\n            "Show and use both cloud and local inpainting settings.\\n"\n            "Experimental and not recommended for normal use."\n'),
+    ('        self.local_radio = local_radio\n        self.hybrid_radio = hybrid_radio\n',
+     '        self.local_radio = local_radio\n        self.api_radio = api_radio\n        self.hybrid_radio = hybrid_radio\n'),
+    ("                    self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint\n        local_model_combo = QComboBox()\n",
+     "                    self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint\n        # The Local radio lists the local inpainting models only; the API radio is the\n        # custom-image-edit inpainter and has no dropdown.\n        local_choices = list(self.LOCAL_INPAINT_MODEL_CHOICES)\n        if self.local_model_type_value not in local_choices:\n            self.local_model_type_value = 'anime_onnx'\n        local_model_choice = self.local_model_type_value\n        if self.inpaint_method_value == 'api':\n            self.local_model_type_value = 'custom-image-edit'\n        local_model_combo = QComboBox()\n"),
+    ("        local_model_combo = QComboBox()\n        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'custom-image-edit', 'mat', 'ollama', 'sd_local'])\n        local_model_combo.setCurrentText(self.local_model_type_value)\n        local_model_combo.setMinimumWidth(150)\n",
+     '        local_model_combo = QComboBox()\n        local_model_combo.addItems(local_choices)\n        local_model_combo.setCurrentText(local_model_choice)\n        local_model_combo.setMinimumWidth(150)\n'),
+    ("        }\n        self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))\n        desc_font = QFont('Arial', 8)\n",
+     "        }\n        self.model_desc_label = QLabel(model_desc.get(local_model_choice, ''))\n        desc_font = QFont('Arial', 8)\n"),
+    ('        local_model_layout.addStretch()\n        \n        local_inpaint_layout.addWidget(local_model_frame)\n',
+     '        local_model_layout.addStretch()\n\n        local_inpaint_layout.addWidget(local_model_frame)\n'),
+    ('        local_inpaint_layout.addWidget(local_model_frame)\n\n',
+     '        local_inpaint_layout.addWidget(local_model_frame)\n        self.local_model_frame = local_model_frame\n\n'),
+    ('        local_inpaint_layout.addWidget(model_info_btn)\n        \n        # Add local_inpaint_frame to inpaint_group\n',
+     '        local_inpaint_layout.addWidget(model_info_btn)\n        self.model_info_btn = model_info_btn\n\n        # Add local_inpaint_frame to inpaint_group\n'),
+    ("                        method = str(getattr(self, 'inpaint_method_value', '') or '').lower()\n                        if method == 'local':\n                            self._trigger_inpainter_preload_after_toggle()\n",
+     "                        method = str(getattr(self, 'inpaint_method_value', '') or '').lower()\n                        if method in ('local', 'api'):\n                            self._trigger_inpainter_preload_after_toggle()\n"),
+    ("            method = 'local'\n        elif self.hybrid_radio.isChecked():\n",
+     "            method = 'local'\n        elif getattr(self, 'api_radio', None) is not None and self.api_radio.isChecked():\n            method = 'api'\n        elif self.hybrid_radio.isChecked():\n"),
+    ("            method = 'local'  # Default fallback\n        \n        # Update the stored value\n",
+     "            method = 'local'  # Default fallback\n\n        # Update the stored value\n"),
+    ('        self.inpaint_method_value = method\n        \n        # Show/hide frames based on method\n',
+     "        self.inpaint_method_value = method\n\n        # API (Recommended) is the custom-image-edit inpainter; the other methods use the\n        # Local Model dropdown's model.\n        previous_model = str(getattr(self, 'local_model_type_value', '') or '')\n        if method == 'api':\n            model = 'custom-image-edit'\n        else:\n            model = self.local_model_combo.currentText() if hasattr(self, 'local_model_combo') else previous_model\n\n        # Show/hide frames based on method\n"),
+    ("        # Cloud frame: visible for cloud and hybrid\n        # Local frame: visible for local and hybrid\n        if method == 'cloud':\n",
+     "        # Cloud frame: visible for cloud and hybrid\n        # Local frame: visible for local, api and hybrid (api hides the model dropdown)\n        if method == 'cloud':\n"),
+    ("            self.local_inpaint_frame.hide()\n        elif method == 'local':\n            self.cloud_inpaint_frame.hide()\n",
+     "            self.local_inpaint_frame.hide()\n        elif method in ('local', 'api'):\n            self.cloud_inpaint_frame.hide()\n"),
+    ('            self.local_inpaint_frame.show()\n        \n',
+     "            self.local_inpaint_frame.show()\n        if hasattr(self, 'local_model_frame'):\n            self.local_model_frame.setVisible(method != 'api')\n        if hasattr(self, 'model_info_btn'):\n            self.model_info_btn.setVisible(method != 'api')\n\n        if model and model != previous_model:\n            if getattr(self, '_initializing', False) or method == 'cloud':\n                # nothing to load: Replicate does not use the local model\n                self.local_model_type_value = model\n                self._apply_custom_image_edit_ui_state()\n            else:\n                # Same path as picking the model in the dropdown: load / endpoint state, then save\n                self.local_model_type_value = model\n                self._on_local_model_change(model)\n                return\n        \n"),
+]
+
+_INPAINT_API_RUNNER = [
+    ("                    effective_workers > 1\n                    and inpaint_method == 'local'\n                    and hasattr(self, 'translator')\n",
+     "                    effective_workers > 1\n                    and inpaint_method in ('local', 'api')\n                    and hasattr(self, 'translator')\n"),
+    ("                    local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')\n                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')\n",
+     "                    local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')\n                    if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter\n                        local_method = 'custom-image-edit'\n                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')\n"),
+]
+
+_INPAINT_API_EDITOR = [
+    ("        local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')\n        is_custom_image_edit = inpaint_method == 'local' and str(local_model or '').lower() == 'custom-image-edit'\n        \n",
+     "        local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')\n        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter\n            local_model = 'custom-image-edit'\n        is_custom_image_edit = inpaint_method in ('local', 'api') and str(local_model or '').lower() == 'custom-image-edit'\n        \n"),
+    ("        \n        if inpaint_method == 'local':\n            # Use local inpainter with the same method as manga_translator\n",
+     "        \n        if inpaint_method in ('local', 'api'):\n            # Use local inpainter with the same method as manga_translator\n"),
+    ("        inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')\n        local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')\n        \n        is_custom_image_edit = False\n",
+     "        inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')\n        local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')\n        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter\n            local_model = 'custom-image-edit'\n        \n        is_custom_image_edit = False\n"),
+    ("        is_custom_image_edit = False\n        if inpaint_method == 'local':\n            # Use local inpainter with the same method as manga_translator\n",
+     "        is_custom_image_edit = False\n        if inpaint_method in ('local', 'api'):\n            # Use local inpainter with the same method as manga_translator\n"),
+    ("        local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')\n\n",
+     "        local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')\n        if inpaint_method == 'api':  # API (Recommended) = the custom-image-edit inpainter\n            local_model = 'custom-image-edit'\n\n"),
+    ('\n        if inpaint_method != \'local\':\n            print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")\n',
+     '\n        if inpaint_method not in (\'local\', \'api\'):\n            print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")\n'),
+    ('        inpaint_method = self.main_gui.config.get(\'manga_inpaint_method\', \'local\')\n        local_model = self.main_gui.config.get(\'manga_local_inpaint_model\', \'anime_onnx\')\n        \n        print(f"[INPAINT_REGION] Using method: {inpaint_method}, model: {local_model}")\n',
+     '        inpaint_method = self.main_gui.config.get(\'manga_inpaint_method\', \'local\')\n        local_model = self.main_gui.config.get(\'manga_local_inpaint_model\', \'anime_onnx\')\n        if inpaint_method == \'api\':  # API (Recommended) = the custom-image-edit inpainter\n            local_model = \'custom-image-edit\'\n        \n        print(f"[INPAINT_REGION] Using method: {inpaint_method}, model: {local_model}")\n'),
+    ("        \n        if inpaint_method == 'local':\n            # Get model path from config (same way as _run_clean_background)\n",
+     "        \n        if inpaint_method in ('local', 'api'):\n            # Get model path from config (same way as _run_clean_background)\n"),
+    ('                        self._cleaned_image_path = None\n                    # Only run inpainting if method is not \'none\' and is \'local\' or \'hybrid\'\n                    elif inpaint_method in [\'local\', \'hybrid\']:\n                        self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")\n',
+     '                        self._cleaned_image_path = None\n                    # Only run inpainting if method is not \'none\' and is \'local\', \'api\' or \'hybrid\'\n                    elif inpaint_method in [\'local\', \'api\', \'hybrid\']:\n                        self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")\n'),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5595,6 +5681,19 @@ APPROVED = (
         "source": {
             "src/manga_integration.py": _IMAGE_EDIT_PROMPT_PROFILES,
             "src/manga_image_preview.py": _USER_DRAWN_BOXES_PREVIEW,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-07",
+        "what": "Manga Inpaint Method: separate radios Replicate (Bad) / Local (Light-weight) / API (Recommended) / "
+                "Hybrid (Trash). API is the custom image edit inpainter (manga_inpaint_method 'api', no model "
+                "dropdown); the Local dropdown no longer lists custom-image-edit. An old 'local' + "
+                "'custom-image-edit' config moves to 'api' (manga_models.migrate_inpaint_method), and every reader "
+                "of the method treats 'api' as the custom image edit inpainter",
+        "source": {
+            "src/manga_integration.py": _INPAINT_API_MANGA_INTEGRATION + _INPAINT_API_RUNNER,
+            "src/ImageRenderer.py": _INPAINT_API_EDITOR,
         },
         "values": {},
     },

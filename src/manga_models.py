@@ -87,6 +87,12 @@ __all__ = [
     "find_spec",
     "spec_for_detector_variant",
     "spec_for_inpaint_method",
+    "INPAINT_METHOD_API",
+    "CUSTOM_IMAGE_EDIT_INPAINTER",
+    "LOCAL_PIPELINE_INPAINT_METHODS",
+    "normalize_inpaint_method",
+    "effective_inpaint_model",
+    "migrate_inpaint_method",
     "specs_for_ocr_provider",
     "required_models",
     "missing_models",
@@ -618,6 +624,68 @@ def rapidocr_model_keys(config: Optional[Dict[str, Any]]) -> List[str]:
     for name in rapidocr_model_sets(config.get("rapidocr_language", "auto"), ocr.get("language_hints")):
         keys += [key for key in RAPIDOCR_MODELS[name] if key not in keys]
     return keys
+
+
+# =========================================================================== inpaint method
+#: ``manga_inpaint_method`` (and ``manga_settings.inpainting.method``) values: 'cloud' (Replicate),
+#: 'local' (a local inpainting model, ``manga_local_inpaint_model``), 'api' (the custom image edit
+#: endpoint) and 'hybrid'. Before 'api' existed the image edit endpoint was the 'local' method with
+#: the local model 'custom-image-edit'; such a config reads as 'api' (``normalize_inpaint_method``)
+#: and ``migrate_inpaint_method`` rewrites it. An 'api' config stores 'custom-image-edit' as its
+#: local model, so the run path (LocalInpainter) loads the image edit inpainter for both methods.
+INPAINT_METHOD_API = "api"
+CUSTOM_IMAGE_EDIT_INPAINTER = "custom-image-edit"
+#: The methods that run through LocalInpainter (the local model, or the image edit endpoint).
+LOCAL_PIPELINE_INPAINT_METHODS = ("local", INPAINT_METHOD_API)
+_IMAGE_EDIT_LOCAL_MODELS = (CUSTOM_IMAGE_EDIT_INPAINTER, "qwen_image_edit")
+
+
+def normalize_inpaint_method(method: Any, local_model: Any = None, default: str = "local") -> str:
+    """The inpainting method a config means: 'api' for 'api' and for the old 'local' +
+    'custom-image-edit' (or 'qwen_image_edit') pair, else the stored method ('local' when unset)."""
+    name = str(method or "").strip().lower() or default
+    if name == "local" and str(local_model or "").strip().lower() in _IMAGE_EDIT_LOCAL_MODELS:
+        return INPAINT_METHOD_API
+    return name
+
+
+def effective_inpaint_model(method: Any, local_model: Any, default: str = "anime_onnx") -> str:
+    """The model LocalInpainter loads for ``method``: 'custom-image-edit' for the API method,
+    else the stored local model (``default`` when unset)."""
+    if normalize_inpaint_method(method, local_model) == INPAINT_METHOD_API:
+        return CUSTOM_IMAGE_EDIT_INPAINTER
+    return str(local_model or "").strip() or default
+
+
+def migrate_inpaint_method(config: Any) -> bool:
+    """Move an old 'local' + 'custom-image-edit' config to the 'api' method (in place, top-level and
+    nested copies); an 'api' config gets 'custom-image-edit' as its local model. A real local model,
+    'cloud' and 'hybrid' are left alone. Returns whether anything changed."""
+    if not isinstance(config, dict):
+        return False
+    manga = config.get("manga_settings")
+    inpainting = manga.get("inpainting") if isinstance(manga, dict) else None
+    if not isinstance(inpainting, dict):
+        inpainting = None
+    method = config.get("manga_inpaint_method")
+    if _unset(method) and inpainting is not None:
+        method = inpainting.get("method")
+    model = config.get("manga_local_inpaint_model")
+    if _unset(model) and inpainting is not None:
+        model = inpainting.get("local_method")
+    if normalize_inpaint_method(method, model) != INPAINT_METHOD_API:
+        return False
+    changed = False
+    slots = [(config, "manga_inpaint_method", INPAINT_METHOD_API),
+             (config, "manga_local_inpaint_model", CUSTOM_IMAGE_EDIT_INPAINTER)]
+    if inpainting is not None:
+        slots += [(inpainting, "method", INPAINT_METHOD_API),
+                  (inpainting, "local_method", CUSTOM_IMAGE_EDIT_INPAINTER)]
+    for holder, key, value in slots:
+        if holder.get(key) != value:
+            holder[key] = value
+            changed = True
+    return changed
 
 
 def spec_for_inpaint_method(method: str) -> Optional[ModelSpec]:

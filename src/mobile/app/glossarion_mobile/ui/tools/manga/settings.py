@@ -20,9 +20,9 @@ keys), rendered with the shared Settings tiles (locks, defaults, reset and help 
   context, image request quality, the manga output token limit.
 * **Glossary workflow** — use / generate / load / clear / auto-load / compress / debug subfolder.
 * **Inpainting** — the method with its status chip (Preloaded · Loading · Not downloaded ·
-  Needs key): Skip, Local / API model (ONNX aot / anime / lama with the model rows, the custom
-  image-edit endpoint with Edit Prompt, Batch Image Requests and Test), Replicate (key), Hybrid
-  and the Torch JIT / ollama / sd_local models disabled with their reasons.
+  Needs key): Skip, Replicate (key), Local (ONNX aot / anime / lama with the model rows), API
+  (the custom image-edit endpoint with Edit Prompt, Batch Image Requests and Test), Hybrid and
+  the Torch JIT / ollama / sd_local models disabled with their reasons.
 * **Rendering** — a live sample bubble over font, size mode, background, text colour, shadow,
   safe area, constrain to bubble, caps, wrapping and line spacing; presets Manga / Manhwa /
   Large Text and Reset.
@@ -307,6 +307,8 @@ class SettingsTab(MangaTab):
                       self.inpaint_card, self.render_card, self.all_card],
             expand=True, spacing=tokens.SPACING["md"], padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             key=self.key)
+        # an old 'local' + 'custom-image-edit' config moves to the API method (desktop does the same)
+        self.set_many(svc.inpaint_migration_updates(self.config()))
         self.refresh(push_now=False)
         self._build_all_groups()
         return self.root
@@ -863,9 +865,11 @@ class SettingsTab(MangaTab):
                 if row.disabled else None,
                 on_click=None if row.disabled else (lambda e, v=row.value: self.select_inpaint(v)),
                 key=self.k(f"ms-inpaint-{row.value}-{self._gen}")))
-        if method == "local":
+        if method == "api":
+            controls += self._image_edit_controls(cfg)
+        elif method == "local":
             controls.append(ft.Row([
-                ft.Text("Local / API model", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                ft.Text("Local model", theme_style=ft.TextThemeStyle.TITLE_SMALL),
                 ft.IconButton(icon=ft.Icons.INFO_OUTLINE, tooltip="Model information", key=self.k("ms-model-info"),
                               size_constraints=HIT_TARGET, on_click=lambda e, m=local: self.show_model_info(m)),
             ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER))
@@ -892,9 +896,7 @@ class SettingsTab(MangaTab):
                         reason="Model downloads unavailable",
                         detail=(f"The model registry (manga_models) has no download for {local}."
                                 if self.session.models.available else svc.MISSING_CORE + " (manga_models).")))
-            elif local == "custom-image-edit":
-                controls += self._image_edit_controls(cfg)
-            if local and local != "custom-image-edit":
+            if local:
                 controls += self._model_file_controls(cfg, local)
         elif method == "cloud":
             quality = str(cfg.get("manga_inpaint_quality", "high") or "high")
@@ -1017,13 +1019,13 @@ class SettingsTab(MangaTab):
         picked = local is not None
         if method == "local" and local is None:
             local = svc.current_inpaint_choice(self.config())[1]
-            if svc.value_reason(svc.K_LOCAL_MODEL, local):
+            if local == svc.IMAGE_EDIT_MODEL or svc.value_reason(svc.K_LOCAL_MODEL, local):
                 local = svc.phone_local_model()
         for key, value in svc.inpaint_choice_updates(method, local).items():
             self.set(key, value)
         if picked and method == "local" and local:
             self.set_many(svc.model_choice_updates("inpaint", local))  # kept on the phone's runs
-        if local == "custom-image-edit" and method == "local":
+        if method == "api":
             endpoint = str(self.config().get(svc.K_EDIT_ENDPOINT) or "")
             self.set(svc.K_USE_EDIT_ENDPOINT, bool(endpoint))
         self.refresh()
