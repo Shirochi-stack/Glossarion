@@ -3622,15 +3622,30 @@ class ChatView:
                 mapped[os.path.normcase(os.path.abspath(str(epub)))] = str(glossary)
         jobs = getattr(self.env, "jobs", None)
         start_reason = None if jobs is not None else "The job service is not running"
+        instances, assignment = self._batch_instances(batch)
         signature = (self.cid, batch.get("created"), tuple(batch.get("files") or ()), bool(batch.get("include_subfolders")),
-                     self._glossary_chip_text(), tuple(sorted(mapped.items())), start_reason)
+                     self._glossary_chip_text(), tuple(sorted(mapped.items())), start_reason,
+                     tuple(instances), tuple(sorted(assignment.items())))
         if self.batch_card is not None and getattr(self.batch_card, "_signature", None) == signature:
             return self.batch_card
+        pickers = None
+        if assignment:
+            from glossarion_mobile.ui.components.instance_pickers import InstancePickers
+
+            cid, created = self.cid, batch.get("created")
+
+            def picked(chosen: dict) -> None:  # kept in the batch so a rebuilt card shows the pick
+                self._update_batch(cid, created, instance_map=chosen)
+
+            pickers = InstancePickers(instances, assignment, list(batch.get("files") or ()),
+                                      picker_key="batch-instance", text_key="batch-instance-jobs",
+                                      push=self._push, on_change=picked)
         card = BatchPlanCard(files=list(batch.get("files") or ()), folder=str(batch.get("folder") or ""),
                              include_subfolders=bool(batch.get("include_subfolders")),
                              glossary_label=self._glossary_chip_text(), mapped=mapped, run_options=panel,
                              on_action=lambda action, *args, b=batch: self._on_batch_action(b, action, *args),
-                             start_reason=start_reason, key=f"batch-plan-{int(float(batch.get('created') or 0) * 1000)}")
+                             start_reason=start_reason, instances=pickers,
+                             key=f"batch-plan-{int(float(batch.get('created') or 0) * 1000)}")
         card._signature = signature
         self.batch_card = card
         return card
@@ -3669,8 +3684,37 @@ class ChatView:
             return self._spawn(self._start_batch(batch))
         return None
 
+    def _batch_instances(self, batch: dict) -> tuple:
+        """``(instances, {file: instance})`` when the batch is a multi-instance run (``LibraryService
+        .instance_assignment``: the Translation keys on 2+ instances, 2+ files; prefilled from the saved
+        ``instance_file_map``, else round-robin), with this card's own picks (``instance_map``) on top;
+        ``([], {})`` for a single-instance run (the one job of before)."""
+        files = [str(p) for p in (batch.get("files") or ()) if p]
+        service = self._library_service() if len(files) > 1 else None
+        finder = getattr(service, "instance_assignment", None)
+        try:
+            multi = finder(files) if callable(finder) else None
+        except Exception:
+            log.debug("the instance assignment failed", exc_info=True)
+            multi = None
+        if not multi:
+            return [], {}
+        instances, assignment = list(multi[0]), dict(multi[1])
+        picked = batch.get("instance_map")
+        if isinstance(picked, dict):
+            for path, number in picked.items():
+                if path in assignment and number in instances:
+                    assignment[path] = number
+        return instances, assignment
+
+    @staticmethod
+    def _batch_title(files: list) -> str:
+        return os.path.basename(files[0]) + (f" +{len(files) - 1}" if len(files) > 1 else "") if files else "Batch"
+
     async def _start_batch(self, batch: dict) -> Any:
-        """One Start: one ``translate`` job over every file (JobSpec inputs; the desktop multi-file run)."""
+        """One Start: one ``translate`` job over every file (JobSpec inputs; the desktop multi-file run), or for a
+        multi-instance run one job per instance with only its files (the desktop's Run with the assignment dialog),
+        the choice remembered in ``instance_file_map``."""
         from glossarion_mobile.ui.chat.transcript_model import LIBRARY_LABEL
 
         cid = self.cid
@@ -3681,15 +3725,38 @@ class ChatView:
             panel.commit()
         run_config = panel.config_overrides() if panel is not None else (
             dict(batch.get("run_config") or {}) if batch.get("only_this_run", False) else {})
-        title = os.path.basename(files[0]) + (f" +{len(files) - 1}" if len(files) > 1 else "") if files else "Batch"
+        title = self._batch_title(files)
         chat_title = str((self.env.chats.session(cid) or {}).get("title") or "Chat")
         params: dict = {"config_overrides": dict(run_config)} if run_config else {}
+        origin = {"type": "chat", "cid": cid, "label": f"Chat · {chat_title}"}
+        card = self.batch_card
+        pickers = getattr(card, "instances", None) if card is not None else None
+        if pickers is not None and pickers.assignment:
+            assignment = dict(pickers.assignment)
+            plan = pickers.groups()
+        else:
+            _instances, assignment = self._batch_instances(batch)
+            plan = {}
+            if assignment:
+                import instance_plan
+
+                plan = instance_plan.plan(files, assignment)
         try:
-            job_id = await self.env.jobs.submit("translate", title, tuple(files), params,
-                                                {"type": "chat", "cid": cid, "label": f"Chat · {chat_title}"})
+            if plan:
+                service = self._library_service()
+                saver = getattr(service, "save_instance_assignment", None)
+                if callable(saver):
+                    saver(assignment)
+                groups = [(number, self._batch_title(group), tuple(group)) for number, group in plan.items()]
+                job_ids = await self.env.jobs.submit_instances("translate", groups, params, origin)
+                job_id = next((j for j in job_ids if j), None)
+            else:
+                job_id = await self.env.jobs.submit("translate", title, tuple(files), params, origin)
         except Exception as exc:
             self.notify(f"Could not start: {exc}")
             return None
+        if plan and job_id is None:
+            return None  # nothing queued (the preflight said why)
         self.env.chats.set_meta(cid, "pending_batch", None)
         self._drop_panel((cid, "batch", created))  # committed above
         self.batch_card = None
@@ -3697,9 +3764,17 @@ class ChatView:
             f"\n- … +{len(files) - 50} more" if len(files) > 50 else "")
         self.env.chats.record_user_turn(cid, ("user", f"📚 Batch translation ({len(files)} files):\n{names}"),
                                         f"Batch · {len(files)} files")
-        append_tool_message(self.env.chats, cid, f"📚 **Batch started:** {len(files)} file(s) translate as books in "
-                                                 "the output folder (Library shelf). Follow it in Jobs.", "",
-                            LIBRARY_LABEL, {"library_job": str(job_id)})
+        if plan:  # the file -> instance mapping, as the desktop run lists its instances
+            from glossarion_mobile.ui.components.instance_pickers import jobs_line
+
+            mapping = "\n".join(f"- **Instance {number}:** " + ", ".join(os.path.basename(p) for p in group)
+                                for number, group in plan.items())
+            text = (f"📚 **Batch started:** {jobs_line(plan)}\n{mapping}\n\nThe files translate as books in the "
+                    "output folder (Library shelf). Follow them in Jobs.")
+        else:
+            text = (f"📚 **Batch started:** {len(files)} file(s) translate as books in the output folder (Library "
+                    "shelf). Follow it in Jobs.")
+        append_tool_message(self.env.chats, cid, text, "", LIBRARY_LABEL, {"library_job": str(job_id)})
         self.show_newest()
         # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return job_id
