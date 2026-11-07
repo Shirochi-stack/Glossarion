@@ -1092,6 +1092,59 @@ def _push(*controls: Any) -> None:
             pass
 
 
+def open_key_editor(
+    controller: "KeysController",
+    pool: str,
+    *,
+    ctx: Any,
+    io: Callable[..., Any],
+    index: Optional[int] = None,
+    prefill: Optional[Mapping[str, Any]] = None,
+    sheet_env: Any = None,
+    read_clipboard: Optional[Callable[[], Any]] = None,
+    copy_text: Optional[Callable[[str], Any]] = None,
+    on_stored: Optional[Callable[[], Any]] = None,
+    on_saved: Optional[Callable[[dict], Any]] = None,
+) -> Any:
+    """The Multi-Key Manager's Add key / Edit key editor for ``pool`` (``index`` None: a new key, from
+    ``prefill`` when given). ``on_stored()`` runs after the key is written, ``on_saved(entry)`` once the
+    editor closed after a save (a close without saving runs neither). The Keys screen and the
+    ModelSheet row "Add key" open the same editor."""
+    from glossarion_mobile.ui.screens.key_editor import KeyEditor
+
+    spec = controller.spec(pool)
+    keys = controller.keys(pool)
+    new = index is None or not 0 <= index < len(keys)
+    entry = (dict(prefill) if prefill is not None else controller.new_entry(spec.id)) if new else keys[index]
+    azure_versions: list = []
+    schema = getattr(ctx, "schema", None)
+    try:
+        spec_obj = schema.spec("azure_api_version") if schema is not None else None
+        choices = getattr(spec_obj, "choices", None) or ()
+        azure_versions = [str(c[0] if isinstance(c, (list, tuple)) else c) for c in choices]
+    except Exception:
+        azure_versions = []
+
+    def save(value: dict) -> Optional[str]:
+        if new:
+            _index, error = controller.add_key(pool, value)
+        else:
+            error = controller.update_key(pool, index, value)
+        if error is None and on_stored is not None:
+            on_stored()
+        return error
+
+    async def test(value: dict) -> dict:
+        return await io(lambda: controller.test_entry(value, pool))
+
+    return KeyEditor(
+        ctx, entry=entry, pool_id=spec.id, pool_title=spec.title, contexts=spec.contexts,
+        context_labels=context_labels(), on_save=save, on_saved=on_saved, on_test=test, sheet_env=sheet_env,
+        azure_versions=azure_versions, read_clipboard=read_clipboard, copy_text=copy_text, new=new,
+        test_reason=None if controller.backend.available else SERVICE_MISSING,
+    ).show()
+
+
 class KeysScreen(Screen):  # type: ignore[misc,valid-type]
     title = "API keys"
 
@@ -1713,42 +1766,13 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
     # ---- editor --------------------------------------------------------------------------------------------
 
     def open_editor(self, index: Optional[int], *, prefill: Optional[Mapping[str, Any]] = None) -> Any:
-        from glossarion_mobile.ui.screens.key_editor import KeyEditor
+        def stored() -> None:
+            self.render()
+            _push(self.list_view)
 
-        spec = self.spec
-        keys = self.controller.keys(self.pool)
-        new = index is None or not 0 <= index < len(keys)
-        entry = (dict(prefill) if prefill is not None else self.controller.new_entry(spec.id)) if new else keys[index]
-        azure_versions: list = []
-        schema = getattr(self.ctx, "schema", None)
-        try:
-            spec_obj = schema.spec("azure_api_version") if schema is not None else None
-            choices = getattr(spec_obj, "choices", None) or ()
-            azure_versions = [str(c[0] if isinstance(c, (list, tuple)) else c) for c in choices]
-        except Exception:
-            azure_versions = []
-
-        pool = self.pool
-
-        def save(value: dict) -> Optional[str]:
-            if new:
-                _index, error = self.controller.add_key(pool, value)
-            else:
-                error = self.controller.update_key(pool, index, value)
-            if error is None:
-                self.render()
-                _push(self.list_view)
-            return error
-
-        async def test(value: dict) -> dict:
-            return await self.io(lambda: self.controller.test_entry(value, self.pool))
-
-        self.editor = KeyEditor(
-            self.ctx, entry=entry, pool_id=spec.id, pool_title=spec.title, contexts=spec.contexts,
-            context_labels=context_labels(), on_save=save, on_test=test, sheet_env=self.sheet_env,
-            azure_versions=azure_versions, read_clipboard=self.read_clipboard, copy_text=self.copy_text, new=new,
-            test_reason=None if self.controller.backend.available else SERVICE_MISSING,
-        ).show()
+        self.editor = open_key_editor(self.controller, self.pool, ctx=self.ctx, io=self.io, index=index,
+                                      prefill=prefill, sheet_env=self.sheet_env, read_clipboard=self.read_clipboard,
+                                      copy_text=self.copy_text, on_stored=stored)
         return self.editor
 
     # ---- tests ----------------------------------------------------------------------------------------------
