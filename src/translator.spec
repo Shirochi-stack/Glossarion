@@ -79,8 +79,12 @@ print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
 if msys2_bin and os.path.exists(msys2_bin):
-    dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
-    print(f"  Found {len(dll_list)} DLL files in {msys2_bin}")
+    # Only the DLLs WeasyPrint loads (their PE closure), not all of mingw64/bin
+    from spec_slim import msys2_weasyprint_dlls
+    dll_list = msys2_weasyprint_dlls(msys2_bin)
+    if dll_list is None:
+        dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
+    print(f"  Using {len(dll_list)} DLL files from {msys2_bin}")
     if dll_list:
         # Print first few DLLs for verification
         print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
@@ -93,7 +97,7 @@ else:
     print(f"  WARNING: No MSYS2 directory found in any candidate location")
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'chardet', 'charset_normalizer']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
@@ -1250,6 +1254,13 @@ hiddenimports = list(set(hiddenimports))
 # EXCLUSIONS (Packages to exclude to reduce size)
 # ============================================================================
 
+# SLIM (docs/lite_builds_bloat_report.md): hidden imports nothing in the app
+# imports (no src module uses pytz, sqlite3 or lru; PyInstaller still collects
+# any of them a shipped package really imports). setuptools/pkg_resources stay:
+# cffi pulls them in anyway, and pyi_rth_pkgres needs pkg_resources.
+_SLIM_UNUSED_HIDDEN = {'pytz', 'sqlite3', '_sqlite3', 'lru'}
+hiddenimports = [h for h in hiddenimports if h not in _SLIM_UNUSED_HIDDEN]
+
 excludes = [
     # ============================================================================
     # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)
@@ -1422,6 +1433,25 @@ excludes = [
     # Arena controls the app's Qt6 WebEngine directly through CDP.
     # ============================================================================
     'playwright', 'playwright.*',
+    # ============================================================================
+    # SLIM (docs/lite_builds_bloat_report.md): reached only through optional or
+    # lazy imports this tier never runs
+    # ============================================================================
+    # Manga stack modules PyInstaller follows from try-guarded lazy imports in
+    # stop_control, translator_gui and translation_pipeline (no manga in this tier)
+    'manga_translator', 'ocr_manager', 'bubble_detector', 'local_inpainter',
+    'ImageRenderer', 'manga_editor_core', 'manga_env', 'manga_runner',
+    'manga_settings_dialog', 'doctr', 'doctr.*',
+    # google.genai's optional MCP support (try-guarded); websockets' optional router
+    'mcp', 'mcp.*', 'werkzeug', 'werkzeug.*',
+    # A Redis client (datasketch's optional storage) and the old tkinter theme
+    # (tkinter is excluded above); the Lite tiers drop them too. rich and pygments
+    # stay: poe_api_wrapper/__init__ imports .example, which imports rich.markdown
+    # (-> rich.syntax -> pygments), and Standard ships the Poe route.
+    'redis', 'redis.*',
+    'ttkbootstrap', 'ttkbootstrap.*',
+    # onnxruntime is excluded above, so its extensions can never load
+    'onnxruntime_extensions', 'onnxruntime_extensions.*',
 ]
 
 # ============================================================================
@@ -1478,6 +1508,19 @@ a.pure = [p for p in a.pure if not any([
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
 ])]
+
+# ============================================================================
+# SLIM (docs/lite_builds_bloat_report.md): the NoCuda rules (WebEngine DevTools and
+# debug resources, Chromium locales but en-US, Qt .qm translations, the qml/ tree,
+# Qt6 DLLs nothing links), plus Qt bindings and plugins nothing imports. The Qt6
+# Quick/Qml/Positioning DLLs stay: Qt6WebEngineCore links them.
+# ============================================================================
+from spec_slim import slim_analysis, pyside6_unused_bindings
+slim_analysis(a, 'STANDARD', extra=pyside6_unused_bindings([
+    'QtOpenGL.pyd', 'QtQuick.pyd', 'QtQml.pyd', 'QtPositioning.pyd', 'QtQuickWidgets.pyd',
+    'pyside6qml.abi3.dll', 'plugins/qmltooling/', 'plugins/position/',
+    'plugins/platforminputcontexts/',
+]))
 
 # ============================================================================
 # PYZ (Python Zip archive)
