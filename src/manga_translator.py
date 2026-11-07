@@ -9753,6 +9753,7 @@ class MangaTranslator:
         free_text_count = 0
         
         from image_edit_check import region_needs_no_lettering
+        redraw_free_text = self._image_edit_translates_text()
         for i, region in enumerate(regions):
             if not _region_has_ocr_text(region):
                 regions_skipped += 1
@@ -9767,6 +9768,10 @@ class MangaTranslator:
                     region.art_kept_unmasked = True
                 regions_skipped += 1
                 self._log(f"   Region {i+1}: SKIPPED (number-only text stays as drawn)", "debug")
+                continue
+            if redraw_free_text and self._leave_to_image_edit_redraw(region):
+                regions_skipped += 1
+                self._log(f"   Region {i+1}: SKIPPED (outside bubbles: the translate image edit prompt redraws it)", "debug")
                 continue
 
             # CHECK: Should this region be inpainted?
@@ -9914,17 +9919,72 @@ class MangaTranslator:
         
         return mask
 
+    def _custom_image_edit_prompts(self):
+        """``(system, user)`` custom image edit prompts of the run: the config, then the main GUI's vars."""
+        main_gui = getattr(self, 'main_gui', None)
+        cfg = getattr(main_gui, 'config', {}) if main_gui is not None else {}
+        system_prompt = user_prompt = ''
+        if isinstance(cfg, dict):
+            system_prompt = cfg.get('custom_image_edit_system_prompt', '') or cfg.get('custom_image_edit_prompt', '')
+            user_prompt = cfg.get('custom_image_edit_user_prompt', '')
+        if not system_prompt and main_gui is not None:
+            system_prompt = (
+                getattr(main_gui, 'custom_image_edit_system_prompt_var', '')
+                or getattr(main_gui, 'custom_image_edit_prompt_var', '')
+            )
+        if not user_prompt and main_gui is not None:
+            user_prompt = getattr(main_gui, 'custom_image_edit_user_prompt_var', '')
+        return system_prompt, user_prompt
+
+    def _image_edit_translates_text(self) -> bool:
+        """True when the page is cleaned by the custom image edit with a translate prompt (``{target_lang}``,
+        the Translate SFX profiles): the model redraws the sound effects / background text translated, so
+        the text outside speech bubbles and caption boxes is left to it (``_leave_to_image_edit_redraw``)."""
+        try:
+            if getattr(self, 'skip_inpainting', False) or getattr(self, 'use_cloud_inpainting', False):
+                return False
+            if str(self._get_live_local_inpaint_method() or '').lower() != 'custom-image-edit':
+                return False
+            from local_inpainter import custom_image_edit_prompt_translates
+            return custom_image_edit_prompt_translates(*self._custom_image_edit_prompts())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _leave_to_image_edit_redraw(region) -> bool:
+        """Under a translate image edit prompt: a region the detector classed as free text (outside any
+        speech bubble or caption box: sound effects, signs, titles, notes) is neither masked nor lettered;
+        the model redraws it translated and the edit keeps what it redrew (or, when the prompt leaves such
+        text alone, as Translate SFX does for signs, the source art stays). Marks it ``image_edit_redraws``."""
+        kind = getattr(region, 'bubble_type', None) or getattr(region, 'region_type', None)
+        if str(kind or '').strip().lower().replace('-', '_').replace(' ', '_') != 'free_text':
+            return False
+        region.image_edit_redraws = True
+        return True
+
+    def _mark_regions_left_to_image_edit(self, regions):
+        """Flag the free-text regions a translate image edit prompt redraws (not lettered)."""
+        if not self._image_edit_translates_text():
+            for region in regions or []:
+                if getattr(region, 'image_edit_redraws', False):
+                    region.image_edit_redraws = False  # the prompt changed since: letter it again
+            return
+        for region in regions or []:
+            if self._leave_to_image_edit_redraw(region):
+                self._log(
+                    f"   ⏭️ Not lettering '{str(getattr(region, 'text', ''))[:20]}': outside bubbles, "
+                    "redrawn by the translate image edit prompt",
+                    "debug",
+                )
+
     def _apply_custom_image_edit_request_config(self, inpainter):
         """Scope custom-image-edit prompt/language to the manga inpainter request object."""
         try:
             if inpainter is None or not hasattr(inpainter, 'config') or not isinstance(inpainter.config, dict):
                 return
             cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
-            system_prompt = ''
-            user_prompt = ''
+            system_prompt, user_prompt = self._custom_image_edit_prompts()
             if isinstance(cfg, dict):
-                system_prompt = cfg.get('custom_image_edit_system_prompt', '') or cfg.get('custom_image_edit_prompt', '')
-                user_prompt = cfg.get('custom_image_edit_user_prompt', '')
                 inpainter.config['manga_settings'] = cfg.get('manga_settings') or getattr(self, 'manga_settings', {})
                 inpainter.config['manga_batch_image_requests_enabled'] = cfg.get('manga_batch_image_requests_enabled', True)
                 inpainter.config['manga_batch_image_requests_size'] = cfg.get('manga_batch_image_requests_size', 5)
@@ -9934,13 +9994,6 @@ class MangaTranslator:
                 inpainter.config['inpainter_keys'] = cfg.get('inpainter_keys', []) or []
                 inpainter.config['force_key_rotation'] = cfg.get('force_key_rotation', True)
                 inpainter.config['rotation_frequency'] = cfg.get('rotation_frequency', 1)
-            if not system_prompt and hasattr(self, 'main_gui'):
-                system_prompt = (
-                    getattr(self.main_gui, 'custom_image_edit_system_prompt_var', '')
-                    or getattr(self.main_gui, 'custom_image_edit_prompt_var', '')
-                )
-            if not user_prompt and hasattr(self, 'main_gui'):
-                user_prompt = getattr(self.main_gui, 'custom_image_edit_user_prompt_var', '')
             if system_prompt:
                 inpainter.config['custom_image_edit_system_prompt'] = system_prompt
                 inpainter.config['custom_image_edit_prompt'] = system_prompt
@@ -11397,8 +11450,10 @@ class MangaTranslator:
     def _region_left_unlettered(region) -> bool:
         """Regions whose art stays as drawn: text the edit left, unchanged digits (11:59) or
         symbols (also when their translation arrived after the mask kept their art), and a
-        translation that is only a placeholder ("[Illegible text]")."""
-        if getattr(region, 'image_edit_text_left', False) or getattr(region, 'art_kept_unmasked', False):
+        translation that is only a placeholder ("[Illegible text]"); free text a translate image
+        edit prompt redraws (``image_edit_redraws``)."""
+        if (getattr(region, 'image_edit_text_left', False) or getattr(region, 'art_kept_unmasked', False)
+                or getattr(region, 'image_edit_redraws', False)):
             return True
         if _is_unreadable_translation(getattr(region, 'translated_text', ''), getattr(region, 'text', '')):
             return True
@@ -11413,7 +11468,8 @@ class MangaTranslator:
             mask: The mask indicating regions to inpaint
             inpainter: Optional pre-checked-out inpainter instance to reuse (avoids pool exhaustion)
         """
-        if mask is None or not np.any(mask):
+        # A translate image edit prompt also redraws the free text left out of the mask (sound effects).
+        if mask is None or (not np.any(mask) and not self._image_edit_translates_text()):
             self._log("   ⏭️ No OCR text in inpaint mask; skipping inpainting", "info")
             return image.copy()
 
@@ -12264,7 +12320,8 @@ class MangaTranslator:
         # Text the image edit could not remove is left as drawn rather than lettered over,
         # and so are digits that translate to themselves. Indexes survive the layout copies.
         self._mark_regions_with_text_left(image, regions)
-        unlettered_indexes = {i for i, region in enumerate(regions) if self._region_left_unlettered(region)}
+        self._mark_regions_left_to_image_edit(regions)
+        unlettered_indexes ={i for i, region in enumerate(regions) if self._region_left_unlettered(region)}
 
         # OPTIMIZATION: Cache mask creation result
         if not hasattr(self, '_cached_mask') or not hasattr(self, '_cached_mask_regions'):
@@ -16265,7 +16322,7 @@ class MangaTranslator:
                     except Exception:
                         pass
                     mask_local = self.create_text_mask(image, regions)
-                    if not np.any(mask_local):
+                    if not np.any(mask_local) and not self._image_edit_translates_text():
                         self._log("⏭️ No OCR-confirmed text to inpaint; preserving original image", "info")
                         _save_cleaned_image_if_changed(image, "thread")
                         return image.copy()

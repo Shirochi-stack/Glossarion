@@ -1513,6 +1513,52 @@ def test_settings_tab_providers_inpainting_rendering_and_schema_groups(iso, tmp_
     asyncio.run(scenario())
 
 
+@needs_cores
+def test_settings_image_edit_prompt_profiles(iso, tmp_path, monkeypatch):
+    """The custom image edit card has the desktop Custom Image Edit Prompt dialog's profile row (the shared
+    manga_env.ImageEditPromptProfiles in the Glossary settings' ProfileBar); Edit Prompt edits the selected
+    profile, whose prompts are the ones the runs read."""
+    import manga_env
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.settings.context import SettingsContext
+    from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+
+    monkeypatch.setenv("GLOSSARION_MOBILE", "1")
+    monkeypatch.setitem(sys.modules, "manga_models", FakeModels())
+    store, schema = _settings_store(tmp_path)
+    store.set("custom_image_edit_system_prompt", "My own edit prompt")
+
+    async def scenario():
+        _conn, session = _tb()._fake_session("android")
+        page = session.page
+        settings = SettingsContext(page=page, store=store, schema=schema)
+        ctx = _ctx(page, store, settings=settings, output_root=str(iso["Output"]))
+        screen = MangaScreen(parse_route("/tools/manga?tab=settings"), ctx, session=_session(tmp_path, {}))
+        _mount(page, screen.get_body())
+        tab = screen.settings_tab
+        tab.did_show()
+        assert tab.select_inpaint("local", "custom-image-edit")
+        bar = tab.image_edit_profile_bar
+        assert bar.names == ["Default", "Translate SFX", "Translate SFX + background text"]
+        assert bar.selected == "Default" and bar.profiles.texts["system"] == "My own edit prompt"
+        assert store.get("custom_image_edit_system_prompt") == "My own edit prompt"  # nothing changed
+        bar.select("Translate SFX")
+        assert store.get("active_custom_image_edit_prompt_profile") == "Translate SFX"
+        assert store.get("custom_image_edit_system_prompt") == manga_env.IMAGE_EDIT_TRANSLATE_SFX_PROMPT
+        assert store.get("custom_image_edit_prompt_profile_default")["system"] == "My own edit prompt"
+        editor = tab.edit_image_edit_prompts()
+        assert editor.field.value == manga_env.IMAGE_EDIT_TRANSLATE_SFX_PROMPT
+        assert editor.default == manga_env.IMAGE_EDIT_TRANSLATE_SFX_PROMPT
+        editor.field.value = "Redraw the sound effects in {target_lang}."
+        assert editor.save()
+        assert store.get("custom_image_edit_system_prompt") == "Redraw the sound effects in {target_lang}."
+        assert store.get("custom_image_edit_prompt_profiles")["Translate SFX"]["system"] == \
+            "Redraw the sound effects in {target_lang}."
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(not _has("settings_schema"), reason="settings_schema not importable")
 def test_schema_keys_group_by_the_desktop_tabs():
     import settings_schema

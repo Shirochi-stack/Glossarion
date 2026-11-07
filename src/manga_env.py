@@ -3104,6 +3104,130 @@ def default_custom_image_edit_system_prompt():
     return MangaEnvMixin._default_custom_image_edit_system_prompt(None)
 
 
+# ---------------------------------------------------------------------------
+# Custom image edit prompt profiles (the manga tab's "Custom Image Edit Prompt" dialog, mobile
+# Manga › Settings › Edit Prompt)
+# ---------------------------------------------------------------------------
+#
+# ``{target_lang}`` is the placeholder the translation prompt profiles use: the image edit request
+# fills it with the output language the text translation uses (local_inpainter, OUTPUT_LANGUAGE).
+# A prompt that contains it asks the model to draw translated text, so the image edit treats it as a
+# translate prompt (LocalInpainter._custom_image_edit_translates_text): the whole crop is sent, not only
+# the detected text boxes; the edit is kept in the bubble / caption mask and where the model redrew text
+# (image_edit_check.redrawn_text_mask), and the free text (outside bubbles) is neither masked nor
+# lettered by Glossarion (MangaTranslator._image_edit_translates_text).
+
+_IMAGE_EDIT_DIALOGUE_RULE = (
+    "1. Dialogue and narration: remove all written text inside speech bubbles, thought bubbles, caption boxes "
+    "and narration boxes. Redraw only the area the letters covered so it matches the surrounding bubble or box "
+    "fill, and leave these areas empty: do not write any text in them, the translation is lettered there later.\n"
+)
+_IMAGE_EDIT_SFX_RULE = (
+    "2. Sound effects: translate every sound effect and onomatopoeia that is drawn as part of the artwork "
+    "(outside the speech bubbles) into {target_lang} and redraw it in the same place, replacing the original "
+    "letters completely. Match the original hand-lettered sound-effect style: size, colour, outline, stroke "
+    "weight, angle, perspective and any distortion or motion effect. Repaint the artwork the original letters "
+    "covered where the new letters do not. Leave a sound effect that is already in {target_lang} as it is.\n"
+)
+_IMAGE_EDIT_KEEP_RULE = (
+    "Keep everything else identical: characters, faces, backgrounds, speech-bubble outlines, text-box borders, "
+    "panel frames, colours, line art and the image dimensions. Do not add text anywhere else, do not add "
+    "translator notes, and do not redraw, restyle, crop, move or rescale the artwork. Return only the edited image."
+)
+
+#: "Translate SFX": the dialogue is removed as with the default prompt, the sound effects are redrawn
+#: translated.
+IMAGE_EDIT_TRANSLATE_SFX_PROMPT = (
+    "Edit this comic image in two ways and change nothing else.\n"
+    + _IMAGE_EDIT_DIALOGUE_RULE
+    + _IMAGE_EDIT_SFX_RULE
+    + "Leave signs, notes, titles and all other background text exactly as drawn.\n"
+    + _IMAGE_EDIT_KEEP_RULE
+)
+
+#: "Translate SFX + background text": also the text the text detector usually misses (signs, letters,
+#: guild cards, papers, ..., long vertical titles), redrawn in place.
+IMAGE_EDIT_TRANSLATE_SFX_BACKGROUND_PROMPT = (
+    "Edit this comic image in three ways and change nothing else.\n"
+    + _IMAGE_EDIT_DIALOGUE_RULE
+    + _IMAGE_EDIT_SFX_RULE
+    + "3. Background text: translate every other piece of text that is part of the scene into {target_lang} and "
+      "redraw it in place on the same surface: signs and shop signs, letters, notes, papers and documents, guild "
+      "cards and ID cards, posters, banners, labels, book covers, screens and displays, title cards, and long "
+      "vertical titles or vertical columns of text. Match the original lettering style, colour, size, "
+      "perspective, curvature and lighting, and keep the text inside the area the original text took up. Keep "
+      "the orientation: text written top to bottom stays a vertical line in the same strip and at the same "
+      "length (letters stacked or the line turned 90 degrees, whichever reads naturally), and slanted or curved "
+      "text follows the same slant or curve. Leave text that is already in {target_lang}, and logos, as they are.\n"
+    + _IMAGE_EDIT_KEEP_RULE
+)
+
+IMAGE_EDIT_PROMPT_PROFILES_KEY = 'custom_image_edit_prompt_profiles'
+IMAGE_EDIT_PROMPT_DEFAULT_KEY = 'custom_image_edit_prompt_profile_default'
+IMAGE_EDIT_ACTIVE_PROMPT_PROFILE_KEY = 'active_custom_image_edit_prompt_profile'
+
+#: The shipped profiles besides Default (protected; ↺ Reset restores these texts).
+BUILTIN_IMAGE_EDIT_PROMPT_PROFILES = {
+    "Translate SFX": {'system': IMAGE_EDIT_TRANSLATE_SFX_PROMPT, 'user': ''},
+    "Translate SFX + background text": {'system': IMAGE_EDIT_TRANSLATE_SFX_BACKGROUND_PROMPT, 'user': ''},
+}
+
+
+def _image_edit_prompt_profiles_base():
+    import prompt_profiles
+    return prompt_profiles.PromptSetProfiles
+
+
+class ImageEditPromptProfiles(_image_edit_prompt_profiles_base()):
+    """The custom image edit prompt profiles (a system + optional user prompt each), without widgets.
+
+    ``prompt_profiles.PromptSetProfiles`` (the review / glossary refinement profile engine): Default is the
+    prompt the image edit used before profiles (a saved custom prompt stays in Default, so nothing changes for
+    an existing config; ↺ Reset gives the shipped one back) and the built-ins ``Translate SFX`` / ``Translate
+    SFX + background text``. Every action writes ``custom_image_edit_prompt_profiles`` /
+    ``custom_image_edit_prompt_profile_default`` / ``active_custom_image_edit_prompt_profile`` and the prompts
+    the runs read (``custom_image_edit_system_prompt`` / ``custom_image_edit_user_prompt``): through
+    ``on_runtime(texts)`` when given (the desktop tab's ``_sync_custom_image_edit_prompt``), else into
+    ``owner.config`` and the owner's ``custom_image_edit_*_prompt_var``.
+    """
+
+    FIELDS = ('system', 'user')
+    PROFILES_KEY = IMAGE_EDIT_PROMPT_PROFILES_KEY
+    DEFAULT_KEY = IMAGE_EDIT_PROMPT_DEFAULT_KEY
+    ACTIVE_KEY = IMAGE_EDIT_ACTIVE_PROMPT_PROFILE_KEY
+    SYSTEM_KEY = 'custom_image_edit_system_prompt'
+    USER_KEY = 'custom_image_edit_user_prompt'
+    RUNTIME_KEYS = (SYSTEM_KEY, USER_KEY)
+    LABEL = 'image edit prompt profile'
+    BUILTINS = {name: dict(texts) for name, texts in BUILTIN_IMAGE_EDIT_PROMPT_PROFILES.items()}
+    DEFAULT_BUILTIN = {'system': default_custom_image_edit_system_prompt(), 'user': ''}
+
+    def __init__(self, owner, *, persist=None, log=None, on_runtime=None):
+        self.on_runtime = on_runtime
+        config = owner.config
+        system = str(config.get(self.SYSTEM_KEY, '') or config.get('custom_image_edit_prompt', '') or '').strip()
+        user = str(config.get(self.USER_KEY, '') or '').strip()
+        super().__init__(owner, {'system': system or self.DEFAULT_BUILTIN['system'], 'user': user},
+                         persist=persist, log=log)
+
+    def _write_runtime(self, texts):
+        if self.on_runtime is not None:
+            self.on_runtime(dict(texts))
+            return
+        system = texts.get('system') or self.DEFAULT_BUILTIN['system']
+        user = texts.get('user', '')
+        config = self.owner.config
+        config[self.SYSTEM_KEY] = system
+        config[self.USER_KEY] = user
+        for name, value in (('custom_image_edit_system_prompt_var', system),
+                            ('custom_image_edit_prompt_var', system),
+                            ('custom_image_edit_user_prompt_var', user)):
+            try:
+                setattr(self.owner, name, value)
+            except Exception:
+                pass
+
+
 def import_ocr_session(state, path=None, *, document=None, files=None, merge=False):
     """Load an OCR JSON (``manga_ocr_io``) for reuse by the next batch run on *state*.
 
@@ -3333,9 +3457,13 @@ def test_custom_image_edit_endpoint(config, http_get=None):
 
 
 __all__ = [
+    "BUILTIN_IMAGE_EDIT_PROMPT_PROFILES",
     "CUSTOM_IMAGE_EDIT_BLANK_MESSAGE",
     "FONT_PRESETS",
     "HeadlessMangaState",
+    "IMAGE_EDIT_TRANSLATE_SFX_BACKGROUND_PROMPT",
+    "IMAGE_EDIT_TRANSLATE_SFX_PROMPT",
+    "ImageEditPromptProfiles",
     "MangaEnvMixin",
     "MangaOcrSessionMixin",
     "MangaRunEnv",

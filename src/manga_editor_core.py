@@ -70,7 +70,9 @@ try:
 except ImportError:
     UnifiedClient = None
 
-_REGION_METADATA_KEYS = ('bubble_type', 'region_type', 'bubble_bounds')
+# user_drawn: a box the user drew in the editor (manga_image_preview); it is cleaned / image-edited
+# even when OCR reads no text in it (a sound effect or sign the detector missed).
+_REGION_METADATA_KEYS = ('bubble_type', 'region_type', 'bubble_bounds', 'user_drawn')
 
 
 def _import_google_vision():
@@ -283,6 +285,17 @@ def _is_free_text_region_metadata(region=None, rect_item=None) -> bool:
     return any(_normalize_region_kind(value) in ('free_text', 'text_free', 'freetext') for value in candidates)
 
 
+def _image_edit_redraws_free_text(self) -> bool:
+    """A translate image edit prompt is active (MangaTranslator._image_edit_translates_text, the Translate
+    SFX profiles): the free text is left to the model's redraw, out of the mask (the renderer does not
+    letter it either), as in the batch run."""
+    translator = getattr(self, 'translator', None)
+    try:
+        return bool(translator is not None and translator._image_edit_translates_text())
+    except Exception:
+        return False
+
+
 def _preserve_free_text_inpaint_enabled(self) -> bool:
     values = []
     try:
@@ -356,6 +369,35 @@ def _manga_output_text(value):
     return value
 
 
+def _is_user_drawn_region(region) -> bool:
+    """A box the user drew in the editor (``user_drawn``, set by manga_image_preview)."""
+    if isinstance(region, dict):
+        return bool(region.get('user_drawn'))
+    return bool(getattr(region, 'user_drawn', False))
+
+
+def _blank_user_drawn_regions(self, recognized_texts) -> list:
+    """The editor boxes the user drew that OCR read no text in (``_current_regions``, the boxes the page's
+    recognition ran on). Translate still cleans them, so a box drawn around a sound effect or sign the
+    detector missed is in the inpaint / image edit mask (a Translate SFX image edit prompt redraws it)."""
+    read = set()
+    for item in recognized_texts or []:
+        if isinstance(item, dict) and str(_manga_output_text(item.get('text'))).strip():
+            try:
+                read.add(int(item['region_index']))
+            except (KeyError, TypeError, ValueError):
+                pass
+    blank = []
+    for index, region in enumerate(getattr(self, '_current_regions', None) or []):
+        if not isinstance(region, dict) or not _is_user_drawn_region(region) or index in read:
+            continue
+        if len(region.get('bbox') or ()) < 4:
+            continue
+        original_index = region.get('rect_index')
+        blank.append({**region, 'rect_index': index if original_index is None else original_index})
+    return blank
+
+
 def _regions_with_ocr_text(regions, recognized_texts):
     """Keep detected regions whose matching OCR result contains real text."""
     valid_indexes = set()
@@ -372,7 +414,7 @@ def _regions_with_ocr_text(regions, recognized_texts):
     for index, region in enumerate(regions or []):
         if index not in valid_indexes and not (
             isinstance(region, dict) and tuple(region.get('bbox') or ()) in valid_boxes
-        ):
+        ) and not _is_user_drawn_region(region):
             continue
         if isinstance(region, dict):
             original_index = region.get('rect_index')
@@ -2421,6 +2463,7 @@ def _run_inpainting_sync(
         excluded_count = 0
         free_text_skipped_count = 0
         preserve_free_text = _preserve_free_text_inpaint_enabled(self)
+        redraw_free_text = _image_edit_redraws_free_text(self)
         
         print(f"[INPAINT_SYNC] Processing {len(regions)} regions for inpainting")
         for i, region in enumerate(regions):
@@ -2431,16 +2474,20 @@ def _run_inpainting_sync(
                 excluded_count += 1
                 print(f"[INPAINT_SYNC] Skipping region {region_index} (excluded from clean)")
                 continue
-            if preserve_free_text and _is_free_text_region_metadata(region):
+            if (preserve_free_text or redraw_free_text) and _is_free_text_region_metadata(region):
                 free_text_skipped_count += 1
                 print(f"[INPAINT_SYNC] Skipping region {i} (free text preserved)")
                 continue
-            if isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip():
+            if (isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip()
+                    and not _is_user_drawn_region(region)):
                 print(f"[INPAINT_SYNC] Skipping region {i} (no OCR text)")
                 continue
             
             regions_to_inpaint.append((region_index, region))
         
+        # Boxes the user drew that OCR read no text in: cleaned, but not judged by the image edit's
+        # leftover-text check (LocalInpainter._without_unchecked_regions).
+        unchecked_mask = np.zeros_like(mask)
         print(f"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions ({excluded_count} excluded, {free_text_skipped_count} free-text preserved)")
         for region_index, region in regions_to_inpaint:
             # Handle both dictionary format (from detect) and object format (from translator)
@@ -2485,6 +2532,9 @@ def _run_inpainting_sync(
             else:
                 # Draw filled rectangle on mask
                 cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            if _is_user_drawn_region(region) and not (
+                    isinstance(region, dict) and str(_manga_output_text(region.get('text'))).strip()):
+                cv2.rectangle(unchecked_mask, (x1, y1), (x2, y2), 255, -1)
 
         if not np.any(mask):
             print("[INPAINT_SYNC] No eligible text regions; skipping inpainting")
@@ -2734,6 +2784,7 @@ def _run_inpainting_sync(
                     getattr(inpainter, 'config', {}).get('manga_disable_inpaint_performance_mode', False)
                     if hasattr(inpainter, 'config') else False
                 )
+                inpainter._image_edit_unchecked_mask = unchecked_mask if np.any(unchecked_mask) else None
                 cleaned_image = inpainter.inpaint(
                     image,
                     mask,
@@ -2741,6 +2792,7 @@ def _run_inpainting_sync(
                     _skip_tiling=disable_performance_mode,
                 )
             finally:
+                inpainter._image_edit_unchecked_mask = None
                 if is_custom_image_edit:
                     inpainter.set_log_callback(previous_inpainter_log_callback)
                 if old_mp_enabled is not None:
@@ -4277,6 +4329,8 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
                         'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
                     }
                     regions.append(region_dict)
+                # The boxes the user drew are cleaned even when OCR read no text in them.
+                regions.extend(_blank_user_drawn_regions(self, recognized_texts))
 
                 cleaned_image_path = _run_inpainting_sync(self, image_path, regions)
 
@@ -9137,7 +9191,7 @@ EDITOR_FUNCTIONS = (
 )
 #: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback, the
 #: safe_image page reads: cv2_imread, open_page_image).
-EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',
+EDITED_FUNCTIONS = ('_regions_with_ocr_text', '_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',
                     '_run_translate_background',)
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
@@ -9147,7 +9201,10 @@ SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
                 '_attach_region_styles',  # 2026-11-06: per-box text styles (Format toolbar)
                 '_record_region_font_sizes',  # 2026-11-06: the size each box was rendered at
                 '_release_sync_inpainter',  # 2026-11-06: Translate's inpainter goes back to the pool
-                '_wait_for_concurrent_inpainting')  # 2026-11-06: Translate renders on the cleaned page
+                '_wait_for_concurrent_inpainting',  # 2026-11-06: Translate renders on the cleaned page
+                '_is_user_drawn_region',  # 2026-11-07: boxes the user drew are cleaned without OCR text
+                '_blank_user_drawn_regions',
+                '_image_edit_redraws_free_text')  # 2026-11-07: a translate prompt redraws the free text
 
 
 # ===========================================================================
@@ -10158,6 +10215,9 @@ class MangaEditorSession:
             idx = len(boxes) - 1
             box.region_index = idx
             box.is_recognized = False
+            # Drawn by the user (manga_image_preview marks its drawn rectangles the same way): cleaned /
+            # image-edited even when OCR reads no text in it.
+            box.user_drawn = True
             _add_context_menu_to_rectangle(self, box, idx)
             self.image_preview_widget._persist_rectangles_state()
             self.image_state_manager.flush()

@@ -458,3 +458,89 @@ def test_number_only_rule(source, translated, expected):
     from image_edit_check import region_needs_no_lettering
 
     assert region_needs_no_lettering(source, translated) is expected
+
+
+# ---------------------------------------------------------------------------
+# PR 170: a translate image edit prompt (Translate SFX profiles) letters only bubbles and captions
+# ---------------------------------------------------------------------------
+
+FREE_BOX = (40, 40, 260, 90)  # a sound effect / sign outside the bubbles (detector class: free text)
+
+
+def _free_text(box, text, translated):
+    region = _region(box, text, translated)
+    region.region_type = region.bubble_type = "free_text"
+    return region
+
+
+def _image_edit_prompt(mt, monkeypatch, prompt):
+    monkeypatch.setattr(mt, "_get_live_local_inpaint_method", lambda: "custom-image-edit")
+    mt.main_gui.config["custom_image_edit_system_prompt"] = prompt
+    mt.main_gui.config["custom_image_edit_user_prompt"] = ""
+
+
+def _builtin_prompt(name):
+    import manga_env
+
+    if name == "Default":
+        return manga_env.default_custom_image_edit_system_prompt()
+    return manga_env.BUILTIN_IMAGE_EDIT_PROMPT_PROFILES[name]["system"]
+
+
+@pytest.mark.parametrize("profile", ["Translate SFX", "Translate SFX + background text"])
+def test_translate_prompt_leaves_free_text_to_the_model(mt, monkeypatch, profile):
+    """Live test: with a translate prompt the model redraws a detected sound effect / sign translated and
+    Glossarion lettered its own translation over it ("SHUUUUK" over SWOOOOSH, "WANTED" over WANTED; under
+    Translate SFX a title it was told to leave got English lettered over the Korean). Free text is now
+    neither masked nor lettered; bubbles and captions are cleaned and lettered as before."""
+    _image_edit_prompt(mt, monkeypatch, _builtin_prompt(profile))
+    page = np.full((340, 360, 3), 255, np.uint8)
+    cv2.putText(page, "KWANG", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 160), 4)
+    sfx = _free_text(FREE_BOX, "쾅!", "BOOM!")
+    speech = _region(SPEECH_BOX, "안녕하세요", "Hello there")
+
+    mask = mt.create_text_mask(page, [sfx, speech])
+    assert not _box(mask, FREE_BOX).any(), "the free text is left to the model's redraw"
+    assert _box(mask, SPEECH_BOX).any(), "the bubble is still cleaned"
+
+    rendered = mt.render_translated_text(page.copy(), [sfx, speech])
+    assert np.array_equal(_box(rendered, FREE_BOX), _box(page, FREE_BOX)), "no second lettering"
+    assert not np.array_equal(_box(rendered, SPEECH_BOX), _box(page, SPEECH_BOX))
+
+
+def test_default_prompt_still_cleans_and_letters_free_text(mt, monkeypatch):
+    _image_edit_prompt(mt, monkeypatch, _builtin_prompt("Default"))
+    page = np.full((340, 360, 3), 255, np.uint8)
+    sfx = _free_text(FREE_BOX, "쾅!", "BOOM!")
+    speech = _region(SPEECH_BOX, "안녕하세요", "Hello there")
+
+    mask = mt.create_text_mask(page, [sfx, speech])
+    assert _box(mask, FREE_BOX).any() and _box(mask, SPEECH_BOX).any()
+    rendered = mt.render_translated_text(page.copy(), [sfx, speech])
+    assert not np.array_equal(_box(rendered, FREE_BOX), _box(page, FREE_BOX))
+    assert not getattr(sfx, "image_edit_redraws", False)
+
+
+@pytest.mark.parametrize("profile, edited", [("Default", False), ("Translate SFX", True)])
+def test_page_with_only_free_text_still_reaches_a_translate_image_edit(mt, monkeypatch, profile, edited):
+    """The free text is out of the mask, so a page whose only text is a sound effect has an empty mask:
+    a translate prompt still sends it (the model redraws the sound effect), the Default prompt skips it."""
+    _image_edit_prompt(mt, monkeypatch, _builtin_prompt(profile))
+    page = np.full((200, 200, 3), 255, np.uint8)
+    calls = []
+
+    class FakeImageEdit:
+        model_loaded = True
+        config = {}
+        log_callback = None
+        last_image_edit_unremoved_mask = None
+
+        def set_log_callback(self, callback):
+            self.log_callback = callback
+
+        def inpaint(self, image, mask, **_kwargs):
+            calls.append(mask)
+            return image.copy()
+
+    mt.inpaint_regions(page, np.zeros(page.shape[:2], np.uint8), inpainter=FakeImageEdit())
+    assert bool(calls) is edited

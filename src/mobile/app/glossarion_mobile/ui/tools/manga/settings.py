@@ -610,12 +610,56 @@ class SettingsTab(MangaTab):
                                    subtitle=key)
         return self.editor.show()
 
+    def _image_edit_profile_bar(self) -> Any:
+        """The image edit prompt profile row (the desktop Custom Image Edit Prompt dialog's profiles:
+        ``manga_env.ImageEditPromptProfiles`` in the Glossary settings' ``ProfileBar``; Default, Translate SFX,
+        Translate SFX + background text, ＋ New · 💾 Save · 🗑 Delete / ↺ Reset)."""
+        from glossarion_mobile.ui.glossary.settings_tabs import ProfileBar
+        from glossarion_mobile.ui.tools.review import ReviewProfileSource
+
+        class ImageEditProfileSource(ReviewProfileSource):
+            noun = "image edit prompt profiles"
+
+            def profiles_class(self) -> Any:
+                cls = svc.core_attr("manga_env", "ImageEditPromptProfiles")
+                if cls is None:
+                    raise RuntimeError("manga_env.ImageEditPromptProfiles is not in this build")
+                return cls
+
+        self.image_edit_profile_bar = ProfileBar(
+            self.ctx, self.k("image_edit"), prompt_keys=("custom_image_edit_system_prompt", "custom_image_edit_user_prompt"),
+            source=ImageEditProfileSource(self.ctx), label="Image edit prompt profile", fields=("system", "user"),
+            noun="image edit")
+        return self.image_edit_profile_bar
+
     def edit_image_edit_prompts(self) -> Any:
-        """Custom image edit system prompt (+ optional user prompt) — ``_sync_custom_image_edit_prompt`` keys."""
+        """Custom image edit system prompt (+ optional user prompt) — ``_sync_custom_image_edit_prompt`` keys.
+
+        With the image edit prompt profiles (the row above Edit Prompt), this edits the selected profile's
+        system prompt; its user prompt is kept."""
         from glossarion_mobile.ui.settings.editors import PromptEditor
 
         cfg = self.config()
         default = self._default_prompt("image_edit")
+        bar = getattr(self, "image_edit_profile_bar", None)
+        profiles = bar.profiles if bar is not None else None
+        if profiles is not None:
+            name = bar.selected
+            shipped = (profiles.builtin_texts(name) or {}).get("system") or default or ""
+            current = str(profiles.texts.get("system") or "") or shipped
+
+            def save_profile(value: Any) -> Optional[str]:
+                texts = dict(profiles.texts)
+                texts["system"] = str(value or "").strip() or shipped
+                profiles.stage(name, texts)
+                if not bar._persist():
+                    return "Could not save the image edit prompt profile. Please try again."
+                return None
+
+            self.editor = PromptEditor(self._editor_ctx(), title=f"Custom image edit prompt · {name}", value=current,
+                                       default=shipped or None, on_save=save_profile,
+                                       subtitle="custom_image_edit_system_prompt · {target_lang} = the output language")
+            return self.editor.show()
         current = (str(cfg.get("custom_image_edit_system_prompt") or "") or str(cfg.get("custom_image_edit_prompt") or "")
                    or (default or ""))
 
@@ -1013,6 +1057,7 @@ class SettingsTab(MangaTab):
                                               "which this build does not provide yet."))
         return [
             self.endpoint_field,
+            self._image_edit_profile_bar().control,
             ft.Row(test_row, wrap=True, spacing=8),
             ft.Row([
                 ft.Switch(label="Batch Image Requests", value=batch, key=self.k("ms-edit-batch"),
