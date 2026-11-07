@@ -418,6 +418,66 @@ def test_translate_prompt_sends_crops_without_detected_text(monkeypatch):
         assert len(posted) == expected, name
 
 
+def test_translate_prompt_failed_textless_crop_keeps_source_and_overlap_is_a_hard_cut(monkeypatch):
+    """Live test (S21: a Vertex "content silently blocked" crop failed the whole page; overlapping crops
+    were cross-faded, so the redrawn art showed twice). With a translate prompt a failed crop that has no
+    detected text keeps its source art, a failed crop with text still fails the page, and the overlap
+    of two kept crops is a hard cut (no mix of both redraws)."""
+    import requests
+
+    top, top_mask = _page()
+    bottom = np.full((400, 300, 3), 230, np.uint8)
+    page = np.vstack([top, bottom])
+    mask = np.vstack([top_mask, np.zeros(bottom.shape[:2], np.uint8)])
+    settings = {"manga_settings": {"preprocessing": {"chunk_height": 420, "chunk_overlap": 40}},
+                "manga_batch_image_requests_enabled": False}
+    owner = _owner(settings)
+    manga_env.ImageEditPromptProfiles(owner).select(SFX)
+    monkeypatch.setenv("CUSTOM_IMAGE_EDIT_MODEL", "fake-edit-model")
+    monkeypatch.setenv("CUSTOM_IMAGE_EDIT_API_KEY", "sk-fake")
+    monkeypatch.setenv("CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT", "10")
+
+    def endpoint(fill_for_call):
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(kwargs)
+            fill = fill_for_call(len(calls))
+            if fill is None:
+                return types.SimpleNamespace(status_code=500, text="blocked", json=lambda: {})
+            crop = cv2.imdecode(np.frombuffer(kwargs["files"]["image"][1], np.uint8), cv2.IMREAD_COLOR)
+            ok, png = cv2.imencode(".png", np.full_like(crop, fill))
+            return types.SimpleNamespace(status_code=200, text="", json=lambda: {
+                "data": [{"b64_json": base64.b64encode(png.tobytes()).decode("ascii")}]})
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        return calls
+
+    inpainter = _inpainter(**owner.config)
+    ranges = inpainter._custom_image_edit_chunk_ranges(mask, 420, 40)
+    assert len(ranges) == 2 and ranges[1][0] < ranges[0][1]  # the two crops overlap
+
+    # both crops come back: the overlap is the first crop's top half and the second crop's bottom half
+    calls = endpoint(lambda n: 50 if n == 1 else 200)
+    result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
+    assert len(calls) == 2 and result is not None
+    assert set(np.unique(result)) <= {50, 200}  # no cross-faded rows
+    cut = ranges[1][0] + (ranges[0][1] - ranges[1][0]) // 2
+    assert (result[:cut] == 50).all() and (result[cut:] == 200).all()
+
+    # the text-free bottom crop fails: the page is kept, with the bottom crop's source art
+    calls = endpoint(lambda n: 50 if n == 1 else None)
+    inpainter = _inpainter(**owner.config)
+    result = inpainter._custom_image_edit_inpaint_chunked(page, mask)
+    assert len(calls) == 2 and result is not None
+    assert np.array_equal(result[ranges[0][1]:], page[ranges[0][1]:])
+
+    # the crop with the detected dialogue fails: the page fails as before
+    calls = endpoint(lambda n: None if n == 1 else 200)
+    inpainter = _inpainter(**owner.config)
+    assert inpainter._custom_image_edit_inpaint_chunked(page, mask) is None
+
+
 # ---------------------------------------------------------------------------
 # B: blank user-drawn boxes stay in the mask
 # ---------------------------------------------------------------------------

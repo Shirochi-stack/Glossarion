@@ -2860,10 +2860,20 @@ class LocalInpainter:
             if self._custom_image_edit_force_stopped():
                 return None
             log_crop_progress(f"Custom image edit request {request_index}/{request_count}: rows {start}-{end}")
-            edited = self._custom_image_edit_inpaint(
-                image[start:end], mask[start:end], iterations=iterations, _pool_prepared=True
-            )
+            try:
+                edited = self._custom_image_edit_inpaint(
+                    image[start:end], mask[start:end], iterations=iterations, _pool_prepared=True
+                )
+            except Exception:
+                if not optional_crop(start, end):
+                    raise
+                edited = None
             return None if self._custom_image_edit_force_stopped() else edited
+
+        def optional_crop(start, end):
+            # A translate prompt also sends the crops without a detected text box: there is no text to
+            # remove in them, so a failed one (a blocked request) keeps the source art, not failing the page.
+            return translate_text and not np.any(mask[start:end])
 
         edited_crops = {}
         if workers == 1:
@@ -2879,6 +2889,11 @@ class LocalInpainter:
                 if self._custom_image_edit_force_stopped():
                     return None
                 if edited is None or edited.shape != image[start:end].shape:
+                    if optional_crop(start, end):
+                        log_crop_progress(
+                            f"Custom image edit crop {request_index}/{request_count} failed; it has no detected "
+                            "text, so its source art is kept", "warning")
+                        continue
                     log_crop_progress(f"Custom image edit crop {request_index}/{request_count} failed", "error")
                     return None
                 edited_crops[range_index] = edited
@@ -2900,7 +2915,11 @@ class LocalInpainter:
                 continue
             edited = edited_crops[range_index]
             overlap_end = min(previous_end, end)
-            if overlap_end > start:
+            if overlap_end > start and translate_text:
+                # A translate prompt keeps each crop's whole output, and two redraws of the same rows differ:
+                # a cross-fade would show the art twice. Cut in the middle of the overlap (a text-free gap).
+                overlap_end = start + (overlap_end - start) // 2
+            elif overlap_end > start:
                 count = overlap_end - start
                 weight = (np.arange(1, count + 1, dtype=np.float32) / (count + 1))[:, None, None]
                 blended = (result[start:overlap_end].astype(np.float32) * (1 - weight)
