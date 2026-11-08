@@ -20,10 +20,14 @@ jobs:
         # tests/parity) read `git show <base sha>:src/...` and fail in CI when it is missing.
         fetch-depth: 0
     
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.2.0
+
+    - name: Set up Python 3.10
+      run: |
+        # Use Astral's CPython distribution because the runner no longer caches 3.10.
+        uv venv --seed --python 3.10 "$RUNNER_TEMP/glossarion-test-venv"
+        echo "$RUNNER_TEMP/glossarion-test-venv/bin" >> "$GITHUB_PATH"
     
     - name: Install Cairo and headless Qt dependencies
       run: |
