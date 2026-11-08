@@ -13828,11 +13828,15 @@ class MangaTranslator:
         mx, my = ax + aw / 2.0, ay + ah / 2.0
         if not (cx0 <= mx <= cx1 and cy0 <= my <= cy1):
             return False
+        slack = container.get('margin', 0) + 4  # outline and margin a box drawn on the bubble passes
+        if cx0 >= ax - slack and cy0 >= ay - slack and cx1 <= ax + aw + slack and cy1 <= ay + ah + slack:
+            # A closed box wholly inside a loose detector box (a webtoon narration box): its own
+            # bubble however much of the box it covers. Stray patches reach outside the box.
+            return True
         iw = max(0, min(ax + aw, cx1) - max(ax, cx0))
         ih = max(0, min(ay + ah, cy1) - max(ay, cy0))
         if iw * ih < 0.5 * aw * ah:
             return False
-        slack = container.get('margin', 0) + 4  # outline and margin a box drawn on the bubble passes
         for before, after, size in ((ax - cx0, cx1 - (ax + aw), aw), (ay - cy0, cy1 - (ay + ah), ah)):
             # > 0: the container reaches past that edge of the box; < 0: the box runs past it
             for out, short in ((before, after), (after, before)):
