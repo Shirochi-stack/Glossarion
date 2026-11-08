@@ -1040,3 +1040,46 @@ def test_progress_manager_merges_stable_pdf_rows_with_outline_seeds(tmp_path):
     assert entry["pdf_section_id"] == section_id
     assert entry["pdf_progress_key"] == f"pdf:{section_id}"
     assert entry["pdf_hash_migration_pending"] is True
+
+
+def test_stale_word_count_copy_from_an_earlier_pdf_is_replaced(tmp_path, monkeypatch):
+    """Owner (2026-11-08): a shorter earlier PDF (chapters 1-4) left word_count/pdf_section_2.html in the same
+    output folder; extracting the real PDF (chapter 5 in that section) kept the old copy because it was only
+    written when missing, and header translation then read "1화" from it. A copy that differs is replaced;
+    one that matches is left untouched."""
+    import os
+    from txt_processor import TextFileProcessor
+
+    class Splitter:
+        @staticmethod
+        def count_tokens(_content):
+            return 10
+
+    processor = object.__new__(TextFileProcessor)
+    processor.file_path = str(tmp_path / "book.pdf")
+    processor.output_dir = str(tmp_path / "out")
+    processor.cache_suffix = ""
+    processor.chapter_splitter = Splitter()
+    processor.pdf_render_mode = "legacy_layout"
+    monkeypatch.setenv("PDF_RENDER_MODE", "fast_semantic")
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "100000")
+    monkeypatch.setenv("COMPRESSION_FACTOR", "1")
+
+    word_count = tmp_path / "out" / "word_count"
+    word_count.mkdir(parents=True)
+    stale = word_count / "pdf_section_2.html"
+    stale.write_text("<h1>책 1화</h1>", encoding="utf-8")
+    current = "<h1>책 5화</h1><p>body</p>"
+
+    def run():
+        processor._process_chapters_for_splitting([{
+            "num": 2, "title": "책 5화", "content": current, "is_html": True,
+            "pdf_toc_section": True, "pdf_section_num": 2,
+        }])
+
+    run()
+    assert stale.read_text(encoding="utf-8") == current
+    mtime = os.path.getmtime(stale)
+    os.utime(stale, (mtime - 100, mtime - 100))
+    run()
+    assert os.path.getmtime(stale) == mtime - 100  # unchanged copy is not rewritten
