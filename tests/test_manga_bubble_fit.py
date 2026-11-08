@@ -375,3 +375,33 @@ def test_free_text_on_a_plain_panel_does_not_grow_to_the_panel(mt):
     box = (500, 400, 200, 100)
     found = mt._find_text_container(page, box, box)
     assert found is None or (found["rect"][2] <= 200 and found["rect"][3] <= 100)
+
+
+HAIR_TEXT = "SO THAT MEANS YOU CAN LIVE WITH THE HEADQUARTERS AND EVERYONE ELSE DURING THAT TIME!!?"
+
+
+def _hair_page():
+    """A white patch of page closed in by black hair on three sides and the panel border below."""
+    page = np.full((700, 640, 3), 255, np.uint8)
+    cv2.rectangle(page, (10, 10), (630, 690), (0, 0, 0), 4)
+    cv2.rectangle(page, (10, 10), (200, 560), (0, 0, 0), -1)
+    cv2.rectangle(page, (440, 10), (630, 560), (0, 0, 0), -1)
+    cv2.rectangle(page, (10, 10), (630, 200), (0, 0, 0), -1)
+    cv2.line(page, (10, 560), (630, 560), (0, 0, 0), 4)
+    return page
+
+
+@pytest.mark.parametrize("box", [(200, 370, 230, 170), (230, 370, 240, 170)])
+def test_free_text_keeps_its_own_box_next_to_black_hair(mt, box):
+    """Free text dragged onto plain page between locks of hair: the patch was taken for a bubble
+    (closed in the grown window) and the text was centred on it, far above the box's middle."""
+    page = _hair_page()
+    region = _region(box, HAIR_TEXT, None)
+    region.bubble_type = region.region_type = "free_text"
+    ink = _ink(page, _render(mt, page, [region]))
+    x, y, w, h = box
+    ys = np.nonzero(ink)[0]
+    top, bottom = ys.min() - y, y + h - 1 - ys.max()
+    assert region._fit_container is None
+    assert top >= 0 and bottom >= 0, "text left its box"
+    assert abs(top - bottom) <= 12, "text is not vertically centred in its box"
