@@ -48,6 +48,15 @@ def build_source_structure_metadata(file_path: str, existing_metadata=None) -> D
     return metadata
 
 
+
+def _existing_text(path):
+    """The text of *path*, or None when it cannot be read (missing file)."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
 class TextFileProcessor:
     """Process plain text files for translation"""
     
@@ -359,19 +368,18 @@ class TextFileProcessor:
                     )
                     chunk_filename = f"{filename_prefix}_{int(chapter_data['num'])}_{chunk_idx - 1}{file_ext}"
                     
-                    # Save original chunk content to word_count folder (only if it doesn't exist)
+                    # Save original chunk content to word_count folder (again when it differs: a copy left by an earlier source must not stay)
                     original_chunk_path = os.path.join(word_count_dir, chunk_filename)
-                    if not os.path.exists(original_chunk_path):
-                        # Wrap HTML chunks with full document structure
-                        content_to_write = chunk_content
-                        if file_ext == '.html':
-                            _render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
-                            if (_render_mode in ("fast_semantic", "fast_layout", "legacy_layout", "xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
-                                # Write the MuPDF page HTML as-is to preserve layout/styles
-                                content_to_write = chunk_content
-                            else:
-                                _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
-                                content_to_write = f"""<!DOCTYPE html>
+                    # Wrap HTML chunks with full document structure
+                    content_to_write = chunk_content
+                    if file_ext == '.html':
+                        _render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
+                        if (_render_mode in ("fast_semantic", "fast_layout", "legacy_layout", "xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
+                            # Write the MuPDF page HTML as-is to preserve layout/styles
+                            content_to_write = chunk_content
+                        else:
+                            _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
+                            content_to_write = f"""<!DOCTYPE html>
 <html lang=\"en\">
 <head>
     <meta charset=\"UTF-8\">
@@ -383,6 +391,7 @@ class TextFileProcessor:
 {chunk_content}
 </body>
 </html>"""
+                    if _existing_text(original_chunk_path) != content_to_write:
                         with open(original_chunk_path, 'w', encoding='utf-8') as f:
                             f.write(content_to_write)
                     
@@ -425,19 +434,18 @@ class TextFileProcessor:
                 )
                 chapter_filename = f"{filename_prefix}_{chapter_data['num']}{file_ext}"
                 
-                # Save original content to word_count folder (only if it doesn't exist)
+                # Save original content to word_count folder (again when it differs: a copy left by an earlier source must not stay)
                 original_chunk_path = os.path.join(word_count_dir, chapter_filename)
-                if not os.path.exists(original_chunk_path):
-                    # Wrap HTML files with full document structure
-                    content_to_write = chapter_content
-                    if file_ext == '.html':
-                        _render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
-                        if (_render_mode in ("fast_semantic", "fast_layout", "legacy_layout", "xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
-                            # Write MuPDF page HTML as-is to preserve layout/styles
-                            content_to_write = chapter_content
-                        else:
-                            _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
-                            content_to_write = f"""<!DOCTYPE html>
+                # Wrap HTML files with full document structure
+                content_to_write = chapter_content
+                if file_ext == '.html':
+                    _render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
+                    if (_render_mode in ("fast_semantic", "fast_layout", "legacy_layout", "xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
+                        # Write MuPDF page HTML as-is to preserve layout/styles
+                        content_to_write = chapter_content
+                    else:
+                        _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
+                        content_to_write = f"""<!DOCTYPE html>
 <html lang=\"en\">
 <head>
     <meta charset=\"UTF-8\">
@@ -449,6 +457,7 @@ class TextFileProcessor:
 {chapter_content}
 </body>
 </html>"""
+                if _existing_text(original_chunk_path) != content_to_write:
                     with open(original_chunk_path, 'w', encoding='utf-8') as f:
                         f.write(content_to_write)
                 
