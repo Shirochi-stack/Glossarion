@@ -13790,17 +13790,55 @@ class MangaTranslator:
         x0, y0, x1, y1 = max(0, x0), max(0, y0), min(iw, x1), min(ih, y1)
         if x1 - x0 < 8 or y1 - y0 < 8:
             return None
-        found, closed = self._text_container_in_window(image, (ax, ay, aw, ah), (x0, y0, x1, y1))
+        area = (ax, ay, aw, ah)
+        found, closed = self._text_container_in_window(image, area, (x0, y0, x1, y1))
+        if found is not None and not self._container_holds_area(found, area):
+            found = None
         if closed is None or closed:
             return found  # no uniform fill to look further for, or a bubble closed by its outline
         gx, gy = x1 - x0, y1 - y0
         grown = (max(0, x0 - gx), max(0, y0 - gy), min(iw, x1 + gx), min(ih, y1 + gy))
         if grown != (x0, y0, x1, y1):
-            again, closed = self._text_container_in_window(image, (ax, ay, aw, ah), grown)
+            again, closed = self._text_container_in_window(image, area, grown)
             # a bubble the box covers part of, not a whole panel of plain background around free text
-            if again is not None and closed and again['rect'][2] <= 2 * gx and again['rect'][3] <= 2 * gy:
+            if (again is not None and closed and again['rect'][2] <= 2 * gx and again['rect'][3] <= 2 * gy
+                    and self._container_holds_area(again, area)):
                 return again
         return found
+
+    @staticmethod
+    def _container_holds_area(container, area) -> bool:
+        """True when a found container is the bubble of the text box ``area`` (x, y, w, h).
+
+        Speech bubbles and narration boxes are convex (ovals, rectangles, a thin tail at most): a
+        closed patch that is not (white page boxed in by locks of hair, speed lines and the panel
+        border, often reaching up beside the box above) is not a bubble. The container must also
+        hold the box: its middle and at least half of it. A bubble that runs far past one edge of
+        the box while the box runs past its opposite edge is a neighbouring bubble (the box was
+        dragged half off it): the text would be centred on it, outside the box. A box inside a
+        larger bubble (narrower, or over part of an oval) stays inside it, so it keeps the bubble.
+        Without a container the text is centred in its own box.
+        """
+        solidity = container.get('solidity')
+        if solidity is not None and solidity < 0.9:
+            return False
+        ax, ay, aw, ah = area
+        cx0, cy0, cw, ch = container['rect']
+        cx1, cy1 = cx0 + cw, cy0 + ch
+        mx, my = ax + aw / 2.0, ay + ah / 2.0
+        if not (cx0 <= mx <= cx1 and cy0 <= my <= cy1):
+            return False
+        iw = max(0, min(ax + aw, cx1) - max(ax, cx0))
+        ih = max(0, min(ay + ah, cy1) - max(ay, cy0))
+        if iw * ih < 0.5 * aw * ah:
+            return False
+        slack = container.get('margin', 0) + 4  # outline and margin a box drawn on the bubble passes
+        for before, after, size in ((ax - cx0, cx1 - (ax + aw), aw), (ay - cy0, cy1 - (ay + ah), ah)):
+            # > 0: the container reaches past that edge of the box; < 0: the box runs past it
+            for out, short in ((before, after), (after, before)):
+                if out > 0.25 * size and -short - slack > 0.1 * size:
+                    return False
+        return True
 
     def _text_container_in_window(self, image: np.ndarray, area, window):
         """_find_text_container's search inside one window (x0, y0, x1, y1) of the page.
@@ -13839,6 +13877,8 @@ class MangaTranslator:
         filled = np.zeros_like(comp)
         cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill holes (leftover text, specks)
         open_patch = bool(filled[0].any() or filled[-1].any() or filled[:, 0].any() or filled[:, -1].any())
+        hull = sum(float(cv2.contourArea(cv2.convexHull(c))) for c in contours)
+        solidity = sum(float(cv2.contourArea(c)) for c in contours) / hull if hull > 0 else 1.0
         # A bubble's interior covers the middle of its text area; a patch between speed lines or
         # other art strokes does not (free text). A bubble closed by its outline only needs most
         # of the middle's fill and a fair share of the area: the rest of the middle is the
@@ -13886,9 +13926,15 @@ class MangaTranslator:
         text_h = min(ay + ah, y1) - max(ay, y0)
         if open_patch and (2 * half + 1 < 0.8 * text_w or bottom - top + 1 < 0.8 * text_h):
             return None, False
+        # The same when art cuts into the patch over part of its height (a lock of hair poking
+        # into the box's corner): lines fitted around it come out far smaller than the box allows
+        widths = 2 * np.minimum(left, right)[top:bottom + 1] + 1
+        if open_patch and float(np.mean(widths < 0.8 * text_w)) > 0.1:
+            return None, False
         return {
             'rect': (x0 + cx - half, y0 + top, 2 * half + 1, bottom - top + 1),
             'cx': x0 + cx, 'row0': y0, 'left': left, 'right': right, 'margin': margin,
+            'solidity': solidity,
         }, not open_patch
 
     @staticmethod
@@ -13927,7 +13973,7 @@ class MangaTranslator:
         A copy the overlap adjustment moved off its place (its detector box overlaps a
         neighbour's) still looks for its bubble where the region really is: the bubbles'
         outlines keep the two texts apart, and the moved box would straddle the neighbour's
-        outline. Only text without a bubble (free text) is laid out at the moved place.
+        outline. Text without a bubble is laid out in the region's own box too.
         """
         region._fit_container = None
         if not getattr(self, 'constrain_to_bubble', True):
@@ -13953,9 +13999,25 @@ class MangaTranslator:
             except Exception as e:
                 container = None
                 self._log(f"  ⚠️ Bubble interior detection failed: {e}", "debug")
+        if container is not None and source_regions:
+            # a patch that holds another box's middle is shared page, not this text's own bubble
+            cx0, cy0, cw, ch = container['rect']
+            for j, other in enumerate(source_regions):
+                if other is region or j == idx:
+                    continue
+                try:
+                    ox, oy, ow, oh = (float(v) for v in other.bounding_box)
+                except Exception:
+                    continue
+                if cx0 <= ox + ow / 2 <= cx0 + cw and cy0 <= oy + oh / 2 <= cy0 + ch:
+                    container = None
+                    break
         if container is not None:
             region._fit_container = container
             return container['rect']
+        # Without a bubble the text is centred in the region's own box, where it was placed: a
+        # neighbour it overlaps does not push it off (out of its panel, or onto the art)
+        area = tuple(find_area)
         x, y, w, h = area
         try:
             l, t, r, b = self._text_ink_pads(int(self.max_font_size_limit))
