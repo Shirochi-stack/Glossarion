@@ -405,3 +405,59 @@ def test_free_text_keeps_its_own_box_next_to_black_hair(mt, box):
     assert region._fit_container is None
     assert top >= 0 and bottom >= 0, "text left its box"
     assert abs(top - bottom) <= 12, "text is not vertically centred in its box"
+
+
+def _centred_in(ink, box):
+    x, y, w, h = box
+    ys = np.nonzero(ink[:, x:x + w].any(axis=1))[0]
+    assert len(ys), "text was not rendered"
+    top, bottom = ys.min() - y, y + h - 1 - ys.max()
+    assert top >= 0 and bottom >= 0, "text left its box"
+    assert abs(top - bottom) <= 12, "text is not vertically centred in its box"
+
+
+def _notched_hair_page():
+    """White page right of black hair that pokes into it, a tall patch under the box above."""
+    page = np.full((903, 640, 3), 255, np.uint8)
+    cv2.rectangle(page, (10, 280), (630, 530), (0, 0, 0), 4)  # panel border
+    cv2.rectangle(page, (10, 280), (428, 530), (0, 0, 0), -1)  # hair
+    cv2.rectangle(page, (428, 380), (470, 405), (0, 0, 0), -1)  # a lock poking into the patch
+    cv2.rectangle(page, (546, 280), (630, 530), (0, 0, 0), -1)
+    return page
+
+
+UPPER_TEXT = "HUH? A YEAR—"
+LOWER_TEXT = "THAT MEANS YOU WOULDN'T BE ABLE TO LIVE WITH RENTARO AND EVERYONE ELSE THAT WHOLE TIME!!?"
+
+
+@pytest.mark.parametrize("lower", [(428, 380, 117, 140), (428, 370, 117, 150)])
+def test_text_bubble_overlapping_the_box_above_stays_centred_in_its_box(mt, lower):
+    """A text bubble box dragged up into the box above, beside black hair: the white patch reaching
+    up past the box (boxed in by hair and the panel border, holding the box above) was taken for
+    its bubble, and the text came out small at the top of the box. Moved down off the box above,
+    it fitted the box; overlapping, it must too."""
+    mt.min_readable_size, mt.max_font_size_limit = 8, 48  # the editor's Auto font size range
+    page = _notched_hair_page()
+    upper = _region((500, 290, 45, 100), UPPER_TEXT, None)
+    region = _region(lower, LOWER_TEXT, None)
+    for r in (upper, region):
+        r.bubble_type = "text_bubble"
+    ink = _ink(page, _render(mt, page, [upper, region]))
+    x, y, w, h = lower
+    _centred_in(ink[:, :500], (x, y, 500 - x, h))  # left of the box above: only this text
+    alone = _region((x, 410, w, h), LOWER_TEXT, None)
+    alone.bubble_type = "text_bubble"
+    _render(mt, page, [alone])
+    assert region.rendered_font_size >= alone.rendered_font_size - 1
+
+
+def test_box_moved_half_off_an_oval_keeps_its_text_in_the_box(mt):
+    """A box dragged down over the lower part of an oval bubble: the bubble was its container and
+    the text stayed up in the bubble, over the box's top edge."""
+    page, _inside, _bubble = _oval_page()
+    box = (200, 280, 240, 200)
+    region = _region(box, LONG, None)
+    region.bubble_type = "text_bubble"
+    ink = _ink(page, _render(mt, page, [region]))
+    assert region._fit_container is None
+    _centred_in(ink, box)
