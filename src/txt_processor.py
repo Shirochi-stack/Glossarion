@@ -49,6 +49,12 @@ def build_source_structure_metadata(file_path: str, existing_metadata=None) -> D
 
 
 
+def _file_content_fingerprint(path):
+    """The EPUB chapter cache's SHA-256 file fingerprint (``Chapter_Extractor``)."""
+    from Chapter_Extractor import _file_content_fingerprint as fingerprint
+    return fingerprint(path)
+
+
 def _existing_text(path):
     """The text of *path*, or None when it cannot be read (missing file)."""
     try:
@@ -568,6 +574,11 @@ class TextFileProcessor:
                     # word_count file missing — cache is stale
                     print(f"📊 Split cache stale — missing {filename}")
                     return None
+                # The copy must be the one this cache was built with (same fingerprint as the EPUB
+                # chapter cache uses): a copy left by an earlier source in this folder is not reused
+                if meta.get('word_count_fingerprint') != _file_content_fingerprint(body_path):
+                    print(f"📊 Split cache stale — {filename} is not the extracted copy")
+                    return None
                 
                 with open(body_path, 'r', encoding='utf-8') as f:
                     body = f.read()
@@ -583,6 +594,7 @@ class TextFileProcessor:
                         pass  # Malformed HTML, use as-is
                 
                 chapter = dict(meta)  # Copy metadata
+                chapter.pop('word_count_fingerprint', None)
                 chapter['body'] = body
                 chapter['content_hash'] = self._generate_hash(body)
                 chapter['file_size'] = len(body)
@@ -626,6 +638,9 @@ class TextFileProcessor:
                 ):
                     if ch.get(key) is not None:
                         meta[key] = ch[key]
+                meta['word_count_fingerprint'] = _file_content_fingerprint(
+                    os.path.join(self.output_dir, 'word_count', meta['filename'])
+                )
                 cache_data['chapters'].append(meta)
             
             with open(cache_path, 'w', encoding='utf-8') as f:

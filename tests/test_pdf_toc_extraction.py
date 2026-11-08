@@ -1083,3 +1083,36 @@ def test_stale_word_count_copy_from_an_earlier_pdf_is_replaced(tmp_path, monkeyp
     os.utime(stale, (mtime - 100, mtime - 100))
     run()
     assert os.path.getmtime(stale) == mtime - 100  # unchanged copy is not rewritten
+
+
+def test_split_cache_is_stale_when_a_word_count_copy_is_not_the_extracted_one(tmp_path):
+    """The split cache rebuilt sections from word_count copies left by an earlier PDF (the book's 5화-8화
+    were translated as the old 1화-4화). Like the EPUB chapter cache, it now stores each copy's SHA-256
+    fingerprint and is stale when a copy differs (or the cache predates fingerprints)."""
+    import json
+    from txt_processor import TextFileProcessor
+
+    processor = object.__new__(TextFileProcessor)
+    processor.file_path = str(tmp_path / "book.pdf")
+    processor.output_dir = str(tmp_path / "out")
+    word_count = tmp_path / "out" / "word_count"
+    word_count.mkdir(parents=True)
+    copy = word_count / "pdf_section_2.html"
+    copy.write_text("<h1>책 5화</h1>", encoding="utf-8")
+    cache = tmp_path / "split.cache"
+    chapter = {"num": 2, "title": "책 5화", "filename": "pdf_section_2.html", "pdf_toc_section": True}
+
+    processor._save_split_cache(str(cache), "src-hash", [chapter])
+    restored = processor._load_split_cache(str(cache), "src-hash", str(word_count))
+    assert [c["body"] for c in restored] == ["<h1>책 5화</h1>"]
+    assert "word_count_fingerprint" not in restored[0]
+
+    copy.write_text("<h1>책 1화</h1>", encoding="utf-8")       # a copy from another source
+    assert processor._load_split_cache(str(cache), "src-hash", str(word_count)) is None
+
+    data = json.loads(cache.read_text(encoding="utf-8"))      # a cache written before fingerprints
+    for meta in data["chapters"]:
+        meta.pop("word_count_fingerprint")
+    cache.write_text(json.dumps(data), encoding="utf-8")
+    copy.write_text("<h1>책 5화</h1>", encoding="utf-8")
+    assert processor._load_split_cache(str(cache), "src-hash", str(word_count)) is None
