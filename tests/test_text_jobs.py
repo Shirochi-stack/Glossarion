@@ -238,13 +238,26 @@ def test_extract_glossary_is_moved_verbatim(legacy_tg):
             ("import traceback\nglossary_main(log_callback=self.append_log, stop_callback=enhanced_stop_callback)",
              "import traceback\nglossary_main = self._backend_entry('glossary_main')\n"
              "glossary_main(log_callback=self.append_log, stop_callback=enhanced_stop_callback)"),
+            # Scoped glossary runs load the instance's config snapshot.
+            ("sys.argv = ['extract_glossary_from_epub.py', '--epub', file_path, '--output', output_path, "
+             "'--config', CONFIG_FILE]",
+             "sys.argv = ['extract_glossary_from_epub.py', '--epub', file_path, '--output', output_path, "
+             "'--config', config_file]"),
+        ],
+        insert_before=[
+            ("os.environ.update(env_updates)",
+             "config_file = CONFIG_FILE\n"
+             "if key_scope() is not None:\n"
+             "    config_file = os.environ.get('CONFIG_FILE') or config_file\n"
+             "    env_updates = {name: scoped_env(name, value, environ=env_updates) "
+             "for name, value in env_updates.items()}"),
         ],
         drop_def="enhanced_stop_callback",
         def_with="enhanced_stop_callback = make_glossary_stop_callback(lambda: self.stop_requested, "
                  "lambda: getattr(self, 'graceful_stop_active', False))",
     )
     _assert_moved(legacy_tg["_extract_glossary_from_text_file"], new["_extract_glossary_from_text_file"], edits,
-                  expected_hits=4)
+                  expected_hits=6)
 
 
 def _compile_core(legacy_runner):

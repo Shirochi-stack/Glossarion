@@ -194,6 +194,10 @@ EDITS = {
          "            glossary_stop_flag = self._backend_entry('glossary_stop_flag')\n"
          "            if glossary_stop_flag:\n                glossary_stop_flag(False)\n", 1),
         ("            self.thread_complete_signal.emit()", "            self._ui_request('thread_complete')", 1),
+        # Instance workers use the extraction outcome for their exit status.
+        ("            payload_summary.auto_update(self)\n            \n",
+         "            payload_summary.auto_update(self)\n"
+         "            return successful > 0 and failed == 0 and not self.stop_requested\n\n", 1),
     ],
 }
 PREPARE_EDITS = [
@@ -512,7 +516,15 @@ def test_desktop_run_translation_thread_is_preflight_plus_the_shared_pipeline(le
     launch = _apply("\n".join(lines[tail:]), [
         ("            target=simple_thread_target,\n",
          "            target=self._translation_worker,\n            args=(request,),\n", 1)], "launch")
-    expected = "\n".join(lines[:p_start]) + "\n" + (
+    preflight = _apply("\n".join(lines[:p_start]), [
+        # A glossary run can still be active after the local worker has ended.
+        ("        if (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or \\"
+         "\n           (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done()):",
+         "        if (instance_runs.run_active(self, 'glossary')\n"
+         "                or (self.glossary_thread and self.glossary_thread.is_alive())\n"
+         "                or (self.glossary_future and not self.glossary_future.done())):", 1),
+    ], "preflight")
+    expected = preflight + "\n" + (
         "        # The run set-up and the worker thread body are shared with the mobile JobService\n"
         "        # (translation_pipeline.TranslationPipelineMixin).\n"
         "        request = self._prepare_translation_run()\n"
