@@ -230,12 +230,21 @@ restrict_translation_keys = restrict_keys
 # ---------------------------------------------------------------------------
 
 
-def request_stop(owner, mode, log=print):
-    """The main window's Stop for this instance: the desktop ``stop_translation`` sequence without
-    its widgets (as the mobile JobService's ``JobBackend.request_stop`` replays it)."""
+def request_stop(owner, mode, log=print, *, kind="translation"):
+    """Apply the desktop stop protocol for this instance without its widgets."""
     import stop_control
 
     graceful = mode == STOP_GRACEFUL
+    if kind == "glossary":
+        def latch_glossary():
+            owner.graceful_stop_active = graceful
+            owner.stop_requested = True
+
+        stop_control.request_glossary_stop(
+            graceful=graceful, set_stop_requested=latch_glossary, log=log,
+        )
+        return
+
     if mode == STOP_FORCE:
         owner.graceful_stop_active = False
         owner._last_stop_was_graceful = False
@@ -494,13 +503,17 @@ def _forward_qa_scan_request(owner, log):
 
 
 def run_job(job, host=None, parent=None):
-    """Run one instance's translation from a parsed job file; returns the exit code.
+    """Run one instance's translation or glossary extraction and return its exit code.
 
     *host* receives the run's log (default: a :class:`_ProcessHost` on the current stdout);
     *parent* is the main window process (:class:`_ParentProcess`; default: taken from the job)."""
     host = host if host is not None else _ProcessHost(sys.stdout)
     log = host.log
     instance = instance_plan.coerce_instance(job.get("instance"))
+    kind = job.get("kind", "translation")
+    if kind not in ("translation", "glossary"):
+        log(f"Instance {instance}: unsupported job kind {kind!r}")
+        return EXIT_FAILED
     files = [os.path.abspath(str(path)) for path in (job.get("files") or []) if path]
     config_path = str(job.get("config_path") or "")
     if not files:
@@ -523,7 +536,7 @@ def run_job(job, host=None, parent=None):
             config = load_config(config_path)
             # whose key is whose: fingerprints of every other instance's keys and the main GUI key
             restore_keys = restrict_keys(instance, key_owners=job.get("key_owners") or {})
-            stop_control.reset_for_new_run("translation")
+            stop_control.reset_for_new_run(kind)
             from headless_owner import HeadlessOwner
 
             owner = HeadlessOwner(config, host=host)
@@ -535,26 +548,25 @@ def run_job(job, host=None, parent=None):
                 translate_headers_standalone._attach_logging_handlers(owner)
             except Exception:
                 pass
-            _forward_qa_scan_request(owner, log)
-            # the main window recorded every input of the run in the Library registry before it
-            # started the instances; recording again here would race its writes
-            owner._record_library_raw_inputs = lambda _files: None
+            if kind == "translation":
+                _forward_qa_scan_request(owner, log)
+                # The main window already recorded all inputs in the Library registry.
+                owner._record_library_raw_inputs = lambda _files: None
             watcher = _StopWatcher(job.get("stop_file"), parent if parent is not None else job.get("parent_pid"),
-                                   lambda mode: request_stop(owner, mode, log), log)
+                                   lambda mode: request_stop(owner, mode, log, kind=kind), log)
             watcher.start()
             log(f"▶ Instance {instance}: {len(files)} file(s) — " + ", ".join(os.path.basename(p) for p in files))
-            request = owner._prepare_translation_run(files)
-            if request is None or request is False:
-                stop_seen = watcher.mode is not None
-                if not stop_seen:
+            if kind == "glossary":
+                owner.selected_files = files
+                outcome = owner.run_glossary_extraction_direct()
+            else:
+                request = owner._prepare_translation_run(files)
+                if watcher.mode is not None:
+                    return EXIT_STOPPED
+                if request is None or request is False:
                     log(f"❌ Instance {instance}: the translation did not start (see the log)")
-                return EXIT_STOPPED if stop_seen else EXIT_FAILED
-            if watcher.mode is not None:
-                # a Stop that came before the set-up's own stop-flag reset
-                log("⏹️ Translation stopped before it started")
-                stop_seen = True
-                return EXIT_STOPPED
-            outcome = owner._translation_worker(request)
+                    return EXIT_FAILED
+                outcome = owner._translation_worker(request)
     except SystemExit as exc:  # backend mains may sys.exit()
         if exc.code not in (None, 0):
             log(f"❌ Instance {instance}: the backend exited with code {exc.code}")

@@ -6,6 +6,8 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 
 import os
 import sys
+import textwrap
+
 from request_parameters import normalize_request_parameters
 from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, context_presets, key_enabled_for_context,
                           normalize_disabled_contexts)
@@ -10190,11 +10192,14 @@ class MultiAPIKeyDialog(QDialog):
     POOL_KEY_TREE_WIDTHS = (220, 80, 105, 100, 90, 170, 42, 42, 80)  # after the API Key column
     # a key's multi-instance number (instance_plan), in every pool
     KEY_INSTANCE_MAX = 99
-    KEY_INSTANCE_HELP = ("Instance: with 2 or more input files selected and enabled Translation keys on 2 or "
-                         "more instances, each instance translates its own files in its own run, using only "
-                         "the keys of its number in every key pool (1 = default). A pool without an enabled "
-                         "key of an instance is off for that instance (its Translation keys do the work); the "
-                         "main GUI key belongs to instance 1.")
+    KEY_INSTANCE_HELP = textwrap.fill(
+        "Instance: with 2 or more input files selected and enabled Translation keys on 2 or "
+        "more instances, each instance translates its own files in its own run, using only "
+        "the keys of its number in every key pool (1 = default). A pool without an enabled "
+        "key of an instance is off for that instance (its Translation keys do the work); the "
+        "main GUI key belongs to instance 1.",
+        width=72,
+    )
 
     def _pool_key_tree_widths(self):
         """Default column widths of a Fallback / Glossary / dedicated key list."""

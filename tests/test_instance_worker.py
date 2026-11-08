@@ -311,6 +311,40 @@ def job_env(tmp_path, monkeypatch, clean_env):
                                  tmp=tmp_path)
 
 
+def test_glossary_job_uses_the_glossary_worker_and_stop_protocol(job_env, monkeypatch):
+    from headless_owner import HeadlessOwner
+
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def extract(owner):
+        assert owner.selected_files == job_env.job["files"]
+        assert instance_plan.key_scope() == 2
+        assert not hasattr(owner, "prepared")
+        started.set()
+        assert stopped.wait(5)
+        assert owner.stop_requested and owner.graceful_stop_active
+        return False
+
+    def stop(*, graceful, set_stop_requested, log):
+        assert graceful
+        set_stop_requested()
+        stopped.set()
+
+    import stop_control
+
+    monkeypatch.setattr(HeadlessOwner, "run_glossary_extraction_direct", extract, raising=False)
+    monkeypatch.setattr(stop_control, "request_glossary_stop", stop)
+    results = []
+    job = dict(job_env.job, kind="glossary")
+    worker = threading.Thread(target=lambda: results.append(iw.run_job(job, _Host())), daemon=True)
+    worker.start()
+    assert started.wait(5)
+    iw.write_stop_request(job["stop_file"], iw.STOP_GRACEFUL)
+    worker.join(5)
+    assert results == [iw.EXIT_STOPPED]
+
+
 def test_run_job_completed(job_env):
     host = _Host()
     original = vars(job_env.client)["setup_multi_key_pool"]

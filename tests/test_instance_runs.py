@@ -56,8 +56,11 @@ job = json.load(open(sys.argv[1], encoding="utf-8"))
 print("child instance", os.environ.get("GLOSSARION_INSTANCE"), "stop-file-env", os.environ.get("GLOSSARY_STOP_FILE"),
       "files", ",".join(os.path.basename(p) for p in job["files"]), flush=True)
 mode = os.environ.get("FAKE_CHILD_MODE", "ok")
+if job.get("kind") == "glossary":
+    print("glossary job", flush=True)
 if mode == "ok":
-    print("##GLOSSARION_INSTANCE_QA_SCAN##", flush=True)
+    if job.get("kind") != "glossary":
+        print("##GLOSSARION_INSTANCE_QA_SCAN##", flush=True)
     print("translated", flush=True)
     sys.exit(0)
 deadline = time.time() + 30
@@ -280,6 +283,34 @@ def test_run_button_runs_run_translation_thread_once_for_a_single_instance(env, 
 # --------------------------------------------------------------------------
 # a multi-instance run
 # --------------------------------------------------------------------------
+
+def test_extract_glossary_button_assigns_files_and_stops_child(env, translator_gui_module):
+    gui = FakeGui(_config(), env.files)
+    gui._has_epub_conversion_inputs = lambda: False
+    gui.glossary_button = QPushButton()
+    gui.graceful_stop_var = True
+    gui._start_glossary_extraction = lambda worker: worker()
+    gui.run_glossary_extraction_direct = lambda: gui._translation_worker(None)
+    env.monkeypatch.setenv("FAKE_CHILD_MODE", "obey")
+
+    translator_gui_module.TranslatorGUI.run_glossary_extraction_thread(gui)
+    run = gui._instance_run
+    assert env.dialogs == [{env.files[0]: 1, env.files[1]: 2}]
+    assert gui.worker_seen[0]["files"] == env.files[:1]
+    assert gui.worker_seen[0]["snapshot_keys"] == ["sk-one"]
+    assert _wait(lambda: run.results.get(1) == "completed")
+    assert instance_runs.run_active(gui, "glossary")
+    assert not instance_runs.run_active(gui, "translation")
+    child_log = instance_runs._log_widget(gui, 2)
+    assert _wait(lambda: "glossary job" in child_log.toPlainText())
+
+    translator_gui_module.TranslatorGUI.stop_glossary_extraction(gui)
+    assert _wait(lambda: run.finished)
+    assert run.results == {1: "completed", 2: "stopped"}
+    assert "stopping: graceful" in child_log.toPlainText()
+    assert gui.selected_files == env.files
+    assert instance_plan.key_scope() is None
+
 
 def test_multi_instance_run(env):
     import config_store
@@ -652,7 +683,7 @@ def _tg_methods():
 
 def test_translator_gui_wiring():
     methods = _tg_methods()
-    assert "instance_runs" not in methods["run_translation_thread"]  # instance 1 = today's run, unchanged
+    assert "instance_runs.start_run" not in methods["run_translation_thread"]  # local worker never opens the dialog
     clicked = methods["_run_translation_clicked"]
     assert "if instance_runs.start_run(self):" in clicked and "self.run_translation_thread()" in clicked
     assert "self.run_button.clicked.connect(self._run_translation_clicked)" in methods["update_run_button"]
@@ -660,7 +691,8 @@ def test_translator_gui_wiring():
                for name, body in methods.items() if name != "update_run_button")
     assert not any("clicked.connect(self.run_translation_thread)" in body for body in methods.values())
     for name in ("update_run_button", "_is_any_process_running"):
-        assert "instance_runs.children_alive(self)" in methods[name], name
+        for kind in ("translation", "glossary"):
+            assert f"instance_runs.run_active(self, {kind!r})" in methods[name], name
     assert "instance_runs.stop_children(self, graceful=graceful_stop, force=force_stop)" in methods["stop_translation"]
     assert "instance_runs.shutdown(self)" in methods["closeEvent"]
     log_section = methods["_create_log_section"]

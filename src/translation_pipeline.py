@@ -1087,7 +1087,8 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
             # Payloads > Auto-update (desktop setting): this run's payloads into the readable summary
             import payload_summary
             payload_summary.auto_update(self)
-            
+            return successful > 0 and failed == 0 and not self.stop_requested
+
         except Exception as e:
             self.append_log(f"❌ Glossary extraction setup error: {e}")
             import traceback

@@ -23477,8 +23477,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_thread(self):
         """Start translation in a background worker (ThreadPoolExecutor)"""
         # Prevent overlap with glossary extraction
-        if (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or \
-           (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done()):
+        if (instance_runs.run_active(self, 'glossary')
+                or (self.glossary_thread and self.glossary_thread.is_alive())
+                or (self.glossary_future and not self.glossary_future.done())):
             self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
             QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete before starting translation.")
             return
@@ -23562,13 +23563,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
     def run_glossary_extraction_thread(self):
         """Start glossary extraction in a background worker (ThreadPoolExecutor)"""
-        if ((hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
+        if (instance_runs.run_active(self, 'translation') or
+            (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
             (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())):
             self.append_log("⚠️ Cannot run glossary extraction while translation is in progress.")
             QMessageBox.warning(self, "Process Running", "Please wait for translation to complete before extracting glossary.")
             return
         
-        if self.glossary_thread and self.glossary_thread.is_alive():
+        if (instance_runs.run_active(self, 'glossary')
+                or (self.glossary_thread and self.glossary_thread.is_alive())
+                or (self.glossary_future and not self.glossary_future.done())):
             self.stop_glossary_extraction()
             return
 
@@ -23583,7 +23587,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 QMessageBox.critical(self, "Error", "Please select file(s) to extract glossary from.")
                 return
             self.selected_files = [file_path]
-        
+
+        if instance_runs.start_run(self, kind='glossary'):
+            return
+        self._start_glossary_extraction(self.run_glossary_extraction_direct)
+
+    def _start_glossary_extraction(self, worker):
+        """Start the local glossary worker for a standalone run or instance 1."""
         # Reset stop flags
         self.stop_requested = False
         self.graceful_stop_active = False  # Reset graceful stop state
@@ -23618,20 +23628,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             pass
         self._ensure_executor()
         if self.executor:
-            self.glossary_future = self.executor.submit(self.run_glossary_extraction_direct)
-            # Add callback to clean up when done (button update handled by thread_complete_signal in finally block)
-            def _glossary_done_callback(f):
-                try:
+            future = self.executor.submit(worker)
+            self.glossary_future = future
+
+            def _glossary_done_callback(completed):
+                if self.glossary_future is completed:
                     self.glossary_future = None
-                except Exception:
-                    pass
-            try:
-                self.glossary_future.add_done_callback(_glossary_done_callback)
-            except Exception:
-                pass
+                    self.thread_complete_signal.emit()
+
+            future.add_done_callback(_glossary_done_callback)
         else:
             thread_name = f"GlossaryThread_{int(time.time())}"
-            self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
+            self.glossary_thread = threading.Thread(target=worker, name=thread_name, daemon=True)
             self.glossary_thread.start()
         
         # Delay auto-scroll so first log is readable (set to 0 for immediate scrolling)
@@ -23873,9 +23881,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
        translation_running = (
            (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
            (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done()) or
-           instance_runs.children_alive(self)  # instance processes of a multi-instance run
+           instance_runs.run_active(self, 'translation')
        )
        glossary_running = (
+           instance_runs.run_active(self, 'glossary') or
            (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or
            (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done())
        )
@@ -23898,9 +23907,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
        translation_running = (
            (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
            (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done()) or
-           instance_runs.children_alive(self)  # instance processes of a multi-instance run
+           instance_runs.run_active(self, 'translation')
        )
        glossary_running = (
+           instance_runs.run_active(self, 'glossary') or
            (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or
            (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done())
        )
@@ -24653,6 +24663,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 }
             """)
 
+        if instance_runs.run_active(self, 'glossary'):
+            instance_runs.stop_children(self, graceful=graceful_stop)
+            if not ((self.glossary_thread and self.glossary_thread.is_alive())
+                    or (self.glossary_future and not self.glossary_future.done())):
+                return  # Only the child instances still need to stop.
+
         # The stop protocol (stop_control.request_glossary_stop, desktop order): GRACEFUL_STOP ->
         # graceful: silence HTTP logs -> stop_requested -> immediate: cancel env, module stop
         # flags, run-id-guarded cleanup thread (hard cancel, helper processes, glossary stop
@@ -25097,7 +25113,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 and hasattr(translation_future, 'done')
                 and not translation_future.done()
             )
-            if translation_thread_running or translation_future_running:
+            if translation_thread_running or translation_future_running or instance_runs.run_active(self, 'translation'):
                 return
         except Exception:
             return
@@ -26757,7 +26773,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def open_parallel_epub_pair_dialog(self):
         """Show the persistent EPUB mapper and prepare an accepted pair."""
         if (
-            (getattr(self, "translation_thread", None) and self.translation_thread.is_alive())
+            instance_runs.run_active(self, 'translation')
+            or instance_runs.run_active(self, 'glossary')
+            or (getattr(self, "translation_thread", None) and self.translation_thread.is_alive())
             or (
                 getattr(self, "translation_future", None)
                 and not self.translation_future.done()

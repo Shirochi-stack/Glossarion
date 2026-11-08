@@ -1,20 +1,20 @@
-"""instance_runs: the main window's side of a multi-instance translation (desktop, Qt).
+"""instance_runs: the main window's side of multi-instance runs (desktop, Qt).
 
 A run is split into instances when Multi API Keys is on, the enabled Translation keys carry at
 least two instance numbers and at least two input files are selected
-(``instance_plan.is_multi_instance``). Otherwise the Run button runs exactly as before.
+(``instance_plan.is_multi_instance``). Glossary extraction also requires independent document inputs.
 
-The Run button's handler (``TranslatorGUI._run_translation_clicked``) calls :func:`start_run`, which
+The Run Translation and Extract Glossary buttons call :func:`start_run`, which
 
-* asks which instance translates which file (:class:`InstanceAssignmentDialog`, prefilled from the
+* asks which instance processes which file (:class:`InstanceAssignmentDialog`, prefilled from the
   saved ``instance_file_map``, else round-robin) and saves the answer through ``save_config``;
-* records every input of the run in the Library registry once (the instances do not);
+* records every translation input in the Library registry once;
 * starts instances 2..N as processes of this program (``instance_worker``), each with a config
   snapshot holding only its own keys of every key pool (never the main GUI key, which is instance
   1's), its own stop file, log and watchdog subfolder, and a reader thread that feeds its output
   into that instance's log;
-* runs instance 1 in this window exactly like a normal Run (``run_translation_thread``: same thread,
-  same log, same dialogs) on instance 1's files. The saved config is never narrowed.
+* starts the local translation or glossary worker in this window on instance 1's files.
+  The saved config is never narrowed.
 
 While any instance of the run is alive this window uses instance 1's API keys only, in every key
 pool (``instance_worker.restrict_keys``): instance 1's run and everything else started here
@@ -73,6 +73,7 @@ __all__ = [
     "children_alive",
     "file_instance",
     "log_area",
+    "run_active",
     "show_single_instance",
     "shutdown",
     "start_run",
@@ -297,6 +298,12 @@ def children_alive(gui):
     return bool(run is not None and run.children_alive())
 
 
+def run_active(gui, kind):
+    """True until the window has processed the last worker's completion."""
+    run = getattr(gui, "_instance_run", None)
+    return run is not None and run.kind == kind and not run.finished
+
+
 def user_selection(gui):
     """The input files the user selected, as an action of this window should see them.
 
@@ -346,12 +353,10 @@ def _thread_alive(gui, thread_name, future_name):
                 or (future is not None and not future.done()))
 
 
-def start_run(gui):
-    """The Run button's multi-instance branch.
+def start_run(gui, *, kind="translation"):
+    """The translation and glossary buttons' multi-instance branch.
 
-    Returns False when this is not a multi-instance run (the caller runs
-    ``run_translation_thread`` as before, which also reports why a run cannot start), True when it
-    handled the click: a multi-instance run started, or the user cancelled it.
+    Returns False to use the caller's single-instance path, or True when the click was handled.
     """
     previous = getattr(gui, "_instance_run", None)
     if previous is not None and previous.finished and not _thread_alive(gui, "qa_thread", "qa_future"):
@@ -361,7 +366,8 @@ def start_run(gui):
     if not isinstance(config, dict) or not instance_plan.is_multi_instance(config, files):
         show_single_instance(gui)
         return False
-    if (children_alive(gui) or _thread_alive(gui, "translation_thread", "translation_future")
+    if ((previous is not None and not previous.finished)
+            or _thread_alive(gui, "translation_thread", "translation_future")
             or _thread_alive(gui, "glossary_thread", "glossary_future")):
         return False
     # runs prepared by another entry point keep their own single-instance path
@@ -374,17 +380,22 @@ def start_run(gui):
     except Exception:
         pass
     # run_translation_thread turns a click right after a graceful stop into a force stop
-    if (getattr(gui, "_last_stop_was_graceful", False)
+    if (kind == "translation" and getattr(gui, "_last_stop_was_graceful", False)
             and time.time() - float(getattr(gui, "_last_stop_translation_ts", 0) or 0) < 2.0):
         return False
-    if not gui._require_model_selection("starting translation"):
+    if kind == "glossary":
+        if not _independent_glossary_inputs(gui, files):
+            show_single_instance(gui)
+            return False
+    elif not gui._require_model_selection("starting translation"):
         return True
 
     instances = instance_plan.available_instances(config)
     assignment = instance_plan.default_assignment(files, instances, config.get(instance_plan.CONFIG_FILE_MAP))
-    dialog = InstanceAssignmentDialog(gui, instances, assignment)
+    dialog = InstanceAssignmentDialog(gui, instances, assignment, kind=kind)
+    task = "glossary extraction" if kind == "glossary" else "translation"
     if dialog.exec() != QDialog.Accepted:
-        gui.append_log("⏹️ Multi-instance translation cancelled")
+        gui.append_log(f"⏹️ Multi-instance {task} cancelled")
         return True
     assignment = dialog.assignment()
     saved = config.get(instance_plan.CONFIG_FILE_MAP)
@@ -399,14 +410,33 @@ def start_run(gui):
     try:
         snapshots = {number: instance_plan.config_for_instance(gui.config, number) for number in plan}
     except ValueError as exc:
-        QMessageBox.warning(gui, "Multi-Instance Translation", str(exc))
+        QMessageBox.warning(gui, dialog.windowTitle(), str(exc))
         return True
     previous = getattr(gui, "_instance_run", None)
     if previous is not None:
         previous.deleteLater()  # its processes and readers are done (children_alive above)
-    run = InstanceRun(gui, plan)
+    run = InstanceRun(gui, plan, kind=kind)
     gui._instance_run = run
     run.start(snapshots)
+    return True
+
+
+def _independent_glossary_inputs(gui, files):
+    """Split documents whose glossary outputs can be written independently."""
+    from glossary_paths import sanitize_glossary_folder_name
+
+    if gui._has_epub_conversion_inputs():
+        return False
+    outputs = set()
+    for path in instance_plan.plan(files, {}).get(1, ()):
+        stem, ext = os.path.splitext(os.path.basename(path))
+        if ext.lower() not in {".epub", ".txt", ".pdf", ".sdlxliff"}:
+            # Image folders and subtitle bundles can form a single glossary.
+            return False
+        name = sanitize_glossary_folder_name(stem).casefold()
+        if name in outputs:
+            return False
+        outputs.add(name)
     return True
 
 
@@ -416,16 +446,19 @@ def start_run(gui):
 
 
 class InstanceAssignmentDialog(QDialog):
-    """Which instance translates which input file (one row per file, an instance dropdown each)."""
+    """Assign each input file to an instance."""
 
-    def __init__(self, gui, instances, assignment):
+    def __init__(self, gui, instances, assignment, *, kind="translation"):
         super().__init__(gui if isinstance(gui, QWidget) else None)
-        self.setWindowTitle("Multi-Instance Translation")
+        glossary = kind == "glossary"
+        self.setWindowTitle("Multi-Instance Glossary Extraction" if glossary else "Multi-Instance Translation")
         self._files = list(assignment)
         self._combos = []
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Each input file is translated by one instance. The instances run at the same time as "
+            ("Each input file's glossary is extracted by one instance. " if glossary
+             else "Each input file is translated by one instance. ")
+            + "The instances run at the same time as "
             "separate processes, each with its own log and only the API keys of its own number, in "
             "every key pool (Multi API Key Manager › Instance). Instance 1 runs in this window and "
             "is the only one that uses the main GUI key."
@@ -499,7 +532,7 @@ class _Child:
 
 
 class InstanceRun(QObject):
-    """The instances of one Run click: instance 1 in this window, the others as processes."""
+    """One translation or glossary run, with instance 1 in this window and the others in child processes."""
 
     #: a reader thread queued output lines (coalesced: at most one pending emission)
     lines_ready = Signal()
@@ -510,9 +543,11 @@ class InstanceRun(QObject):
     #: instance 1's run asked for its post-translation QA scan
     instance_one_qa = Signal()
 
-    def __init__(self, gui, plan):
+    def __init__(self, gui, plan, *, kind="translation"):
         super().__init__(gui if isinstance(gui, QObject) else None)
         self.gui = gui
+        self.kind = kind
+        self.task = "glossary extraction" if kind == "glossary" else "translation"
         self.plan = {int(number): list(files) for number, files in plan.items()}
         self.children = {}
         self.results = {}
@@ -577,19 +612,19 @@ class InstanceRun(QObject):
             # run, a review, the Manga translator, a QA scan ...) uses instance 1's keys only
             self._scope_undo = instance_worker.restrict_keys(1, gui.config, key_owners=self._key_owners)
         except Exception as exc:
-            gui.append_log(f"❌ Multi-instance translation could not start: instance 1's API keys "
+            gui.append_log(f"❌ Multi-instance {self.task} could not start: instance 1's API keys "
                            f"could not be kept to it: {exc}")
             self.results = {number: "did not start" for number in self.plan}
             self.finished = True
             shutil.rmtree(self.run_dir, ignore_errors=True)
             return
         every_file = [path for files in self.plan.values() for path in files]
-        if not getattr(gui, "_input_output_run_active", False):
+        if self.kind == "translation" and not getattr(gui, "_input_output_run_active", False):
             try:
                 gui._record_library_raw_inputs(every_file)
             except Exception:
                 pass
-        gui.append_log(f"🧩 Multi-instance translation: {len(every_file)} file(s) in {len(self.plan)} instance(s)")
+        gui.append_log(f"🧩 Multi-instance {self.task}: {len(every_file)} file(s) in {len(self.plan)} instance(s)")
         for number, files in self.plan.items():
             gui.append_log(f"   Instance {number}: " + ", ".join(os.path.basename(p) for p in files))
         for number, files in self.plan.items():
@@ -626,6 +661,7 @@ class InstanceRun(QObject):
         overflow = {name: value for name, value in overflow.items() if instance_worker.inheritable(name)}
         job = {
             "version": instance_worker.JOB_VERSION,
+            "kind": self.kind,
             "instance": number,
             "files": list(files),
             "config_path": config_path,
@@ -661,9 +697,7 @@ class InstanceRun(QObject):
         threading.Thread(target=self._read, args=(child,), name=f"instance-{number}-reader", daemon=True).start()
 
     def _start_instance_one(self, snapshot):
-        """Instance 1's files through the normal Run (``run_translation_thread``), its keys only
-        (the run's key scope, :meth:`start`); its helper processes read instance 1's snapshot and
-        ``gui.selected_files`` holds only its files until its worker returns."""
+        """Start the local worker with instance 1's files and a config snapshot for its helpers."""
         gui = self.gui
         from config_store import save_config_file
 
@@ -694,10 +728,19 @@ class InstanceRun(QObject):
         gui.selected_files = list(own)
         self.narrowed = (selection, own)
         self._undo.append(lambda: self._restore_selection(selection, own))
-        self._forward_own_qa_scan()
-
-        before = getattr(gui, "translation_thread", None)
         self.instance_one_running = True
+        if self.kind == "glossary":
+            try:
+                gui._start_glossary_extraction(self._instance_one_worker)
+            except Exception as exc:
+                self.instance_one_running = False
+                self.results[1] = "did not start"
+                self._restore_instance_one()
+                gui.append_log(f"Instance 1 could not start: {exc}")
+            return
+
+        self._forward_own_qa_scan()
+        before = getattr(gui, "translation_thread", None)
         gui._translation_worker = self._instance_one_worker  # the thread target records the outcome
         try:
             gui.run_translation_thread()
@@ -714,11 +757,14 @@ class InstanceRun(QObject):
             self.results[1] = "did not start"
             self._restore_instance_one()
 
-    def _instance_one_worker(self, request):
+    def _instance_one_worker(self, request=None):
         self._entered.set()
         outcome = None
         try:
-            outcome = type(self.gui)._translation_worker(self.gui, request)
+            if self.kind == "glossary":
+                outcome = self.gui.run_glossary_extraction_direct()
+            else:
+                outcome = type(self.gui)._translation_worker(self.gui, request)
             return outcome
         finally:
             self._outcome = outcome
@@ -801,7 +847,7 @@ class InstanceRun(QObject):
         try:
             for raw in proc.stdout:
                 line = raw.rstrip("\r\n").split("\r")[-1]
-                if line == instance_worker.QA_SCAN_MARKER:
+                if self.kind == "translation" and line == instance_worker.QA_SCAN_MARKER:
                     self.qa_requested.add(child.number)
                     continue
                 with self._pending_lock:
@@ -872,7 +918,8 @@ class InstanceRun(QObject):
                 except OSError as exc:
                     self._log(child.number, f"⚠️ Could not send Stop to instance {child.number}: {exc}")
             # a second click ends the processes, so Stop stays clickable while one still runs
-            button = getattr(self.gui, "run_button", None)
+            button_name = "glossary_button" if self.kind == "glossary" else "run_button"
+            button = getattr(self.gui, button_name, None)
             if button is not None:
                 button.setEnabled(True)
 
@@ -891,7 +938,7 @@ class InstanceRun(QObject):
         if any(number not in self.results for number in self.plan):
             return  # a reader has not reported its process's end yet
         self.finished = True
-        self.gui.append_log("🏁 Multi-instance translation finished")
+        self.gui.append_log(f"🏁 Multi-instance {self.task} finished")
         for number in sorted(self.plan):
             names = ", ".join(os.path.basename(p) for p in self.plan[number])
             self.gui.append_log(f"   Instance {number} — {self.results.get(number, 'did not start')}: {names}")
@@ -940,7 +987,9 @@ class InstanceRun(QObject):
             self._qa_queue = []  # a Stop meanwhile ends the scans not started yet
         if not self._qa_queue:
             return
-        if _thread_alive(gui, "translation_thread", "translation_future") or children_alive(gui):
+        if (_thread_alive(gui, "translation_thread", "translation_future")
+                or _thread_alive(gui, "glossary_thread", "glossary_future")
+                or run_active(gui, "glossary") or children_alive(gui)):
             files = [path for number in self._qa_queue for path in self.plan.get(number, [])]
             self._qa_queue = []
             gui.append_log("ℹ️ Run QA Scan for: " + ", ".join(os.path.basename(p) for p in files))

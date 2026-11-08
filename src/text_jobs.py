@@ -38,6 +38,7 @@ import sys
 from dataclasses import dataclass
 
 from app_paths import CONFIG_FILE
+from instance_plan import key_scope, scoped_env
 from job_runner import JobHooksMixin, scoped_process_state
 from stop_control import make_glossary_stop_callback
 
@@ -688,8 +689,15 @@ class TextJobsMixin(JobHooksMixin):
                     # Keep going even if we can't set env for some reason
                     pass
 
+                config_file = CONFIG_FILE
+                if key_scope() is not None:
+                    config_file = os.environ.get('CONFIG_FILE') or config_file
+                    env_updates = {
+                        name: scoped_env(name, value, environ=env_updates)
+                        for name, value in env_updates.items()
+                    }
                 os.environ.update(env_updates)
-                
+
                 chap_range = self.chapter_range_entry.text().strip()
                 if chap_range:
                     self.append_log(f"📊 Chapter Range: {chap_range} (glossary extraction will only process these chapters)")
@@ -710,7 +718,7 @@ class TextJobsMixin(JobHooksMixin):
                     'extract_glossary_from_epub.py',
                     '--epub', file_path,
                     '--output', output_path,
-                    '--config', CONFIG_FILE
+                    '--config', config_file
                 ]
                 
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
