@@ -86,7 +86,8 @@ def test_the_multipass_scan_of_a_translation_job_takes_turns(phone, monkeypatch)
         return {"ok": True, "outputs": []}
 
     owner = SimpleNamespace(_prepare_translation_run=lambda _files: {"files": []}, _translation_worker=worker)
-    ctx = SimpleNamespace(owner=owner, phase=lambda _label: None, stop_requested=lambda: False, log=lambda _text: None,
+    ctx = SimpleNamespace(owner=owner, params={}, phase=lambda _label: None, stop_requested=lambda: False,
+                          log=lambda _text: None,
                           add_outputs=lambda _paths: None, output_dir=str(phone))
     previous = sys.getswitchinterval()
     sys.setswitchinterval(0.005)
