@@ -270,7 +270,7 @@ def test_expression_evaluator_semantics():
 BUILD_JOBS = {"prepare", "wheels-android", "wheels-ios", "android", "android-smoke", "android-ui-tests", "ios",
               "ios-signed", "ios-simulator-smoke"}
 DISPATCH_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests", "android_legacy_packaging",
-                   "llama_suite"}
+                   "llama_suite", "require_python_ci"}
 CALL_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests"}
 SIGNING_SECRETS = {"ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
                    "IOS_DIST_CERT_P12_BASE64", "IOS_DIST_CERT_PASSWORD", "IOS_PROVISIONING_PROFILE_BASE64",
@@ -383,6 +383,16 @@ def test_permissions_are_read_only_except_the_release_update(wf):
             assert "permissions" not in job, job_id
     assert sorted(_permission_values(wf)) == ["read", "write"]
     assert "write-all" not in _code(BUILD_MOBILE)
+
+
+def test_strict_dispatch_checks_python_ci_before_packaging(wf):
+    dispatch = _triggers(wf)["workflow_dispatch"]["inputs"]
+    assert dispatch["require_python_ci"]["default"] is False
+    steps = wf["jobs"]["prepare"]["steps"]
+    gate = next(i for i, step in enumerate(steps) if step.get("name") == "Require successful Python CI on this commit")
+    assert gate < next(i for i, step in enumerate(steps) if step.get("name") == "Upload prepared bundle")
+    assert steps[gate]["if"] == "inputs.require_python_ci"
+    assert "head_sha=$GITHUB_SHA" in steps[gate]["run"]
 
 
 def test_workflow_call_cannot_publish(wf):

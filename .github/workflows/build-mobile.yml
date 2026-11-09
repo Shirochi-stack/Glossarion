@@ -129,7 +129,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   # github.workflow is the caller's name under workflow_call, so a build-all run and a direct
@@ -412,26 +411,20 @@ jobs:
 
       - name: Require successful Python CI on this commit
         if: inputs.require_python_ci
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          run_id=""
-          for _ in {1..40}; do
-            if [ -z "$run_id" ]; then
-              run_id="$(gh run list --workflow python-app.yml --event push --commit "$GITHUB_SHA" \
-                --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)"
+          # This is public run metadata. The build needs no token to read it.
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/python-app.yml/runs"
+          for _ in {1..20}; do
+            runs="$(curl --fail --silent --show-error --max-time 15 \
+              "$url?event=push&head_sha=$GITHUB_SHA&per_page=1" || true)"
+            read -r run_id status conclusion <<< "$(jq -r \
+              '.workflow_runs[0] | select(. != null) | [.id,.status,.conclusion] | @tsv' <<< "$runs")"
+            if [ "$status" = completed ]; then
+              echo "Python CI run $run_id finished with $conclusion"
+              test "$conclusion" = success
+              exit "$?"
             fi
-            if [ -n "$run_id" ]; then
-              read -r status conclusion <<< "$(gh run view "$run_id" --json status,conclusion \
-                --jq '[.status,.conclusion] | @tsv' || true)"
-              if [ "$status" = completed ]; then
-                echo "Python CI run $run_id finished with $conclusion"
-                test "$conclusion" = success
-                exit "$?"
-              fi
-            fi
-            sleep 15
+            sleep 30
           done
           echo "::error::Python CI did not finish for $GITHUB_SHA"
           exit 1
