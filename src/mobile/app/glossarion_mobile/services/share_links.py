@@ -690,8 +690,10 @@ class ShareLinkService:
         return ProviderState(info, enabled, consented, has_key, reason, signed_in)
 
     def provider_states(self) -> list:
+        drive_available = (self.platform in ("android", "ios")
+                           and (self._providers is None or "gdrive" in self._providers))
         return [self.provider_state(pid) for pid in PROVIDER_IDS
-                if pid != "gdrive" or self.platform in ("android", "ios")]
+                if pid != "gdrive" or drive_available]
 
     def consent_text(self, provider_id: str, path: Optional[str] = None, size: Optional[int] = None) -> ConsentText:
         return consent_text(provider_id, file_name=os.path.basename(path) if path else "", size=size)

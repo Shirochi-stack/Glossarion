@@ -1240,7 +1240,8 @@ def test_cloud_and_share_sources_have_no_network_path():
     allowed_imports = {"__init__.py": {"http.client", "socket", "ssl"},
                        "send_e2ee.py": {"websockets", "websockets.sync.client", "websockets.exceptions"}}
     allowed_hosts = {"transfer.it", "gofile.io", "api.gofile.io", "upload.gofile.io", "send.vis.ee",
-                     "pixeldrain.com", "github.com"}
+                     "pixeldrain.com", "github.com", "drive.google.com", "www.google.com",
+                     "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com"}
     providers = sorted((services / "share_providers").glob("*.py"))
     assert {p.name for p in providers} >= {"__init__.py", "gofile.py", "pixeldrain.py", "send_e2ee.py",
                                            "transferit_handoff.py"}

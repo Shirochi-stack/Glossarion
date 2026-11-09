@@ -782,11 +782,12 @@ class JobDetailScreen(Screen):
         return folder
 
     def _apply_progress_actions(self, snap: JobSnapshot) -> None:
-        has_book = bool(self._library_bid(snap) or self._library_found) and self.navigate is not None
-        has_folder = bool(self._progress_folder(snap)) and self.open_progress is not None
-        self.progress_button.visible = has_book or has_folder
+        has_book = bool(self._library_bid(snap) or self._library_found)
+        has_folder = bool(self._progress_folder(snap))
+        self.progress_button.visible = (has_book and self.navigate is not None
+                                        or has_folder and self.open_progress is not None)
         failed = int(getattr(snap.progress, "failed", 0) or 0)
-        self.qa_chip.visible = failed > 0 and not snap.is_active and self.progress_button.visible
+        self.qa_chip.visible = failed > 0 and not snap.is_active and (has_book or has_folder)
         self.qa_chip.label = ft.Text(f"{failed} QA failed")
 
     def _on_progress(self, failed: bool = False) -> Any:
@@ -796,7 +797,7 @@ class JobDetailScreen(Screen):
         snap = self.snap
         if snap is None:
             return None
-        bid = self._library_bid(snap) or self._library_found
+        bid = self._library_bid(snap) or getattr(self, "_library_found", None)
         glossary = not failed and progress_view(snap) == "glossary"
         if bid is not None and self.navigate is not None:
             query = {"tab": "chapters", "filter": "failed"} if failed else {"tab": "glossary" if glossary else "chapters"}
@@ -859,7 +860,7 @@ class JobDetailScreen(Screen):
             except Exception:
                 log.debug("chat workspace lookup failed", exc_info=True)
         if snap.kind != "direct_text":
-            folders.append(str(self._progress_folder(snap) or ""))
+            folders.append(str(snap.output_dir or ""))
             folders.extend(str(folder or "") for folder in (snap.output_dirs or {}).values())
         out: list = []
         seen: set = set()

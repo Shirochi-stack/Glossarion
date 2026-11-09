@@ -14,6 +14,7 @@ Hit targets: Material 3 compact density shrinks visuals, never touch areas;
 from __future__ import annotations
 
 from enum import Enum
+import sys
 from typing import Any, Optional
 
 import flet as ft
@@ -71,7 +72,7 @@ def configure_switches(page: Any) -> None:
     except ImportError:
         _switch_type = ft.Switch
         return
-    _switch_type = ScaledSwitch if native_widgets_available(page) else ft.Switch
+    _switch_type = ScaledSwitch if sys.platform in ("android", "ios") and native_widgets_available(page) else ft.Switch
 
 
 def toggle(**kwargs: Any) -> ft.Switch:

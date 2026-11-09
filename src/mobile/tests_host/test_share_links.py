@@ -730,6 +730,30 @@ def test_drive_ios_oauth_validates_redirect_and_pkce():
         drive.callback_code(callback, "wrong-state")
 
 
+def test_drive_android_consent_connect_and_disconnect(env):
+    class Native:
+        async def call(self, method, arguments, **kwargs):
+            assert method == "drive_authorize" and arguments["interactive"]
+            return {"token": "google-access-token-for-test"}
+
+    async def scenario():
+        svc = _service(env, platform="android", native=Native())
+        assert [state.id for state in svc.provider_states()][-1] == "gdrive"
+        with pytest.raises(sp.ShareError, match="Turn on Google Drive"):
+            await svc.connect_drive()
+        await svc.set_enabled("gdrive", True, consent=True)
+        assert not svc.provider_state("gdrive").ready
+        assert (await svc.connect_drive()).ready
+        assert "google-access-token-for-test" not in (env["data"] / sl.STORE_FILE).read_text(encoding="utf-8")
+        await svc.disconnect_drive()
+        assert not svc.provider_state("gdrive").signed_in
+        assert "gdrive_grant" not in svc.store.read().get("secrets", {})
+        injected = _service(env, platform="android", providers={})
+        assert "gdrive" not in [state.id for state in injected.provider_states()]
+
+    asyncio.run(scenario())
+
+
 def test_only_book_outputs_inside_the_library_or_output_qualify(env, tmp_path):
     svc = _service(env)
     _, epub = _book(env)
