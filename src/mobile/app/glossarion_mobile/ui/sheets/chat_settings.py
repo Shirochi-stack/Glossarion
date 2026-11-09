@@ -85,7 +85,7 @@ from glossarion_mobile.ui.screens.profiles import (
     grouped_profile_names,
     profile_prompt_card,
 )
-from glossarion_mobile.ui.theme import HIT_TARGET, mono_family
+from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, toggle
 
 __all__ = [
     "CHAT_SETTING_KEYS",
@@ -414,7 +414,7 @@ class ChatSettingsSheet:
                         color=ft.Colors.ON_SURFACE_VARIANT)]
 
     def _switch(self, field_name: str, label: str) -> ft.Control:
-        switch = ft.Switch(value=bool(self.value_of(field_name)),
+        switch = toggle(value=bool(self.value_of(field_name)),
                            on_change=lambda e, f=field_name: self.set_value(f, bool(e.control.value)))
         # the label wraps (switch_row): a Switch label stays on one line and ran under the
         # "Inherited from: ..." badge on a phone (owner 2026-10-19)

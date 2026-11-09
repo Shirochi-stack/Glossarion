@@ -26,7 +26,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.reader import model as rm
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = ["AaSheet", "SCOPE_ALL", "SCOPE_BOOK"]
 
@@ -173,7 +173,7 @@ class AaSheet:
     def _theme_tab(self) -> ft.Control:
         self.swatch_row = ft.Row([self._swatch(i, t) for i, t in enumerate(self.themes)], wrap=True, spacing=8,
                                  run_spacing=8, key="aa-swatches")
-        self.follow_switch = ft.Switch(label="Follow app theme", value=self.settings.follow_app_theme,
+        self.follow_switch = toggle(label="Follow app theme", value=self.settings.follow_app_theme,
                                        on_change=lambda e: self._emit({"follow_app_theme": bool(e.control.value)}),
                                        key="aa-follow")
         return ft.ListView(controls=[ft.Container(self.swatch_row, padding=ft.Padding.only(top=8)), self.follow_switch],
@@ -191,16 +191,16 @@ class AaSheet:
             on_change=lambda e: self._emit({"layout": next(iter(e.control.selected or [rm.LAYOUT_SINGLE]))}),
             key="aa-layout",
         )
-        self.zones_switch = ft.Switch(label="Tap edges to turn pages", value=self.settings.tap_zones,
+        self.zones_switch = toggle(label="Tap edges to turn pages", value=self.settings.tap_zones,
                                       on_change=lambda e: self._emit({"tap_zones": bool(e.control.value)}),
                                       key="aa-zones")
-        self.turn_switch = ft.Switch(label="Page turn animation", value=self.settings.page_turn,
+        self.turn_switch = toggle(label="Page turn animation", value=self.settings.page_turn,
                                      on_change=lambda e: self._emit({"page_turn": bool(e.control.value)}),
                                      key="aa-page-turn")
-        self.awake_switch = ft.Switch(label="Keep screen on", value=self.settings.keep_screen_on,
+        self.awake_switch = toggle(label="Keep screen on", value=self.settings.keep_screen_on,
                                       on_change=lambda e: self._emit({"keep_screen_on": bool(e.control.value)}),
                                       key="aa-awake")
-        self.progress_switch = ft.Switch(label="Show progress %", value=self.settings.show_progress,
+        self.progress_switch = toggle(label="Show progress %", value=self.settings.show_progress,
                                          on_change=lambda e: self._emit({"show_progress": bool(e.control.value)}),
                                          key="aa-progress")
         controls: list[ft.Control] = [ft.Container(self.layout_buttons, padding=ft.Padding.only(top=8))]

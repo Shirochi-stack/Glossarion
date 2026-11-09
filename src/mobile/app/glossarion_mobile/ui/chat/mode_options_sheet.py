@@ -33,7 +33,7 @@ from glossarion_mobile.ui.chat.output_modes import mode_label, normalize_mode, o
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.sheet import fits_compact, scroll_column, sheet_frame
-from glossarion_mobile.ui.theme import icon_data
+from glossarion_mobile.ui.theme import icon_data, toggle
 
 __all__ = [
     "GENERATE_LABEL",
@@ -183,7 +183,7 @@ class ModeOptionsContent:
                  ft.Text(mode_label(self.mode), theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600)],
                 spacing=8,
             ))
-        self.this_chat_switch = ft.Switch(label="This chat only", value=bool(this_chat),
+        self.this_chat_switch = toggle(label="This chat only", value=bool(this_chat),
                                           disabled=on_this_chat is None, on_change=self._this_chat_changed,
                                           key="mode-this-chat")
         if show_header:

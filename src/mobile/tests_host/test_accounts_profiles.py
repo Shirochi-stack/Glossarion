@@ -1387,6 +1387,8 @@ def test_profiles_screens_flow(tmp_path, test_key):
 @needs_flet
 @needs_crypto
 def test_prefill_profiles_flow(tmp_path, test_key):
+    import flet as ft
+
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.screens.prefill_profiles import PREFILL_CONFIG_KEYS, PrefillCore, PrefillScreen, PrefillService
 
@@ -1396,7 +1398,8 @@ def test_prefill_profiles_flow(tmp_path, test_key):
     assert listing.options == ["Default"] and listing.default_text == "legacy prefill"  # seeded from the old prefill
     ctx = Ctx(store)
     screen = PrefillScreen(parse_route("/settings/prefill"), ctx, service=service)
-    screen.get_body()
+    body = screen.get_body()
+    assert isinstance(body, ft.ListView) and not screen.dropdown.expand and not screen.editor.expand
     assert screen.editor.value == "legacy prefill" and screen.status_text.value.startswith("✓ Prefill is active")
     assert screen.new() == "New Profile #1"
     assert store.get("active_assistant_prompt_profile") == "New Profile #1" and store.get("assistant_prompt") == ""

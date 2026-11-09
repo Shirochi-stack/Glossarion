@@ -146,6 +146,7 @@ _TOOLS = (
     ("progress", "Progress manager", "U5"),
     ("progress/glossary", "Glossary progress", "U5"),
     ("qa", "QA scanner", "U6"),
+    ("glossary-names", "Glossary name mismatches", "U6"),
     ("convert", "Compile EPUB / PDF", "U6"),
     ("headers", "Headers & metadata", "U6"),
     ("async", "Async batch", "U7"),

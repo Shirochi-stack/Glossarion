@@ -110,6 +110,9 @@ class GlossarionApp:
 
         # Page services: keep strong references (Flet unregisters unreferenced services).
         self.native = NativeBridge(page)  # GlossarionNative on Android/iOS, stub elsewhere
+        from glossarion_mobile.ui.theme import configure_switches
+
+        configure_switches(page)
         self.url_launcher = ft.UrlLauncher()
         self.clipboard = ft.Clipboard()
         self.haptics = Haptics(ft.HapticFeedback())

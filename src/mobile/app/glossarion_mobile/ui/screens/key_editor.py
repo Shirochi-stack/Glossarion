@@ -26,7 +26,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
 from glossarion_mobile.ui.settings.editors import FullScreenEditor
 from glossarion_mobile.ui.settings.model import mask_secret
-from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic, toggle
 
 __all__ = ["KeyEditor", "KeyField", "TEST_LABELS", "normalize_test_result"]
 
@@ -340,7 +340,7 @@ class KeyEditor(FullScreenEditor):
         )
         self.model_picker = ModelPicker(value=str(entry.get("model") or ""), label="Model", env=self.sheet_env,
                                         page=getattr(self.ctx, "page", None), key="key-model")
-        self.enabled_switch = ft.Switch(label="Enabled", value=bool(entry.get("enabled", True)))
+        self.enabled_switch = toggle(label="Enabled", value=bool(entry.get("enabled", True)))
         # 🔢 the key's multi-instance number (desktop Instance column; every pool's keys carry one, default 1)
         from glossarion_mobile.ui.screens.keys import INSTANCE_FIELD, INSTANCE_HELP, INSTANCE_MAX, key_instance_number
 
@@ -368,7 +368,7 @@ class KeyEditor(FullScreenEditor):
             )
             self.number_fields[name] = (field, kind, low, high, empty)
             numbers.append(field)
-        self.endpoint_switch = ft.Switch(label="Use individual endpoint",
+        self.endpoint_switch = toggle(label="Use individual endpoint",
                                          value=bool(entry.get("use_individual_endpoint", False)),
                                          on_change=self._on_endpoint_toggle)
         self.endpoint_field = ft.TextField(value=str(entry.get("azure_endpoint") or ""), label="Endpoint URL",

@@ -44,7 +44,7 @@ DEFAULT_TIMEOUT = 45.0
 #: ``flet_glossarion_native._LONG_TIMEOUT``): the outer guard waits longer, or Python would report a failure
 #: while the native copy still runs (the copy-once mirror, Save to Downloads, the transfer.it handoff).
 METHOD_TIMEOUTS = {"save_to_downloads": 960.0, "save_to_downloads_entry": 960.0,
-                   "take_photo": 960.0}  # ＋ › Camera: the user takes their time in the camera app
+                   "take_photo": 960.0, "drive_authorize": 305.0}
 #: Document destinations (U10, ``flet_glossarion_native`` documents API): off-device every one answers
 #: ``{"ok": False, "error": "unavailable"}``. The cloud sync calls them on the extension directly
 #: (``cloud_sync.NativeDocs``): the extension bounds each one itself (pickers 1 h, writes by size).

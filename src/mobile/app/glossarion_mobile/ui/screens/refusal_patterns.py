@@ -122,7 +122,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
     from glossarion_mobile.ui.components.field_commit import commit_on_blur
     from glossarion_mobile.ui.screens.base import Screen
-    from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
+    from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, toggle
 except ImportError:  # pragma: no cover - Flet missing
     ft = None  # type: ignore[assignment]
     Screen = object  # type: ignore[assignment,misc]
@@ -169,7 +169,7 @@ class RefusalPatternsScreen(Screen):  # type: ignore[misc,valid-type]
     # ---- body --------------------------------------------------------------------------------------
 
     def build_body(self) -> "ft.Control":
-        self.disable_switch = ft.Switch(label="Disable refusal pattern checks", value=self.model.disabled(),
+        self.disable_switch = toggle(label="Disable refusal pattern checks", value=self.model.disabled(),
                                         on_change=lambda e: self.model.set_disabled(bool(e.control.value)))
         self.limit_field = commit_on_blur(
             ft.TextField(value=str(self.model.length_limit()), label="Length limit", suffix=ft.Text("chars"),

@@ -39,7 +39,7 @@ from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET, log_text, mono_family, status_color
+from glossarion_mobile.ui.theme import HIT_TARGET, log_text, mono_family, status_color, toggle
 
 __all__ = ["DiagnosticsScreen", "runtime_lines"]
 
@@ -259,11 +259,11 @@ class DiagnosticsScreen(Screen):
         http_on = bool(self._pref(dl.PREF_HTTP_LOG, False))
         payload_on = bool(self._pref(dl.PREF_SAVE_PAYLOAD, True))
         memory_on = bool(self._pref(dl.PREF_MEMORY_STATS, False))
-        self.http_switch = ft.Switch(label="HTTP logging", value=http_on, key="diag-http-log",
+        self.http_switch = toggle(label="HTTP logging", value=http_on, key="diag-http-log",
                                      on_change=lambda e: self.set_http_logging(bool(e.control.value)))
-        self.payload_switch = ft.Switch(label="Save payloads", value=payload_on, key="diag-save-payload",
+        self.payload_switch = toggle(label="Save payloads", value=payload_on, key="diag-save-payload",
                                         on_change=lambda e: self.set_save_payload(bool(e.control.value)))
-        self.memory_switch = ft.Switch(label="Memory stats", value=memory_on, key="diag-memory",
+        self.memory_switch = toggle(label="Memory stats", value=memory_on, key="diag-memory",
                                        on_change=lambda e: self.set_memory_stats(bool(e.control.value)))
         folder_rows: list = []
         for folder_id, label, path in dl.debug_folders(self.data_dir, self.logs_dir):
@@ -311,7 +311,7 @@ class DiagnosticsScreen(Screen):
         logs_card = SectionCard(title="Log files", icon="DESCRIPTION",
                                 subtitle="run.log, crash.log, freeze.log; secrets are redacted when shared",
                                 children=[self.log_column, self.bundle_button], key="diag-logfiles")
-        self.dev_switch = ft.Switch(label="Developer mode", value=bool(self._pref(dl.PREF_DEVELOPER, False)),
+        self.dev_switch = toggle(label="Developer mode", value=bool(self._pref(dl.PREF_DEVELOPER, False)),
                                     key="diag-developer",
                                     on_change=lambda e: self._set_pref(dl.PREF_DEVELOPER, bool(e.control.value)))
         dev_card = SectionCard(title="Developer options", icon="DEVELOPER_MODE", children=[

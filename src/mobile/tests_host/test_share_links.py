@@ -669,6 +669,67 @@ def test_consent_texts_are_neutral_and_say_who_can_read_the_file():
     assert "your own pixeldrain account" in " ".join(sp.consent_text("pixeldrain").lines)
 
 
+def test_drive_upload_refreshes_token_and_shares_resumable_file(tmp_path, monkeypatch):
+    from glossarion_mobile.services.share_providers import google_drive as drive
+
+    monkeypatch.setattr(drive, "CHUNK_SIZE", 3)
+    path = tmp_path / "book.epub"
+    path.write_bytes(b"abcdef")
+    session = "https://www.googleapis.com/upload/drive/v3/files?upload_id=fixture"
+    responses = iter([
+        sp.HttpResponse(401, {}, b"{}"),
+        sp.HttpResponse(200, {"location": session}, b""),
+        sp.HttpResponse(308, {"range": "bytes=0-2"}, b""),
+        sp.HttpResponse(200, {}, b'{"id":"file-1"}'),
+        sp.HttpResponse(200, {}, b"{}"),
+        sp.HttpResponse(200, {}, b'{"trashed":true}'),
+    ])
+    calls = []
+
+    class Http:
+        def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return next(responses)
+
+    current = "old"
+
+    def token(rejected):
+        nonlocal current
+        if rejected:
+            assert rejected == "old"
+            current = "fresh"
+        return current
+
+    provider = drive.GoogleDriveProvider(Http())
+    progress = []
+    credentials = {"access_token": token}
+    result = provider.upload(path, name=path.name, mime="application/epub+zip", size=6, credentials=credentials,
+                             options={}, progress=lambda *p: progress.append(p), cancel=sp.CancelToken())
+    assert result.url == "https://drive.google.com/file/d/file-1/view"
+    assert [c[2]["headers"]["Authorization"] for c in calls] == ["Bearer old"] + ["Bearer fresh"] * 4
+    assert [c[2]["headers"]["Content-Range"] for c in calls if c[0] == "PUT"] == ["bytes 0-2/6", "bytes 3-5/6"]
+    assert [c[2]["body"] for c in calls if c[0] == "PUT"] == [b"abc", b"def"]
+    assert json.loads(calls[-1][2]["body"]) == {"type": "anyone", "role": "reader", "allowFileDiscovery": False}
+    assert progress == [(3, 6), (6, 6)]
+    assert provider.delete(result.delete_handle, credentials)
+    assert json.loads(calls[-1][2]["body"]) == {"trashed": True}
+
+
+def test_drive_ios_oauth_validates_redirect_and_pkce():
+    from urllib.parse import parse_qs, urlsplit
+
+    from glossarion_mobile.services.share_providers import google_drive as drive
+
+    args, state, verifier = drive.authorization_request()
+    params = parse_qs(urlsplit(args["url"]).query)
+    assert params["scope"] == [drive.SCOPE] and params["code_challenge_method"] == ["S256"]
+    assert params["state"] == [state] and verifier not in args["url"]
+    callback = f"{drive.REDIRECT_URI}?code=fixture&state={state}"
+    assert drive.callback_code(callback, state) == "fixture"
+    with pytest.raises(sp.ShareError, match="could not be verified"):
+        drive.callback_code(callback, "wrong-state")
+
+
 def test_only_book_outputs_inside_the_library_or_output_qualify(env, tmp_path):
     svc = _service(env)
     _, epub = _book(env)

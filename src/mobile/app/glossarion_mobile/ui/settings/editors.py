@@ -28,7 +28,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, number_keyboard
+from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, number_keyboard, toggle
 
 log = logging.getLogger("glossarion.ui")
 
@@ -542,7 +542,7 @@ class EntryTypesEditor(FullScreenEditor):
         self.rows = ft.ListView(expand=True, spacing=2, key="entry-types-rows")
         self.new_name = ft.TextField(label="Type field", dense=True, expand=True, border_radius=tokens.RADII["field"],
                                      color=ft.Colors.ON_SURFACE, key="entry-types-new", on_submit=lambda e: self.add())
-        self.new_gender = ft.Switch(label="Include gender field", value=False, key="entry-types-gender")
+        self.new_gender = toggle(label="Include gender field", value=False, key="entry-types-gender")
         self._render()
         return ft.Column([
             ft.Text("Active Entry Types", theme_style=ft.TextThemeStyle.TITLE_SMALL),
@@ -564,7 +564,7 @@ class EntryTypesEditor(FullScreenEditor):
         controls: list = []
         builtin = getattr(self.gd, "BUILTIN_ENTRY_TYPES", ("character", "terms"))
         for name, config in self._ordered():
-            switch = ft.Switch(value=bool(config.get("enabled", True)), key=f"entry-type-{name}")
+            switch = toggle(value=bool(config.get("enabled", True)), key=f"entry-type-{name}")
             self.switches[name] = switch
             row: list = [switch, ft.Text(name, expand=True, theme_style=ft.TextThemeStyle.BODY_MEDIUM)]
             if config.get("has_gender", False):

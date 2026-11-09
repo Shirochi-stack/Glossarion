@@ -31,7 +31,7 @@ __all__ = ["IMPLEMENTED_ROUTES", "SCREEN_ROUTES", "ToolsFeature"]
 
 log = logging.getLogger("glossarion.tools")
 
-SCREEN_ROUTES = ("tools", "tools.qa", "tools.qa.report", "tools.convert", "tools.headers", "tools.async",
+SCREEN_ROUTES = ("tools", "tools.qa", "tools.qa.report", "tools.glossary-names", "tools.convert", "tools.headers", "tools.async",
                  "tools.review", "tools.sdlxliff", "tools.rpgmaker")
 #: Routes this feature ships (Integrate merges them into the hub / drawer "implemented" sets).
 IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES)
@@ -196,6 +196,10 @@ class ToolsFeature:
             from glossarion_mobile.ui.tools.qa_screen import QaScannerScreen
 
             return QaScannerScreen(match, ctx)
+        if name == "tools.glossary-names":
+            from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNamesScreen
+
+            return GlossaryNamesScreen(match, ctx)
         if name == "tools.qa.report":
             from glossarion_mobile.ui.tools.qa_report import QaReportScreen
 

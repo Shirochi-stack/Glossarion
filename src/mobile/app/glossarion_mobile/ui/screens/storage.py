@@ -29,6 +29,8 @@ from typing import Any, Iterable, Mapping, Optional
 
 import flet as ft
 
+from glossarion_mobile.ui.theme import toggle
+
 from glossarion_mobile.services.files import (
     MIRROR_PREF,
     PHONE_FOLDER_LABEL,
@@ -319,7 +321,7 @@ class StorageScreen(PageScreen):
         if self.platform == "android" and self._not_listed_help():
             links.append(ft.TextButton(content=NOT_LISTED_TITLE, icon=ft.Icons.HELP_OUTLINE,
                                        on_click=self.show_not_listed_help, key="storage-phone-help"))
-        self.mirror_switch = ft.Switch(
+        self.mirror_switch = toggle(
             value=bool(self.prefs.get(MIRROR_PREF, False)) if self.prefs is not None else False,
             disabled=self.phone_folder_reason is not None,
             tooltip=OTHER_OUTPUTS_LABEL,

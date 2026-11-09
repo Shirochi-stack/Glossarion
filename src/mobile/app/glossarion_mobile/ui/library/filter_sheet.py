@@ -21,6 +21,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui.theme import toggle
+
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.library.models import (
@@ -86,7 +88,7 @@ class FilterSheet:
             on_change=self._on_sort,
             key="sort",
         )
-        self.reverse_switch = ft.Switch(label="Reverse", value=state.reverse, on_change=self._on_reverse,
+        self.reverse_switch = toggle(label="Reverse", value=state.reverse, on_change=self._on_reverse,
                                         key="reverse")
         self.view_buttons = ft.SegmentedButton(
             segments=[ft.Segment(value="grid", label=ft.Text("Grid"), icon=ft.Icons.GRID_VIEW),
@@ -96,13 +98,13 @@ class FilterSheet:
             on_change=self._on_view,
             key="view",
         )
-        self.raw_switch = ft.Switch(label="Raw titles", value=raw_titles,
+        self.raw_switch = toggle(label="Raw titles", value=raw_titles,
                                     on_change=lambda e: self._emit("raw_titles", bool(e.control.value)),
                                     key="raw-titles")
-        self.language_switch = ft.Switch(label="Show language badge", value=show_language,
+        self.language_switch = toggle(label="Show language badge", value=show_language,
                                          on_change=lambda e: self._emit("show_language", bool(e.control.value)),
                                          key="show-language")
-        self.progress_switch = ft.Switch(label="Show progress bar on cover", value=show_progress,
+        self.progress_switch = toggle(label="Show progress bar on cover", value=show_progress,
                                          on_change=lambda e: self._emit("show_progress", bool(e.control.value)),
                                          key="show-progress")
         self.tabs = ft.Tabs(

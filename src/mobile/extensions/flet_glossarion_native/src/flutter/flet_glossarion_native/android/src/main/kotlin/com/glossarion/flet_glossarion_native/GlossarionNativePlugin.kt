@@ -158,8 +158,11 @@ class GlossarionNativePlugin :
 
     override fun onNewIntent(intent: Intent): Boolean = handleIntent(intent, initial = false)
 
+    private val driveAuthorization = DriveAuthorization()
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean =
-        documents?.onActivityResult(requestCode, resultCode, data) ?: false
+        driveAuthorization.onActivityResult(appContext, requestCode, data) ||
+            (documents?.onActivityResult(requestCode, resultCode, data) ?: false)
 
     // ----------------------------------------------------------------- intents
 
@@ -382,6 +385,10 @@ class GlossarionNativePlugin :
         }
         try {
             when (call.method) {
+                "drive_authorize" -> driveAuthorization.authorize(
+                    context, activityBinding?.activity, call.argument<Boolean>("interactive") == true,
+                    call.argument<String>("rejected_token"), result,
+                )
                 "attach" -> {
                     dartAttached = true
                     val shared = ArrayList(pendingShared)

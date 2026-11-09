@@ -254,6 +254,8 @@ class GlossarionNativeService extends FletService {
   Future<dynamic> _invokeMethod(String name, dynamic args) async {
     try {
       switch (name) {
+        case 'drive_authorize':
+          return _isMobile ? await _platform(name, args) : {'error': 'unavailable'};
         case 'get_platform_info':
           return await _platformInfo();
         case 'get_initial_shared':

@@ -25,7 +25,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 from glossarion_mobile.ui.tools import headers_model as hm
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import (
@@ -314,7 +314,7 @@ class HeadersScreen(Screen):
                                        ft.TextButton(content="Clear", on_click=lambda e: self.set_targets([]),
                                                      key="hd-clear")], wrap=True)],
                      icon="LIBRARY_BOOKS", key="hd-books-card")
-        self.rebuild = ft.Switch(label="Rebuild the EPUB afterwards", value=bool(self.state.get("rebuild", True)),
+        self.rebuild = toggle(label="Rebuild the EPUB afterwards", value=bool(self.state.get("rebuild", True)),
                                  on_change=self._on_rebuild, key="hd-rebuild")
         self.header_actions = ft.Row(wrap=True, spacing=8, run_spacing=8, key="hd-header-actions")
         self.run_status = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="hd-status")

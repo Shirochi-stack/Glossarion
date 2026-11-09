@@ -39,7 +39,7 @@ from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, toggle
 from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text
@@ -140,7 +140,7 @@ class QaScannerScreen(Screen):
             ft.TextField(label=qm.WORKERS_LABEL, value=str(qm.workers_shown(self.ctx.config_snapshot())), dense=True,
                          keyboard_type=number_keyboard(), helper=qm.workers_hint(), key="qa-workers"),
             lambda _text: self._on_workers(), current=lambda: self.ctx.cfg(qm.WORKERS_KEY, None))
-        self.auto_search = ft.Switch(label="Auto-search output", value=bool(self.ctx.cfg("qa_auto_search_output", True)),
+        self.auto_search = toggle(label="Auto-search output", value=bool(self.ctx.cfg("qa_auto_search_output", True)),
                                      on_change=self._on_auto_search, key="qa-auto-search")
         fields = card("Scan options", [self.sample_field, self.workers_field, self.auto_search], icon="TUNE",
                       key="qa-fields")

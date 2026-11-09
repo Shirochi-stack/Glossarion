@@ -238,14 +238,15 @@ class PrefillScreen(Screen):
         self.selected = self.listing.active or DEFAULT_LABEL
         editable = self.service.available
         self.dropdown = ft.Dropdown(
-            label="Assistant Profile", value=self.selected, dense=True, expand=True,
+            label="Assistant Profile", value=self.selected, dense=True,
             options=[ft.DropdownOption(key=n, text=n) for n in self.listing.options],
             on_select=lambda e: self.select(e.control.value or DEFAULT_LABEL), disabled=not editable,
         )
         self.name_field = ft.TextField(label="Profile name", value=self.selected, dense=True, read_only=not editable)
         self.editor = PromptEditorPane(value=self.listing.text_for(self.listing.active), placeholders=(), mono=self.mono,
                                        hint="Enter assistant prefill prompt here... (leave empty to disable)",
-                                       run_io=getattr(self.ctx, "run_io", None), model=self.model, min_lines=10)
+                                       run_io=getattr(self.ctx, "run_io", None), model=self.model, min_lines=6,
+                                       fill=False)
         self.editor.field.read_only = not editable
         self._status()
         rows: list[ft.Control] = [
@@ -272,7 +273,7 @@ class PrefillScreen(Screen):
                               disabled=not editable),
             ], wrap=True, spacing=4),
         ]
-        return ft.Container(padding=12, expand=True, content=ft.Column(rows, spacing=8, expand=True))
+        return ft.ListView(rows, padding=12, expand=True, spacing=8)
 
     def _status(self) -> None:
         active = bool((self.editor.value if hasattr(self, "editor") else "").strip())

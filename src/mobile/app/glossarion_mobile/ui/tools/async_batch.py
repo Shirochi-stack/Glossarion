@@ -35,7 +35,7 @@ from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, toggle
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import ChoiceDialog, JobWatch, action_button, card, hint_text
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
@@ -141,7 +141,7 @@ class AsyncBatchScreen(Screen):
         self.support_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="async-support")
         info = card("Model", [self.model_text, self.support_text, hint_text(DISCOUNT_NOTE, key="async-discount")],
                     icon="SCHEDULE_SEND", key="async-info")
-        self.wait_switch = ft.Switch(value=bool(self.ctx.cfg(WAIT_KEY, False)), on_change=self._on_wait,
+        self.wait_switch = toggle(value=bool(self.ctx.cfg(WAIT_KEY, False)), on_change=self._on_wait,
                                      key="async-wait")
         self.poll_field = commit_on_blur(
             ft.TextField(label="Poll interval (seconds)", value=str(self.ctx.cfg(POLL_KEY, 60)), dense=True,

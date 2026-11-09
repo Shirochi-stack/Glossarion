@@ -55,6 +55,29 @@ def hit_target() -> ft.BoxConstraints:
 
 HIT_TARGET = hit_target()
 
+
+@ft.control("GlossarionScaledSwitch")
+class ScaledSwitch(ft.Switch):
+    """A native switch whose track follows the current theme text size."""
+
+
+_switch_type = ft.Switch
+
+
+def configure_switches(page: Any) -> None:
+    global _switch_type
+    try:
+        from flet_glossarion_native import native_widgets_available
+    except ImportError:
+        _switch_type = ft.Switch
+        return
+    _switch_type = ScaledSwitch if native_widgets_available(page) else ft.Switch
+
+
+def toggle(**kwargs: Any) -> ft.Switch:
+    return _switch_type(**kwargs)
+
+
 _WEIGHTS = {
     400: ft.FontWeight.W_400,
     500: ft.FontWeight.W_500,

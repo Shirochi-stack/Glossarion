@@ -240,6 +240,10 @@ class GlossarionNative(ft.Service):
 
     # ------------------------------------------------------------ platform info
 
+    async def drive_authorize(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._call("drive_authorize", arguments, default={"error": "unavailable"},
+                                timeout=300 if arguments.get("interactive") else 30)
+
     async def get_platform_info(self) -> dict[str, Any]:
         """Platform facts: ``platform``, ``sdk_int``/``system_version``,
         ``notifications_enabled``, ``ignoring_battery_optimizations``,

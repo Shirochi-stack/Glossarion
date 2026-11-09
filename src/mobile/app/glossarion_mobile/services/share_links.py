@@ -293,6 +293,7 @@ class ProviderState:
     consented: bool  # the current consent version was accepted
     has_key: bool = False  # pixeldrain: an API key is saved
     reason: Optional[str] = None  # why it cannot be used right now (None: ready)
+    signed_in: bool = False  # Google Drive
 
     @property
     def id(self) -> str:
@@ -497,6 +498,7 @@ class ShareLinkService:
         is_busy: Optional[Callable[[str], bool]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        from glossarion_mobile.services.share_providers.google_drive import DriveOAuth
         from glossarion_mobile.services.share_providers.transferit_handoff import TransferItHandoff
 
         self.store = ShareLinkStore(store_path)
@@ -504,6 +506,10 @@ class ShareLinkService:
         self.post = post
         self.platform = platform
         self.native = native
+        self._drive_oauth = DriveOAuth()
+        self._drive_auth_lock = asyncio.Lock()
+        self._drive_token_lock = threading.Lock()
+        self._drive_access: Optional[tuple] = None
         self.secrets = secrets or SecretBox()
         self.allowed_roots = [r for r in (_norm(p) for p in allowed_roots if p) if r]
         base_cache = os.fspath(cache_dir) if cache_dir else os.path.join(os.fspath(Path(store_path).parent), "cache")
@@ -581,10 +587,12 @@ class ShareLinkService:
         """The direct providers (built on first use)."""
         if self._providers is None:
             from glossarion_mobile.services.share_providers.gofile import GofileProvider
+            from glossarion_mobile.services.share_providers.google_drive import GoogleDriveProvider
             from glossarion_mobile.services.share_providers.pixeldrain import PixeldrainProvider
             from glossarion_mobile.services.share_providers.send_e2ee import SendProvider
 
-            self._providers = {"gofile": GofileProvider(), "send": SendProvider(), "pixeldrain": PixeldrainProvider()}
+            self._providers = {"gofile": GofileProvider(), "send": SendProvider(),
+                               "pixeldrain": PixeldrainProvider(), "gdrive": GoogleDriveProvider()}
         return self._providers
 
     def subscribe(self, callback: Callable[[str], Any]) -> Callable[[], None]:
@@ -667,6 +675,7 @@ class ShareLinkService:
         except (TypeError, ValueError):
             consented = False
         has_key = bool((data.get("secrets") or {}).get("pixeldrain_key")) if info.needs_api_key else False
+        signed_in = provider_id == "gdrive" and bool((data.get("secrets") or {}).get("gdrive_grant"))
         reason = None
         if not enabled:
             reason = "Turn it on in Settings › Cloud sync & sharing"
@@ -674,12 +683,15 @@ class ShareLinkService:
             reason = "Read and accept what this service can see first"
         elif info.needs_api_key and not has_key:
             reason = f"Add your {info.label} API key in Settings › Cloud sync & sharing"
+        elif provider_id == "gdrive" and not signed_in:
+            reason = "Connect Google Drive in Settings › Cloud sync & sharing"
         elif info.direct and not self.secrets.available():
             reason = "Secure storage is not available on this phone"
-        return ProviderState(info, enabled, consented, has_key, reason)
+        return ProviderState(info, enabled, consented, has_key, reason, signed_in)
 
     def provider_states(self) -> list:
-        return [self.provider_state(pid) for pid in PROVIDER_IDS]
+        return [self.provider_state(pid) for pid in PROVIDER_IDS
+                if pid != "gdrive" or self.platform in ("android", "ios")]
 
     def consent_text(self, provider_id: str, path: Optional[str] = None, size: Optional[int] = None) -> ConsentText:
         return consent_text(provider_id, file_name=os.path.basename(path) if path else "", size=size)
@@ -769,6 +781,110 @@ class ShareLinkService:
                                                          None)[1])
         self._emit("providers")
 
+    async def _drive_native(self, arguments: dict) -> dict:
+        if self.platform not in ("android", "ios") or self.native is None:
+            raise ShareError("unsupported", "Google Drive sign-in is available on Android and iOS.")
+        result = await self.native.call("drive_authorize", arguments, default={})
+        result = result if isinstance(result, dict) else {}
+        if result.get("callback") or result.get("token"):
+            return result
+        error = result.get("error")
+        if error == "cancelled":
+            raise ShareError("cancelled", "Google Drive sign-in was cancelled.")
+        if error == "sign_in":
+            raise ShareError("sign_in", "Google Drive needs you to connect your account again.")
+        if error == "google_10":
+            raise ShareError("auth", "Google Drive does not recognize this Android build's signing certificate.")
+        if isinstance(error, str) and error.startswith("google_") and error[7:].isdigit():
+            raise ShareError("auth", f"Google Drive sign-in could not complete (Google error {error[7:]}).")
+        raise ShareError("auth", "Google Drive sign-in could not complete. Try again.")
+
+    async def connect_drive(self) -> ProviderState:
+        from glossarion_mobile.services.share_providers.google_drive import authorization_request
+
+        await self.load()
+        async with self._drive_auth_lock:
+            state = self.provider_state("gdrive")
+            if not (state.enabled and state.consented):
+                raise ShareError("consent", "Turn on Google Drive sharing and accept its terms first.")
+            if not self.secrets.available():
+                raise ShareError("secrets_unavailable", "Secure storage is unavailable.")
+            if state.signed_in:
+                return state
+            if self.platform == "ios":
+                arguments, nonce, verifier = authorization_request()
+                response = await self._drive_native(arguments)
+                grant = await self._io(self._drive_oauth.exchange, response["callback"], nonce, verifier)
+            else:
+                await self._drive_native({"interactive": True})
+                grant = "android"
+            await self._io(self.store.mutate, lambda data: data.setdefault("secrets", {}).update(
+                gdrive_grant=self.secrets.seal(grant)))
+            self._emit("providers")
+            return self.provider_state("gdrive")
+
+    async def disconnect_drive(self) -> None:
+        await self.load()
+        async with self._drive_auth_lock:
+            if self.uploading:
+                raise ShareError("busy", "Wait for the upload to finish or cancel it first.")
+            sealed = (self.store.read().get("secrets") or {}).get("gdrive_grant")
+            await self._io(self._clear_drive_grant, sealed)
+            if sealed and self.platform == "ios":
+                try:
+                    await self._io(lambda: self._drive_oauth.revoke(self.secrets.open(sealed)))
+                except ShareError:
+                    pass  # the local disconnect still takes effect
+
+    def _clear_drive_grant(self, sealed: Any) -> None:
+        def forget(data: dict) -> None:
+            entries = data.setdefault("secrets", {})
+            if entries.get("gdrive_grant") == sealed:
+                entries.pop("gdrive_grant", None)
+
+        self.store.mutate(forget)
+        self._emit("providers")
+
+    def _drive_token(self, sealed: Any, rejected: str) -> str:
+        def current() -> bool:
+            return bool(sealed and (self.store.read().get("secrets") or {}).get("gdrive_grant") == sealed)
+
+        if not current():
+            raise ShareError("sign_in", "Connect Google Drive in Settings › Cloud sync & sharing.")
+        try:
+            if self.platform == "ios":
+                token = self._drive_oauth.token(self.secrets.open(sealed), rejected)
+            elif self.platform == "android":
+                token = self._android_drive_token(sealed, rejected)
+            else:
+                raise ShareError("auth", "Google Drive sign-in is unavailable.")
+        except ShareError as exc:
+            if exc.code == "sign_in":
+                self._clear_drive_grant(sealed)
+            raise
+        if not current():
+            raise ShareError("sign_in", "Google Drive was disconnected.")
+        return token
+
+    def _android_drive_token(self, sealed: Any, rejected: str) -> str:
+        with self._drive_token_lock:
+            if self._drive_access is not None:
+                grant, token, expiry = self._drive_access
+                if grant == sealed and token != rejected and expiry > time.monotonic():
+                    return token
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                raise ShareError("auth", "Google Drive sign-in is unavailable.")
+            pending = asyncio.run_coroutine_threadsafe(
+                self._drive_native({"interactive": False, "rejected_token": rejected}), loop)
+            try:
+                token = pending.result(timeout=35)["token"]
+            except TimeoutError:
+                pending.cancel()
+                raise ShareError("network", "Google Drive did not answer the authorization request.") from None
+            self._drive_access = (sealed, token, time.monotonic() + 2700)
+            return token
+
     def _credentials_blocking(self, provider_id: str) -> dict:
         secrets = self.store.read().get("secrets") or {}
         if provider_id == "gofile":
@@ -779,6 +895,9 @@ class ShareLinkService:
             if not key:
                 raise ShareError("no_key", "Add your pixeldrain API key in Settings › Cloud sync & sharing first.")
             return {"api_key": self.secrets.open(key)}
+        if provider_id == "gdrive":
+            sealed = secrets.get("gdrive_grant")
+            return {"access_token": lambda rejected: self._drive_token(sealed, rejected)}
         return {}
 
     # ---- Send defaults ----------------------------------------------------------------------------------
@@ -895,6 +1014,8 @@ class ShareLinkService:
             raise ShareError("not_allowed", "Only book files from the Library can be shared by link.")
         if state.info.needs_api_key and not state.has_key:
             raise ShareError("no_key", f"Add your {state.info.label} API key in Settings › Cloud sync & sharing first.")
+        if provider_id == "gdrive" and not state.signed_in:
+            raise ShareError("sign_in", "Connect Google Drive in Settings › Cloud sync & sharing.")
         if not self.secrets.available():
             raise ShareError("secrets_unavailable", "Secure storage is not available on this phone, so Glossarion "
                              "cannot keep share links or keys safely.")

@@ -94,7 +94,13 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
 
   // MARK: - Method channel
 
+  private let driveAuthorization = DriveAuthorization()
+
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    if call.method == "drive_authorize" {
+      driveAuthorization.open(call.arguments, result: result)
+      return
+    }
     let args = call.arguments as? [String: Any] ?? [:]
     if DocumentDestinations.methods.contains(call.method) {
       documents.handle(call.method, args, result: result)

@@ -75,7 +75,7 @@ from glossarion_mobile.ui.settings.model import (
     summarize,
     tile_kind,
 )
-from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic, toggle
 
 __all__ = [
     "DelayRangeTile",
@@ -536,7 +536,7 @@ class SwitchTile(SettingTile):
     kind = "switch"
 
     def build_control(self) -> Optional[ft.Control]:
-        self.switch = ft.Switch(value=False, on_change=self._on_switch)
+        self.switch = toggle(value=False, on_change=self._on_switch)
         return self.switch
 
     def refresh_value(self) -> None:

@@ -34,7 +34,7 @@ import flet as ft
 
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = ["ScheduleSheet", "parse_time_text", "queue_summary"]
 
@@ -134,7 +134,7 @@ class ScheduleSheet:
         current, enabled = rs.editable_config(schedule)
         self.suggested = current is None  # nothing saved: the DeepSeek preset is a suggestion
         # Off by default: everything below is disabled (greyed out) until the schedule is enabled
-        self.enable_switch = ft.Switch(value=bool(enabled), key="schedule-enabled",
+        self.enable_switch = toggle(value=bool(enabled), key="schedule-enabled",
                                        on_change=lambda e: self.set_enabled(bool(e.control.value)))
         self.enable_row = ft.Row([self.enable_switch, ft.Container(
             content=ft.Text(rs.ENABLE_LABELS.get(self.mode, rs.ENABLE_LABELS["queue"]),

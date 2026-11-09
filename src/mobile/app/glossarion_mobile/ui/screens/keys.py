@@ -1054,6 +1054,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     import flet as ft
 
     from glossarion_mobile.ui import tokens
+    from glossarion_mobile.ui.theme import toggle
     from glossarion_mobile.ui.components._handlers import call_handler
     from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
     from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
@@ -1233,7 +1234,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
     # ---- body ----------------------------------------------------------------------------------------
 
     def build_body(self) -> "ft.Control":
-        rotation_switch = ft.Switch(label="Force key rotation", value=bool(self.controller.setting("force_key_rotation", True)),
+        rotation_switch = toggle(label="Force key rotation", value=bool(self.controller.setting("force_key_rotation", True)),
                                     on_change=lambda e: self.controller.set_setting("force_key_rotation", bool(e.control.value)))
         self.rotation_switch = rotation_switch
         self.frequency_field = commit_on_blur(
@@ -1423,7 +1424,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
 
     def _pool_header(self, spec: PoolSpec) -> "ft.Control":
         count = self.controller.count(spec.id)
-        self.pool_switch = ft.Switch(value=self.controller.enabled(spec.id), tooltip=f"Use {spec.title}",
+        self.pool_switch = toggle(value=self.controller.enabled(spec.id), tooltip=f"Use {spec.title}",
                                      on_change=lambda e: self.controller.set_enabled(self.pool, bool(e.control.value)))
         pool_menu = ft.PopupMenuButton(
             icon=ft.Icons.MORE_HORIZ, tooltip="Pool actions",
@@ -1441,11 +1442,11 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             children.append(ft.Text(spec.description, theme_style=ft.TextThemeStyle.BODY_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT))
         if spec.id == "fallback":
-            children.append(ft.Switch(label="Use Main GUI Key as Fallback #1",
+            children.append(toggle(label="Use Main GUI Key as Fallback #1",
                                       value=bool(self.controller.setting("use_main_key_fallback", True)),
                                       on_change=lambda e: self.controller.set_setting("use_main_key_fallback",
                                                                                       bool(e.control.value))))
-            children.append(switch_row(ft.Switch(value=bool(self.controller.setting("fallback_key_shuffle", False)),
+            children.append(switch_row(toggle(value=bool(self.controller.setting("fallback_key_shuffle", False)),
                                                 on_change=lambda e: self.controller.set_setting(
                                                     "fallback_key_shuffle", bool(e.control.value))),
                                       "Fallback Key Shuffle (skip keys on API delay cooldown)"))
@@ -2055,7 +2056,7 @@ class BulkFieldSheet:
                                           page=page, key="bulk-model")
             controls.append(self.input)
         elif field == "endpoint":
-            self.endpoint_switch = ft.Switch(label="Use individual endpoint",
+            self.endpoint_switch = toggle(label="Use individual endpoint",
                                              value=bool(sample.get("use_individual_endpoint", True)))
             self.endpoint_field = ft.TextField(value=str(sample.get("azure_endpoint") or ""), label="Endpoint URL",
                                                hint_text="https://…", dense=True, keyboard_type=ft.KeyboardType.URL)

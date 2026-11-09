@@ -20,7 +20,7 @@ from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.tools import qa_model as qm
-from glossarion_mobile.ui.theme import number_keyboard
+from glossarion_mobile.ui.theme import number_keyboard, toggle
 from glossarion_mobile.ui.tools.common import hint_text, section_header
 
 __all__ = ["CustomModeSheet"]
@@ -73,7 +73,7 @@ class CustomModeSheet:
                                        value=str(self.values.get("min_text_length", 500)),
                                        keyboard_type=number_keyboard(), key="qa-custom-min-length",
                                        helper=f"{m_low}-{m_high}")
-        self.check_all = ft.Switch(value=bool(self.values.get("check_all_pairs", False)), key="qa-custom-all-pairs")
+        self.check_all = toggle(value=bool(self.values.get("check_all_pairs", False)), key="qa-custom-all-pairs")
         rows += [self.consecutive, self.sample, self.min_length,
                  switch_row(self.check_all, "Check all file pairs (slower but more thorough)")]
         if not self.defaults:

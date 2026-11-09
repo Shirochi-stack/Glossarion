@@ -33,7 +33,7 @@ from glossarion_mobile.ui.settings.schema_access import SearchHit
 from glossarion_mobile.ui.settings.search import SettingsSearch, search_sheet
 from glossarion_mobile.ui.settings.tiles import (MOBILE_READONLY_REASONS, EffectiveConfig, SettingTile, listed_setting,
                                                  make_tile)
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = ["HIGHLIGHT_SECONDS", "SECTION_POOL_KEYS", "STATIC_LINKS", "STATIC_ROWS", "SectionPage",
            "pool_toggle_key", "static_row"]
@@ -124,7 +124,7 @@ def static_row(title: str, reason: str, detail: str = "") -> ft.Control:
         content=ft.ListTile(
             title=ft.Text(title, color=ft.Colors.ON_SURFACE_VARIANT),
             subtitle=ft.Row([ReasonChip(reason=reason, detail=detail or None)], wrap=True),
-            trailing=ft.Switch(value=False, disabled=True),
+            trailing=toggle(value=False, disabled=True),
             # not disabled=True: Flet would disable the ReasonChip too and its reason could not be opened
             min_height=tokens.SIZES["hit_target"],
         ),

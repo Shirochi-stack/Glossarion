@@ -26,6 +26,8 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
+from glossarion_mobile.ui.theme import toggle
+
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.page_base import PageScreen, section
@@ -87,7 +89,7 @@ class UpdatesScreen(PageScreen):
         self.ring = ft.ProgressRing(width=20, height=20, stroke_width=2, visible=False, key="updates-ring")
         self.check_button = ft.FilledButton(content="Check now", icon=ft.Icons.REFRESH, on_click=self._on_check,
                                             key="updates-check", tooltip="Check GitHub for a newer release")
-        self.startup_switch = ft.Switch(label="Check on startup", value=service.startup_enabled(),
+        self.startup_switch = toggle(label="Check on startup", value=service.startup_enabled(),
                                         on_change=self._on_startup, key="updates-startup")
         self.release_holder = ft.Container(key="updates-release")
         self._render(self.result)

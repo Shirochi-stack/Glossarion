@@ -39,7 +39,7 @@ from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.drag_sheet import draggable_sheet_class, height_fraction
 from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 from glossarion_mobile.ui.sheets.model_sheet import MAX_ROWS, ModelSheet, _push
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = ["MiniModelSheet", "short_model_name"]
 
@@ -101,7 +101,7 @@ class MiniModelSheet(ModelSheet):
         self.custom_language: Optional[ft.TextField] = None
         self.effort_dropdown = ft.Dropdown(label="Effort", dense=True, expand=True, options=[], visible=False,
                                            on_select=self._on_effort, key="mini-model-effort")
-        self.pass_switch = ft.Switch(label=PASS_UNKNOWN_LABEL, value=False, visible=False,
+        self.pass_switch = toggle(label=PASS_UNKNOWN_LABEL, value=False, visible=False,
                                      on_change=self._on_pass_unknown, key="mini-model-pass-thinking")
         self.all_button = ft.FilledTonalButton(content="All models", icon=ft.Icons.APPS, on_click=self.open_all_models,
                                                key="mini-model-all")

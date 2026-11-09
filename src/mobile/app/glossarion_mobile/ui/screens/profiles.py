@@ -59,7 +59,7 @@ from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.screens.prompt_editor import PLACEHOLDERS, PromptEditorPane
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = [
     "PROFILE_CONFIG_KEYS",
@@ -1093,7 +1093,7 @@ class ProfileDetailScreen(_ProfilesBase):
         self.editor = PromptEditorPane(value=listing.texts.get(self.name, ""), placeholders=PLACEHOLDERS, mono=self.mono,
                                        run_io=getattr(self.ctx, "run_io", None), model=self.model)
         self.editor.field.read_only = not editable
-        self.role_switch = ft.Switch(
+        self.role_switch = toggle(
             label="Send as user message (🔀)", value=self.service.role_is_user(),
             on_change=lambda e: self.service.set_role_user(bool(e.control.value)),
         )

@@ -75,4 +75,5 @@ kotlin {
 dependencies {
     // Same androidx.core line as flutter_foreground_task 11.0.3 (core-ktx 1.15.0).
     implementation("androidx.core:core:1.15.0")
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
 }

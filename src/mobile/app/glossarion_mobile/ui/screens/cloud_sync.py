@@ -60,7 +60,7 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip, unavailable_
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.screens.page_base import PageScreen, human_size, section
-from glossarion_mobile.ui.theme import icon_data
+from glossarion_mobile.ui.theme import icon_data, toggle
 
 __all__ = [
     "ANDROID_ONLY",
@@ -827,6 +827,7 @@ def _provider_dict(state: Any) -> dict:
         "enabled": bool(getattr(state, "enabled", False)),
         "consented": bool(getattr(state, "consented", False)),
         "has_key": bool(getattr(state, "has_key", False)),
+        "signed_in": bool(getattr(state, "signed_in", False)),
         "reason": getattr(state, "reason", None),
     }
 
@@ -1516,6 +1517,9 @@ class U10Actions:
             if provider.get("needs_key") and not provider.get("has_key"):
                 self.say(f"Add your {provider.get('label')} API key in Settings first", "Settings", self.open_settings)
                 return None
+            if provider.get("id") == "gdrive" and not provider.get("signed_in"):
+                self.say("Connect Google Drive in sharing settings", "Settings", self.open_settings)
+                return None
         if provider.get("handoff"):
             return await self.handoff(provider, path, identity)
         return await self.upload(provider, path, identity)
@@ -1969,7 +1973,7 @@ class CloudSyncScreen(PageScreen):
         self.destination_text = ft.Text("…", theme_style=ft.TextThemeStyle.BODY_LARGE, key="cloud-destination")
         self.dest_actions = ft.Row([], wrap=True, spacing=8, key="cloud-dest-actions")
         self.destinations_column = ft.Column(spacing=0, key="cloud-destinations")
-        self.auto_switch = ft.Switch(value=False,
+        self.auto_switch = toggle(value=False,
                                      on_change=self._on_auto, key="cloud-auto")
         self.auto_reason = ft.Row([], wrap=True, key="cloud-auto-reason")
         self.kind_chips = {
@@ -2136,7 +2140,9 @@ class CloudSyncScreen(PageScreen):
         self._render_activity(n)
         provider_sig = (self.share_facade.available, tuple(
             (p["id"], str(p.get("label")), bool(p.get("needs_key")), bool(p.get("has_key")), bool(p.get("handoff")),
-             bool(p.get("e2ee")), str(p.get("operator")), str(p.get("retention"))) for p in self.providers),
+             bool(p.get("e2ee")), str(p.get("operator")), str(p.get("retention")),
+             (p.get("enabled"), p.get("consented"), p.get("signed_in")) if p["id"] == "gdrive" else ())
+            for p in self.providers),
             tuple(sorted(self.send_options.items())))
         if self._changed("providers", provider_sig):
             self.provider_switches = {}
@@ -2255,7 +2261,7 @@ class CloudSyncScreen(PageScreen):
             if provider.get("handoff"):
                 facts.append("you upload on its web page")
             facts.append("end-to-end encrypted" if provider.get("e2ee") else "the service can read the file")
-            switch = ft.Switch(value=bool(provider.get("enabled")), on_change=lambda e, p=pid: self._on_provider(e, p),
+            switch = toggle(value=bool(provider.get("enabled")), on_change=lambda e, p=pid: self._on_provider(e, p),
                                key=f"share-toggle-{pid}-{n}")
             self.provider_switches[pid] = switch
             tiles.append(ft.ListTile(
@@ -2272,6 +2278,17 @@ class CloudSyncScreen(PageScreen):
                                           padding=ft.Padding.only(left=56, right=8), key=f"share-retention-{pid}-{n}"))
             if provider.get("needs_key"):
                 tiles.append(self._key_row(provider, n))
+            if pid == "gdrive":
+                connected = bool(provider.get("signed_in"))
+                tiles.append(ft.Container(content=ft.Row([
+                    ft.Text("Google Drive connected" if connected else "Sign in to upload to your Drive",
+                            theme_style=ft.TextThemeStyle.BODY_SMALL),
+                    ft.TextButton("Disconnect" if connected else "Sign in with Google",
+                                  icon=ft.Icons.LINK_OFF if connected else ft.Icons.LOGIN,
+                                  disabled=not connected and not (provider.get("enabled") and provider.get("consented")),
+                                  on_click=lambda e, active=connected: self.spawn(self._drive_account(active)),
+                                  key=f"share-drive-account-{n}"),
+                ], wrap=True), padding=ft.Padding.only(left=48)))
             if pid == "send" and self.send_options:
                 tiles.append(self._send_row(n))
             if pid == "gofile":
@@ -2478,6 +2495,14 @@ class CloudSyncScreen(PageScreen):
             self.say(str(result.get("message") or "Could not remove the key"))
         await self.refresh()
         return bool(result.get("ok"))
+
+    async def _drive_account(self, connected: bool) -> None:
+        result = await self.share_facade.call("disconnect_drive" if connected else "connect_drive")
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "Google Drive sign-in failed"))
+        else:
+            self.say("Google Drive disconnected" if connected else "Google Drive connected")
+        await self.refresh()
 
     async def forget_gofile(self) -> bool:
         result = await self.share_facade.call("forget_gofile_account")

@@ -484,15 +484,10 @@ class JobDetailScreen(Screen):
             and snap.started is not None and snap.resolution is None
         self.resume_button.visible = can_resume
         self.resume_button.content = "Retry" if snap.state is JobState.FAILED else "Resume"
-        folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
         self.files_button.visible = (self.navigate is not None and self.file_ref is not None
                                      and self.files_target(snap) is not None)
-        library_bid = self._library_bid(snap)
-        self.progress_button.visible = bool(folder) and (self.open_progress is not None or library_bid is not None)
-        failed = int(getattr(snap.progress, "failed", 0) or 0)
-        self.qa_chip.visible = failed > 0 and not snap.is_active and (folder is not None or library_bid is not None)
-        self.qa_chip.label = ft.Text(f"{failed} QA failed")
         self._apply_library(snap)
+        self._apply_progress_actions(snap)
         active_issue = snap.active_issue() if hasattr(snap, "active_issue") else None
         label = issue_label(active_issue) if active_issue else ""
         self.issue_chip.label = ft.Text(label)
@@ -776,6 +771,24 @@ class JobDetailScreen(Screen):
         origin = snap.spec.origin or {}
         return str(origin["bid"]) if origin.get("type") == "library" and origin.get("bid") else None
 
+    @staticmethod
+    def _progress_folder(snap: JobSnapshot) -> Optional[str]:
+        folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
+        if not folder and snap.kind == "qa_scan":
+            from glossarion_mobile.job_kinds.qa import normalize_targets
+
+            targets = normalize_targets(snap.spec.params or {}, snap.spec.inputs, with_flags=True)
+            folder = next((path for path, _source, direct in targets if not direct), None)
+        return folder
+
+    def _apply_progress_actions(self, snap: JobSnapshot) -> None:
+        has_book = bool(self._library_bid(snap) or self._library_found) and self.navigate is not None
+        has_folder = bool(self._progress_folder(snap)) and self.open_progress is not None
+        self.progress_button.visible = has_book or has_folder
+        failed = int(getattr(snap.progress, "failed", 0) or 0)
+        self.qa_chip.visible = failed > 0 and not snap.is_active and self.progress_button.visible
+        self.qa_chip.label = ft.Text(f"{failed} QA failed")
+
     def _on_progress(self, failed: bool = False) -> Any:
         """Progress / "N QA failed": a Library book opens Book › Chapters (filtered on failures for the
         chip, QA report's link), any other workspace the Progress manager over the output folder; a
@@ -783,7 +796,7 @@ class JobDetailScreen(Screen):
         snap = self.snap
         if snap is None:
             return None
-        bid = self._library_bid(snap)
+        bid = self._library_bid(snap) or self._library_found
         glossary = not failed and progress_view(snap) == "glossary"
         if bid is not None and self.navigate is not None:
             query = {"tab": "chapters", "filter": "failed"} if failed else {"tab": "glossary" if glossary else "chapters"}
@@ -791,7 +804,7 @@ class JobDetailScreen(Screen):
                 return self.navigate("library.book", {"bid": bid}, query)
             except TypeError:
                 return self.navigate("library.book", {"bid": bid})
-        folder = snap.output_dir or next(iter(snap.output_dirs.values()), None)
+        folder = self._progress_folder(snap)
         if folder and self.open_progress is not None:
             return self.open_progress(str(folder), glossary=True) if glossary else self.open_progress(str(folder))
         self._notify("No output folder for this job")
@@ -846,7 +859,7 @@ class JobDetailScreen(Screen):
             except Exception:
                 log.debug("chat workspace lookup failed", exc_info=True)
         if snap.kind != "direct_text":
-            folders.append(str(snap.output_dir or ""))
+            folders.append(str(self._progress_folder(snap) or ""))
             folders.extend(str(folder or "") for folder in (snap.output_dirs or {}).values())
         out: list = []
         seen: set = set()
@@ -929,6 +942,7 @@ class JobDetailScreen(Screen):
         self._library_found = bid
         if self.snap is not None and getattr(self, "library_button", None) is not None:
             self._apply_library(self.snap)
+            self._apply_progress_actions(self.snap)
             self._mark_dirty()
         return bid
 

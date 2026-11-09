@@ -10,7 +10,8 @@ consent sheet (``services.share_links`` enforces that; nothing here uploads on i
 * ``gofile`` - Gofile's documented API with one reused anonymous guest account;
 * ``send_e2ee`` - Send (send.vis.ee, the timvisee/send protocol): encrypted on the phone, the key
   only in the link's ``#`` fragment;
-* ``pixeldrain`` - pixeldrain's documented API with the user's own API key.
+* ``pixeldrain`` - pixeldrain's documented API with the user's own API key;
+* ``google_drive`` - Google OAuth and resumable Drive uploads to the user's account.
 
 Retries follow the U10 critic: no automatic retry, except Gofile's HTTP 429 with a Retry-After of
 at most a minute, retried once. A read timeout after the whole body was sent is never retried: the
@@ -64,7 +65,7 @@ __all__ = [
 log = logging.getLogger("glossarion.share")
 
 #: Menu order (UI_SPEC U10): the handoff first (no third-party API), then the direct providers.
-PROVIDER_IDS = ("transferit", "gofile", "send", "pixeldrain")
+PROVIDER_IDS = ("transferit", "gofile", "send", "pixeldrain", "gdrive")
 
 #: Gofile 429: wait for Retry-After (and retry once) only when it is at most this long (seconds).
 MAX_RETRY_AFTER = 60.0
@@ -240,6 +241,13 @@ _INFO = {
         retention="Removed 60 days after the last download. You can delete it from the Book page.",
         terms_url="https://pixeldrain.com/about",
     ),
+    "gdrive": ProviderInfo(
+        id="gdrive", label="Google Drive", operator="Google", country="",
+        site="https://drive.google.com", e2ee=False, direct=True, needs_api_key=False, can_delete=True,
+        max_bytes=5_000_000_000_000,
+        retention="Uses your Drive storage. Files stay there until you move them to Trash.",
+        terms_url="https://www.google.com/drive/terms-of-service/",
+    ),
 }
 
 
@@ -302,6 +310,9 @@ def consent_text(provider_id: str, *, file_name: str = "", size: Optional[int] =
     lines.append(info.retention)
     if info.needs_api_key:
         lines.append(f"Uploads use your own {info.label} account (your API key, stored encrypted on this phone).")
+    if info.id == "gdrive":
+        lines.append("Sign in with Google to upload to your Drive. Glossarion can access only Drive files "
+                     "you use with the app. Shared files are set to Anyone with the link (Viewer).")
     lines.append(f"Only share files you have the right to share. {info.label} removes files reported as "
                  "infringing and can block your access.")
     if info.direct:

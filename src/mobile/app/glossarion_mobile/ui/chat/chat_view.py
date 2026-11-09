@@ -157,7 +157,7 @@ from glossarion_mobile.ui.foreground import park_while_hidden
 from glossarion_mobile.ui.responsive import Layout, layout_for
 from glossarion_mobile.ui.sheets.plus_sheet import CAMERA_OFF_REASON, PlusSheet, camera_error_text
 from glossarion_mobile.ui.shell.job_strip import JobStrip
-from glossarion_mobile.ui.theme import build_text_theme
+from glossarion_mobile.ui.theme import build_text_theme, toggle
 
 __all__ = ["ChatView", "TOOL_ROUTES"]
 
@@ -2785,7 +2785,7 @@ class ChatView:
             ], icon="FACT_CHECK", meta=summary)
             # the run's multipass (a refinement pass after it): off by default, Partial.b preselected
             card.buttons.controls.extend([
-                ft.Switch(label="Multipass", value=multipass, key="qajob-multipass",
+                toggle(label="Multipass", value=multipass, key="qajob-multipass",
                           on_change=lambda e: self._set_qa_option("qa_multipass", bool(e.control.value))),
                 ft.Dropdown(value=mode, dense=True, width=150, key="qajob-multipass-mode", disabled=not multipass,
                             options=[ft.DropdownOption(key=k, text=t) for k, t in QA_MULTIPASS_MODES],

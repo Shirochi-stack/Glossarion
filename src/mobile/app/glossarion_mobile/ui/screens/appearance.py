@@ -21,7 +21,7 @@ import flet as ft
 from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.components.reason_chip import unavailable_tile
 from glossarion_mobile.ui.screens.page_base import PageScreen, section
-from glossarion_mobile.ui.theme import Appearance, apply_theme
+from glossarion_mobile.ui.theme import Appearance, apply_theme, toggle
 
 __all__ = [
     "ACCENT_LABELS",
@@ -133,9 +133,9 @@ class AppearanceScreen(PageScreen):
                                       divisions=round((TEXT_SCALE_RANGE[1] - TEXT_SCALE_RANGE[0]) / TEXT_SCALE_STEP),
                                       value=values["text_scale"], key="appearance-scale",
                                       on_change_end=lambda e: self.set_value("text_scale", e.control.value))
-        self.motion_switch = ft.Switch(label="Reduce motion", value=values["reduce_motion"],
+        self.motion_switch = toggle(label="Reduce motion", value=values["reduce_motion"],
                                        on_change=lambda e: self.set_value("reduce_motion", bool(e.control.value)))
-        self.haptics_switch = ft.Switch(label="Haptic feedback", value=values["haptics"],
+        self.haptics_switch = toggle(label="Haptic feedback", value=values["haptics"],
                                         on_change=lambda e: self.set_value("haptics", bool(e.control.value)))
         dpi = unavailable_tile(  # an enabled row: a disabled ListTile would disable its ReasonChip too
             "Auto DPI / GUI scale",

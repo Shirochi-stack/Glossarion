@@ -57,7 +57,7 @@ from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.components.sheet import (bottom_sheet, fits_compact, page_width, scroll_column, sheet_frame,
                                                    text_height)
-from glossarion_mobile.ui.theme import HIT_TARGET, semantic
+from glossarion_mobile.ui.theme import HIT_TARGET, semantic, toggle
 
 __all__ = ["CONTEXT_SLIDER", "ContextControl", "CustomModelSheet", "FileChooser", "LocalModelsPanel", "LocalPresetEditor",
            "OnDeviceFlow", "RAM_HINTS"]
@@ -942,7 +942,7 @@ class OnDeviceFlow:
         engine card and the Welcome page ("Run on this phone"); *key_prefix* keeps their control keys apart."""
         backend = self._gpu_backend()
         use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
-        self.gpu_switch = ft.Switch(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
+        self.gpu_switch = toggle(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
                                     on_change=lambda e: self.save_gpu())
         if backend == "OpenCL":
             text = ("Runs the model on a Qualcomm Adreno GPU (Snapdragon) through OpenCL. Fastest with Q4_0 models; "
@@ -1179,17 +1179,17 @@ class LocalModelsPanel(OnDeviceFlow):
         }
         self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
-        self.forced_truncation_switch = ft.Switch(value=self.service.forced_truncation(), key="local-forced-truncation",
+        self.forced_truncation_switch = toggle(value=self.service.forced_truncation(), key="local-forced-truncation",
                                                   on_change=lambda e: self.save_forced_truncation())
         self.forced_truncation_seconds = ft.TextField(value=str(self.service.forced_truncation_seconds()), dense=True,
                                                       label="Seconds", width=118, key="local-forced-truncation-seconds",
                                                       keyboard_type=ft.KeyboardType.NUMBER,
                                                       on_blur=lambda e: self.save_forced_truncation(),
                                                       on_submit=lambda e: self.save_forced_truncation())
-        self.mark_glossary_complete_switch = ft.Switch(
+        self.mark_glossary_complete_switch = toggle(
             value=self.service.mark_glossary_complete(), key="local-mark-glossary-complete",
             on_change=lambda e: self.service.save_mark_glossary_complete(self.mark_glossary_complete_switch.value))
-        self.block_cjk_switch = ft.Switch(value=self.service.block_cjk(),
+        self.block_cjk_switch = toggle(value=self.service.block_cjk(),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),

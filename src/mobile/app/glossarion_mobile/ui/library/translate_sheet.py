@@ -39,6 +39,8 @@ from typing import Any, Mapping, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui.theme import toggle
+
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.instance_pickers import InstancePickers
@@ -220,7 +222,7 @@ class TranslateSheet:
             run_controls.append(self.run_panel.control)
         supported = review_gate_supported()
         self.review_hint: Optional[ft.Text] = None
-        self.review_switch = ft.Switch(value=False, on_change=self._review_changed,
+        self.review_switch = toggle(value=False, on_change=self._review_changed,
                                        disabled=not supported, key="review-glossary")
         review_row: list[ft.Control] = [switch_row(self.review_switch, "Review glossary before translating")]
         if not supported:

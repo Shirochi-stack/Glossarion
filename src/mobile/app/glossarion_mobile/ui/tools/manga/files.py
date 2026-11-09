@@ -42,7 +42,7 @@ import flet as ft
 
 from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 from glossarion_mobile.ui.components.empty_state import faded_mascot
 from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT
 from glossarion_mobile.ui.components.switch_row import switch_row
@@ -107,7 +107,7 @@ class FilesTab(MangaTab):
                                         key="mf-range")
         self.range_status = ft.Text("All images", theme_style=ft.TextThemeStyle.BODY_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT, key="mf-range-status")
-        self.split_switch = ft.Switch(value=self.session.files.split_first_level, on_change=self._on_split,
+        self.split_switch = toggle(value=self.session.files.split_first_level, on_change=self._on_split,
                                       key="mf-split")
         self.group_picker = ft.Dropdown(label="Process group", options=[], visible=False, dense=True,
                                         on_select=self._on_group, key="mf-group")
@@ -129,10 +129,10 @@ class FilesTab(MangaTab):
         )
         cfg = self.ctx.config_snapshot()
         # the tab's defaults (manga_settings_defaults: both on, like the desktop checkboxes)
-        self.create_cbz_switch = ft.Switch(value=bool(svc.effective_setting(cfg, svc.K_CREATE_CBZ, True)),
+        self.create_cbz_switch = toggle(value=bool(svc.effective_setting(cfg, svc.K_CREATE_CBZ, True)),
                                            on_change=lambda e: self.ctx.set_cfg(svc.K_CREATE_CBZ, bool(e.control.value)),
                                            key="mf-create-cbz")
-        self.consolidate_switch = ft.Switch(value=bool(svc.effective_setting(cfg, svc.K_CONSOLIDATE, True)),
+        self.consolidate_switch = toggle(value=bool(svc.effective_setting(cfg, svc.K_CONSOLIDATE, True)),
                                             on_change=lambda e: self.ctx.set_cfg(svc.K_CONSOLIDATE,
                                                                                  bool(e.control.value)),
                                             key="mf-consolidate")
@@ -143,7 +143,7 @@ class FilesTab(MangaTab):
         self.import_ocr_button = ft.TextButton(content="Import OCR", icon=ft.Icons.FILE_UPLOAD, key="mf-import-ocr",
                                                tooltip="Reuse the OCR (and translations) of an exported session",
                                                on_click=lambda e: self.ctx.spawn(self.import_ocr()))
-        self.import_merge_switch = ft.Switch(value=bool(getattr(self.session, "ocr_import_merge", False)),
+        self.import_merge_switch = toggle(value=bool(getattr(self.session, "ocr_import_merge", False)),
                                              on_change=lambda e: self._set_import_merge(bool(e.control.value)),
                                              key="mf-import-ocr-merge")
         self.imported_row = ft.Row([], wrap=True, spacing=4, visible=False, key="mf-imported-ocr",
@@ -307,7 +307,7 @@ class FilesTab(MangaTab):
                     max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, theme_style=ft.TextThemeStyle.BODY_SMALL,
                     color=ft.Colors.ON_SURFACE_VARIANT),
         ], spacing=0, tight=True, expand=True)
-        switch = ft.Switch(value=not skipped, tooltip="Process this image",
+        switch = toggle(value=not skipped, tooltip="Process this image",
                            on_change=lambda e, p=path: self.toggle_skip(p), key=f"mf-skip-{self._build_gen}-{index}")
         row = ft.Container(
             content=ft.Row([thumb, texts, switch], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),

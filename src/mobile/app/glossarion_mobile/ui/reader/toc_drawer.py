@@ -19,7 +19,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.reader.model import TocRow, toc_rows
-from glossarion_mobile.ui.theme import icon_data, status_color
+from glossarion_mobile.ui.theme import icon_data, status_color, toggle
 
 __all__ = ["ChaptersDrawer", "TocRow", "toc_rows"]
 
@@ -46,11 +46,11 @@ class ChaptersDrawer:
         self.current = 0
         self.title = ft.Text("Chapters", theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600)
         self.count = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.native_switch = ft.Switch(label="Native TOC", value=False, on_change=self._on_native, key="toc-native")
+        self.native_switch = toggle(label="Native TOC", value=False, on_change=self._on_native, key="toc-native")
         self.native_reason = ReasonChip(reason="No native TOC",
                                         detail="No TOC.txt or toc.ncx entries could be matched to this book's chapters.")
         self.native_reason.visible = False
-        self.special_switch = ft.Switch(label="Show special files", value=False, on_change=self._on_special,
+        self.special_switch = toggle(label="Show special files", value=False, on_change=self._on_special,
                                         key="toc-special")
         self.list_view = ft.ListView(controls=[], expand=True, spacing=0, build_controls_on_demand=True,
                                      key="toc-list")

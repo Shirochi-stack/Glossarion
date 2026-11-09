@@ -43,6 +43,7 @@ HUB_GROUPS = (
     )),
     ("Check", (
         ToolTile("tools.qa", "QA Scanner", "FACT_CHECK", "tools.qa"),
+        ToolTile("tools.glossary-names", "Glossary name mismatches", "SPELLCHECK", "tools.glossary-names"),
         ToolTile("tools.progress", "Progress manager", "LIST_ALT", "tools.progress"),
         ToolTile("tools.progress.glossary", "Glossary progress", "SPELLCHECK", "tools.progress.glossary"),
         ToolTile("tools.sdlxliff", "SDLXLIFF reviewer", "TRANSLATE", "tools.sdlxliff"),

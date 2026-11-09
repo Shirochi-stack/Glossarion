@@ -310,6 +310,18 @@ class Harness:
         return "enabled"
 
 
+def test_completed_qa_job_can_open_progress_without_an_output_dir():
+    async def scenario():
+        snap = _snap("qa_scan", state=JobState.DONE, origin={"type": "library", "bid": "book00000001"})
+        harness = Harness(FakeJobService(snap), snap.id, Lookups())
+        assert harness.detail.progress_button.visible
+        harness.detail._on_progress()
+        assert harness.navigated == [("library.book", {"bid": "book00000001"})]
+        harness.detail.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_a_job_for_a_library_book_opens_its_book_page_at_once(tmp_path):
     """Library / Book page / Reader / Tools jobs of one book and a chat's "Save to: Library" run carry the book
     in their origin: the button is enabled from the first frame (running or finished) and needs no lookup."""

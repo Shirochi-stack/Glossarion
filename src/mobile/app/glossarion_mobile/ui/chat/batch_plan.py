@@ -25,7 +25,7 @@ from glossarion_mobile.ui.chat.cards import material_surface
 from glossarion_mobile.ui.chat.direct_text_rules import attachment_icon, format_attachment_size
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
-from glossarion_mobile.ui.theme import icon_data
+from glossarion_mobile.ui.theme import icon_data, toggle
 
 __all__ = ["BatchPlanCard", "MAX_CHIPS"]
 
@@ -79,7 +79,7 @@ class BatchPlanCard(ft.Container):
             ))
         if count > MAX_CHIPS:
             chips.append(ft.Chip(label=ft.Text(f"+{count - MAX_CHIPS} more"), key="batch-more"))
-        self.subfolders_switch = ft.Switch(label="Include subfolders", value=self.include_subfolders,
+        self.subfolders_switch = toggle(label="Include subfolders", value=self.include_subfolders,
                                            visible=bool(self.folder), key="batch-subfolders",
                                            on_change=lambda e: self._act("subfolders", bool(e.control.value)))
         self.glossary_chip = ft.Chip(label=ft.Text(glossary_label or "Glossary"), leading=ft.Icon(ft.Icons.MENU_BOOK, size=16),

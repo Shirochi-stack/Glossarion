@@ -155,13 +155,9 @@ package_files = [
 scheme = "glossarion"
 host = "app"
 
-# flet 1.0.3 build_base.py reads ONLY the platform-specific tables for Android/iOS
-# (no fallback to [tool.flet.deep_linking]), so all three must be set.
+# Flet reads platform-specific deep link settings. iOS declares its two schemes
+# together in CFBundleURLTypes below.
 [tool.flet.android.deep_linking]
-scheme = "glossarion"
-host = "app"
-
-[tool.flet.ios.deep_linking]
 scheme = "glossarion"
 host = "app"
 
@@ -256,6 +252,10 @@ NSCameraUsageDescription = "Glossarion uses the camera to photograph pages you w
 NSPhotoLibraryUsageDescription = "Glossarion opens the photos you choose to translate them."
 UIBackgroundModes = ["processing"]
 BGTaskSchedulerPermittedIdentifiers = ["com.glossarion.app.job.*"]
+CFBundleURLTypes = [
+  { CFBundleURLName = "app", CFBundleURLSchemes = ["glossarion"] },
+  { CFBundleURLName = "Google Drive", CFBundleURLSchemes = ["com.googleusercontent.apps.957824331511-1445nlka8d0ea1070r36109c4bqmshb2"] },
+]
 CFBundleDocumentTypes = [
   { CFBundleTypeName = "EPUB", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["org.idpf.epub-container", "org.idpf.epub-folder"] },
   { CFBundleTypeName = "Text", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.plain-text", "net.daringfireball.markdown", "public.html"] },

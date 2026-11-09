@@ -60,7 +60,7 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.foreground import poll_sleep
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, toggle
 from glossarion_mobile.ui.tools.common import hint_text
 
 __all__ = ["ARGOS_REASON", "LAST_PREF", "LEGEND", "NOTEPAD_REASON", "PROVIDERS", "ReviewerBinding", "ReviewerRequest",
@@ -421,7 +421,7 @@ class SdlxliffScreen(Screen):
                                             on_click=lambda e: self.open_options_sheet(),
                                             size_constraints=HIT_TARGET)
         webview = self._webview_ok()
-        self.layout_switch = ft.Switch(value=False, disabled=not webview, on_change=self._on_layout, key="sdl-layout")
+        self.layout_switch = toggle(value=False, disabled=not webview, on_change=self._on_layout, key="sdl-layout")
         # mobile hotfix 3: the Notepad switch shares the actions row; hotfix 4: an icon instead of its label
         notepad_toggle = ft.Container(
             content=ft.Row([ft.Icon(ft.Icons.EDIT_NOTE, size=20, color=ft.Colors.ON_SURFACE_VARIANT),

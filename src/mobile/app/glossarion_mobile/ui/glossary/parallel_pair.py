@@ -44,7 +44,7 @@ from glossarion_mobile.ui.components.windowed_list import WindowedList
 from glossarion_mobile.ui.glossary.common import ask, prompt_text
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = ["DEFAULT_PROFILE", "PairMapping", "ParallelPairScreen", "UNMAPPED"]
 
@@ -185,7 +185,7 @@ class ParallelPairScreen(Screen):
     def build_body(self) -> ft.Control:
         self.raw_card = self._epub_card("raw", "Raw EPUB (source language)")
         self.translated_card = self._epub_card("translated", "Translated EPUB")
-        self.auto_offset = ft.Switch(label="Auto-offset", value=bool(self.service.cfg(
+        self.auto_offset = toggle(label="Auto-offset", value=bool(self.service.cfg(
             "parallel_epub_auto_offset_enabled", True)), on_change=lambda e: self._on_auto_offset(), key="pp-auto-offset")
         self.offset_text = ft.Text("offset +0", key="pp-offset")
         self.status = ft.Text("Load both EPUBs to create a map.", theme_style=ft.TextThemeStyle.BODY_SMALL,

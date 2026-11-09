@@ -29,6 +29,8 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui.theme import toggle
+
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.plan_model import (RUN_OPTION_KEYS, SUMMARY_KEYS, RunOverlayStore, range_label,
                                                   run_options_summary)
@@ -109,7 +111,7 @@ class RunOptionsPanel:
         self.tiles: dict = {}
         self._gen = 0
         self._unsub: Any = None
-        self.switch = ft.Switch(label="Only for this run", value=self.only, on_change=self._on_switch,
+        self.switch = toggle(label="Only for this run", value=self.only, on_change=self._on_switch,
                                 key=f"{key}-only")
         self.summary_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=2,
                                     overflow=ft.TextOverflow.ELLIPSIS)
@@ -323,7 +325,7 @@ class ChooseChaptersSheet:
         self.range_field = ft.TextField(label="Chapter range", hint_text="e.g. 5 or 5-10 (empty: all chapters)",
                                         value=current, dense=True, on_change=lambda e: self._schedule(),
                                         key="chapters-range", border_radius=tokens.RADII["field"])
-        self.spine_switch = ft.Switch(label="Spine order (OPF positions)", value=spine, disabled=not spine_available,
+        self.spine_switch = toggle(label="Spine order (OPF positions)", value=spine, disabled=not spine_available,
                                       on_change=lambda e: self._schedule(), key="chapters-spine")
         self.header = ft.Text("", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY, key="chapters-header")
         self.note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True, visible=False)

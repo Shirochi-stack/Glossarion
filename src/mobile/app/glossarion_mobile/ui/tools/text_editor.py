@@ -34,7 +34,7 @@ from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
-from glossarion_mobile.ui.theme import HIT_TARGET
+from glossarion_mobile.ui.theme import HIT_TARGET, toggle
 
 __all__ = ["EDIT_LIMIT", "EditorRequest", "LANGUAGE_BY_EXTENSION", "LoadedText", "TextEditorScreen",
            "code_editor_available", "editor_language", "find_matches", "load_text", "open_text_editor",
@@ -249,7 +249,7 @@ class TextEditorScreen(Screen):
         language = editor_language(self.path or "")
         self.info = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                             key="text-info")
-        self.read_only_switch = ft.Switch(label="Read-only", value=self.read_only, on_change=self._on_read_only,
+        self.read_only_switch = toggle(label="Read-only", value=self.read_only, on_change=self._on_read_only,
                                           key="text-read-only")
         self.notice = ft.Container(visible=False, key="text-notice")
         self.find_field = ft.TextField(hint_text="Find…", value=self.find_term, dense=True, expand=True,

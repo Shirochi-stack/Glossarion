@@ -25,6 +25,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, scroll_sheet, sheet_frame
+from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.common import ask, hint_text, section_header
 
@@ -143,6 +144,87 @@ def _preview_snippets(folder: str, output_file: str, finding: Any, progress_path
         return name_check.finding_snippets(html.escape(markup), finding), None
     source = name_check.source_chapters_for_folder(folder, progress_path).get(output_file, "")
     return name_check.finding_snippets(markup, finding), name_check.source_snippets(source, finding)
+
+
+class GlossaryNamesScreen(Screen):
+    title = "Glossary name mismatches"
+
+    def __init__(self, match: Any, ctx: Any) -> None:
+        super().__init__(match)
+        self.ctx = ctx
+        self.target = None
+        self._visible = False
+        self._selection_version = 0
+        self._label = hint_text("Choose an output folder")
+        self._run = ft.FilledButton("Check glossary names", icon=ft.Icons.SPELLCHECK,
+                                    disabled=True, on_click=self._scan)
+
+    def build_body(self) -> ft.Control:
+        return ft.ListView([
+            hint_text("Compare the translation with its glossary and preview name mismatches before fixing them."),
+            self._label,
+            ft.Row([ft.OutlinedButton("Choose output", icon=ft.Icons.FOLDER_OPEN, on_click=self._pick),
+                    self._run], wrap=True),
+        ], padding=12, spacing=12, expand=True)
+
+    @staticmethod
+    def _ineligible(target: Any) -> Optional[str]:
+        from glossarion_mobile.ui.tools.targets import folder_has_html
+
+        if target.direct_text or not target.folder or not folder_has_html(target.folder):
+            return "Needs an output folder with translated HTML"
+        return None
+
+    def did_show(self) -> None:
+        self._visible = True
+        if self.target is None:
+            self.ctx.spawn(self._select_recent())
+
+    def dispose(self) -> None:
+        self._visible = False
+
+    async def _select_recent(self) -> None:
+        from glossarion_mobile.ui.tools import targets as tg
+
+        service = self.ctx.service
+        version = self._selection_version
+        snapshot = getattr(service, "snapshot", None)
+        try:
+            if snapshot is not None and not getattr(snapshot, "scanned_at", None):
+                await service.refresh(quiet=True, reason="glossary names default output")
+
+            def latest() -> Any:
+                chat = tg.chat_workspace_targets(self.ctx.chats_root, service=service) if self.ctx.chats_root else []
+                return next((t for t in tg.recent_output_targets(service, chat_rows=chat)
+                             if self._ineligible(t) is None), None)
+
+            target = await self.ctx.io(latest)
+        except Exception:
+            log.debug("finding the glossary name check workspace failed", exc_info=True)
+            return
+        if target is not None and self._visible and version == self._selection_version:
+            self._select([target])
+
+    def _select(self, targets: Sequence[Any]) -> None:
+        if not targets:
+            return
+        self._selection_version += 1
+        self.target = targets[0]
+        self._label.value = self.target.title or os.path.basename(self.target.folder)
+        self._run.disabled = False
+        self.ctx.push(self._label, self._run)
+
+    def _pick(self, _event: Any) -> None:
+        from glossarion_mobile.ui.tools.source_picker import SourcePicker
+
+        picker = SourcePicker(self.ctx, title="Choose output to check", multi=False,
+                              eligible=self._ineligible, on_done=self._select, find_folder=True)
+        if self.ctx.page is not None:
+            picker.show(self.ctx.page)
+
+    def _scan(self, _event: Any) -> None:
+        if self.target is not None and self.ctx.page is not None:
+            GlossaryNameFixSheet(self.ctx, [self.target.folder]).show(self.ctx.page)
 
 
 class GlossaryNameFixSheet:

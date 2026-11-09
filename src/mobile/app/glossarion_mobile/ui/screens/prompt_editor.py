@@ -206,15 +206,17 @@ class PromptEditorPane(ft.Column):
         counter: Optional[Callable[[str, str], int]] = None,
         min_lines: int = 14,
         key: Optional[str] = None,
+        fill: bool = True,
     ) -> None:
-        super().__init__(spacing=tokens.SPACING["sm"], expand=True, key=key)
+        super().__init__(spacing=tokens.SPACING["sm"], expand=fill, key=key)
         self.initial = str(value or "")
         self.on_text_change = on_change
         self.field = ft.TextField(
             value=self.initial,
             multiline=True,
             min_lines=min_lines,
-            expand=True,
+            max_lines=None if fill else min_lines,
+            expand=fill,
             hint_text=hint or None,
             color=ft.Colors.ON_SURFACE,
             text_style=ft.TextStyle(font_family=mono, size=13),
@@ -233,7 +235,7 @@ class PromptEditorPane(ft.Column):
         rows: list[ft.Control] = []
         if self.chips:
             rows.append(ft.Row(self.chips, wrap=True, spacing=6, run_spacing=4))
-        rows.append(ft.Container(content=self.field, expand=True))
+        rows.append(ft.Container(content=self.field, expand=fill))
         rows.append(self.counter_text)
         self.controls = rows
 

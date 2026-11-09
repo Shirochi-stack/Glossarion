@@ -1619,16 +1619,42 @@ def test_tools_feature_wraps_the_screen_factory(tmp_path):
                                     settings=None, config_store={}, url_launcher=None)
         feature = await ToolsFeature.install(app)
         assert app.tools is feature and shell.screen_factory == feature.screen_factory
-        for route in ("/tools", "/tools/qa", "/tools/convert", "/tools/headers", "/tools/qa/report/0123456789ab"):
+        for route in ("/tools", "/tools/qa", "/tools/convert", "/tools/headers",
+                      "/tools/qa/report/0123456789ab", "/tools/glossary-names"):
             screen = shell.screen_factory(parse_route(route))
             assert screen != "fallback" and screen.get_body() is not None
         assert shell.screen_factory(parse_route("/tools/progress")) == "fallback" and fallback == ["tools.progress"]
         ctx = feature.context()
         assert ctx.chats_root == os.path.join(str(tmp_path / "Output"), "Direct Text")
         assert ctx.import_dir == os.path.join(str(tmp_path / "data"), "imports") and not ctx.webview_ok()
-        assert IMPLEMENTED_ROUTES == {"tools", "tools.qa", "tools.qa.report", "tools.convert", "tools.headers",
+        assert IMPLEMENTED_ROUTES == {"tools", "tools.qa", "tools.qa.report", "tools.glossary-names",
+                                      "tools.convert", "tools.headers",
                                       # U7 (screens: tests_host/test_tools_u7.py)
                                       "tools.async", "tools.review", "tools.sdlxliff", "tools.rpgmaker"}
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_glossary_names_selects_latest_eligible_output(tmp_path, monkeypatch):
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools import targets
+    from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNamesScreen
+
+    recent = tmp_path / "recent"
+    recent.mkdir()
+    (recent / "chapter.xhtml").write_text("<p>Translated</p>", encoding="utf-8")
+    selected = targets.ToolTarget("Recent book", str(recent))
+    monkeypatch.setattr(targets, "recent_output_targets",
+                        lambda *_a, **_k: [targets.ToolTarget("Raw only"), selected])
+    async def scenario():
+        ctx = _ctx(None)
+        screen = GlossaryNamesScreen(parse_route("/tools/glossary-names"), ctx)
+        screen.get_body()
+        screen._visible = True
+        await screen._select_recent()
+        assert screen.target == selected
+        assert screen._label.value == "Recent book" and not screen._run.disabled
 
     asyncio.run(scenario())
 

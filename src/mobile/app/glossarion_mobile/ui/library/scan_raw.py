@@ -25,6 +25,8 @@ from typing import Any, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui.theme import toggle
+
 from glossarion_mobile.services.library import CoreMissing, first_value
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
@@ -160,7 +162,7 @@ class ScanRawScreen(Screen):
         self.slider = ft.Slider(min=40, max=95, divisions=11, value=self.threshold, label="{value}%",
                                 disabled=self.mode == "exact", on_change=self._on_threshold,
                                 on_change_end=self._on_threshold_end, expand=True, key="raw-threshold")
-        self.auto_switch = ft.Switch(label="Auto", value=self.auto, on_change=self._on_auto, key="raw-auto")
+        self.auto_switch = toggle(label="Auto", value=self.auto, on_change=self._on_auto, key="raw-auto")
         self.ext_chips = {ext: ft.Chip(label=ft.Text(f".{ext}"), selected=ext in self.exts, disabled=self.auto,
                                        show_checkmark=True, on_select=lambda e, x=ext: self._on_ext(x),
                                        key=f"raw-ext-{ext}") for ext in EXTENSIONS}

@@ -74,7 +74,7 @@ from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.poll_border import PollBorder
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
-from glossarion_mobile.ui.theme import HIT_TARGET, semantic
+from glossarion_mobile.ui.theme import HIT_TARGET, semantic, toggle
 
 __all__ = [
     "EXCLUDED_ROUTE_PREFIXES",
@@ -427,7 +427,7 @@ class ModelSheet:
                                           on_click=lambda e, c=chip_id: self.set_chip(c), show_checkmark=False,
                                           key=f"model-chip-{chip_id}")
         self.chip_row = ft.Row(list(self.chips.values()), scroll=ft.ScrollMode.AUTO, spacing=6)
-        self.chat_switch = ft.Switch(label="Apply to this chat only", value=False,
+        self.chat_switch = toggle(label="Apply to this chat only", value=False,
                                      visible=not self.one_shot and not self.field_mode)
         self._chat_scope_initial = False
         self.list_view = ft.ListView(controls=[], height=400, spacing=0, build_controls_on_demand=True)
