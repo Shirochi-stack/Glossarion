@@ -302,6 +302,9 @@ from html_tag_entities import (
     fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
 )
 from html_output_utils import convert_br_to_paragraphs, write_utf8_html_file
+from epub_image_html import (
+    load_image_rename_map, migrate_legacy_image_html, prepare_source_html, write_epub_image_html,
+)
 from pdf_output_naming import (
     move_pdf_output_to_readable_name,
     readable_pdf_section_filename,
@@ -3834,8 +3837,9 @@ class ProgressManager:
 
     METADATA_PROGRESS_KEY = METADATA_PROGRESS_KEY
 
-    def __init__(self, payloads_dir):
+    def __init__(self, payloads_dir, *, source_path=None):
         self.payloads_dir = payloads_dir
+        self.source_path = source_path
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
         mirror_path = os.getenv("SUBTITLE_PROGRESS_MIRROR_FILE", "").strip()
         self.PROGRESS_MIRROR_FILE = (
@@ -4058,6 +4062,7 @@ class ProgressManager:
         # next normal save also removes them from disk.
         prune_single_chunk_entries(prog.get("chapter_chunks"))
 
+        migrate_legacy_image_html(self.source_path, self.payloads_dir, prog)
         _env_output_mode = os.getenv("OUTPUT_MODE", "").lower().strip()
         if _env_output_mode == "refine":
             _env_output_mode = "refinement"
@@ -25422,7 +25427,7 @@ def main(log_callback=None, stop_callback=None):
     history_manager = HistoryManager(payloads_dir)
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
-    progress_manager = ProgressManager(payloads_dir)
+    progress_manager = ProgressManager(payloads_dir, source_path=None if metadata_only else input_path)
     metadata_progress_enabled = (
         config.TRANSLATE_BOOK_TITLE
         and not is_text_file
@@ -28694,68 +28699,21 @@ def main(log_callback=None, stop_callback=None):
         print("=" * 50)
         print("Copying raw HTML files, generating images, and preserving original CSS.")
 
-        os.environ["IMAGE_MODE_EPUB_PASSTHROUGH"] = "1"
-
-        # 1) Copy raw chapter HTML as response_ files so epub converter finds them
-        #    Read bytes directly from the source EPUB zip to get truly unmodified markup.
-        epub_path = os.getenv("EPUB_PATH", "").strip()
-        _epub_zip = None
-        if epub_path and os.path.isfile(epub_path) and epub_path.lower().endswith(('.epub',)):
-            try:
-                import zipfile as _zf
-                _epub_zip = _zf.ZipFile(epub_path, 'r')
-            except Exception as _ze:
-                print(f"  ⚠️ Could not open source EPUB for raw copy: {_ze}")
-
-        _image_mode_rename_map = {}
-        _rename_map_path = os.path.join(out, "image_rename_map.json")
-        if os.path.isfile(_rename_map_path):
-            try:
-                with open(_rename_map_path, 'r', encoding='utf-8') as _rmf:
-                    loaded_map = json.load(_rmf)
-                if isinstance(loaded_map, dict):
-                    _image_mode_rename_map = loaded_map
-            except Exception as _rme:
-                print(f"  ⚠️ Could not load image rename map for passthrough HTML: {_rme}")
-
-        def _apply_image_mode_rename_map(raw_markup):
-            if not raw_markup or not _image_mode_rename_map:
-                return raw_markup
-            try:
-                from bs4 import BeautifulSoup as _BeautifulSoup
-                soup = _BeautifulSoup(raw_markup, 'html.parser')
-                if Chapter_Extractor._update_image_refs_in_soup(soup, _image_mode_rename_map):
-                    return str(soup)
-            except Exception as _ime:
-                print(f"  ⚠️ Could not apply image rename map to passthrough HTML: {_ime}")
-            return raw_markup
-
-        copied_count = 0
-        for c in chapters:
-            if check_stop():
-                if _epub_zip:
-                    _epub_zip.close()
+        raw_epub_html = input_path.lower().endswith(".epub")
+        if raw_epub_html:
+            copied_count = write_epub_image_html(input_path, out, chapters, check_stop)
+            if copied_count is None:
                 return
-            actual_num = c.get('actual_chapter_num', c.get('num'))
+            progress_manager.prog["epub_image_html_in_raw"] = True
+        else:
+            from instance_plan import scoped_env
 
-            # Try reading the exact raw bytes from the source EPUB zip
-            raw_markup = None
-            zip_internal_path = c.get("filename", "")
-            if _epub_zip and zip_internal_path:
-                try:
-                    raw_bytes = _epub_zip.read(zip_internal_path)
-                    # Decode, trying common encodings
-                    for enc in ('utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr'):
-                        try:
-                            raw_markup = raw_bytes.decode(enc)
-                            break
-                        except (UnicodeDecodeError, LookupError):
-                            continue
-                except Exception:
-                    pass
-
-            # Fallback to in-memory fields if zip read failed
-            if not raw_markup:
+            copied_count = 0
+            image_rename_map = load_image_rename_map(out)
+            for c in chapters:
+                if check_stop():
+                    return
+                actual_num = c.get('actual_chapter_num', c.get('num'))
                 raw_markup = (
                     c.get("original_html")
                     or c.get("source_html")
@@ -28763,25 +28721,19 @@ def main(log_callback=None, stop_callback=None):
                     or c.get("body")
                     or ""
                 )
-
-            raw_markup = _apply_image_mode_rename_map(raw_markup)
-
-            fname = FileUtilities.create_chapter_filename(c, actual_num)
-            output_path = os.path.join(out, fname)
-            write_utf8_html_file(output_path, raw_markup)
-
-            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c.get("body", ""))
-            idx = c.get("_progress_idx", c.get("num", 0))
-            progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
-            copied_count += 1
-
-        if _epub_zip:
-            _epub_zip.close()
+                try:
+                    raw_markup = prepare_source_html(raw_markup, image_rename_map)
+                except Exception as exc:
+                    print(f"  ⚠️ Could not apply image rename map to passthrough HTML: {exc}")
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                write_utf8_html_file(os.path.join(out, fname), raw_markup)
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c.get("body", ""))
+                idx = c.get("_progress_idx", c.get("num", 0))
+                with scoped_env("IMAGE_MODE_EPUB_PASSTHROUGH", "1"):
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                copied_count += 1
         progress_manager.save()
-        if _image_mode_rename_map:
-            print(f"✅ Copied {copied_count} HTML files from source EPUB with renamed image refs (no translation)")
-        else:
-            print(f"✅ Copied {copied_count} HTML files as-is from source EPUB (no translation)")
+        print(f"✅ Prepared {copied_count} source HTML files for image-mode compilation")
 
         # 2) Copy CSS from source epub to css subfolder (already extracted by Chapter_Extractor)
         css_dir = os.path.join(out, "css")
@@ -28967,8 +28919,10 @@ def main(log_callback=None, stop_callback=None):
                     pass
 
                 _already_skipped = set()
-                # Scan OCR cache directories for "No" responses (illustration-only images)
-                for _ocr_subdir in ("single", "translations"):
+                # EPUB image edits need their own result. A previous OCR run
+                # can say "No" for a cover that the image editor should edit.
+                ocr_cache_dirs = () if raw_epub_html else ("single", "translations")
+                for _ocr_subdir in ocr_cache_dirs:
                     _ocr_scan_dir = os.path.join(out, "OCR", _ocr_subdir)
                     try:
                         if os.path.isdir(_ocr_scan_dir):
@@ -29046,6 +29000,10 @@ def main(log_callback=None, stop_callback=None):
                             print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Generated successfully")
                             return (img_idx, img_name, 'success', result)
 
+                        if raw_epub_html:
+                            print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: No edited image returned")
+                            return (img_idx, img_name, 'fail', result)
+
                         # Text was translated but no image generated — this means
                         # the model returned a text translation, not an edited image.
                         # Still count as success since the translation was produced.
@@ -29098,20 +29056,20 @@ def main(log_callback=None, stop_callback=None):
                         gen_fail += 1
                         _igen_progress_image(img_idx, img_name, 'failed')
                         return
-                    gen_success += 1
-                    _igen_progress_image(img_idx, img_name, 'completed')
-                    if not result:
-                        return
                     img_path = os.path.join(images_dir, img_name)
-                    _gen_match = _re_gen.search(r'\[GENERATED_IMAGE:(.+?)\]', result)
+                    _gen_match = _re_gen.search(r'\[GENERATED_IMAGE:(.+?)\]', result or '')
+                    generated_path = _gen_match.group(1).strip() if _gen_match else ''
+                    if raw_epub_html and not os.path.isfile(generated_path):
+                        gen_fail += 1
+                        _igen_progress_image(img_idx, img_name, 'failed', 'Edited image file missing')
+                        return
                     if _gen_match:
-                        generated_path = _gen_match.group(1).strip()
                         if os.path.isfile(generated_path):
                             with _gen_lock:
                                 gen_archive_path = os.path.join(images_generated_dir, img_name)
+                                _shutil_gen.copy2(generated_path, img_path)
                                 _shutil_gen.copy2(generated_path, gen_archive_path)
                                 print(f"    📂 [{img_idx}] Archived → images_generated/{img_name}")
-                                _shutil_gen.copy2(generated_path, img_path)
                                 print(f"    🔄 [{img_idx}] Replaced original with generated version")
                                 try:
                                     os.unlink(generated_path)
@@ -29119,7 +29077,7 @@ def main(log_callback=None, stop_callback=None):
                                     pass
                         else:
                             print(f"    ⚠️ [{img_idx}] Generated image path not found: {generated_path}")
-                    else:
+                    elif result:
                         _check_name = os.path.splitext(img_name)[0]
                         with _gen_lock:
                             for _f in os.listdir(out):
@@ -29135,6 +29093,8 @@ def main(log_callback=None, stop_callback=None):
                                         except Exception:
                                             pass
                                         break
+                    gen_success += 1
+                    _igen_progress_image(img_idx, img_name, 'completed')
 
                 if _img_batch_enabled and _img_batch_size > 1:
                     # ── Parallel mode ────────────────────────────────────────
@@ -29284,7 +29244,7 @@ def main(log_callback=None, stop_callback=None):
         else:
             print("ℹ️ No images directory found")
 
-        # 4) Build final EPUB (epub converter will respect IMAGE_MODE_EPUB_PASSTHROUGH)
+        # 4) Build final EPUB with the image-mode chapter source.
         if (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip():
             print("🎯 Single-chapter mode: skipping EPUB converter phase")
         elif not check_stop():
@@ -29292,7 +29252,8 @@ def main(log_callback=None, stop_callback=None):
             try:
                 from epub_converter import fallback_compile_epub
                 compiled_epub = fallback_compile_epub(
-                    out, log_callback=log_callback
+                    out, log_callback=log_callback, image_passthrough=True,
+                    raw_epub_html=raw_epub_html,
                 )
                 if not compiled_epub or not os.path.isfile(compiled_epub):
                     print("❌ EPUB build did not produce an output file")
@@ -29301,9 +29262,6 @@ def main(log_callback=None, stop_callback=None):
             except Exception as e:
                 print(f"❌ EPUB build failed: {e}")
                 return False
-
-        # Clean up passthrough env var
-        os.environ.pop("IMAGE_MODE_EPUB_PASSTHROUGH", None)
 
         total_time = time.time() - translation_start_time
         hours = int(total_time // 3600)

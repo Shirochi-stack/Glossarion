@@ -55,6 +55,10 @@ from chapter_chunk_progress import (
 )
 from chapter_display_numbering import nonreset_chapter_display_numbers
 from epub_package import find_epub_opf_member
+from epub_image_html import (
+    RAW_HTML_DIR, inspect_epub_image_chapters, list_chapter_html,
+    load_image_rename_map, migrate_legacy_image_html,
+)
 from metadata_progress import (
     METADATA_PROGRESS_KEY,
     build_metadata_progress_plan,
@@ -1381,10 +1385,12 @@ class ProgressViewMixin:
                 return False
         return True
 
-    def _progress_entry_is_skipped_special(self, ch):
+    def _progress_entry_is_skipped_special(self, ch, data=None):
         """True when a Progress Manager entry is a skipped special file —
         i.e. one of the rows the "Show skipped files" toggle reveals."""
         if not isinstance(ch, dict):
+            return False
+        if self._progress_epub_cover_status(ch, data) is not None:
             return False
         if self._is_translation_artifact_progress_info(ch):
             nested = ch.get('info') if isinstance(ch.get('info'), dict) else {}
@@ -2047,7 +2053,7 @@ class ProgressViewMixin:
             entry or {'output_file': output_file},
         )
 
-    def _progress_entry_needs_special_visibility(self, info):
+    def _progress_entry_needs_special_visibility(self, info, data=None):
         """Return whether a row depends on the special-files visibility toggle."""
         if isinstance(info, dict) and info.get('is_subtitle'):
             return False
@@ -2067,7 +2073,7 @@ class ProgressViewMixin:
             # Active metadata is always visible. Disabled metadata behaves like
             # every other skipped special file and follows the visibility toggle.
             return not bool(enabled)
-        return self._progress_entry_is_skipped_special(info)
+        return self._progress_entry_is_skipped_special(info, data)
 
     @staticmethod
     def _is_subtitle_progress_entry(entry, output_file=''):
@@ -3192,6 +3198,8 @@ class ProgressViewMixin:
             except Exception as exc:
                 print(f"Warning: Could not save seeded subtitle progress: {exc}")
 
+        migrate_legacy_image_html(file_path, output_dir, prog)
+
         # Snapshot the output directory once.  Large EPUBs used to rescan and
         # restat this directory for every spine row, turning a 2,000-file book
         # into millions of filesystem operations on the GUI thread.
@@ -4247,6 +4255,7 @@ class ProgressViewMixin:
                 and not _progress_has_active_entries(data['prog'])):
             if self._progress_cleanup_ready():
                 before_cleanup = copy.deepcopy(data['prog'])
+                migrate_legacy_image_html(data.get('file_path'), data['output_dir'], data['prog'])
                 cleanup_missing_files(data['prog'], data['output_dir'])
 
                 # Save only if cleanup really changed the file. During active translation
@@ -4335,7 +4344,7 @@ class ProgressViewMixin:
             non_skipped = []
             skipped = 0
             for info in chapter_display_info:
-                if self._progress_entry_is_skipped_special(info):
+                if self._progress_entry_is_skipped_special(info, data) or self._progress_epub_no_images(info, data):
                     skipped += 1
                 else:
                     non_skipped.append(info)
@@ -4361,19 +4370,19 @@ class ProgressViewMixin:
             mode,
         )
 
-    def _progress_initial_statistics(self, prog, chapter_display_info, spine_chapters):
+    def _progress_initial_statistics(self, prog, chapter_display_info, spine_chapters, *, data=None):
         """Legend values when the dialog is built (RG 27600-27621).
 
         Returns ``(total_chapters, chunk_count, completed, merged, in_progress, pending,
         missing, failed, skipped)``.
         """
-        _stats_data = {'prog': prog}
+        _stats_data = data if data is not None else {'prog': prog}
         _stats_entries = chapter_display_info or spine_chapters or []
         chunk_count = sum(bool(info.get("is_chunk_progress")) for info in _stats_entries)
         total_chapters = len(_stats_entries)
         completed = merged = in_progress = pending = missing = failed = skipped = 0
         for ch in _stats_entries:
-            if self._progress_entry_is_skipped_special(ch):
+            if self._progress_entry_is_skipped_special(ch, _stats_data) or self._progress_epub_no_images(ch, _stats_data):
                 skipped += 1
                 continue
             _st = self._progress_display_status(ch, _stats_data)
@@ -5128,27 +5137,19 @@ class ProgressViewMixin:
         """Add a lightweight summary row for image generation progress (image output mode)."""
         try:
             prog = data.get('prog') or {}
-            image_gen = prog.get('image_gen')
-            if not isinstance(image_gen, dict):
+            image_gen = prog.get('image_gen') or {}
+            if self._current_progress_output_mode(data) != 'image':
                 return
-            # Hide the row when the user switches output mode away from 'image'.
-            # Check the live GUI combo directly — it's the most reliable source.
-            combo = getattr(self, '_output_mode_combo', None)
-            if combo is not None:
-                try:
-                    live_mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video', 4: 'audio', 5: 'refinement'}.get(combo.currentIndex(), 'text')
-                    if live_mode != 'image':
-                        return
-                except Exception:
-                    pass
-            # Verify the source is epub/pdf using the stored source_file or the current file.
-            source_file = str(image_gen.get('source_file') or data.get('file_path') or '')
+            source_file = str(data.get('file_path') or image_gen.get('source_file') or '')
             if source_file and not source_file.lower().endswith(('.epub', '.pdf')):
                 return
 
             total = int(image_gen.get('total') or 0)
             if total <= 0:
                 return
+            raw_count = 0
+            if source_file.lower().endswith('.epub') and data.get('output_dir'):
+                raw_count = len(list_chapter_html(os.path.join(data['output_dir'], RAW_HTML_DIR)))
             done = int(image_gen.get('done') or 0)
             success = int(image_gen.get('success') or 0)
             skipped = int(image_gen.get('skipped') or 0)
@@ -5159,7 +5160,7 @@ class ProgressViewMixin:
             elif status == 'cancelled':
                 status = 'failed'
 
-            source_file = os.path.basename(str(image_gen.get('source_file') or data.get('file_path') or 'EPUB'))
+            source_file = os.path.basename(source_file or 'EPUB')
             label_bits = [f"{min(done, total)}/{total} images"]
             if success:
                 label_bits.append(f"{success} generated")
@@ -5167,6 +5168,8 @@ class ProgressViewMixin:
                 label_bits.append(f"{skipped} skipped")
             if failed:
                 label_bits.append(f"{failed} failed")
+            if raw_count:
+                label_bits.append(f"{raw_count} source HTML files in RAW/")
             output_label = f"🎨 Image Generation: {source_file} ({', '.join(label_bits)})"
 
             info = dict(image_gen)
@@ -5456,6 +5459,54 @@ class ProgressViewMixin:
                 changed = True
         return changed
 
+    def _progress_epub_image_chapters(self, info, data):
+        if info.get('opf_position') is None or not data:
+            return (), {}
+        source = str(data.get('file_path') or '')
+        spine = data.get('spine_chapters')
+        if not source.lower().endswith('.epub') or not spine or self._current_progress_output_mode(data) != 'image':
+            return (), {}
+        chapters = data.get('_epub_image_chapters')
+        if chapters is None:
+            chapters = inspect_epub_image_chapters(source, spine)
+            data['_epub_image_chapters'] = chapters
+        return chapters
+
+    def _progress_epub_no_images(self, info, data):
+        """Only show the image-mode skip for an untranslated EPUB spine row."""
+        if info.get('status') != 'not_translated':
+            return False
+        no_images, _ = self._progress_epub_image_chapters(info, data)
+        return info.get('opf_position') in no_images
+
+    def _progress_epub_cover_status(self, info, data):
+        """The cover's image edit is independent of its text translation."""
+        _, covers = self._progress_epub_image_chapters(info, data)
+        names = covers.get(info.get('opf_position'))
+        if names is None:
+            return None
+        output_dir = data.get('output_dir')
+        if not output_dir or not names:
+            return 'pending'
+        renames = {
+            name.casefold(): renamed for name, renamed in load_image_rename_map(output_dir).items()
+            if isinstance(renamed, str)
+        }
+        targets = [renames.get(name.casefold(), name) for name in names]
+        archived = os.path.join(output_dir, 'images_generated')
+        if all(os.path.isfile(os.path.join(archived, name)) for name in targets):
+            return 'completed'
+        targets = {name.casefold() for name in targets}
+        image_gen = (data.get('prog') or {}).get('image_gen') or {}
+        for record in (image_gen.get('images') or {}).values():
+            if (
+                isinstance(record, dict)
+                and str(record.get('image_file') or '').casefold() in targets
+                and record.get('status') == 'failed'
+            ):
+                return 'failed'
+        return 'pending'
+
     def _progress_display_status(self, info, data=None):
         """Derive the status shown in Progress Manager for post-processing modes."""
         # Generated translation artifacts are translation phases, not chapter
@@ -5468,6 +5519,11 @@ class ProgressViewMixin:
             if status in ('completed_empty', 'completed_image_only'):
                 return 'completed'
             return status
+        cover_status = self._progress_epub_cover_status(info, data)
+        if cover_status is not None:
+            return cover_status
+        if self._progress_epub_no_images(info, data):
+            return 'skipped'
         # Skipped special files (the rows the "Show skipped files" toggle
         # reveals) get their own display status instead of masquerading
         # as Not Translated.
@@ -5807,6 +5863,7 @@ class ProgressViewMixin:
 
         chapter_num = info.get('display_num', info['num'])
         status = self._progress_display_status(info, data)
+        no_images = status == 'skipped' and self._progress_epub_no_images(info, data)
         output_file = info['output_file']
         output_display = self._progress_model_column_text(info, data, output_file)
         show_model_info = bool(
@@ -5814,15 +5871,18 @@ class ProgressViewMixin:
         )
         hide_model_info = (
             show_model_info
-            and _progress_status_hides_model_for_display(status)
+            and (no_images or _progress_status_hides_model_for_display(status))
         )
         pipe_column_suffix = '' if hide_model_info else f" | {output_display}"
         arrow_column_suffix = '' if hide_model_info else f" -> {output_display}"
         icon = status_icons.get(status, '❓')
         status_label = status_labels.get(status, status)
-        if (
+        if no_images:
+            status_label = 'No Images'
+        elif (
             status == 'completed'
             and _progress_entry_is_completed_image_only_for_display(info)
+            and self._progress_epub_cover_status(info, data) is None
         ):
             icon = '📸'
             status_label = 'Image Only (Completed)'
@@ -5852,6 +5912,7 @@ class ProgressViewMixin:
             'arrow_column_suffix': arrow_column_suffix,
             'icon': icon,
             'status_label': status_label,
+            'no_images': no_images,
             'chapter_info': chapter_info,
             'ocr_progress': ocr_progress,
         }
@@ -5945,6 +6006,8 @@ class ProgressViewMixin:
                 f"Section {section_label} | {icon} {status_label:14s} | "
                 f"{page_label}{pipe_column_suffix}"
             )
+        elif info.get('image_gen'):
+            display = f"{output_file} | {icon} {status_label}"
         elif info.get('pdf_ocr'):
             display = (
                 f"PDF OCR | {icon} {status_label:18s}"
@@ -6259,7 +6322,7 @@ def present_row(owner, info, data, *, show_special_files=None, widths=None):
     num = parts['chapter_num']
     if show_special_files is None:
         show_special_files = bool(data.get('show_special_files_state'))
-    hidden = bool(owner._progress_entry_needs_special_visibility(info) and not show_special_files)
+    hidden = bool(owner._progress_entry_needs_special_visibility(info, data) and not show_special_files)
 
     if kind == 'chunk':
         base = (
@@ -6303,15 +6366,19 @@ def present_row(owner, info, data, *, show_special_files=None, widths=None):
         title = f"{_chapter_label(num, 'Chapter ')}"
 
     model = ''
-    if not _progress_status_hides_model_for_display(status):
+    if not parts['no_images'] and not _progress_status_hides_model_for_display(status):
         model = owner._progress_entry_model_name(info, data)
     subtitle = '' if parts['hide_model_info'] else str(parts['output_display'] or '')
     if kind in ('pdf_ocr', 'image_gen'):
         subtitle = ''
 
     badges = []
-    label = PM_STATUS_LABELS.get(status, status)
-    if status == 'completed' and _progress_entry_is_completed_image_only_for_display(info):
+    label = parts['status_label'] if status == 'skipped' else PM_STATUS_LABELS.get(status, status)
+    if (
+        status == 'completed'
+        and _progress_entry_is_completed_image_only_for_display(info)
+        and owner._progress_epub_cover_status(info, data) is None
+    ):
         badges.append('📸')
     elif status == 'completed' and owner._progress_entry_refinement_failed(info):
         badges.append('💀')
@@ -6766,7 +6833,7 @@ def compute_book_summary(source_path, config=None, *, owner=None, output_dir=Non
         chapters_total = chapters_completed = chapters_failed = chapters_in_progress = 0
         chunks = (data['prog'].get('chapter_chunks') or {}) if isinstance(data['prog'], dict) else {}
         for info in data.get('chapter_display_info') or []:
-            if info.get('is_chunk_progress') or owner._progress_entry_is_skipped_special(info):
+            if info.get('is_chunk_progress') or owner._progress_entry_is_skipped_special(info, data):
                 continue
             status = owner._progress_display_status(info, data)
             chapters_total += 1

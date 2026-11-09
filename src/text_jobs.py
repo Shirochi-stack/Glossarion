@@ -904,24 +904,25 @@ class TextJobsMixin(JobHooksMixin):
             
             self._build_epub_compile_env(folder)
 
+            from epub_image_html import RAW_HTML_DIR
+            from output_workspace import workspace_source_format
+
+            has_raw_html = os.path.isdir(os.path.join(folder, RAW_HTML_DIR))
+            epub_source = workspace_source_format(folder) == 'EPUB'
+            image_mode = (has_raw_html or epub_source) and self._get_output_mode() == 'image'
             fallback_compile_epub = self._backend_entry('fallback_compile_epub')
-            compiled_path = fallback_compile_epub(folder, log_callback=self.append_log)
+            compile_options = {'raw_epub_html': True} if image_mode else {}
+            compiled_path = fallback_compile_epub(folder, log_callback=self.append_log, **compile_options)
             
             if not self.stop_requested:
-                self.append_log("✅ EPUB Converter completed successfully!")
-                
                 if compiled_path and os.path.isfile(compiled_path):
+                    self.append_log("✅ EPUB Converter completed successfully!")
                     result.path = compiled_path
                     self._notify_compile_result('epub', path=compiled_path)
                 else:
-                    epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
-                    if epub_files:
-                        epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
-                        out_file = os.path.join(folder, epub_files[0])
-                        result.path = out_file
-                        self._notify_compile_result('epub', path=out_file)
-                    else:
-                        self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+                    result.error = "EPUB file was not created. Check the logs for details."
+                    self.append_log(f"⚠️ {result.error}")
+                    self._notify_compile_result('epub', error=result.error)
             else:
                 result.stopped = True
 

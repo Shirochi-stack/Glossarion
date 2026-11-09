@@ -161,6 +161,26 @@ MIXIN_RANGES = ((16579, 16580), (17931, 18645), (19069, 19889), (19891, 20013),
                 (31719, 33044), (33066, 33338))
 
 MIXIN_EDITS = {
+    "_progress_entry_is_skipped_special": [
+        ("def _progress_entry_is_skipped_special(self, ch):",
+         "def _progress_entry_is_skipped_special(self, ch, data=None):"),
+        ("    if not isinstance(ch, dict):\n        return False\n",
+         "    if not isinstance(ch, dict):\n        return False\n"
+         "    if self._progress_epub_cover_status(ch, data) is not None:\n        return False\n"),
+    ],
+    "_progress_entry_needs_special_visibility": [
+        ("def _progress_entry_needs_special_visibility(self, info):",
+         "def _progress_entry_needs_special_visibility(self, info, data=None):"),
+        ("return self._progress_entry_is_skipped_special(info)",
+         "return self._progress_entry_is_skipped_special(info, data)"),
+    ],
+    "_progress_display_status": [(
+        '    # Skipped special files (the rows the "Show skipped files" toggle',
+        "    cover_status = self._progress_epub_cover_status(info, data)\n"
+        "    if cover_status is not None:\n        return cover_status\n"
+        "    if self._progress_epub_no_images(info, data):\n        return 'skipped'\n"
+        '    # Skipped special files (the rows the "Show skipped files" toggle',
+    )],
     "_rematch_spine_chapters": [(
         "            with open(data['progress_file'], 'w', encoding='utf-8') as f:\n"
         "                json.dump(prog, f, ensure_ascii=False, indent=2)\n",
@@ -176,8 +196,8 @@ MIXIN_EDITS = {
         "config.get('skip_pdf_title_translation', True)",
     )],
 }
-#: Moved methods rewritten as a split (checked as blocks below).
-SPLIT_METHODS = {"_progress_list_display_text"}
+#: Methods covered by behavior tests after the original extraction.
+SPLIT_METHODS = {"_progress_list_display_text", "_append_image_gen_display_info"}
 
 
 def test_moved_module_helpers_are_verbatim():
@@ -265,6 +285,9 @@ def test_split_build_method_holds_the_frozen_blocks():
         "            file_path, output_dir, registry_cb=self._progress_raw_input_recorder()\n"
         "        )\n")])
     block = _legacy_block(20864, 21031, strip=8, add=8, edits=[
+        ("        # Snapshot the output directory once.",
+         "        migrate_legacy_image_html(file_path, output_dir, prog)\n\n"
+         "        # Snapshot the output directory once."),
         ("                _write_progress_snapshot_atomic(progress_file, prog)\n",
          "                _view_baseline = _commit_view_progress(progress_file, _view_baseline, prog)\n"),
         ("        ProgressManager = _get_progress_manager_nonblocking()\n"
@@ -285,10 +308,35 @@ def test_split_refresh_and_stats_hold_the_frozen_blocks():
     _assert_block_in(source, 31335, 31371, strip=12, add=8)
     _assert_block_in(source, 31373, 31421, strip=12, add=8)
     _assert_block_in(source, 31440, 31529, strip=12, add=8)
-    _assert_block_in(source, 33728, 33767, strip=12, add=8)
-    _assert_block_in(source, 27600, 27621, strip=8, add=8)
-    _assert_block_in(source, 33158, 33193, strip=8, add=8)
-    _assert_block_in(source, 33195, 33338, strip=8, add=8)
+    _assert_block_in(source, 33728, 33767, strip=12, add=8, edits=[
+        ("if self._progress_entry_is_skipped_special(info):",
+         "if self._progress_entry_is_skipped_special(info, data) or self._progress_epub_no_images(info, data):"),
+    ])
+    _assert_block_in(source, 27600, 27621, strip=8, add=8, edits=[
+        ("_stats_data = {'prog': prog}", "_stats_data = data if data is not None else {'prog': prog}"),
+        ("if self._progress_entry_is_skipped_special(ch):",
+         "if self._progress_entry_is_skipped_special(ch, _stats_data) or self._progress_epub_no_images(ch, _stats_data):"),
+    ])
+    _assert_block_in(source, 33158, 33193, strip=8, add=8, edits=[
+        ("        status = self._progress_display_status(info, data)\n",
+         "        status = self._progress_display_status(info, data)\n"
+         "        no_images = status == 'skipped' and self._progress_epub_no_images(info, data)\n"),
+        ("and _progress_status_hides_model_for_display(status)",
+         "and (no_images or _progress_status_hides_model_for_display(status))"),
+        ("        status_label = status_labels.get(status, status)\n        if (",
+         "        status_label = status_labels.get(status, status)\n"
+         "        if no_images:\n"
+         "            status_label = 'No Images'\n        elif ("),
+        ("and _progress_entry_is_completed_image_only_for_display(info)",
+         "and _progress_entry_is_completed_image_only_for_display(info)\n"
+         "            and self._progress_epub_cover_status(info, data) is None"),
+    ])
+    _assert_block_in(source, 33195, 33338, strip=8, add=8, edits=[
+        ("        elif info.get('pdf_ocr'):",
+         "        elif info.get('image_gen'):\n"
+         "            display = f\"{output_file} | {icon} {status_label}\"\n"
+         "        elif info.get('pdf_ocr'):"),
+    ])
 
 
 def test_cleanup_missing_files_is_the_transate_method():
@@ -1322,3 +1370,221 @@ def test_image_progress_manager_dialog_lists_the_runner_output(tmp_path, monkeyp
     finally:
         dialog.hide()
         host._image_retranslation_dialog_cache.clear()
+
+
+@pytest.fixture
+def image_mode_workspace(tmp_path, monkeypatch):
+    from ebooklib import epub
+
+    source = tmp_path / "Book.epub"
+    out = tmp_path / "output" / source.stem
+    out.mkdir(parents=True)
+    book = epub.EpubBook()
+    book.set_identifier("image-mode-test")
+    book.set_title("Image Mode Test")
+    book.set_language("ja")
+    pages = []
+    for number in (1, 2):
+        page = epub.EpubHtml(title=f"Chapter {number}", file_name=f"Text/chapter{number:04d}.xhtml")
+        page.content = f'<h1>第{number}章</h1><p>日本語の本文 {number}</p>'
+        if number == 1:
+            page.content += '<img src="../Images/old.png"/>'
+        book.add_item(page)
+        pages.append(page)
+    book.spine = pages
+    book.toc = tuple(pages)
+    book.add_item(epub.EpubNcx())
+    epub.write_epub(str(source), book)
+    (out / "source_epub.txt").write_text(str(source), encoding="utf-8")
+    (out / "metadata.json").write_text(json.dumps({"title": "Image Mode Test", "language": "ja"}), encoding="utf-8")
+    monkeypatch.setenv("GLOSSARION_LIBRARY_DIR", str(tmp_path / "library"))
+    monkeypatch.setenv("EPUB_PATH", str(source))
+    monkeypatch.setenv("DISABLE_EPUB_GALLERY", "1")
+    monkeypatch.setenv("ENABLE_PDF_OUTPUT", "0")
+    monkeypatch.delenv("IMAGE_MODE_EPUB_PASSTHROUGH", raising=False)
+    members = [f"EPUB/{page.file_name}" for page in pages]
+    return source, out, members
+
+
+def chapter_statuses(book):
+    return {row.title.split(" · ")[-1]: row.status for row in book.rows if row.kind == "chapter"}
+
+
+def test_epub_image_mode_counts_no_images_as_skipped(image_mode_workspace):
+    source, out, _ = image_mode_workspace
+    book = pc.build_book_progress(
+        str(source), {"output_mode": "image"}, fixed_output_dir=str(out), show_model_info=True
+    )
+    rows = [row for row in book.rows if row.kind == "chapter"]
+    assert [(row.status, row.icon, row.label) for row in rows] == [
+        ("not_translated", "⬜", "Not Translated"),
+        ("skipped", "⏭️", "No Images"),
+    ]
+    assert "⏭️ No Images" in rows[1].text
+    assert not rows[1].model and " -> " not in rows[1].text
+    assert not rows[1].hidden
+    assert (book.stats.missing, book.stats.skipped) == (1, 1)
+    initial = book.owner._progress_initial_statistics(
+        book.data["prog"], book.data["chapter_display_info"], book.data["spine_chapters"], data=book.data
+    )
+    assert (initial[6], initial[8]) == (1, 1)
+
+    book.owner.config["output_mode"] = "text"
+    text_book = pc.refresh_book_progress(book, force=True)
+    assert chapter_statuses(text_book) == {
+        "chapter0001.xhtml": "not_translated", "chapter0002.xhtml": "not_translated"
+    }
+    assert (text_book.stats.missing, text_book.stats.skipped) == (2, 0)
+
+
+def test_epub_image_cover_uses_edited_asset_instead_of_text_completion(tmp_path):
+    from ebooklib import epub
+
+    source = tmp_path / "Cover.epub"
+    out = tmp_path / "output"
+    out.mkdir()
+    book = epub.EpubBook()
+    book.set_identifier("cover-test")
+    book.set_title("Cover test")
+    book.set_language("ja")
+    book.set_cover("art.png", b"source cover", create_page=False)
+    cover = epub.EpubHtml(title="Cover", file_name="cover.xhtml")
+    cover.content = '<img src="art.png"/>'
+    book.add_item(cover)
+    book.add_item(epub.EpubNcx())
+    book.spine = [cover]
+    epub.write_epub(str(source), book)
+    (out / "cover.xhtml").write_text('<html><body><img src="art.png"/></body></html>', encoding="utf-8")
+    (out / "image_rename_map.json").write_text('{"art.png": "cover_img_1.png"}', encoding="utf-8")
+    (out / "RAW").mkdir()
+    (out / "RAW" / "cover.xhtml").write_text('<html><body><img src="art.png"/></body></html>', encoding="utf-8")
+    progress_path = out / "translation_progress.json"
+    progress_path.write_text(json.dumps({"chapters": {
+        "0_cover": {"actual_num": 0, "status": "completed_image_only", "output_file": "cover.xhtml",
+                    "original_basename": "cover.xhtml"},
+    }}), encoding="utf-8")
+
+    view = pc.build_book_progress(str(source), {"output_mode": "image"}, fixed_output_dir=str(out))
+    row = next(row for row in view.rows if row.kind == "chapter")
+    assert (row.status, row.hidden) == ("pending", False)
+    assert not any(row.kind == "image_gen" for row in view.rows)
+    assert view.stats.skipped == 0
+
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["image_gen"] = {"total": 1, "done": 1, "status": "failed", "images": {
+        "1": {"image_file": "cover_img_1.png", "status": "failed"},
+    }}
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+    view = pc.refresh_book_progress(view, force=True)
+    assert next(row for row in view.rows if row.kind == "chapter").status == "failed"
+    summary = next(row for row in view.rows if row.kind == "image_gen")
+    assert "Image Generation" in summary.text and "1 source HTML files in RAW/" in summary.text
+
+    (out / "images_generated").mkdir()
+    (out / "images_generated" / "cover_img_1.png").write_bytes(b"edited cover")
+    view = pc.refresh_book_progress(view, force=True)
+    assert next(row for row in view.rows if row.kind == "chapter").status == "completed"
+
+    text = pc.build_book_progress(
+        str(source), {"output_mode": "text", "translate_special_files": True}, fixed_output_dir=str(out)
+    )
+    assert next(row for row in text.rows if row.kind == "chapter").status == "completed"
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["chapters"]["0_cover"]["status"] == "completed_image_only"
+
+
+def epub_html(path):
+    from zipfile import ZipFile
+
+    with ZipFile(path) as archive:
+        return "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist() if name.endswith((".xhtml", ".html"))
+        )
+
+
+def test_raw_epub_html_compiles_in_image_mode_and_text_progress_stays_separate(image_mode_workspace):
+    from epub_converter import compile_epub
+    from epub_image_html import write_epub_image_html
+    from html_output_utils import write_utf8_html_file
+    from text_jobs import TextJobsMixin
+
+    source, out, members = image_mode_workspace
+    chapters = [{"filename": member} for member in members]
+    assert write_epub_image_html(source, out, chapters, lambda: False) == 2
+    assert not list(out.glob("*.html"))
+    assert sorted(p.name for p in (out / "RAW").iterdir()) == ["chapter0001.xhtml", "chapter0002.xhtml"]
+
+    image_book = pc.build_book_progress(str(source), {"output_mode": "image"}, fixed_output_dir=str(out))
+    assert not any(row.kind == "image_gen" for row in image_book.rows)
+    text_book = pc.build_book_progress(str(source), {"output_mode": "text"}, fixed_output_dir=str(out))
+    assert chapter_statuses(text_book) == {
+        "chapter0001.xhtml": "not_translated", "chapter0002.xhtml": "not_translated"
+    }
+
+    image_epub = compile_epub(str(out), log_callback=lambda _: None, raw_epub_html=True)
+    assert image_epub and "日本語の本文 1" in epub_html(image_epub)
+    class CompileOwner(TextJobsMixin):
+        stop_requested = False
+
+        def _get_output_mode(self):
+            return self.mode
+
+        def _build_epub_compile_env(self, folder):
+            pass
+
+        def _backend_entry(self, name):
+            return compile_epub
+
+        def _notify_compile_result(self, *args, **kwargs):
+            pass
+
+        def append_log(self, message):
+            pass
+
+    owner = CompileOwner()
+    owner.mode = "text"
+    result = owner._run_epub_compile(str(out))
+    assert result.path is None and "No translated chapters" in result.error
+
+    write_utf8_html_file(out / "response_chapter0001.html", "<html><body><p>English chapter.</p></body></html>")
+    text_epub = owner._run_epub_compile(str(out)).path
+    assert text_epub and "English chapter." in epub_html(text_epub)
+    assert "日本語の本文" not in epub_html(text_epub)
+    owner.mode = "image"
+    image_epub = owner._run_epub_compile(str(out)).path
+    assert image_epub and "日本語の本文 1" in epub_html(image_epub)
+    assert "English chapter." not in epub_html(image_epub)
+
+
+def test_detect_repairs_legacy_raw_progress_and_preserves_translated_chapter(image_mode_workspace):
+    from zipfile import ZipFile
+
+    from epub_image_html import prepare_source_html
+    from html_output_utils import write_utf8_html_file
+
+    source, out, members = image_mode_workspace
+    rename_map = {"old.png": "chapter0001_img_1.png"}
+    (out / "image_rename_map.json").write_text(json.dumps(rename_map), encoding="utf-8")
+    raw_output = out / "response_chapter0001.html"
+    translated_output = out / "response_chapter0002.html"
+    with ZipFile(source) as archive:
+        write_utf8_html_file(raw_output, prepare_source_html(archive.read(members[0]).decode(), rename_map))
+    write_utf8_html_file(translated_output, "<html><body><p>Keep this translation.</p></body></html>")
+    progress_file = out / "translation_progress.json"
+    progress_file.write_text(json.dumps({
+        "output_mode": "image",
+        "chapters": {
+            str(i): {"actual_num": i, "status": "completed",
+                     "original_basename": f"chapter{i:04d}.xhtml",
+                     "output_file": f"response_chapter{i:04d}.html"}
+            for i in (1, 2)
+        },
+        "chapter_chunks": {},
+    }), encoding="utf-8")
+
+    book = pc.build_book_progress(str(source), {"output_mode": "text"}, fixed_output_dir=str(out))
+
+    assert chapter_statuses(book) == {"chapter0001.xhtml": "not_translated", "chapter0002.xhtml": "completed"}
+    assert not raw_output.exists()
+    assert "chapter0001_img_1.png" in (out / "RAW" / "chapter0001.xhtml").read_text(encoding="utf-8")
+    assert "Keep this translation." in translated_output.read_text(encoding="utf-8")

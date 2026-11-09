@@ -13256,6 +13256,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         from authds_auth import has_session
         # If already signed in, offer to log out (like ChatGPT's button)
         if has_session():
+            self._update_authds_login_status()
             reply = QMessageBox.question(
                 self, "DeepSeek Account",
                 "Currently signed in to DeepSeek.\n\nDo you want to log out?",

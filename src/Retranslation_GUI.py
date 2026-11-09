@@ -12197,7 +12197,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                             # Dynamically re-evaluate is_special to respect current
                             # translate_all_numbered_html setting.
                             is_skipped_special = self._progress_entry_needs_special_visibility(
-                                item_data.get('info') or item_data
+                                item_data.get('info') or item_data,
+                                getattr(show_special_files_cb, '_progress_data_ref', built),
                             )
                             # Show all items if toggled on; otherwise hide special-only rows.
                             item.setHidden(is_skipped_special and not show_special_files[0])
@@ -12241,7 +12242,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         # status counts so they aren't double-counted as Not Translated.
         (total_chapters, chunk_count, completed, merged, in_progress, pending,
          missing, failed, skipped) = self._progress_initial_statistics(
-            prog, chapter_display_info, spine_chapters
+            prog, chapter_display_info, spine_chapters, data=built
         )
 
         # Create labels (outside the if/else so they always appear)
@@ -12301,15 +12302,13 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         lbl_failed.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_failed)
 
-        # Skipped: special files excluded from translation — the rows the
-        # "Show skipped files" toggle reveals. Hidden when none exist.
+        # Skipped includes chapters without images in EPUB Image output.
         lbl_skipped = QLabel(f"⏭️ Skipped: {skipped}")
         lbl_skipped.setFont(stats_font)
         lbl_skipped.setStyleSheet("color: #9aa0a6;")
         lbl_skipped.setCursor(Qt.PointingHandCursor)
         lbl_skipped.setToolTip(
-            "Special files the translation pipeline skips\n"
-            "(toggle visibility with “Show skipped files”).")
+            "Skipped special files and EPUB chapters with no images in Image output.")
         stats_layout.addWidget(lbl_skipped)
         if skipped == 0:
             lbl_skipped.setVisible(False)
@@ -12411,6 +12410,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             'progress_source_is_subtitle': progress_source_is_subtitle,
             'spine_chapters': spine_chapters,
             'opf_chapter_order': opf_chapter_order,
+            '_epub_image_chapters': built.get('_epub_image_chapters'),
             'chapter_display_info': chapter_display_info,
             'listbox': listbox,
             'selection_count_label': selection_count_label,
@@ -12436,6 +12436,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             None,
         )
         show_model_info_cb._progress_data_ref = result
+        show_special_files_cb._progress_data_ref = result
         manual_editing_cb._progress_data_ref = result
         
         # If standalone (no parent), add buttons and show dialog
@@ -14573,9 +14574,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
     def _apply_progress_list_item_visuals(self, item, status):
         item.setForeground(QColor(progress_status_color(status)))
 
-    def _set_progress_list_item_metadata(self, item, info, status, show_special_files):
+    def _set_progress_list_item_metadata(self, item, info, status, show_special_files, data=None):
         is_special = info.get('is_special', False)
-        is_skipped_special = self._progress_entry_needs_special_visibility(info)
+        is_skipped_special = self._progress_entry_needs_special_visibility(info, data)
         item.setToolTip("")
         item.setData(Qt.UserRole, {
             'is_special': is_special,
@@ -14617,6 +14618,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         data['_progress_list_view_revision'] = (
             self._progress_list_show_special(data),
             bool(data.get('show_model_info_state')),
+            ((data.get('prog') or {}).get('image_gen') or {}).get('last_updated'),
         )
 
         selected_keys = set()
@@ -14722,13 +14724,13 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                         item.setText(display)
                     self._set_compact_inline_item_size(listbox, item)
                     self._apply_progress_list_item_visuals(item, status)
-                    self._set_progress_list_item_metadata(item, info, status, show_special_files)
+                    self._set_progress_list_item_metadata(item, info, status, show_special_files, data)
                     item.setData(
                         Qt.UserRole + 4,
                         (
                             display,
                             status,
-                            self._progress_entry_needs_special_visibility(info)
+                            self._progress_entry_needs_special_visibility(info, data)
                             and not show_special_files,
                         ),
                     )
@@ -14780,6 +14782,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         view_revision = (
             show_special_files,
             bool(data.get('show_model_info_state')),
+            ((data.get('prog') or {}).get('image_gen') or {}).get('last_updated'),
         )
 
         # Reject unchanged rows using only compact Python tuples before doing
@@ -14850,7 +14853,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 max_output_len,
             )
             hidden = (
-                self._progress_entry_needs_special_visibility(info)
+                self._progress_entry_needs_special_visibility(info, data)
                 and not show_special_files
             )
             fingerprint = (display, display_status, hidden)
@@ -14883,7 +14886,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     or old_fingerprint[1] != display_status
                 ):
                     self._apply_progress_list_item_visuals(item, display_status)
-                self._set_progress_list_item_metadata(item, info, display_status, show_special_files)
+                self._set_progress_list_item_metadata(item, info, display_status, show_special_files, data)
                 if old_fingerprint != fingerprint:
                     item.setData(Qt.UserRole + 4, fingerprint)
             if identity_changed:

@@ -290,22 +290,37 @@ def test_compile_runners_are_moved_verbatim(legacy_tg):
     epub_try = _compile_core(legacy_tg["run_epub_converter_direct"])
     edits = _Edits(
         replace=[
-            ("QTimer.singleShot(0, lambda p=compiled_path: QMessageBox.information(self, 'EPUB Compilation Success', f'Created: {p}'))",
-             "result.path = compiled_path\nself._notify_compile_result('epub', path=compiled_path)"),
-            ("QTimer.singleShot(0, lambda: QMessageBox.information(self, 'EPUB Compilation Success', f'Created: {out_file}'))",
-             "result.path = out_file\nself._notify_compile_result('epub', path=out_file)"),
+            ("compiled_path = fallback_compile_epub(folder, log_callback=self.append_log)",
+             "from epub_image_html import RAW_HTML_DIR\n"
+             "from output_workspace import workspace_source_format\n"
+             "has_raw_html = os.path.isdir(os.path.join(folder, RAW_HTML_DIR))\n"
+             "epub_source = workspace_source_format(folder) == 'EPUB'\n"
+             "image_mode = (has_raw_html or epub_source) and self._get_output_mode() == 'image'\n"
+             "fallback_compile_epub = self._backend_entry('fallback_compile_epub')\n"
+             "compile_options = {'raw_epub_html': True} if image_mode else {}\n"
+             "compiled_path = fallback_compile_epub(folder, log_callback=self.append_log, **compile_options)"),
             ("QTimer.singleShot(0, lambda: QMessageBox.critical(self, 'EPUB Converter Failed', f'Error: {error_str}'))",
              "self._notify_compile_result('epub', error=error_str)"),
             ("error_str = str(e)\nself.append_log(f'❌ EPUB Converter error: {error_str}')",
              "error_str = str(e)\nself.append_log(f'❌ EPUB Converter error: {error_str}')\nresult.error = error_str"),
         ],
-        insert_before=[("compiled_path = fallback_compile_epub(folder, log_callback=self.append_log)",
-                        "fallback_compile_epub = self._backend_entry('fallback_compile_epub')")],
     )
     epub_try = edits.visit(epub_try)
-    assert edits.hits == 5
+    assert edits.hits == 3
     stopped = next(s for s in epub_try.body if isinstance(s, ast.If) and ast.unparse(s.test) == "not self.stop_requested")
     assert not stopped.orelse
+    # Image and Text can coexist in one workspace. Only the new output is a
+    # successful compile, even when an EPUB from the other mode is present.
+    stopped.body = _stmt(
+        "if compiled_path and os.path.isfile(compiled_path):\n"
+        "    self.append_log('✅ EPUB Converter completed successfully!')\n"
+        "    result.path = compiled_path\n"
+        "    self._notify_compile_result('epub', path=compiled_path)\n"
+        "else:\n"
+        "    result.error = 'EPUB file was not created. Check the logs for details.'\n"
+        "    self.append_log(f'⚠️ {result.error}')\n"
+        "    self._notify_compile_result('epub', error=result.error)"
+    )
     stopped.orelse = _stmt("result.stopped = True")
     new_epub = new["_run_epub_compile"]
     assert [ast.unparse(s) for s in new_epub.body[1:3]] == [

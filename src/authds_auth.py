@@ -256,10 +256,14 @@ _gate = _LEASES.gate
 
 
 @contextmanager
-def _open_browser(*, visible=False, cancel_check=None):
+def _open_browser(*, visible=False, cancel_check=None, interactive=False):
     """Lease an independent tab; only browser/profile management is serialized."""
     if browser_driver.use_driver("AUTHDS_MODE") or not mobile_runtime.subprocesses_available():
         with _launch_browser(visible=visible, cancel_check=cancel_check) as page:
+            yield page
+        return
+    if interactive:
+        with _LEASES.open_interactive(cancel_check) as page:
             yield page
         return
     with _LEASES.open(visible=visible, cancel_check=cancel_check) as page:
@@ -278,6 +282,54 @@ _TOKEN_PRESENT = """(() => {
 })()"""
 
 
+def _desktop_login_token_present(page, cancel_check):
+    def token_present(target):
+        try:
+            return bool(target.evaluate(_TOKEN_PRESENT))
+        except AuthDSError as exc:
+            if exc.error_type not in ("browser_error", "timeout"):
+                raise
+            return False  # Redirects can replace the JS context.
+
+    if token_present(page):
+        return True
+
+    # The login may return to DeepSeek in another tab or a Google sign-in popup.
+    debugger_url = getattr(page, "debugger_url", None)
+    if not debugger_url:
+        return False
+    try:
+        targets = page.call("Target.getTargets", timeout=2).get("targetInfos", [])
+    except AuthDSError as exc:
+        if exc.error_type not in ("browser_error", "timeout"):
+            raise
+        return False
+    from urllib.parse import urlsplit
+
+    endpoint, current_id = debugger_url.rsplit("/", 1)
+    for target in targets:
+        target_id = target.get("targetId")
+        url = urlsplit(target.get("url", ""))
+        if (
+            target.get("type") != "page" or not target_id or target_id == current_id
+            or url.scheme != "https" or url.netloc != "chat.deepseek.com"
+        ):
+            continue
+        import websocket
+        try:
+            other_page = _Page(f"{endpoint}/{target_id}", cancel_check)
+        except (OSError, websocket.WebSocketException):
+            continue  # The popup closed between listing it and connecting.
+        try:
+            if token_present(other_page):
+                return True
+        except (OSError, websocket.WebSocketException):
+            continue
+        finally:
+            other_page.ws.close()
+    return False
+
+
 def _wait_login(page, log_fn, cancel_check=None, timeout=300):
     if getattr(page, "driver", False):
         # a hidden in-app page cannot show DeepSeek's login: only an existing session counts
@@ -291,13 +343,7 @@ def _wait_login(page, log_fn, cancel_check=None, timeout=300):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         _check(cancel_check)
-        try:
-            present = page.evaluate(_TOKEN_PRESENT)
-        except AuthDSError as exc:
-            if exc.error_type != "browser_error":
-                raise
-            present = False  # Google sign-in redirects replace the JS context.
-        if present:
+        if _desktop_login_token_present(page, cancel_check):
             _mark_session(True)
             return
         time.sleep(.5)
@@ -306,7 +352,7 @@ def _wait_login(page, log_fn, cancel_check=None, timeout=300):
 
 def login(log_fn=print, cancel_check=None):
     global _login_generation
-    with _open_browser(visible=True, cancel_check=cancel_check) as page:
+    with _open_browser(visible=True, cancel_check=cancel_check, interactive=True) as page:
         with _serialized(cancel_check, _login_gate):
             _wait_login(page, log_fn, cancel_check)
             _login_generation += 1
@@ -389,7 +435,9 @@ class StreamParser:
     """Incremental SSE parser; thinking is never mistaken for translated output."""
     def __init__(self):
         self.buffer = ""
-        self.channel = "THINK"
+        self.fragments = {}
+        self.path = ""
+        self.operation = "SET"
         self.content = ""
         self.reasoning = ""
         self.tokens = None
@@ -398,7 +446,6 @@ class StreamParser:
 
     def feed(self, text):
         self.buffer = (self.buffer + text).replace("\r\n", "\n")
-        outputs = []
         while "\n\n" in self.buffer:
             frame, self.buffer = self.buffer.split("\n\n", 1)
             event = ""
@@ -424,47 +471,77 @@ class StreamParser:
                 raise AuthDSError("AuthDS rejected the chat request. Check your session or account limits.")
             if event in ("ready", "title"):
                 continue
-            outputs.extend(self._patch(payload))
-        return outputs
+            if "p" in payload:
+                self.path = str(payload["p"]).strip("/")
+                self.operation = "SET"
+            if "o" in payload:
+                self.operation = payload["o"]
+            value = payload.get("v")
+            if isinstance(value, str) and "p" not in payload and self.path in ("", "response/fragments"):
+                # Older streams send an implicit append to the latest fragment.
+                self._patch("response/fragments/-1/content", "APPEND", value)
+            else:
+                self._patch(self.path, self.operation, value)
 
-    def _fragment(self, fragment):
-        self.channel = fragment.get("type", self.channel)
-        text = fragment.get("content", "")
-        return self._append(text) if isinstance(text, str) else []
-
-    def _append(self, text):
-        if self.channel == "RESPONSE":
-            self.content += text
-            return [text] if text else []
-        if self.channel == "THINK":
-            self.reasoning += text
-            if text and self.on_thinking:
-                self.on_thinking(text)
+        previous_content, previous_reasoning = self.content, self.reasoning
+        self.content = self._channel_text("RESPONSE")
+        self.reasoning = self._channel_text("THINK")
+        if self.on_thinking and self.reasoning.startswith(previous_reasoning):
+            delta = self.reasoning[len(previous_reasoning):]
+            if delta:
+                self.on_thinking(delta)
+        if self.content.startswith(previous_content):
+            delta = self.content[len(previous_content):]
+            return [delta] if delta else []
         return []
 
-    def _patch(self, payload):
-        path, operation, value = payload.get("p"), payload.get("o"), payload.get("v")
-        outputs = []
-        if isinstance(value, dict) and isinstance(value.get("response"), dict):
-            response = value["response"]
-            for fragment in response.get("fragments", []):
-                outputs.extend(self._fragment(fragment))
-            self.tokens = response.get("accumulated_token_usage", self.tokens)
-        elif path == "response/fragments" and operation == "APPEND" and isinstance(value, list):
-            for fragment in value:
-                outputs.extend(self._fragment(fragment))
-        elif isinstance(value, str) and (path is None or path.endswith("/content")):
-            outputs.extend(self._append(value))
-        elif path == "response" and operation == "BATCH" and isinstance(value, list):
+    def _channel_text(self, channel):
+        return "".join(
+            fragment["content"] for _, fragment in sorted(self.fragments.items())
+            if fragment.get("type") == channel and isinstance(fragment.get("content"), str)
+        )
+
+    def _patch(self, path, operation, value):
+        if operation == "BATCH" and isinstance(value, list):
             for patch in value:
-                patch = dict(patch)
-                patch["p"] = "response/" + patch.get("p", "")
-                outputs.extend(self._patch(patch))
+                if isinstance(patch, dict) and isinstance(patch.get("p"), str):
+                    child_path = "/".join(part for part in (path, patch["p"].strip("/")) if part)
+                    self._patch(child_path, patch.get("o", "SET"), patch.get("v"))
+            return
+
+        response = None
+        if isinstance(value, dict):
+            response = value if path == "response" and "response" not in value else value.get("response")
+        if isinstance(response, dict):
+            self._patch("response/fragments", "SET", response.get("fragments"))
+            self.tokens = response.get("accumulated_token_usage", self.tokens)
+            if response.get("status") in ("FINISHED", "finished"):
+                self.finished = True
+        elif path == "response/fragments" and isinstance(value, list):
+            if operation == "SET":
+                self.fragments.clear()
+            start = max(self.fragments, default=-1) + 1
+            for index, fragment in enumerate(value, start):
+                if isinstance(fragment, dict):
+                    self.fragments[index] = dict(fragment)
+        elif match := re.fullmatch(r"response/fragments/(-?\d+)(?:/(type|content))?", path):
+            index = int(match[1])
+            if index < 0:
+                index += max(self.fragments, default=-1) + 1
+            if index < 0:
+                return
+            field = match[2]
+            if field is None and isinstance(value, dict):
+                self.fragments[index] = dict(value)
+            elif field and isinstance(value, str):
+                fragment = self.fragments.setdefault(index, {})
+                if field == "content" and operation == "APPEND":
+                    value = str(fragment.get(field) or "") + value
+                fragment[field] = value
         elif path == "response/accumulated_token_usage":
             self.tokens = value
         elif path == "response/status" and value in ("FINISHED", "finished"):
             self.finished = True
-        return outputs
 
 
 # Async work stays in the authenticated origin; polling drains a bounded chunk queue.

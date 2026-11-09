@@ -164,7 +164,10 @@ def launch(*, binary, profile, start_url, ready, page_factory, check, error, clo
                 page.ws.send(json.dumps({"id": 999999, "method": "Browser.close"}))
             except Exception:
                 pass
-            page.ws.close()
+            try:
+                page.ws.close()
+            except Exception:
+                pass
         if proc:
             try:
                 proc.wait(timeout=5)
@@ -197,6 +200,17 @@ class BrowserLeases:
 
     def serialized(self, cancel_check=None, gate=None):
         return serialized(self.gate if gate is None else gate, self.check, cancel_check)
+
+    @contextmanager
+    def open_interactive(self, cancel_check=None):
+        """Use the visible browser's first tab and release its profile on exit."""
+        while True:
+            with self.serialized(cancel_check):
+                if self.session is None:
+                    with self.launch(visible=True, cancel_check=cancel_check) as page:
+                        yield page
+                    return
+            time.sleep(.2)
 
     @contextmanager
     def open(self, *, visible=False, cancel_check=None, prepare=None):

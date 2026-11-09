@@ -62,6 +62,28 @@ def test_nested_batch_and_usage():
     assert parser.content == "answer" and parser.tokens == 42 and parser.finished
 
 
+@pytest.mark.parametrize("model", ["authds/flash-thinking", "authds/pro-thinking"])
+def test_thinking_models_follow_indexed_answer_and_inherited_patch_path(model):
+    stream = frame({"v": {"response": {"fragments": [{"type": "THINK", "content": "Plan"}]}}})
+    stream += frame({"p": "response/fragments/1", "o": "BATCH", "v": [
+        {"p": "type", "v": "RESPONSE"},
+        {"p": "content", "v": "<p>"},
+    ]})
+    stream += frame({"p": "response/fragments/1/content", "o": "APPEND", "v": "Translated"})
+    stream += frame({"v": " text"})
+    stream += frame({"p": "response/fragments/0/content", "o": "APPEND", "v": " privately"})
+    stream += frame({"p": "response/fragments/1/content", "o": "APPEND", "v": "</p>"})
+    stream += frame({"p": "response/status", "v": "FINISHED"})
+    answer = []
+    thinking = []
+    page = Page([{"chunks": [stream], "done": True}])
+
+    result = ds._complete(page, model, [{"content": "source"}], 5, None, answer.append, None, thinking.append)
+
+    assert result["content"] == "".join(answer) == "<p>Translated text</p>"
+    assert result["reasoning_content"] == "".join(thinking) == "Plan privately"
+
+
 def test_error_never_returns_partial_answer():
     parser=ds.StreamParser()
     parser.feed(frame({"v":{"response":{"fragments":[{"type":"RESPONSE","content":"partial"}]}}}))
@@ -183,6 +205,52 @@ def test_manual_login_preserves_existing_session(monkeypatch, tmp_path):
     ds.login(log_fn=lambda _:None)
     assert scripts == [ds._TOKEN_PRESENT]
     assert (tmp_path/'.signed_in').exists()
+
+
+def test_manual_login_checks_deepseek_popup_and_closes_the_browser(monkeypatch, tmp_path):
+    events = []
+
+    class LoginPage:
+        debugger_url = "ws://127.0.0.1:12345/devtools/page/login"
+
+        def evaluate(self, expression):
+            assert expression == ds._TOKEN_PRESENT
+            raise ds.AuthDSError("navigation", "timeout")
+
+        def call(self, method, **kwargs):
+            assert method == "Target.getTargets"
+            return {"targetInfos": [
+                {"targetId": "oauth", "type": "page", "url": "https://accounts.google.com/"},
+                {"targetId": "done", "type": "page", "url": ds.BASE_URL + "/"},
+            ]}
+
+    class Popup:
+        ws = type("Socket", (), {"close": lambda self: events.append("disconnect popup")})()
+
+        def evaluate(self, expression):
+            return expression == ds._TOKEN_PRESENT
+
+    @contextmanager
+    def launch(*, visible, cancel_check):
+        assert visible
+        events.append("open login")
+        try:
+            yield LoginPage()
+        finally:
+            events.append("close browser")
+
+    def popup(url, _):
+        assert url.endswith("/done")
+        return Popup()
+
+    monkeypatch.setattr(ds, "profile_dir", lambda: tmp_path)
+    monkeypatch.setattr(ds, "_launch_browser", launch)
+    monkeypatch.setattr(ds, "_Page", popup)
+
+    ds.login(log_fn=lambda _: None)
+
+    assert (tmp_path / ".signed_in").exists()
+    assert events == ["open login", "disconnect popup", "close browser"]
 
 
 def test_login_browser_does_not_modify_workers_or_reload(monkeypatch, tmp_path):

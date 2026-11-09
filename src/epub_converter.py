@@ -34,6 +34,7 @@ from epub_package import (
     find_epub_opf_member,
     find_opf_path as find_workspace_opf_path,
 )
+from epub_image_html import RAW_HTML_DIR, list_chapter_html, migrate_legacy_image_html
 from epub_metadata_utils import (
     extract_epub_metadata_file,
     merge_source_epub_metadata,
@@ -82,14 +83,12 @@ configure_utf8_output()
 _global_log_callback = None
 _stop_flag = False
 
-# Historical refinement data is never a valid EPUB source.  Keep this rule at
-# the converter boundary as well as in the translation pipeline so a recursive
-# fallback cannot accidentally discover a chapter under the backup directory.
-_EPUB_FORBIDDEN_SOURCE_DIRS = frozenset({"unrefined_backup", ".cache"})
+# Recursive chapter discovery stays within the selected HTML source.
+_EPUB_FORBIDDEN_SOURCE_DIRS = frozenset({"unrefined_backup", ".cache", RAW_HTML_DIR.casefold()})
 
 
 def _is_forbidden_epub_source_path(path: str, output_dir: str) -> bool:
-    """Return True when *path* is outside the workspace or inside a backup."""
+    """Return True when *path* falls outside the selected chapter source."""
     try:
         root = os.path.realpath(os.path.abspath(output_dir))
         candidate = os.path.realpath(os.path.abspath(path))
@@ -1702,11 +1701,16 @@ class EPUBCompiler:
         log_callback: Optional[Callable] = None,
         stop_callback: Optional[Callable] = None,
         api_client: Any = None,
+        *,
+        image_passthrough: bool = False,
+        raw_epub_html: bool = False,
     ):
         self.base_dir = os.path.abspath(base_dir)
         self.log_callback = log_callback
         self.stop_callback = stop_callback
         self.output_dir = self.base_dir
+        self.raw_epub_html = raw_epub_html
+        self.image_passthrough = image_passthrough or raw_epub_html
         self.last_epub_output_path: Optional[str] = None
         self.images_dir = os.path.join(self.output_dir, "images")
         self.css_dir = os.path.join(self.output_dir, "css")
@@ -1902,9 +1906,18 @@ class EPUBCompiler:
 
         return result
 
+    @property
+    def _chapter_html_dir(self):
+        if getattr(self, "raw_epub_html", False):
+            return os.path.join(self.output_dir, RAW_HTML_DIR)
+        return self.output_dir
+
+    def _is_image_passthrough(self):
+        return getattr(self, "image_passthrough", False) or os.getenv("IMAGE_MODE_EPUB_PASSTHROUGH") == "1"
+
     def _html_image_references(self, filename: str) -> List[str]:
         """Return file references from HTML ``img`` and SVG ``image`` elements."""
-        path = os.path.join(self.output_dir, filename)
+        path = os.path.join(self._chapter_html_dir, filename)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 markup = _unescape_valid_html_tag_entities(f.read())
@@ -1926,7 +1939,7 @@ class EPUBCompiler:
 
     def _html_declares_cover_semantics(self, filename: str) -> bool:
         """Return whether markup explicitly identifies itself as a cover page."""
-        path = os.path.join(self.output_dir, filename)
+        path = os.path.join(self._chapter_html_dir, filename)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 markup = _unescape_valid_html_tag_entities(f.read())
@@ -2886,7 +2899,7 @@ class EPUBCompiler:
 
             # Translate metadata if configured (skip in image output passthrough mode —
             # content is not translated, only images are edited)
-            _image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+            _image_passthrough = self._is_image_passthrough()
             if hasattr(self, 'metadata_translator') and self.metadata_translator and not _image_passthrough:
                 if any(configured_metadata_fields.values()):
                     self.log("🌐 Translating metadata fields...")
@@ -3522,14 +3535,7 @@ class EPUBCompiler:
 
     def _has_standard_files(self) -> bool:
         """Check if directory contains standard response_ files"""
-        if not os.path.exists(self.base_dir):
-            return False
-        
-        html_exts = ('.html', '.xhtml', '.htm')
-        html_files = [f for f in os.listdir(self.base_dir) if f.lower().endswith(html_exts)]
-        response_files = [f for f in html_files if f.startswith('response_')]
-        
-        return len(response_files) > 0
+        return any(f.startswith('response_') for f in list_chapter_html(self._chapter_html_dir))
 
     def _preflight_check_strict(self) -> bool:
         """Original strict pre-flight check - for standard files"""
@@ -3542,7 +3548,7 @@ class EPUBCompiler:
             issues.append(f"Directory does not exist: {self.base_dir}")
             return False
         
-        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
+        html_files = list_chapter_html(self._chapter_html_dir)
         response_files = [f for f in html_files if f.startswith('response_')]
         
         if not html_files:
@@ -3587,8 +3593,7 @@ class EPUBCompiler:
         # Phase 2: Try relaxed mode (any HTML files)
         self.log("\n[Phase 2] Checking for any HTML files...")
         
-        html_exts = ('.html', '.xhtml', '.htm')
-        html_files = [f for f in os.listdir(self.base_dir) if f.lower().endswith(html_exts)]
+        html_files = list_chapter_html(self._chapter_html_dir)
         
         if html_files:
             self.log(f"✅ Found {len(html_files)} HTML files:")
@@ -3757,7 +3762,7 @@ class EPUBCompiler:
         def analyze_single_file(idx_filename):
             """Worker function to analyze a single file"""
             idx, filename = idx_filename
-            file_path = os.path.join(self.output_dir, filename)
+            file_path = os.path.join(self._chapter_html_dir, filename)
             
             try:
                 # Read and process file
@@ -3866,7 +3871,7 @@ class EPUBCompiler:
         def process_chapter_content(data):
             """Worker function to process chapter content with FULL DEBUGGING"""
             chapter_num, filename = data
-            path = os.path.join(self.output_dir, filename)
+            path = os.path.join(self._chapter_html_dir, filename)
             
             # Debug tracking for problem chapters
             is_problem_chapter = 49 <= chapter_num <= 56
@@ -4337,11 +4342,7 @@ class EPUBCompiler:
         candidates = list(html_files or [])
         if not candidates:
             try:
-                candidates = [
-                    name
-                    for name in os.listdir(self.output_dir)
-                    if name.lower().endswith((".html", ".htm", ".xhtml"))
-                ]
+                candidates = list_chapter_html(self._chapter_html_dir)
             except OSError:
                 return None
 
@@ -4445,16 +4446,14 @@ class EPUBCompiler:
 
     def _find_html_files(self) -> List[str]:
         """Find HTML files using OPF-based ordering when available"""
-        self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
+        self.log(f"\n[DEBUG] Scanning directory: {self._chapter_html_dir}")
 
         backup_dir = os.path.join(self.output_dir, "unrefined_backup")
         if os.path.isdir(backup_dir):
             self.log("[INFO] Ignoring unrefined_backup/ (historical data is never an EPUB source)")
         
         # Get all HTML files in directory
-        all_files = os.listdir(self.output_dir)
-        html_extensions = ('.html', '.htm', '.xhtml')
-        html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
+        html_files = list_chapter_html(self._chapter_html_dir)
         
         if not html_files:
             self.log("[ERROR] No HTML files found!")
@@ -4612,7 +4611,7 @@ class EPUBCompiler:
                     # If special files override is enabled, or passthrough mode,
                     # do NOT treat special files as auxiliary
                     translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                    image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+                    image_passthrough = self._is_image_passthrough()
                     if translate_special or image_passthrough:
                         # Don't exclude any special files when override is enabled
                         aux = set()
@@ -4644,7 +4643,7 @@ class EPUBCompiler:
                 # If special files override is enabled or passthrough mode,
                 # don't mark special files as auxiliary
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+                image_passthrough = self._is_image_passthrough()
                 if translate_special or image_passthrough:
                     # Don't exclude any files when override is enabled
                     aux_set = set()
@@ -4710,7 +4709,7 @@ class EPUBCompiler:
                                css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                                spine: List, toc: List, metadata: dict) -> bool:
         """Process a single chapter with COMPREHENSIVE debugging"""
-        path = os.path.join(self.output_dir, filename)
+        path = os.path.join(self._chapter_html_dir, filename)
         
         # Flag for extra debugging on problem chapters
         is_problem_chapter = 49 <= num <= 56
@@ -5600,7 +5599,7 @@ img {
         # Check for explicit CSS override from GUI
         # Skip CSS override in image mode passthrough — use original source CSS
         override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
-        image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+        image_passthrough = self._is_image_passthrough()
         if image_passthrough:
             override_path = ''  # Force skip CSS override in passthrough mode
         if override_path:
@@ -6705,17 +6704,13 @@ img {
         from urllib.parse import unquote
 
         reference_keys = set()
-        html_exts = (".html", ".htm", ".xhtml")
         try:
-            filenames = [
-                f for f in os.listdir(self.output_dir)
-                if f.lower().endswith(html_exts) and os.path.isfile(os.path.join(self.output_dir, f))
-            ]
-        except Exception:
+            filenames = list_chapter_html(self._chapter_html_dir)
+        except OSError:
             return reference_keys
 
         for filename in filenames:
-            path = os.path.join(self.output_dir, filename)
+            path = os.path.join(self._chapter_html_dir, filename)
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
@@ -8330,21 +8325,21 @@ img {
 
                 # Direct path check
                 for cand in expanded:
-                    direct = os.path.normpath(os.path.join(self.output_dir, cand))
+                    direct = os.path.normpath(os.path.join(self._chapter_html_dir, cand))
                     if (
-                        not _is_forbidden_epub_source_path(direct, self.output_dir)
+                        not _is_forbidden_epub_source_path(direct, self._chapter_html_dir)
                         and os.path.exists(direct)
                     ):
                         return True
                 # Dynamically discover likely roots by locating any HTML/XHTML files
                 roots = set()
                 try:
-                    for root_dir, dirnames, files in os.walk(self.output_dir):
+                    for root_dir, dirnames, files in os.walk(self._chapter_html_dir):
                         dirnames[:] = [
                             dirname for dirname in dirnames
                             if dirname.casefold() not in _EPUB_FORBIDDEN_SOURCE_DIRS
                         ]
-                        if _is_forbidden_epub_source_path(root_dir, self.output_dir):
+                        if _is_forbidden_epub_source_path(root_dir, self._chapter_html_dir):
                             continue
                         if any(f.lower().endswith(('.html', '.htm', '.xhtml')) for f in files):
                             roots.add(root_dir)
@@ -8356,7 +8351,7 @@ img {
                     for cand in expanded:
                         candidate = os.path.normpath(os.path.join(root_dir, cand))
                         if (
-                            not _is_forbidden_epub_source_path(candidate, self.output_dir)
+                            not _is_forbidden_epub_source_path(candidate, self._chapter_html_dir)
                             and os.path.exists(candidate)
                         ):
                             return True
@@ -8379,10 +8374,9 @@ img {
                 target_core = _core_of(os.path.basename(rel_path))
                 if target_core:
                     try:
-                        for f in os.listdir(self.output_dir):
-                            if f.lower().endswith(('.html', '.htm', '.xhtml')) and os.path.isfile(os.path.join(self.output_dir, f)):
-                                if _core_of(f) == target_core:
-                                    return True
+                        for f in list_chapter_html(self._chapter_html_dir):
+                            if _core_of(f) == target_core:
+                                return True
                     except Exception:
                         pass
 
@@ -9539,7 +9533,7 @@ img {
                 self.log("🛑 PDF generation stopped by user")
                 return
             
-            file_path = os.path.join(self.output_dir, html_file)
+            file_path = os.path.join(self._chapter_html_dir, html_file)
             if not os.path.exists(file_path):
                 continue
             
@@ -9766,14 +9760,31 @@ def compile_epub(
     base_dir: str,
     log_callback: Optional[Callable] = None,
     api_client: Any = None,
+    *,
+    image_passthrough: bool = False,
+    raw_epub_html: bool = False,
 ):
-    """Compile translated HTML files into EPUB"""
+    """Compile the requested chapter source into an EPUB."""
     # This is a new operation. Reset every stop source used by the compiler's
     # local work and its metadata/header/TOC API requests before constructing
     # the compiler (which may construct a new UnifiedClient).
     reset_stop_state_for_new_compilation(api_client)
     
-    compiler = EPUBCompiler(base_dir, log_callback, api_client=api_client)
+    source = _read_compile_source_reference(base_dir)
+    if source.lower().endswith(".epub"):
+        try:
+            with open(os.path.join(base_dir, "translation_progress.json"), encoding="utf-8") as f:
+                progress = json.load(f)
+        except (OSError, ValueError):
+            progress = {}
+        migrate_legacy_image_html(source, base_dir, progress)
+
+    image_options = {}
+    if raw_epub_html:
+        image_options["raw_epub_html"] = True
+    elif image_passthrough:
+        image_options["image_passthrough"] = True
+    compiler = EPUBCompiler(base_dir, log_callback, api_client=api_client, **image_options)
     with _ACTIVE_COMPILERS_LOCK:
         _ACTIVE_COMPILERS.add(compiler)
     try:
