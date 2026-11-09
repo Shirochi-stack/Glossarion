@@ -388,7 +388,7 @@ def test_library_and_completed_book_readers_jump_to_the_book_page_and_back(app_e
         await run.driver.tap(key="ov-read", timeout=15)
         reader = await _new_reader(run, previous)
         assert reader.bid == alpha_bid and reader.index == 1  # where the last visit left the book
-        assert _stack(run) == ["/library", f"/library/book/{alpha_bid}", f"/reader/{alpha_bid}?mode=translated"]
+        assert _stack(run) == ["/library", f"/library/book/{alpha_bid}", f"/reader/{alpha_bid}"]
         await _read_to(run, reader, 3)
         await _show_bars(run, reader)
         await run.driver.tap(key="reader-details", timeout=15)

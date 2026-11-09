@@ -453,6 +453,8 @@ class OverviewTab:
         label = str(self.read_button.content or "")
         if "raw" in label.lower():
             self.page.open_reader(mode="original", raw_only=True)
+        elif self.page.service.format_of(self.page.book) in ("txt", "pdf", "html", "image"):
+            self.page.open_reader(mode="translated")
         else:
             self.page.open_reader()
 

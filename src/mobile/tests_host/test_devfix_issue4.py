@@ -289,8 +289,8 @@ def _texts(tester) -> list:
 
 
 def _no_migrate_words(texts) -> list:
-    return [t for t in texts if "migrate" in str(t).lower() or "organize" in str(t).lower()
-            or str(t).lower().startswith("undo (")]
+    return [t for t in texts if str(t) != "🖥 Migrate Job to PC" and (
+        "migrate" in str(t).lower() or "organize" in str(t).lower() or str(t).lower().startswith("undo ("))]
 
 
 def _scan_root_for(root: Path, name: str) -> list:
@@ -402,6 +402,7 @@ def test_chat_book_joins_the_library_without_a_tap(iso, migrate_calls):
                 [c.action_reasons for c in _job_cards(view)]
             card = next(c for c in _job_cards(view) if c.action_reasons.get("library", "?") is None)
             assert "migrate" not in card.action_buttons and "library" in card.action_buttons
+            assert "migrate_job" in card.action_buttons
             assert not _no_migrate_words(_texts(tester)), _no_migrate_words(_texts(tester))
             found = await driver.find(text="Open in Library")
             assert found.count >= 1
@@ -427,7 +428,8 @@ def test_chat_book_joins_the_library_without_a_tap(iso, migrate_calls):
             assert not {i for i in ids if "organize" in i or "undo" in i}, ids
             assert not _no_migrate_words(_texts(tester)), _no_migrate_words(_texts(tester))
             sheet_items = [i.label for i in screen.card_actions(completed[0]).items]
-            assert not [t for t in sheet_items if "organize" in t.lower() or "migrate" in t.lower()], sheet_items
+            assert not _no_migrate_words(sheet_items), sheet_items
+            assert "🖥 Migrate Job to PC" in sheet_items
 
             # ---- Attachments manager: nothing waiting, and no Migrate anywhere ----------------------------
             app.navigate_to("chat.attachments", {"cid": cid})

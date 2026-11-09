@@ -1836,19 +1836,16 @@ def _run_multipass_refinement_qa_scan(
     progress_path,
     config,
     selected_files=None,
+    scan_path=None,
 ):
     from qa_scan_runtime import run_qa_scan_path
 
+    scan_path = scan_path or run_qa_scan_path
     qa_log = _BufferedQAScanLog()
     scan_stopped = threading.Event()
 
     def _scan():
-        mobile_attachment = (
-            os.environ.get("GLOSSARION_MOBILE") == "1"
-            and os.environ.get("DIRECT_TEXT_ACTIVE") == "1"
-            and os.environ.get("DIRECT_TEXT_ORDERED_BATCH") == "1"
-        )
-        return run_qa_scan_path(
+        return scan_path(
             folder_path,
             log=qa_log,
             stop_flag=lambda: scan_stopped.is_set() or _multipass_stop_requested(stop_flag),
@@ -1859,7 +1856,6 @@ def _run_multipass_refinement_qa_scan(
             text_file_mode=None,
             progress_path=progress_path,
             config=config,
-            allow_direct_text=mobile_attachment,
         )
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MultipassQAScan")

@@ -25,6 +25,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, scroll_sheet, sheet_frame
+from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.common import ask, hint_text, section_header
 
 __all__ = ["GlossaryNameFixSheet", "NER_KEY", "chapters_at_once", "name_check_scope", "use_ner"]
@@ -247,7 +248,7 @@ class GlossaryNameFixSheet:
                         value=finding.fixable and not self.output_file, key=f"gn-row-{len(self.rows)}")
                     self.rows.append((box, review.folder, chapter.output_file, finding))
                     controls.append(ft.Row([ft.Container(content=box, expand=True), ft.IconButton(
-                        icon=ft.Icons.VISIBILITY, tooltip="Preview translation and raw source",
+                        icon=ft.Icons.VISIBILITY, tooltip="Preview translation and raw source", size_constraints=HIT_TARGET,
                         on_click=lambda e, folder=review.folder, name=chapter.output_file, found=finding:
                         self.ctx.spawn(self.preview(folder, name, found)), key=f"gn-preview-{len(self.rows) - 1}")]))
         self.results.controls = controls

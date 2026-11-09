@@ -83,6 +83,7 @@ import sys
 import threading
 import time
 import traceback
+from functools import partial
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 __all__ = ["KINDS", "MOBILE_QUICK_SAMPLE_SIZE", "MODES", "QUICK_SAMPLE_KEY", "REPORT_FILE",
@@ -323,7 +324,7 @@ def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any, log: Callable[[A
 
 
 @contextlib.contextmanager
-def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None) -> Iterator[None]:
+def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None, *, chat_attachment: bool = False) -> Iterator[None]:
     """A translation job: the QA scan its Multipass refinement runs on its own (``run_qa_scan_path`` in the backend,
     with the workers of ``mobile_qa_env_overrides``) goes through ``_scan_turns`` too, like a QA scan job. Its lines
     reach the job's log through ``print`` (``job_runner`` tees it), like the lines around that call."""
@@ -338,6 +339,10 @@ def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None) -> Iterat
         return
 
     def scan_taking_turns(*args: Any, **kwargs: Any) -> Any:
+        if chat_attachment:
+            from qa_scan_runtime import run_qa_scan_path
+
+            kwargs["scan_path"] = partial(run_qa_scan_path, allow_direct_text=True)
         if phase is not None:
             phase("Multipass QA scan")
         try:
