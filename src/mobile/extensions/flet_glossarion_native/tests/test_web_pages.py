@@ -767,11 +767,14 @@ def test_swift_plugin_wiring_and_shared_key_window():
     assert "root = UIApplication.shared.delegate?.window??.rootViewController" in top
 
 
-def test_build_files_are_unchanged():
+def test_native_build_configuration():
     gradle = _source(GRADLE)
     assert re.search(r"minSdk = 24\b", gradle) and re.search(r"compileSdk = 36\b", gradle)
     deps = re.search(r"^dependencies \{(.*?)^\}", gradle, re.S | re.M).group(1)
-    assert re.findall(r'implementation\("([^"]+)"\)', deps) == ["androidx.core:core:1.15.0"]
+    assert re.findall(r'implementation\("([^"]+)"\)', deps) == [
+        "androidx.core:core:1.15.0",
+        "com.google.android.gms:play-services-auth:22.0.0",  # Google Drive authorization
+    ]
     assert "androidx.webkit" not in gradle
     package = _source(PACKAGE_SWIFT)
     assert '.iOS("13.0")' in package and "// swift-tools-version: 5.9" in package and "WebKit" not in package
