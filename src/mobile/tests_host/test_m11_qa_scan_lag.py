@@ -453,8 +453,13 @@ def test_only_the_cpu_batches_take_turns_and_the_scanner_is_put_back(tmp_path, m
 @needs_backend
 def test_the_workers_and_the_interval_do_not_change_the_findings(phone, monkeypatch):
     """The way a scan ran before (Python's interval, all workers running) against the scan's own: same report."""
+    import mobile_runtime
+
     from glossarion_mobile.job_kinds import qa as qa_kind
 
+    # This compares phone worker settings. Keep process pools off even if a
+    # different host test's background job is still restoring its environment.
+    monkeypatch.setattr(mobile_runtime, "processes_available", lambda: False)
     monkeypatch.setattr(os, "cpu_count", lambda: 8)
     runs = {}
     for name, workers, interval, turns in (("one", 1, 0.005, False), ("free", 4, 0.005, False),
