@@ -1297,11 +1297,25 @@ def test_transfer_it_handoff_keeps_the_pasted_link(tmp_path):
         assert not (await parts["save"]())["ok"] and parts["error"].visible
         parts["field"].value = "https://transfer.it/t/abcdef12"
         assert (await parts["save"]())["ok"]
-        assert "transfer.it link saved on the book" not in env.said  # silent (owner 2026-10-20)
+        assert "transfer.it upload link saved" in env.said
         await tab.refresh_cloud()
         assert any(t == "Remove" for t in texts(tab.cloud_column))  # transfer.it links cannot be deleted from the app
         await parts["open"]()
         assert shares.handoff_opened == ["https://transfer.it/start", "https://transfer.it/start"]
+
+    run(scenario())
+
+
+def test_hidden_upload_reports_success(tmp_path):
+    async def scenario():
+        shares = FakeShares()
+        tab, env = _output_tab(tmp_path, shares=shares, page=FakePage())
+        provider = next(p for p, _ in tab.actions.shares.menu(env.epub_new) if p["id"] == "gofile")
+        task = asyncio.create_task(tab.actions.run_upload(provider, env.epub_new, env.workspace))
+        await asyncio.sleep(0)
+        tab.actions.last_sheet["hide"]()
+        assert (await task)["ok"]
+        assert env.said[-1] == "Uploaded Novel New.epub to Gofile"
 
     run(scenario())
 

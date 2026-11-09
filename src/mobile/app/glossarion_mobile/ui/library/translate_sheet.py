@@ -248,7 +248,7 @@ class TranslateSheet:
         self.chat_button = ft.TextButton(content="Open in chat instead", icon=ft.Icons.CHAT_BUBBLE_OUTLINE,
                                          on_click=self._on_chat, disabled=self.chat_reason is not None,
                                          tooltip=self.chat_reason, key="open-in-chat")
-        title = (f"Load {len(self.books)} for translation" if len(self.books) > 1
+        title = ("Load Translation" if len(self.books) > 1
                  else f"Translate “{self.books[0].get('name') or ''}”" if self.books else "Translate")
         self.facts_row = ft.Row(self.fact_chips, wrap=True, spacing=6, run_spacing=6)
         self.start_reason_text = ft.Text(self.start_reason or "", color=ft.Colors.ERROR, visible=bool(self.start_reason),

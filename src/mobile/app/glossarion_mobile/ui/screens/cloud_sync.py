@@ -104,6 +104,7 @@ ROUTE_NAME = "settings.cloud"
 CLOUD_ROUTE = "/settings/cloud"
 SETTINGS_PLACE = "Settings › Cloud sync & sharing"
 SHARE_LABEL = "Share file via link"
+MIGRATE_LABEL = "🖥 Migrate Job to PC"
 SEND_NOW_LABEL = "Send to cloud now"
 #: Notification ids of cloud sync (``services.notifications``: 41100 FGS, 41200 done, 41600 action).
 CLOUD_NOTIFICATION_BASE = 42000
@@ -1217,6 +1218,7 @@ class U10Actions:
         self.last_sheet: Any = None  # the newest ActionSheet / sheet parts (tests, back handling)
         self.last_dialog: Any = None
         self.uploading: Optional[str] = None  # provider id of the running upload
+        self.preparing_migration = False
         self.sheet_builds = 0  # per-build dialog keys (``_sheet``)
 
     # ---- context helpers ----
@@ -1440,6 +1442,27 @@ class U10Actions:
                     return await self.start_provider(provider, path, identity)
         return await self.provider_sheet(path, identity)
 
+    async def migrate_job(self, workspace: str, raw: str, identity: str) -> Any:
+        from glossarion_mobile.services.share_providers import ShareError
+
+        prepare = getattr(self.shares.service, "prepare_migration", None)
+        if not callable(prepare):
+            self.say("Job migration is unavailable in this session")
+            return None
+        if self.preparing_migration:
+            self.say("A migration ZIP is already being prepared")
+            return None
+        self.preparing_migration = True
+        self.say("Preparing the output folder and raw source as a ZIP…")
+        try:
+            archive = await prepare(workspace, raw)
+        except (OSError, ShareError) as exc:
+            self.say(f"Could not prepare the migration ZIP. {exc}")
+            return None
+        finally:
+            self.preparing_migration = False
+        return await self.share_file(archive, identity)
+
     async def provider_sheet(self, path: str, identity: str) -> Optional[ActionSheet]:
         """The services the user can send ``path`` to; off ones stay listed with their reason (the service's
         ``menu``: switches, consent, the key, eligibility, a running upload)."""
@@ -1660,8 +1683,10 @@ class U10Actions:
         if still_open:
             hide()
         if result.get("ok") and result.get("url"):
-            if still_open:  # a hidden progress sheet ends silently: the link is on the book (owner 2026-10-20)
-                self.link_sheet(result)
+            if still_open:
+                self.link_sheet(result, title="Upload complete")
+            else:
+                self.say(f"Uploaded {name} to {label}", "Open link", lambda *_: self.link_sheet(result))
         elif result.get("code") != "cancelled":
             self.say(f"{label}: {result.get('message') or 'Upload failed'}")
         return result
@@ -1689,14 +1714,19 @@ class U10Actions:
             buttons.append(ft.TextButton(content="Upload again", icon=ft.Icons.REPLAY, on_click=upload_again,
                                          key="link-again"))
         buttons.append(ft.FilledTonalButton(content="Done", on_click=done, key="link-done"))
-        dialog = self._sheet(scroll_column([
+        body = [
             ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600),
             ft.Text(str(link.get("url") or ""), selectable=True, theme_style=ft.TextThemeStyle.BODY_MEDIUM,
                     key="link-url"),
             ft.Text(link_meta_text(link), theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.Text("Saved on the book: its Output tab lists it.", theme_style=ft.TextThemeStyle.BODY_SMALL,
                     color=ft.Colors.ON_SURFACE_VARIANT),
-        ], footer=[ft.Row(buttons, alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8)]), "share-link-ready")
+        ]
+        if str(link.get("name") or "").lower().endswith(".zip"):
+            body.append(ft.Text("On PC, extract the ZIP, place the book folder in your Glossarion output directory, "
+                                "and load the raw source to resume.", theme_style=ft.TextThemeStyle.BODY_SMALL))
+        dialog = self._sheet(scroll_column(body, footer=[
+            ft.Row(buttons, alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8)]), "share-link-ready")
         holder["dialog"] = dialog
         self.last_sheet = {"dialog": dialog, "link": dict(link), "done": done}
         self._open_dialog(dialog)
@@ -1747,6 +1777,7 @@ class U10Actions:
                 self._push(error)
                 return result
             self._close(holder.get("dialog"))
+            self.say(f"{label} upload link saved")
             return result
 
         steps: list = [

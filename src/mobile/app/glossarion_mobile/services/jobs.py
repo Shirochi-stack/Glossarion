@@ -1259,8 +1259,9 @@ def kind_verb(kind: str) -> str:
 def job_verb(snap: Any) -> str:
     """The word a job's lines start with: its kind's verb, "Indexing" while a book job is in its glossary stage
     (``job_kinds.translate.indexing_phase``)."""
-    if str(getattr(snap, "phase", "") or "") == INDEXING:
-        return INDEXING
+    phase = getattr(snap, "phase", "")
+    if phase in (INDEXING, "Multipass QA scan", "Multipass refinement"):
+        return phase
     return kind_verb(getattr(snap, "kind", "") or "")
 
 

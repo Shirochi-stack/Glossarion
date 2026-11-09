@@ -323,7 +323,7 @@ def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any, log: Callable[[A
 
 
 @contextlib.contextmanager
-def multipass_scan_turns() -> Iterator[None]:
+def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None) -> Iterator[None]:
     """A translation job: the QA scan its Multipass refinement runs on its own (``run_qa_scan_path`` in the backend,
     with the workers of ``mobile_qa_env_overrides``) goes through ``_scan_turns`` too, like a QA scan job. Its lines
     reach the job's log through ``print`` (``job_runner`` tees it), like the lines around that call."""
@@ -332,19 +332,39 @@ def multipass_scan_turns() -> Iterator[None]:
     except Exception:  # pragma: no cover - the translation itself reports a build without the backend
         backend = None
     original = getattr(backend, "_run_multipass_refinement_qa_scan", None)
+    refine = getattr(backend, "_process_refinement_or_tts_mode", None)
     if not callable(original):
         yield
         return
 
     def scan_taking_turns(*args: Any, **kwargs: Any) -> Any:
-        with _scan_turns():
-            return original(*args, **kwargs)
+        if phase is not None:
+            phase("Multipass QA scan")
+        try:
+            with _scan_turns():
+                return original(*args, **kwargs)
+        finally:
+            if phase is not None:
+                phase("Translating")
+
+    def show_refinement(config: Any, *args: Any, **kwargs: Any) -> Any:
+        if config.OUTPUT_MODE != "refinement" or not getattr(config, "MULTIPASS_MODE", False):
+            return refine(config, *args, **kwargs)
+        phase("Multipass refinement")
+        try:
+            return refine(config, *args, **kwargs)
+        finally:
+            phase("Translating")
 
     backend._run_multipass_refinement_qa_scan = scan_taking_turns
+    if phase is not None and callable(refine):
+        backend._process_refinement_or_tts_mode = show_refinement
     try:
         yield
     finally:
         backend._run_multipass_refinement_qa_scan = original
+        if phase is not None and callable(refine):
+            backend._process_refinement_or_tts_mode = refine
 
 
 def normalize_targets(params: Mapping[str, Any], inputs: Sequence[str], *, with_flags: bool = False) -> list:

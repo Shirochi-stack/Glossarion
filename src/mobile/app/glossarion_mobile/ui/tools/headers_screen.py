@@ -405,11 +405,8 @@ class HeadersScreen(Screen):
                           key="hd-delete-toc", reason=delete_reason, destructive=True),
         ]
         meta_reason = none or (None if self.ctx.has_kind("metadata") else "The job service is not running")
-        count = len(hm.epub_targets(targets))
-        label = f"🌐 Translate Metadata for {count} EPUB{'s' if count != 1 else ''}" if count > 1 \
-            else "🌐 Translate Metadata"
         self.metadata_actions.controls = [
-            action_button(label, "LABEL", lambda e: self.ctx.spawn(self.translate_metadata()),
+            action_button("Translate Metadata", "LABEL", lambda e: self.ctx.spawn(self.translate_metadata()),
                           key="hd-translate-metadata", reason=meta_reason, filled=True),
         ]
         snap = self.active_job

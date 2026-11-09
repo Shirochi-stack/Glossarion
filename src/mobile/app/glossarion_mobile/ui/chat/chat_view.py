@@ -1364,7 +1364,7 @@ class ChatView:
 
     def _live_segments(self, run: Any) -> list:
         out = []
-        for position, segment in enumerate(run.stream.segments()):
+        for position, segment in enumerate(run.stream.display_segments):
             key = segment.get("request_number") or segment.get("thread") or position
             out.append((str(key), segment))
         return out
@@ -1611,8 +1611,9 @@ class ChatView:
         snapshot = run.last_snapshot
         counts = progress_counts(snapshot)
         phase_name, status = self._live_phase(run, snapshot)
-        card.set_phase(CardPhase(phase_name), status=status)
-        segments = run.stream.segments()
+        if card.phase.name != phase_name or card.status != status:
+            card.set_phase(CardPhase(phase_name), status=status)
+        segments = run.stream.display_segments
         current = str(segments[-1].get("label") or "") if segments else ""
         card.set_progress(counts.get("fraction"), progress_line(snapshot, eta=self._eta), current)
         # the turn's committed cards (the glossary gate's, an earlier run's before a Resume / Retry failed)
@@ -1633,7 +1634,7 @@ class ChatView:
             else:
                 live_labels = {str(s.get("label") or "") for s in segments} - {""}
                 saved = [s for s in saved if str(s.get("label") or "") not in live_labels]
-        card.set_requests(saved + rows)
+        card.set_requests([*saved, *rows])
         active_issue = getattr(snapshot, "active_issue", None)
         try:
             from glossarion_mobile.services.jobs import issue_label
@@ -1689,7 +1690,10 @@ class ChatView:
             await park_while_hidden(self.page)  # no repaints in the background; one catch-up on return
             if not run.live or str(run.cid) != self.cid:
                 break  # finished meanwhile: _on_run_changed renders the committed cards
-            if run.stream.drain():
+            changed = await self.env.run_io(run.stream.drain)
+            if not run.live or str(run.cid) != self.cid:
+                break
+            if changed:
                 # U12 item 4: re-send only what changed. The whole transcript (every card of the window) went
                 # to the client on each tick (280-900 ms) for the whole run, which made every other screen lag.
                 old_tail = list(self.transcript.tail)
@@ -2929,6 +2933,8 @@ class ChatView:
                 self.navigate("jobs")
         elif action == "export":
             self._spawn(self._export_outputs(item))
+        elif action == "migrate_job":
+            self._spawn(self._migrate_job_to_pc(item))
         elif action == "compile":
             self._compile_menu(item)
         elif action == "library":
@@ -3242,6 +3248,14 @@ class ChatView:
             self.env.open_output(folder)
         else:
             self.notify("No output folder for this chat yet")
+
+    async def _migrate_job_to_pc(self, item: Any) -> None:
+        migrate = getattr(self.env, "migrate_job", None)
+        if migrate is None:
+            self.notify("Job migration is unavailable in this session")
+            return
+        folder = await self.env.run_io(self._job_workspace, item)
+        await migrate(folder, self._turn_source(item))
 
     def _open_output_file(self, path: str, kind: str, item: Any = None) -> Optional[ActionSheet]:
         """An output chip: Open (the Reader for the turn's EPUB, the text editor for text, subtitle,

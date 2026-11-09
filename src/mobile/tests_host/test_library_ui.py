@@ -314,6 +314,10 @@ def test_continue_button_only_from_m_up_and_the_title_shrinks_to_fit_two_lines()
     stacks = {card: card.control.content.content.controls[0] for card in (small, large)}
     assert not [c for c in stacks[small].controls if c.key == "continue"]
     assert [c for c in stacks[large].controls if c.key == "continue"]
+    unread = build_card(_book("in_progress"), key="unread", bid="u", can_read=True)
+    unread_large = BookCard(unread, card_w=180, cover_h=260)
+    unread_stack = unread_large.control.content.content.controls[0]
+    assert next(c for c in unread_stack.controls if c.key == "continue").content.tooltip == "Start reading"
     title = large.control.content.content.controls[1]
     assert title.key == "title" and title.size == large.title_size() and title.max_lines == 2
 
@@ -745,7 +749,7 @@ def test_library_home_shelves_selection_and_delete_levels(tmp_path):
         page.update()
         assert screen.selection_bar.count_text.value == "2 selected" and screen.bulk_bar.control.visible
         labels = [a.label for a in screen.bulk_bar.actions]
-        assert labels[:4] == ["Load 2 for translation", "Translate Metadata for 0 EPUBs", "Compile", "Delete 2"]
+        assert labels[:4] == ["Load Translation", "Translate Metadata", "Compile", "Delete 2"]
         assert "Delete glossary files (2)" in labels and "Restore glossary backup" in labels
         assert "Clear saved raw link (for 2 items)" in labels and "Share" in labels
         assert "Organize selected" not in labels
@@ -2099,7 +2103,7 @@ def test_card_model_for_book_list_row_and_cover_queue_are_shared(tmp_path):
         screen.get_body()
         model = screen._card_model(key)
         assert model == card_model_for(service, alpha, views=snap.views, raw_titles=False, dark=screen.ctx.dark,
-                                       has_continue=True)
+                                       has_continue=True, can_read=True)
         screen.dispose()
 
     asyncio.run(scenario())

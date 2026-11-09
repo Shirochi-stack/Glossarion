@@ -190,6 +190,9 @@ class OverviewTab:
         self.continue_button = ft.OutlinedButton(content="", icon=ft.Icons.PLAY_ARROW, on_click=self._on_continue,
                                                  visible=False, key="ov-continue")
         self.icon_row = ft.Row(wrap=True, spacing=0, key="ov-icons")
+        self.migrate_button = ft.TextButton(content="🖥 Migrate Job to PC", visible=False,
+                                            on_click=lambda e: self.ctx.spawn(self.page.output.migrate_job()),
+                                            key="ov-migrate-job")
         self.synopsis_text = ft.Text(NO_SYNOPSIS, max_lines=4, overflow=ft.TextOverflow.ELLIPSIS, selectable=True,
                                      key="ov-synopsis")
         self.synopsis_toggle = ft.TextButton(content="More", on_click=self._toggle_synopsis, visible=False,
@@ -210,6 +213,7 @@ class OverviewTab:
             self.strip,
             ft.Row([self.read_button, self.raw_button, self.continue_button], wrap=True, spacing=8, run_spacing=6),
             self.icon_row,
+            self.migrate_button,
             self.error_text,
         ]
         self.right_items = [
@@ -308,6 +312,7 @@ class OverviewTab:
             for key, label_text in _METADATA_ROWS
         ]
         has_workspace = bool(pm.book_workspace(service, book))
+        self.migrate_button.visible = has_workspace
         self.edit_button.disabled = not has_workspace
         self.edit_button.tooltip = None if has_workspace else "No output workspace yet"
         self.tags_row.controls = [ft.Chip(label=ft.Text(tag), key=f"tag-{i}") for i, tag in enumerate(values["tags"])]
@@ -446,7 +451,10 @@ class OverviewTab:
 
     def _on_read(self, e: Any = None) -> None:
         label = str(self.read_button.content or "")
-        self.page.open_reader(mode="original" if "raw" in label.lower() else "translated")
+        if "raw" in label.lower():
+            self.page.open_reader(mode="original", raw_only=True)
+        else:
+            self.page.open_reader()
 
     def _on_read_raw(self, e: Any = None) -> None:
         self.page.open_reader(mode="original", raw_only=True)

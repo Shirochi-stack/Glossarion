@@ -1013,6 +1013,14 @@ def test_resolve_qa_prefers_the_llm_token_repair_like_the_desktop_menu(tmp_path)
     pa.build_partial_b_request = lambda data, info: None
     assert pm.plan_action(service, view, "resolve_qa", [row]).refusal == "This chapter has no resolvable QA issue."
 
+    for kind in ("glossary_name_mismatch", "glossary_name_variant"):
+        marked = _row(output_file="response_ch002.html", info={"qa_issues_found": [f"{kind} (Wal → Val)"]})
+        pa.row_actions = lambda *_args: ["open_file"]
+        assert "resolve_qa" in pm.row_action_ids(service, view, marked)
+        names = pm.plan_action(service, view, "resolve_qa", [marked])
+        assert names.refusal is None and names.extra == {
+            "glossary_name_file": "response_ch002.html", "output_dir": str(out), "progress_path": "p.json"}
+
 
 def test_reset_tts_marks_skip_cleanup_like_the_desktop(tmp_path):
     from glossarion_mobile.ui.library import progress_model as pm

@@ -1,8 +1,7 @@
 """Check glossary names (QA Scanner, experimental; desktop QA Scanner settings › "Check glossary names
 in existing output…").
 
-Opened from the QA screen when Settings › QA Scanner Settings › "Check glossary names with NER
-(Experimental)" is on. It scans the chosen folders on the io pool
+Opened from the QA screen or from a chapter's Resolve QA action. It scans the chosen folders on the io pool
 (``glossary_name_check.review_folder``: the folder's glossary with the Emergency Glossary Compliance
 entry types / minimum length, chapters matched to their sources through translation_progress.json +
 chapters_full.json) and lists every name that differs from the glossary as ☐ "Found → Glossary
@@ -16,6 +15,7 @@ text (never inside tags), backing each file up to ``glossary_name_check_backup``
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 from typing import Any, Optional, Sequence
@@ -24,15 +24,13 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
+from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, scroll_sheet, sheet_frame
 from glossarion_mobile.ui.tools.common import ask, hint_text, section_header
 
-__all__ = ["CHECK_KEY", "GlossaryNameFixSheet", "NER_KEY", "chapters_at_once", "check_enabled", "name_check_scope",
-           "use_ner"]
+__all__ = ["GlossaryNameFixSheet", "NER_KEY", "chapters_at_once", "name_check_scope", "use_ner"]
 
 log = logging.getLogger("glossarion.tools.qa")
 
-CHECK_KEY = ("qa_scanner_settings", "check_glossary_names")
 NER_KEY = "glossary_name_check_use_ner"
 SCOPE_KEYS = ("emergency_glossary_compliance_mode", "emergency_glossary_compliance_custom_types",
               "glossary_name_check_min_chars", "glossary_name_check_autofix_level",
@@ -43,10 +41,6 @@ TITLE = "Check Glossary Names"
 INTRO = ("Checked rows are replaced with the glossary name. Rows are pre-checked when one close spelling of a "
          "character name was found; review the others before checking them. Each changed file is backed up to "
          "glossary_name_check_backup first.")
-
-
-def check_enabled(ctx: Any) -> bool:
-    return bool(ctx.cfg(CHECK_KEY, False))
 
 
 def name_check_scope(ctx: Any) -> dict:
@@ -109,7 +103,8 @@ async def offer_ner_download(ctx: Any, manager: Any = None) -> bool:
 
 
 def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
-                state: Optional[dict] = None, layer_settings: Optional[dict] = None, chosen: int = 0) -> list:
+                state: Optional[dict] = None, layer_settings: Optional[dict] = None, chosen: int = 0,
+                output_file: str = "", progress_path: Optional[str] = None) -> list:
     """Review every folder on a worker thread; ``state`` gets the progress text and fraction
     (``text`` / ``value``, None = indeterminate) that ``GlossaryNameFixSheet.scan`` shows. ``chosen``:
     Settings › "Chapters checked at once" (``chapters_at_once``; 0 = Auto)."""
@@ -133,14 +128,29 @@ def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
 
         state.update(text="Scanning…", value=None)
         reviews.append(name_check.review_folder(folder, scope, ner=ner, progress=on_chapter, workers=workers,
-                                                settings=layer_settings))
+                                                settings=layer_settings, progress_path=progress_path,
+                                                selected_files=[output_file] if output_file else None))
     return reviews
 
 
+def _preview_snippets(folder: str, output_file: str, finding: Any, progress_path: Optional[str]) -> tuple:
+    import glossary_name_check as name_check
+
+    with open(os.path.join(folder, output_file), encoding="utf-8", errors="ignore") as handle:
+        markup = handle.read()
+    if output_file in name_check.TITLE_FILES:
+        return name_check.finding_snippets(html.escape(markup), finding), None
+    source = name_check.source_chapters_for_folder(folder, progress_path).get(output_file, "")
+    return name_check.finding_snippets(markup, finding), name_check.source_snippets(source, finding)
+
+
 class GlossaryNameFixSheet:
-    def __init__(self, ctx: Any, folders: Sequence[str]) -> None:
+    def __init__(self, ctx: Any, folders: Sequence[str], *, output_file: str = "",
+                 progress_path: Optional[str] = None) -> None:
         self.ctx = ctx
         self.folders = [str(f) for f in folders if f]
+        self.output_file = output_file
+        self.progress_path = progress_path
         self.reviews: list = []
         self.rows: list = []  # (checkbox, folder, output file, finding)
         self.applied: Optional[dict] = None
@@ -156,7 +166,8 @@ class GlossaryNameFixSheet:
         footer = ft.Row([self.check_all, self.uncheck_all, self.apply_button], alignment=ft.MainAxisAlignment.END,
                         wrap=True, spacing=8)
         body = scroll_column([
-            ft.Text(TITLE, theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
+            ft.Text("Resolve QA issue · Glossary names" if output_file else TITLE,
+                    theme_style=ft.TextThemeStyle.TITLE_LARGE, weight=ft.FontWeight.W_600),
             hint_text(INTRO),
             self.progress,
             self.status,
@@ -182,11 +193,15 @@ class GlossaryNameFixSheet:
         with_ner = use_ner(self.ctx)
         state: dict = {}
         if with_ner and ner_needs_download():
-            state.update(text="Downloading the named-entity model (NER, 104 MB)…", value=None)
+            with_ner = self._page is not None and await ask(
+                self.ctx, TITLE, "Download the 104 MB named-entity model for this check?",
+                [("heuristic", "Use capitalization", "text"), ("download", "Download model", "filled")],
+                key="gn-ner-download") == "download"
         try:
             task = asyncio.ensure_future(
                 self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner, state,
-                            glossary_layer_settings(self.ctx), chapters_at_once(self.ctx)))
+                            glossary_layer_settings(self.ctx), chapters_at_once(self.ctx),
+                            self.output_file, self.progress_path))
             shown = None
             while not task.done():
                 current = (state.get("text"), state.get("value"))
@@ -229,9 +244,12 @@ class GlossaryNameFixSheet:
                     total += 1
                     box = ft.Checkbox(
                         label=f"{' / '.join(finding.variants)} → {finding.expected}  ×{finding.occurrences}",
-                        value=finding.fixable, key=f"gn-row-{len(self.rows)}")
+                        value=finding.fixable and not self.output_file, key=f"gn-row-{len(self.rows)}")
                     self.rows.append((box, review.folder, chapter.output_file, finding))
-                    controls.append(box)
+                    controls.append(ft.Row([ft.Container(content=box, expand=True), ft.IconButton(
+                        icon=ft.Icons.VISIBILITY, tooltip="Preview translation and raw source",
+                        on_click=lambda e, folder=review.folder, name=chapter.output_file, found=finding:
+                        self.ctx.spawn(self.preview(folder, name, found)), key=f"gn-preview-{len(self.rows) - 1}")]))
         self.results.controls = controls
         self.progress.visible = False
         if total:
@@ -244,6 +262,32 @@ class GlossaryNameFixSheet:
             button.disabled = not self.rows
         self.ctx.push(self.results, self.progress, self.status, self.check_all, self.uncheck_all,
                       self.apply_button)
+
+    async def preview(self, folder: str, output_file: str, finding: Any) -> Any:
+        try:
+            translated, source = await self.ctx.io(_preview_snippets, folder, output_file, finding,
+                                                   self.progress_path)
+        except OSError as exc:
+            self.ctx.say(f"Could not open the preview: {exc}")
+            return None
+        if self._page is not None and not self.sheet.open:
+            return None
+        controls = [ft.Text(f"{' / '.join(finding.variants)} → {finding.expected}", selectable=True),
+                    hint_text(f"{finding.raw} · {finding.entry_type} · {finding.origin or 'Book glossary'}")]
+        for label, snippets in (("In the translation", translated), ("In the raw source chapter", source)):
+            if snippets is None:
+                continue
+            controls.append(section_header(label))
+            if not snippets:
+                controls.append(hint_text("No matching text found."))
+            for before, match, after in snippets:
+                controls.append(ft.Text(spans=[ft.TextSpan(before), ft.TextSpan(
+                    match, style=ft.TextStyle(weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)),
+                    ft.TextSpan(after)], selectable=True))
+        preview = scroll_sheet(f"Preview — {output_file}", controls, key="gn-preview")
+        if self.ctx.page is not None:
+            self.ctx.page.show_dialog(preview)
+        return preview
 
     def set_all(self, value: bool) -> None:
         for row in self.rows:

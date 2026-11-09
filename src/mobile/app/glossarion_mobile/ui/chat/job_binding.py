@@ -224,8 +224,9 @@ def running_label(snapshot: Any, *, waiting_for_glossary: bool = False, refining
         return "Waiting for your glossary decision"
     if state in ("QUEUED", "STARTING"):
         return STARTING_LABEL
-    if str(_get(snapshot, "phase", "") or "") == INDEXING:
-        return INDEXING
+    phase = _get(snapshot, "phase", "")
+    if phase in (INDEXING, "Multipass QA scan", "Multipass refinement"):
+        return phase
     last = str(_get(snapshot, "last_line", "") or "").lower()
     if "glossary" in last and ("extract" in last or "generat" in last):
         return "Generating glossary…"

@@ -556,3 +556,28 @@ def test_owner_flow_chat_runs_follow_the_multipass_setting(phone):
 
     with FakeLLMServer() as server:
         asyncio.run(scenario(server))
+
+
+@needs_runs
+def test_partial_multipass_scans_mobile_chat_attachments(monkeypatch):
+    import TransateKRtoEN as backend
+    import qa_scan_runtime
+
+    monkeypatch.setenv("GLOSSARION_MOBILE", "1")
+    monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "1")
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    calls = []
+
+    def scan(_folder, *, allow_direct_text, **_kwargs):
+        calls.append(allow_direct_text)
+        return ["finished"]
+
+    monkeypatch.setattr(qa_scan_runtime, "run_qa_scan_path", scan)
+    for ordered in ("1", "0"):
+        monkeypatch.setenv("DIRECT_TEXT_ORDERED_BATCH", ordered)
+        assert backend._run_multipass_refinement_qa_scan(
+            "Direct Text/Book", stop_flag=lambda: False, mode="quick-scan", qa_settings={},
+            epub_path="Book.epub", progress_path="progress.json", config={},
+        ) == ["finished"]
+    assert calls == [True, False]

@@ -1182,7 +1182,8 @@ class FolderReview:
     problem: str = ""  # why nothing could be checked (NO_GLOSSARY / NO_ENTRIES / NO_SOURCES)
 
 
-def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None, workers=None, settings=None):
+def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None, workers=None, settings=None,
+                  selected_files=None, progress_path=None):
     """Scan one output folder for the review dialog (desktop QA Scanner, Glossarion Mobile): its
     chapters, then the chapter titles, TOC and book metadata (``check_titles``)."""
     review = FolderReview(folder=folder_path)
@@ -1195,12 +1196,13 @@ def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None, wor
     if not entries:
         review.problem = NO_ENTRIES
         return review
-    has_titles = any(os.path.isfile(os.path.join(folder_path, name)) for name in TITLE_FILES)
-    if not source_chapters_for_folder(folder_path) and not has_titles:
+    has_titles = selected_files is None and any(os.path.isfile(os.path.join(folder_path, name)) for name in TITLE_FILES)
+    if not source_chapters_for_folder(folder_path, progress_path) and not has_titles:
         review.problem = NO_SOURCES
         return review
-    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner, progress=progress, workers=workers)
-    if not (stop is not None and stop()):
+    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner, progress=progress, workers=workers,
+                                  selected_files=selected_files, progress_path=progress_path)
+    if has_titles and not (stop is not None and stop()):
         review.chapters += check_titles(folder_path, entries, ner=ner)
     return review
 

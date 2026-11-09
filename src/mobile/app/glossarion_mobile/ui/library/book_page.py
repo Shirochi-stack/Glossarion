@@ -210,11 +210,15 @@ class BookPageScreen(Screen):
             item("Translate Metadata", lambda: self.ctx.spawn(self.translate_metadata()), ft.Icons.LABEL,
                  self.metadata_reason() is not None),
             item("QA scan", lambda: self.ctx.go("tools.qa", None, {"out": self.bid}), ft.Icons.FACT_CHECK),
+            item("Check glossary names in existing output…", self.open_glossary_name_check,
+                 ft.Icons.SPELLCHECK, not has_workspace),
             item("Edit metadata.json", lambda: self.ctx.go("library.book.metadata", {"bid": self.bid}),
                  ft.Icons.DATA_OBJECT, not has_workspace),
             item("Files", self.open_files, ft.Icons.FOLDER_OPEN, not has_workspace),
             # the Library card ⋯ › ↗ Share (a card tap opens this page, it no longer shares)
             item("↗ Share", lambda: self.ctx.spawn(self.share()), ft.Icons.IOS_SHARE),
+            item("🖥 Migrate Job to PC", lambda: self.ctx.spawn(self.output.migrate_job()),
+                 ft.Icons.DESKTOP_WINDOWS, not has_workspace),
             # U9 (UI_SPEC §3.12): reload every tab from disk (the Chapters ⋯ and the Glossary tab have it too)
             item("⟳ Refresh", lambda: self.ctx.spawn(self.full_refresh()), ft.Icons.REFRESH),
             item("Clear saved raw link", lambda: self.ctx.spawn(self.clear_raw_link()), ft.Icons.LINK_OFF),
@@ -717,6 +721,13 @@ class BookPageScreen(Screen):
     async def share(self) -> bool:
         """⋯ › ↗ Share: the book's file to another app (``LibraryContext.share_books``, as the card ⋯)."""
         return bool(await self.ctx.share_books([self.book]))
+
+    def open_glossary_name_check(self) -> Any:
+        from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
+
+        folder = self.workspace
+        if folder and self.ctx.page is not None:
+            return GlossaryNameFixSheet(self.ctx, [folder]).show(self.ctx.page)
 
     def open_files(self) -> None:
         folder = self.workspace

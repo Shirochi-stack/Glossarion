@@ -1840,12 +1840,18 @@ def _run_multipass_refinement_qa_scan(
     from qa_scan_runtime import run_qa_scan_path
 
     qa_log = _BufferedQAScanLog()
+    scan_stopped = threading.Event()
 
     def _scan():
+        mobile_attachment = (
+            os.environ.get("GLOSSARION_MOBILE") == "1"
+            and os.environ.get("DIRECT_TEXT_ACTIVE") == "1"
+            and os.environ.get("DIRECT_TEXT_ORDERED_BATCH") == "1"
+        )
         return run_qa_scan_path(
             folder_path,
             log=qa_log,
-            stop_flag=stop_flag,
+            stop_flag=lambda: scan_stopped.is_set() or _multipass_stop_requested(stop_flag),
             mode=mode,
             qa_settings=qa_settings,
             epub_path=epub_path,
@@ -1853,6 +1859,7 @@ def _run_multipass_refinement_qa_scan(
             text_file_mode=None,
             progress_path=progress_path,
             config=config,
+            allow_direct_text=mobile_attachment,
         )
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MultipassQAScan")
@@ -1867,13 +1874,15 @@ def _run_multipass_refinement_qa_scan(
             # shared stop flags underneath a still-running multipass phase.
             if _multipass_hard_stop_requested(stop_flag):
                 hard_stopped = True
+                scan_stopped.set()
                 print("⏹️ Force stop requested during multipass QA scan; abandoning scan wait.")
                 break
             if _multipass_graceful_stop_requested() and not graceful_announced:
                 graceful_announced = True
+                scan_stopped.set()
                 print("⏳ Graceful stop requested during multipass QA scan; waiting for active scan work to finish...")
             time.sleep(0.05)
-        while qa_log.flush(force=True):
+        while not hard_stopped and qa_log.flush(force=True):
             time.sleep(0.01)
         if future.done():
             return future.result()
@@ -19642,6 +19651,7 @@ def _text_has_foreign_characters_for_partial_refinement(text, qa_settings) -> bo
         has_issue, issues = detect_non_english_content(
             _partial_refinement_detection_text(text, qa_settings),
             _partial_refinement_detection_settings(qa_settings),
+            check_language=False,
         )
         return bool(has_issue and any(_is_foreign_character_qa_issue(issue) for issue in issues))
     except Exception:
@@ -19656,6 +19666,7 @@ def _foreign_character_qa_issues_for_partial_refinement_text(text, qa_settings):
         has_issue, issues = detect_non_english_content(
             _partial_refinement_detection_text(text, qa_settings),
             _partial_refinement_detection_settings(qa_settings),
+            check_language=False,
         )
     except Exception:
         return []

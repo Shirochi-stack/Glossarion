@@ -118,6 +118,7 @@ def test_owner_report_11_every_segment_shows_its_own_text(phone, kind):
         if kind == "in_progress":
             phone.book = _in_progress_book(phone.tmp / "progress")
         await phone.start()
+        phone.app.config_store.set("epub_reader_show_raw", True)
         engine = D1._engine(phone)
         client = D1._attach_webview(phone, engine)
         try:
@@ -135,6 +136,13 @@ def test_owner_report_11_every_segment_shows_its_own_text(phone, kind):
             await _switch(phone, client, screen, turns, TRANSLATED, 0)
             await _switch(phone, client, screen, turns, BILINGUAL, 0)
             await _switch(phone, client, screen, turns, ORIGINAL, 0)
+            assert phone.app.prefs.reader_position(screen.bid)["mode"] == ORIGINAL
+            await D1._leave(phone, screen)
+            screen = await D1._open(phone, chapter=0)
+            session = screen.session
+            assert session.flavor == ORIGINAL and screen.chrome.mode_buttons.selected == [ORIGINAL]
+            turns = D1.Turns(phone, client, screen)
+            await turns.page_ready(set(), 0)
             await _switch(phone, client, screen, turns, TRANSLATED, 0)
             if kind == "in_progress":
                 # chapter 4 has no translation yet: Bilingual is off, Original shows the raw text

@@ -725,6 +725,40 @@ def test_size_checks_refuse_before_any_request(env, send, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_migrate_job_uploads_the_workspace_and_raw_file(env, gofile):
+    import io
+    import zipfile
+
+    svc = _service(env, providers={"gofile": gofile.provider()})
+    workspace, _ = _book(env, data=b"compiled")
+    folder = Path(workspace)
+    (folder / "translation_progress.json").write_bytes(b'{"chapters":{}}')
+    (folder / "nested").mkdir()
+    (folder / "nested" / "response.html").write_bytes(b"translated")
+    raw = env["Library"] / "Raw.epub"
+    raw.write_bytes(b"source")
+    assert not svc.eligible(folder / "arbitrary.zip")
+
+    async def run():
+        await _enable(svc, "gofile")
+        path = await svc.prepare_migration(workspace, str(raw))
+        assert svc.eligible(path)
+        result = await svc.upload("gofile", path, book=workspace)
+        assert result.name == "Novel.zip"
+        assert [link.id for link in await svc.links_for(book=workspace)] == [result.id]
+
+    asyncio.run(run())
+    remote = next(iter(gofile.folders.values()))["content"]
+    with zipfile.ZipFile(io.BytesIO(remote)) as archive:
+        assert archive.testzip() is None
+        assert {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")} == {
+            "Output/Novel/Novel.epub": b"compiled",
+            "Output/Novel/translation_progress.json": b'{"chapters":{}}',
+            "Output/Novel/nested/response.html": b"translated",
+            "Raw/Raw.epub": b"source",
+        }
+
+
 def test_gofile_upload_reuses_one_guest_account_and_deletes_the_folder(env, gofile, caplog):
     caplog.set_level(logging.DEBUG)
     svc = _service(env, providers={"gofile": gofile.provider()})

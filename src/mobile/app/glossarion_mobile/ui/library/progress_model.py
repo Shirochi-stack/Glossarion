@@ -572,7 +572,20 @@ def row_action_ids(service: Any, view: ProgressView, row: RowVM, selected: Seque
         ids = fn(state.owner, state.data, row.info, [r.info for r in selected] or None)
     except Exception:
         return None
-    return {_ROW_ACTION_IDS.get(i, i) for i in ids}
+    actions = {_ROW_ACTION_IDS.get(i, i) for i in ids}
+    if _has_glossary_name_issue(row.info):
+        actions.add("resolve_qa")
+    return actions
+
+
+def _has_glossary_name_issue(info: Mapping[str, Any]) -> bool:
+    entry = info.get("info")
+    if not isinstance(entry, Mapping):
+        return False
+    issues = entry.get("qa_issues_found") or ()
+    if isinstance(issues, str):
+        issues = (issues,)
+    return any(str(issue).startswith(("glossary_name_mismatch", "glossary_name_variant")) for issue in issues)
 
 
 @dataclass
@@ -640,6 +653,13 @@ def plan_action(service: Any, view: ProgressView, action: str, rows: Sequence[Ro
         # (``_start_single_progress_qa_resolution``).
         info = infos[0]
         entry = info.get("info") if isinstance(info.get("info"), dict) else {}
+        output_dir = state.data.get("output_dir") or ""
+        if _has_glossary_name_issue(info):
+            path = exact_output_path(output_dir, info)
+            if path:
+                return ActionPlan(action, [info], 1, extra={"glossary_name_file": os.path.basename(path),
+                                  "output_dir": output_dir, "progress_path": state.data.get("progress_file")})
+            return ActionPlan(action, refusal="The chapter's translated output file is missing.")
         has_llm_token = service.core.fn("progress_core", "_progress_entry_has_llm_token_qa")
         if has_llm_token is not None and has_llm_token(entry):
             return ActionPlan(action, [info], 1,

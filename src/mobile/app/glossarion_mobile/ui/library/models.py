@@ -273,6 +273,7 @@ class CardModel:
     selected: bool = False
     signature: Any = None
     tooltip: str = ""
+    can_read: bool = False
 
     @property
     def semantics(self) -> str:
@@ -377,6 +378,7 @@ def build_card(
     dark: bool = True,
     badge_text: Optional[str] = None,
     size_label: Optional[str] = None,
+    can_read: bool = False,
 ) -> CardModel:
     """The ``CardModel`` of one scanned book (``badge_text`` / ``size_label``: the shared
     ``card_type_badge`` / ``card_size_text`` strings when the core has them)."""
@@ -416,6 +418,7 @@ def build_card(
         selected=selected,
         signature=signature,
         tooltip=name if not raw_titles else f"{title}\n{name}",
+        can_read=can_read,
     )
 
 
@@ -430,6 +433,7 @@ def card_model_for(
     has_continue: bool = False,
     key: Optional[str] = None,
     signatures: Optional[Mapping[str, Any]] = None,
+    can_read: bool = False,
 ) -> CardModel:
     """The ``CardModel`` the Library renders for ``book``, from the ``LibraryService`` (route id, the
     shared card badge / size label, the raw title when ``raw_titles`` is on, the compiling ribbon) and
@@ -444,7 +448,7 @@ def card_model_for(
         book, key=key, bid=service.bid_for(book), view=(views or {}).get(key), raw_titles=raw_titles,
         raw_title=service.raw_title(book) if raw_titles else None, compiling=service.is_compiling(book),
         has_continue=has_continue, selected=selected, signature=signatures.get(key), dark=dark,
-        badge_text=badge, size_label=size)
+        badge_text=badge, size_label=size, can_read=can_read)
 
 
 # ---------------------------------------------------------------------------

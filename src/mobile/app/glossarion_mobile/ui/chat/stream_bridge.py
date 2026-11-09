@@ -13,7 +13,7 @@ number and model) and feeds it every raw log line of the job, including the toke
 payloads the job log suppresses. ``RunStream`` reads it through ``provider`` (the
 chat binds ``JobService.request_stream(job_id)``; None while the job is queued):
 
-* ``drain(final=False)`` - classify the queued lines (UI loop tick, the desktop's
+* ``drain(final=False)`` - classify the queued lines (worker tick, the desktop's
   12 ms / 1200-record budget); bumps ``version`` when the cards changed;
 * ``segments()`` - copies of the live segment dicts (label, phase, content,
   thinking, thinking_tokens, text_tokens, complete, status_only, order_key, ...) as
@@ -116,6 +116,8 @@ class RunStream:
         self.auto_scroll_disabled = auto_scroll_disabled
         self._lock = threading.RLock()
         self._signature: Any = None
+        self.display_segments: tuple = ()
+        self.display_characters = 0
         self.version = 0
 
     def model(self) -> Any:
@@ -140,15 +142,15 @@ class RunStream:
     def drain(self, final: bool = False) -> bool:
         """Classify the queued log lines; True when the cards changed since the last drain.
 
-        ``final=False`` (UI tick) is the desktop's budget (12 ms / 1200 records per call); the
-        unbudgeted ``final=True`` belongs on a worker thread (finishing the run)."""
+        The display snapshot lets the UI repaint without waiting for the job's stream lock."""
         model = self.model()
         if model is None:
             return False
         with self._lock:
             try:
                 model.drain(final=final)
-                signature = self._cards_signature(_model_segments(model))
+                segments = _model_segments(model)
+                signature = self._cards_signature(segments)
             except Exception:
                 log.exception("stream drain failed")
                 return False
@@ -156,6 +158,8 @@ class RunStream:
             self._signature = signature
             if changed:
                 self.version += 1
+                self.display_segments = tuple(segments)
+                self.display_characters = sum(row[2] + row[3] for row in signature)
             return changed
 
     def segments(self) -> list:
@@ -176,4 +180,4 @@ class RunStream:
         return sum(len(str(s.get("content", "") or "")) + len(str(s.get("thinking", "") or "")) for s in self.segments())
 
     def render_interval_ms(self) -> int:
-        return stream_render_interval_ms(self.active_characters(), self.auto_scroll_disabled)
+        return stream_render_interval_ms(self.display_characters, self.auto_scroll_disabled)

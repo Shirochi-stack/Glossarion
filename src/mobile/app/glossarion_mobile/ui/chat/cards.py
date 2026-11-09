@@ -48,7 +48,7 @@ from glossarion_mobile.ui.chat.job_binding import CardPhase
 from glossarion_mobile.ui.chat.stream_bridge import request_label_text, segment_processing_label
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.tap_away import closes_on_tap_away
-from glossarion_mobile.ui.screens.cloud_sync import NO_SERVICE_REASON, SHARE_LABEL, reason_detail, status_row
+from glossarion_mobile.ui.screens.cloud_sync import MIGRATE_LABEL, NO_SERVICE_REASON, SHARE_LABEL, reason_detail, status_row
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
 __all__ = [
@@ -89,6 +89,7 @@ _MUTED = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
 ATTACHMENT_ACTIONS = (
     ("read", "Read", "AUTO_STORIES", None),
     ("export", "Share / Export", "IOS_SHARE", None),
+    ("migrate_job", MIGRATE_LABEL, "DESKTOP_WINDOWS", None),
     ("compile", "Compile ▾", "MENU_BOOK", None),
     ("qa", "QA scan", "FACT_CHECK", None),
     ("open_output", "Open output", "FOLDER_OPEN", None),
@@ -1064,6 +1065,8 @@ class JobCard(ft.Container):
         """Every request of the turn; the newest ``shown_rows`` are rows ("Requests (N)" counts them all,
         "↑ Show … earlier requests" pages back). A row whose segment did not change stays the same
         control, so a live repaint re-sends only the requests that moved."""
+        if not force and not getattr(self, "_rows_stale", False) and segments == self.request_segments:
+            return
         self.request_segments = list(segments)
         total = len(self.request_segments)
         self.requests_tile.title = f"Requests ({total})"

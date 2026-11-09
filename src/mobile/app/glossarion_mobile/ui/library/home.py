@@ -418,7 +418,8 @@ class LibraryScreen(Screen):
         book = self.books_by_key.get(key) or self._book(key)
         return card_model_for(self.service, book, key=key, views=self.snapshot.views,
                               signatures=self.snapshot.signatures, raw_titles=self.raw_titles, dark=self.ctx.dark,
-                              selected=key in self.selected[self.shelf], has_continue=self._has_continue(book))
+                              selected=key in self.selected[self.shelf], has_continue=self._has_continue(book),
+                              can_read=bool(reader_actions(book)) or bool(self.service.workspace_for(book)))
 
     def _make_card(self, key: str) -> Any:
         model = self._card_model(key)
@@ -737,10 +738,10 @@ class LibraryScreen(Screen):
         if not epubs:
             metadata_reason = "No raw EPUB resolves for the selection"
         primary = [
-            BulkAction("translate", f"Load {count} for translation" if count != 1 else "Load for translation",
+            BulkAction("translate", "Load Translation",
                        "TRANSLATE", lambda: self.ctx.spawn(open_translate_sheet(self.ctx, books)),
                        None if with_raw else "No raw source file resolves for the selection"),
-            BulkAction("metadata", f"Translate Metadata for {len(epubs)} EPUB{'s' if len(epubs) != 1 else ''}",
+            BulkAction("metadata", "Translate Metadata",
                        "LABEL", lambda: self.ctx.spawn(self.translate_metadata(epubs)), metadata_reason),
             BulkAction("compile", "Compile", "MENU_BOOK", lambda: self.compile_menu(workspaces),
                        None if workspaces else "No output workspace in the selection"),
@@ -828,7 +829,7 @@ class LibraryScreen(Screen):
             items.append(ActionItem("\U0001f4d6 Open in Reader", lambda: None, icon="AUTO_STORIES",
                                     disabled_reason=reason))
         items += [
-            ActionItem("\U0001f501 Load for translation",
+            ActionItem("\U0001f501 Load Translation",
                        lambda: self.ctx.spawn(open_translate_sheet(self.ctx, [book])), icon="TRANSLATE",
                        disabled_reason=None if has_raw else "The raw source file can't be found"),
             ActionItem("\U0001f310 Translate Metadata", lambda: self.ctx.spawn(self.translate_metadata([book])),
@@ -844,6 +845,8 @@ class LibraryScreen(Screen):
             ActionItem("\U0001f4c1 Files", lambda: self.open_files(book), icon="FOLDER_OPEN",
                        disabled_reason=None if folder else "No output folder"),
             ActionItem("↗ Share", lambda: self.ctx.spawn(self.share_books([book])), icon="IOS_SHARE"),
+            ActionItem("🖥 Migrate Job to PC", lambda: self.ctx.spawn(self.ctx.migrate_job(book, folder)),
+                       icon="DESKTOP_WINDOWS", disabled_reason=None if folder else "No output folder"),
             ActionItem("\U0001f4cb Copy Path", lambda: self.copy_path(book), icon="CONTENT_COPY",
                        disabled_reason=None if self._developer() else "Developer setting"),
             ActionItem("✂️ Clear saved raw link", lambda: self.ctx.spawn(clear_raw_link_flow(self.ctx, [book])),
@@ -966,6 +969,8 @@ class LibraryScreen(Screen):
             return []
         if not imported:
             return []
+        count = len(imported)
+        self.ctx.say(f"Imported {count} file{'s' if count != 1 else ''}")
         self.service.mark_dirty()
         await self.service.refresh(reason="import")
         return imported

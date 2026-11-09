@@ -10,8 +10,8 @@ What it does, and what it never does:
   never retried by themselves (the Gofile 429 rule in ``share_providers.gofile`` is the one
   exception the critic allows). transfer.it is a browser handoff (``start_handoff`` +
   ``add_pasted_link``): Glossarion makes no request to transfer.it.
-* Only book outputs qualify (``eligible``): EPUB/PDF/TXT/HTML/CBZ under the Library or Output
-  folders - never a config or key export, nothing from the data folder (config, Inbox).
+* Compiled book files under the Library or Output folders qualify, as do the workspace and raw
+  source ZIPs staged by the user's Migrate Job to PC action.
 * Before an upload the file is copied to a private snapshot in the app cache (hashing it on the
   way), so a compile that rewrites the EPUB meanwhile cannot tear the upload; the snapshot is
   removed afterwards (and stale ones at the next start).
@@ -46,6 +46,7 @@ import secrets as _secrets
 import shutil
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
@@ -810,6 +811,9 @@ class ShareLinkService:
     def eligible(self, path: Any) -> bool:
         """A book output the user may share by link (no IO beyond path resolution)."""
         text = os.fspath(path) if path else ""
+        if text.lower().endswith(".zip"):
+            migration_root = os.path.join(self.snapshot_root, "migration")
+            return _under(_norm(os.path.realpath(text)), _norm(os.path.realpath(migration_root)))
         if not text or os.path.splitext(text)[1].lower() not in ELIGIBLE_EXTENSIONS:
             return False
         if not self.allowed_roots:
@@ -819,6 +823,55 @@ class ShareLinkService:
         except OSError:
             return False
         return any(_under(real, root) or _under(real, _norm(os.path.realpath(root))) for root in self.allowed_roots)
+
+    async def prepare_migration(self, workspace: str, raw: str) -> str:
+        """Stage a ZIP for the provider picker. The startup snapshot sweep removes it after this session."""
+        await self.load()
+        return await self._io(self._prepare_migration, workspace, raw)
+
+    def _prepare_migration(self, workspace: str, raw: str) -> str:
+        if not workspace or not os.path.isdir(workspace):
+            raise ShareError("missing_file", "This book has no output folder yet.")
+        if not raw or not os.path.isfile(raw):
+            raise ShareError("missing_file", "Re-link the raw source file before migrating this book.")
+        workspace = os.path.realpath(workspace)
+        raw = os.path.realpath(raw)
+        if self.allowed_roots and not any(_under(_norm(workspace), _norm(os.path.realpath(root)))
+                                          and _norm(workspace) != _norm(os.path.realpath(root))
+                                          for root in self.allowed_roots):
+            raise ShareError("not_allowed", "This folder is outside the app's book workspaces.")
+        progress = Path(workspace) / "translation_progress.json"
+
+        def check_workspace() -> Optional[int]:
+            if self.is_busy is not None and self.is_busy(str(progress)):
+                raise ShareError("busy", "Wait for this book's job to finish before migrating it.")
+            return progress.stat().st_mtime_ns if progress.is_file() else None
+
+        def walk_error(error: OSError) -> None:
+            raise error
+
+        signature = check_workspace()
+        name = os.path.basename(workspace)
+        staging = Path(self.snapshot_root) / "migration" / _secrets.token_hex(8)
+        target = staging / f"{name}.zip"
+        try:
+            staging.mkdir(parents=True)
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=1, strict_timestamps=False) as archive:
+                for directory, subdirs, files in os.walk(workspace, onerror=walk_error):
+                    if any(os.path.islink(os.path.join(directory, item)) for item in (*subdirs, *files)):
+                        raise ShareError("not_allowed", "The output folder contains a symbolic link.")
+                    relative = Path(directory).relative_to(workspace)
+                    archive_dir = Path("Output") / name / relative
+                    archive.write(directory, archive_dir.as_posix())
+                    for file in files:
+                        archive.write(os.path.join(directory, file), (archive_dir / file).as_posix())
+                archive.write(raw, f"Raw/{os.path.basename(raw)}")
+            if signature != check_workspace():
+                raise ShareError("busy", "The book changed while its ZIP was being prepared. Try again.")
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return str(target)
 
     def menu(self, path: Any) -> list:
         """``[(ProviderState, disabled_reason)]`` for a "Share file via link" menu on ``path``."""

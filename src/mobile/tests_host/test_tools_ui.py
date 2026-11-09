@@ -1307,12 +1307,11 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, mo
         _conn, off_session = tb._fake_session("android")
         off = QaScannerScreen(parse_route("/tools/qa"), _ctx(off_session.page, store={}))
         _mount(off_session.page, off.get_body())
-        assert off.name_fix_button.visible is False  # the QA toggle is off by default
+        assert off.name_fix_button.visible and off.name_fix_button.disabled
         _conn, session = tb._fake_session("android")
         page = session.page
         # NER off: the host venv has no ONNX Runtime and the test must not download the 104 MB model
-        ctx = _ctx(page, store={"qa_scanner_settings": {"check_glossary_names": True},
-                                "emergency_glossary_compliance_mode": "all",
+        ctx = _ctx(page, store={"emergency_glossary_compliance_mode": "all",
                                 "glossary_name_check_use_ner": False})
         screen = QaScannerScreen(parse_route("/tools/qa"), ctx)
         _mount(page, screen.get_body())
@@ -1326,6 +1325,21 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, mo
         assert rows == [(True, "response_chapter0001.html", "Walter Argent → Valter Argent"),
                         (True, "response_chapter0001.html", "Gang Si-hyeon → Kang Si-hyeon"),
                         (False, "response_chapter0002.html", "Abellan Empire → Abelan Empire")]
+        from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet, _preview_snippets
+
+        _, folder, output_file, finding = sheet.rows[0]
+        translated, source = _preview_snippets(folder, output_file, finding, None)
+        assert [match for _, match, _ in translated] == ["Walter Argent"]
+        assert [match for _, match, _ in source] == ["발터 아르겐트"]
+        preview = await sheet.preview(folder, output_file, finding)
+        assert preview is not None and preview.key == "gn-preview" and preview.open
+        from glossarion_mobile.ui.components.dialogs import close_dialog
+
+        close_dialog(page, preview)
+        scoped = GlossaryNameFixSheet(ctx, [str(out)], output_file=output_file)
+        await scoped.scan()
+        assert len(scoped.rows) == 2
+        assert all(row[2] == output_file and not row[0].value for row in scoped.rows)
         ctx.extras["answers"] = ["yes"]
         changed = await sheet.apply()
         assert changed == {str(out): {"response_chapter0001.html": 2}}

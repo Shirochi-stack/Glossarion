@@ -452,6 +452,7 @@ class ChatFeature:
         env.reconcile_profiles = self.reconcile_profile_overrides
         # U10: ChatView hands every Result card to this (Send to cloud / Share file via link, cloud status, links)
         env.bind_u10_card = self.bind_u10_card
+        env.migrate_job = self.migrate_job
         return env
 
     def attach(self) -> None:
@@ -1979,6 +1980,12 @@ class ChatFeature:
                 tablet=tablet, platform="android" if self.is_android else ("ios" if self.is_ios else "desktop"))
         self._u10.tablet = tablet
         return self._u10
+
+    async def migrate_job(self, folder: str, raw: str) -> Any:
+        library = self.library_service()
+        if library is not None and folder and not os.path.isfile(raw):
+            raw = await self._run_io(library.raw_source, {"output_folder": folder, "raw_source_path": raw})
+        return await self.u10_actions().migrate_job(folder, raw, folder)
 
     def bind_u10_card(self, card: Any, resolve: Callable[[], Any], live: bool = False, *, force: bool = False) -> Any:
         """ChatView, for every Result card it renders: bind Send to cloud / Share file via link and the cloud

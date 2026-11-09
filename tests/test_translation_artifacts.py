@@ -1242,6 +1242,13 @@ def test_cyrillic_lookalikes_remain_foreign_for_non_latin_targets(target):
     assert issues[0].startswith('Cyrillic_text_found_7_chars_')
 
 
+def test_qa_accepts_a_cyrillic_lookalike_initial_in_latin_text():
+    settings = {"target_language": "english"}
+    assert detect_non_english_content("K. and К. stepped inside.", settings) == (False, [])
+    assert detect_non_english_content("Книга", settings)[0]
+    assert detect_non_english_content("К.", {"target_language": "japanese"})[0]
+
+
 def test_scanner_foreign_character_filter_respects_title_skip_setting():
     html = (
         "<html><head><title>義妹生活</title></head>"

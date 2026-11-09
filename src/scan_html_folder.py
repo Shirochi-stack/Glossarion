@@ -1338,7 +1338,10 @@ def is_korean_separator_pattern(text, excluded_chars=None):
     # Check if all characters are separators or excluded characters
     return all(c in excluded_chars or c.isspace() for c in cleaned)
 
-def detect_non_english_content(text, qa_settings=None):
+_QA_SCRIPT_CHAR = re.compile("[" + "".join(f"{chr(start)}-{chr(end)}" for start, end, _ in SCRIPT_RANGES) + "]")
+
+
+def detect_non_english_content(text, qa_settings=None, *, check_language=True):
     """Detect content not in the target language.
     
     For Latin-based languages (English, Spanish, French, etc.): Uses language detection
@@ -1408,8 +1411,10 @@ def detect_non_english_content(text, qa_settings=None):
         # Accepted Cyrillic lookalikes: Latin o, a, e, c, p, x, y.
         # This is a QA whitelist only; the saved text remains unchanged.
         all_excluded_chars.update('\u043e\u0430\u0435\u0441\u0440\u0445\u0443')
+        # A standalone Cyrillic К looks identical to a Latin initial K.
+        filtered_text = re.sub(r'(?<!\w)\u041a(?!\w)', 'K', filtered_text)
     
-    if target_language in latin_languages and len(filtered_text.strip()) > 100:
+    if check_language and target_language in latin_languages and len(filtered_text.strip()) > 100:
         # Try to detect the actual language of the text
         try:
             from langdetect import detect_langs
@@ -1502,7 +1507,8 @@ def detect_non_english_content(text, qa_settings=None):
             continue
         
         # Check characters in this part
-        for char in part:
+        for match in _QA_SCRIPT_CHAR.finditer(part):
+            char = match[0]
             # Skip characters in excluded set
             if char in all_excluded_chars:
                 continue

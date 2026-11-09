@@ -68,11 +68,16 @@ class LibraryContext:
     dark: bool = False
     text_scale: float = 1.0
     extras: dict = field(default_factory=dict)
+    _share_actions: Any = field(default=None, init=False, repr=False)
 
     # ---- threading -------------------------------------------------------------------------
 
     async def io(self, fn: Callable[..., Any], *args: Any) -> Any:
         return await self.service.io(fn, *args)
+
+    def cfg(self, key: str, default: Any = None) -> Any:
+        getter = getattr(self.service, "cfg", None)
+        return getter(key, default) if callable(getter) else default
 
     def spawn(self, coro: Any) -> Any:
         dispatcher = self.dispatcher
@@ -170,6 +175,24 @@ class LibraryContext:
             self.say("Nothing to share for the selection")
             return False
         return bool(await files.share(paths))
+
+    def share_actions(self) -> Any:
+        if self._share_actions is None:
+            from glossarion_mobile.ui.screens.cloud_sync import U10Actions
+
+            self._share_actions = U10Actions(
+                cloud=self.extras.get("cloud_sync"), shares=self.extras.get("share_links"), page=self.page,
+                say=self.say, spawn=self.spawn, io=self.io, go=self.go, copy_text=self.copy_text,
+                share_text=getattr(self.files, "share_text", None),
+                show_in_files=getattr(self.files, "show_in_files", None), open_url=self.extras.get("open_url"),
+                read_clipboard=self.extras.get("read_clipboard"), tablet=self.tablet, platform=self.platform)
+        return self._share_actions
+
+    async def migrate_job(self, book: Mapping[str, Any], workspace: str) -> Any:
+        from glossarion_mobile.services.library import book_identity
+
+        raw = await self.io(self.service.raw_source, {**book, "output_folder": workspace})
+        return await self.share_actions().migrate_job(workspace, raw, book_identity(book) or workspace)
 
     def go(self, name: str, params: Optional[dict] = None, query: Optional[dict] = None) -> None:
         navigate = self.navigate

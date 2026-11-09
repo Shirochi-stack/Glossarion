@@ -1373,7 +1373,7 @@ def test_library_reader_and_glossary_sheets(app_env, monkeypatch, tmp_path, sche
             await client.tap(tooltip="Book actions")
             assert await client.until(lambda: client.showing(_top_dialog(page)))
             actions = _top_dialog(page)
-            await client.tap(text="\U0001f501 Load for translation")
+            await client.tap(text="\U0001f501 Load Translation")
             assert await client.until(lambda: _top_dialog(page) not in (None, actions)
                                       and client.showing(_top_dialog(page)) and len(client.modals()) == 1
                                       and not _in_dialogs(page, actions), 15), client.describe()

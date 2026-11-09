@@ -513,6 +513,10 @@ class OutputTab:
         self.ctx.say("Nothing to share yet")
         return False
 
+    async def migrate_job(self) -> Any:
+        book = dict(self.page.book)
+        return await self.ctx.migrate_job(book, pm.book_workspace(self.page.service, book))
+
     def _share_raw(self, e: Any = None) -> Any:
         if not self.raw:
             self.ctx.say("The raw source file can't be found")
@@ -521,23 +525,12 @@ class OutputTab:
 
     # ---- U10: cloud sync and share links ------------------------------------------------------------
 
-    def _extra(self, name: str) -> Any:
-        extras = getattr(self.ctx, "extras", None)
-        return extras.get(name) if isinstance(extras, dict) else None
-
     @property
     def actions(self) -> u10.U10Actions:
         """The shared U10 actions (``ui/screens/cloud_sync``) over this context: the services come from
         ``ctx.extras`` (``cloud_sync`` / ``share_links``, set by the Library feature)."""
         if self._u10 is None:
-            files = self.ctx.files
-            self._u10 = u10.U10Actions(
-                cloud=self._extra("cloud_sync"), shares=self._extra("share_links"), page=self.ctx.page,
-                say=self.ctx.say, spawn=self.ctx.spawn, io=self.ctx.io, go=self.ctx.go,
-                copy_text=self.ctx.copy_text, share_text=getattr(files, "share_text", None) if files is not None else None,
-                show_in_files=getattr(files, "show_in_files", None) if files is not None else None,
-                open_url=self._extra("open_url"), read_clipboard=self._extra("read_clipboard"),
-                tablet=self.ctx.tablet, platform=self.ctx.platform)
+            self._u10 = self.ctx.share_actions()
         return self._u10
 
     def _gather_cloud(self, identity: str) -> dict:
@@ -735,6 +728,10 @@ class OutputTab:
                              lambda e: self.ctx.spawn(self.share_link()), f"out-share-link-{n}"),
         ]
         controls.append(ft.Row(buttons, wrap=True, spacing=8, run_spacing=4, key=f"out-cloud-buttons-{n}"))
+        if pm.book_workspace(self.page.service, self.page.book):
+            controls.append(self._u10_button(u10.MIGRATE_LABEL, "DESKTOP_WINDOWS",
+                                             None if actions.shares.available else u10.NO_SERVICE_REASON,
+                                             lambda e: self.ctx.spawn(self.migrate_job()), f"out-migrate-{n}"))
         if self.links:
             controls.append(ft.Text(f"Saved links ({len(self.links)})", theme_style=ft.TextThemeStyle.LABEL_LARGE,
                                     key=f"out-links-title-{n}"))

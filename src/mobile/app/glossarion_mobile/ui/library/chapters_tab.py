@@ -1839,6 +1839,15 @@ class ChaptersTab:
         if plan.refusal:
             self.ctx.say(plan.refusal)
             return None
+        if action == "resolve_qa" and plan.extra.get("glossary_name_file"):
+            from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
+
+            sheet = GlossaryNameFixSheet(self.ctx, [plan.extra["output_dir"]],
+                                         output_file=plan.extra["glossary_name_file"],
+                                         progress_path=plan.extra.get("progress_path"))
+            if self.ctx.page is not None:
+                sheet.show(self.ctx.page)
+            return None
         if action == "resolve_qa" and plan.extra.get("partial_b") is not None:
             return await self.resolve_qa_job(plan)
         copy = confirm_copy(action, plan.count, plan.extra)

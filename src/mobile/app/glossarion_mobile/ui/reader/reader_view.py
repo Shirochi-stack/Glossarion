@@ -776,10 +776,8 @@ class ReaderScreen(Screen):
             self._show_error("No readable content found for this book.")
             return
         if flavor != session.flavor:
-            # Bilingual needs both versions of the chapter that opens (chapter 0 is often a cover)
-            if flavor == rm.BILINGUAL and not session.available_modes(self._start_chapter(session)).get(rm.BILINGUAL):
-                flavor = rm.TRANSLATED
-            if flavor == rm.ORIGINAL and not session.has_alternate:
+            # Bilingual may fall back for the current chapter while staying selected for the book.
+            if not session.has_alternate:
                 flavor = rm.TRANSLATED
             if flavor != session.flavor:
                 await self._switch_flavor(session, flavor, session.flavor)  # a failure keeps the loaded one
@@ -874,7 +872,7 @@ class ReaderScreen(Screen):
             return rm.TRANSLATED
         if saved and saved.get("mode") in rm.READER_MODES:
             return saved["mode"]
-        return rm.ORIGINAL if self.settings.show_raw else rm.TRANSLATED
+        return rm.TRANSLATED
 
     def _start_chapter(self, session: ReaderSession) -> int:
         """The chapter to open: the caller's chapter file name first (the desktop resolves the Book
@@ -1302,6 +1300,8 @@ class ReaderScreen(Screen):
             index = session.filenames.index(href) if href in session.filenames else min(self.index, session.count - 1)
             self._refresh_toc()
             await self.render(index, hint=hint)
+            if not self.disposed and session is self.session:
+                self.save_position()
         finally:
             self._mode_busy = False
             if not self.disposed and session is self.session:

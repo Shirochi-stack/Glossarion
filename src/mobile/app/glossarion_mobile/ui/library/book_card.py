@@ -208,9 +208,10 @@ class BookCard(_CardBase):
             stack.append(ft.ProgressBar(value=max(0.0, min(1.0, model.progress)), bar_height=3, left=0, right=0,
                                         bottom=0, color=resolve_color("#6c63ff"), bgcolor=tinted("#000000", 0.25),
                                         semantics_label="Translation progress", key="bar"))
-        if model.has_continue and self.show_continue:
+        if (model.can_read or model.has_continue) and self.show_continue:
+            tooltip = "Continue reading" if model.has_continue else "Start reading"
             stack.append(ft.Container(
-                content=ft.FilledIconButton(icon=ft.Icons.PLAY_ARROW, icon_size=16, tooltip="Continue reading",
+                content=ft.FilledIconButton(icon=ft.Icons.PLAY_ARROW, icon_size=16, tooltip=tooltip,
                                             on_click=self._continue, width=28, height=28,
                                             style=ft.ButtonStyle(padding=0)),
                 right=0, bottom=4, width=tokens.SIZES["hit_target"], height=tokens.SIZES["hit_target"],

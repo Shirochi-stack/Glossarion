@@ -45,7 +45,6 @@ from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text
 from glossarion_mobile.ui.tools.qa_custom import CustomModeSheet
 from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
-from glossarion_mobile.ui.tools.qa_glossary_names import check_enabled as check_name_fix_enabled
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
 __all__ = ["QaScannerScreen", "open_qa_report", "qa_eligibility"]
@@ -161,10 +160,9 @@ class QaScannerScreen(Screen):
         self.log_button = ft.TextButton(content="View log", icon=ft.Icons.TERMINAL, on_click=self._on_view_log,
                                         visible=False, key="qa-log")
         self.progress = ft.ProgressBar(visible=False, key="qa-progress")
-        # QA Scanner Settings › "Check glossary names with NER (Experimental)" shows it (desktop: the same toggle)
-        self.name_fix_button = ft.OutlinedButton(content="Check glossary names…", icon=ft.Icons.SPELLCHECK,
+        self.name_fix_button = ft.OutlinedButton(content="Check glossary names in existing output…", icon=ft.Icons.SPELLCHECK,
                                                  on_click=lambda e: self.open_name_fix(),
-                                                 visible=check_name_fix_enabled(self.ctx), key="qa-name-fix")
+                                                 key="qa-name-fix")
         run = card("Run", [ft.Row([self.start_button, self.stop_button, self.log_button], wrap=True),
                            self.progress, self.run_status, self.name_fix_button], icon="PLAY_CIRCLE", key="qa-run")
         settings = card("Settings", [
@@ -350,8 +348,7 @@ class QaScannerScreen(Screen):
             self.open_custom()
 
     def _render_name_fix(self) -> None:
-        self.name_fix_button.visible = check_name_fix_enabled(self.ctx)
-        self.name_fix_button.disabled = not any(t.folder for t in self.targets)
+        self.name_fix_button.disabled = not any(t.folder and not t.direct_text for t in self.targets)
         self.ctx.push(self.name_fix_button)
 
     def open_name_fix(self) -> Optional[GlossaryNameFixSheet]:

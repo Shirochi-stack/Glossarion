@@ -25,6 +25,7 @@ class ChatEnv(SettingsContext):
     read_clipboard: Optional[Callable[[], Any]] = None  # async -> str | None
     share_files: Optional[Callable[[list], Any]] = None  # async (paths)
     export_file: Optional[Callable[[str], Any]] = None  # ExportSheet for one file (Share / Save to / Downloads)
+    migrate_job: Optional[Callable[..., Any]] = None  # async (workspace folder, raw source)
     open_output: Optional[Callable[[str], Any]] = None  # output folder -> file browser
     open_reader: Optional[Callable[..., Any]] = None  # async (workspace folder, attachment path) -> Reader (U5)
     pick_files: Optional[Callable[..., Any]] = None  # async (extensions, multiple) -> [paths]
