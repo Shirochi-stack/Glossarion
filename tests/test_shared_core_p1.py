@@ -1055,13 +1055,15 @@ def _scenario_names():
 @pytest.mark.parametrize("name", _scenario_names())
 def test_moved_code_reproduces_desktop_goldens(parity, name):
     from parity import scenarios
+    from parity.approved_changes import apply_epub_compiler_log_change
 
     cg = parity["cg"]
     result = cg.capture(parity["new_factory"], scenarios.get(name))
     try:
         expected = cg.load_golden(BASE_SHA, name)
     except (FileNotFoundError, OSError):
-        expected = cg.roundtrip(cg.capture(parity["legacy_factory"], scenarios.get(name)))
+        expected = apply_epub_compiler_log_change(
+            cg.roundtrip(cg.capture(parity["legacy_factory"], scenarios.get(name))))
     problems = cg.diff(expected, cg.roundtrip(result))
     assert not problems, "\n".join(problems)
 

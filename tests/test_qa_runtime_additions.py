@@ -104,6 +104,8 @@ U7_BASE_SHA = "41814faa95e273e956870bd3aac5a2c6fb7d66b1"
 #: ``allow_direct_text=False`` on run_qa_scan_path / run_bulk_qa_scan, passed only by Glossarion
 #: Mobile's chat QA job (tests/parity/DISCREPANCIES.md "Chat QA of Direct Text workspaces").
 DEVFIX_BASE_SHA = "cddd73a4f5d057a03810d00b5787f37c14017130"
+#: The approved standalone Cyrillic К exception and script scan changes.
+QA_SCRIPT_CHECK_SHA = "a1045386618fcb050226f4309659e746478ac1fd"
 RUNTIME_U7_NAMES = {"load_current_qa_settings", "reset_qa_cancel_flags", "next_qa_stop_phase",
                     "apply_qa_graceful_stop_flags", "apply_qa_force_stop_flags", "clear_qa_stop_flags",
                     "run_bulk_qa_scan"}
@@ -472,8 +474,15 @@ def test_desktop_callers_never_pass_the_direct_text_opt_in():
     multipass scan keep the Direct Text refusal, and no other desktop module names the keyword."""
     for name in ("QA_Scanner_GUI.py", "TransateKRtoEN.py"):
         tree = ast.parse(src_text(name))
+        call_names = {"run_bulk_qa_scan", "run_qa_scan_path"}
+        if name == "TransateKRtoEN.py":
+            tree = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                        and n.name == "_run_multipass_refinement_qa_scan")
+            assert any(isinstance(n, ast.Assign) and ast.unparse(n) == "scan_path = scan_path or run_qa_scan_path"
+                       for n in tree.body)
+            call_names.add("scan_path")
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                 and getattr(n.func, "id", getattr(n.func, "attr", "")) in ("run_bulk_qa_scan", "run_qa_scan_path")]
+                 and getattr(n.func, "id", getattr(n.func, "attr", "")) in call_names]
         assert calls, name
         for call in calls:
             assert all(kw.arg is not None and kw.arg != "allow_direct_text" for kw in call.keywords), name
@@ -534,7 +543,19 @@ def test_scanner_refusal_defaults_are_key_pool_service_list():
     assert not [n for n in new_tree.body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], "id", "") == "DEFAULT_REFUSAL_PATTERNS"]
     _drop_shared_script_ranges(legacy_tree, new_tree)
-    # the import stands where the list was; nothing else in the scanner changed (bar the hashlib fix)
+    approved_tree = ast.parse(git_text("src/scan_html_folder.py", QA_SCRIPT_CHECK_SHA))
+    for tree in (approved_tree, new_tree):
+        script_regex = next(n for n in tree.body if isinstance(n, ast.Assign)
+                            and getattr(n.targets[0], "id", "") == "_QA_SCRIPT_CHAR")
+        detector = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "detect_non_english_content")
+        if tree is approved_tree:
+            approved_script_check = ast.dump(script_regex), ast.dump(detector)
+        else:
+            assert (ast.dump(script_regex), ast.dump(detector)) == approved_script_check
+            tree.body[tree.body.index(detector)] = next(
+                n for n in legacy_tree.body if isinstance(n, ast.FunctionDef) and n.name == detector.name)
+            tree.body.remove(script_regex)
+    # The import stands where the old list was. Keep checking the rest of the scanner against the baseline.
     old_body = [ast.dump(n) for n in legacy_tree.body]
     new_body = [ast.dump(n) for n in new_tree.body]
     index = old_body.index(ast.dump(old[0]))

@@ -909,12 +909,14 @@ def parity(tmp_path_factory):
     def golden(name):
         if name not in goldens:
             from parity import scenarios
+            from parity.approved_changes import apply_epub_compiler_log_change
 
             try:
                 goldens[name] = cg.load_golden(BASE_SHA, name)
             except (FileNotFoundError, OSError):
                 legacy_factory = fakes.make_legacy_owner_factory(legacy_bundle)
-                goldens[name] = cg.roundtrip(cg.capture(legacy_factory, scenarios.get(name)))
+                goldens[name] = apply_epub_compiler_log_change(
+                    cg.roundtrip(cg.capture(legacy_factory, scenarios.get(name))))
         return goldens[name]
 
     return {"cg": cg, "fakes": fakes, "desktop": desktop_factory, "headless": headless_factory, "golden": golden,

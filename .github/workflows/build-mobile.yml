@@ -60,6 +60,10 @@ on:
         type: choice
         options: [all, android, ios]
         default: all
+      require_python_ci:
+        description: Wait for the Python application tests on this commit before packaging
+        type: boolean
+        default: false
       emulator_smoke:
         description: Android emulator smoke test (launch markers + on-device self-test + offline E2E)
         type: boolean
@@ -125,6 +129,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # github.workflow is the caller's name under workflow_call, so a build-all run and a direct
@@ -394,8 +399,8 @@ jobs:
           export GLOSSARION_BACKEND_DIR="$PWD/app/backend" PYTHONPATH="$PWD/app"
           timeout 1200 uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python -m glossarion_mobile.diagnostics.e2e --strict --json build/e2e_result.json
 
-      - name: Host tests (online, keyless; non-blocking)
-        continue-on-error: true
+      - name: Host tests (online, keyless)
+        continue-on-error: ${{ !inputs.require_python_ci }}
         run: |
           rc=0
           uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host -q -m online || rc=$?
@@ -404,6 +409,32 @@ jobs:
             exit 0
           fi
           exit "$rc"
+
+      - name: Require successful Python CI on this commit
+        if: inputs.require_python_ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          run_id=""
+          for _ in {1..40}; do
+            if [ -z "$run_id" ]; then
+              run_id="$(gh run list --workflow python-app.yml --event push --commit "$GITHUB_SHA" \
+                --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)"
+            fi
+            if [ -n "$run_id" ]; then
+              read -r status conclusion <<< "$(gh run view "$run_id" --json status,conclusion \
+                --jq '[.status,.conclusion] | @tsv' || true)"
+              if [ "$status" = completed ]; then
+                echo "Python CI run $run_id finished with $conclusion"
+                test "$conclusion" = success
+                exit "$?"
+              fi
+            fi
+            sleep 15
+          done
+          echo "::error::Python CI did not finish for $GITHUB_SHA"
+          exit 1
 
       - name: Upload backend report
         if: always()

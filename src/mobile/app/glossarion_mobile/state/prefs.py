@@ -74,7 +74,15 @@ def atomic_write_json(path: PathLike, data: Any) -> None:
             json.dump(data, handle, ensure_ascii=False, indent=1)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, target)
+        for attempt in range(6):
+            try:
+                os.replace(tmp, target)
+                break
+            except PermissionError as exc:
+                # A Windows reader can briefly deny replacement while polling this file.
+                if getattr(exc, "winerror", None) not in (5, 32) or attempt == 5:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
     except BaseException:
         try:
             tmp.unlink()

@@ -5832,4 +5832,17 @@ def apply_to_golden(data):
             return tuple(walk(item) for item in node)
         return node
 
-    return walk(data)
+    return apply_epub_compiler_log_change(walk(data))
+
+
+def apply_epub_compiler_log_change(result):
+    # The EPUB converter reports success only when it creates or updates an EPUB.
+    # The golden's fake compiler returns without producing a file.
+    calls = result.get("entries", {}).get("epub_compile", {}).get("calls", [])
+    success = ["append_log", ["✅ EPUB Converter completed successfully!"], {}]
+    missing = ["append_log", ["⚠️ EPUB file was not created. Check the logs for details."], {}]
+    for index, (call, following) in enumerate(zip(calls, calls[1:])):
+        if call == success and following == missing:
+            del calls[index]
+            break
+    return result
