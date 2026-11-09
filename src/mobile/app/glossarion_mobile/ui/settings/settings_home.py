@@ -271,7 +271,8 @@ class SettingsHome(HubScreen):
     def _listed_keys(self, section: SectionInfo) -> list:
         """The settings the section's page lists (available on mobile and not read-only)."""
         return [key for key in section.keys
-                if (spec := self.ctx.schema.spec(key)) is not None and listed_setting(self.ctx, spec)]
+                if key != "auto_update_check" and (spec := self.ctx.schema.spec(key)) is not None
+                and listed_setting(self.ctx, spec)]
 
     @staticmethod
     def _has_pools(section: SectionInfo) -> bool:
@@ -359,6 +360,8 @@ class SettingsHome(HubScreen):
         return self.ctx.go("settings.section", {"section": section_id})
 
     def open_hit(self, hit: SearchHit) -> Optional[str]:
+        if hit.key == "auto_update_check":
+            return self.ctx.go("settings.updates")
         if self._show_section(hit.section_id, hit.key):
             return build_route("settings.section", {"section": hit.section_id}, fragment=hit.key)
         return self.ctx.open_setting(hit.section_id, hit.key)

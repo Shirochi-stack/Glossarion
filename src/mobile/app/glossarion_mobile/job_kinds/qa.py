@@ -86,6 +86,8 @@ import traceback
 from functools import partial
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
+from glossarion_mobile.state.config_store import QA_SDLXLIFF_CHECK, QA_SDLXLIFF_DEFAULT
+
 __all__ = ["KINDS", "MOBILE_QUICK_SAMPLE_SIZE", "MODES", "QUICK_SAMPLE_KEY", "REPORT_FILE",
            "SCAN_INTERPRETERS", "SCAN_PHASE_SOURCE_EXTENSIONS", "SCAN_SWITCH_INTERVAL", "SCAN_WORKER_TURNS", "WORKERS_KEY",
            "default_scan_workers", "multipass_scan_turns",
@@ -141,11 +143,19 @@ def saved_quick_sample_size(config: Optional[Mapping[str, Any]]) -> Any:
 
 
 def with_mobile_qa_defaults(settings: Mapping[str, Any], config: Optional[Mapping[str, Any]]) -> dict:
-    """``settings`` (``load_current_qa_settings``) with the mobile Quick Scan sample size when the
-    saved config has none (the shared normaliser fills in the desktop 1000 otherwise)."""
-    out = dict(settings or {})
+    """Apply mobile scan defaults only to keys absent from the saved config."""
+    out = _with_mobile_sdlxliff_default(settings, config)
     if saved_quick_sample_size(config) is None:
         out[QUICK_SAMPLE_KEY[1]] = MOBILE_QUICK_SAMPLE_SIZE
+    return out
+
+
+def _with_mobile_sdlxliff_default(settings: Mapping[str, Any], config: Optional[Mapping[str, Any]]) -> dict:
+    out = dict(settings or {})
+    parent, key = QA_SDLXLIFF_CHECK
+    saved = (config or {}).get(parent)
+    if not isinstance(saved, Mapping) or key not in saved:
+        out[key] = QA_SDLXLIFF_DEFAULT
     return out
 
 
@@ -324,7 +334,8 @@ def _scan_runtime(config: Optional[Mapping[str, Any]], qa: Any, log: Callable[[A
 
 
 @contextlib.contextmanager
-def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None, *, chat_attachment: bool = False) -> Iterator[None]:
+def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None, *, chat_attachment: bool = False,
+                        config: Optional[Mapping[str, Any]] = None) -> Iterator[None]:
     """A translation job: the QA scan its Multipass refinement runs on its own (``run_qa_scan_path`` in the backend,
     with the workers of ``mobile_qa_env_overrides``) goes through ``_scan_turns`` too, like a QA scan job. Its lines
     reach the job's log through ``print`` (``job_runner`` tees it), like the lines around that call."""
@@ -339,6 +350,8 @@ def multipass_scan_turns(phase: Optional[Callable[[str], Any]] = None, *, chat_a
         return
 
     def scan_taking_turns(*args: Any, **kwargs: Any) -> Any:
+        if "qa_settings" in kwargs:
+            kwargs["qa_settings"] = _with_mobile_sdlxliff_default(kwargs["qa_settings"], config)
         if chat_attachment:
             from qa_scan_runtime import run_qa_scan_path
 

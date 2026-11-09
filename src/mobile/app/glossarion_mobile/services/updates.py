@@ -207,7 +207,7 @@ def releases_page(provider: str = 'github') -> str:
 _CHECKER_CLASS: Any = None
 
 
-def _mobile_checker(host: Any, current_version: str, arch: str) -> Any:
+def _mobile_checker(host: Any, current_version: str, arch: str, platform: str) -> Any:
     """``update_core.HeadlessUpdateChecker`` whose downloader accepts this phone's APK (the desktop's
     ``_compatible_update_asset`` knows desktop installers only; the mobile check never calls it)."""
     global _CHECKER_CLASS
@@ -219,12 +219,15 @@ def _mobile_checker(host: Any, current_version: str, arch: str) -> Any:
 
             def _compatible_update_asset(self, asset: Any) -> bool:
                 name = str((asset or {}).get("name") or "")
+                if self.mobile_platform == "ios":
+                    return classify_asset(name) in ("ipa", "ipa_signed")
                 return (classify_asset(name) == "apk" and self.mobile_arch != "unknown"
                         and core.UpdateCoreMixin._asset_arch(name) == self.mobile_arch)
 
         _CHECKER_CLASS = MobileUpdateChecker
     checker = _CHECKER_CLASS(host, current_version, build_variant="Mobile")
     checker.mobile_arch = arch
+    checker.mobile_platform = platform
     return checker
 
 
@@ -284,6 +287,13 @@ class UpdateResult:
             return apk
         return apk if apk.hotfix > 0 and not self.installed and self.status == "current" else None
 
+    @property
+    def download_asset(self) -> Optional[MobileAsset]:
+        downloads = self.downloads
+        if downloads is not None and downloads.platform == "ios" and self.status == "update":
+            return downloads.ipa or downloads.ipa_signed
+        return self.install_asset
+
 
 class UpdateService:
     """One per app session: the desktop checker on the mobile config (blocking calls; run them
@@ -296,7 +306,7 @@ class UpdateService:
         self.host = StoreConfigHost(store)
         self.platform = str(platform or "").lower()
         self.arch = arch or core.UpdateCoreMixin._detect_arch()
-        self.checker = _mobile_checker(self.host, current_version, self.arch)
+        self.checker = _mobile_checker(self.host, current_version, self.arch, self.platform)
         self.clock = clock
         #: Where the installed APK is (``own_apk_path`` on Android); None skips the hotfix recognition.
         self.installed_apk = installed_apk if installed_apk is not None else (
@@ -357,6 +367,15 @@ class UpdateService:
         if latest is None:  # inside the 30-minute window: no request was made
             checker.latest_release = before
             return self._remember(UpdateResult("cached", "Checked less than 30 minutes ago."), keep_last=True)
+        if self.platform in ("android", "ios") and not select_downloads(latest, self.platform, self.arch).available:
+            current = checker._release_version(self.current_version)
+            for candidate in checker.all_releases:
+                tag = candidate["tag_name"]
+                if checker._release_version(tag) > current and (manual or tag not in self.skipped_versions()):
+                    if select_downloads(candidate, self.platform, self.arch).available:
+                        latest = checker.latest_release = candidate
+                        available = True
+                        break
         result = self._describe(latest)
         if available:
             result.status = "update"
@@ -441,7 +460,7 @@ class UpdateService:
 
     def download_apk(self, asset: MobileAsset, folder: str, progress: Callable[[int, float, float], Any],
                      cancelled: Callable[[], bool]) -> str:
-        """Blocking: download ``asset`` of the checked release into ``folder`` with the desktop's
+        """Blocking: download the checked APK or IPA into ``folder`` with the desktop's
         verified downloader (exact published size + SHA-256, never installed on a mismatch). The path."""
         release = self.checker.latest_release or {}
         raw = next((a for a in release.get("assets") or [] if isinstance(a, dict) and a.get("name") == asset.name), None)
@@ -522,6 +541,8 @@ class ApkInstaller:
     ``installing`` (the system installer is open: Android asks "update this app?", and the update
     restarts Glossarion; a user who backed out taps Install again); ``error`` (``error``)."""
 
+    app_platform = "Android"
+
     def __init__(self, service: Any, native: Any, *, folder: Optional[str] = None,
                  run_io: Optional[Callable[..., Awaitable[Any]]] = None) -> None:
         self.service = service
@@ -578,7 +599,7 @@ class ApkInstaller:
     async def adopt(self, asset: Optional[MobileAsset]) -> None:
         """After a check: a verified download of ``asset`` from before is ready to install; the files
         of anything else are removed (an installed or outdated APK is ~300 MB of cache)."""
-        if self.state in ("downloading", "installing") and not self.busy_with(asset):
+        if self.state in ("downloading", "installing"):
             return
         folder = await self.folder()
         if folder is None:
@@ -587,7 +608,10 @@ class ApkInstaller:
         await self.run_io(self.service.prune_downloads, folder, asset.name if ready else "")
         if ready and self.state not in ("downloading", "installing"):
             self.asset, self.path = asset, ready
-            self._set("permission" if not await self.native.can_install_packages() else "ready")
+            self._set(await self.ready_state())
+
+    async def ready_state(self) -> str:
+        return "ready" if await self.native.can_install_packages() else "permission"
 
     async def download(self, asset: MobileAsset) -> str:
         """Download, verify and install ``asset``: the outcome of :meth:`install`, or ``cancelled`` /
@@ -597,7 +621,7 @@ class ApkInstaller:
         folder = await self.folder()
         if folder is None:
             self.asset = asset
-            self._set("error", "Installing updates needs the Glossarion Android app. Use the browser link.")
+            self._set("error", f"Downloading updates needs the Glossarion {self.app_platform} app. Use the browser link.")
             return "error"
         ready = await self.run_io(self.service.ready_apk, asset, folder)
         if ready:
@@ -672,3 +696,16 @@ class ApkInstaller:
         if self.state == "permission" and self.path and await self.native.can_install_packages():
             return await self.install()
         return None
+
+
+class IpaDownloader(ApkInstaller):
+    """Download and verify an IPA. iOS hands the file to the share sheet or Files."""
+
+    app_platform = "iOS"
+
+    async def ready_state(self) -> str:
+        return "ready"
+
+    async def install(self) -> str:
+        self._set("ready")
+        return "ready"

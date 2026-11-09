@@ -60,6 +60,8 @@ __all__ = [
 log = logging.getLogger("glossarion.config")
 
 DEFAULT_DEBOUNCE = 0.6  # seconds (UI_SPEC §4.15: "Editing auto-saves with a 600 ms debounce")
+QA_SDLXLIFF_CHECK = ("qa_scanner_settings", "check_missing_beautifulsoup_tags")
+QA_SDLXLIFF_DEFAULT = True
 
 
 class _Missing:
@@ -450,11 +452,14 @@ class MobileConfigStore:
 
         Nested settings use their dotted schema key (``qa_scanner_settings.min_file_length``).
         """
+        dotted = ".".join(_as_path(key))
+        if dotted == ".".join(QA_SDLXLIFF_CHECK):
+            return QA_SDLXLIFF_DEFAULT
         provider = self._defaults
         if provider is None:  # no schema wired in: no display defaults
             return None
         try:
-            return provider(".".join(_as_path(key)))
+            return provider(dotted)
         except Exception:
             return None
 

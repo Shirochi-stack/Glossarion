@@ -349,6 +349,12 @@ class SettingTile:
         try:
             self.lock_reason = self.ctx.schema.lock_reason(self.spec, self.config)
             self.hidden_reason = self.ctx.schema.hidden_reason(self.spec, self.config)
+            if not self.lock_reason and self.key.startswith("qa_scanner_settings.sdlxliff_"):
+                from glossarion_mobile.state.config_store import QA_SDLXLIFF_CHECK
+                from glossarion_mobile.ui.settings.qa_layout import SDLXLIFF_TAG_FIELDS
+
+                if self.key in SDLXLIFF_TAG_FIELDS and not self.store.effective(QA_SDLXLIFF_CHECK):
+                    self.lock_reason = "Turn on SDLXLIFF tag checks first"
         except Exception:
             log.debug("rule evaluation failed for %s", self.key, exc_info=True)
             self.lock_reason = self.hidden_reason = None

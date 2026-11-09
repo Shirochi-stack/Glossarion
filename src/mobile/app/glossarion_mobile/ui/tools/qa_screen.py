@@ -44,7 +44,7 @@ from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text
 from glossarion_mobile.ui.tools.qa_custom import CustomModeSheet
-from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
+from glossarion_mobile.ui.tools.qa_glossary_names import start_name_check
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
 __all__ = ["QaScannerScreen", "open_qa_report", "qa_eligibility"]
@@ -120,7 +120,6 @@ class QaScannerScreen(Screen):
         self.last_spec: Any = None
         self.picker: Optional[SourcePicker] = None
         self.custom_sheet: Optional[CustomModeSheet] = None
-        self.name_fix_sheet: Optional[GlossaryNameFixSheet] = None
 
     # ---- layout -----------------------------------------------------------------------------------
 
@@ -351,16 +350,10 @@ class QaScannerScreen(Screen):
         self.name_fix_button.disabled = not any(t.folder and not t.direct_text for t in self.targets)
         self.ctx.push(self.name_fix_button)
 
-    def open_name_fix(self) -> Optional[GlossaryNameFixSheet]:
+    def open_name_fix(self) -> Any:
         """Review names that differ from the glossary in the chosen folders and fix the checked ones."""
         folders = [t.folder for t in self.targets if t.folder and not t.direct_text]
-        if not folders:
-            self.ctx.say("Choose a folder first")
-            return None
-        self.name_fix_sheet = GlossaryNameFixSheet(self.ctx, folders)
-        if self.ctx.page is not None:
-            self.name_fix_sheet.show(self.ctx.page)
-        return self.name_fix_sheet
+        return self.ctx.spawn(start_name_check(self.ctx, folders))
 
     def open_custom(self, on_saved: Any = None) -> Optional[CustomModeSheet]:
         if qm.custom_defaults() is None:

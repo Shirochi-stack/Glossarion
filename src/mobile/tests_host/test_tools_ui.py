@@ -459,10 +459,13 @@ def test_qa_adapter_mobile_sample_size_default_survives_the_per_folder_reload(tm
     qa_kind.run(ctx)
     assert fake.calls[0]["settings"]["quick_scan_sample_size"] == 0
     assert not any("Quick Scan duplicate check" in line for line in ctx.logs)
-    assert qa_kind.with_mobile_qa_defaults({"quick_scan_sample_size": 1000}, {}) == {"quick_scan_sample_size": 0}
-    assert qa_kind.with_mobile_qa_defaults({"quick_scan_sample_size": 1000},
-                                           {"qa_scanner_settings": {"quick_scan_sample_size": 1000}}) == {
-        "quick_scan_sample_size": 1000}
+    from glossarion_mobile.state.config_store import QA_SDLXLIFF_CHECK
+
+    parent, tags = QA_SDLXLIFF_CHECK
+    assert qa_kind.with_mobile_qa_defaults({"quick_scan_sample_size": 1000}, {}) == {
+        "quick_scan_sample_size": 0, tags: True}
+    saved = {"quick_scan_sample_size": 1000, tags: False}
+    assert qa_kind.with_mobile_qa_defaults(saved, {parent: saved}) == saved
 
 
 def test_chat_qa_job_parts_summary_and_the_job_service(tmp_path, monkeypatch):
@@ -1293,8 +1296,7 @@ def _name_check_book(out: Path) -> None:
 
 
 @needs_flet
-def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, monkeypatch):
-    monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake_qa_runtime())
+def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path):
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.tools.qa_screen import QaScannerScreen
 
@@ -1318,15 +1320,34 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, mo
         assert screen.name_fix_button.visible is True and screen.name_fix_button.disabled is True
         screen.set_targets([target])
         assert screen.name_fix_button.disabled is False
-        sheet = screen.open_name_fix()
-        await sheet.scan()
+        job_id = await screen.open_name_fix()
+        assert job_id == "job1"
+        assert ctx.navigated[-1][:2] == ("jobs.detail", {"jid": job_id})
+        from glossarion_mobile.job_kinds import glossary_names
+        from glossarion_mobile.services.jobs import JobSnapshot
+        from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet, _preview_snippets
+
+        async def scan(spec):
+            tj = _load("_glossarion_names_jobs_helpers", "test_jobs.py")
+            service, _backend = tj.make_service(tmp_path / "name-check-jobs")
+            try:
+                ident = service.submit(spec)
+                assert await asyncio.to_thread(service.wait_idle, 30.0)
+                snap = service.snapshot(ident)
+                assert snap.state is JobState.DONE and snap.progress.completed == snap.progress.total > 0
+                restored = JobSnapshot.from_dict(json.loads(json.dumps(snap.to_dict())))
+                return glossary_names.load_reviews(restored.result["glossary_name_reviews"])
+            finally:
+                service.close()
+
+        spec = ctx.jobs.specs[0]
+        assert spec.kind == "glossary_names"
+        sheet = GlossaryNameFixSheet(ctx, await scan(spec)).show(page)
         rows = [(box.value, output_file, finding.describe()) for box, _f, output_file, finding in sheet.rows]
         # the character spellings are pre-checked; the location (report only) is not
         assert rows == [(True, "response_chapter0001.html", "Walter Argent → Valter Argent"),
                         (True, "response_chapter0001.html", "Gang Si-hyeon → Kang Si-hyeon"),
                         (False, "response_chapter0002.html", "Abellan Empire → Abelan Empire")]
-        from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet, _preview_snippets
-
         _, folder, output_file, finding = sheet.rows[0]
         translated, source = _preview_snippets(folder, output_file, finding, None)
         assert [match for _, match, _ in translated] == ["Walter Argent"]
@@ -1336,8 +1357,11 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, mo
         from glossarion_mobile.ui.components.dialogs import close_dialog
 
         close_dialog(page, preview)
-        scoped = GlossaryNameFixSheet(ctx, [str(out)], output_file=output_file)
-        await scoped.scan()
+        from dataclasses import replace
+
+        scoped_spec = replace(spec, params={**spec.params, "output_file": output_file})
+        scoped = GlossaryNameFixSheet(ctx, await scan(scoped_spec), output_file=output_file)
+        scoped.render()
         assert len(scoped.rows) == 2
         assert all(row[2] == output_file and not row[0].value for row in scoped.rows)
         ctx.extras["answers"] = ["yes"]

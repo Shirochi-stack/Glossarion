@@ -316,7 +316,7 @@ SECTION_TITLES = {
     "other.processing": "Processing & extraction",
     "other.processing.extraction": "Chapter extraction",
     "other.image": "Image & vision",
-    "other.context": "Desktop display scaling & update check",
+    "other.context": "App updates",
 }
 
 #: Settings home order of the sections inside their groups (unlisted ones follow in schema order).

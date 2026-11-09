@@ -192,7 +192,7 @@ def github(monkeypatch):
     """Scripted GitHub: ``github.latest`` is the /releases/latest payload (or an exception)."""
     import requests
 
-    state = types.SimpleNamespace(latest=_mobile_release(), calls=[])
+    state = types.SimpleNamespace(latest=_mobile_release(), history=None, calls=[])
 
     def get(url, headers=None, timeout=None, **kwargs):
         state.calls.append(url)
@@ -201,7 +201,8 @@ def github(monkeypatch):
         if url.endswith("/releases/latest"):
             return state.latest if isinstance(state.latest, _Response) else _Response(state.latest)
         if "per_page=" in url:
-            return _Response([state.latest] if isinstance(state.latest, dict) else [])
+            history = state.history if state.history is not None else [state.latest]
+            return _Response([row for row in history if isinstance(row, dict)])
         raise AssertionError(url)
 
     monkeypatch.setattr(requests, "get", get)
@@ -286,6 +287,15 @@ def test_service_current_desktop_only_and_errors(tmp_path, github, capsys):
 # ---------------------------------------------------------------------------
 # the screen (fake context) and the feature
 # ---------------------------------------------------------------------------
+
+def test_updater_finds_an_installable_release_behind_desktop_only_latest(tmp_path, github):
+    github.latest = {**_desktop_release(), "tag_name": "v9.15.1"}
+    github.history = [github.latest, _mobile_release()]
+    service = up.UpdateService(None, "9.14.0", platform="android", arch="arm64")
+    result = service.check(manual=True)
+    assert result.tag == "v9.15.0" and result.download_asset.abi == "arm64-v8a"
+    assert service.checker.latest_release["tag_name"] == result.tag
+
 
 class _Ctx:
     def __init__(self):
@@ -569,6 +579,9 @@ def test_updates_page_renders_on_the_real_app(app_env, caplog):
             assert isinstance(screen, UpdatesScreen) and feature.screens_built == ["settings.updates"]
             await screen.check_now()  # the session serialises the re-rendered card
             assert service.checks == [True] and screen.release_holder.content is not None
+            await app.navigate(build_route("settings.section", {"section": "other.context"}))
+            assert isinstance(app.shell.top_screen, UpdatesScreen)
+            assert app.shell.top_screen.title == "App updates"
             await asyncio.sleep(0.2)
             errors = [r for r in caplog.records if r.levelno >= 40 and r.name.startswith("glossarion")]
             assert not errors, [r.getMessage() for r in errors]

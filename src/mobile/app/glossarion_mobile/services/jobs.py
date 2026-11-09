@@ -405,6 +405,7 @@ class JobKind(str, enum.Enum):
     SINGLE_CHAPTER = "single_chapter"
     # U6 tools
     QA_SCAN = "qa_scan"
+    GLOSSARY_NAMES = "glossary_names"
     VALIDATE_EPUB = "validate_epub"
     RENAME_OUTPUTS = "rename_outputs"
     TRANSLATE_HEADERS = "translate_headers"
@@ -1261,6 +1262,8 @@ def job_verb(snap: Any) -> str:
     (``job_kinds.translate.indexing_phase``)."""
     phase = getattr(snap, "phase", "")
     if phase in (INDEXING, "Multipass QA scan", "Multipass refinement"):
+        return phase
+    if phase and getattr(snap, "kind", "") == "glossary_names":
         return phase
     return kind_verb(getattr(snap, "kind", "") or "")
 

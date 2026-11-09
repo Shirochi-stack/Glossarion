@@ -849,6 +849,22 @@ class JobsFeature:
 
     # ---- screens --------------------------------------------------------------------------------
 
+    def _review_names(self, snap: Any) -> Any:
+        tools = getattr(self.app, "tools", None)
+        if tools is None or snap is None or self.page is None:
+            return None
+        from glossarion_mobile.job_kinds.glossary_names import load_reviews
+        from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
+
+        records = (snap.result or {}).get("glossary_name_reviews")
+        if not records:
+            return None
+        params = snap.spec.params
+        sheet = GlossaryNameFixSheet(tools.context(), load_reviews(records),
+                                     output_file=params.get("output_file") or "",
+                                     progress_path=params.get("progress_path"))
+        return sheet.show(self.page)
+
     def make_screen(self, match: RouteMatch) -> Any:
         tablet, dark = self._tablet(), self._dark()
         notify = getattr(self.app, "notify", None)
@@ -863,7 +879,8 @@ class JobsFeature:
                                      file_ref=self.file_ref if self.prefs is not None else None, tablet=tablet,
                                      dark=dark, open_progress=self._open_progress_folder, roots=self.file_roots,
                                      chat_workspace=self._chat_workspace, library_book=self._library_book_of_folder,
-                                     library_source=self._library_book_of_file, run_io=self.run_io)
+                                     library_source=self._library_book_of_file, run_io=self.run_io,
+                                     review_names=self._review_names)
         elif match.name in ("tools.files", "tools.files.folder"):
             from glossarion_mobile.ui.screens.files import FileBrowserScreen
 

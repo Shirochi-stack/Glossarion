@@ -424,7 +424,7 @@ def test_ios_says_why_it_cannot_self_update(tmp_path, github, capsys):
     screen = UpdatesScreen(parse_route("/settings/updates"), _Ctx(), service=service)
     body = screen.build_body()
     note = _find(body, "updates-note")[0].value
-    assert "iOS does not let an app replace itself" in note and "AltStore" in note
+    assert "sideloading app" in note and "save it to Files" in note
     asyncio.run(screen.check_now())
     assert not _find(screen.release_holder.content, "updates-install-")
     assert _find(screen.release_holder.content, "updates-ipa-")
@@ -432,7 +432,7 @@ def test_ios_says_why_it_cannot_self_update(tmp_path, github, capsys):
 
 
 @needs_flet
-def test_feature_builds_the_installer_on_the_android_app_only():
+def test_feature_builds_the_platform_downloader_on_device_only():
     from glossarion_mobile.ui.screens import updates as screens
 
     def app(platform, native):
@@ -443,8 +443,23 @@ def test_feature_builds_the_installer_on_the_android_app_only():
     assert screens.UpdatesFeature(app("android", _FakeNative("/c")), service=service).installer is not None
     stub = native_mod.NativeBridge(native=native_mod.NativeStub())
     assert screens.UpdatesFeature(app("android", stub), service=service).installer is None
-    assert screens.UpdatesFeature(app("ios", _FakeNative("/c")), service=service).installer is None
+    assert isinstance(screens.UpdatesFeature(app("ios", _FakeNative("/c")), service=service).installer, up.IpaDownloader)
+    assert screens.UpdatesFeature(app("ios", stub), service=service).installer is None
     assert screens.UpdatesFeature(app("android", None), service=service).installer is None
+
+
+def test_ios_download_is_verified_and_left_ready_for_export(tmp_path, github):
+    ipa = next(a for a in github.release["assets"] if a["name"].endswith(".ipa"))
+    payload = _payload("ipa-content")
+    ipa.update(size=len(payload), digest="sha256:" + hashlib.sha256(payload).hexdigest())
+    github.payloads[ipa["name"]] = payload
+    service = _service(tmp_path, version="9.15.6", platform="ios")
+    result = service.check(manual=True)
+    assert result.download_asset.name == ipa["name"]
+    downloader = up.IpaDownloader(service, None, folder=str(tmp_path / "updates"))
+    assert asyncio.run(downloader.download(result.download_asset)) == "ready"
+    assert downloader.state == "ready" and Path(downloader.path).read_bytes() == payload
+    assert service.ready_apk(result.download_asset, str(tmp_path / "updates")) == downloader.path
 
 
 _TB_SPEC = importlib.util.spec_from_file_location("_glossarion_tb_helpers_b9157u", Path(__file__).with_name("test_bootstrap.py"))

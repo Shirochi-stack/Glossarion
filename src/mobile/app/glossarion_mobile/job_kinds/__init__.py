@@ -58,6 +58,7 @@ KIND_MODULES = {
     "single_chapter": "single_chapter",
     # U6 tools (Tools › QA Scanner / Converter / Headers & metadata, Library metadata)
     "qa_scan": "qa",
+    "glossary_names": "glossary_names",
     "validate_epub": "compile",
     "rename_outputs": "compile",
     "translate_headers": "headers",

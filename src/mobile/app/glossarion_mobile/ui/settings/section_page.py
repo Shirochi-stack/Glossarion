@@ -60,6 +60,7 @@ STATIC_ROWS: dict = {
 #: ``SettingsContext.extras['actions']`` (a full-screen view without a route, e.g. the Multi-Key
 #: Manager's Refusal patterns); the link is hidden while no feature registered it.
 STATIC_LINKS: dict = {
+    "qa.settings": (("AI Hunter settings", "MANAGE_SEARCH", "settings.section", {"section": "qa.ai_hunter"}),),
     # Output MD / Output TXT (Sidecars): the desktop "Generate MD" / "Generate TXT" retroactive buttons;
     # Validate EPUB Structure / Rename Files (retain source extension) / Load Font: Tools › Converter
     "epub_output": (("Generate MD / TXT for existing outputs…", "DESCRIPTION", "tools.convert"),
@@ -158,6 +159,8 @@ class SectionPage(Screen):
         self.pool_tiles: list[SettingTile] = []  # SECTION_POOL_KEYS (outside the window)
         self.window: tuple[int, int] = (0, 0)
         self.list_view: Optional[ft.ListView] = None
+        self.qa_tabs: list[tuple[str, int, int]] = []
+        self.tabs: Optional[ft.Tabs] = None
         self.banner = JobBanner(ctx)
         self.search_sheet: Optional[ft.BottomSheet] = None
         self.search: Optional[SettingsSearch] = None
@@ -186,7 +189,11 @@ class SectionPage(Screen):
         # nor informational read-only ones (owner 2026-10-13)
         specs = [spec for spec in self.ctx.schema.specs_for(self.section) if listed_setting(self.ctx, spec)]
         curated = dict(getattr(self.section, "headings", ()) or ())
-        if curated:  # UI_SPEC §4.15 curated section: its own sub-headings, in its order
+        if self.section_id == "qa.settings":
+            from glossarion_mobile.ui.settings.qa_layout import qa_settings_layout
+
+            self.specs, self.headings, self.qa_tabs = qa_settings_layout(specs)
+        elif curated:  # UI_SPEC §4.15 curated section: its own sub-headings, in its order
             self.specs = list(specs)
             self.headings = {str(getattr(spec, "key", "")): curated.get(str(getattr(spec, "key", "")), "")
                              for spec in specs}
@@ -206,13 +213,21 @@ class SectionPage(Screen):
         )
         start = 0
         if self.focus_target in self.keys:
-            start = window_bounds(self.keys.index(self.focus_target), len(self.keys), self.window_size)[0]
+            index = self.keys.index(self.focus_target)
+            start = index if self.qa_tabs else window_bounds(index, len(self.keys), self.window_size)[0]
+        if self.qa_tabs:
+            self.tabs = ft.Tabs(length=len(self.qa_tabs), expand=True, on_change=self._on_qa_tab,
+                                content=ft.Column([
+                                    ft.TabBar(tabs=[ft.Tab(label=title) for title, _, _ in self.qa_tabs],
+                                              scrollable=True, key="qa-settings-tab-bar"),
+                                    self.list_view,
+                                ], spacing=0, expand=True), key="qa-settings-tabs")
         self.render_window(start, push=False)
         controls: list[ft.Control] = [self.banner.control]
         if not self.specs and not STATIC_LINKS.get(self.section_id) and not SECTION_POOL_KEYS.get(self.section_id):
             controls.append(EmptyState(icon="SETTINGS", title=self.title, body="This section has no settings yet.",
                                        key="settings-empty-section"))
-        controls.append(self.list_view)
+        controls.append(self.tabs or self.list_view)
         return ft.Column(controls, spacing=tokens.SPACING["sm"], expand=True)
 
     def actions(self) -> list[ft.Control]:
@@ -249,11 +264,18 @@ class SectionPage(Screen):
         if self.list_view is None:
             return
         total = len(self.keys)
-        start = max(0, min(start, max(0, total - self.window_size)))
-        end = min(total, start + self.window_size)
+        tab = None
+        if self.qa_tabs:
+            tab = next((i for i, (_, first, last) in enumerate(self.qa_tabs) if first <= start < last), 0)
+            if self.tabs is not None:
+                self.tabs.selected_index = tab
+            _, start, end = self.qa_tabs[tab]
+        else:
+            start = max(0, min(start, max(0, total - self.window_size)))
+            end = min(total, start + self.window_size)
         self.window = (start, end)
         controls: list[ft.Control] = []
-        if start > 0:
+        if tab is None and start > 0:
             self.earlier_button.content = f"Show earlier settings ({start})"
             controls.append(self.earlier_button)
         heading = None
@@ -265,14 +287,15 @@ class SectionPage(Screen):
             tile = self.tile(key)
             tile.refresh(push=False)
             controls.append(tile.control)
-        if end < total:
+        if tab is None and end < total:
             self.later_button.content = f"Show more settings ({total - end})"
             controls.append(self.later_button)
-        else:
+        if (tab is None and end == total) or (tab is not None and self.qa_tabs[tab][0] == "More checks"):
             pools = self.pool_controls()
             if pools:
                 controls.append(self._heading("API key pools"))
                 controls.extend(pools)
+        if end == total:
             for link in STATIC_LINKS.get(self.section_id, ()):
                 label, icon, route = link[:3]
                 params = link[3] if len(link) > 3 else None
@@ -291,7 +314,20 @@ class SectionPage(Screen):
                     on_click=lambda e, r=route, p=params, f=fragment: self.ctx.go(r, p, fragment=f)))
         self.list_view.controls = controls
         if push:
-            self.ctx.push(self.list_view)
+            self.ctx.push(self.tabs or self.list_view)
+
+    async def _on_qa_tab(self, event: Any) -> None:
+        tab = event.control.selected_index
+        if tab is None or not 0 <= tab < len(self.qa_tabs):
+            return
+        _, start, end = self.qa_tabs[tab]
+        if self.window == (start, end):
+            return  # A search jump has already mounted this tab and set its scroll target.
+        self.render_window(start)
+        try:
+            await self.list_view.scroll_to(offset=0, duration=0)
+        except Exception:  # a view that closed before Flutter reported the tab change
+            pass
 
     def ctx_action(self, name: str) -> Optional[Callable[[], Any]]:
         """The feature action a STATIC_LINKS ``action:<name>`` link runs (None: not registered)."""
@@ -349,7 +385,7 @@ class SectionPage(Screen):
         index = self.keys.index(key)
         start, end = self.window
         if not start <= index < end:
-            self.render_window(window_bounds(index, len(self.keys), self.window_size)[0])
+            self.render_window(index if self.qa_tabs else window_bounds(index, len(self.keys), self.window_size)[0])
             await asyncio.sleep(settle)  # the client builds the new window first
         self.jumps.append(key)
         try:

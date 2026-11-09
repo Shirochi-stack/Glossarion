@@ -231,7 +231,7 @@ ROUTES: tuple[RouteSpec, ...] = (
     _settings_page("logs", "Logs & diagnostics", "U1"),
     # Diagnostic: the env the next translation run would get (HeadlessOwner + run_env), redacted.
     RouteSpec("settings.env_preview", "/settings/logs/env", "Env preview", VIEW, "U2", parent="settings.logs"),
-    _settings_page("updates", "Updates", "U9"),
+    _settings_page("updates", "App updates", "U9"),
     _settings_page("about", "About", "U2"),
     _settings_page("danger", "Danger zone", "U2"),
     # Flows and handled routes

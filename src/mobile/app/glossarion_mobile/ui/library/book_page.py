@@ -210,8 +210,8 @@ class BookPageScreen(Screen):
             item("Translate Metadata", lambda: self.ctx.spawn(self.translate_metadata()), ft.Icons.LABEL,
                  self.metadata_reason() is not None),
             item("QA scan", lambda: self.ctx.go("tools.qa", None, {"out": self.bid}), ft.Icons.FACT_CHECK),
-            item("Check glossary names in existing output…", self.open_glossary_name_check,
-                 ft.Icons.SPELLCHECK, not has_workspace),
+            item("Check glossary names in existing output…", lambda: self.ctx.spawn(self.open_glossary_name_check()),
+                 ft.Icons.FIND_IN_PAGE, not has_workspace),
             item("Edit metadata.json", lambda: self.ctx.go("library.book.metadata", {"bid": self.bid}),
                  ft.Icons.DATA_OBJECT, not has_workspace),
             item("Files", self.open_files, ft.Icons.FOLDER_OPEN, not has_workspace),
@@ -737,12 +737,11 @@ class BookPageScreen(Screen):
         """⋯ › ↗ Share: the book's file to another app (``LibraryContext.share_books``, as the card ⋯)."""
         return bool(await self.ctx.share_books([self.book]))
 
-    def open_glossary_name_check(self) -> Any:
-        from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
+    async def open_glossary_name_check(self) -> Optional[str]:
+        from glossarion_mobile.ui.tools.qa_glossary_names import start_name_check
 
         folder = self.workspace
-        if folder and self.ctx.page is not None:
-            return GlossaryNameFixSheet(self.ctx, [folder]).show(self.ctx.page)
+        return await start_name_check(self.ctx, [folder]) if folder else None
 
     def open_files(self) -> None:
         folder = self.workspace

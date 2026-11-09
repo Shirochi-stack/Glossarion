@@ -5,7 +5,7 @@ release notes · Android: **Download and install** (the APK for this device's AB
 ``_hotfixN`` of the release when there is one: downloaded in the app with progress, size and
 SHA-256 verified, then handed to Android's installer by ``services.updates.ApkInstaller``; the
 first time one tap opens "Install unknown apps" for Glossarion, and coming back installs) with
-the browser link kept as a fallback · iOS: the IPA links and why the app cannot replace itself.
+the browser link kept as a fallback · iOS: download and verify the IPA, then share or save it.
 The checks are the desktop's (``services.updates.UpdateService`` over ``update_core``).
 
 ``await UpdatesFeature.install(app)`` wires the route into the shell's screen factory, marks
@@ -58,15 +58,16 @@ def describe_checked(timestamp: float, now: Optional[float] = None) -> str:
 
 
 class UpdatesScreen(PageScreen):
-    title = "Updates"
+    title = "App updates"
 
     def __init__(self, match: Any, ctx: Any, *, service: Any, open_url: Optional[Callable[[str], Any]] = None,
-                 installer: Any = None) -> None:
+                 installer: Any = None, files: Any = None) -> None:
         super().__init__(match, ctx)
         self.service = service
         self.open_url = open_url
         #: ``services.updates.ApkInstaller`` (Android app); None: the APK opens in the browser.
         self.installer = installer
+        self.files = files
         self.busy = False
         self._builds = 0
         self._install_builds = 0
@@ -87,7 +88,7 @@ class UpdatesScreen(PageScreen):
         self.checked_text = ft.Text(describe_checked(service.last_checked()), theme_style=ft.TextThemeStyle.BODY_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT, key="updates-checked")
         self.ring = ft.ProgressRing(width=20, height=20, stroke_width=2, visible=False, key="updates-ring")
-        self.check_button = ft.FilledButton(content="Check now", icon=ft.Icons.REFRESH, on_click=self._on_check,
+        self.check_button = ft.FilledButton(content="Check for updates", icon=ft.Icons.REFRESH, on_click=self._on_check,
                                             key="updates-check", tooltip="Check GitHub for a newer release")
         self.startup_switch = toggle(label="Check on startup", value=service.startup_enabled(),
                                         on_change=self._on_startup, key="updates-startup")
@@ -109,9 +110,7 @@ class UpdatesScreen(PageScreen):
     def _note(self) -> str:
         platform = str(getattr(self.service, "platform", "") or "")
         if platform == "ios":
-            return ("iOS does not let an app replace itself: only the App Store, TestFlight or the tool you "
-                    "sideloaded Glossarion with (AltStore, SideStore, Sideloadly…) can install a new IPA over it. "
-                    "Download the IPA here and install it with that tool.")
+            return "Download the verified IPA here, then share it to your sideloading app or save it to Files."
         if platform == "android":
             return ("Glossarion downloads the update and opens Android's installer. Android always asks you to "
                     "confirm an app update (only the Play Store or a managed phone can update silently), and the "
@@ -151,7 +150,7 @@ class UpdatesScreen(PageScreen):
                                       key=f"updates-skip-{n}"))
         if result.notes:
             rows.append(ft.ExpansionTile(
-                title="Release notes", expanded=result.status == "update", key=f"updates-notes-{n}",
+                title="Release notes", expanded=True, key=f"updates-notes-{n}",
                 controls=[ft.Markdown(result.notes[:60000], selectable=True,
                                       extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                                       on_tap_link=lambda e: self._open_web(getattr(e, "data", "") or ""))],
@@ -162,7 +161,7 @@ class UpdatesScreen(PageScreen):
     def _android_rows(self, downloads: Any) -> list:
         rows: list[ft.Control] = []
         apk = downloads.apk
-        offer = getattr(self.result, "install_asset", None) if self.result is not None else None
+        offer = self._download_offer()
         installed = getattr(self.result, "installed", "") if self.result is not None else ""
         if installed:
             rows.append(ft.Text(f"Installed: {installed}", theme_style=ft.TextThemeStyle.BODY_SMALL,
@@ -196,6 +195,11 @@ class UpdatesScreen(PageScreen):
 
     def _ios_rows(self, downloads: Any) -> list:
         rows: list[ft.Control] = []
+        offer = self._download_offer()
+        if offer is not None and self.installer is not None:
+            self.install_box = ft.Column(spacing=tokens.SPACING["sm"], key=f"updates-install-{self._builds}")
+            self._fill_install_box(offer)
+            rows.append(self.install_box)
         if downloads.ipa is not None:
             rows.append(self._link_tile(f"Unsigned IPA ({downloads.ipa.size_mb:.0f} MB)", downloads.ipa.url,
                                         ft.Icons.DOWNLOAD, f"updates-ipa-{self._builds}"))
@@ -205,6 +209,12 @@ class UpdatesScreen(PageScreen):
         return rows
 
     # ---- Android in-app install (services.updates.ApkInstaller) ------------------------------------
+
+    def _download_offer(self) -> Any:
+        return getattr(self.result, "download_asset", getattr(self.result, "install_asset", None))
+
+    def _is_ios(self) -> bool:
+        return getattr(self.service, "platform", None) == "ios"
 
     def _fill_install_box(self, asset: Any) -> None:
         """The install step for ``asset`` from the installer's state (new keys per fill)."""
@@ -236,6 +246,14 @@ class UpdatesScreen(PageScreen):
                 ft.TextButton(content="Install", icon=ft.Icons.INSTALL_MOBILE, on_click=self._on_install,
                               key=f"updates-install-retry-{n}"),
             ]
+        elif state == "ready" and self._is_ios():
+            controls += [
+                ft.Text("Downloaded and verified", key=f"updates-install-ready-text-{n}"),
+                ft.FilledButton(content="Share IPA", icon=ft.Icons.IOS_SHARE, disabled=self.files is None,
+                                on_click=lambda e: self.spawn(self._export_ipa(share=True)), key=f"updates-ipa-share-{n}"),
+                ft.TextButton(content="Save to Files", icon=ft.Icons.FOLDER_OPEN,
+                              on_click=lambda e: self.spawn(self._export_ipa(share=False)), key=f"updates-ipa-save-{n}"),
+            ]
         elif state in ("ready", "installing"):
             text = ("Android's installer is open: tap Update there. Glossarion restarts when it is done."
                     if state == "installing" else "Downloaded and verified.")
@@ -249,10 +267,29 @@ class UpdatesScreen(PageScreen):
             if state == "error" and installer.error:
                 controls.append(ft.Text(installer.error, color=ft.Colors.ERROR, theme_style=ft.TextThemeStyle.BODY_SMALL,
                                         key=f"updates-install-error-{n}"))
+            action = "Download update" if self._is_ios() else f"Download and install {what}"
             controls.append(ft.FilledButton(
-                content=f"Download and install {what} ({asset.size_mb:.0f} MB)", icon=ft.Icons.SYSTEM_UPDATE,
+                content=f"{action} ({asset.size_mb:.0f} MB)", icon=ft.Icons.SYSTEM_UPDATE,
                 on_click=lambda e, a=asset: self._on_download(a), key=f"updates-install-start-{n}"))
         box.controls = controls
+
+    async def _export_ipa(self, *, share: bool) -> None:
+        path = self.installer.path
+        if not path or not os.path.isfile(path):
+            self.say("The downloaded IPA is gone. Download it again.")
+            self.installer.path = None
+            self.installer._set("idle")
+            return
+        if share:
+            if self.files is not None and not await self.files.share([path], title="Glossarion update"):
+                self.say("Could not share the IPA")
+            return
+        from glossarion_mobile.services.cloud_sync import NativeDocs
+
+        result = await NativeDocs(self.installer.native, platform="ios").pick_save_location(
+            os.path.basename(path), "application/octet-stream", path)
+        if result is not None:
+            self.say("Saved to Files" if result.get("ok") else result.get("message") or "Could not save the IPA")
 
     def _progress_text(self) -> str:
         installer = self.installer
@@ -262,7 +299,7 @@ class UpdatesScreen(PageScreen):
 
     def _on_installer(self, progress_only: bool) -> None:
         """Installer listener (event loop): progress ticks move the bar, state changes refill the step."""
-        offer = getattr(self.result, "install_asset", None) if self.result is not None else None
+        offer = self._download_offer()
         if self.install_box is None or offer is None:
             return
         if progress_only and self.install_bar is not None and self.install_line is not None:
@@ -360,7 +397,7 @@ class UpdatesScreen(PageScreen):
         self.push(self.release_holder, self.checked_text)
         if self.installer is not None and result is not None and result.status != "error":
             # a verified APK from a visit before is offered as "Install"; any other download is removed
-            self.spawn(self.installer.adopt(getattr(result, "install_asset", None)))
+            self.spawn(self.installer.adopt(self._download_offer()))
         return self.result
 
     def _set_busy(self, busy: bool) -> None:
@@ -436,12 +473,14 @@ class UpdatesFeature:
     def installer(self) -> Any:
         """The in-app APK install (Android app only: the extension opens the system installer); None
         elsewhere, where the screen keeps the browser link."""
-        if self._installer is None and self._platform() == "android":
+        platform = self._platform()
+        if self._installer is None and platform in ("android", "ios"):
             native = getattr(self.app, "native", None)
             if native is not None and not getattr(native, "is_stub", True):
-                from glossarion_mobile.services.updates import ApkInstaller
+                from glossarion_mobile.services.updates import ApkInstaller, IpaDownloader
 
-                self._installer = ApkInstaller(self.service, native, run_io=self._run_io)
+                downloader = IpaDownloader if platform == "ios" else ApkInstaller
+                self._installer = downloader(self.service, native, run_io=self._run_io)
         return self._installer
 
     async def _run_io(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -487,9 +526,9 @@ class UpdatesFeature:
     # ---- routing ---------------------------------------------------------------------------
 
     def screen_factory(self, match: RouteMatch) -> Any:
-        if match.name == ROUTE:
+        if match.name == ROUTE or (match.name == "settings.section" and match.params.get("section") == "other.context"):
             screen = UpdatesScreen(match, self._ctx(), service=self.service, open_url=self.open_url,
-                                   installer=self.installer)
+                                   installer=self.installer, files=getattr(self.app, "files", None))
             self.screens_built.append(match.name)
             return screen
         if self._fallback_factory is None:
@@ -553,7 +592,7 @@ class UpdatesFeature:
         installer = self.installer
         if installer is not None and getattr(result, "status", "") in ("update", "hotfix", "current", "skipped"):
             try:
-                await installer.adopt(getattr(result, "install_asset", None))  # drops an installed update's APK
+                await installer.adopt(getattr(result, "download_asset", getattr(result, "install_asset", None)))
             except Exception:
                 log.exception("checking downloaded updates failed")
         downloads = getattr(result, "downloads", None)

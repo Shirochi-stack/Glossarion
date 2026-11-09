@@ -832,7 +832,15 @@ def test_renderer_builds_every_section_and_tile_kind(tmp_path):
             kinds.update(t.kind for t in screen.tiles.values())
             assert screen.title == section.title
             # U12 item 1: keys that cannot work on mobile are not listed at all
-            assert screen.visible_keys == [k for k in section.keys if ctx.schema.availability(k)[0]]
+            expected_keys = [k for k in section.keys if ctx.schema.availability(k)[0]]
+            if screen.qa_tabs:
+                assert sorted(screen.keys) == sorted(expected_keys)
+                for _title, start, end in screen.qa_tabs:
+                    screen.render_window(start)
+                    assert screen.visible_keys == screen.keys[start:end]
+                    kinds.update(t.kind for t in screen.tiles.values())
+            else:
+                assert screen.visible_keys == expected_keys
             for key, tile in screen.tiles.items():
                 # search's scroll_to target is the tile's top marker, never the tile (its field keeps focus)
                 assert tile.control.content.controls[0].key == __import__("flet").ScrollKey(key)
@@ -1047,11 +1055,12 @@ def test_nested_lazy_default_and_key_pool_tiles(tmp_path):
         assert nested.path == ("qa_scanner_settings", "min_file_length")
         assert nested.value_text.value == "200 · default" and not nested.stored
         assert nested.apply("300") and store.get("qa_scanner_settings") == {"report_format": "summary", "min_file_length": 300}
-        assert t["qa_scanner_settings.report_format"].value_text.value == "summary"
         sheet = nested.open_help()
         assert "Config key: qa_scanner_settings › min_file_length" in sheet.body
         assert "Files shorter than this are flagged.\n0 disables & skips." in sheet.body and "<b>" not in sheet.body
         assert nested.reset() and store.get("qa_scanner_settings") == {"report_format": "summary"}
+        assert await qa.focus_key("qa_scanner_settings.report_format", highlight=False)
+        assert t["qa_scanner_settings.report_format"].value_text.value == "summary"
         # lazy defaults: shown as notes until resolved, never imported on the loop
         assert t["assistant_prompt"].value_text.value == "Loading default…"
         assert t["extraction_workers"].value_text.value == "Computed when a run starts"
@@ -1267,6 +1276,8 @@ def test_real_schema_renders_every_section(tmp_path):
             screen = SectionPage(_match(build_route("settings.section", {"section": section.id})), ctx, window_size=400)
             page.views[0].controls[:] = [screen.get_body()]
             page.update()
+            for _title, start, _end in screen.qa_tabs:
+                screen.render_window(start)
             for key in section.keys:
                 if (schema.spec(key) is not None and schema.display_key(key) == key  # devfix4: folded keys
                         and listed_setting(ctx, schema.spec(key))):  # unavailable / read-only keys are not listed
@@ -1279,6 +1290,38 @@ def test_real_schema_renders_every_section(tmp_path):
         store._saver.close()
 
     asyncio.run(scenario())
+
+
+@needs_flet
+@pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable")
+def test_mobile_qa_tabs_follow_desktop_order_and_keep_sdlxliff_fields_together(tmp_path):
+    from glossarion_mobile.state.config_store import QA_SDLXLIFF_CHECK
+    from glossarion_mobile.ui.settings.qa_layout import SDLXLIFF_TAG_FIELDS
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+
+    schema = SchemaAccess()
+    store = _memory_store(tmp_path, {}, schema)
+    ctx = _ctx(store, schema)
+    screen = SectionPage(_match("/settings/s/qa.settings"), ctx)
+    screen.get_body()
+    assert [title for title, _, _ in screen.qa_tabs] == ["Detection", "Files & tags", "More checks", "Report & speed"]
+    key = ".".join(QA_SDLXLIFF_CHECK)
+    index = screen.keys.index(key)
+    assert tuple(screen.keys[index + 1:index + 4]) == SDLXLIFF_TAG_FIELDS
+    assert screen.keys.index("qa_scanner_settings.source_language") < index
+    assert index < screen.keys.index("qa_scanner_settings.min_file_length")
+    screen.tabs.selected_index = 3
+    asyncio.run(screen.tabs.on_change(types.SimpleNamespace(control=screen.tabs)))
+    assert "qa_scanner_settings.report_format" in screen.visible_keys
+    assert not store.has(QA_SDLXLIFF_CHECK)
+    assert asyncio.run(screen.focus_key(key, highlight=False))
+    assert screen.tabs.selected_index == 1 and screen.tile(key).value() is True
+    field = screen.tile(SDLXLIFF_TAG_FIELDS[0])
+    assert field.editable
+    store.set(QA_SDLXLIFF_CHECK, False)
+    screen.refresh_all()
+    assert screen.tile(key).value() is False and not field.editable
+    store._saver.close()
 
 
 # ==========================================================================

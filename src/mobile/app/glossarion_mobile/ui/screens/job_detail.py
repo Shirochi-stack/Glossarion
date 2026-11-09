@@ -196,6 +196,7 @@ class JobDetailScreen(Screen):
         library_book: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
         library_source: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
         run_io: Optional[Callable[..., Awaitable[Any]]] = None,
+        review_names: Optional[Callable[[Any], Any]] = None,
     ) -> None:
         super().__init__(match)
         self.open_progress = open_progress  # (output folder) -> the Progress manager over it
@@ -207,6 +208,7 @@ class JobDetailScreen(Screen):
         self.library_book = library_book
         self.library_source = library_source
         self.run_io = run_io
+        self.review_names = review_names
         self._files_key: Any = None
         self._files_target: Optional[tuple] = None
         self._library_key: Any = None  # the job state the Library lookup ran for (``_apply_library``)
@@ -271,6 +273,9 @@ class JobDetailScreen(Screen):
                                                   on_click=lambda e: self.open_review(), visible=False,
                                                   key="job-review")
         self.review_sheet: Any = None
+        self.names_button = ft.FilledTonalButton("Review mismatches", icon=ft.Icons.FIND_IN_PAGE, visible=False,
+                                                on_click=lambda e: self.review_names(self.snap),
+                                                key="job-review-names")
         self.issue_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.HOURGLASS_TOP, size=16), visible=False,
                                   key="job-issue")
         self.qa_chip = ft.Chip(label=ft.Text(""), leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR, size=16),
@@ -296,7 +301,7 @@ class JobDetailScreen(Screen):
                 self.error_text,
                 self.issue_chip,
                 self.qa_chip,
-                ft.Row([self.review_button, self.stop_button, self.resume_button,
+                ft.Row([self.review_button, self.names_button, self.stop_button, self.resume_button,
                         self.progress_button, self.library_button, self.library_reason], wrap=True, spacing=8,
                        run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                        # a button wrapped onto its own line sits in the middle (owner 2026-10-29)
@@ -467,6 +472,8 @@ class JobDetailScreen(Screen):
 
         reviewable = glossary_question(snap) is not None and chat_of(snap) is None
         self.review_button.visible = reviewable
+        self.names_button.visible = (self.review_names is not None and snap.state is JobState.DONE
+                                     and bool((snap.result or {}).get("glossary_name_reviews")))
         self.question_text.value = ("Waiting for your glossary decision — review it to continue" if reviewable else
                                     "Waiting for your glossary decision — answer it in the chat") if snap.question else ""
         self.question_text.color = ft.Colors.TERTIARY
