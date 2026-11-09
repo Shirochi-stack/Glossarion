@@ -510,6 +510,7 @@ def load_progress_view(service: Any, book: Mapping[str, Any], *, show_special: b
     previous_state = previous.state if previous is not None else None
     try:
         if previous_state is not None and hasattr(progress_core, "refresh_book_progress"):
+            previous_state.owner.config = service.config_snapshot()
             toggles = (previous.show_special != show_special) or (previous.show_model_info != show_model_info)
             if toggles and hasattr(progress_core, "set_view_toggles"):
                 progress_core.set_view_toggles(previous_state, show_special_files=show_special,

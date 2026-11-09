@@ -365,6 +365,9 @@ class BookPageScreen(Screen):
             return
         if not self._unsubs:
             self._unsubs.append(self.service.subscribe(self._on_library))
+            observe = getattr(getattr(self.service, "config", None), "observe", None)
+            if callable(observe):
+                self._unsubs.append(observe("output_mode", self._on_output_mode_changed))
             jobs = self.ctx.jobs
             subscribe = getattr(jobs, "subscribe", None) if jobs is not None else None
             if callable(subscribe):
@@ -425,6 +428,17 @@ class BookPageScreen(Screen):
             if gp_signature != self._gp_signature:
                 await self.reload_glossary()
 
+    def _on_output_mode_changed(self, _key: str, _value: Any) -> None:
+        def refresh():
+            if self._unsubs:
+                self.ctx.spawn(self.reload_progress(wait=True))
+
+        dispatcher = self.ctx.dispatcher
+        if dispatcher is not None and getattr(dispatcher, "bound", False):
+            dispatcher.post(refresh)
+        else:
+            refresh()
+
     async def full_refresh(self) -> None:
         """⟳ Refresh / pull-to-refresh: full reconcile (``read_only=False``) + a Library rescan.
 
@@ -460,13 +474,14 @@ class BookPageScreen(Screen):
         self.overview.render()
         return self.details
 
-    async def reload_progress(self, *, full: bool = False, force: bool = False) -> Optional[pm.ProgressView]:
+    async def reload_progress(self, *, full: bool = False, force: bool = False,
+                              wait: bool = False) -> Optional[pm.ProgressView]:
         """Open the book's Progress Manager view, or refresh it (``full`` = read-write reconcile).
 
         Loads are serialised (one ``BookProgress`` is refreshed in place by the shared code): a
         poll tick that finds a load running is skipped; a forced reload waits for it.
         """
-        if self._loading_progress and not (full or force):
+        if self._loading_progress and not (full or force or wait):
             return self.progress
         if self._progress_lock is None:
             self._progress_lock = asyncio.Lock()

@@ -604,6 +604,53 @@ def test_real_progress_view_rows_chunks_and_status_groups(real_env):
     assert pm.progress_signature(service, book, again) == sig
 
 
+def test_open_book_updates_progress_when_output_mode_changes(real_env, tmp_path):
+    from glossarion_mobile.state.config_store import MobileConfigStore
+    from glossarion_mobile.ui.library.book_page import BookPageScreen
+    from glossarion_mobile.ui.router import parse_route
+
+    service = real_env["service"]
+    config = MobileConfigStore(tmp_path / "mobile-config.json", backup_first_save=False)
+    service.config = config
+
+    async def scenario():
+        _, session = _TB._fake_session("android")
+        await service.refresh()
+        book = service.snapshot.in_progress[0]
+        screen = BookPageScreen(parse_route(f"/library/book/{service.bid_for(book)}?tab=chapters"),
+                                _ctx(session.page, service))
+        screen.actions()
+        _mount(session.page, screen.get_body())
+        screen.did_show()
+        screen.poller.stop()
+
+        async def mode_is(mode):
+            for _ in range(100):
+                if screen.progress is not None and screen.progress.mode == mode:
+                    return
+                await asyncio.sleep(0.025)
+            pytest.fail(f"The open progress view did not switch to {mode}")
+
+        try:
+            await mode_is("text")
+            initial = screen.progress
+            config.set("output_mode", "image")
+            await mode_is("image")
+            assert screen.progress.signature == initial.signature
+            assert any(row.label == "No Images" for row in screen.chapters.visible)
+            assert any(chip.group == "skipped" and chip.count > 0 for chip in screen.progress.chips)
+            config.set("output_mode", "text")
+            await mode_is("text")
+            assert all(row.label != "No Images" for row in screen.chapters.visible)
+        finally:
+            screen.dispose()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        config.close()
+
+
 def test_real_progress_action_writes_through_mutate_progress(real_env):
     if _core("progress_actions", "plan_remove_qa_marks", "remove_qa_marks") is None:
         pytest.skip("progress_actions not importable")

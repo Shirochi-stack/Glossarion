@@ -1430,11 +1430,34 @@ def test_epub_image_mode_counts_no_images_as_skipped(image_mode_workspace):
     assert (initial[6], initial[8]) == (1, 1)
 
     book.owner.config["output_mode"] = "text"
-    text_book = pc.refresh_book_progress(book, force=True)
+    text_book = pc.refresh_book_progress(book)
+    assert text_book.signature == book.signature
     assert chapter_statuses(text_book) == {
         "chapter0001.xhtml": "not_translated", "chapter0002.xhtml": "not_translated"
     }
     assert (text_book.stats.missing, text_book.stats.skipped) == (2, 0)
+
+
+def test_open_desktop_progress_refreshes_rows_and_legend_on_mode_change(image_mode_workspace):
+    from other_settings import _set_output_mode
+
+    source, out, _ = image_mode_workspace
+    host = pl.make_host(pl.current_rg(), {"output_mode": "text"})
+    data = pl.open_progress_manager(host, source, resolved_output_dir=str(out))
+    try:
+        legend = data["_stats_labels"]["skipped"]
+        assert legend.isHidden()
+        _set_output_mode(host, "image")
+        pl.pump(until=lambda: "Skipped: 1" in legend.text(), timeout=3.0)
+        assert not legend.isHidden()
+        assert any("No Images" in data["listbox"].item(i).text() for i in range(data["listbox"].count()))
+        _set_output_mode(host, "text")
+        pl.pump(until=legend.isHidden, timeout=3.0)
+        assert legend.isHidden()
+        assert all("No Images" not in data["listbox"].item(i).text() for i in range(data["listbox"].count()))
+    finally:
+        data["dialog"].close()
+        host.close()
 
 
 def test_epub_image_cover_uses_edited_asset_instead_of_text_completion(tmp_path):

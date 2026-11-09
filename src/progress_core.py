@@ -6699,7 +6699,7 @@ def build_book_progress(source_path, config=None, *, owner=None, fixed_output_di
 
 
 def refresh_book_progress(book, *, read_only=True, force=False):
-    """Re-read a book's progress; returns ``book`` unchanged when nothing moved on disk.
+    """Re-read progress when the workspace or selected output mode changes.
 
     ``read_only`` is the desktop's silent tick (no writes); ``read_only=False`` is the
     explicit Refresh (seed, clean up, commit through the merge).
@@ -6709,7 +6709,8 @@ def refresh_book_progress(book, *, read_only=True, force=False):
     signature = snapshot_signature(
         data['progress_file'], data['output_dir'], include_tts=_include_tts_listing(owner, data)
     )
-    if not force and read_only and signature == book.signature:
+    mode = owner._current_progress_output_mode(data)
+    if not force and read_only and signature == book.signature and mode == book.stats.mode:
         return book
     if not reconcile_workspace(owner, data, read_only=read_only):
         return book

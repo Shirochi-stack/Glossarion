@@ -12795,6 +12795,7 @@ def _set_output_mode(self, mode: str):
         # Normalised mode + the legacy flags it implies (settings_rules, shared with mobile)
         flags = settings_rules.output_mode_flags(mode)
         mode = flags.mode
+        mode_changed = self.config.get('output_mode') != mode
 
         # --- set legacy booleans ---
         for attr, value in flags.var_values.items():
@@ -12836,6 +12837,10 @@ def _set_output_mode(self, mode: str):
                 combo.blockSignals(True)
                 combo.setCurrentIndex(idx)
                 combo.blockSignals(False)
+
+        refresh_progress = getattr(self, '_refresh_progress_managers_for_output_mode', None)
+        if mode_changed and callable(refresh_progress):
+            refresh_progress()
     except Exception:
         pass
 

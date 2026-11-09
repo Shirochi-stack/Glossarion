@@ -7356,6 +7356,27 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 _add(dialog)
         return dialogs
 
+    def _refresh_progress_managers_for_output_mode(self):
+        """Repaint cached chapter lists and their legends after a mode change."""
+        def refresh():
+            cache = getattr(self, '_retranslation_dialog_cache', {})
+            views = list(cache.values())
+            multi = getattr(self, '_multi_file_retranslation_dialog', None)
+            views.extend(getattr(multi, '_tab_data', ()))
+            seen = set()
+            for data in views:
+                if not isinstance(data, dict) or id(data) in seen or not self._is_data_valid(data):
+                    continue
+                seen.add(id(data))
+                previous = data.get('_refresh_read_only', False)
+                data['_refresh_read_only'] = True
+                try:
+                    self._refresh_retranslation_data(data)
+                finally:
+                    data['_refresh_read_only'] = previous
+
+        QTimer.singleShot(0, refresh)
+
     def _reopen_glossary_progress_after_input_change(self, attempt=0):
         for dialog in self._progress_manager_dialogs():
             try:
@@ -14618,6 +14639,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         data['_progress_list_view_revision'] = (
             self._progress_list_show_special(data),
             bool(data.get('show_model_info_state')),
+            self._current_progress_output_mode(data),
             ((data.get('prog') or {}).get('image_gen') or {}).get('last_updated'),
         )
 
@@ -14782,6 +14804,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         view_revision = (
             show_special_files,
             bool(data.get('show_model_info_state')),
+            self._current_progress_output_mode(data),
             ((data.get('prog') or {}).get('image_gen') or {}).get('last_updated'),
         )
 
