@@ -515,6 +515,10 @@ async def _check_book_page(app, driver, tester, conn, page, uf, row, expect: dic
     external_before = len(_external_calls(conn))
     share_before = len(app.files.share.calls)
     await driver.tap(text=SHARE_ITEM, timeout=10)
+    if expect.get("warn_uncompiled"):
+        await driver.wait(text="Compile before sharing?", timeout=10)
+        assert len(app.files.share.calls) == share_before
+        await driver.tap(key="lib-share-stale-share", timeout=10)
     assert await uf._wait(lambda: len(app.files.share.calls) > share_before, timeout=10)
     shared = app.files.share.calls[-1]
     seen["shared"] = [os.path.basename(p) for p in shared]
@@ -670,6 +674,7 @@ def test_tapping_every_completed_book_opens_its_book_page(app_env, tmp_path, mon
                 ("In-progress EPUB workspace (comparison)", golf,
                  {"shelf": "In progress (", "workspace": seeds["in_progress"], "chapter_rows": 4,
                   "statuses": ("completed", "not_translated"),
+                  "warn_uncompiled": True,
                   "share": golf.get("raw_source_path") or golf.get("path")}),
             ]
             failures: list = []  # every kind is checked; the test fails at the end with all of them

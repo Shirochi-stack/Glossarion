@@ -238,6 +238,13 @@ async def _settings_section(app, driver, section_id: str):
     from glossarion_mobile.ui.settings.section_page import SectionPage
 
     await flows.open_settings(driver)
+    if section_id == "other.response":
+        home = app.shell.top_screen
+        translation = next(card for card in home.content.controls if card.title == "Translation")
+        tabs = translation.children[0]
+        bar = tabs.content.controls[0]
+        tabs.selected_index = next(i for i, tab in enumerate(bar.tabs) if tab.label == "Quality")
+        tabs.on_change(types.SimpleNamespace(control=tabs))
     await driver.tap(key=f"settings-section-{section_id}", timeout=30, scroll=True)
 
     def opened():
