@@ -1493,6 +1493,9 @@ a = Analysis(
     noarchive=False,
 )
 
+from spec_slim import exclude_windows_system_icu
+exclude_windows_system_icu(a)
+
 # Simple cleanup after Analysis + Fix R6034 runtime conflicts
 a.binaries = [b for b in a.binaries if not any([
     b[0].endswith('opencv_videoio_ffmpeg490_64.dll'),

@@ -8,6 +8,17 @@ in docs/nocuda_bloat_report.md and docs/lite_builds_bloat_report.md.
 
 import glob
 import os
+import sys
+
+
+def exclude_windows_system_icu(analysis):
+    """Keep Qt's Windows ICU imports from resolving to a copy found on the build PATH."""
+    if sys.platform != 'win32':
+        return
+    system_icu = {'icu.dll', 'icuin.dll', 'icuuc.dll'}
+    for field in ('binaries', 'datas'):
+        entries = getattr(analysis, field)
+        setattr(analysis, field, [entry for entry in entries if slim_norm(entry[0]) not in system_icu])
 
 
 def msys2_weasyprint_dlls(bin_dir):

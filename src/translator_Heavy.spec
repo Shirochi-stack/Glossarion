@@ -1585,6 +1585,9 @@ a = Analysis(
     noarchive=False,
 )
 
+from spec_slim import exclude_windows_system_icu
+exclude_windows_system_icu(a)
+
 # Strip google-cloud-aiplatform proto stubs (~60 MB packed, not needed at runtime)
 a.pure = [p for p in a.pure if not any([
 ])]

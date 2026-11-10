@@ -1612,6 +1612,9 @@ a = Analysis(
     noarchive=False,
 )
 
+from spec_slim import exclude_windows_system_icu
+exclude_windows_system_icu(a)
+
 # ============================================================================
 # SURGICAL GPU/CUDA BINARY REMOVAL
 # ============================================================================
