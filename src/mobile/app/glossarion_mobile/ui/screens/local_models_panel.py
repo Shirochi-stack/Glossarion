@@ -1238,7 +1238,8 @@ class LocalModelsPanel(OnDeviceFlow):
                     continue
                 from glossarion_mobile.ui.settings.tiles import make_tile
 
-                tile = make_tile(spec, ctx)
+                # The on-device engine has its own script-ban switch.
+                tile = make_tile(spec, ctx, include_dependencies=False)
             except Exception:
                 log.exception("building the %s tile failed", key)
                 continue

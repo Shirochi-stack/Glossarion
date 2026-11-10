@@ -186,7 +186,8 @@ async def _open(env, bid: str, tab: str = "overview", **ctx_kwargs):
     TLU._mount(page, screen.get_body())
     await screen.load()
     page.update()
-    return screen, ctx, page
+    # Page holds a weak reference to its session. Keep the session alive during the test.
+    return screen, ctx, session
 
 
 # ==========================================================================
@@ -205,7 +206,7 @@ def test_organized_book_keeps_every_workspace_action(env):
         folders = _tree(output)
         files, jobs = FakeFiles(), FakeJobs()
         service.jobs = jobs
-        screen, ctx, page = await _open(env, bid, "chapters", files=files, jobs=jobs)
+        screen, ctx, session = await _open(env, bid, "chapters", files=files, jobs=jobs)
         # the ⋯ menu: every workspace action is enabled, and ↗ Share is there
         menu = _menu(screen)
         for label in ("Compile EPUB", "Compile PDF", "Edit metadata.json", "Files", "↗ Share"):
@@ -233,7 +234,7 @@ def test_organized_book_keeps_every_workspace_action(env):
                                      None)
         # Output tab: the workspace (size, groups) and the Library EPUB itself
         await screen.output.reload()
-        page.update()
+        session.page.update()
         assert screen.output.size is not None and "metadata" in screen.output.groups
         assert _norm(env["library"] / "Translated" / "Fin.epub") in {_norm(p) for p, _k in screen.output.outputs}
         assert all(not b.disabled for b in screen.output.compile_row.controls)
@@ -303,7 +304,7 @@ def test_a_scan_that_resolves_the_workspace_later_enables_the_menu(env):
         fresh = LibraryService(paths=service.paths, config={}, prefs=service.prefs)  # no scan yet
         fresh.ensure_env()
         env_fresh = dict(env, service=fresh)
-        screen, ctx, page = await _open(env_fresh, bid, "chapters")
+        screen, ctx, session = await _open(env_fresh, bid, "chapters")
         assert screen.book.get("synthesised") and screen.workspace == ""
         assert _menu(screen)["Compile EPUB"] is True and screen.progress.no_workspace
         assert _tree(output) == folders  # no Output/<raw stem> for the unscanned file row
@@ -340,7 +341,7 @@ def test_add_translation_epub_lists_its_own_chapters(env):
         bid = service.bid_for(row)
         folders = _tree(output)
         reader = FakeReader()
-        screen, ctx, page = await _open(env, bid, "chapters", reader=lambda: reader, files=FakeFiles())
+        screen, ctx, session = await _open(env, bid, "chapters", reader=lambda: reader, files=FakeFiles())
         assert screen.progress.no_workspace
         chapters = screen.chapters
         rows = list(chapters.visible)
@@ -372,7 +373,7 @@ def test_add_translation_epub_lists_its_own_chapters(env):
         chapters.toggle_raw_titles()
         assert len(chapters.visible) == 4 and all(r.kind == "spine" for r in chapters.visible)
         chapters.toggle_raw_titles()
-        page.update()  # the EPUB rows serialise
+        session.page.update()  # the EPUB rows serialise
         # the workspace actions stay off; Share does not
         menu = _menu(screen)
         assert menu["Compile EPUB"] is True and menu["Files"] is True and menu["↗ Share"] is False
@@ -467,7 +468,7 @@ def test_book_page_share_sends_the_book_through_the_library_share(env):
         await service.refresh()
         row = next(b for b in service.snapshot.completed if _norm(b.get("path") or "") == _norm(env["shelf"]))
         files = FakeFiles()
-        screen, ctx, page = await _open(env, service.bid_for(row), files=files)
+        screen, ctx, session = await _open(env, service.bid_for(row), files=files)
         item = next(i for i in screen.menu.items if str(i.content) == "↗ Share")
         assert not item.disabled
         calls: list = []

@@ -232,7 +232,8 @@ def listed_setting(ctx: Any, spec: Any) -> bool:
 class SettingTile:
     kind = "text"
 
-    def __init__(self, spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> None:
+    def __init__(self, spec: Any, ctx: Any, *, config: Optional[Mapping] = None,
+                 include_dependencies: bool = True) -> None:
         self.spec = spec
         self.ctx = ctx
         self.key = str(spec_attr(spec, "key", ""))
@@ -240,6 +241,7 @@ class SettingTile:
         self.label = label_for(spec)
         self.help = help_line(spec)
         self.config = config if config is not None else EffectiveConfig(ctx.store)
+        self.include_dependencies = include_dependencies
         self.available, self.unavailable_reason = ctx.schema.availability(self.key)
         partial = getattr(ctx.schema, "partial_reason", None)
         self.partial_reason: Optional[str] = partial(self.key) if callable(partial) else None
@@ -348,7 +350,9 @@ class SettingTile:
 
     def _evaluate_rules(self) -> None:
         try:
-            self.lock_reason = self.ctx.schema.lock_reason(self.spec, self.config)
+            self.lock_reason = self.ctx.schema.lock_reason(
+                self.spec, self.config, include_dependencies=self.include_dependencies
+            )
             self.hidden_reason = self.ctx.schema.hidden_reason(self.spec, self.config)
             if not self.lock_reason and self.key.startswith("qa_scanner_settings.sdlxliff_"):
                 from glossarion_mobile.state.config_store import QA_SDLXLIFF_CHECK
@@ -1447,7 +1451,8 @@ TILE_CLASSES: dict[str, type] = {
 }
 
 
-def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> SettingTile:
+def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None,
+              include_dependencies: bool = True) -> SettingTile:
     key = str(spec_attr(spec, "key", ""))
     if key in MULTIPLIER_KEYS:
         cls: type = MultiplierGridTile
@@ -1473,4 +1478,4 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> Setti
         cls = DelayRangeTile
     else:
         cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
-    return cls(spec, ctx, config=config)
+    return cls(spec, ctx, config=config, include_dependencies=include_dependencies)
