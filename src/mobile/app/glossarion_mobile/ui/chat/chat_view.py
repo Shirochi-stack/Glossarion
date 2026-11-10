@@ -1628,14 +1628,17 @@ class ChatView:
         if saved and segments:
             live_numbers = {segment_request_number(s) for s in segments} - {0}
             base = int(getattr(run, "committed_from", 0) or 0)
-            own = {label_request_number(s.get("label")) for s in saved if int(s.get("index", -1)) >= base}
-            if run.awaiting_glossary and not run.refining and own:
-                # The committed glossary rows can arrive before the live stream clears at the gate.
-                rows = []
-            elif run.state == "finishing" and live_numbers & own:
+            committed = [s["label"] for s in saved if int(s.get("index", -1)) >= base]
+            own = {label_request_number(label) for label in committed}
+            if run.state == "finishing" and live_numbers & own:
                 rows = []
             else:
-                live_labels = {str(s.get("label") or "") for s in segments} - {""}
+                # At approval the committed rows gain a request-number suffix. The displayed
+                # stream can retain their earlier labels until its next tick, even after Yes.
+                committed_titles = {label.rsplit(" · Request ", 1)[0] for label in committed if label}
+                rows = [s for s in segments if str(s.get("label") or "").rsplit(" · Request ", 1)[0]
+                        not in committed_titles]
+                live_labels = {str(s.get("label") or "") for s in rows} - {""}
                 saved = [s for s in saved if str(s.get("label") or "") not in live_labels]
         card.set_requests([*saved, *rows])
         active_issue = getattr(snapshot, "active_issue", None)

@@ -487,6 +487,9 @@ def test_owner_issue12_book_card_stays_live_through_the_glossary_gate(desktop_st
             # ✓ Yes, the translation streams its requests and reports progress
             view._answer_glossary(True)
             jobs.publish("RUNNING", last_line="📑 Glossary extraction complete, proceeding to translation...")
+            run.stream.display_segments = glossary_stream
+            view._update_live_job_card(run)
+            assert card.requests_tile.title == f"Requests ({cards})"
             for k in range(1, 4):
                 thread, lines = _chapter_lines(k)
                 for line in lines:
