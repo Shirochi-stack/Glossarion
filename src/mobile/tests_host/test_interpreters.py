@@ -1108,7 +1108,7 @@ def test_the_workers_hint_says_what_more_workers_do(monkeypatch):
 
 @needs_interpreters
 @needs_backend
-def test_the_smoke_check_passes_here_and_says_so(tmp_path, phone):
+def test_the_smoke_check_passes_here_and_says_so(tmp_path, glossary_phone):
     from glossarion_mobile.diagnostics import interpreter_check
 
     detail = interpreter_check.check_scan_in_child(tmp_path / "work", "windows")
@@ -1397,8 +1397,13 @@ def _korean_book(sentences: int, seed: int = 15) -> str:
 def glossary_phone(phone, monkeypatch):
     """The phone's comparison modules in the parent too: this PC's jellyfish does not load in a child, a phone has none."""
     import duplicate_detection_config as ddc
+    import unified_api_client
     from rapidfuzz.distance import JaroWinkler
 
+    # These tests call the filter directly, without a job's reset of cancellation state.
+    monkeypatch.setattr(_gm(), "_stop_requested", False)
+    monkeypatch.setattr(unified_api_client, "global_stop_flag", False)
+    monkeypatch.setattr(unified_api_client.UnifiedClient, "_global_cancelled", False)
     monkeypatch.setattr(ddc, "_HAS_JELLYFISH", False)
     monkeypatch.setattr(ddc, "_jellyfish", None)
     monkeypatch.setattr(ddc, "_rf_jaro_winkler", JaroWinkler)

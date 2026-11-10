@@ -2176,6 +2176,9 @@ def test_editor_box_style_tab_on_the_real_editor_session(iso, tmp_path, monkeypa
     translation is re-rendered (Save & Update Overlay); Reset drops it."""
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.tools.manga.screen import MangaScreen
+    import unified_api_client
+
+    log_print = unified_api_client.print
 
     monkeypatch.setenv("GLOSSARION_NO_PROCESSES", "1")
     monkeypatch.setenv("CONFIG_FILE", str(tmp_path / "config.json"))
@@ -2242,6 +2245,7 @@ def test_editor_box_style_tab_on_the_real_editor_session(iso, tmp_path, monkeypa
         manga.editor.close()
 
     asyncio.run(scenario())
+    assert unified_api_client.print is log_print
 
 
 @pytest.mark.skipif(importlib.util.find_spec("flet") is None, reason="flet not installed")

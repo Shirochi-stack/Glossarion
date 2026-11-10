@@ -1387,7 +1387,8 @@ class MangaTranslator:
                 pass
     
     
-    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None, skip_inpainter_init: bool = False, skip_ocr_init: bool = False):
+    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None,
+                 skip_inpainter_init: bool = False, skip_ocr_init: bool = False, *, manage_print: bool = True):
         """Initialize with OCR configuration and API client from main GUI
         
         Args:
@@ -1400,6 +1401,7 @@ class MangaTranslator:
                 }
             skip_inpainter_init: If True, skip automatic inpainter initialization (for pool access only)
             skip_ocr_init: If True, skip OCR provider initialization (for bubble detector preload only)
+            manage_print: Disable the process-wide print hook for local overlay rendering.
         """
         # CRITICAL: Set thread limits FIRST before any heavy library operations
         # This must happen before cv2, torch, numpy operations
@@ -1488,9 +1490,10 @@ class MangaTranslator:
         
         # Store the callback for later use
         import threading
+        self._manage_print = manage_print
         if not hasattr(builtins, '_manga_log_callbacks'):
             builtins._manga_log_callbacks = {}
-        if log_callback:
+        if log_callback and self._manage_print:
             builtins._manga_log_callbacks[id(self)] = log_callback
         
         # Store original print as class variable for fallback (only once)
@@ -2042,6 +2045,8 @@ class MangaTranslator:
     
     def restore_print(self):
         """Restore original print function to builtins"""
+        if not getattr(self, '_manage_print', False):
+            return
         try:
             import builtins
             import sys

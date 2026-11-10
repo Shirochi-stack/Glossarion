@@ -10498,7 +10498,7 @@ class MangaEditorSession:
                 self.translator = None
                 self._manga_translator = MangaTranslator(
                     ocr_config={}, unified_client=None, main_gui=owner, log_callback=self._log,
-                    skip_inpainter_init=True, skip_ocr_init=True,
+                    skip_inpainter_init=True, skip_ocr_init=True, manage_print=False,
                 )
                 return self._save_open_overlay() if indexes is None else self._rerender_open_page(indexes, page)
             finally:
