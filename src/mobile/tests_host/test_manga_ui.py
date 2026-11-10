@@ -835,6 +835,11 @@ class FakeEditorSession:
         self._step("rerender_boxes", image_path, owner)
         self.calls.append(("rerender_boxes_indexes", tuple(indexes)))
 
+    def rerender_boxes_locally(self, indexes, image_path, config):
+        self.calls.append(("local_overlay", tuple(indexes), image_path))
+        self.output_revision += 1
+        return self.rendered.get(image_path)
+
     def import_ocr(self, path, images=None, *, owner=None, render=True, merge=False):
         self._step("import_ocr", path, owner)
         self.calls.append(("import_ocr_merge", merge))
@@ -3406,11 +3411,9 @@ def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso
         await _settle()
         # (the desktop's rectangle-moved auto save for the moved box: the post-move render must not lock
         # it to its last render position, which Save & Update Overlay does)
-        assert jobs.specs[-1].params["step"] == "rerender_boxes" and jobs.specs[-1].params["boxes"] == [0]
-        assert tab.busy
-        jobs.finish(manga.step_job_id, result={"manga_step": "rerender_boxes"})
-        await _settle()
-        assert tab.live == {}
+        assert jobs.specs[-1].params["step"] == "translate"
+        assert ("local_overlay", (0,), pages[0]) in fake_session.calls
+        assert not tab.busy and tab.live == {}
         # the Move tab: exact numbers, nudges by the step, saved like a drag
         tab.show_box_tab("move")
         panel = tab.panel

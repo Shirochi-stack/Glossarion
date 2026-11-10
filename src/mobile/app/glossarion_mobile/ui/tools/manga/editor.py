@@ -483,6 +483,7 @@ class EditorTab(MangaTab):
         # cv.Image}] — the page under the deleted text covers it at once
         self.holes: list = []
         self._render_token = 0
+        self._overlay_rendering = False
 
     # ---- build --------------------------------------------------------------------------------------
 
@@ -680,7 +681,7 @@ class EditorTab(MangaTab):
 
     @property
     def busy(self) -> bool:
-        return self.watch.active() is not None
+        return self._overlay_rendering or self.watch.active() is not None
 
     def _busy_reason(self) -> Optional[str]:
         return "Wait for the running step" if self.busy else None
@@ -1385,7 +1386,7 @@ class EditorTab(MangaTab):
         reason = self._steps_reason()
         for step, button in self.step_buttons.items():
             needs_boxes = step == "render"
-            button.disabled = running or not has_page or reason is not None or (needs_boxes and not self.boxes)
+            button.disabled = self.busy or not has_page or reason is not None or (needs_boxes and not self.boxes)
         self.step_reason.content = ReasonChip(reason=svc.chip_text(reason), detail=reason) if reason else None
         self.stop_button.visible = running
         self.step_bar.visible = running
@@ -1709,14 +1710,40 @@ class EditorTab(MangaTab):
         self._render_token += 1
         self.ctx.spawn(self._render_later(self._render_token))
 
-    async def _render_later(self, token: int) -> Optional[str]:
+    async def _render_later(self, token: int) -> None:
         import asyncio
 
         await asyncio.sleep(RENDER_DELAY)
         if token != self._render_token or self.drag or self.busy or self._editing or not (self.live or self.holes):
-            return None
+            return
+        editor = self.session.editor
+        if editor is None:
+            return
         moved = sorted(index for index in self.live if 0 <= index < len(self.boxes))
-        return await self.run_step("rerender_boxes", extra={"boxes": moved})
+        image_path, config = self.image_path, self.ctx.config_snapshot()
+        self._overlay_rendering = True
+        self.step_status.value = "Updating overlay…"
+        self.refresh()
+
+        def render() -> Any:
+            from job_runner import job_process_state
+
+            with job_process_state():
+                return editor.rerender_boxes_locally(moved, image_path, config)
+
+        try:
+            if not await self.ctx.io(render):
+                self.step_status.value = "Could not update the overlay"
+                return
+            self.live.clear()
+            self.holes.clear()
+            self.step_status.value = "Overlay updated"
+            await self._apply_snapshot(await self._snapshot())
+        except Exception as exc:
+            self.step_status.value = f"Could not update the overlay: {exc}"
+        finally:
+            self._overlay_rendering = False
+            self.refresh()
 
     # ---- box actions ------------------------------------------------------------------------------------
 

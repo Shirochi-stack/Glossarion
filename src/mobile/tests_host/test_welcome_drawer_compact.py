@@ -245,10 +245,15 @@ def test_drawer_destinations_never_scroll_and_fit_360_and_412():
 def test_drawer_destination_cells_navigate_and_carry_the_jobs_badge():
     went = []
     state = AppState()
-    drawer = ChatDrawer(state=state, on_navigate=went.append, clock=lambda: 200.0)
+    drawer = ChatDrawer(state=state, on_navigate=went.append, on_settings=lambda e: went.append("settings"),
+                        clock=lambda: 200.0)
     for dest_id, _label, _icon, route in DESTINATIONS:
         drawer.destination_chips[dest_id].on_click(None)
     assert went == [d[3] for d in DESTINATIONS]
+    avatar = drawer.header.content.controls[0]
+    assert avatar.key == "drawer-avatar-settings"
+    avatar.on_click(None)
+    assert went[-1] == "settings"
     state.jobs_badge.value = type(state.jobs_badge.value)(running=3)
     drawer.refresh()
     assert drawer.destination_chips["jobs"].badge is not None

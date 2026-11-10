@@ -154,7 +154,12 @@ class ChatDrawer:
             padding=ft.Padding.only(left=16, right=4),
             content=ft.Row(
                 [
-                    ft.CircleAvatar(foreground_image_src=HALGAKOS_AVATAR, radius=tokens.SIZES["avatar_small"] / 2),
+                    ft.IconButton(
+                        icon=ft.CircleAvatar(foreground_image_src=HALGAKOS_AVATAR,
+                                             radius=tokens.SIZES["avatar_small"] / 2),
+                        tooltip="Settings", on_click=on_settings, size_constraints=HIT_TARGET,
+                        key="drawer-avatar-settings",
+                    ),
                     ft.Container(  # the title, with the row's 56 dp minimum height (it grows at 200 % text)
                         content=ft.Row([ft.Container(width=0, height=tokens.SIZES["drawer_header"]),
                                         ft.Text("Glossarion", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,

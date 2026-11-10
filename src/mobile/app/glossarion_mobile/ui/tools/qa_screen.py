@@ -352,8 +352,10 @@ class QaScannerScreen(Screen):
 
     def open_name_fix(self) -> Any:
         """Review names that differ from the glossary in the chosen folders and fix the checked ones."""
-        folders = [t.folder for t in self.targets if t.folder and not t.direct_text]
-        return self.ctx.spawn(start_name_check(self.ctx, folders))
+        targets = [t for t in self.targets if t.folder and not t.direct_text]
+        target = targets[0] if len(targets) == 1 else None
+        return self.ctx.spawn(start_name_check(self.ctx, [t.folder for t in targets],
+                                               title=target.title if target else "", bid=target.bid if target else ""))
 
     def open_custom(self, on_saved: Any = None) -> Optional[CustomModeSheet]:
         if qm.custom_defaults() is None:

@@ -1438,6 +1438,32 @@ class LibraryService:
             out.insert(0, (path, kind))
         return out
 
+    def share_needs_compile(self, folder: str, compiled: str) -> bool:
+        """Compare the shared file with the workspace content that goes into an EPUB or PDF."""
+        if not folder or not os.path.isdir(folder):
+            return False
+        try:
+            compiled_time = os.stat(compiled).st_mtime_ns if compiled else -1
+        except OSError:
+            compiled_time = -1
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [name for name in dirs if not name.startswith(".")
+                       and not name.casefold().endswith(("_backup", "_backups"))]
+            for name in files:
+                name_lower = name.casefold()
+                ext = os.path.splitext(name_lower)[1]
+                if name_lower.startswith(("validation_results", "qa_report", "qa_scan_report")):
+                    continue
+                if not (ext in (".html", ".xhtml", ".htm", ".css", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif")
+                        or name_lower in ("metadata.json", "toc.txt", "translated_headers.txt")):
+                    continue
+                try:
+                    if os.stat(os.path.join(root, name)).st_mtime_ns > compiled_time:
+                        return True
+                except OSError:
+                    continue
+        return False
+
     # ---- jobs ------------------------------------------------------------------------------------
 
     def has_job_kind(self, kind: str) -> bool:
@@ -1602,7 +1628,7 @@ class LibraryService:
         result = jobs.submit(spec) if instance is None else jobs.submit(spec, instance=instance)
         if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
             result = await result
-        if spec.kind in ("compile_epub", "compile_pdf"):
+        if result and spec.kind in ("compile_epub", "compile_pdf"):
             for path in spec.inputs:
                 self.compiling.add(_norm(path))
         return result

@@ -161,20 +161,76 @@ class LibraryContext:
         def targets() -> list:
             out = []
             for book in books:
+                folder = service.workspace_for(book)
                 outputs = service.compiled_outputs_blocking(book)
-                if outputs:
-                    out.append(outputs[0][0])
-                elif book.get("path") and os.path.isfile(str(book.get("path"))):
-                    out.append(str(book.get("path")))
-                elif service.raw_source(book):
-                    out.append(service.raw_source(book))
+                compiled, kind = outputs[0] if outputs else ("", "epub")
+                path = compiled or str(book.get("path") or "")
+                if not path or not os.path.isfile(path):
+                    path = service.raw_source(book)
+                stale = service.share_needs_compile(folder, compiled)
+                out.append((book, path, folder, kind, stale))
             return out
 
-        paths = await self.io(targets)
+        planned = await self.io(targets)
+        pending = [entry for entry in planned if entry[-1]]
+        fresh: dict[str, str] = {}
+        if pending:
+            from glossarion_mobile.ui.tools.common import ask
+
+            message = ("This book has changes that haven’t been compiled for sharing."
+                       if len(pending) == 1 else f"{len(pending)} books have changes that haven’t been compiled for sharing.")
+            options = [("cancel", "Cancel", "text"), ("share", "Share existing files", "text")]
+            if self.jobs is not None:
+                options.append(("compile", "Compile and share", "filled"))
+            answer = await ask(self, "Compile before sharing?", message, options, key="lib-share-stale")
+            if answer not in ("share", "compile"):
+                return False
+            if answer == "compile":
+                for book, _path, folder, kind, _stale in pending:
+                    path = await self._compile_for_share(book, folder, kind)
+                    if not path:
+                        return False
+                    fresh[folder] = path
+        paths = list(dict.fromkeys(path for _book, existing, folder, _kind, _stale in planned
+                                   if (path := fresh.get(folder, existing))))
         if not paths:
             self.say("Nothing to share for the selection")
             return False
         return bool(await files.share(paths))
+
+    async def _compile_for_share(self, book: Mapping[str, Any], folder: str, kind: str) -> str:
+        from glossarion_mobile.services.jobs import JobState
+
+        service, jobs = self.service, self.jobs
+        loop = asyncio.get_running_loop()
+        finished = loop.create_future()
+
+        def accept(snap: Any) -> None:
+            if snap is not None and snap.id == job_id and snap.is_terminal and not finished.done():
+                finished.set_result(snap)
+
+        job_id = None
+        unsubscribe = jobs.on_transition(lambda snap, _previous: loop.call_soon_threadsafe(accept, snap))
+        try:
+            spec = await self.io(service.compile_spec, book, "compile_pdf" if kind == "pdf" else "compile_epub", folder)
+            job_id = await service.submit(spec)
+            if job_id:
+                self.say("Compiling before sharing")
+                accept(jobs.snapshot(job_id))
+                result = await finished
+                if result.state == JobState.DONE:
+                    outputs = [str(path) for path in result.outputs if os.path.isfile(path)]
+                    suffixes = (".pdf", ".epub") if kind == "pdf" else (".epub", ".pdf")
+                    for suffix in suffixes:
+                        for path in outputs:
+                            if path.lower().endswith(suffix):
+                                return path
+        except Exception:
+            log.exception("compiling before sharing failed")
+        finally:
+            unsubscribe()
+        self.say("Could not compile a new file to share")
+        return ""
 
     def share_actions(self) -> Any:
         if self._share_actions is None:

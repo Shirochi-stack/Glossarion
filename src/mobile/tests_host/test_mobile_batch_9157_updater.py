@@ -389,13 +389,11 @@ def test_screen_downloads_and_installs_in_the_app(tmp_path, github, capsys):
         assert f"Installed: {BASE_ARM}" in _labels(card)
         start = _find(card, "updates-install-start-")
         assert len(start) == 1 and start[0].content == "Download and install hotfix 1 (0 MB)"
-        fallback = _find(card, "updates-apk-")[0]
-        assert fallback.title.value.startswith("Download in the browser instead")
-        fallback.on_click(None)
-        assert opened == [GH + HOTFIX_ARM]
+        assert not _find(card, "updates-apk-")
 
         start[0].on_click(None)  # Download and install
         await asyncio.gather(*ctx.tasks)
+        assert opened == []
         assert installer.state == "permission"
         allow = _find(screen.install_box, "updates-install-allow-")
         assert len(allow) == 1 and allow[0].content == "Allow installs from Glossarion"

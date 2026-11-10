@@ -741,7 +741,8 @@ class BookPageScreen(Screen):
         from glossarion_mobile.ui.tools.qa_glossary_names import start_name_check
 
         folder = self.workspace
-        return await start_name_check(self.ctx, [folder]) if folder else None
+        return await start_name_check(self.ctx, [folder], title=self.book.get("name") or "",
+                                      bid=self.bid) if folder else None
 
     def open_files(self) -> None:
         folder = self.workspace

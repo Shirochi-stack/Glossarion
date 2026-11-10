@@ -288,6 +288,11 @@ class JobDetailScreen(Screen):
                                      visible=is_instance_job(self.snap), key="job-instance")
         self.state_row = ft.Row([self.state_chip, self.files_button, self.instance_chip, self.origin_button], wrap=True,
                                 spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="job-state-row")
+        actions = [self.review_button, self.names_button, self.stop_button, self.resume_button]
+        book_actions = [self.progress_button, self.library_button, self.library_reason]
+        action_row = ft.Row(actions if self.snap.kind == "glossary_names" else actions + book_actions,
+                            wrap=True, spacing=8, run_spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER, key="job-actions")
         header = SectionCard(
             title="Job",
             icon=kind_icon(self.snap.kind),
@@ -301,11 +306,9 @@ class JobDetailScreen(Screen):
                 self.error_text,
                 self.issue_chip,
                 self.qa_chip,
-                ft.Row([self.review_button, self.names_button, self.stop_button, self.resume_button,
-                        self.progress_button, self.library_button, self.library_reason], wrap=True, spacing=8,
-                       run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                       # a button wrapped onto its own line sits in the middle (owner 2026-10-29)
-                       alignment=ft.MainAxisAlignment.CENTER, key="job-actions"),
+                action_row,
+                *([ft.Row(book_actions, wrap=True, spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+                          key="job-book-actions")] if self.snap.kind == "glossary_names" else []),
             ],
             key="job-header",
         )
@@ -786,6 +789,8 @@ class JobDetailScreen(Screen):
 
             targets = normalize_targets(snap.spec.params or {}, snap.spec.inputs, with_flags=True)
             folder = next((path for path, _source, direct in targets if not direct), None)
+        if not folder and snap.kind == "glossary_names" and len(snap.spec.inputs) == 1:
+            folder = snap.spec.inputs[0]
         return folder
 
     def _apply_progress_actions(self, snap: JobSnapshot) -> None:
@@ -869,6 +874,8 @@ class JobDetailScreen(Screen):
         if snap.kind != "direct_text":
             folders.append(str(snap.output_dir or ""))
             folders.extend(str(folder or "") for folder in (snap.output_dirs or {}).values())
+        if snap.kind == "glossary_names" and len(snap.spec.inputs) == 1:
+            folders.append(snap.spec.inputs[0])
         out: list = []
         seen: set = set()
         for folder in folders:

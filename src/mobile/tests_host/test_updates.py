@@ -505,6 +505,24 @@ def test_feature_routes_and_startup_check(monkeypatch):
         action()
         assert notes[-1] == ("nav", screens.ROUTE)
 
+        app, notes = _fake_app()
+        service = _FakeService(_result())
+        downloads = []
+
+        async def download(asset):
+            downloads.append(asset)
+
+        async def adopt(asset):
+            assert asset == service.result.download_asset
+
+        installer = types.SimpleNamespace(adopt=adopt, download=download)
+        feature = await screens.UpdatesFeature.install(app, service=service, startup_delay=0, installer=installer)
+        await feature.startup_check()
+        _, label, action = notes[0]
+        assert label == "Update"
+        await action()
+        assert downloads == [service.result.download_asset] and notes[-1] == ("nav", screens.ROUTE)
+
         # no notification when the release has no file for this device, or the user turned it off
         for result_, startup in ((_result("android", _desktop_release()), True), (_result(), False)):
             app, notes = _fake_app()

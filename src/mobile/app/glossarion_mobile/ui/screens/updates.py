@@ -173,20 +173,18 @@ class UpdatesScreen(PageScreen):
                 rows.append(self.install_box)
             else:
                 self.install_box = None
-            label = f"Download APK ({apk.abi}, {apk.size_mb:.0f} MB)"
-            if offer is not None and self.installer is not None:
-                rows.append(self._link_tile(f"Download in the browser instead ({apk.size_mb:.0f} MB)", apk.url,
-                                            ft.Icons.OPEN_IN_BROWSER, f"updates-apk-{self._builds}"))
-            else:
+            if self.installer is None:
+                label = f"Download APK ({apk.abi}, {apk.size_mb:.0f} MB)"
                 rows.append(ft.FilledButton(content=label, icon=ft.Icons.DOWNLOAD,
                                             on_click=lambda e, url=apk.url: self._open(url),
                                             key=f"updates-apk-{self._builds}"))
             if apk.debug_signed:
                 rows.append(ft.Text("Debug-signed build: it updates only a debug-signed install.",
                                     theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
-        for index, other in enumerate(downloads.other_apks):
-            rows.append(self._link_tile(f"{other.name} ({other.size_mb:.0f} MB)", other.url, ft.Icons.ANDROID,
-                                        f"updates-apk-other-{self._builds}-{index}"))
+        if self.installer is None:
+            for index, other in enumerate(downloads.other_apks):
+                rows.append(self._link_tile(f"{other.name} ({other.size_mb:.0f} MB)", other.url, ft.Icons.ANDROID,
+                                            f"updates-apk-other-{self._builds}-{index}"))
         if apk is not None or downloads.other_apks:
             rows.append(ft.Text("Android installs an update only when it is signed with the same key as the "
                                 "installed app.", theme_style=ft.TextThemeStyle.BODY_SMALL,
@@ -200,10 +198,10 @@ class UpdatesScreen(PageScreen):
             self.install_box = ft.Column(spacing=tokens.SPACING["sm"], key=f"updates-install-{self._builds}")
             self._fill_install_box(offer)
             rows.append(self.install_box)
-        if downloads.ipa is not None:
+        if self.installer is None and downloads.ipa is not None:
             rows.append(self._link_tile(f"Unsigned IPA ({downloads.ipa.size_mb:.0f} MB)", downloads.ipa.url,
                                         ft.Icons.DOWNLOAD, f"updates-ipa-{self._builds}"))
-        if downloads.ipa_signed is not None:
+        if self.installer is None and downloads.ipa_signed is not None:
             rows.append(self._link_tile(f"Signed IPA ({downloads.ipa_signed.size_mb:.0f} MB)", downloads.ipa_signed.url,
                                         ft.Icons.DOWNLOAD, f"updates-ipa-signed-{self._builds}"))
         return rows
@@ -590,17 +588,25 @@ class UpdatesFeature:
             return None
         self.startup_result = result
         installer = self.installer
+        asset = getattr(result, "download_asset", getattr(result, "install_asset", None))
         if installer is not None and getattr(result, "status", "") in ("update", "hotfix", "current", "skipped"):
             try:
-                await installer.adopt(getattr(result, "download_asset", getattr(result, "install_asset", None)))
+                await installer.adopt(asset)
             except Exception:
                 log.exception("checking downloaded updates failed")
         downloads = getattr(result, "downloads", None)
         if getattr(result, "status", "") in ("update", "hotfix") and downloads is not None and downloads.available:
             notify = getattr(self.app, "notify", None)
             if callable(notify):
-                notify(result.message, "View", lambda e=None: self._view())
+                if installer is not None and asset is not None:
+                    notify(result.message, "Update", lambda e=None: self._start_update(installer, asset))
+                else:
+                    notify(result.message, "View", lambda e=None: self._view())
         return result
+
+    def _start_update(self, installer: Any, asset: Any) -> Any:
+        self._view()
+        return self._spawn(installer.download(asset))
 
     def _view(self) -> None:
         navigate = getattr(self.app, "navigate_to", None)

@@ -7282,8 +7282,9 @@ def _render_with_manga_translator(
         
         # Decide which translator to use: prefer existing main translator for consistent settings
         translator_inst = None
+        local_overlay = getattr(self, '_local_overlay_render', False)
         try:
-            if use_existing_translator and hasattr(self, 'translator') and self.translator:
+            if not local_overlay and use_existing_translator and hasattr(self, 'translator') and self.translator:
                 translator_inst = self.translator
                 # Ensure latest GUI settings are applied to the main translator
                 try:
@@ -7298,21 +7299,22 @@ def _render_with_manga_translator(
             # Fallback: create or reuse a lightweight translator dedicated to rendering
             if not hasattr(self, '_manga_translator') or self._manga_translator is None:
                 print(f"[RENDER] Creating new MangaTranslator instance (render-only)...")
-                ocr_config = _get_ocr_config(self, )
-                api_key = self.main_gui.config.get('api_key', '') if hasattr(self, 'main_gui') else ''
-                model = self.main_gui.config.get('model', 'gpt-4o-mini') if hasattr(self, 'main_gui') else 'gpt-4o-mini'
-                # Check if model uses own auth (no API key needed) — delegate to UnifiedClient
-                _uses_own_auth = not UnifiedClient._model_needs_api_key(model)
-                if not api_key and not _uses_own_auth:
-                    print(f"[RENDER] ERROR: No API key found!")
-                    raise ValueError("No API key found")
-                unified_client = UnifiedClient(model=model, api_key=api_key)
+                ocr_config, unified_client = {}, None
+                if not local_overlay:
+                    ocr_config = _get_ocr_config(self)
+                    api_key = self.main_gui.config.get('api_key', '') if hasattr(self, 'main_gui') else ''
+                    model = self.main_gui.config.get('model', 'gpt-4o-mini') if hasattr(self, 'main_gui') else 'gpt-4o-mini'
+                    if not api_key and UnifiedClient._model_needs_api_key(model):
+                        print(f"[RENDER] ERROR: No API key found!")
+                        raise ValueError("No API key found")
+                    unified_client = UnifiedClient(model=model, api_key=api_key)
                 self._manga_translator = MangaTranslator(
                     ocr_config=ocr_config,
                     unified_client=unified_client,
                     main_gui=self.main_gui,
                     log_callback=self._log,
-                    skip_inpainter_init=True
+                    skip_inpainter_init=True,
+                    skip_ocr_init=local_overlay,
                 )
                 print(f"[RENDER] MangaTranslator instance created")
             else:
@@ -10196,7 +10198,7 @@ class MangaEditorSession:
         action(self, *args)
         self.pump_updates(before, names)
 
-    def _begin(self, owner, image_path):
+    def _begin(self, owner, image_path, *, reset_cancellation=True):
         if owner is not None:
             self.set_owner(owner)
         elif self.main_gui is not None:
@@ -10215,7 +10217,8 @@ class MangaEditorSession:
         # env, MangaTranslator / UnifiedClient / module flags), as the desktop click handlers do.
         # The per-box OCR / Clean / Save & Update Overlay handlers do not reset on their own, so
         # without this one Stop left every later step "cancelled by user".
-        _reset_cancellation_flags(self)
+        if reset_cancellation:
+            _reset_cancellation_flags(self)
         return self.image_preview_widget.current_image_path
 
     def _finish(self):
@@ -10453,7 +10456,10 @@ class MangaEditorSession:
         position. With no ``indexes`` the page is rendered from the text maps at the last render
         positions (a deleted box's text goes away). Returns the rendered path (None: nothing rendered)."""
         with self._op_lock:
-            page = self._begin(owner, image_path)
+            if getattr(self, '_local_overlay_render', False):
+                page = self._begin(owner, image_path, reset_cancellation=False)
+            else:
+                page = self._begin(owner, image_path)
             boxes = self.image_preview_widget.viewer.rectangles
             wanted = []
             for value in indexes or ():
@@ -10474,6 +10480,19 @@ class MangaEditorSession:
                 return None
             self.output_revision += 1
             return (self.image_state_manager.get_state(page) or {}).get('rendered_image_path')
+
+    def rerender_boxes_locally(self, indexes, image_path, config):
+        """Refresh a moved overlay with the renderer alone, without a translation job or API client."""
+        from types import SimpleNamespace
+
+        with self._op_lock:
+            previous = self.main_gui, self._tab, self._manga_translator
+            self._local_overlay_render = True
+            try:
+                return self.rerender_boxes(indexes, image_path, owner=SimpleNamespace(config=config))
+            finally:
+                self._local_overlay_render = False
+                self.main_gui, self._tab, self._manga_translator = previous
 
     def clear_page(self, image_path=None, *, include_cleaned=False):
         """Clear Boxes (manga_image_preview's ``_on_clear_boxes_clicked``): every box of the page, its

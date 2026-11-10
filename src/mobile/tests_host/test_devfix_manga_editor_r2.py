@@ -147,10 +147,8 @@ def test_moving_a_translated_box_carries_its_text_and_rerenders_it_where_it_went
         # a moment after the last move: the desktop's rectangle-moved render of the moved box
         await asyncio.sleep(0.3)
         await mu._settle()
-        spec = jobs.specs[-1]
-        assert spec.params["step"] == "rerender_boxes" and spec.params["boxes"] == [0] and tab.busy
-        jobs.finish(manga.step_job_id, result={"manga_step": "rerender_boxes"})
-        await mu._settle()
+        assert not jobs.specs and not tab.busy
+        assert ("local_overlay", (0,), pages[0]) in fake.calls
         assert tab.live == {} and tab.view == "translated"
         screen.dispose()
 
@@ -189,7 +187,8 @@ def test_rerender_boxes_renders_a_moved_box_at_its_new_place_like_the_desktop(is
     rendered = _stub_renderer(monkeypatch, core)
     session = core.MangaEditorSession(None, state_file=str(tmp_path / "state.json"), image_paths=[page])
     # (no owner / settings needed for a render of known texts)
-    monkeypatch.setattr(session, "_begin", lambda owner, image_path: session.image_preview_widget.current_image_path)
+    monkeypatch.setattr(session, "_begin",
+                        lambda owner, image_path, **kw: session.image_preview_widget.current_image_path)
     try:
         session.open_page(page)
         session.add_box(10, 20, 40, 60)
@@ -203,7 +202,7 @@ def test_rerender_boxes_renders_a_moved_box_at_its_new_place_like_the_desktop(is
         session.save_and_update_overlay(page)
         assert ((10, 20, 40, 60), "Hi") in rendered[-1]
         # the desktop's rectangle-moved auto save: the moved box at its new place, the other one stays
-        assert session.rerender_boxes([0], page)
+        assert session.rerender_boxes_locally([0], page, {})
         assert rendered[-1] == [((10, 120, 40, 40), "Two"), ((50, 100, 40, 60), "Hi")]
     finally:
         session.close()
@@ -296,10 +295,8 @@ def test_deleting_a_translated_box_covers_its_text_and_rerenders_the_page(iso, t
         assert _colors(hole.src) == {BLUE}  # the cleaned page covers the deleted text at once
         await asyncio.sleep(0.3)
         await mu._settle()
-        spec = jobs.specs[-1]
-        assert spec.params["step"] == "rerender_boxes" and spec.params["boxes"] == []
-        jobs.finish(manga.step_job_id, result={"manga_step": "rerender_boxes"})
-        await mu._settle()
+        assert not jobs.specs and not tab.busy
+        assert ("local_overlay", (), pages[0]) in fake.calls
         assert tab.holes == []
         screen.dispose()
 

@@ -1304,6 +1304,7 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path):
     target = tool_target(tmp_path, "Names")
     out = Path(target.folder)
     _name_check_book(out)
+    (out / "metadata.json").write_text(json.dumps({"title": "Translated Names"}), encoding="utf-8")
 
     async def scenario():
         _conn, off_session = tb._fake_session("android")
@@ -1341,7 +1342,7 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path):
                 service.close()
 
         spec = ctx.jobs.specs[0]
-        assert spec.kind == "glossary_names"
+        assert spec.kind == "glossary_names" and spec.title == "Translated Names"
         sheet = GlossaryNameFixSheet(ctx, await scan(spec)).show(page)
         rows = [(box.value, output_file, finding.describe()) for box, _f, output_file, finding in sheet.rows]
         # the character spellings are pre-checked; the location (report only) is not

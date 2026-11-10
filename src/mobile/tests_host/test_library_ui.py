@@ -2092,6 +2092,52 @@ def test_every_completed_card_opens_the_book_page(tmp_path):
 
 
 @needs_flet
+def test_library_share_warns_about_edits_and_shares_the_new_compile(tmp_path):
+    from glossarion_mobile.services.jobs import JobState
+    from glossarion_mobile.services.library import LibraryService
+    from glossarion_mobile.ui.library.common import LibraryContext
+
+    folder = tmp_path / "workspace"
+    folder.mkdir()
+    compiled = folder / "Old.epub"
+    compiled.write_bytes(b"old")
+    chapter = folder / "chapter01.html"
+    chapter.write_text("<p>edited</p>", encoding="utf-8")
+    os.utime(chapter, (compiled.stat().st_mtime + 2,) * 2)
+    rebuilt = folder / "New.epub"
+    book = {"name": "Book", "path": str(compiled), "output_folder": str(folder)}
+    shared, queued, unsubscribed = [], [], []
+
+    async def share(paths):
+        shared.append(paths)
+        return True
+
+    async def submit(spec):
+        queued.append(spec)
+        rebuilt.write_bytes(b"new")
+        return "compile-1"
+
+    jobs = types.SimpleNamespace(
+        submit=submit,
+        on_transition=lambda callback: lambda: unsubscribed.append(True),
+        snapshot=lambda job_id: types.SimpleNamespace(id=job_id, state=JobState.DONE, is_terminal=True,
+                                                       outputs=(str(rebuilt),)),
+    )
+    service = LibraryService(jobs=jobs, prefs=FakePrefs())
+    ctx = LibraryContext(service, jobs=jobs, files=types.SimpleNamespace(share=share),
+                         extras={"answers": ["cancel", "share", "compile"]})
+
+    async def scenario():
+        assert not await ctx.share_books([book]) and not shared
+        assert await ctx.share_books([book]) and shared[-1] == [str(compiled)]
+        assert await ctx.share_books([book]) and shared[-1] == [str(rebuilt)]
+
+    asyncio.run(scenario())
+    assert [s.kind for s in queued] == ["compile_epub"]
+    assert unsubscribed == [True] and len(ctx.extras["asked"]) == 3
+
+
+@needs_flet
 def test_reader_actions_open_txt_books_in_the_reader(tmp_path):
     """Device fix #2 (Library part): a TXT book (standalone, a finished TXT workspace, an In-progress row
     whose raw is a .txt, with or without a workspace) gets "📖 Open in Reader"; a PDF without a workspace

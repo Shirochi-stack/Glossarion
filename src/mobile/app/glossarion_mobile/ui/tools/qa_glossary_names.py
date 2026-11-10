@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html
 import inspect
+import json
 import logging
 import os
 from typing import Any, Optional, Sequence
@@ -104,8 +105,20 @@ async def offer_ner_download(ctx: Any, manager: Any = None) -> bool:
                                action="Check glossary names")
 
 
+def _workspace_title(folder: str) -> str:
+    try:
+        with open(os.path.join(folder, "metadata.json"), encoding="utf-8-sig") as handle:
+            metadata = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(metadata, dict):
+        return ""
+    return next((title.strip() for key in ("translated_title", "title")
+                 if isinstance((title := metadata.get(key)), str) and title.strip()), "")
+
+
 async def start_name_check(ctx: Any, folders: Sequence[str], *, output_file: str = "",
-                           progress_path: Optional[str] = None) -> Optional[str]:
+                           progress_path: Optional[str] = None, title: str = "", bid: str = "") -> Optional[str]:
     from glossarion_mobile.services.jobs import JobSpec
 
     folders = tuple(dict.fromkeys(str(f) for f in folders if f))
@@ -124,10 +137,14 @@ async def start_name_check(ctx: Any, folders: Sequence[str], *, output_file: str
         if answer not in ("heuristic", "download"):
             return None
         with_ner = answer == "download"
-    label = os.path.basename(folders[0].rstrip("/\\")) if len(folders) == 1 else f"{len(folders)} folders"
+    if len(folders) == 1:
+        label = await ctx.io(_workspace_title, folders[0]) or title or os.path.basename(folders[0].rstrip("/\\"))
+        origin = {"type": "library", "bid": bid} if bid else {}
+    else:
+        label, origin = f"{len(folders)} folders", {}
     params = {"scope": name_check_scope(ctx), "ner": with_ner, "layers": glossary_layer_settings(ctx),
               "workers": chapters_at_once(ctx), "output_file": output_file, "progress_path": progress_path}
-    result = jobs.submit(JobSpec(kind="glossary_names", title=label, inputs=folders, params=params))
+    result = jobs.submit(JobSpec(kind="glossary_names", title=label, inputs=folders, params=params, origin=origin))
     job_id = await result if inspect.isawaitable(result) else result
     if job_id:
         ctx.go("jobs.detail", {"jid": job_id})
@@ -223,7 +240,8 @@ class GlossaryNamesScreen(Screen):
 
     def _scan(self, _event: Any) -> None:
         if self.target is not None:
-            self.ctx.spawn(start_name_check(self.ctx, [self.target.folder]))
+            self.ctx.spawn(start_name_check(self.ctx, [self.target.folder],
+                                            title=self.target.title, bid=self.target.bid))
 
 
 class GlossaryNameFixSheet:

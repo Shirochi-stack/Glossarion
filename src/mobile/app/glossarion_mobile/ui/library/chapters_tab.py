@@ -1844,7 +1844,8 @@ class ChaptersTab:
 
             return await start_name_check(self.ctx, [plan.extra["output_dir"]],
                                           output_file=plan.extra["glossary_name_file"],
-                                          progress_path=plan.extra.get("progress_path"))
+                                          progress_path=plan.extra.get("progress_path"),
+                                          title=self.page.book.get("name") or "", bid=self.page.bid)
         if action == "resolve_qa" and plan.extra.get("partial_b") is not None:
             return await self.resolve_qa_job(plan)
         copy = confirm_copy(action, plan.count, plan.extra)

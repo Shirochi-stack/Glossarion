@@ -558,6 +558,7 @@ class ApkInstaller:
         self.error = ""
         self._cancelled = False
         self._listeners: list = []
+        self._download_lock = asyncio.Lock()
 
     # ---- observers ----------------------------------------------------------------------------
 
@@ -601,6 +602,10 @@ class ApkInstaller:
         of anything else are removed (an installed or outdated APK is ~300 MB of cache)."""
         if self.state in ("downloading", "installing"):
             return
+        async with self._download_lock:
+            await self._adopt(asset)
+
+    async def _adopt(self, asset: Optional[MobileAsset]) -> None:
         folder = await self.folder()
         if folder is None:
             return
@@ -616,7 +621,13 @@ class ApkInstaller:
     async def download(self, asset: MobileAsset) -> str:
         """Download, verify and install ``asset``: the outcome of :meth:`install`, or ``cancelled`` /
         ``error`` / ``busy``."""
-        if self.state == "downloading":
+        if self.state in ("downloading", "installing"):
+            return "busy"
+        async with self._download_lock:
+            return await self._download(asset)
+
+    async def _download(self, asset: MobileAsset) -> str:
+        if self.state == "installing":
             return "busy"
         folder = await self.folder()
         if folder is None:

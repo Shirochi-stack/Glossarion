@@ -115,6 +115,14 @@ _ROUTE_ICONS = {
     "settings.about": "INFO_OUTLINE",
     "settings.danger": "WARNING_AMBER",
 }
+TRANSLATION_TABS = {
+    "Run": ("translation_defaults", "context_memory", "direct_text.settings", "main.prompt",
+            "settings.profiles", "settings.prefill"),
+    "Quality": ("other.response", "other.anti_duplicate.core", "other.anti_duplicate.logit_bias"),
+    "Files": ("main.file", "other.processing", "other.processing.extraction", "other.meta_data",
+              "epub_output", "pdf", "other.image"),
+    "Tools": ("tools.review", "tools.async"),
+}
 PROFILES_REASON = "Unavailable in this session"
 # Shown only when Profiles & prompts (AccountsProfilesFeature, U4) did not install; once it does,
 # the chip opens Settings › Profiles & prompts instead.
@@ -132,6 +140,7 @@ class SettingsHome(HubScreen):
         self.section_tiles: dict[str, ft.ListTile] = {}
         self.route_tiles: dict[str, ft.ListTile] = {}
         self.group_titles: list[str] = []
+        self.translation_tab = "Run"
         self.banner = JobBanner(ctx)
         self._unsubs: list[Callable[[], None]] = []
         self.search = SettingsSearch(ctx, on_open=self.open_hit, on_change=self._search_changed)
@@ -284,6 +293,7 @@ class SettingsHome(HubScreen):
         self.section_tiles = {}
         self.route_tiles = {}
         groups: dict[str, list[ft.Control]] = {}
+        translation: dict[str, ft.Control] = {}
         names: list[str] = []
         section_ids = set()
         for group, sections in self.ctx.schema.groups():
@@ -291,20 +301,49 @@ class SettingsHome(HubScreen):
                 section_ids.add(section.id)
                 if not self._listed_keys(section) and not self._has_pools(section):
                     continue  # nothing to change here (Direct Text: edited in Chat settings): not listed
-                groups.setdefault(group, []).append(self._section_tile(section))
+                tile = self._section_tile(section)
+                if group == "Translation":
+                    translation[section.id] = tile
+                else:
+                    groups.setdefault(group, []).append(tile)
                 names.append(group)
         for spec in self.children():
             slug = spec.pattern.rsplit("/", 1)[-1]
             if slug in section_ids or ROUTE_SECTIONS.get(slug) in section_ids:  # a schema section covers it
                 continue
             group = self.route_group(spec)
-            groups.setdefault(group, []).append(self._route_tile(spec))
+            tile = self._route_tile(spec)
+            if group == "Translation":
+                translation[spec.name] = tile
+            else:
+                groups.setdefault(group, []).append(tile)
             names.append(group)
+        if translation:
+            groups["Translation"] = [self._translation_tabs(translation)]
         self.group_titles = ordered_groups(names)
         return [
             SectionCard(title=group, children=groups[group], key=f"settings-group-{group}")
             for group in self.group_titles
         ]
+
+    def _translation_tabs(self, tiles: dict[str, ft.Control]) -> ft.Tabs:
+        panels = {title: [tiles.pop(key) for key in keys if key in tiles]
+                  for title, keys in TRANSLATION_TABS.items()}
+        panels["Run"].extend(tiles.values())
+        titles = [title for title, rows in panels.items() if rows]
+        if self.translation_tab not in titles:
+            self.translation_tab = titles[0]
+        body = ft.Column(panels[self.translation_tab], spacing=0, tight=True)
+
+        def select(event: Any) -> None:
+            self.translation_tab = titles[event.control.selected_index]
+            body.controls = panels[self.translation_tab]
+            self.ctx.push(body)
+
+        return ft.Tabs(length=len(titles), selected_index=titles.index(self.translation_tab), on_change=select,
+                       content=ft.Column([ft.TabBar(tabs=[ft.Tab(label=title) for title in titles],
+                                                     scrollable=True), body], spacing=0, tight=True),
+                       key="settings-translation-tabs")
 
     # ---- lifecycle ---------------------------------------------------------------------------
 

@@ -1180,6 +1180,10 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
         page.update()
         home.did_show()
         assert home.group_titles == ["General", "Translation", "Models & keys", "Glossary", "QA", "Data", "About"]
+        translation = next(card for card in home.content.controls if card.title == "Translation")
+        tabs = translation.children[0]
+        bar, panel = tabs.content.controls
+        assert bar.tabs[0].label == "Run" and home.route_tiles["settings.prefill"] in panel.controls
         # (counts the settings the page lists: read-only ones are not listed)
         assert home.section_tiles["context"].subtitle.value == "6 settings · 1 changed"
         assert "settings.appearance" not in home.route_tiles  # the schema section "appearance" covers it
