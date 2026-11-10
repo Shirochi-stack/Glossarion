@@ -385,7 +385,7 @@ jobs:
       - name: Host tests (offline)
         env:
           PYTEST_ADDOPTS: ${{ inputs.require_python_ci && '--runxfail' || '' }}
-        run: uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host extensions/flet_glossarion_native/tests -q -m "not online"
+        run: uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host extensions/flet_glossarion_native/tests -q -rs --junitxml=build/test-results/mobile-offline.xml -m "not online"
 
       - name: Offline E2E on the collected bundle (fake OpenAI server)
         working-directory: src/mobile
@@ -406,12 +406,25 @@ jobs:
           PYTEST_ADDOPTS: ${{ inputs.require_python_ci && '--runxfail' || '' }}
         run: |
           rc=0
-          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host -q -m online || rc=$?
+          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host -q -rs --junitxml=build/test-results/mobile-online.xml -m online || rc=$?
           if [ "$rc" -eq 5 ]; then
             echo "No online tests are collected yet."
             exit 0
           fi
           exit "$rc"
+
+      - name: Report every skipped mobile host test
+        if: always()
+        run: python src/mobile/ci/pytest_report.py 'src/mobile/build/test-results/*.xml'
+
+      - name: Upload mobile host test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-host-test-results
+          path: src/mobile/build/test-results/*.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Require successful Python CI on this commit
         if: inputs.require_python_ci

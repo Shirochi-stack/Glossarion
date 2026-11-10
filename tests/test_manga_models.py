@@ -1291,22 +1291,33 @@ def test_torch_only_manga_settings_are_unavailable_on_mobile(key):
 def test_every_desktop_combo_option_is_covered():
     """Each option of the desktop manga combos is runnable on mobile (ONNX registry, cloud, endpoint)
     or carries a mobile reason: nothing silently missing."""
-    text = "\n".join(path.read_text(encoding="utf-8") for path in sorted(SRC.glob("manga*.py")))
-    local = re.search(r"local_model_combo\.addItems\(\[([^\]]+)\]\)", text)
-    if local is None or "ocr_providers = [" not in text:
-        pytest.skip("the desktop combo lists moved; update this cross-check")
-    options = re.findall(r"'([^']+)'", local.group(1))
+    tree = ast.parse((SRC / "manga_integration.py").read_text(encoding="utf-8-sig"))
+
+    def choices(name):
+        values = [node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)]
+        assert len(values) == 1, f"Desktop {name} declaration changed; update this cross-check"
+        return ast.literal_eval(values[0])
+
+    options = choices("LOCAL_INPAINT_MODEL_CHOICES")
+    # Verify the dropdown still consumes that declaration, rather than checking an unused constant.
+    assert any(isinstance(node, ast.Assign) and ast.unparse(node) ==
+               "local_choices = list(self.LOCAL_INPAINT_MODEL_CHOICES)" for node in ast.walk(tree))
+    assert any(isinstance(node, ast.Call) and ast.unparse(node) ==
+               "local_model_combo.addItems(local_choices)" for node in ast.walk(tree))
     assert {"aot_onnx", "anime_onnx", "lama_onnx", "ollama", "sd_local"} <= set(options)
     runnable = {s.selector for s in mm.specs(mm.KIND_INPAINTER)} | {"custom-image-edit"}
     for option in options:
-        available, _reason = ss.is_value_available("manga_local_inpaint_model", option)
+        available, reason = ss.is_value_available("manga_local_inpaint_model", option)
         assert available is (option in runnable), option
-    block = re.search(r"ocr_providers = \[(.+?)\n\s*\]", text, re.S).group(1)
-    providers = re.findall(r"^\s*#?\s*\('([^']+)',", block, re.M)
-    assert {"custom-api", "rapidocr", "manga-ocr", "paddleocr"} <= set(providers)
+        assert available or reason, option
+    providers = [value for value, label in choices("ocr_providers")]
+    assert {"custom-api", "rapidocr", "manga-ocr", "hayai-ocr"} <= set(providers)
     cloud_or_onnx = {"custom-api", "google", "azure", "azure-document-intelligence", "rapidocr", "hayai-ocr"}
     for provider in providers:
-        assert ss.is_value_available("manga_ocr_provider", provider)[0] is (provider in cloud_or_onnx), provider
+        available, reason = ss.is_value_available("manga_ocr_provider", provider)
+        assert available is (provider in cloud_or_onnx), provider
+        assert available or reason, provider
 
 
 # =========================================================================== packaging

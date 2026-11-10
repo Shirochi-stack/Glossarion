@@ -74,7 +74,7 @@ jobs:
         QT_QPA_PLATFORM: offscreen
       run: |
         pip install --no-cache-dir pytest
-        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
+        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic -rs --junitxml=build/test-results/python.xml \
           tests/test_anti_duplicate_wire.py \
           tests/test_mobile_runtime.py \
           tests/test_safe_image.py \
@@ -169,6 +169,19 @@ jobs:
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \
           tests/parity/test_u9_gap_round4.py
+
+    - name: Report every skipped Python test
+      if: always()
+      run: python src/mobile/ci/pytest_report.py 'build/test-results/*.xml'
+
+    - name: Upload Python test results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: python-test-results
+        path: build/test-results/*.xml
+        if-no-files-found: warn
+        retention-days: 14
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -283,7 +296,20 @@ jobs:
         PYTHONUTF8: '1'
         PYTHONIOENCODING: utf-8
         PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
-      run: uv run --locked python -m pytest -p no:cacheprovider -o console_output_style=classic -q tests_host/test_ci_release.py
+      run: uv run --locked python -m pytest -p no:cacheprovider -o console_output_style=classic -q -rs --junitxml=build/test-results/policy.xml tests_host/test_ci_release.py
+
+    - name: Report every skipped CI policy test
+      if: always()
+      run: python src/mobile/ci/pytest_report.py 'src/mobile/build/test-results/*.xml'
+
+    - name: Upload CI policy test results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: mobile-policy-test-results
+        path: src/mobile/build/test-results/*.xml
+        if-no-files-found: warn
+        retention-days: 14
 
     - name: Upload host smoke report
       if: always()

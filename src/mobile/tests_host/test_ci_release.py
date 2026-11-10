@@ -71,6 +71,62 @@ def _triggers(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True)) or {}
 
 
+def test_every_pytest_job_keeps_skip_details_even_on_failure():
+    count = 0
+    for workflow in (BUILD_MOBILE, WORKFLOWS / "python-app.yml"):
+        for job in _load(workflow)["jobs"].values():
+            steps = job.get("steps", [])
+            tests = [step for step in steps if re.search(r"\bpytest\b", step.get("run", ""))]
+            if not tests:
+                continue
+            count += len(tests)
+            assert all("-rs" in step["run"] and "--junitxml=" in step["run"] for step in tests)
+            reporters = [step for step in steps if "ci/pytest_report.py" in step.get("run", "")]
+            assert len(reporters) == 1 and reporters[0]["if"] == "always()"
+            assert all(steps.index(reporters[0]) > steps.index(step) for step in tests)
+            artifacts = [step for step in steps if "upload-artifact@" in step.get("uses", "")
+                         and "test-results/*.xml" in step.get("with", {}).get("path", "")]
+            assert len(artifacts) == 1 and artifacts[0]["if"] == "always()"
+    assert count == 4  # Python backend, CI policy, mobile offline and online
+
+
+def test_pytest_skip_report_lists_each_case_and_reason_after_a_failed_run(tmp_path):
+    sample = tmp_path / "test_sample.py"
+    sample.write_text('''import pytest
+@pytest.mark.parametrize("value", [1, 2])
+@pytest.mark.skip(reason="optional <model> missing")
+def test_optional(value): pass
+def test_pass(): pass
+def test_fail(): assert False
+''', encoding="utf-8")
+    xml = tmp_path / "results.xml"
+    run = subprocess.run([sys.executable, "-m", "pytest", str(sample), "-q", "--rootdir", str(tmp_path),
+                          f"--junitxml={xml}"],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert run.returncode == 1 and xml.exists(), run.stdout + run.stderr
+    summary = tmp_path / "summary.md"
+    summary.write_text("Existing summary\n", encoding="utf-8")
+    result = subprocess.run([sys.executable, str(MOBILE_DIR / "ci" / "pytest_report.py"), str(xml)],
+                            env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "4 test cases, 2 skipped" in result.stdout
+    for value in (1, 2):
+        assert f"SKIPPED test_sample::test_optional[{value}]: optional <model> missing" in result.stdout
+    body = summary.read_text(encoding="utf-8")
+    assert body.startswith("Existing summary\n")
+    assert body.count("optional &lt;model&gt; missing") == 2
+    assert "test_optional[1]" in body and "test_optional[2]" in body
+
+
+def test_pytest_skip_report_explains_missing_reports(capsys):
+    from pytest_report import report
+
+    summary = report([])
+    assert "No pytest XML reports were produced" in summary
+    assert "No pytest XML reports were produced" in capsys.readouterr().out
+
+
 def _code(path: Path) -> str:
     """The file without its comment lines (comments may say what the workflow does not do)."""
     return "\n".join(line for line in path.read_text(encoding="utf-8").splitlines()
