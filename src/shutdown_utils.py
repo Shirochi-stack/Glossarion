@@ -1760,6 +1760,24 @@ def _cleanup_pyinstaller_temp_dir(retries: int = 4, delay: float = 0.2) -> None:
     return
 
 
+def _exit_frozen_windows_qt(code: int) -> None:
+    if sys.platform != 'win32' or not getattr(sys, 'frozen', False) or 'PySide6.QtCore' not in sys.modules:
+        return
+    # Qt has already shut down. The CRT's DLL-detach pass can crash in Shiboken
+    # after os._exit on Windows. End this process after explicit app cleanup and
+    # let the PyInstaller parent collect the exit status and remove its temp files.
+    from ctypes import WinDLL, wintypes
+
+    kernel32 = WinDLL('kernel32', use_last_error=True)
+    get_process = kernel32.GetCurrentProcess
+    get_process.argtypes = ()
+    get_process.restype = wintypes.HANDLE
+    terminate = kernel32.TerminateProcess
+    terminate.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    terminate.restype = wintypes.BOOL
+    terminate(get_process(), code)
+
+
 def force_shutdown(
     exit_code: int = 0,
     cleanup_fns: Optional[Iterable[Callable[[], None]]] = None,
@@ -1830,6 +1848,10 @@ def force_shutdown(
         if getattr(sys, 'frozen', False):
             restart_env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
         subprocess.Popen(list(restart_command), env=restart_env)
+    try:
+        _exit_frozen_windows_qt(code)
+    except Exception:
+        pass
     try:
         os._exit(code)
     except Exception:
