@@ -1224,11 +1224,12 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
 
 @needs_flet
 @pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable")
-def test_translation_tab_click_switches_rows_and_opens_the_selected_section(tmp_path):
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_translation_tab_click_switches_rows_and_opens_the_selected_section(tmp_path, platform):
     from glossarion_mobile.ui.settings.settings_home import SettingsHome
 
     async def scenario():
-        _, session = _fake_session("android")
+        _, session = _fake_session(platform)
         schema = SchemaAccess()
         store = _memory_store(tmp_path, schema=schema)
         navigated = []
@@ -1236,6 +1237,7 @@ def test_translation_tab_click_switches_rows_and_opens_the_selected_section(tmp_
         home = SettingsHome(_match("/settings"), ctx)
         session.page.views[0].controls.append(home.get_body())
         session.page.update()
+        home.did_show()
 
         def controls():
             card = next(card for card in home.content.controls if card.title == "Translation")
@@ -1244,9 +1246,20 @@ def test_translation_tab_click_switches_rows_and_opens_the_selected_section(tmp_
             return tabs, bar, panel
 
         tabs, bar, panel = controls()
+        original_tabs = tabs
+        original_tile = home.section_tiles["translation_defaults"]
+        initial_subtitle = original_tile.subtitle.value
         assert [tab.label for tab in bar.tabs] == ["Run", "Quality", "Files", "Tools"]
         for index, section in ((2, "epub_output"), (1, "other.response"), (3, "tools.review"),
                                (0, "translation_defaults"), (2, "epub_output")):
+            # Settings refreshes after edits/imports and when returning from a section.
+            # Exercise Flet's mounted keyed diff, not only the first render.
+            store.set("translation_temperature", 1.1 + 0.1 * index)
+            home.refresh_all()
+            tabs, bar, panel = controls()
+            assert tabs is original_tabs
+            assert home.section_tiles["translation_defaults"] is original_tile
+            assert original_tile.subtitle.value != initial_subtitle
             # Flutter's click carries the index while Tabs.selected_index can still be stale.
             assert tabs.selected_index != index
             await session.dispatch_event(bar._i, "click", index)
@@ -1258,8 +1271,10 @@ def test_translation_tab_click_switches_rows_and_opens_the_selected_section(tmp_
 
         home.search.set_query("temperature")
         home.search.set_query("")
-        tabs, _, panel = controls()
+        tabs, bar, panel = controls()
         assert tabs.selected_index == 2 and home.section_tiles["epub_output"] in panel.controls
+        await session.dispatch_event(bar._i, "click", 1)
+        assert tabs.selected_index == 1 and home.section_tiles["other.response"] in panel.controls
         home.dispose()
         store.close()
 

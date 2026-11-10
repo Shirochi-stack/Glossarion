@@ -141,6 +141,7 @@ class SettingsHome(HubScreen):
         self.route_tiles: dict[str, ft.ListTile] = {}
         self.group_titles: list[str] = []
         self.translation_tab = "Run"
+        self._group_cards: Optional[list[ft.Control]] = None
         self.banner = JobBanner(ctx)
         self._unsubs: list[Callable[[], None]] = []
         self.search = SettingsSearch(ctx, on_open=self.open_hit, on_change=self._search_changed)
@@ -241,6 +242,12 @@ class SettingsHome(HubScreen):
         subtitle = f"{count} setting{'s' if count != 1 else ''}"
         if modified:
             subtitle += f" · {modified} changed"
+        tile = self.section_tiles.get(section.id)
+        if tile is not None:
+            if isinstance(tile.subtitle, ft.Text):
+                tile.subtitle.value = subtitle
+            tile.selected = section.id == self.selected_section
+            return tile
         try:
             build_route("settings.section", {"section": section.id})
             routable = True
@@ -290,6 +297,15 @@ class SettingsHome(HubScreen):
         return bool(SECTION_POOL_KEYS.get(section.id))
 
     def group_cards(self) -> list[ft.Control]:
+        # Keep the mounted imperative controls alive across config/save refreshes.
+        # Replacing keyed cards makes Flet reconcile their children as frozen;
+        # the new tab handler then crashes when it mutates its captured Tabs.
+        if self._group_cards is not None:
+            for _, sections in self.ctx.schema.groups():
+                for section in sections:
+                    if section.id in self.section_tiles:
+                        self._section_tile(section)
+            return self._group_cards
         self.section_tiles = {}
         self.route_tiles = {}
         groups: dict[str, list[ft.Control]] = {}
@@ -321,10 +337,11 @@ class SettingsHome(HubScreen):
         if translation:
             groups["Translation"] = [self._translation_tabs(translation)]
         self.group_titles = ordered_groups(names)
-        return [
+        self._group_cards = [
             SectionCard(title=group, children=groups[group], key=f"settings-group-{group}")
             for group in self.group_titles
         ]
+        return self._group_cards
 
     def _translation_tabs(self, tiles: dict[str, ft.Control]) -> ft.Tabs:
         panels = {title: [tiles.pop(key) for key in keys if key in tiles]
