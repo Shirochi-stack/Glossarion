@@ -165,7 +165,8 @@ def _stub_renderer(monkeypatch, core):
             self.text, self.vertices, self.bounding_box = text, vertices, bounding_box
             self.confidence, self.region_type, self.translated_text = confidence, region_type, ""
 
-    monkeypatch.setitem(sys.modules, "manga_translator", mu._module("manga_translator", TextRegion=TextRegion))
+    monkeypatch.setitem(sys.modules, "manga_translator",
+                        mu._module("manga_translator", TextRegion=TextRegion, MangaTranslator=lambda **kw: object()))
 
     def render(self, base_image, regions, output_path=None, original_image_path=None, switch_tab=False, **kw):
         rendered.append(sorted((tuple(r.bounding_box), r.translated_text) for r in regions))

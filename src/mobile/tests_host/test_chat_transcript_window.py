@@ -447,6 +447,7 @@ def test_owner_issue12_book_card_stays_live_through_the_glossary_gate(desktop_st
                 for line in lines:
                     jobs.line(line, thread)
             run.stream.drain(final=True)  # the stream loop's ticks, all at once
+            glossary_stream = run.stream.display_segments
             view._update_live_job_card(run)
             live = view.live_job_card
             assert live is not None and live.requests_tile.title == f"Requests ({cards})"
@@ -464,6 +465,16 @@ def test_owner_issue12_book_card_stays_live_through_the_glossary_gate(desktop_st
             assert card is view.live_job_card is live, "the running card stays the live card at the gate"
             assert card.phase.name == "running" and card.state_text.value == "Waiting for your glossary decision"
             assert card.title_text.value == "novel.epub" and card.requests_tile.title == f"Requests ({cards})"
+            # A stale stream tick can still carry the pre-commit labels without the request number.
+            current_stream = run.stream.display_segments
+            run.stream.display_segments = tuple(
+                {**segment, "label": segment["label"].split(" · Request ")[0]} for segment in glossary_stream
+            )
+            try:
+                view._update_live_job_card(run)
+                assert card.requests_tile.title == f"Requests ({cards})"
+            finally:
+                run.stream.display_segments = current_stream
             # U12 item 3: the running card shows a summary line until the user opens the list
             assert len(card.requests_column.controls) == min(cards, limit) and not card.requests_tile.expanded
             assert card.requests_tile.subtitle  # the summary line ("N/M done · …")
