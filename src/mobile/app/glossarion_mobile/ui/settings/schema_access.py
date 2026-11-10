@@ -30,6 +30,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from glossarion_mobile.ui.settings.model import (
+    ANTI_DUPLICATE_BIAS_SECTION,
+    ANTI_DUPLICATE_MASTER,
+    ANTI_DUPLICATE_OFF,
+    ANTI_DUPLICATE_SECTION,
     CURATED_REMNANT_GROUPS,
     CURATED_SECTIONS,
     CURATED_SOURCE_PREFIXES,
@@ -540,7 +544,20 @@ class SchemaAccess:
                     return func
         return None
 
-    def lock_reason(self, spec: Any, config: Mapping[str, Any]) -> Optional[str]:
+    def lock_reason(self, spec: Any, config: Mapping[str, Any], *, include_dependencies: bool = True) -> Optional[str]:
+        key = spec_attr(spec, "key")
+        section = spec_attr(spec, "section")
+        if include_dependencies and key != ANTI_DUPLICATE_MASTER and section in (
+            ANTI_DUPLICATE_SECTION, ANTI_DUPLICATE_BIAS_SECTION
+        ):
+            if not config.get(ANTI_DUPLICATE_MASTER):
+                return ANTI_DUPLICATE_OFF
+            if key in ("logit_bias_strength", "bias_common_words", "bias_repetitive_phrases"):
+                if not config.get("logit_bias_enabled"):
+                    return "Enable word bias first"
+            if key in ("forced_truncation_seconds", "mark_glossary_forced_truncation_complete"):
+                if not config.get("forced_truncation_enabled"):
+                    return "Turn on Forced Truncation first"
         return self._evaluate(spec_attr(spec, "locked_if", None), config, _LOCK_REASON)
 
     def hidden_reason(self, spec: Any, config: Mapping[str, Any]) -> Optional[str]:

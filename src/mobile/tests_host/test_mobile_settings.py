@@ -833,9 +833,9 @@ def test_renderer_builds_every_section_and_tile_kind(tmp_path):
             assert screen.title == section.title
             # U12 item 1: keys that cannot work on mobile are not listed at all
             expected_keys = [k for k in section.keys if ctx.schema.availability(k)[0]]
-            if screen.qa_tabs:
+            if screen.tab_ranges:
                 assert sorted(screen.keys) == sorted(expected_keys)
-                for _title, start, end in screen.qa_tabs:
+                for _title, start, end in screen.tab_ranges:
                     screen.render_window(start)
                     assert screen.visible_keys == screen.keys[start:end]
                     kinds.update(t.kind for t in screen.tiles.values())
@@ -1223,6 +1223,50 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
 
 
 @needs_flet
+@pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable")
+def test_translation_tab_click_switches_rows_and_opens_the_selected_section(tmp_path):
+    from glossarion_mobile.ui.settings.settings_home import SettingsHome
+
+    async def scenario():
+        _, session = _fake_session("android")
+        schema = SchemaAccess()
+        store = _memory_store(tmp_path, schema=schema)
+        navigated = []
+        ctx = _ctx(store, schema, session.page, navigated=navigated)
+        home = SettingsHome(_match("/settings"), ctx)
+        session.page.views[0].controls.append(home.get_body())
+        session.page.update()
+
+        def controls():
+            card = next(card for card in home.content.controls if card.title == "Translation")
+            tabs = card.children[0]
+            bar, panel = tabs.content.controls
+            return tabs, bar, panel
+
+        tabs, bar, panel = controls()
+        assert [tab.label for tab in bar.tabs] == ["Run", "Quality", "Files", "Tools"]
+        for index, section in ((2, "epub_output"), (1, "other.response"), (3, "tools.review"),
+                               (0, "translation_defaults"), (2, "epub_output")):
+            # Flutter's click carries the index while Tabs.selected_index can still be stale.
+            assert tabs.selected_index != index
+            await session.dispatch_event(bar._i, "click", index)
+            assert tabs.selected_index == index
+            tile = home.section_tiles[section]
+            assert tile in panel.controls
+            await session.dispatch_event(tile._i, "click", None)
+            assert navigated[-1] == f"/settings/s/{section}"
+
+        home.search.set_query("temperature")
+        home.search.set_query("")
+        tabs, _, panel = controls()
+        assert tabs.selected_index == 2 and home.section_tiles["epub_output"] in panel.controls
+        home.dispose()
+        store.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 @pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable yet (U2 schema agent)")
 def test_search_typing_keeps_result_keys_unique(tmp_path):
     """Typing into Settings search one character at a time (2026-10-23 emulator crash): hits come in
@@ -1280,7 +1324,7 @@ def test_real_schema_renders_every_section(tmp_path):
             screen = SectionPage(_match(build_route("settings.section", {"section": section.id})), ctx, window_size=400)
             page.views[0].controls[:] = [screen.get_body()]
             page.update()
-            for _title, start, _end in screen.qa_tabs:
+            for _title, start, _end in screen.tab_ranges:
                 screen.render_window(start)
             for key in section.keys:
                 if (schema.spec(key) is not None and schema.display_key(key) == key  # devfix4: folded keys
@@ -1308,14 +1352,15 @@ def test_mobile_qa_tabs_follow_desktop_order_and_keep_sdlxliff_fields_together(t
     ctx = _ctx(store, schema)
     screen = SectionPage(_match("/settings/s/qa.settings"), ctx)
     screen.get_body()
-    assert [title for title, _, _ in screen.qa_tabs] == ["Detection", "Files & tags", "More checks", "Report & speed"]
+    assert [title for title, _, _ in screen.tab_ranges] == ["Detection", "Files & tags", "More checks", "Report & speed"]
     key = ".".join(QA_SDLXLIFF_CHECK)
     index = screen.keys.index(key)
     assert tuple(screen.keys[index + 1:index + 4]) == SDLXLIFF_TAG_FIELDS
     assert screen.keys.index("qa_scanner_settings.source_language") < index
     assert index < screen.keys.index("qa_scanner_settings.min_file_length")
-    screen.tabs.selected_index = 3
-    asyncio.run(screen.tabs.on_change(types.SimpleNamespace(control=screen.tabs)))
+    bar = screen.tabs.content.controls[0]
+    asyncio.run(bar.on_click(types.SimpleNamespace(data=3)))
+    assert screen.tabs.selected_index == 3
     assert "qa_scanner_settings.report_format" in screen.visible_keys
     assert not store.has(QA_SDLXLIFF_CHECK)
     assert asyncio.run(screen.focus_key(key, highlight=False))
@@ -1326,6 +1371,87 @@ def test_mobile_qa_tabs_follow_desktop_order_and_keep_sdlxliff_fields_together(t
     screen.refresh_all()
     assert screen.tile(key).value() is False and not field.editable
     store._saver.close()
+
+
+@needs_flet
+@pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable")
+def test_anti_duplicate_tabs_sliders_and_dependencies(tmp_path):
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+    from glossarion_mobile.ui.settings.settings_home import SettingsHome
+
+    async def scenario():
+        _, session = _fake_session("android")
+        schema = SchemaAccess()
+        store = _memory_store(tmp_path, {"top_p": 0.65, "logit_bias_strength": -1.2}, schema)
+        ctx = _ctx(store, schema, session.page)
+        route = "/settings/s/other.anti_duplicate.core"
+        legacy_route = "/settings/s/other.anti_duplicate.logit_bias"
+        home = SettingsHome(_match("/settings"), ctx)
+        home.get_body()
+        assert home.section_tiles["other.anti_duplicate.core"].title.value == "Anti-Duplicate Parameters"
+        assert "other.anti_duplicate.logit_bias" not in home.section_tiles
+        assert schema.section_for_key("logit_bias_strength").id == "other.anti_duplicate.core"
+        assert schema.search("logit_bias_strength")[0].section_id == "other.anti_duplicate.core"
+
+        screen = SectionPage(_match(route), ctx)
+        body = screen.get_body()
+        session.page.views[0].controls.append(body)
+        session.page.update()
+        screen.did_show()
+        master = screen.tile("enable_anti_duplicate")
+        top_p = screen.tile("top_p")
+        bar = screen.tabs.content.controls[0]
+        assert body.controls[1].content.controls[0] is master.control
+        assert [tab.label for tab in bar.tabs] == ["Core Parameters", "Logit Bias"]
+        assert screen.visible_keys[:4] == ["enable_anti_duplicate", "top_p", "min_p", "bypass_min_p_allowlist"]
+        assert not master.switch.disabled and screen.master_note.visible
+        assert top_p.editor_row.disabled and not top_p.apply(0.2)
+        assert (top_p.slider.min, top_p.slider.max, top_p.slider.divisions) == (0, 1, 100)
+        assert top_p.slider.round == 2 and screen.tile("top_k").slider.round == 0
+        penalty = screen.tile("frequency_penalty").slider
+        assert (penalty.min, penalty.max, penalty.divisions) == (0, 2, 200)
+
+        await session.dispatch_event(bar._i, "click", 1)
+        word_bias = screen.tile("logit_bias_enabled")
+        strength = screen.tile("logit_bias_strength")
+        script_ban = screen.tile("block_other_scripts")
+        seconds = screen.tile("forced_truncation_seconds")
+        assert screen.tabs.selected_index == 1 and "top_p" not in screen.visible_keys
+        assert word_bias.switch.disabled and script_ban.switch.disabled and strength.editor_row.disabled
+        assert strength.slider.value == 1.2 and store.get(("logit_bias_strength",)) == -1.2
+        master.apply(True)
+        assert not screen.master_note.visible and not word_bias.switch.disabled and not script_ban.switch.disabled
+        assert strength.editor_row.disabled and seconds.editor_row.disabled
+        word_bias.apply(True)
+        assert not strength.editor_row.disabled
+        assert (strength.slider.min, strength.slider.max, strength.slider.divisions) == (0, 2, 20)
+        strength.slider.value = 0.7
+        await session.dispatch_event(strength.slider._i, "change_end", 0.7)
+        assert store.get(("logit_bias_strength",)) == 0.7
+        screen.tile("forced_truncation_enabled").apply(True)
+        assert seconds.kind == "number" and not seconds.editor_row.disabled
+
+        await session.dispatch_event(bar._i, "click", 0)
+        assert screen.tabs.selected_index == 0 and not top_p.editor_row.disabled and top_p.slider.value == 0.65
+        assert await screen.focus_key("logit_bias_strength", highlight=False)
+        assert screen.tabs.selected_index == 1
+        assert await screen.focus_key("enable_anti_duplicate", highlight=False)
+        assert screen.tabs.selected_index == 1
+        master.apply(False)
+        assert strength.editor_row.disabled and store.get(("logit_bias_strength",)) == 0.7
+        assert {"top_p", "logit_bias_strength"}.issubset(screen.reset_section())
+
+        legacy = SectionPage(_match(legacy_route), ctx)
+        legacy.get_body()
+        assert legacy.tabs.selected_index == 1
+        result = SectionPage(_match(route + "#logit_bias_strength"), ctx)
+        result.get_body()
+        assert result.tabs.selected_index == 1
+        screen.dispose()
+        home.dispose()
+        store.close()
+
+    asyncio.run(scenario())
 
 
 # ==========================================================================

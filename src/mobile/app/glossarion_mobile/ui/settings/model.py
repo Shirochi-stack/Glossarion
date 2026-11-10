@@ -119,6 +119,29 @@ SECTION_GROUPS = {
     "other.stored": "Advanced",
 }
 
+ANTI_DUPLICATE_SECTION = "other.anti_duplicate.core"
+ANTI_DUPLICATE_BIAS_SECTION = "other.anti_duplicate.logit_bias"
+ANTI_DUPLICATE_MASTER = "enable_anti_duplicate"
+ANTI_DUPLICATE_CORE = ("top_p", "min_p", "bypass_min_p_allowlist", "top_k", "frequency_penalty",
+                       "presence_penalty", "repetition_penalty", "candidate_count", "custom_stop_sequences")
+ANTI_DUPLICATE_BIAS_GROUPS = (
+    ("Word bias · OpenAI", ("logit_bias_enabled", "logit_bias_strength", "bias_common_words", "bias_repetitive_phrases")),
+    ("Script ban", ("block_other_scripts", "script_ban_allow_kaomoji", "script_ban_whitelist_source")),
+    ("Forced truncation", ("forced_truncation_enabled", "forced_truncation_seconds",
+                           "mark_glossary_forced_truncation_complete")),
+)
+ANTI_DUPLICATE_SLIDERS = {
+    "top_p": (0, 1, 100),
+    "min_p": (0, 1, 100),
+    "top_k": (0, 100, 100),
+    "frequency_penalty": (0, 2, 200),
+    "presence_penalty": (0, 2, 200),
+    "repetition_penalty": (1, 2, 100),
+    "candidate_count": (1, 4, 3),
+    "logit_bias_strength": (0, 2, 20),
+}
+ANTI_DUPLICATE_OFF = "Enable Anti-Duplicate Parameters first"
+
 #: UI_SPEC §4.15 curated sections (U9): ``(id, title, home group, ((sub-heading, keys), ...))``.
 #: Each listed key moves out of its desktop schema section into the curated one (the schema stays the
 #: source of the tiles; the desktop dialogs are untouched); keys a build does not have are skipped. A
@@ -126,6 +149,10 @@ SECTION_GROUPS = {
 #: remaining keys follow under "Other settings". A desktop section emptied by the move
 #: (``main.run``, ``other.output``) resolves to the curated section that took most of its keys.
 CURATED_SECTIONS: tuple = (
+    (ANTI_DUPLICATE_SECTION, "Anti-Duplicate Parameters", "Translation", (
+        ("", (ANTI_DUPLICATE_MASTER, *ANTI_DUPLICATE_CORE)),
+        *ANTI_DUPLICATE_BIAS_GROUPS,
+    )),
     ("translation_defaults", "Translation defaults", "Translation", (
         ("Language & output mode", ("output_language", "output_mode")),
         ("Sampling & limits", ("translation_temperature", "disable_temperature", "max_output_tokens", "token_limit",
@@ -494,6 +521,9 @@ def slider_params(spec: Any) -> Optional[tuple[float, float, int]]:
     kind = spec_type(spec)
     if kind not in ("int", "float"):
         return None
+    desktop = ANTI_DUPLICATE_SLIDERS.get(spec_attr(spec, "key"))
+    if desktop is not None:
+        return desktop
     low, high = _number(spec_attr(spec, "minimum", None)), _number(spec_attr(spec, "maximum", None))
     if low is None or high is None or high <= low:
         return None

@@ -243,8 +243,8 @@ async def _settings_section(app, driver, section_id: str):
         translation = next(card for card in home.content.controls if card.title == "Translation")
         tabs = translation.children[0]
         bar = tabs.content.controls[0]
-        tabs.selected_index = next(i for i, tab in enumerate(bar.tabs) if tab.label == "Quality")
-        tabs.on_change(types.SimpleNamespace(control=tabs))
+        quality = next(i for i, tab in enumerate(bar.tabs) if tab.label == "Quality")
+        await home.ctx.page.session.dispatch_event(bar._i, "click", quality)
     await driver.tap(key=f"settings-section-{section_id}", timeout=30, scroll=True)
 
     def opened():

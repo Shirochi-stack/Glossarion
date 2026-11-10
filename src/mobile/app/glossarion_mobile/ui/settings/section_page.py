@@ -28,7 +28,8 @@ from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.settings.banners import JobBanner
-from glossarion_mobile.ui.settings.model import WINDOW_SIZE, grouped_specs, window_bounds
+from glossarion_mobile.ui.settings.model import (ANTI_DUPLICATE_BIAS_SECTION, ANTI_DUPLICATE_MASTER,
+                                                 ANTI_DUPLICATE_SECTION, WINDOW_SIZE, grouped_specs, window_bounds)
 from glossarion_mobile.ui.settings.schema_access import SearchHit
 from glossarion_mobile.ui.settings.search import SettingsSearch, search_sheet
 from glossarion_mobile.ui.settings.tiles import (MOBILE_READONLY_REASONS, EffectiveConfig, SettingTile, listed_setting,
@@ -141,13 +142,14 @@ class SectionPage(Screen):
         super().__init__(match)
         self.ctx = ctx
         self.section_id = section_id or (match.params.get("section", "") if match is not None else "")
+        self.open_bias_tab = self.section_id == ANTI_DUPLICATE_BIAS_SECTION
         self.focus_target = match.fragment if match is not None else None
         display_key = getattr(ctx.schema, "display_key", None)
         if self.focus_target and callable(display_key):  # a key folded into a virtual control (Streaming)
             self.focus_target = display_key(self.focus_target)
         self.window_size = max(4, int(window_size))
         self.section = ctx.schema.section(self.section_id) if ctx.schema.available else None
-        if self.section is not None and self.section.id != self.section_id and section_id is None:
+        if self.section is not None and self.section.id != self.section_id and (section_id is None or self.open_bias_tab):
             self.section_id = self.section.id  # a desktop id the curated map emptied (main.run)
         self.title = self.section.title if self.section is not None else "Settings"
         self.opened_snapshot = ctx.store.snapshot()
@@ -159,8 +161,10 @@ class SectionPage(Screen):
         self.pool_tiles: list[SettingTile] = []  # SECTION_POOL_KEYS (outside the window)
         self.window: tuple[int, int] = (0, 0)
         self.list_view: Optional[ft.ListView] = None
-        self.qa_tabs: list[tuple[str, int, int]] = []
+        self.tab_ranges: list[tuple[str, int, int]] = []
         self.tabs: Optional[ft.Tabs] = None
+        self.master_key: Optional[str] = None
+        self.master_note: Optional[ft.Text] = None
         self.banner = JobBanner(ctx)
         self.search_sheet: Optional[ft.BottomSheet] = None
         self.search: Optional[SettingsSearch] = None
@@ -192,14 +196,37 @@ class SectionPage(Screen):
         if self.section_id == "qa.settings":
             from glossarion_mobile.ui.settings.qa_layout import qa_settings_layout
 
-            self.specs, self.headings, self.qa_tabs = qa_settings_layout(specs)
+            self.specs, self.headings, self.tab_ranges = qa_settings_layout(specs)
         elif curated:  # UI_SPEC §4.15 curated section: its own sub-headings, in its order
             self.specs = list(specs)
             self.headings = {str(getattr(spec, "key", "")): curated.get(str(getattr(spec, "key", "")), "")
                              for spec in specs}
         else:
             self.specs, self.headings = grouped_specs(specs)
+        if self.section_id == ANTI_DUPLICATE_SECTION:
+            self.specs.sort(key=lambda spec: spec.section == ANTI_DUPLICATE_BIAS_SECTION)
         self.keys = [str(getattr(spec, "key", "")) for spec in self.specs]
+        controls: list[ft.Control] = [self.banner.control]
+        start = 0
+        if self.section_id == ANTI_DUPLICATE_SECTION:
+            core_start = 0
+            if self.keys and self.keys[0] == ANTI_DUPLICATE_MASTER:
+                self.master_key = ANTI_DUPLICATE_MASTER
+                core_start = 1
+                self.master_note = ft.Text("Turn on Anti-Duplicate Parameters to edit these settings.",
+                                           theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                           color=ft.Colors.ON_SURFACE_VARIANT,
+                                           visible=not self.config_view.get(self.master_key))
+                controls.append(ft.Container(
+                    content=ft.Column([self.tile(self.master_key).control, self.master_note], spacing=4),
+                    padding=ft.Padding.symmetric(horizontal=tokens.SPACING["md"]),
+                ))
+            bias_start = next((i for i, spec in enumerate(self.specs)
+                               if spec.section == ANTI_DUPLICATE_BIAS_SECTION), len(self.specs))
+            self.tab_ranges = [(title, first, end) for title, first, end in (
+                ("Core Parameters", core_start, bias_start), ("Logit Bias", bias_start, len(self.specs))
+            ) if first < end]
+            start = bias_start if self.open_bias_tab else core_start
         self.earlier_button = ft.TextButton(content="", icon=ft.Icons.EXPAND_LESS, on_click=self._on_earlier,
                                             key="settings-window-earlier")
         self.later_button = ft.TextButton(content="", icon=ft.Icons.EXPAND_MORE, on_click=self._on_later,
@@ -211,19 +238,18 @@ class SectionPage(Screen):
             build_controls_on_demand=False,
             auto_scroll=False,
         )
-        start = 0
         if self.focus_target in self.keys:
             index = self.keys.index(self.focus_target)
-            start = index if self.qa_tabs else window_bounds(index, len(self.keys), self.window_size)[0]
-        if self.qa_tabs:
-            self.tabs = ft.Tabs(length=len(self.qa_tabs), expand=True, on_change=self._on_qa_tab,
+            start = index if self.tab_ranges else window_bounds(index, len(self.keys), self.window_size)[0]
+        if self.tab_ranges:
+            tab_key = "qa-settings" if self.section_id == "qa.settings" else "anti-duplicate-settings"
+            self.tabs = ft.Tabs(length=len(self.tab_ranges), expand=True,
                                 content=ft.Column([
-                                    ft.TabBar(tabs=[ft.Tab(label=title) for title, _, _ in self.qa_tabs],
-                                              scrollable=True, key="qa-settings-tab-bar"),
+                                    ft.TabBar(tabs=[ft.Tab(label=title) for title, _, _ in self.tab_ranges],
+                                              scrollable=True, key=f"{tab_key}-tab-bar", on_click=self._on_tab),
                                     self.list_view,
-                                ], spacing=0, expand=True), key="qa-settings-tabs")
+                                ], spacing=0, expand=True), key=f"{tab_key}-tabs")
         self.render_window(start, push=False)
-        controls: list[ft.Control] = [self.banner.control]
         if not self.specs and not STATIC_LINKS.get(self.section_id) and not SECTION_POOL_KEYS.get(self.section_id):
             controls.append(EmptyState(icon="SETTINGS", title=self.title, body="This section has no settings yet.",
                                        key="settings-empty-section"))
@@ -258,18 +284,18 @@ class SectionPage(Screen):
     @property
     def visible_keys(self) -> list[str]:
         start, end = self.window
-        return self.keys[start:end]
+        return ([self.master_key] if self.master_key else []) + self.keys[start:end]
 
     def render_window(self, start: int, push: bool = True) -> None:
         if self.list_view is None:
             return
         total = len(self.keys)
         tab = None
-        if self.qa_tabs:
-            tab = next((i for i, (_, first, last) in enumerate(self.qa_tabs) if first <= start < last), 0)
+        if self.tab_ranges:
+            tab = next((i for i, (_, first, last) in enumerate(self.tab_ranges) if first <= start < last), 0)
             if self.tabs is not None:
                 self.tabs.selected_index = tab
-            _, start, end = self.qa_tabs[tab]
+            _, start, end = self.tab_ranges[tab]
         else:
             start = max(0, min(start, max(0, total - self.window_size)))
             end = min(total, start + self.window_size)
@@ -290,7 +316,7 @@ class SectionPage(Screen):
         if tab is None and end < total:
             self.later_button.content = f"Show more settings ({total - end})"
             controls.append(self.later_button)
-        if (tab is None and end == total) or (tab is not None and self.qa_tabs[tab][0] == "More checks"):
+        if (tab is None and end == total) or (tab is not None and self.tab_ranges[tab][0] == "More checks"):
             pools = self.pool_controls()
             if pools:
                 controls.append(self._heading("API key pools"))
@@ -316,11 +342,11 @@ class SectionPage(Screen):
         if push:
             self.ctx.push(self.tabs or self.list_view)
 
-    async def _on_qa_tab(self, event: Any) -> None:
-        tab = event.control.selected_index
-        if tab is None or not 0 <= tab < len(self.qa_tabs):
+    async def _on_tab(self, event: Any) -> None:
+        tab = event.data
+        if not isinstance(tab, int) or not 0 <= tab < len(self.tab_ranges):
             return
-        _, start, end = self.qa_tabs[tab]
+        _, start, end = self.tab_ranges[tab]
         if self.window == (start, end):
             return  # A search jump has already mounted this tab and set its scroll target.
         self.render_window(start)
@@ -384,14 +410,15 @@ class SectionPage(Screen):
             return False
         index = self.keys.index(key)
         start, end = self.window
-        if not start <= index < end:
-            self.render_window(index if self.qa_tabs else window_bounds(index, len(self.keys), self.window_size)[0])
+        if key != self.master_key and not start <= index < end:
+            self.render_window(index if self.tab_ranges else window_bounds(index, len(self.keys), self.window_size)[0])
             await asyncio.sleep(settle)  # the client builds the new window first
         self.jumps.append(key)
-        try:
-            await self.list_view.scroll_to(scroll_key=ft.ScrollKey(key), duration=300)
-        except Exception as exc:  # not mounted (yet) / client gone
-            log.debug("scroll_to(%s) failed: %s", key, exc)
+        if key != self.master_key:
+            try:
+                await self.list_view.scroll_to(scroll_key=ft.ScrollKey(key), duration=300)
+            except Exception as exc:  # not mounted (yet) / client gone
+                log.debug("scroll_to(%s) failed: %s", key, exc)
         tile = self.tiles.get(key)
         if tile is not None and highlight:
             tile.set_highlight(True)
@@ -426,7 +453,11 @@ class SectionPage(Screen):
                 tile.refresh(push=False)
         for tile in self.pool_tiles:
             tile.refresh(push=False)
-        self.ctx.push(self.list_view)
+        if self.master_key and self.master_note is not None:
+            self.master_note.visible = not self.config_view.get(self.master_key)
+            self.ctx.push(self.list_view, self.tiles[self.master_key].control, self.master_note)
+        else:
+            self.ctx.push(self.list_view)
 
     def refresh_all(self) -> None:
         """Re-render values (e.g. after the lazy schema defaults were resolved)."""
@@ -467,7 +498,7 @@ class SectionPage(Screen):
                 continue
             if key in MOBILE_READONLY_REASONS:  # edited on its own page (Prompt profiles: Profiles & prompts)
                 continue
-            if ok and self.ctx.schema.lock_reason(spec, self.config_view) is None:
+            if ok and self.ctx.schema.lock_reason(spec, self.config_view, include_dependencies=False) is None:
                 if self.ctx.store.unset(self.ctx.schema.path_of(key)):
                     removed.append(key)
         self._on_config_change("")

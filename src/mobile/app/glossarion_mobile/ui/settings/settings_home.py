@@ -37,7 +37,7 @@ from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.router import ROUTES_BY_NAME, RouteError, RouteMatch, RouteSpec, build_route, parse_route
 from glossarion_mobile.ui.screens.base import HubScreen, unavailable_reason
 from glossarion_mobile.ui.settings.banners import JobBanner, notice
-from glossarion_mobile.ui.settings.model import ordered_groups
+from glossarion_mobile.ui.settings.model import ANTI_DUPLICATE_SECTION, ordered_groups
 from glossarion_mobile.ui.settings.schema_access import SearchHit, SectionInfo
 from glossarion_mobile.ui.settings.search import SettingsSearch
 from glossarion_mobile.ui.settings.tiles import listed_setting
@@ -118,7 +118,7 @@ _ROUTE_ICONS = {
 TRANSLATION_TABS = {
     "Run": ("translation_defaults", "context_memory", "direct_text.settings", "main.prompt",
             "settings.profiles", "settings.prefill"),
-    "Quality": ("other.response", "other.anti_duplicate.core", "other.anti_duplicate.logit_bias"),
+    "Quality": ("other.response", ANTI_DUPLICATE_SECTION),
     "Files": ("main.file", "other.processing", "other.processing.extraction", "other.meta_data",
               "epub_output", "pdf", "other.image"),
     "Tools": ("tools.review", "tools.async"),
@@ -336,14 +336,21 @@ class SettingsHome(HubScreen):
         body = ft.Column(panels[self.translation_tab], spacing=0, tight=True)
 
         def select(event: Any) -> None:
-            self.translation_tab = titles[event.control.selected_index]
+            # The tap carries its index even before Flutter syncs the Tabs selection.
+            index = event.data
+            if not isinstance(index, int) or not 0 <= index < len(titles):
+                return
+            if titles[index] == self.translation_tab:
+                return
+            self.translation_tab = titles[index]
+            tabs.selected_index = index
             body.controls = panels[self.translation_tab]
-            self.ctx.push(body)
+            self.ctx.push(tabs)
 
-        return ft.Tabs(length=len(titles), selected_index=titles.index(self.translation_tab), on_change=select,
-                       content=ft.Column([ft.TabBar(tabs=[ft.Tab(label=title) for title in titles],
-                                                     scrollable=True), body], spacing=0, tight=True),
-                       key="settings-translation-tabs")
+        bar = ft.TabBar(tabs=[ft.Tab(label=title) for title in titles], scrollable=True, on_click=select)
+        tabs = ft.Tabs(length=len(titles), selected_index=titles.index(self.translation_tab),
+                       content=ft.Column([bar, body], spacing=0, tight=True), key="settings-translation-tabs")
+        return tabs
 
     # ---- lifecycle ---------------------------------------------------------------------------
 

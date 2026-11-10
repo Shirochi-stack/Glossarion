@@ -63,6 +63,7 @@ from glossarion_mobile.ui.settings.editors import (
     SecretEditor,
 )
 from glossarion_mobile.ui.settings.model import (
+    ANTI_DUPLICATE_OFF,
     choice_options,
     config_path,
     env_names,
@@ -365,7 +366,7 @@ class SettingTile:
             out.append(ReasonChip(reason=self.unavailable_reason or "Not available on mobile",
                                   detail=f"{self.label}: {self.unavailable_reason or 'not available on mobile'}. "
                                          "Its config.json value is kept untouched."))
-        if self.lock_reason:
+        if self.lock_reason and self.lock_reason != ANTI_DUPLICATE_OFF:
             color = semantic("locked", False)
             out.append(
                 ft.Container(
@@ -405,7 +406,7 @@ class SettingTile:
         stored = self.stored
         noted = not stored and self.value() is None and bool(self.default_note())
         self.value_text.value = text if (stored or noted) else f"{text} · default"
-        self.value_text.color = ft.Colors.PRIMARY if stored else ft.Colors.ON_SURFACE_VARIANT
+        self.value_text.color = ft.Colors.PRIMARY if stored and editable else ft.Colors.ON_SURFACE_VARIANT
         self.modified_dot.visible = self.store.is_modified(self.path)
         self.title_text.color = ft.Colors.ON_SURFACE if editable else ft.Colors.ON_SURFACE_VARIANT
         self.badges.controls = self._badge_controls()
@@ -764,9 +765,19 @@ class DelayRangeTile(NumberTile):
 class SliderTile(NumberTile):
     kind = "slider"
 
+    def value(self) -> Any:
+        value = super().value()
+        if self.key == "logit_bias_strength":
+            try:
+                return abs(float(value))  # desktop accepts both signs in older profiles
+            except (TypeError, ValueError):
+                pass
+        return value
+
     def build_editor_row(self) -> Optional[ft.Control]:
         low, high, divisions = slider_params(self.spec) or (0.0, 1.0, 10)
         self.slider = ft.Slider(min=low, max=high, divisions=divisions, value=low, label="{value}",
+                                round=0 if self.number_kind == "int" else 2,
                                 on_change=self._on_slide, on_change_end=self._on_slide_end, expand=True)
         self.slider_value = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, width=56,
                                     text_align=ft.TextAlign.END)
@@ -781,6 +792,7 @@ class SliderTile(NumberTile):
             number = low
         self.slider.value = min(high, max(low, number))
         self.slider_value.value = summarize(value, "number") if value is not None else ""
+        self.slider_value.color = ft.Colors.ON_SURFACE if self.editable else ft.Colors.ON_SURFACE_VARIANT
 
     def _slider_number(self, raw: Any) -> Any:
         number = float(raw)
