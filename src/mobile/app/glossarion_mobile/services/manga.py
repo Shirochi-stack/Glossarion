@@ -1517,15 +1517,6 @@ class MangaFileList:
     def cbz_job_for(self, path: str) -> Optional[str]:
         return (getattr(self.host, "cbz_image_to_job", {}) or {}).get(path)
 
-    def _folder_cbz(self, page: str) -> str:
-        """The archive ``_create_cbz_from_isolated_folders`` writes for a run whose first page is
-        ``page``: ``<folder>/<folder name>_translated.cbz`` (in the output override instead when one
-        is set, which a mobile job never has: ``_output_view``)."""
-        override = str(self.host.main_gui.config.get("output_directory") or "") or os.environ.get(
-            "OUTPUT_DIRECTORY", "")
-        parent = override if override and os.path.isdir(override) else os.path.dirname(page)
-        return os.path.join(parent, f"{os.path.basename(parent)}_translated.cbz")
-
     def existing_cbz(self) -> list:
         """Archives already packed for the selection, as a mobile job sees the folders:
         ``<name>_translated.cbz`` next to each imported CBZ (``_finalize_cbz_jobs``) and the archive
@@ -1542,10 +1533,11 @@ class MangaFileList:
             run = list(self.run_files()[0])
             mapping = self.cbz_image_to_job
             plain = [p for p in run if p not in mapping]
-            for page in dict.fromkeys(run[:1] + plain[:1]):
-                packed = self._folder_cbz(page)
-                if os.path.isfile(packed) and packed not in found:
-                    found.append(packed)
+            for selection in (run, plain):
+                if selection:
+                    packed = self.host._manga_batch_cbz_path(selection)
+                    if os.path.isfile(packed) and packed not in found:
+                        found.append(packed)
         return found
 
     def create_cbz(self, files: Optional[Sequence[str]] = None) -> list:
@@ -1578,8 +1570,7 @@ class MangaFileList:
             if plain:
                 self.host._manga_processing_files = plain
                 try:
-                    self.host._create_cbz_from_isolated_folders()
-                    archives.append(self._folder_cbz(plain[0]))
+                    archives.append(self.host._create_cbz_from_isolated_folders())
                 except FileNotFoundError as exc:
                     error = exc
                 finally:

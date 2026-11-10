@@ -393,6 +393,9 @@ def test_strict_dispatch_checks_python_ci_before_packaging(wf):
     assert gate < next(i for i, step in enumerate(steps) if step.get("name") == "Upload prepared bundle")
     assert steps[gate]["if"] == "inputs.require_python_ci"
     assert "head_sha=$GITHUB_SHA" in steps[gate]["run"]
+    host = [step for step in steps[:gate] if step.get("name", "").startswith("Host tests (")]
+    assert len(host) == 2
+    assert all("inputs.require_python_ci && '--runxfail'" in step["env"]["PYTEST_ADDOPTS"] for step in host)
 
 
 def test_workflow_call_cannot_publish(wf):

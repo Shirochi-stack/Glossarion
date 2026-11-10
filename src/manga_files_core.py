@@ -1103,78 +1103,64 @@ class MangaFilesMixin:
         except Exception as e:
             print(f"[FILE_PERSIST] Error loading files: {e}")
 
+    def _manga_batch_cbz_path(self, source_files):
+        config = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
+        override = config.get('output_directory') or os.environ.get('OUTPUT_DIRECTORY')
+        mapping = getattr(self, 'cbz_image_to_job', {}) or {}
+        first_archive = mapping.get(source_files[0])
+        if first_archive and all(mapping.get(path) == first_archive for path in source_files):
+            return os.path.splitext(first_archive)[0] + '_translated.cbz'
+        first_source = first_archive or source_files[0]
+        parent = override if override and os.path.isdir(override) else os.path.dirname(first_source)
+        name = os.path.basename(os.path.normpath(parent))
+        path = os.path.join(parent, f"{name}_translated.cbz")
+        imported_outputs = {
+            os.path.normcase(os.path.abspath(os.path.splitext(archive)[0] + '_translated.cbz'))
+            for archive in getattr(self, 'cbz_jobs', {}) or {}
+        }
+        number = 1
+        while os.path.normcase(os.path.abspath(path)) in imported_outputs:
+            suffix = '_batch' if number == 1 else f'_batch_{number}'
+            path = os.path.join(parent, f"{name}{suffix}_translated.cbz")
+            number += 1
+        return path
+
     def _create_cbz_from_isolated_folders(self):
-        """Create a single CBZ file from all isolated *_translated folders"""
+        """Create a batch CBZ from the selected pages' actual translated outputs."""
+        import tempfile
         import zipfile
-        
+
         source_files = self._current_manga_processing_files()
         if not source_files:
             raise FileNotFoundError("No images loaded. Please load some images first.")
-        
+
+        paths = [self._get_manga_output_path_for_file(path, create_dir=False) for path in source_files]
+        images = [path for path in dict.fromkeys(paths) if os.path.isfile(path)]
+        if not images:
+            raise FileNotFoundError("No translated images found. Please translate some images first.")
+
+        cbz_path = self._manga_batch_cbz_path(source_files)
+        fd, temporary = tempfile.mkstemp(suffix=".cbz", dir=os.path.dirname(cbz_path))
+        os.close(fd)
         try:
-            
-            # Get parent directory - respect OUTPUT_DIRECTORY override
-            first_file = source_files[0]
-            
-            # Check for output directory override
-            override_dir = None
-            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
-                override_dir = self.main_gui.config.get('output_directory', '')
-            if not override_dir:
-                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
-            
-            if override_dir and os.path.isdir(override_dir):
-                parent_dir = override_dir
-            else:
-                parent_dir = os.path.dirname(first_file)
-            
-            # Find all *_translated folders
-            translated_folders = []
-            allowed_folders = {
-                f"{os.path.splitext(os.path.basename(path))[0]}_translated"
-                for path in source_files
-            }
-            for item in os.listdir(parent_dir):
-                item_path = os.path.join(parent_dir, item)
-                if os.path.isdir(item_path) and item.endswith('_translated') and item in allowed_folders:
-                    translated_folders.append(item_path)
-            
-            if not translated_folders:
-                self._log("⚠️ No translated folders found for CBZ creation", "warning")
-                raise FileNotFoundError("No translated images found. Please translate some images first.")
-            
-            # Create CBZ filename based on parent folder name
-            parent_folder_name = os.path.basename(parent_dir)
-            cbz_filename = f"{parent_folder_name}_translated.cbz"
-            cbz_path = os.path.join(parent_dir, cbz_filename)
-            
-            # Counter for images
-            image_count = 0
-            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-            
-            # Create CBZ (ZIP) file - only include the main translated images, not _cleaned versions
-            with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                # Sort folders to maintain order
-                for folder in sorted(translated_folders):
-                    # Get all images from this folder
-                    for filename in sorted(os.listdir(folder)):
-                        if filename.lower().endswith(image_extensions):
-                            # Skip _cleaned versions - only include the main translated images
-                            if '_cleaned' in filename.lower():
-                                continue
-                            src_path = os.path.join(folder, filename)
-                            # Add to CBZ with just the filename (flat structure)
-                            zf.write(src_path, filename)
-                            image_count += 1
-            
-            self._log(f"📦 Created CBZ file with {image_count} images: {cbz_filename}", "success")
-            
-        except Exception as e:
-            self._log(f"❌ Error creating CBZ file: {str(e)}", "error")
-            import traceback
-            self._log(traceback.format_exc(), "debug")
-            # Re-raise so button handler can show error state
-            raise
+            with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as archive:
+                used = set()
+                for image in images:
+                    name = os.path.basename(image)
+                    stem, extension = os.path.splitext(name)
+                    number = 2
+                    while name.casefold() in used:
+                        name = f"{stem}_{number}{extension}"
+                        number += 1
+                    archive.write(image, name)
+                    used.add(name.casefold())
+            os.replace(temporary, cbz_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+        self._log(f"📦 Created CBZ file with {len(images)} images: {os.path.basename(cbz_path)}", "success")
+        return cbz_path
 
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.
@@ -1299,16 +1285,16 @@ class MangaFilesMixin:
         except Exception as e:
             self._log(f"⚠️ Failed to compile CBZ packages: {e}", "warning")
 
-    def _get_manga_output_path_for_file(self, filepath: str) -> str:
+    def _get_manga_output_path_for_file(self, filepath: str, *, create_dir: bool = True) -> str:
         """Mirror the normal per-image output path routing used by the worker."""
         filename = os.path.basename(filepath)
         try:
             if hasattr(self, 'cbz_image_to_job') and filepath in self.cbz_image_to_job:
                 cbz_file = self.cbz_image_to_job[filepath]
                 job = getattr(self, 'cbz_jobs', {}).get(cbz_file)
-                if job:
-                    output_dir = job.get('out_dir')
-                    os.makedirs(output_dir, exist_ok=True)
+                if job and (output_dir := job.get('out_dir')):
+                    if create_dir:
+                        os.makedirs(output_dir, exist_ok=True)
                     return os.path.join(output_dir, filename)
         except Exception:
             pass
@@ -1316,7 +1302,8 @@ class MangaFilesMixin:
         base_name = os.path.splitext(filename)[0]
         parent_dir = os.environ.get('OUTPUT_DIRECTORY') or os.path.dirname(filepath)
         output_dir = os.path.join(parent_dir, f"{base_name}_translated")
-        os.makedirs(output_dir, exist_ok=True)
+        if create_dir:
+            os.makedirs(output_dir, exist_ok=True)
         return os.path.join(output_dir, filename)
 
 

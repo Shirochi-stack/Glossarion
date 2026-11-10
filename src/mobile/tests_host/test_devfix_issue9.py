@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -688,19 +689,6 @@ REASON = re.compile(r"failed to load image|cannot identify image file|unsupporte
 CRASH = re.compile(r"'NoneType' object has no attribute|object is not subscriptable|Traceback \(most recent call last\)")
 
 
-#: A known, unrelated failure of the shared run (U8; manga_files_core / manga_runner, unchanged by the
-#: decoder hardening): "Create CBZ at end" looks for ``<stem>_translated`` folders next to the run's
-#: FIRST file, so a run whose first file is a CBZ page logs "Error creating CBZ file" with its
-#: traceback (also with no crafted page at all). ``test_create_cbz_at_end_with_a_cbz_page_first``
-#: tracks it; the refusal checks look at the rest of the log.
-_CBZ_AT_END_FAILURE = re.compile(r"^.*Error creating CBZ file: No translated images found.*$\n"
-                                 r"(?:^(?:Traceback \(most recent call last\):|  .*|\w*Error: .*)$\n?)*", re.M)
-
-
-def _without_cbz_at_end_failure(log: str) -> str:
-    return _CBZ_AT_END_FAILURE.sub("", log)
-
-
 def _page_lines(log: str, name: str) -> list:
     return [line for line in log.splitlines() if name in line]
 
@@ -785,7 +773,7 @@ def test_run_rejects_crafted_pages_with_a_clear_message(drive):
     if unclear:
         problems.append("no clear refusal line for: " + ", ".join(
             f"{n} ({' | '.join(_page_lines(log, n)[-2:])[:200]})" for n in unclear))
-    crashes = sorted({m.group(0) for m in CRASH.finditer(_without_cbz_at_end_failure(log))})
+    crashes = sorted({m.group(0) for m in CRASH.finditer(log)})
     if crashes:
         problems.append(f"raw crash text in the job log: {crashes}")
     failed = run["result"].get("manga_failed")
@@ -795,13 +783,19 @@ def test_run_rejects_crafted_pages_with_a_clear_message(drive):
 
 
 @needs_e2e
-@pytest.mark.xfail(strict=True, reason=(
-    "pre-existing (U8, desktop-shared manga_files_core._create_cbz_from_isolated_folders / "
-    "manga_runner.cbz_paths, not part of the decoder hardening): 'Create CBZ at end' (on by default on "
-    "mobile) looks next to the run's first file, so a run that starts with a CBZ page logs "
-    "'Error creating CBZ file: No translated images found' and its traceback"))
 def test_create_cbz_at_end_with_a_cbz_page_first(drive):
-    assert "Error creating CBZ file" not in drive["run"]["log"]
+    pages, run = drive["pages"], drive["run"]
+    source = Path(pages["cbz"])
+    assert Path(drive["files_add"]["files"][0]).name in pages["cbz_members"]
+    archives = set(map(Path, run["result"]["manga_cbz"]))
+    imported = source.with_name(f"{source.stem}_translated.cbz")
+    batch = source.parent / f"{source.parent.name}_translated.cbz"
+    assert archives == {imported, batch}
+    assert "Failed to create CBZ file" not in run["log"]
+    assert "Error creating CBZ file" not in run["log"]
+    members = pages["cbz_output_members"]
+    assert sorted(members[str(batch)].values()) == sorted(pages["output_digests"])
+    assert list(members[str(imported)]) == [Path(pages["cbz_good_output"]["output"]).name]
 
 
 @needs_e2e
@@ -1066,12 +1060,20 @@ def _drive(out_path: str) -> int:
             crafted_bytes = {source_archive.read(m)[:64] for m, kind in members.items() if kind != "good"}
         crafted_bytes |= {Path(p).read_bytes()[:64] for p in bad.values()}
         packed = []
+        archive_members = {}
         for archive in run["result"].get("manga_cbz") or []:
             with zipfile.ZipFile(archive) as zf:
-                for member in zf.namelist():
-                    if not member.endswith("/") and zf.read(member)[:64] in crafted_bytes:
-                        packed.append(f"{os.path.basename(archive)}:{member}")
+                archive_members[archive] = members_with_digests = {}
+                for member in zf.infolist():
+                    if member.is_dir():
+                        continue
+                    data = zf.read(member)
+                    members_with_digests[member.filename] = hashlib.sha256(data).hexdigest()
+                    if data[:64] in crafted_bytes:
+                        packed.append(f"{os.path.basename(archive)}:{member.filename}")
         report["pages"]["cbz_out_crafted_members"] = packed
+        report["pages"]["cbz_output_members"] = archive_members
+        report["pages"]["output_digests"] = [hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in outputs]
 
         # 3. Editor steps (manga_step jobs on one editor session); RT-DETR = host_smoke's synthetic export
         import bubble_detector as bd

@@ -383,6 +383,8 @@ jobs:
           exit "$rc"
 
       - name: Host tests (offline)
+        env:
+          PYTEST_ADDOPTS: ${{ inputs.require_python_ci && '--runxfail' || '' }}
         run: uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host extensions/flet_glossarion_native/tests -q -m "not online"
 
       - name: Offline E2E on the collected bundle (fake OpenAI server)
@@ -400,6 +402,8 @@ jobs:
 
       - name: Host tests (online, keyless)
         continue-on-error: ${{ !inputs.require_python_ci }}
+        env:
+          PYTEST_ADDOPTS: ${{ inputs.require_python_ci && '--runxfail' || '' }}
         run: |
           rc=0
           uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host -q -m online || rc=$?

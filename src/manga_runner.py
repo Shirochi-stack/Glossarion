@@ -1424,7 +1424,7 @@ class MangaRunMixin:
                 # Create CBZ from isolated folders if enabled
                 if hasattr(self, 'create_cbz_at_end_value') and self.create_cbz_at_end_value:
                     try:
-                        self._create_cbz_from_isolated_folders()
+                        self._manga_batch_cbz = self._create_cbz_from_isolated_folders()
                     except Exception as e:
                         self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
 
@@ -3093,6 +3093,7 @@ class HeadlessMangaRunner(MangaRunMixin, HeadlessMangaState):
         if glossary_only is not None:
             self._manga_glossary_only_run = bool(glossary_only)
         self._last_glossary_only = bool(getattr(self, '_manga_glossary_only_run', False))
+        self._manga_batch_cbz = None
         launched = False
         try:
             launched = self.start()
@@ -3146,14 +3147,9 @@ class HeadlessMangaRunner(MangaRunMixin, HeadlessMangaState):
         for cbz_file in (getattr(self, 'cbz_jobs', {}) or {}):
             base = os.path.splitext(os.path.basename(cbz_file))[0]
             candidates.append(os.path.join(os.path.dirname(cbz_file), f"{base}_translated.cbz"))
-        parents = []
-        override_dir = ((getattr(self.main_gui, 'config', {}) or {}).get('output_directory', '')
-                        or os.environ.get('OUTPUT_DIRECTORY', ''))
-        if override_dir and os.path.isdir(override_dir):
-            parents.append(override_dir)
-        parents.extend(os.path.dirname(path) for path in self._run_files[:1])
-        for parent_dir in parents:
-            candidates.append(os.path.join(parent_dir, f"{os.path.basename(parent_dir)}_translated.cbz"))
+        batch_archive = getattr(self, '_manga_batch_cbz', None)
+        if batch_archive:
+            candidates.append(batch_archive)
         paths = []
         for candidate in candidates:
             if candidate and os.path.isfile(candidate) and candidate not in paths:
