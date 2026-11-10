@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_stop_state():
+    """A Stop exercised by one test must not cancel work in the next test."""
+    stop_env = ("GRACEFUL_STOP", "GRACEFUL_STOP_COMPLETED", "TRANSLATION_CANCELLED", "WAIT_FOR_CHUNKS")
+    env_before = {name: os.environ.get(name) for name in stop_env}
+
+    def stop_flags():
+        client = sys.modules.get("unified_api_client")
+        return (
+            (client, "global_stop_flag"),
+            (getattr(client, "UnifiedClient", None), "_global_cancelled"),
+            (sys.modules.get("GlossaryManager"), "_stop_requested"),
+        )
+
+    flags_before = {name: getattr(owner, name, False) for owner, name in stop_flags()}
+    yield
+    for owner, name in stop_flags():
+        if hasattr(owner, name):
+            setattr(owner, name, flags_before[name])
+    for name, value in env_before.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 @pytest.fixture(autouse=True)
