@@ -186,7 +186,8 @@ class BoxPanel:
         self.translation_field = _field(str(box.get("translation") or ""), "Translation", "box-translation",
                                         hint_text="Type the translation" if recognized else NOT_RECOGNIZED)
         self.save_render_button = ft.FilledButton(content="Save & Update Overlay", icon=ft.Icons.AUTO_FIX_NORMAL,
-                                                  key="box-save-render", tooltip=reason, disabled=reason is not None,
+                                                  key="box-save-render", tooltip=busy_reason,
+                                                  disabled=busy_reason is not None,
                                                   style=COMPACT_BUTTON, on_click=lambda e: self.act("save_render"))
         translate_reason = reason or (None if recognized else NOT_RECOGNIZED)
         self.translate_button = ft.TextButton(content="Translate this text", icon=ft.Icons.TRANSLATE,
@@ -236,18 +237,18 @@ class BoxPanel:
             options=[ft.DropdownOption(key="", text="Default font")] + [
                 ft.DropdownOption(key=path, text=os.path.splitext(os.path.basename(path))[0]) for path in font_paths],
             on_select=lambda e: self.set_style(font=e.control.value or None))
-        # Size: the box's own px value (0.5 px steps); empty = Auto, with the size the box was last
-        # rendered at as the hint ("Auto 28"); − / + step from the shown size, Auto clears it
+        # Show the fitted size as a value so it remains visible when the field is unfocused.
         size, auto = box_size(box)
+        shown_size = size_text(size)
         self.size_field = commit_on_blur(
-            ft.TextField(value=size_text(style.get("font_size")), label="Size",
-                         hint_text=f"Auto {size_text(size)}" if auto and size else "Auto", dense=True,
+            ft.TextField(value=shown_size, label="Auto" if auto else "Size", dense=True,
                          width=76, key="box-style-size", keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT,
-                         label_style=LABEL_TEXT, hint_style=BODY_TEXT, disabled=styling,
-                         tooltip=(f"Auto: rendered at {size_text(size)} px" if auto and size else None),
+                         label_style=LABEL_TEXT, disabled=styling,
+                         tooltip=(f"Auto: rendered at {shown_size} px" if size else
+                                  "Update overlay to measure the fitted size") if auto else None,
                          content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
                          border_radius=tokens.RADII["field"]),
-            lambda text: self.set_size(text), current=lambda: size_text(self.style.get("font_size")))
+            self.set_size, current=lambda: shown_size)
         self.size_down_button = ft.IconButton(
             icon=ft.Icons.REMOVE, tooltip="Smaller (0.5 px)", key="box-style-size-down", size_constraints=HIT_TARGET,
             disabled=styling or size is None, on_click=lambda e: self.step_size(-SIZE_STEP))

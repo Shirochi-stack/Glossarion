@@ -7,7 +7,7 @@ Overlay (re-render) and the per-image editor state of the desktop manga tab
 Layout
 ------
 * **Moved verbatim from ImageRenderer.py** (module functions that take the manga tab as
-  ``self``): ``EDITOR_FUNCTIONS``. Eleven carry listed edits (``EDITED_FUNCTIONS``):
+  ``self``): ``EDITOR_FUNCTIONS``. Some carry listed edits (``EDITED_FUNCTIONS``):
   Qt-only lines became hooks (``_style_recognized_rectangle``,
   ``_confirm_clean_excluded_rectangle``, ``_schedule_rendered_output_refresh``), the editor
   OCR's ``from google.cloud import vision`` falls back to ``google_vision_rest`` when the SDK
@@ -6973,8 +6973,8 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                 except Exception as e:
                     print(f"[DEBUG] Failed to generate output path: {e}")
                     output_path = None
-                _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
-                return True  # Success!
+                return bool(_render_with_manga_translator(self, base_image, regions, output_path=output_path,
+                                                         original_image_path=current_image, switch_tab=False))
             else:
                 print(f"[DEBUG] ❌ No regions to render")
                 self._log("⚠️ No regions to render", "warning")
@@ -7236,7 +7236,8 @@ def save_positions_and_rerender(self):
             output_path = None
         
         # Render
-        _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
+        return _render_with_manga_translator(self, base_image, regions, output_path=output_path,
+                                            original_image_path=current_image, switch_tab=False)
     except Exception as e:
         print(f"[SAVE_POS] Error: {e}")
         import traceback
@@ -7459,7 +7460,6 @@ def _render_with_manga_translator(
         _attach_region_styles(self, original_image_path or image_path, regions)
         _attach_region_detector_metadata(self, original_image_path or image_path, regions)
         rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
-        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)
         print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
         
         # Convert back to PIL and save
@@ -7480,6 +7480,7 @@ def _render_with_manga_translator(
         
         print(f"[RENDER] Saving to: {output_path}\n")
         rendered_pil.save(output_path)
+        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)
         print(f"[RENDER] Saved successfully, file exists: {os.path.exists(output_path)}")
         
         # Trigger instant preview refresh now that file is saved
@@ -9298,7 +9299,8 @@ EDITOR_FUNCTIONS = (
 #: Moved functions with a listed edit (Qt lines -> hooks, the google_vision_rest fallback, the
 #: safe_image page reads: cv2_imread, open_page_image).
 EDITED_FUNCTIONS = ('_regions_with_ocr_text', '_run_ocr_on_regions', '_update_rectangles_with_recognition', '_process_ocr_result', '_handle_clean_this_rectangle', '_render_with_manga_translator', '_run_detect_background', '_run_clean_background', '_run_detection_sync', '_run_inpainting_sync', '_load_inpainter_into_pool',
-                    '_run_translate_background', '_resolve_cleaned_image_for_render',)
+                    '_run_translate_background', '_resolve_cleaned_image_for_render',
+                    '_update_single_text_overlay', 'save_positions_and_rerender')
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).
@@ -10289,13 +10291,17 @@ class MangaEditorSession:
     def save_and_update_overlay(self, image_path=None, *, owner=None):
         """Save & Update Overlay: persist the boxes and re-render the page with its translations."""
         with self._op_lock:
-            page = self._begin(owner, image_path)
-            self.image_preview_widget._persist_rectangles_state()
-            save_positions_and_rerender(self)
-            self.pump_updates()
-            self._finish()
+            self._begin(owner, image_path)
+            return self._save_open_overlay()
+
+    def _save_open_overlay(self):
+        self.image_preview_widget._persist_rectangles_state()
+        output = save_positions_and_rerender(self)
+        self.pump_updates()
+        self._finish()
+        if output:
             self.output_revision += 1
-            return (self.image_state_manager.get_state(page) or {}).get('rendered_image_path')
+        return output
 
     def render_page(self, image_path, *, owner=None):
         """Render a page from its persisted state only (imported sessions; no box reads)."""
@@ -10479,7 +10485,7 @@ class MangaEditorSession:
         return (self.image_state_manager.get_state(page) or {}).get('rendered_image_path')
 
     def rerender_boxes_locally(self, indexes, image_path, config):
-        """Refresh a moved overlay with the renderer alone, without a translation job or API client."""
+        """Render without an API client. None saves the open overlay at its last rendered positions."""
         from types import SimpleNamespace
 
         from manga_translator import MangaTranslator
@@ -10494,7 +10500,7 @@ class MangaEditorSession:
                     ocr_config={}, unified_client=None, main_gui=owner, log_callback=self._log,
                     skip_inpainter_init=True, skip_ocr_init=True,
                 )
-                return self._rerender_open_page(indexes, page)
+                return self._save_open_overlay() if indexes is None else self._rerender_open_page(indexes, page)
             finally:
                 self.main_gui, self._tab, self._manga_translator, self.translator = previous
 

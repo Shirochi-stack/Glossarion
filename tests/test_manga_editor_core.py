@@ -237,8 +237,21 @@ EDITS = (
      # editor re-render under a translate image edit prompt leaves the free text to the model's
      # redraw as the batch run does (_attach_region_detector_metadata)
      "        _attach_region_detector_metadata(self, original_image_path or image_path, regions)\n"
-     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"
+     "        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)\n"),
+    # Overlay success and fitted sizes describe the new image only after it was written.
+    ("_render_with_manga_translator",
+     "        rendered_pil.save(output_path)\n",
+     "        rendered_pil.save(output_path)\n"
      "        _record_region_font_sizes(self, original_image_path or image_path, regions, filtered_regions)\n"),
+    ("_update_single_text_overlay",
+     "                _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)\n"
+     "                return True  # Success!\n",
+     "                return bool(_render_with_manga_translator(self, base_image, regions, output_path=output_path,\n"
+     "                                                         original_image_path=current_image, switch_tab=False))\n"),
+    ("save_positions_and_rerender",
+     "        _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)\n",
+     "        return _render_with_manga_translator(self, base_image, regions, output_path=output_path,\n"
+     "                                            original_image_path=current_image, switch_tab=False)\n"),
     # 2026-11-07 (owner: moving a text box re-rendered on an older cleaned page): the newest cleaned
     # page of the page wins over a stale state / cached path (_newest_cleaned_image_candidate)
     ("_resolve_cleaned_image_for_render",

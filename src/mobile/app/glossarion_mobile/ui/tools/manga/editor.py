@@ -1386,7 +1386,8 @@ class EditorTab(MangaTab):
         reason = self._steps_reason()
         for step, button in self.step_buttons.items():
             needs_boxes = step == "render"
-            button.disabled = self.busy or not has_page or reason is not None or (needs_boxes and not self.boxes)
+            button.disabled = self.busy or not has_page or (
+                not self.boxes if needs_boxes else reason is not None)
         self.step_reason.content = ReasonChip(reason=svc.chip_text(reason), detail=reason) if reason else None
         self.stop_button.visible = running
         self.step_bar.visible = running
@@ -1716,29 +1717,45 @@ class EditorTab(MangaTab):
         await asyncio.sleep(RENDER_DELAY)
         if token != self._render_token or self.drag or self.busy or self._editing or not (self.live or self.holes):
             return
-        editor = self.session.editor
-        if editor is None:
+        await self._render_overlay()
+
+    async def _render_overlay(self, *, show_output: bool = False) -> None:
+        if not self._can_edit():
             return
-        moved = sorted(index for index in self.live if 0 <= index < len(self.boxes))
+        editor = self.session.editor
+        # A manual save can land during the move debounce. Include those moves in this render.
+        moved = None
+        if self.live or self.holes:
+            moved = sorted(index for index in self.live if 0 <= index < len(self.boxes))
         image_path, config = self.image_path, self.ctx.config_snapshot()
         self._overlay_rendering = True
         self.step_status.value = "Updating overlay…"
-        self.refresh()
 
         def render() -> Any:
-            from job_runner import job_process_state
+            from job_runner import JOB_LOCK, job_process_state
 
-            with job_process_state():
-                return editor.rerender_boxes_locally(moved, image_path, config)
+            if not JOB_LOCK.acquire(blocking=False):
+                raise svc.MangaBusy("another job is running. Try Update overlay when it finishes.")
+            try:
+                with job_process_state():
+                    if svc.hide_output_override():
+                        config.pop("output_directory", None)
+                        svc.apply_phone_defaults(config)
+                    return editor.rerender_boxes_locally(moved, image_path, config)
+            finally:
+                JOB_LOCK.release()
 
         try:
+            self.refresh()
             if not await self.ctx.io(render):
-                self.step_status.value = "Could not update the overlay"
+                self.step_status.value = "Could not render the overlay. Check that the page has translated text."
                 return
             self.live.clear()
             self.holes.clear()
-            self.step_status.value = "Overlay updated"
             await self._apply_snapshot(await self._snapshot())
+            if show_output and self.translated_view:
+                self.set_view("translated")
+            self.step_status.value = "Overlay updated"
         except Exception as exc:
             self.step_status.value = f"Could not update the overlay: {exc}"
         finally:
@@ -1759,8 +1776,10 @@ class EditorTab(MangaTab):
             self.ctx.say(f"Could not change the box: {exc}")
             return False
         finally:
-            self._editing = False
-            await self._apply_snapshot(await self._snapshot())
+            try:
+                await self._apply_snapshot(await self._snapshot())
+            finally:
+                self._editing = False
 
     async def delete_selected(self) -> bool:
         """Delete box (the toolbar 🗑 and the box panel's ⋯ › Delete box; the desktop's 🗑 Delete
@@ -1912,8 +1931,11 @@ class EditorTab(MangaTab):
         if not self.image_path:
             self.ctx.say("Open a page first")
             return None
-        if self.busy:
+        if self.busy or self._editing:
             self.ctx.say("Wait for the running step")
+            return None
+        if step == "render":
+            await self._render_overlay(show_output=True)
             return None
         reason = self._steps_reason()
         if reason:

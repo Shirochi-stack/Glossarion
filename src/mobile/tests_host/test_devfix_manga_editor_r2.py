@@ -173,6 +173,7 @@ def _stub_renderer(monkeypatch, core):
         state = self.image_state_manager.get_state(original_image_path) or {}
         state["rendered_image_path"] = output_path
         self.image_state_manager.set_state(original_image_path, state, save=True)
+        return output_path
 
     monkeypatch.setattr(core, "_render_with_manga_translator", render)
     return rendered

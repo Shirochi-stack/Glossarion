@@ -2198,34 +2198,46 @@ def test_editor_box_style_tab_on_the_real_editor_session(iso, tmp_path, monkeypa
         tab.pan_update(25, 40)
         await tab.pan_end()
         tab.set_tool("select")
-        steps = []
-
-        async def run_step(step, **kwargs):
-            steps.append(step)
-            return None
-
-        monkeypatch.setattr(tab, "run_step", run_step)
         assert tab.long_press_at(15, 25) is not None
         panel = tab.show_box_tab("style")
         assert panel.tab == "style" and panel.style_body.visible and panel.reset_style_button.disabled
         # no translation yet: stored, nothing to render
         await tab.box_action("style", 0, {**panel.changes(), "style": {"bold": True, "font_size": 30}})
-        assert tab.boxes[0]["style"] == {"bold": True, "font_size": 30} and steps == []
+        assert tab.boxes[0]["style"] == {"bold": True, "font_size": 30} and not tab.translated_view
         assert tab.panel.style_toggles["bold"].selected and tab.panel.size_field.value == "30"
         assert tab.panel.tab == "style" and not tab.panel.reset_style_button.disabled
         tab.panel.translation_field.value = "Hello!"
         await tab.box_action("style", 0, {**tab.panel.changes(), "style": {"align": "right", "bold": False}})
         assert tab.boxes[0]["style"] == {"font_size": 30, "align": "right"} and tab.boxes[0]["translation"] == "Hello!"
-        assert steps == ["render"] and tab.panel.align_buttons["right"].selected
+        assert not ctx.jobs.specs and tab.panel.align_buttons["right"].selected
+        assert tab.step_status.value == "Overlay updated" and not tab.busy
+        old_view = tab.translated_view
+        assert os.path.isfile(old_view) and tab.view == "translated"
         state = manga.editor.image_state_manager.get_state(os.path.abspath(pages[0]))
         assert state["region_styles"] == {"0": {"font_size": 30, "align": "right"}}
-        # the size a render drew each box with (region_font_sizes) reaches the box records
-        assert tab.boxes[0]["rendered_font_size"] is None
-        state["region_font_sizes"] = {"0": 24}
-        await tab._apply_snapshot(await tab._snapshot())
-        assert tab.boxes[0]["rendered_font_size"] == 24
+        assert tab.boxes[0]["rendered_font_size"] == 30
         await tab.box_action("style", 0, {"style": None})
-        assert tab.boxes[0]["style"] == {} and steps == ["render", "render"]
+        assert tab.boxes[0]["style"] == {} and not ctx.jobs.specs
+        assert tab.translated_view != old_view and tab.panel.size_field.label == "Auto"
+        fitted = tab.boxes[0]["rendered_font_size"]
+        assert fitted > 0 and float(tab.panel.size_field.value) == fitted
+        await tab.panel.size_up_button.on_click(None)
+        assert tab.boxes[0]["rendered_font_size"] == fitted + 0.5
+
+        from job_runner import JOB_LOCK
+
+        with JOB_LOCK:
+            await asyncio.wait_for(tab.run_step("render"), timeout=5)
+        assert "another job is running" in tab.step_status.value and not tab.busy
+        assert not ctx.jobs.specs
+
+        import manga_editor_core
+
+        monkeypatch.setattr(manga_editor_core, "_render_with_manga_translator", lambda *a, **kw: None)
+        old_view = tab.translated_view
+        await tab.run_step("render")
+        assert tab.step_status.value.startswith("Could not render the overlay")
+        assert not tab.busy and tab.translated_view == old_view
         screen.dispose()
         manga.editor.close()
 
@@ -2267,30 +2279,32 @@ def test_box_panel_style_tab_size_steps():
     from glossarion_mobile.ui.tools.manga.box_sheet import BoxPanel, box_signature, box_size, size_text
 
     actions = []
-    auto_box = {"ocr_text": "a", "translation": "Hi", "style": {}, "rendered_font_size": 26}
+    auto_box = {"ocr_text": "a", "translation": "Hi", "style": {}, "rendered_font_size": 12}
     panel = BoxPanel(auto_box, 0, on_action=lambda *a: actions.append(a), tab="style")
-    assert box_size(auto_box) == (26, True) and panel.size_field.hint_text == "Auto 26"
-    assert panel.size_field.value == "" and panel.size_auto_button.disabled
+    assert box_size(auto_box) == (12, True) and panel.size_field.label == "Auto"
+    assert panel.size_field.value == "12" and panel.size_auto_button.disabled
+    panel.size_field.on_tap_outside(None)
+    assert actions == []  # displaying the fitted value does not create a manual override
     assert not panel.size_up_button.disabled and not panel.size_down_button.disabled
     panel.size_up_button.on_click(None)
     panel.size_down_button.on_click(None)
     panel.set_size("28.4")
     panel.set_size("30,5")
     panel.set_size("0")
-    assert [a[2]["style"] for a in actions] == [{"font_size": 26.5}, {"font_size": 25.5}, {"font_size": 28.5},
+    assert [a[2]["style"] for a in actions] == [{"font_size": 12.5}, {"font_size": 11.5}, {"font_size": 28.5},
                                                {"font_size": 30.5}, {"font_size": None}]
     # a box with its own size steps from it; Auto clears it
     actions.clear()
     fixed_box = {"ocr_text": "a", "translation": "Hi", "style": {"font_size": 31.5}, "rendered_font_size": 31.5}
     panel = BoxPanel(fixed_box, 0, on_action=lambda *a: actions.append(a), tab="style")
-    assert panel.size_field.value == "31.5" and panel.size_field.hint_text == "Auto"
+    assert panel.size_field.value == "31.5" and panel.size_field.label == "Size"
     assert not panel.size_auto_button.disabled
     panel.size_up_button.on_click(None)
     panel.size_auto_button.on_click(None)
     assert [a[2]["style"] for a in actions] == [{"font_size": 32}, {"font_size": None}]
     # never rendered and on Auto: nothing to step from
     panel = BoxPanel({"ocr_text": "a", "style": {}}, 0, on_action=lambda *a: actions.append(a), tab="style")
-    assert panel.size_field.hint_text == "Auto" and panel.size_up_button.disabled and panel.step_size(0.5) is None
+    assert panel.size_field.label == "Auto" and panel.size_up_button.disabled and panel.step_size(0.5) is None
     # a new render (a new rendered size) rebuilds the panel
     assert box_signature(auto_box, 0) != box_signature({**auto_box, "rendered_font_size": 24}, 0)
     assert size_text(28.0) == "28" and size_text(28.5) == "28.5" and size_text(None) == ""

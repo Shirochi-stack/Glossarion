@@ -593,6 +593,24 @@ def test_a_fixed_half_px_size_is_wrapped_at_that_size(monkeypatch):
     assert 28.5 in sizes and 28 not in sizes and 28.0 not in sizes
 
 
+def test_default_font_without_a_system_font_uses_the_requested_size():
+    translator = _translator()
+    translator.selected_font_style = translator.font_path = None
+    widths = {}
+    for size in (12, 12.5, 18):
+        assert translator._get_font(size).size == size
+        out = _render(translator, [("HELLO WORLD", {'font_size': size})])
+        x0, _y0, x1, _y1 = _ink_box(_ink(out, BOXES[0]))
+        widths[size] = x1 - x0
+    assert widths[12] <= widths[12.5] < widths[18]
+    translator.min_readable_size = translator.max_font_size_limit = 1
+    translator.font_size_mode = 'multiplier'
+    translator.font_size_multiplier = 0.5
+    regions = _regions([("HI", None)])
+    translator.render_translated_text(_page(), regions)
+    assert regions[0].rendered_font_size == 1
+
+
 def test_normalize_font_size_half_px_steps():
     normalize = manga_ocr_io.normalize_font_size
     assert normalize(28) == 28 and isinstance(normalize(28.0), int) and normalize('24') == 24
