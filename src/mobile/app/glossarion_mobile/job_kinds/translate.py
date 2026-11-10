@@ -321,7 +321,8 @@ def run_translation(ctx: Any, files: list) -> dict:
     with (
         indexing_phase(ctx),
         post_translation_qa_trigger(ctx) as qa_requests,
-        multipass_scan_turns(ctx.phase, chat_attachment=bool(ctx.params.get("is_attachment")), config=ctx.config),
+        multipass_scan_turns(ctx.phase, chat_attachment=bool(ctx.params.get("is_attachment")),
+                             config=getattr(ctx, "config", None)),
         filter_in_child(),
     ):
         outcome = worker(request)
