@@ -1160,6 +1160,7 @@ class MangaFilesMixin:
                 os.unlink(temporary)
 
         self._log(f"📦 Created CBZ file with {len(images)} images: {os.path.basename(cbz_path)}", "success")
+        self._manga_batch_cbz = cbz_path
         return cbz_path
 
     def _finalize_cbz_jobs(self):

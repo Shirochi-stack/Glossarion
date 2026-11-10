@@ -94,6 +94,7 @@ NEW_METHODS = {
     "MangaEnvMixin": {"_init_manga_run_state", "_init_manga_prompt_state", "_reset_manga_graceful_stop_env",
                       "_prepare_manga_run_env", "_apply_manga_batch_env", "_manga_pool_api_key",
                       "_manga_pool_models"},
+    "MangaFilesMixin": {"_manga_batch_cbz_path"},
 }
 #: Module-level names moved out of manga_integration (re-exported there).
 MOVED_MODULE_NAMES = {
@@ -245,8 +246,14 @@ def _rstrip_lines(text):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("module,class_name,name", _moved_triples(),
-                         ids=[f"{c}.{n}" for _m, c, n in _moved_triples()])
+# The CBZ export and its read-only output lookup changed to support mixed source folders.
+# Their behavior is checked below and in the mobile manga integration suite.
+VERBATIM_MOVES = [move for move in _moved_triples() if move[2] not in
+                  {"_create_cbz_from_isolated_folders", "_get_manga_output_path_for_file"}]
+
+
+@pytest.mark.parametrize("module,class_name,name", VERBATIM_MOVES,
+                         ids=[f"{c}.{n}" for _m, c, n in VERBATIM_MOVES])
 def test_moved_method_is_the_legacy_text(module, class_name, name):
     legacy = _legacy_tab_methods()
     assert name in legacy, f"{name} was not a MangaTranslationTab method at {LEGACY_SHA[:12]}"
@@ -1723,6 +1730,36 @@ def test_headless_runner_translates_pages_and_packages_cbz(tmp_path, monkeypatch
         assert len(zf.namelist()) == 2
     assert progress and progress[-1][1]["label"].startswith("Complete!")
     assert [e[1] for e in rec.events if e[0] == "process_image"] == ["1.png", "3.png"]
+
+
+def test_batch_cbz_uses_mapped_outputs_without_overwriting_imported_archive(tmp_path, monkeypatch):
+    from manga_files_core import MangaFilesMixin
+
+    monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
+    imported = tmp_path / "Manga" / "Manga.cbz"
+    extracted = tmp_path / "temp" / "001.png"
+    loose = tmp_path / "loose" / "001.png"
+    missing = loose.with_name("002.png")
+    host = MangaFilesMixin()
+    host.selected_files = [str(extracted), str(loose), str(missing)]
+    imported_output = imported.with_name("Manga_translated")
+    host.cbz_jobs = {str(imported): {"out_dir": str(imported_output)}}
+    host.cbz_image_to_job = {str(extracted): str(imported)}
+    host._log = lambda *_args: None
+
+    for source, contents in ((extracted, b"translated archive page"), (loose, b"translated loose page")):
+        Path(host._get_manga_output_path_for_file(str(source))).write_bytes(contents)
+    original_archive = imported.with_name("Manga_translated.cbz")
+    original_archive.write_bytes(b"existing archive")
+
+    batch = Path(host._create_cbz_from_isolated_folders())
+    assert batch == imported.with_name("Manga_batch_translated.cbz")
+    assert original_archive.read_bytes() == b"existing archive"
+    assert not missing.with_name("002_translated").exists()
+    with zipfile.ZipFile(batch) as archive:
+        assert archive.namelist() == ["001.png", "001_2.png"]
+        assert archive.read("001.png") == b"translated archive page"
+        assert archive.read("001_2.png") == b"translated loose page"
 
 
 def test_headless_runner_refuses_like_the_start_button(tmp_path, monkeypatch):

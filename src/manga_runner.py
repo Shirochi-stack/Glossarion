@@ -1424,7 +1424,7 @@ class MangaRunMixin:
                 # Create CBZ from isolated folders if enabled
                 if hasattr(self, 'create_cbz_at_end_value') and self.create_cbz_at_end_value:
                     try:
-                        self._manga_batch_cbz = self._create_cbz_from_isolated_folders()
+                        self._create_cbz_from_isolated_folders()
                     except Exception as e:
                         self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
 
