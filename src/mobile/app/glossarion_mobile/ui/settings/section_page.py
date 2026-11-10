@@ -203,6 +203,10 @@ class SectionPage(Screen):
                              for spec in specs}
         else:
             self.specs, self.headings = grouped_specs(specs)
+        if self.section_id == "other.processing":
+            inputs = [spec for spec in self.specs if spec.key == "deep_scan"]
+            self.specs = inputs + [spec for spec in self.specs if spec.key != "deep_scan"]
+            self.headings.update({spec.key: "Input & output" for spec in inputs})
         if self.section_id == ANTI_DUPLICATE_SECTION:
             self.specs.sort(key=lambda spec: spec.section == ANTI_DUPLICATE_BIAS_SECTION)
         self.keys = [str(getattr(spec, "key", "")) for spec in self.specs]

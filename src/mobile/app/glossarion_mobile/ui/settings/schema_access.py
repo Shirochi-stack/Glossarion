@@ -26,7 +26,7 @@ import importlib
 import logging
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Optional
 
 from glossarion_mobile.ui.settings.model import (
@@ -146,6 +146,13 @@ def curate_sections(sections: list) -> tuple[list, dict]:
     present = {s.id for s in out}
     aliases = {sid: max(counts, key=lambda target: counts[target])
                for sid, counts in moved_from.items() if sid not in present and counts}
+    file_section = next((s for s in out if s.id == "main.file"), None)
+    processing = next((s for s in out if s.id == "other.processing"), None)
+    if file_section is not None and processing is not None:
+        merged = replace(processing, keys=tuple(dict.fromkeys((*file_section.keys, *processing.keys))))
+        out = [merged if s is processing else s for s in out if s is not file_section]
+        # Existing links and search results still reach the setting at its new home.
+        aliases["main.file"] = processing.id
     position = {sid: index for index, sid in enumerate(SECTION_ORDER)}
     schema_order = {s.id: index for index, s in enumerate(sections)}
     out.sort(key=lambda s: (position.get(s.id, len(position)), schema_order.get(s.id, len(schema_order))))

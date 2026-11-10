@@ -1695,6 +1695,31 @@ def test_feature_on_the_real_app_shell(app_env, monkeypatch):
             # GlossarionApp.start installs it once app.py calls ModelsKeysFeature.install (Integrate)
             feature = getattr(app, "models_keys", None) or await mm.ModelsKeysFeature.install(app)
             assert feature.ctx is app.settings.ctx and feature.store is app.config_store
+            await _TB._route(session, "/settings")
+            home = app.shell.top_screen
+            assert "keys.pools" not in home.section_tiles
+            assert "settings.keys" in home.route_tiles
+            # Every setting from the removed duplicate page still has an editor.
+            covered = {"force_key_rotation", "rotation_frequency", "use_main_key_fallback",
+                       "fallback_key_shuffle", "refusal_patterns", "multi_api_key_tree_font_size"}
+            for spec in feature.keys.specs:
+                covered.update((spec.config_key, spec.toggle_key))
+                for key in (spec.config_key, spec.toggle_key):
+                    linked = feature.keys_section_screen(parse_route(f"/settings/s/keys.pools#{key}"))
+                    assert linked.pool == spec.id
+            assert set(feature.ctx.schema.section("keys.pools").keys) <= covered
+            await app.navigate("/settings/s/keys.pools#use_glossary_keys")
+            pool_screen = app.shell.top_screen
+            assert isinstance(pool_screen, keys_module.KeysScreen) and pool_screen.pool == "glossary"
+            pool_screen.pool_switch.value = True
+            await session.dispatch_event(pool_screen.pool_switch._i, "change", True)
+            assert feature.store.get("use_glossary_keys") is True
+            await session.dispatch_event(page._i, "view_pop", {"route": "/settings/s/keys.pools"})
+            assert app.shell.top_screen is home
+            await app.navigate("/settings/s/keys.pools#fallback_key_shuffle")
+            assert app.shell.top_screen.pool == "fallback"
+            await app.navigate("/settings/s/keys.pools#refusal_patterns")
+            assert type(app.shell.top_screen).__name__ == "RefusalPatternsScreen"
             await _TB._route(session, "/settings/models")
             assert type(app.shell.top_screen).__name__ == "ModelManagerScreen"
             await _TB._route(session, "/settings/keys/fallback")

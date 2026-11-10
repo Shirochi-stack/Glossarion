@@ -119,7 +119,7 @@ TRANSLATION_TABS = {
     "Run": ("translation_defaults", "context_memory", "direct_text.settings", "main.prompt",
             "settings.profiles", "settings.prefill"),
     "Quality": ("other.response", ANTI_DUPLICATE_SECTION),
-    "Files": ("main.file", "other.processing", "other.processing.extraction", "other.meta_data",
+    "Files": ("other.processing", "other.processing.extraction", "other.meta_data",
               "epub_output", "pdf", "other.image"),
     "Tools": ("tools.review", "tools.async"),
 }
@@ -315,6 +315,8 @@ class SettingsHome(HubScreen):
         for group, sections in self.ctx.schema.groups():
             for section in sections:
                 section_ids.add(section.id)
+                if section.id == "keys.pools" and "settings.keys" in self.implemented:
+                    continue  # the dedicated API keys screen owns these controls
                 if not self._listed_keys(section) and not self._has_pools(section):
                     continue  # nothing to change here (Direct Text: edited in Chat settings): not listed
                 tile = self._section_tile(section)

@@ -1282,6 +1282,7 @@ class ModelsKeysFeature:
             # Settings › Custom API Endpoints (home, search hits, open_setting) opens the Endpoints page
             # (quick-paste chips, dependency ReasonChips, Local AI, Test connection), not a plain SectionPage
             extras.setdefault("section_screens", {})["other.endpoints"] = self.endpoints_section_screen
+            extras["section_screens"]["keys.pools"] = self.keys_section_screen
         if self.store is not None and not self._unsubs:
             observe = getattr(self.store, "observe_keys", None)
             if observe is not None:
@@ -1427,6 +1428,23 @@ class ModelsKeysFeature:
         return EndpointsScreen(match, self.ctx, run_io=self.run_io, open_local_ai=self.open_local_ai,
                                copy_text=getattr(self.app, "_copy_text", None),
                                read_clipboard=getattr(getattr(self.app, "clipboard", None), "get", None))
+
+    def keys_section_screen(self, match: RouteMatch) -> Any:
+        """Old pool settings links and search hits open the actual pool editor."""
+        from glossarion_mobile.ui.router import build_route, parse_route
+
+        key = match.fragment or ""
+        if key == "refusal_patterns":
+            from glossarion_mobile.ui.screens.refusal_patterns import RefusalModel, RefusalPatternsScreen
+
+            return RefusalPatternsScreen(match, model=RefusalModel(self.store), page=self.page,
+                                         files=getattr(self.app, "files", None),
+                                         notify=getattr(self.app, "notify", None), run_io=self.run_io, spawn=self.spawn)
+        pool = next((spec.slug for spec in self.keys.specs if key in (spec.config_key, spec.toggle_key)),
+                    "translation")
+        if key in ("use_main_key_fallback", "fallback_key_shuffle"):
+            pool = "fallback"
+        return self.make_screen(parse_route(build_route("settings.keys.pool", {"pool": pool})))
 
     async def gemini_status(self, account_id: int) -> Any:
         """ModelSheet › 📊: ``accounts.open_gemini_status`` with the chat feature's OAuthBridge."""

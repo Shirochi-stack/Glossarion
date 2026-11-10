@@ -1469,6 +1469,85 @@ def test_anti_duplicate_tabs_sliders_and_dependencies(tmp_path):
     asyncio.run(scenario())
 
 
+@needs_flet
+@pytest.mark.parametrize("platform", ["android", "ios"])
+@pytest.mark.parametrize("section,keys", [
+    ("qa.settings", ("qa_scanner_settings.check_repetition",
+                     "qa_scanner_settings.check_missing_beautifulsoup_tags",
+                     "qa_scanner_settings.check_missing_header_tags",
+                     "qa_scanner_settings.cache_enabled")),
+    ("other.anti_duplicate.core", ("bypass_min_p_allowlist", "logit_bias_enabled")),
+])
+def test_settings_tabs_survive_edits_back_and_reopen(app_env, caplog, platform, section, keys):
+    """Use real app navigation and mounted Flet diffs, including edits on every tab."""
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+    from glossarion_mobile.ui.settings.settings_home import SettingsHome
+
+    async def scenario():
+        _, session = _fake_session(platform)
+        page = session.page
+        await _load_main_module().main(page)
+        await session.after_event(page)
+        app = page.data
+        route = f"/settings/s/{section}"
+        expected = {}
+        try:
+            await _route(session, "/settings")
+            home = app.shell.top_screen
+            assert isinstance(home, SettingsHome)
+            for cycle in range(2):
+                await app.navigate(route)
+                screen = app.shell.top_screen
+                assert isinstance(screen, SectionPage), (cycle, page.route, app.shell.current_route)
+                tabs = screen.tabs
+                bar = tabs.content.controls[0]
+                if section == "other.anti_duplicate.core":
+                    master = screen.tile("enable_anti_duplicate")
+                    master.switch.value = True
+                    await session.dispatch_event(master.switch._i, "change", True)
+                    assert not screen.tile("top_p").editor_row.disabled
+                for index, key in enumerate(keys):
+                    await session.dispatch_event(bar._i, "click", index)
+                    assert tabs.selected_index == index and key in screen.visible_keys
+                    tile = screen.tile(key)
+                    assert tile.control in screen.list_view.controls and tile.editable
+                    if key in expected:
+                        assert tile.value() == expected[key]
+                    value = not bool(tile.value())
+                    tile.switch.value = value
+                    await session.dispatch_event(tile.switch._i, "change", value)
+                    expected[key] = value
+                    assert app.config_store.get(tile.path) == value
+                    screen.refresh_all()
+                    page.update()
+                    assert screen.tabs is tabs and not hasattr(tabs, "_frozen")
+                    if key.endswith("check_missing_beautifulsoup_tags"):
+                        field = screen.tile("qa_scanner_settings.sdlxliff_tag_retention_threshold")
+                        assert field.editable == value
+                    elif key == "logit_bias_enabled":
+                        assert screen.tile("logit_bias_strength").editable == value
+                # Check backwards navigation across every tab after the config observers ran.
+                for index, key in reversed(list(enumerate(keys))):
+                    await session.dispatch_event(bar._i, "click", index)
+                    assert tabs.selected_index == index and screen.tile(key).value() == expected[key]
+                await screen._on_save_now()
+                await session.dispatch_event(page._i, "view_pop", {"route": route})
+                assert app.shell.top_screen is home
+                card = next(c for c in home.content.controls if c.title == "Translation")
+                home_tabs = card.children[0]
+                for index in (2, 1, 0):
+                    await session.dispatch_event(home_tabs.content.controls[0]._i, "click", index)
+                    assert home_tabs.selected_index == index
+            assert not any("Frozen controls" in r.getMessage() or "Unhandled error" in r.getMessage()
+                           for r in caplog.records)
+        finally:
+            app.settings.close()
+            await app.dispatcher.stop()
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+
 # ==========================================================================
 # Env preview
 # ==========================================================================
