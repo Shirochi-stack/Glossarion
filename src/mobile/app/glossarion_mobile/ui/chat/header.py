@@ -99,6 +99,7 @@ class ChatHeader:
         self.tablet = False
         self.title_text = ft.Text(
             title,
+            key="chat-header-title",
             theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
             weight=ft.FontWeight.W_600,
             max_lines=1,

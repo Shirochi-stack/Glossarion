@@ -156,7 +156,7 @@ async def import_desktop_config(d: Any, name: str = CONFIG_NAME) -> None:
 
 
 async def run_options_close_on_a_tap_away(d: Any) -> None:
-    """The Plan card's Run options: a tap inside keeps them open, a tap on the card's plain text closes them.
+    """The Plan card's Run options: a tap inside keeps them open, a tap on the chat title closes them.
     A device only: the host tester has no Flutter hit test, so no ``TapAway`` to report the tap."""
     inside = "plan-run-options-only"
     await d.tap(text="Run options", timeout=30)
@@ -165,7 +165,10 @@ async def run_options_close_on_a_tap_away(d: Any) -> None:
         await d.tap(key=inside, timeout=30)
         await d.pump(500)
         await d.wait(key=inside, timeout=5)
-    await d.tap(text="Ready to translate", timeout=30)
+    # Expanding the options scrolls the plan heading behind the app bar on a 320 dp
+    # phone. The fixed chat title stays visible, and its short tap has no action,
+    # unlike the plan's settings chips. Its key avoids duplicate filename matches.
+    await d.tap(key="chat-header-title", timeout=30)
     await d.wait(key=inside, gone=True, timeout=30)
 
 
