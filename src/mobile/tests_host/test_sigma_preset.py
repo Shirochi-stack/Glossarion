@@ -202,3 +202,32 @@ def test_sigma_answer_not_trimmed_when_forced_truncation_is_off(tmp_path, monkey
     monkeypatch.setattr(client, "_get_thread_local_client", lambda: SimpleNamespace())
     text = "This phrase is repeated. " * 50
     assert client._trim_forced_truncation(text, "length", "glossary") == (text, "length")
+
+
+def test_active_sigma_reopens_quant_picker_in_both_model_menus(tmp_path):
+    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
+    from glossarion_mobile.ui.sheets.model_sheet import ModelSheet, SheetEnv
+    from test_local_models_panel import _find
+    service = make_service(tmp_path)
+    rows = presets.load_presets(service.prefs)
+    rows[3]["file"] = presets.SIGMA_Q8_FILE
+    presets.save_presets(service.prefs, rows)
+    calls = []
+    async def choose(index):
+        calls.append(index)
+    panel = LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/sigma-q8",
+                             spawn=asyncio.run)
+    panel.get_preset = choose
+    panel.build()
+    button = _find(panel.preset_column, "local-preset-action-3")
+    assert button.content == "Choose quant" and not button.disabled
+    button.on_click(None)
+    panel.dispose()
+    sheet = ModelSheet(current_model="local/sigma-q8", models=["local/sigma-q8"], tab="ondevice",
+                       env=SheetEnv(prefs=service.prefs, local_engine=service))
+    sheet._spawn = asyncio.run
+    sheet.ondevice_flow().get_preset = choose
+    button = _find(sheet.ondevice_list, "ondevice-preset-3-action")
+    assert button.content == "Choose quant" and not button.disabled
+    button.on_click(None)
+    assert calls == [3, 3]

@@ -1005,6 +1005,8 @@ class ModelSheet:
         stem = flow.stem_of_preset(preset)
         state, status = flow.row_state(preset, stem)
         loading = state in ("use", "in_use") and flow.preset_key(preset) in flow.busy
+        choose_sigma = (lp.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma (Best)"
+                        and state in ("download", "use", "in_use") and not loading)
         download = flow.active_download(stem)
         target = download.stem if download is not None else stem
         key = f"ondevice-preset-{index}"
@@ -1029,6 +1031,9 @@ class ModelSheet:
         buttons: list
         if loading:
             buttons = [ft.FilledTonalButton(content="Loading…", disabled=True, key=action)]
+        elif choose_sigma:
+            buttons = [ft.FilledTonalButton(content="Choose quant", key=action,
+                                            on_click=lambda e, i=index: self._spawn(flow.get_preset(i)))]
         elif state == "downloading" and target:
             buttons = [ft.FilledTonalButton(content="Cancel", icon=ft.Icons.CLOSE, key=action,
                                             on_click=lambda e, s=target: flow.cancel(s))]
@@ -1052,7 +1057,7 @@ class ModelSheet:
         else:  # busy: looking the model up on Hugging Face
             buttons = [ft.FilledTonalButton(content="Working…", disabled=True, key=action)]
         on_click = None
-        if state == "use" and not loading:
+        if choose_sigma or (state == "use" and not loading):
             on_click = lambda e, i=index: self._spawn(flow.get_preset(i))  # noqa: E731
         elif state == "in_use" and stem:
             on_click = lambda e, m=f"local/{stem}": self.select("model", m)  # noqa: E731

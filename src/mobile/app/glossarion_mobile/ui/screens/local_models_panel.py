@@ -1490,6 +1490,11 @@ class LocalModelsPanel(OnDeviceFlow):
 
     def _action(self, index: int, state: str, stem: Optional[str], target: Optional[str] = None) -> ft.Control:
         key = f"local-preset-action-{index}"
+        rows = self.presets()
+        if (state in ("download", "use", "in_use") and 0 <= index < len(rows)
+                and presets.is_sigma(rows[index].get("repo")) and rows[index].get("name") == "Sigma (Best)"):
+            return ft.FilledTonalButton(content="Choose quant", icon=ft.Icons.TUNE, key=key,
+                                        on_click=lambda e, i=index: self.spawn(self.get_preset(i)))
         if state == "downloading" and stem:
             # the main button while it downloads: an undo right where "Download" was tapped
             return ft.FilledTonalButton(content="Cancel download", icon=ft.Icons.CLOSE, key=key,
