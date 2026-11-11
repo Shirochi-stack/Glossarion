@@ -146,6 +146,7 @@ def test_ram_gate_counts_the_gpu(tmp_path):
     memory = lambda: (4 * GB, None)  # an iPhone with 4 GB: iOS refuses above half
     service, _engine = _gpu_service(tmp_path, backend="Metal", memory=memory)
     service.platform = "ios"
+    service.save_context(4096)  # isolate GPU overhead at a saved lower context
     size = GB
     service.registry.add("fake-echo", {**service.registry.load()["fake-echo"], "size": size})
     n_ctx = service.context_for("fake-echo")
@@ -260,6 +261,11 @@ def test_former_gpu_presets_are_q4_0_of_the_default_repos():
     assert [p["size"] for p in presets.GPU_PRESETS] == [507154688, 1214873856, 2583221408, 5379417312]
     for row in presets.GPU_PRESETS:
         assert presets._clean(row) == row                        # a valid preset row, nothing dropped
+        if row["repo"] == "unsloth/Qwen3.5-9B-GGUF":
+            assert presets.custom_size_for(row["repo"])[1]["label"] == "9B"
+            assert row["mmproj"] == "mmproj-F16.gguf"
+            assert row["mmproj_sha256"] == "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
+            continue
         assert row["repo"] in defaults and row["mmproj"] == defaults[row["repo"]]["mmproj"]
         assert row["mmproj_sha256"] == defaults[row["repo"]]["mmproj_sha256"] and "Q4_0" in row["name"]
     # the defaults (CPU, iOS) are unchanged and hold no Q4_0 file

@@ -151,9 +151,9 @@ class WelcomeFlow:
         on-device model other than the 9B one (owner 2026-10-19), else the desktop default."""
         if self.glossary_mode_chosen:
             return
-        from glossarion_mobile.state.setting_writes import is_large_on_device_model
+        from glossarion_mobile.state.setting_writes import is_large_on_device_model, uses_on_device_defaults
 
-        local = str(model or "").strip().lower().startswith("local/")
+        local = uses_on_device_defaults(model)
         self.glossary_mode = "no_glossary" if local and not is_large_on_device_model(model) else DEFAULT_GLOSSARY_MODE
 
     def select_extraction(self, method: str) -> None:

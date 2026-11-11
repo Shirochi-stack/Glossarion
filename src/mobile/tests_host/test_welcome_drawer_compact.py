@@ -66,7 +66,8 @@ def by_key(root) -> dict:
 
 
 def text_width(text: str, size: float) -> float:
-    return sum((0.66 if ch.isupper() else 0.30 if ch == " " else 0.52) * size for ch in str(text))
+    return max((sum((0.66 if ch.isupper() else 0.30 if ch == " " else 0.52) * size for ch in line)
+                for line in str(text).split("\n")), default=0)
 
 
 def style_of(control) -> tokens.TypeStyle:
@@ -76,7 +77,8 @@ def style_of(control) -> tokens.TypeStyle:
 
 def text_height(control, width: float, scale: float = 1.0) -> float:
     style = style_of(control)
-    lines = max(1, math.ceil(text_width(control.value, style.size * scale) / max(1.0, width)))
+    lines = sum(max(1, math.ceil(text_width(line, style.size * scale) / max(1.0, width)))
+                for line in str(control.value).split("\n"))
     if control.max_lines:
         lines = min(lines, control.max_lines)
     return lines * style.line * scale
@@ -359,7 +361,7 @@ def test_page_one_fits_with_the_former_gpu_presets(width, tmp_path):
     assert len(cells) == len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS) + len(lp.CUSTOM_FAMILIES)
     names = [cell.content.controls[0] for cell in cells]
     gpu = names[len(lp.DEFAULT_PRESETS):len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS)]
-    assert [n.value for n in gpu] == ["Garbage GPU", "Light GPU", "Medium GPU", "Heavy GPU"]
+    assert [n.value for n in gpu] == ["Garbage GPU", "Light GPU", "Medium GPU", "Qwen 9B\nQ4_0"]
     assert all(n.size == welcome.ONDEVICE_GPU_NAME_SIZE for n in gpu) and all(n.size is None for n in names[:4])
     assert cells[len(lp.DEFAULT_PRESETS)].tooltip.startswith("Garbage · GPU (Q4_0)")
     content_w = width - 32
@@ -401,20 +403,20 @@ def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path)
     assert "Run on this phone (no account needed)" in texts
     assert "authchatgpt/ and authnd/: no sign-in" not in texts
     cells = {k: rows[k] for k in ("welcome-ondevice-garbage", "welcome-ondevice-light", "welcome-ondevice-medium",
-                                  "welcome-ondevice-heavy")}
+                                "welcome-ondevice-sigma--best")}
     lines = {k: [t.value for t in c.content.controls if isinstance(t, ft.Text)] for k, c in cells.items()}
     # the model alone (image support downloads on the first image); the engine's RAM gate on a 6 GB phone with 3 GB free
     assert lines["welcome-ondevice-garbage"] == ["Garbage", "559 MB ✓"]
-    assert lines["welcome-ondevice-light"] == ["Light ⭐", "1.3 GB ✓"]
+    assert lines["welcome-ondevice-light"] == ["Light ⭐", "1.3 GB ⚠"]
     assert lines["welcome-ondevice-medium"] == ["Medium", "2.9 GB ⚠"]
-    assert lines["welcome-ondevice-heavy"] == ["Heavy", "5.7 GB ✕"]
+    assert lines["welcome-ondevice-sigma--best"] == ["Sigma\n(Best)", "Quants"]
     assert "Android may close Glossarion" in cells["welcome-ondevice-medium"].tooltip
-    assert "Pick a smaller model" in cells["welcome-ondevice-heavy"].tooltip
+    assert "Q8_0 recommended" in cells["welcome-ondevice-sigma--best"].tooltip
     # a 2 GB phone: Light does not fit, the biggest preset that does is suggested instead
     kwargs, _service, _engine = _engine_kwargs(tmp_path / "small", total=2 * 1024 ** 3, available=1536 * 1024 ** 2)
     small = screen(**kwargs)
     names = [c.content.controls[0].value for c in by_key(small.page_area.content)["welcome-ondevice"].controls]
-    assert names == ["Garbage ⭐", "Light", "Medium", "Heavy", "Qwen 3.5", "Llama", "Gemma", "LFM2"]
+    assert names == ["Garbage", "Light", "Medium", "Sigma\n(Best)", "Qwen 3.5", "Llama", "Gemma", "LFM2"]
 
 
 def test_page_one_on_device_without_an_engine_points_to_the_model_manager():

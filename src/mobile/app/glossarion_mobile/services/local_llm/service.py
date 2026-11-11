@@ -202,13 +202,11 @@ def process_stop_state() -> Optional[str]:
     return None
 
 
-#: Context of a model without its own / a saved one (tokens): smaller models get more. Owner 2026-10-19:
-#: halved from 8192 / 4096 — shorter requests (the output limit is half the context) keep small
-#: on-device models on task.
-DEFAULT_CONTEXT_SMALL = 4096
-DEFAULT_CONTEXT_LARGE = 2048  # models of 4 GiB or more
+#: Shared on-device default. Saved lower contexts and per-model limits take precedence.
+DEFAULT_CONTEXT_SMALL = presets.DEFAULT_CONTEXT
+DEFAULT_CONTEXT_LARGE = presets.DEFAULT_CONTEXT
 #: What the Welcome screen saves for every on-device model when no Context is saved yet (owner 2026-10-31).
-WELCOME_CONTEXT = 16384
+WELCOME_CONTEXT = presets.DEFAULT_CONTEXT
 
 
 def default_context(size: int) -> int:
@@ -398,6 +396,40 @@ class LocalEngineService:
         self._holder_stops: Optional[int] = None  # ``_stops`` when the generation holding the gate arrived
         self._unload_when_idle = False  # the selection moved off the loaded model while it answered
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
+        self._migrate_sigma_defaults()
+
+    def _migrate_sigma_defaults(self) -> None:
+        if self.prefs is None or self._pref("sigma_defaults_v1"):
+            return
+        settings = self.settings()
+        if settings["n_ctx"] > presets.DEFAULT_CONTEXT:
+            self.save_context(presets.DEFAULT_CONTEXT)
+        rows = presets.load_presets(self.prefs)
+        changed = False
+        for row in rows:
+            if row.get("n_ctx", 0) > presets.DEFAULT_CONTEXT:
+                row["n_ctx"] = presets.DEFAULT_CONTEXT
+                changed = True
+        # Old first-run installations may never have saved the stock Heavy row.
+        for entry in self.registry.load().values():
+            if len(rows) >= presets.MAX_PRESETS:
+                break  # downloaded models remain available in the separate downloaded list
+            if str(entry.get("repo") or "").casefold() != "unsloth/qwen3.5-9b-gguf":
+                continue
+            if any(row.get("repo", "").casefold() == entry["repo"].casefold()
+                   and row.get("file") == entry.get("file") for row in rows):
+                continue
+            label = f"Qwen 3.5 9B · {presets.quant_label(entry.get('file'))}"
+            rows.append({"name": label, "note": f"Custom · {label}", "repo": entry["repo"],
+                         "file": entry["file"], "quant": "", "n_ctx": 0, "size": entry.get("size", 0)})
+            changed = True
+        if changed:
+            presets.save_presets(self.prefs, rows)
+        self._set_pref("sigma_defaults_v1", True)
+
+    def uses_normal_settings(self, stem: Optional[str] = None) -> bool:
+        stem = str(stem or self._stem or "").removeprefix("local/")
+        return presets.uses_normal_settings(self.registry.load().get(stem) or {})
 
     # ---- engine ----------------------------------------------------------------------------------
 
@@ -600,16 +632,20 @@ class LocalEngineService:
             self.prefs.set(SAMPLING_KEY, dict(out))
         return out, None
 
-    def block_cjk(self) -> bool:
+    def block_cjk(self, stem: Optional[str] = None) -> bool:
         """"Block other scripts in translations (adaptive)": on unless switched off."""
+        if self.uses_normal_settings(stem):
+            return False
         try:
             raw = self.prefs.get(BLOCK_CJK_KEY, None) if self.prefs is not None else None
         except Exception:
             raw = None
         return raw is None or bool(raw)
 
-    def forced_truncation(self) -> bool:
+    def forced_truncation(self, stem: Optional[str] = None) -> bool:
         """"Forced Truncation": on unless switched off."""
+        if self.uses_normal_settings(stem):
+            return bool(self._pref("sigma_q8_forced_truncation"))
         raw = self._pref(FORCED_TRUNCATION_KEY)
         return raw is None or bool(raw)
 
@@ -630,16 +666,17 @@ class LocalEngineService:
             self.prefs.set(MARK_GLOSSARY_COMPLETE_KEY, value)
         return value
 
-    def save_forced_truncation(self, enabled: Any, seconds: Any = None) -> tuple:
+    def save_forced_truncation(self, enabled: Any, seconds: Any = None, *, stem: Optional[str] = None) -> tuple:
         """Save the switch and, when given, its seconds; the values now in force."""
         if self.prefs is not None:
-            self.prefs.set(FORCED_TRUNCATION_KEY, bool(enabled))
+            key = "sigma_q8_forced_truncation" if self.uses_normal_settings(stem) else FORCED_TRUNCATION_KEY
+            self.prefs.set(key, bool(enabled))
             if seconds is not None:
                 try:
                     self.prefs.set(FORCED_TRUNCATION_SECONDS_KEY, max(1, min(600, int(float(seconds)))))
                 except (TypeError, ValueError):
                     pass
-        return self.forced_truncation(), self.forced_truncation_seconds()
+        return self.forced_truncation(stem), self.forced_truncation_seconds()
 
     def save_block_cjk(self, enabled: Any) -> bool:
         value = bool(enabled)
@@ -1078,7 +1115,7 @@ class LocalEngineService:
                 raise LocalLLMError(400, "context_length_exceeded",
                                     f"This model's maximum context length is {n_ctx} tokens. However, your messages "
                                     f"resulted in {prompt_tokens} tokens. Please reduce the length of the messages.")
-            params = self._params(body, n_ctx - prompt_tokens)
+            params = self._params(body, n_ctx - prompt_tokens, stem=stem)
             self._set("generating", stem)
             try:
                 deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)
@@ -1099,7 +1136,8 @@ class LocalEngineService:
         return ChatRun(stem, deltas, usage=lambda: getattr(engine, "last_usage", {}),
                        finish=lambda: getattr(engine, "last_finish", "stop"), release=release)
 
-    def _params(self, body: dict, room: int) -> dict:
+    def _params(self, body: dict, room: int, *, stem: Optional[str] = None) -> dict:
+        normal = self.uses_normal_settings(stem)
         wanted = body.get("max_completion_tokens") or body.get("max_tokens")
         try:
             wanted = int(wanted) if wanted else 0
@@ -1111,19 +1149,27 @@ class LocalEngineService:
                 params[key] = body[key]
         # the on-device sampling settings, never the request's (the global anti-duplicate values are for
         # cloud models)
-        params.update(self.sampling())
+        if normal:
+            params["normal_settings"] = True
+            for key in SAMPLING_LIMITS:
+                if body.get(key) is not None:
+                    params[key] = body[key]
+        else:
+            params.update(self.sampling())
         stop = body.get("stop")
         if isinstance(stop, str):
             stop = [stop]
         if isinstance(stop, list) and stop:
             params["stop"] = [str(s) for s in stop][:8]
         params["enable_thinking"] = wants_thinking(body)
-        if self.forced_truncation():
+        if self.forced_truncation(stem):
             params["forced_truncation_seconds"] = self.forced_truncation_seconds()
             if self.mark_glossary_complete() and "glossary" in str(body.get("glossarion_task") or "").lower():
                 params["forced_truncation_finish"] = "stop"
+        if normal:
+            return params
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
-                                            single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk())
+                                            single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk(stem))
         always = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))
         whitelist = always or script_ban._truthy(body.get("glossarion_whitelist_source"))
         if whitelist and any(isinstance(m, dict) and isinstance(m.get("content"), list)

@@ -113,6 +113,8 @@ _GPU_NAME_SUFFIX = " · GPU (Q4_0)"
 def ondevice_cell_name(preset: dict) -> str:
     """A preset's name in its Welcome cell: the stock Q4_0 suffix shortened to " GPU"."""
     name = str(preset.get("name") or "")
+    if name.startswith("Qwen 3.5 9B · "):
+        return "Qwen 9B\n" + name.split(" · ", 1)[1]
     return name[:-len(_GPU_NAME_SUFFIX)] + " GPU" if name.endswith(_GPU_NAME_SUFFIX) else name
 
 __all__ = [
@@ -344,13 +346,16 @@ class WelcomeScreen(Screen):
         else:
             detail = " ".join(x for x in (dl.format_bytes(lp.download_size(preset)) if lp.download_size(preset)
                                           else "", mark) if x)
+            if lp.is_sigma(preset.get("repo")) and not lp.download_size(preset):
+                detail = "Quants"
         gpu = " · " in str(preset.get("name") or "")  # a chosen quant ("Qwen 3.5 2B · Q4_0"), a former GPU preset
         name = ondevice_cell_name(preset) + (" ⭐" if suggested else "")
         color = {"refuse": ft.Colors.ERROR, "confirm": ft.Colors.TERTIARY}.get(verdict) if state == "download" else None
         tooltip = " · ".join(x for x in (str(preset.get("name") or "") if gpu else "", str(preset.get("note") or ""),
                                          words if state == "download" else status) if x)
         lines: list[ft.Control] = [
-            ft.Text(name, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=2 if gpu else 1,
+            ft.Text("Sigma\n(Best)" if lp.is_sigma(preset.get("repo")) and name == "Sigma (Best)" else name,
+                    theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=2 if gpu or lp.is_sigma(preset.get("repo")) else 1,
                     overflow=ft.TextOverflow.ELLIPSIS, size=ONDEVICE_GPU_NAME_SIZE if gpu else None),
             ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
                     color=color or ft.Colors.ON_SURFACE_VARIANT),
@@ -722,7 +727,8 @@ class WelcomeScreen(Screen):
         if self.flow.temperature is not None:
             return float(self.flow.temperature)
         model = str(self.current_model() if self.current_model is not None else "") or ""
-        if model.lower().startswith("local/"):
+        from glossarion_mobile.state.setting_writes import uses_on_device_defaults
+        if uses_on_device_defaults(model):
             return ONDEVICE_TEMPERATURE
         try:
             return float(self._saved("translation_temperature", DEFAULT_TEMPERATURE))

@@ -55,6 +55,10 @@ on:
       - 'v*'  # like build-macos.yml: build, then update that tag's existing release
   workflow_dispatch:
     inputs:
+      rebuild:
+        description: Same-version rebuild counter (0-99; hotfix1 = 1)
+        type: string
+        default: '0'
       targets:
         description: Platforms to build
         type: choice
@@ -278,6 +282,8 @@ jobs:
 
       - name: Read version (src/app_version.py)
         id: version
+        env:
+          GLOSSARION_REBUILD: ${{ inputs.rebuild || '0' }}
         run: uv run --no-project python src/mobile/tools/version_info.py --github-output
 
       - name: Build metadata

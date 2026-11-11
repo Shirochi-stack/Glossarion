@@ -78,7 +78,7 @@ def test_choosing_a_model_keeps_the_saved_context(tmp_path):
     panel = LocalModelsPanel(service=service, prefs=service.prefs, use_model=lambda m: model.update(id=m),
                              current_model=lambda: model["id"])
     panel.build()
-    assert panel.context.value == 4096  # Light's own context (a file under 4 GB)
+    assert panel.context.value == 24576  # shared default
     assert panel.save_context(16384) is None and service.settings()["n_ctx"] == 16384
     assert service.context_for(LIGHT) == 16384
 
@@ -90,7 +90,7 @@ def test_choosing_a_model_keeps_the_saved_context(tmp_path):
 
     assert panel.save_context(0) is None  # nothing saved: each model's own
     assert asyncio.run(panel.activate(HEAVY, "Heavy"))
-    assert panel.context.value == 2048 and panel.context.slider.value == 2048 and engine.loads[-1][1] == 2048
+    assert panel.context.value == 24576 and panel.context.slider.value == 24576 and engine.loads[-1][1] == 24576
     panel.dispose()
 
 
@@ -98,10 +98,10 @@ def test_a_changed_context_reloads_the_loaded_model(tmp_path):
     service, engine = _service(tmp_path)
     service.load_blocking(LIGHT)
     service.load_blocking(LIGHT)
-    assert [load[1] for load in engine.loads] == [4096]  # same context: no reload
+    assert [load[1] for load in engine.loads] == [24576]  # same context: no reload
     service.save_context(12288)
     service.load_blocking(LIGHT)
-    assert [load[1] for load in engine.loads] == [4096, 12288]
+    assert [load[1] for load in engine.loads] == [24576, 12288]
 
 
 def test_local_jobs_use_batch_size_1_and_the_saved_output_up_to_the_context(tmp_path):
@@ -111,7 +111,7 @@ def test_local_jobs_use_batch_size_1_and_the_saved_output_up_to_the_context(tmp_
     svc.set_default_service(service)
     try:
         config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}"})
-        assert config["batch_size"] == 1 and config["max_output_tokens"] == 2048
+        assert config["batch_size"] == 1 and config["max_output_tokens"] == 12288
         service.save_context(20000)
         config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}", "max_output_tokens": 16384,
                                                     "batch_size": 3})
@@ -120,7 +120,7 @@ def test_local_jobs_use_batch_size_1_and_the_saved_output_up_to_the_context(tmp_
         config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}", "max_output_tokens": 50000})
         assert config["max_output_tokens"] == 20000  # never more than the context
         service.save_context(0)
-        assert sw.with_mobile_streaming_defaults({"model": f"local/{HEAVY}"})["max_output_tokens"] == 1024
+        assert sw.with_mobile_streaming_defaults({"model": f"local/{HEAVY}"})["max_output_tokens"] == 12288
         # a cloud model keeps the saved budget
         assert sw.with_mobile_streaming_defaults({"model": "gpt-6", "max_output_tokens": 16384})["max_output_tokens"] == 16384
     finally:
@@ -142,7 +142,7 @@ def test_a_job_exports_each_on_device_models_context_for_the_glossary_chunk_budg
         assert svc.CONTEXT_ENV not in os.environ
     svc.set_default_service(service)
     try:
-        assert sw.local_context_env() == f"local/{LIGHT}=4096;local/{HEAVY}=2048"
+        assert sw.local_context_env() == f"local/{LIGHT}=24576;local/{HEAVY}=24576"
         service.save_context(12288)
         with jobs.local_context_scope():
             assert os.environ[svc.CONTEXT_ENV] == f"local/{LIGHT}=12288;local/{HEAVY}=12288"
@@ -183,10 +183,10 @@ def test_welcome_request_size_shows_the_context_for_an_on_device_model(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     rows = _by_key(s._run_budget())
     # owner 2026-10-31: Welcome starts every on-device model at 16,384 when no Context is saved
-    assert rows["welcome-ctx"].value == "16384" and rows["welcome-ctx-slider"].value == 16384
-    assert service.settings()["n_ctx"] == 16384
+    assert rows["welcome-ctx"].value == "24576" and rows["welcome-ctx-slider"].value == 24576
+    assert service.settings()["n_ctx"] == 24576
     # owner 2026-10-20: both editable; the output starts at half the context and never exceeds it
-    assert rows["welcome-max-tokens"].value == "8192" and not rows["welcome-max-tokens"].disabled
+    assert rows["welcome-max-tokens"].value == "12288" and not rows["welcome-max-tokens"].disabled
     assert not rows["welcome-max-tokens-slider"].disabled
     assert s.default_batch_size() == 1
     s.context_control._from_slider(_event(10240.0))
@@ -210,7 +210,7 @@ def test_welcome_finish_saves_the_request_size_it_showed(tmp_path):
     service, _engine = _service(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     updates = s.finish()
-    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 8192  # half of Welcome's 16,384
+    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 12288  # half of Welcome's 24,576
 
     s = _welcome(service, "gpt-6")
     updates = s.finish()

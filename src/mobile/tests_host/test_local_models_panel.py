@@ -205,7 +205,7 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         # restore defaults
         dialog = panel.confirm_restore()
         await dialog._on_confirm()
-        assert [p["name"] for p in presets.load_presets(prefs)] == ["Garbage", "Light", "Medium", "Heavy"]
+        assert [p["name"] for p in presets.load_presets(prefs)] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
         screen.set_tab("models")
         assert not screen.local_box.visible and screen.rows.control.visible
         screen.dispose()

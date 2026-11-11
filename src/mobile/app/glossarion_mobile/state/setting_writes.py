@@ -334,7 +334,7 @@ def streaming_enabled(source: Any) -> bool:
 def default_batch_size(model: Any) -> int:
     """``settings_rules.default_batch_size``: 1 for the web-chat routes (authds/, authchatgpt/), else 5;
     1 for an on-device ``local/`` model too (mobile only: its engine answers one request at a time)."""
-    if str(model or "").strip().lower().startswith("local/"):
+    if uses_on_device_defaults(model):
         return 1
     rules = _rules()
     if rules is not None and hasattr(rules, "default_batch_size"):
@@ -424,7 +424,8 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
     if str(config.get("model") or "").strip().lower().startswith("local/"):
         # the on-device engine (services.local_llm) answers one request at a time: parallel requests would
         # only queue at its endpoint and spend the client's timeout waiting
-        config.update(LOCAL_ENGINE_JOB_CONFIG)
+        if uses_on_device_defaults(config.get("model")):
+            config.update(LOCAL_ENGINE_JOB_CONFIG)
         # the saved output budget (owner 2026-10-20: editable on the Welcome), never more than the model's
         # context; without one, half the context (owner 2026-10-18), the prompt keeping the rest
         context = local_context_limit(config.get("model"))
@@ -799,13 +800,25 @@ def _glossary_mode_after_on_device(store: Any, settings: Mapping, applied: Mappi
     return GLOSSARY_MODE_AFTER_ON_DEVICE
 
 
+def uses_on_device_defaults(model: Any) -> bool:
+    if not _is_local_model(model):
+        return False
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+        service = default_service()
+        return not (service and service.uses_normal_settings(str(model)))
+    except Exception:
+        return True
+
+
 def _write_model(store: Any, value: Any) -> list:
     """The global model, plus the On-device prompt profiles when it moves to or from a ``local/`` model."""
     _present, old = _stored_value(store, "model")
     changed = _set_many(store, {"model": value})
-    if _is_local_model(value) and not _is_local_model(old):
+    if uses_on_device_defaults(value) and not uses_on_device_defaults(old):
         changed += _use_on_device_profiles(store, value)
-    elif value and _is_local_model(old) and not _is_local_model(value):
+    elif value and not uses_on_device_defaults(value) and (
+            uses_on_device_defaults(old) or _stored_value(store, ON_DEVICE_BEFORE_KEY)[0]):
         changed += _restore_profiles_before_on_device(store)
     return changed
 

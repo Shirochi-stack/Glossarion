@@ -111,7 +111,7 @@ def test_the_table_has_the_four_families_and_real_looking_refs():
     assert presets.custom_size_for("UNSLOTH/qwen3.5-2b-gguf") == (QWEN, TWO_B)
     assert presets.custom_size_for("me/other") is None and presets.custom_family("nope") is None
     # the defaults stay the first-run data
-    assert [p["name"] for p in presets.DEFAULT_PRESETS] == ["Garbage", "Light", "Medium", "Heavy"]
+    assert [p["name"] for p in presets.DEFAULT_PRESETS] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
 
 
 @pytest.mark.parametrize("file,label,no_quant", [
@@ -178,7 +178,7 @@ def test_no_unquantized_file_means_no_no_quant_row(tmp_path, fake_hf):
 def test_rows_carry_the_size_and_the_ram_hint_and_refuse_what_cannot_load(tmp_path, fake_hf):
     fake_hf.trees[REPO] = [("Qwen3.5-2B-Q4_0.gguf", 1 * GIB, None), ("Qwen3.5-2B-Q8_0.gguf", 4 * GIB, None),
                            ("Qwen3.5-2B-BF16.gguf", 20 * GIB, None)]
-    flow, *_ = _flow(tmp_path, memory=(8 * GIB, 3 * GIB))
+    flow, *_ = _flow(tmp_path, memory=(8 * GIB, 4 * GIB))
     flow.service.platform = "android"
     sheet = asyncio.run(_listed(flow))
     keys = _by_key(sheet.quant_box)
@@ -328,7 +328,7 @@ def test_choosing_a_quant_downloads_it_as_an_ordinary_row_with_image_support(tmp
         row = presets.load_presets(prefs)[-1]
         assert row["name"] == "Qwen 3.5 2B · Q4_0" and row["repo"] == REPO and row["file"] == Q4_0
         assert row["mmproj"] == "mmproj-F16.gguf" and row["size"] == 4096 and row["mmproj_size"] == 1024
-        assert [p["name"] for p in presets.load_presets(prefs)][:4] == ["Garbage", "Light", "Medium", "Heavy"]
+        assert [p["name"] for p in presets.load_presets(prefs)][:4] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
         stem = flow.stem_of_preset(row)
         assert service.registry.resolve(stem) and used == [f"local/{stem}"] and after == used
         assert flow.row_state(row, stem)[0] == "use" and flow.is_vision_preset(row, stem)
@@ -412,7 +412,7 @@ def test_downloaded_rows_stay_and_the_others_go(tmp_path):
     _download(service, "garbage-gpu", old[0])
     flow = lmp.OnDeviceFlow(service=service, prefs=prefs)
     rows = flow.presets()
-    assert [r["name"] for r in rows] == ["Garbage", "Light", "Medium", "Heavy", "Garbage · GPU (Q4_0)", "Mine", "My Heavy"]
+    assert [r["name"] for r in rows] == ["Garbage", "Light", "Medium", "Sigma (Best)", "Garbage · GPU (Q4_0)", "Mine", "My Heavy"]
     kept = rows[4]
     assert kept["n_ctx"] == 12288 and flow.row_state(kept, flow.stem_of_preset(kept))[0] == "use"
     assert service.context_for("garbage-gpu") == 12288
@@ -592,7 +592,7 @@ def test_the_slider_ends_at_262144_with_the_same_default():
     assert lmp.CONTEXT_SLIDER == (2048, 262144, 1024)
     control = lmp.ContextControl(4096, lambda _v: None)
     assert control.slider.max == 262144 and control.slider.divisions == 254 and control.slider.value == 4096
-    assert svc.DEFAULT_CONTEXT_SMALL == 4096 and svc.DEFAULT_CONTEXT_LARGE == 2048
+    assert svc.DEFAULT_CONTEXT_SMALL == 24576 and svc.DEFAULT_CONTEXT_LARGE == 24576
 
 
 def test_the_ram_warning_counts_the_new_end(tmp_path):
@@ -619,7 +619,7 @@ def test_welcome_uses_the_same_slider(tmp_path):
     budget = s._run_budget()
     keys = _by_key(budget)
     assert keys["welcome-ctx-slider"].max == 262144 and keys["welcome-ctx-slider"].divisions == 254
-    assert keys["welcome-ctx"].value == "16384" and _service.settings()["n_ctx"] == 16384
+    assert keys["welcome-ctx"].value == "24576" and _service.settings()["n_ctx"] == 24576
 
 
 def test_welcome_keeps_a_saved_context_and_applies_the_default_when_skipped_past(tmp_path):
@@ -628,7 +628,7 @@ def test_welcome_keeps_a_saved_context_and_applies_the_default_when_skipped_past
     kwargs, service, _engine = _engine_kwargs(tmp_path)
     s = screen(**kwargs, current_model=lambda: "local/whatever")
     s.finish()  # never reached Request size
-    assert service.settings()["n_ctx"] == 16384
+    assert service.settings()["n_ctx"] == 24576
     service.save_context(8192)
     s = screen(**kwargs, current_model=lambda: "local/whatever")
     assert _by_key(s._run_budget())["welcome-ctx"].value == "8192"

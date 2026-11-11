@@ -32,10 +32,25 @@ __all__ = [
 PREF_KEY = "local_model_presets"
 MAX_PRESETS = 50
 MAX_CTX = 262144
+DEFAULT_CONTEXT = 24576
+SIGMA_REPO = "sigma6196/e4b-ko-en-novel-translator-sft3"
+SIGMA_Q8_FILE = "gguf/sft3-Q8_0.gguf"
+SIGMA_PRESET = {"name": "Sigma (Best)", "repo": SIGMA_REPO, "file": "", "quant": "",
+                "note": "Korean → English novels · choose a quant · Q8_0 recommended", "n_ctx": 0}
+
+
+def is_sigma(repo: Any) -> bool:
+    return str(repo or "").casefold() == SIGMA_REPO.casefold()
+
+
+def uses_normal_settings(entry: dict) -> bool:
+    """Only the verified Sigma Q8_0 file opts out of small-model overrides."""
+    return is_sigma(entry.get("repo")) and entry.get("file") == SIGMA_Q8_FILE
 
 #: First-run presets (verified on Hugging Face 2026-10-16: size and sha256 = the LFS oid; the vision
 #: projectors 2026-10-17). Garbage, Light and Medium use Unsloth's UD-Q4_K_XL (2026-10-18: lower KL
-#: divergence than Q4_K_M for 2-6 % more bytes); Heavy keeps Q4_K_M, whose RAM is already tight on 8 GB phones. Apache-2.0, architecture ``qwen35``, 262,144 trained context. Qwen3.5 is
+#: divergence than Q4_K_M for 2-6 % more bytes). Sigma replaces Heavy and selects from its live HF files.
+#: The Qwen rows are Apache-2.0, architecture ``qwen35``, 262,144 trained context. Qwen3.5 is
 #: natively multimodal: with its ``mmproj-F16.gguf`` (llama.cpp's mtmd, libmtmd in our own
 #: llama-cpp-python build) the same model reads images, for the chat's Vision mode and image jobs.
 DEFAULT_PRESETS: tuple = (
@@ -54,11 +69,7 @@ DEFAULT_PRESETS: tuple = (
      "sha256": "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7",
      "mmproj": "mmproj-F16.gguf", "mmproj_size": 672423616,
      "mmproj_sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"},
-    {"name": "Heavy", "repo": "unsloth/Qwen3.5-9B-GGUF", "file": "Qwen3.5-9B-Q4_K_M.gguf", "quant": "",
-     "note": "Qwen3.5 9B · best of the four · needs ~8 GB free RAM", "n_ctx": 0, "size": 5680522464,
-     "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
-     "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
-     "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
+    SIGMA_PRESET,
 )
 #: The GPU-friendly variants of the four defaults that earlier versions added to the saved list on Android:
 #: kept only to recognise those rows (``is_old_gpu_row``). Nothing adds them any more (owner 2026-10-31: the
@@ -188,7 +199,19 @@ def load_presets(prefs: Any) -> list:
         saved = None
     if not isinstance(saved, list):
         return _defaults()
-    return [row for row in (_clean(r) for r in saved) if row is not None]
+    rows = [row for row in (_clean(r) for r in saved) if row is not None]
+    migrated = False
+    for row in rows:
+        if row["repo"].casefold() == "unsloth/qwen3.5-9b-gguf" and (
+                row["name"] == "Heavy" or row["name"].startswith("Heavy · GPU (Q4_0)")):
+            row["name"] = f"Qwen 3.5 9B · {quant_label(row['file'])}"
+            row["note"] = f"Custom · {row['name']}"
+            migrated = True
+    if migrated:
+        if len(rows) < MAX_PRESETS and not any(is_sigma(row["repo"]) for row in rows):
+            rows.insert(3 if len(rows) >= 3 else len(rows), copy.deepcopy(SIGMA_PRESET))
+        return save_presets(prefs, rows)
+    return rows
 
 
 def save_presets(prefs: Any, presets: Sequence[dict]) -> list:

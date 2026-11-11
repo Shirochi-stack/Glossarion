@@ -510,6 +510,12 @@ class LlamaEngine(_Base):
             "repeat_penalty": float(params.get("repeat_penalty") or 1.0),
             "stop": params.get("stop") or None,
         }
+        if params.get("normal_settings"):
+            # Sigma Q8 uses the caller's settings; absent values use llama.cpp's defaults,
+            # never the Qwen/small-model defaults above.
+            for key in ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repeat_penalty"):
+                if key not in params:
+                    kwargs.pop(key, None)
         if params.get("seed") is not None:
             kwargs["seed"] = int(params["seed"])
         # create_chat_completion takes no DRY settings: the build's patched _init_sampler reads them from

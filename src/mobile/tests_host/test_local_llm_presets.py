@@ -13,18 +13,17 @@ from local_llm_fakes import FakePrefs
 from glossarion_mobile.services.local_llm import presets
 
 
-def test_defaults_are_the_four_verified_qwen35_ggufs():
+def test_defaults_are_three_verified_qwen35_ggufs_and_sigma_picker():
     rows = presets.load_presets(FakePrefs())
-    assert [(r["name"], r["repo"], r["file"], r["size"], r["sha256"]) for r in rows] == [
+    assert [(r["name"], r["repo"], r["file"], r["size"], r["sha256"]) for r in rows[:3]] == [
         ("Garbage", "unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-UD-Q4_K_XL.gguf", 558772480,
          "3177ebd67afe4438374da19e690bc1b98756f7e0fea9240e1be404336156a7b5"),
         ("Light", "unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-UD-Q4_K_XL.gguf", 1339752704,
          "0af96165ea615bea39a04118d63f0b6d35908aea850ee4a51aa6151d851b8b35"),
         ("Medium", "unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-UD-Q4_K_XL.gguf", 2912109728,
          "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7"),
-        ("Heavy", "unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf", 5680522464,
-         "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
     ]
+    assert rows[3] == presets.SIGMA_PRESET
     assert all(r["n_ctx"] == 0 and r["note"] for r in rows)
     rows[0]["name"] = "changed"  # a copy, never the module data
     assert presets.DEFAULT_PRESETS[0]["name"] == "Garbage"
@@ -41,7 +40,7 @@ def test_edit_rename_remove_restore_persist_in_prefs():
     presets.save_presets(prefs, [])
     assert presets.load_presets(prefs) == []  # an empty saved list wins over the defaults
     presets.restore_defaults(prefs)
-    assert [r["name"] for r in presets.load_presets(prefs)] == ["Garbage", "Light", "Medium", "Heavy"]
+    assert [r["name"] for r in presets.load_presets(prefs)] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
     garbage = [{"name": "", "repo": "x/y"}, "nope", {"name": "a", "repo": ""}, {"name": "ok", "repo": "a/b", "n_ctx": 5}]
     assert presets.save_presets(prefs, garbage) == [
         {"name": "ok", "repo": "a/b", "file": "", "quant": "", "note": "", "n_ctx": 0}]

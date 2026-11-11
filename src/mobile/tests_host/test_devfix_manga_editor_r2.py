@@ -271,6 +271,94 @@ def test_release_remains_interactive_during_render_and_latest_move_wins(iso, tmp
 
 
 @needs_flet_pil
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_repeated_resizes_keep_transparent_preview_and_pulse_during_render(iso, tmp_path, monkeypatch, platform):
+    """Grow/shrink releases stay responsive and keep the latest size while rendering is blocked."""
+    import threading
+    from PIL import Image
+
+    pages = [mu.write_png(tmp_path / "in" / "1.png", 100, 200)]
+    translated = _color_png(tmp_path / "out" / "translated.png", BLUE,
+                            box=(25, 35, 5, 15), box_color=RED)
+    cleaned = _color_png(tmp_path / "out" / "cleaned.png", BLUE)
+    fake = _fake_editor(monkeypatch, tmp_path, pages)
+    entered, release = threading.Event(), threading.Event()
+    original_render = fake.rerender_boxes_locally
+
+    def slow_render(*args):
+        entered.set()
+        assert release.wait(10), "test did not release the renderer"
+        return original_render(*args)
+
+    monkeypatch.setattr(fake, "rerender_boxes_locally", slow_render)
+
+    async def scenario():
+        jobs = mu.FakeJobs()
+        ctx, manga, screen, tab = _open_screen(tmp_path, pages, jobs=jobs, platform=platform)
+        render_task = None
+        try:
+            await tab.open_page(0)
+            await _translated_page(tab, fake, pages[0], translated, cleaned)
+            tab.selected = 0
+            old_image = tab.translated_view
+            tab.pan_start(50, 80)
+            assert tab.drag["mode"] == "resize"
+            tab.pan_update(60, 90)
+            assert await asyncio.wait_for(tab.pan_end(), timeout=0.5) == 0
+            tab._render_token += 1
+            render_task = asyncio.create_task(tab._render_overlay())
+            for _ in range(500):
+                if entered.is_set() and tab.live[0]["text"] is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set() and tab._overlay_rendering
+            updates_before = len([c for c in fake.calls if c[0] == "update_box"])
+            for start, end, size in [((60, 90), (80, 110), (70, 90)),
+                                     ((80, 110), (75, 105), (65, 85))]:
+                tab.pan_start(*start)
+                assert tab.drag["mode"] == "resize"
+                tab.pan_update(*end)
+                live = tab.live[0]
+                assert (live["text"].x, live["text"].y) == (10, 20)
+                assert (live["text"].width, live["text"].height) == size
+                assert (live["hole"].width, live["hole"].height) == (40, 60)
+                with Image.open(io.BytesIO(live["text"].src)) as ink:
+                    assert ink.mode == "RGBA"
+                    assert ink.getpixel((5, 5))[3] == 0  # background must not stretch with the text
+                    assert ink.getpixel((17, 20)) == (*RED, 255)
+                assert await asyncio.wait_for(tab.pan_end(), timeout=0.5) == 0
+                assert tab._pulse_tokens and tab.hit_areas
+            assert len([c for c in fake.calls if c[0] == "update_box"]) == updates_before
+            pulse_widths = lambda: [s.paint.stroke_width for s in tab.canvas.shapes
+                                   if getattr(getattr(s, "paint", None), "color", None) == "#AA66FF"]
+            widths = pulse_widths()
+            assert widths and (5 in widths or 2 in widths)
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if pulse_widths() != widths:
+                    break
+            assert pulse_widths() != widths
+            release.set()
+            await asyncio.wait_for(render_task, timeout=3)
+            assert tab.translated_view == old_image and tab.live  # reject the stale render
+            assert len([c for c in fake.calls if c[0] == "update_box"]) == updates_before + 1
+            assert tuple(fake.boxes[pages[0]][0][k] for k in ("x", "y", "width", "height")) == (10, 20, 65, 85)
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if not tab.live and not tab.busy and not tab._pulse_tokens:
+                    break
+            assert not tab.live and not tab.busy and not tab._pulse_tokens and not tab._deferred_geometry
+            assert not jobs.specs
+        finally:
+            release.set()
+            if render_task is not None:
+                await render_task
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet_pil
 def test_move_during_display_preparation_cannot_install_an_old_render(iso, tmp_path, monkeypatch):
     import threading
     pages = [mu.write_png(tmp_path / "in" / "1.png", 100, 200)]

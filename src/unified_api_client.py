@@ -3658,6 +3658,14 @@ class UnifiedClient:
         tls = self._get_thread_local_client()
         stopped, tls._forced_truncation = getattr(tls, '_forced_truncation', False), False
         on_device = str(getattr(self, 'model', '') or '').lower().startswith('local/')
+        if on_device:
+            try:
+                from glossarion_mobile.services.local_llm.service import default_service
+                service = default_service()
+                if service and service.uses_normal_settings(self.model) and not service.forced_truncation(self.model):
+                    return content, finish_reason
+            except ImportError:
+                pass  # desktop clients have no mobile engine
         glossary = 'glossary' in str(context or '').lower()
         if not isinstance(content, str) or not (stopped or (on_device and (glossary or self._is_truncation_finish_reason(
                 self._normalize_finish_reason(finish_reason) or finish_reason)))):

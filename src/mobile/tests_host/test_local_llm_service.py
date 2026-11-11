@@ -117,7 +117,7 @@ def test_ram_gate(tmp_path):
     ok, error = service.load_blocking("fake-echo")  # more than the phone has: still refused
     assert not ok and error.startswith("This phone has 2.1 GB RAM;")
     service.platform = "ios"
-    memory["value"] = (8 * GB, None)  # need ~3.2 GB: under half of 8 GB
+    memory["value"] = (12 * GB, None)  # 24,576 context needs ~4.5 GB: under half of 12 GB
     assert service.ram_check("fake-echo")[0] == "ok"
     memory["value"] = (4 * GB, None)
     verdict, message = service.ram_check("fake-echo")
@@ -132,9 +132,9 @@ def test_thread_and_context_defaults(tmp_path, monkeypatch):
     prefs = fakes.FakePrefs()
     service, engine = make_service(tmp_path, prefs=prefs)
     service.registry.add("fake-echo", {"repo": "t/fake-echo", "file": "fake-echo.gguf", "size": 1 * GB})
-    assert service.context_for("fake-echo") == 4096  # small models (owner 2026-10-19: halved from 8192)
+    assert service.context_for("fake-echo") == 24576  # the shared on-device default
     service.registry.add("fake-echo", {"repo": "t/fake-echo", "file": "fake-echo.gguf", "size": 5 * GB})
-    assert service.context_for("fake-echo") == 2048  # 4 GiB or more
+    assert service.context_for("fake-echo") == 24576  # large files use the same context default
     assert service.save_settings("4096x", "") == (None, "Context must be a whole number")
     assert service.save_settings("6000", "3") == ({"n_ctx": 6000, "n_threads": 3}, None)
     assert service.context_for("fake-echo") == 6000 and service.threads() == 3

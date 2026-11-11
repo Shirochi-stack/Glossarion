@@ -325,7 +325,7 @@ def test_expression_evaluator_semantics():
 
 BUILD_JOBS = {"prepare", "wheels-android", "wheels-ios", "android", "android-smoke", "android-ui-tests", "ios",
               "ios-signed", "ios-simulator-smoke"}
-DISPATCH_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests", "android_legacy_packaging",
+DISPATCH_INPUTS = {"rebuild", "targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests", "android_legacy_packaging",
                    "llama_suite", "require_python_ci"}
 CALL_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests"}
 SIGNING_SECRETS = {"ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
@@ -421,6 +421,9 @@ def test_no_publish_release_input(wf):
     dispatch = triggers["workflow_dispatch"]["inputs"]
     call = triggers["workflow_call"] or {}
     assert set(dispatch) == DISPATCH_INPUTS
+    assert dispatch["rebuild"]["default"] == "0"
+    version = next(s for s in wf["jobs"]["prepare"]["steps"] if s.get("id") == "version")
+    assert version["env"]["GLOSSARION_REBUILD"] == "${{ inputs.rebuild || '0' }}"
     assert set(call.get("inputs") or {}) == CALL_INPUTS
     for name in set(dispatch) | set(call.get("inputs") or {}):
         assert "publish" not in name and "release" not in name, name

@@ -245,13 +245,16 @@ class FileChooser:
         self._page: Any = None
         self.files = list(files)
         self.selected = selected if selected in self.files else None
+        self.sigma = presets.is_sigma(repo)
+        self.recommended = next((f for f in self.files if f.path == presets.SIGMA_Q8_FILE), None) \
+            if self.sigma else self.selected
         self.group = ft.RadioGroup(
             value=self.selected.path if self.selected else None, on_change=lambda e: self.select(self.group.value),
             content=ft.Column([self._row(i, f) for i, f in enumerate(self.files)], spacing=0, tight=True),
             key="local-file-group")
         self.next_button = ft.FilledButton(content="Next", disabled=self.selected is None, key="local-file-next",
                                            on_click=lambda e: self.pick(self.chosen()))
-        self.title = ft.Text(f"Choose a file of {repo}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
+        self.title = ft.Text("Sigma (Best) · choose a quant" if self.sigma else f"Choose a file of {repo}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
                              weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
         self.actions = ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.pick(None)), self.next_button],
                               alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8)
@@ -261,8 +264,9 @@ class FileChooser:
     def _row(self, index: int, file: hf.HfFile) -> ft.ListTile:
         size = dl.format_bytes(file.size)
         return ft.ListTile(leading=ft.Radio(value=file.path, key=f"local-file-radio-{index}"),
-                           title=ft.Text(file.name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                           subtitle=ft.Text(f"{size} · Recommended" if file is self.selected else size),
+                           title=ft.Text(presets.quant_label(file.path) if self.sigma or presets.is_no_quant(file.path)
+                                         else file.name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                           subtitle=ft.Text(f"{size} · Recommended" if file is self.recommended else size),
                            dense=True, key=f"local-file-{index}", on_click=lambda e, f=file: self.select(f.path))
 
     def _body(self, *, compact: bool) -> ft.Column:
@@ -642,6 +646,10 @@ class OnDeviceFlow:
         chooser.show(self.page)
         return await chooser.future
 
+    def selected_stem(self) -> Optional[str]:
+        model = str(self.current_model() if self.current_model else "")
+        return model[len("local/"):] if model.lower().startswith("local/") else self.service.loaded_stem
+
     # ---- the one-tap flow -------------------------------------------------------------------------
 
     async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None, choose: bool = False,
@@ -667,6 +675,10 @@ class OnDeviceFlow:
                     raise hf.HfError("Split GGUF files are not supported yet" if listing.files
                                      else "This repository has no GGUF model files")
                 default = hf.pick_file(runnable)
+                if presets.is_sigma(ref.repo):
+                    q8 = next((f for f in runnable if f.path == presets.SIGMA_Q8_FILE), None)
+                    if q8 and self.service.preset_ram_check({**presets.SIGMA_PRESET, "size": q8.size})[0] == "ok":
+                        default = q8
                 file = default if len(runnable) == 1 else await self.choose(ref.repo, runnable, default)
                 if file is None:
                     return None
@@ -709,6 +721,12 @@ class OnDeviceFlow:
                 self.say(f"Image support was not downloaded ({state.error}); the model still works for text")
             elif not state.done:
                 return None
+        if preset is not None and presets.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma (Best)":
+            rows = self.presets()
+            for row in rows:
+                if row["name"] == "Sigma (Best)" and presets.is_sigma(row["repo"]):
+                    row.update(file=file.path, quant="", size=file.size, sha256=file.sha256 or "")
+            presets.save_presets(self.prefs, rows)
         return stem
 
     async def activate(self, stem: str, label: str = "") -> bool:
@@ -820,12 +838,14 @@ class OnDeviceFlow:
         self.errors.pop(key, None)
         self.render()
         try:
+            sigma = presets.is_sigma(preset["repo"]) and preset["name"] == "Sigma (Best)"
             stem = self.stem_of_preset(preset)
-            if not stem or self.service.registry.resolve(stem) is None:
+            if sigma or not stem or self.service.registry.resolve(stem) is None:
                 if stem and self.downloads.running(stem):
                     return None
-                ref = hf.HfRef(preset["repo"], preset.get("file") or None, quant=preset.get("quant") or None)
-                stem = await self.fetch(ref, preset=preset)
+                ref = hf.HfRef(preset["repo"], None if sigma else preset.get("file") or None,
+                               quant=None if sigma else preset.get("quant") or None)
+                stem = await self.fetch(ref, preset=preset, choose=sigma)
                 if not stem:
                     return None
             if await self.activate(stem, preset["name"]):
@@ -1047,9 +1067,8 @@ class LocalModelsPanel(OnDeviceFlow):
                    vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             self.engine_detail,
             self.context.control,
-            _small("This Context is used by every on-device model; with none saved a model uses its own (4,096, "
-                   "2,048 for models of 4 GB or more). Jobs on an on-device model ask for half the context as "
-                   "output and send one request at a time.", key="local-ctx-note"),
+            _small("The default context is 24,576 tokens. Saved lower values and per-model limits are kept. "
+                   "The output budget starts at half the context and can be changed.", key="local-ctx-note"),
             ft.Row([self.threads_field,
                     ft.TextButton(content="Save", key="local-settings-save", on_click=lambda e: self.save_settings())],
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -1150,7 +1169,19 @@ class LocalModelsPanel(OnDeviceFlow):
         self.gpu_status.value = note or ""
         self.gpu_status.visible = bool(note)
         self._render_gpu_swap(push=False)  # a model was loaded / switched
+        normal = self.service.uses_normal_settings(self.selected_stem())
+        for field in self.sampling_fields.values():
+            field.disabled = normal
+        self.sampling_actions.disabled = normal
+        self.sampling_note.value = ("Sigma Q8_0 uses your normal prompts, temperature and sampling settings. "
+                                    "On-device script bans are disabled; Forced Truncation starts off." if normal
+                                   else self._small_model_sampling_note)
+        self.block_cjk_switch.disabled = normal
+        self.block_cjk_switch.value = self.service.block_cjk(self.selected_stem())
+        self.forced_truncation_switch.value = self.service.forced_truncation(self.selected_stem())
         if push:
+            _push(*self.sampling_fields.values(), self.sampling_actions, self.sampling_note,
+                  self.block_cjk_switch, self.forced_truncation_switch)
             _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text, self.gpu_status,
                   self.gpu_swap_box)
 
@@ -1179,7 +1210,7 @@ class LocalModelsPanel(OnDeviceFlow):
         }
         self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
-        self.forced_truncation_switch = toggle(value=self.service.forced_truncation(), key="local-forced-truncation",
+        self.forced_truncation_switch = toggle(value=self.service.forced_truncation(self.selected_stem()), key="local-forced-truncation",
                                                   on_change=lambda e: self.save_forced_truncation())
         self.forced_truncation_seconds = ft.TextField(value=str(self.service.forced_truncation_seconds()), dense=True,
                                                       label="Seconds", width=118, key="local-forced-truncation-seconds",
@@ -1189,18 +1220,19 @@ class LocalModelsPanel(OnDeviceFlow):
         self.mark_glossary_complete_switch = toggle(
             value=self.service.mark_glossary_complete(), key="local-mark-glossary-complete",
             on_change=lambda e: self.service.save_mark_glossary_complete(self.mark_glossary_complete_switch.value))
-        self.block_cjk_switch = toggle(value=self.service.block_cjk(),
+        self.block_cjk_switch = toggle(value=self.service.block_cjk(self.selected_stem()),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
+        self._small_model_sampling_note = ("Qwen's recommended values and the DRY sampler reduce repetition loops. "
+                                          "These replace the anti-duplicate settings for small on-device models.")
+        self.sampling_note = _small(self._small_model_sampling_note)
+        self.sampling_actions = ft.Row([
+            ft.TextButton(content="Save", key="local-sampling-save", on_click=lambda e: self.save_sampling()),
+            ft.TextButton(content="Qwen defaults", key="local-sampling-reset", on_click=lambda e: self.reset_sampling())], spacing=4)
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
-            _small("Qwen's recommended values and the DRY sampler reduce repetition loops. DRY stops the "
-                   "model repeating a stretch of text, more strongly the longer the repeat; DRY multiplier 0 "
-                   "turns it off. These replace the anti-duplicate settings for on-device models; cloud "
-                   "models keep using those."),
+            self.sampling_note,
             ft.Row(list(self.sampling_fields.values()), wrap=True, spacing=8, run_spacing=8, key="local-sampling"),
-            ft.Row([ft.TextButton(content="Save", key="local-sampling-save", on_click=lambda e: self.save_sampling()),
-                    ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
-                                  on_click=lambda e: self.reset_sampling())], spacing=4),
+            self.sampling_actions,
             self.sampling_error,
             switch_row(self.forced_truncation_switch, "Forced Truncation"),
             self.forced_truncation_seconds,
@@ -1256,7 +1288,7 @@ class LocalModelsPanel(OnDeviceFlow):
 
     def save_forced_truncation(self) -> tuple:
         enabled, seconds = self.service.save_forced_truncation(self.forced_truncation_switch.value,
-                                                               self.forced_truncation_seconds.value)
+                                                               self.forced_truncation_seconds.value, stem=self.selected_stem())
         self.forced_truncation_seconds.value = str(seconds)
         return enabled, seconds
 
