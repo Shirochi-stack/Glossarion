@@ -836,6 +836,11 @@ class E2ESession:
         self._set_env("OUTPUT_DIRECTORY", str(self.root / "Output"))
         self._set_env("GLOSSARION_LIBRARY_DIR", str(self.root / "Library"))
         self._set_env("GLOSSARION_DIRECT_TEXT_HISTORY", str(self.root / "direct_text_chats.json"))
+        # Host installs can include Ultralytics/PyTorch even though the device
+        # pipeline uses lightweight stubs here. Their import-time probes/caches
+        # must obey the same offline sandbox as the rest of this diagnostic.
+        self._set_env("YOLO_OFFLINE", "true")
+        self._set_env("TORCHINDUCTOR_CACHE_DIR", str(self._dir("torchinductor")))
         # The fake server must never go through a proxy (os.environ is case-insensitive on Windows).
         for key in ("NO_PROXY",) if os.name == "nt" else ("NO_PROXY", "no_proxy"):
             self._set_env(key, ",".join(p for p in (os.environ.get(key, ""), "127.0.0.1,localhost") if p))
