@@ -83,8 +83,11 @@ def test_list_repo_lists_projectors_apart_and_pick_projector_prefers_f16(monkeyp
     assert hf.pick_projector([hf.HfFile("mmproj-x.gguf", 9), hf.HfFile("mmproj-y.gguf", 3)]).path == "mmproj-y.gguf"
 
 
-def test_default_presets_carry_their_vision_projector():
-    for row in presets.DEFAULT_PRESETS:
+def test_qwen_presets_keep_vision_and_sigma_has_no_projector():
+    qwen = [row for row in presets.DEFAULT_PRESETS if not presets.is_sigma(row["repo"])]
+    assert len(qwen) == 3
+    assert "mmproj" not in presets.DEFAULT_PRESETS[3]  # Sigma's repository has text-only GGUFs
+    for row in qwen:
         assert row["mmproj"] == "mmproj-F16.gguf" and row["mmproj_size"] > 100_000_000
         assert len(row["mmproj_sha256"]) == 64
     light = next(r for r in presets.DEFAULT_PRESETS if r["name"] == "Light")
