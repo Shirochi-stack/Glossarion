@@ -481,6 +481,23 @@ def _contains(root, target) -> bool:
 
 
 @needs_flet
+def test_about_sections_paint_their_tiles_on_a_material(app_env):
+    """CI completed both UI flows, but Flutter rejected About's licence tile at teardown."""
+    from types import SimpleNamespace
+
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens.about import AboutScreen
+
+    screen = AboutScreen(parse_route("/settings/about"), SimpleNamespace(),
+                         boot=SimpleNamespace(version={"version": "9.15.17", "build": 9151700}))
+    body = screen.build_body()
+    assert _contains(body, screen.license_tile)
+    assert _ink_problems(body) == []
+    screen.license_tile.expanded = True
+    assert _ink_problems(body) == []
+
+
+@needs_flet
 def test_job_cards_paint_their_tiles_on_a_material(app_env):
     """The running / Result JobCard (Requests, OCR, Extraction report tiles), the Plan card's Run options
     and the batch Plan card: every ExpansionTile header sits on the card's Material surface. A tile in a

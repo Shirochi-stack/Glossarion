@@ -39,11 +39,19 @@ def section(title: str, controls: list, *, key: Optional[str] = None, subtitle: 
                                       weight=ft.FontWeight.W_600)]
     if subtitle:
         head.append(ft.Text(subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
-    return ft.Container(
-        content=ft.Column(head + list(controls), spacing=tokens.SPACING["sm"], tight=True),
-        padding=tokens.SPACING["card_padding"],
-        border_radius=tokens.RADII["card"],
+    # ExpansionTile headers paint ink on their nearest Material. A coloured
+    # Container between them and that Material hides it and triggers Flutter's
+    # ListTile assertion (notably About > Open-source licences).
+    return ft.Card(
+        content=ft.Container(
+            content=ft.Column(head + list(controls), spacing=tokens.SPACING["sm"], tight=True),
+            padding=tokens.SPACING["card_padding"],
+        ),
         bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        elevation=0,
+        margin=ft.Margin.all(0),
+        shape=ft.RoundedRectangleBorder(radius=tokens.RADII["card"]),
+        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         key=key,
     )
 
