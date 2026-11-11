@@ -365,8 +365,8 @@ class ViewTransform:
 
 
 def crop_patches(translated: str, background: str, rect: tuple, image_size: tuple) -> tuple:
-    """Blocking: PNG bytes of ``rect`` (x, y, w, h in page px) cut from the translated render (the
-    box's rendered text) and from ``background`` (the cleaned / original page: what the text covers),
+    """Blocking: transparent rendered ink and the background patch for ``rect`` in page pixels,
+    using the translated render and ``background`` (the cleaned / original page),
     each scaled from ``image_size`` to its file's own size. (None, None) when either cannot be read."""
     import io as _io
 
@@ -374,7 +374,9 @@ def crop_patches(translated: str, background: str, rect: tuple, image_size: tupl
         from safe_image import open_page_image  # the owner's guarded Pillow open (pages are untrusted)
     except Exception:
         return (None, None)
-    out = []
+    from PIL import ImageChops
+
+    crops = []
     iw, ih = (float(v) for v in image_size)
     x, y, w, h = rect
     for path in (translated, background):
@@ -384,11 +386,23 @@ def crop_patches(translated: str, background: str, rect: tuple, image_size: tupl
                 sy = im.height / ih if ih else 1.0
                 box = (int(x * sx), int(y * sy), max(int(x * sx) + 1, int((x + w) * sx)),
                        max(int(y * sy) + 1, int((y + h) * sy)))
-                buffer = _io.BytesIO()
-                im.crop(box).save(buffer, format="PNG")
-                out.append(buffer.getvalue())
+                crops.append(im.crop(box).convert("RGBA"))
         except Exception:
             return (None, None)
+    text, base = crops
+    if base.size != text.size:
+        base = base.resize(text.size)
+    # Carry the rendered ink, not the rectangular piece of artwork underneath it.
+    # A small threshold suppresses compression noise in JPEG output backgrounds.
+    diff = ImageChops.difference(text.convert("RGB"), base.convert("RGB"))
+    red, green, blue = diff.split()
+    mask = ImageChops.lighter(ImageChops.lighter(red, green), blue).point(lambda v: 255 if v > 8 else 0)
+    text.putalpha(ImageChops.multiply(text.getchannel("A"), mask))
+    out = []
+    for crop in (text, crops[1]):
+        buffer = _io.BytesIO()
+        crop.save(buffer, format="PNG")
+        out.append(buffer.getvalue())
     return tuple(out)
 
 
@@ -484,6 +498,13 @@ class EditorTab(MangaTab):
         self.holes: list = []
         self._render_token = 0
         self._overlay_rendering = False
+        self._geometry_saving = False
+        self._deferred_geometry: dict = {}  # newest release per box while the renderer owns the session
+        self._pulse_tokens: dict = {}
+        self._pulse_running = False
+        self._pulse_bright = True
+        self._pulse_until = 0.0
+        self._disposed = False
 
     # ---- build --------------------------------------------------------------------------------------
 
@@ -656,6 +677,9 @@ class EditorTab(MangaTab):
         return view
 
     def dispose(self) -> None:
+        self._disposed = True
+        self._render_token += 1
+        self._pulse_tokens.clear()
         self.watch.stop()
         self.job_ends.stop()
         if self._listening and self._on_session_event in self.session.editor_listeners:
@@ -681,7 +705,7 @@ class EditorTab(MangaTab):
 
     @property
     def busy(self) -> bool:
-        return self._overlay_rendering or self.watch.active() is not None
+        return self._overlay_rendering or self._geometry_saving or self.watch.active() is not None
 
     def _busy_reason(self) -> Optional[str]:
         return "Wait for the running step" if self.busy else None
@@ -701,7 +725,24 @@ class EditorTab(MangaTab):
         snap = await self.ctx.io(es.page_snapshot, self.image_path)
         return dict(snap or {})
 
-    async def _apply_snapshot(self, snap: dict) -> None:
+    async def _apply_snapshot(self, snap: dict, *, render_token: Optional[int] = None) -> None:
+        if render_token is not None:
+            # Prepare display files off the UI thread, then commit all preview state at
+            # once. A move arriving during either await makes this render obsolete.
+            if render_token != self._render_token or self.drag or self._disposed:
+                return
+            cleaned, translated = await self.ctx.io(
+                lambda: (self._display_cleaned(snap), self._display_translated(snap)))
+            if render_token != self._render_token or self.drag or self._disposed:
+                return
+            self.snapshot = dict(snap or {})
+            self.boxes = [dict(b) for b in self.snapshot.get("boxes", [])]
+            self.cleaned_view, self.translated_view = cleaned, translated
+            self._view_pending = False
+            self.live.clear()
+            self.holes.clear()
+            self.refresh()
+            return
         self.snapshot = dict(snap or {})
         self.boxes = [dict(b) for b in (self.snapshot.get("boxes") or [])]
         if self.selected is not None and self.selected >= len(self.boxes):
@@ -718,10 +759,10 @@ class EditorTab(MangaTab):
             self._view_pending = True
         self.refresh()
 
-    def _display_translated(self) -> str:
+    def _display_translated(self, snapshot: Optional[dict] = None) -> str:
         """Blocking: the versioned display copy of the page's translated output. Raises
         ``MangaBusy`` when the page's output path cannot be looked up while a job runs."""
-        snap = self.snapshot
+        snap = self.snapshot if snapshot is None else snapshot
         path = str(snap.get("translated_path") or "")
         cleaned = str(snap.get("cleaned_path") or "")
         if path and cleaned and os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(cleaned)):
@@ -735,18 +776,20 @@ class EditorTab(MangaTab):
         if not path:
             return ""
         try:
-            return svc.display_copy(path, int(snap.get("revision") or 0), self.session.view_cache)
+            return svc.display_copy(path, int(snap.get("revision") or 0), self.session.view_cache,
+                                    keep_paths=(self.translated_view,) if snapshot is not None else ())
         except OSError:
             return path
 
-    def _display_cleaned(self) -> str:
+    def _display_cleaned(self, snapshot: Optional[dict] = None) -> str:
         """Blocking: the versioned display copy of the page's cleaned image ('' when not cleaned)."""
-        snap = self.snapshot
+        snap = self.snapshot if snapshot is None else snapshot
         path = str(snap.get("cleaned_path") or "")
         if not path or not os.path.isfile(path):
             return ""
         try:
-            return svc.display_copy(path, int(snap.get("revision") or 0), self.session.view_cache)
+            return svc.display_copy(path, int(snap.get("revision") or 0), self.session.view_cache,
+                                    keep_paths=(self.cleaned_view,) if snapshot is not None else ())
         except OSError:
             return path
 
@@ -781,6 +824,9 @@ class EditorTab(MangaTab):
             self.refresh()
             return {}
         path = files[index]
+        if path != self.image_path:
+            self._render_token += 1
+            self._pulse_tokens.clear()
         self.session.page_index = index
         if path not in self.sizes:
             self.sizes[path] = await self.ctx.io(image_size, path)
@@ -1090,6 +1136,8 @@ class EditorTab(MangaTab):
                 shapes.extend((hole, text))
         for index, box in enumerate(self.boxes):
             color, opacity, width = BOX_STYLES[box_state(box, selected=index == self.selected)]
+            if index in self._pulse_tokens:
+                color, opacity, width = "#AA66FF", 0.12, (5 if self._pulse_bright else 2)
             x, y = float(box.get("x", 0)) * scale, float(box.get("y", 0)) * scale
             w, h = float(box.get("width", 0)) * scale, float(box.get("height", 0)) * scale
             polygon = box.get("polygon") or []
@@ -1303,7 +1351,7 @@ class EditorTab(MangaTab):
         every box (the last drawn on top, as ``hit_test`` picks it), then the selected box's move
         and resize handles (``handle_at``'s square reach, the same size on screen at every zoom).
         None while a step runs (the page still pans then) or in a drawing tool."""
-        if self.tool != "pan" or not self.image_path or self.session.editor is None or self.busy:
+        if self.tool != "pan" or not self.image_path or self.session.editor is None or self.watch.active() is not None:
             return []
         scale = self.geometry.scale
         rects: list = []
@@ -1468,8 +1516,9 @@ class EditorTab(MangaTab):
             push(canvas)
             self._sync_hits()  # (the boxes' places on screen changed: not while a drag runs)
 
-    def _can_edit(self) -> bool:
-        return bool(self.image_path) and self.session.editor is not None and not self.busy and not self._editing
+    def _can_edit(self, *, geometry: bool = False) -> bool:
+        blocked = self.watch.active() is not None or ((self._overlay_rendering or self._geometry_saving) and not geometry)
+        return bool(self.image_path) and self.session.editor is not None and not blocked and not self._editing
 
     # ---- gestures (display coords in, image px stored) --------------------------------------------------
 
@@ -1511,7 +1560,7 @@ class EditorTab(MangaTab):
     def pan_start(self, dx: float, dy: float) -> None:
         """A drag starts at page point (dx, dy): a drawing tool draws; Pan / move (a drag that started
         on a box's hit area: one on the empty page is the viewer's pan) moves or resizes the box."""
-        if not self._can_edit():
+        if not self._can_edit(geometry=self.tool == "pan"):
             return
         self._render_token += 1  # a pending re-render waits for this edit
         if self.tool in ("box", "circle"):
@@ -1572,7 +1621,12 @@ class EditorTab(MangaTab):
         es = self.session.editor
         mode = drag.get("mode")
         result = None
-        moved = False
+        if mode in ("move", "resize") and drag.get("index") is not None:
+            index = int(drag["index"])
+            if self.panel is not None and self.panel.index == index:
+                self.panel.set_geometry(self.boxes[index])
+            self._pulse_box(index)
+            return index if await self._save_geometry(index) else None
         self._editing = True
         try:
             if mode == "draw" and drag.get("current"):
@@ -1590,13 +1644,6 @@ class EditorTab(MangaTab):
                     (x, y, w, h), polygon = found
                     await self.ctx.io(lambda: es.add_box(x, y, w, h, shape="polygon", polygon=polygon))
                     result = len(self.boxes)
-            elif mode in ("move", "resize") and drag.get("index") is not None:
-                index = int(drag["index"])
-                box = self.boxes[index]
-                await self.ctx.io(lambda: es.update_box(index, box["x"], box["y"], box["width"], box["height"],
-                                                        rerender=False))
-                result = index
-                moved = True
         except Exception as exc:
             self.ctx.say(f"Could not change the box: {exc}")
         finally:
@@ -1604,8 +1651,6 @@ class EditorTab(MangaTab):
         if result is not None:
             self.selected = result
         await self._apply_snapshot(await self._snapshot())
-        if moved:
-            self._schedule_render()
         return result
 
     def _on_pan_start(self, e: Any) -> None:
@@ -1623,7 +1668,7 @@ class EditorTab(MangaTab):
         es = self.session.editor
         if es is None or not (0 <= index < len(self.boxes)):
             return False
-        if not self._can_edit():
+        if not self._can_edit(geometry=True):
             self.ctx.say("Wait for the running step" if self.busy else "Open a page first")
             return False
         self._render_token += 1
@@ -1635,13 +1680,80 @@ class EditorTab(MangaTab):
         if self.panel is not None and self.panel.index == index:
             self.panel.set_geometry(box)
         self._redraw()
-        if not await self._box_call(lambda: es.update_box(index, box["x"], box["y"], box["width"], box["height"],
-                                                          rerender=False)):
+        self._pulse_box(index)
+        return await self._save_geometry(index)
+
+    async def _save_geometry(self, index: int) -> bool:
+        """Coalesce releases without making another gesture wait on a render or disk write."""
+        self._defer_geometry(index)
+        self._redraw()
+        if self._overlay_rendering or self._geometry_saving:
+            return True
+        self._geometry_saving = True
+        try:
+            await self._flush_geometry(self.session.editor)
+            return True
+        except Exception as exc:
+            self.ctx.say(f"Could not save the latest box position: {exc}")
             return False
-        self._schedule_render()
-        return True
+        finally:
+            self._geometry_saving = False
+            # Geometry is already live: do not reload/redecode the page on release.
+            if not self._disposed:
+                self._redraw()
+                if not self._deferred_geometry:
+                    self._schedule_render()
+
+    async def _flush_geometry(self, editor: Any) -> None:
+        while self._deferred_geometry:
+            pending = dict(self._deferred_geometry)
+
+            def save_positions() -> None:
+                for index, values in pending.items():
+                    editor.update_box(index, *values, rerender=False)
+
+            await self.ctx.io(save_positions)
+            for index, values in pending.items():
+                if self._deferred_geometry.get(index) == values:
+                    self._deferred_geometry.pop(index)
 
     # ---- the moved box's text, live ---------------------------------------------------------------------
+
+    def _defer_geometry(self, index: int) -> None:
+        box = self.boxes[index]
+        self._deferred_geometry[index] = tuple(box[key] for key in ("x", "y", "width", "height"))
+        self._render_token += 1  # the running render must not replace this newer preview
+
+    def _pulse_box(self, index: int) -> None:
+        import asyncio
+        import time
+
+        already_pulsing = self._pulse_running
+        self._pulse_tokens[index] = True
+        self._pulse_until = time.monotonic() + RENDER_DELAY + 0.8
+        self._redraw()
+        if already_pulsing:
+            return
+        self._pulse_running = True
+
+        async def pulse() -> None:
+            try:
+                # Give the same immediate save-position feedback as desktop, and keep it
+                # visible while the debounced save/render is outstanding.
+                while not self._disposed and (time.monotonic() < self._pulse_until or
+                                              self._overlay_rendering or self._geometry_saving or self._editing):
+                    await asyncio.sleep(0.2)
+                    if self._disposed:
+                        return
+                    self._pulse_bright = not self._pulse_bright
+                    self._redraw()
+            finally:
+                self._pulse_running = False
+                self._pulse_tokens.clear()
+                if not self._disposed:
+                    self._redraw()
+
+        self.ctx.spawn(pulse())
 
     def _begin_live(self, index: int) -> None:
         """A translated box starts moving: cut its rendered text (and the page under it) from the
@@ -1665,7 +1777,7 @@ class EditorTab(MangaTab):
                 text, hole = await self.ctx.io(crop_patches, translated, background, origin, size)
             except Exception:
                 hole = text = None
-            if self.live.get(index) is not entry or hole is None or text is None:
+            if self._disposed or self.live.get(index) is not entry or hole is None or text is None:
                 return
             entry["hole"] = cv.Image(src=hole, x=0, y=0, width=1, height=1)
             entry["text"] = cv.Image(src=text, x=0, y=0, width=1, height=1)
@@ -1695,7 +1807,7 @@ class EditorTab(MangaTab):
                 _text, hole = await self.ctx.io(crop_patches, translated, background, origin, size)
             except Exception:
                 hole = None
-            if hole is None or not any(item is entry for item in self.holes):
+            if self._disposed or hole is None or not any(item is entry for item in self.holes):
                 return
             entry["hole"] = cv.Image(src=hole, x=0, y=0, width=1, height=1)
             self._redraw()
@@ -1708,6 +1820,9 @@ class EditorTab(MangaTab):
         move / delete of a translated box; another edit first postpones it."""
         if not self.live and not self.holes:
             return
+        if self._pulse_tokens:
+            import time
+            self._pulse_until = time.monotonic() + RENDER_DELAY + 0.8
         self._render_token += 1
         self.ctx.spawn(self._render_later(self._render_token))
 
@@ -1715,7 +1830,7 @@ class EditorTab(MangaTab):
         import asyncio
 
         await asyncio.sleep(RENDER_DELAY)
-        if token != self._render_token or self.drag or self.busy or self._editing or not (self.live or self.holes):
+        if self._disposed or token != self._render_token or self.drag or self.busy or self._editing or not (self.live or self.holes):
             return
         await self._render_overlay()
 
@@ -1728,6 +1843,7 @@ class EditorTab(MangaTab):
         if self.live or self.holes:
             moved = sorted(index for index in self.live if 0 <= index < len(self.boxes))
         image_path, config = self.image_path, self.ctx.config_snapshot()
+        render_token = self._render_token
         self._overlay_rendering = True
         self.step_status.value = "Updating overlay…"
 
@@ -1747,20 +1863,31 @@ class EditorTab(MangaTab):
 
         try:
             self.refresh()
-            if not await self.ctx.io(render):
+            rendered = await self.ctx.io(render)
+            if self._disposed:
+                return
+            if not rendered:
                 self.step_status.value = "Could not render the overlay. Check that the page has translated text."
                 return
-            self.live.clear()
-            self.holes.clear()
-            await self._apply_snapshot(await self._snapshot())
-            if show_output and self.translated_view:
+            if render_token == self._render_token and not self.drag:
+                await self._apply_snapshot(await self._snapshot(), render_token=render_token)
+            if show_output and self.translated_view and render_token == self._render_token:
                 self.set_view("translated")
             self.step_status.value = "Overlay updated"
         except Exception as exc:
             self.step_status.value = f"Could not update the overlay: {exc}"
         finally:
+            # A background render holds the core's operation lock. Save only the newest
+            # positions once it releases it; never make a pointer event wait on that lock.
+            try:
+                await self._flush_geometry(editor)
+            except Exception as exc:
+                self.step_status.value = f"Could not save the latest box position: {exc}"
             self._overlay_rendering = False
-            self.refresh()
+            if not self._disposed:
+                self.refresh()
+            if render_token != self._render_token and not self._disposed and not self._deferred_geometry:
+                self._schedule_render()
 
     # ---- box actions ------------------------------------------------------------------------------------
 

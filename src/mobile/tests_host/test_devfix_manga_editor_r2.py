@@ -36,11 +36,11 @@ needs_real_core = pytest.mark.skipif(
     reason="flet or the shared manga editor core is not importable")
 
 
-def _open_screen(tmp_path, pages, *, jobs=None):
+def _open_screen(tmp_path, pages, *, jobs=None, platform="android"):
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.tools.manga.screen import MangaScreen
 
-    _conn, session = mu._tb()._fake_session("android")
+    _conn, session = mu._tb()._fake_session(platform)
     page = session.page
     ctx = mu._ctx(page, {}, jobs=jobs, files=mu.FakeFiles(), output_root=str(tmp_path / "Output"))
     manga = mu._session(tmp_path, {})
@@ -177,6 +177,227 @@ def _stub_renderer(monkeypatch, core):
 
     monkeypatch.setattr(core, "_render_with_manga_translator", render)
     return rendered
+
+
+@needs_flet_pil
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_release_remains_interactive_during_render_and_latest_move_wins(iso, tmp_path, monkeypatch, platform):
+    """A slow overlay must not remove touch targets or make release wait for the core's lock."""
+    import threading
+    from glossarion_mobile.ui.tools.manga import editor as me
+
+    pages = [mu.write_png(tmp_path / "in" / "1.png", 100, 200)]
+    translated = _color_png(tmp_path / "out" / "translated.png", BLUE, box=(10, 20, 40, 60), box_color=RED)
+    cleaned = _color_png(tmp_path / "out" / "cleaned.png", BLUE)
+    fake = _fake_editor(monkeypatch, tmp_path, pages)
+    entered, release = threading.Event(), threading.Event()
+    original_render = fake.rerender_boxes_locally
+
+    def slow_render(*args):
+        entered.set()
+        assert release.wait(10), "test did not release the renderer"
+        return original_render(*args)
+
+    monkeypatch.setattr(fake, "rerender_boxes_locally", slow_render)
+
+    async def scenario():
+        jobs = mu.FakeJobs()
+        ctx, manga, screen, tab = _open_screen(tmp_path, pages, jobs=jobs, platform=platform)
+        render_task = None
+        try:
+            await tab.open_page(0)
+            await _translated_page(tab, fake, pages[0], translated, cleaned)
+            old_image = tab.translated_view
+            tab.pan_start(30, 50)
+            tab.pan_update(35, 55)
+            old_strip = list(tab.strip.controls)
+            await tab.pan_end()
+            # A geometry save does not replace/redecode the page or rebuild its thumbnails.
+            assert tab.translated_view == old_image and tab.strip.controls == old_strip
+            tab._render_token += 1  # run the render now, not through the debounce timer
+            render_task = asyncio.create_task(tab._render_overlay())
+            for _ in range(500):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set() and tab._overlay_rendering
+            assert tab.hit_areas and tab._can_edit(geometry=True)
+            assert not tab._can_edit()  # destructive actions still wait for the renderer
+            updates_before = len([c for c in fake.calls if c[0] == "update_box"])
+            for start, end in [((35, 55), (40, 60)), ((40, 60), (45, 65))]:
+                tab.pan_start(*start)
+                assert tab.drag and tab.drag["mode"] == "move"
+                tab.pan_update(*end)
+                assert await asyncio.wait_for(tab.pan_end(), timeout=0.5) == 0
+            assert len([c for c in fake.calls if c[0] == "update_box"]) == updates_before
+            assert (tab.boxes[0]["x"], tab.boxes[0]["y"]) == (25, 35)
+            tab.pan_start(65, 95)  # the resize handle remains active too
+            assert tab.drag["mode"] == "resize"
+            tab.pan_update(70, 100)
+            assert await asyncio.wait_for(tab.pan_end(), timeout=0.5) == 0
+            assert tab._pulse_tokens and tab.hit_areas
+            pulse_widths = lambda: [s.paint.stroke_width for s in tab.canvas.shapes
+                                   if getattr(getattr(s, "paint", None), "color", None) == "#AA66FF"]
+            widths = pulse_widths()
+            assert widths and (5 in widths or 2 in widths)
+            for _ in range(40):  # the UI's pulse continues while the renderer is held
+                await asyncio.sleep(0.05)
+                if pulse_widths() != widths:
+                    break
+            assert pulse_widths() != widths
+            assert tab.translated_view == old_image and tab.live
+            release.set()
+            await asyncio.wait_for(render_task, timeout=3)
+            assert (fake.boxes[pages[0]][0]["x"], fake.boxes[pages[0]][0]["y"]) == (25, 35)
+            assert (fake.boxes[pages[0]][0]["width"], fake.boxes[pages[0]][0]["height"]) == (45, 65)
+            assert len([c for c in fake.calls if c[0] == "update_box"]) == updates_before + 1
+            assert tab.translated_view == old_image and tab.live  # stale render was not installed
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if not tab.live and not tab.busy:
+                    break
+            assert not tab.live and not tab.busy and not tab._deferred_geometry
+            assert (tab.boxes[0]["x"], tab.boxes[0]["y"]) == (25, 35)
+            assert not jobs.specs  # auto move renders are not jobs
+            await asyncio.sleep(1.0)
+            assert not tab._pulse_tokens
+        finally:
+            release.set()
+            if render_task is not None:
+                await render_task
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet_pil
+def test_move_during_display_preparation_cannot_install_an_old_render(iso, tmp_path, monkeypatch):
+    import threading
+    pages = [mu.write_png(tmp_path / "in" / "1.png", 100, 200)]
+    translated = _color_png(tmp_path / "out" / "translated.png", BLUE, box=(10, 20, 40, 60), box_color=RED)
+    cleaned = _color_png(tmp_path / "out" / "cleaned.png", BLUE)
+    fake = _fake_editor(monkeypatch, tmp_path, pages)
+    prepared, release = threading.Event(), threading.Event()
+
+    async def scenario():
+        ctx, manga, screen, tab = _open_screen(tmp_path, pages, jobs=mu.FakeJobs())
+        pending = None
+        try:
+            await tab.open_page(0)
+            await _translated_page(tab, fake, pages[0], translated, cleaned)
+            old_image = tab.translated_view
+            display = tab._display_translated
+
+            def slow_display(snap=None):
+                result = display(snap)
+                prepared.set()
+                assert release.wait(10)
+                return result
+
+            monkeypatch.setattr(tab, "_display_translated", slow_display)
+            fake.output_revision += 1
+            snap = fake.page_snapshot()
+            pending = asyncio.create_task(tab._apply_snapshot(snap, render_token=tab._render_token))
+            for _ in range(500):
+                if prepared.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert prepared.is_set()
+            assert Path(old_image).is_file()  # still needed for the next live ink crop
+            tab.pan_start(30, 50)
+            tab.pan_update(45, 65)
+            release.set()
+            await pending
+            assert tab.translated_view == old_image
+            assert (tab.boxes[0]["x"], tab.boxes[0]["y"]) == (25, 35)
+            assert tab.live and tab.drag
+        finally:
+            release.set()
+            if pending is not None:
+                await pending
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet_pil
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_a_slow_position_write_does_not_block_the_next_drag(iso, tmp_path, monkeypatch, platform):
+    import threading
+    pages = [mu.write_png(tmp_path / "in" / "1.png", 100, 200)]
+    fake = _fake_editor(monkeypatch, tmp_path, pages)
+    entered, release = threading.Event(), threading.Event()
+    update = fake.update_box
+
+    def slow_write(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return update(*args, **kwargs)
+
+    monkeypatch.setattr(fake, "update_box", slow_write)
+
+    async def scenario():
+        ctx, manga, screen, tab = _open_screen(tmp_path, pages, jobs=mu.FakeJobs(), platform=platform)
+        saving = None
+        try:
+            await tab.open_page(0)
+            tab._on_viewport_size(types.SimpleNamespace(width=100.0, height=300.0))
+            fake.add_box(10, 20, 40, 60)
+            await tab._apply_snapshot(await tab._snapshot())
+            tab.pan_start(30, 50)
+            tab.pan_update(35, 55)
+            saving = asyncio.create_task(tab.pan_end())
+            for _ in range(500):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set() and tab._geometry_saving
+            assert tab.hit_areas and tab._can_edit(geometry=True)
+            for start, end in [((35, 55), (40, 60)), ((40, 60), (45, 65))]:
+                tab.pan_start(*start)
+                assert tab.drag is not None
+                tab.pan_update(*end)
+                assert await asyncio.wait_for(tab.pan_end(), timeout=0.5) == 0
+            release.set()
+            assert await asyncio.wait_for(saving, timeout=3) == 0
+            assert not tab.busy and not tab._deferred_geometry
+            assert (fake.boxes[pages[0]][0]["x"], fake.boxes[pages[0]][0]["y"]) == (25, 35)
+            assert (tab.boxes[0]["x"], tab.boxes[0]["y"]) == (25, 35)
+            assert len([c for c in fake.calls if c[0] == "update_box"]) == 2  # initial write + latest
+        finally:
+            release.set()
+            if saving is not None:
+                await saving
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet_pil
+@pytest.mark.parametrize("output_scale", [1, 2])
+def test_live_move_patch_contains_ink_without_the_rectangular_artwork(tmp_path, output_scale):
+    from PIL import Image, ImageDraw
+    from glossarion_mobile.ui.tools.manga.editor import crop_patches
+
+    # A patterned panel behind a text glyph must stay on the page, not follow the glyph.
+    base = Image.new("RGB", (100, 200), "white")
+    draw = ImageDraw.Draw(base)
+    for x in range(0, 100, 4):
+        draw.line((x, 0, x, 199), fill=(100, 100, 100))
+    cleaned = tmp_path / "cleaned.png"
+    base.save(cleaned)
+    rendered = base.resize((100 * output_scale, 200 * output_scale))
+    ImageDraw.Draw(rendered).rectangle((25 * output_scale, 35 * output_scale,
+                                      30 * output_scale, 50 * output_scale), fill="black")
+    translated = tmp_path / "translated.png"
+    rendered.save(translated)
+    text, hole = crop_patches(str(translated), str(cleaned), (10, 20, 40, 60), (100, 200))
+    with Image.open(io.BytesIO(text)) as ink, Image.open(io.BytesIO(hole)) as patch:
+        assert ink.mode == "RGBA"
+        assert ink.getpixel((17 * output_scale, 20 * output_scale)) == (0, 0, 0, 255)
+        assert ink.getpixel((5 * output_scale, 5 * output_scale))[3] == 0
+        assert ink.getpixel((10 * output_scale, 5 * output_scale))[3] == 0
+        assert patch.convert("RGB").tobytes() == base.crop((10, 20, 50, 80)).tobytes()
 
 
 @needs_real_core

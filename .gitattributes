@@ -1,4 +1,6 @@
 # Shell scripts must keep LF endings so CI runners and WSL can execute them.
 *.sh text eol=lf
+# Native wheel patches are consumed by Unix patch tools and byte-checked in tests.
+*.patch text eol=lf
 # The oracle loader verifies the exact bytes of this reviewed manifest.
 tests/parity/oracle_manifest.json text eol=lf

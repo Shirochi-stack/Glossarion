@@ -297,6 +297,9 @@ def fake_auth(tmp_path):
         "authcd": FakeAuthModule("authcd", token_dir),
         "authgem": FakeAuthModule("authgem", token_dir),
         "authgrok": FakeDeviceModule(token_dir),
+        # Keep every supported provider in the fixture: sign-out-everywhere must
+        # never import a real provider or inspect the developer's saved accounts.
+        "authnan": FakeAuthModule("authnan", token_dir),
     }
     opener = Opener()
     bridge = OAuthBridge(auth_modules=modules, opener=opener, timeout=5, safe_root=str(tmp_path / "home"))

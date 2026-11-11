@@ -1975,7 +1975,7 @@ def editor_session(token: Optional[str]) -> Any:
         return _EDITOR_SESSIONS.get(str(token or ""))
 
 
-def display_copy(path: Optional[str], revision: int, cache_dir: str) -> str:
+def display_copy(path: Optional[str], revision: int, cache_dir: str, *, keep_paths: tuple = ()) -> str:
     """A versioned copy of a rendered page for display (``page_<id>_v3.png``): the editor rewrites
     the same output file on every render, and Flet's ``Image`` cache would keep showing the first
     one. Older copies of the same page are removed. Blocking (io pool)."""
@@ -2001,7 +2001,7 @@ def display_copy(path: Optional[str], revision: int, cache_dir: str) -> str:
     prefix = f"{stem}_{key}_v"
     for name in os.listdir(cache_dir):
         full = os.path.join(cache_dir, name)
-        if name.startswith(prefix) and full != target:
+        if name.startswith(prefix) and full != target and full not in keep_paths:
             try:
                 os.remove(full)
             except OSError:
