@@ -211,6 +211,15 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(workflow["env"]["IOS_SIMULATOR_SMOKE_POLICY"], "required")
         self.assertEqual(workflow["env"]["ANDROID_UI_TESTS_POLICY"], "optional")
 
+    def test_mobile_rebuild_input_is_bounded_and_forwarded(self):
+        value = self.inputs["rebuild"]
+        self.assertEqual(value["default"], "0")
+        self.assertEqual(self.config["variables"]["GLOSSARION_REBUILD"], "$[[ inputs.rebuild ]]")
+        for counter in ("0", "1", "2", "99"):
+            self.assertIsNotNone(re.fullmatch(value["regex"], counter))
+        for counter in ("-1", "100", "2.5", "2\n", ""):
+            self.assertIsNone(re.fullmatch(value["regex"], counter))
+
     def test_every_selection_has_complete_dependency_graph(self):
         jobs = {name: job for name, job in self.config.items() if isinstance(job, dict) and "script" in job}
         cases = [(task, "all", "true", "auto", "auto") for task in self.inputs["task"]["options"]]

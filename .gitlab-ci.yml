@@ -1,6 +1,10 @@
 # Main/MR checks; release creation dispatches Linux/mobile once.
 spec:
   inputs:
+    rebuild:
+      default: '0'
+      regex: '^(0|[1-9][0-9]?)$'
+      description: Same-version mobile rebuild counter (0-99; hotfix2 = 2).
     task:
       default: source-check
       options:
@@ -155,6 +159,7 @@ variables:
   GIT_DEPTH: '0'
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
+  GLOSSARION_REBUILD: $[[ inputs.rebuild ]]
   GLOSSARION_TASK: $[[ inputs.task ]]
   GLOSSARION_PUBLISH: $[[ inputs.publish ]]
   GLOSSARION_SIGNING_APPROVED: $[[ inputs.signing_approved ]]
