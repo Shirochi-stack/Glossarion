@@ -823,7 +823,8 @@ def _device_conftest():
     ("topResumedActivity=ActivityRecord{1 u0 com.glossarion.app/.MainActivity}", False),
     ("topResumedActivity=ActivityRecord{1 u0 com.android.settings/.Settings}", False),
 ])
-def test_device_permissions_unblock_native_swipes_without_closing_app(monkeypatch, activity, close_request):
+@pytest.mark.parametrize("emulator", [True, False])
+def test_device_permissions_unblock_native_swipes_without_closing_app(monkeypatch, activity, close_request, emulator):
     from android_device import Adb
 
     calls = []
@@ -831,6 +832,8 @@ def test_device_permissions_unblock_native_swipes_without_closing_app(monkeypatc
 
     def shell(command, **kwargs):
         calls.append(command)
+        if command == "getprop ro.kernel.qemu":
+            return "1\n" if emulator else "0\n"
         return activity if command.startswith("dumpsys activity activities") else ""
 
     monkeypatch.setattr(device, "shell", shell)
@@ -840,6 +843,8 @@ def test_device_permissions_unblock_native_swipes_without_closing_app(monkeypatc
         "dumpsys deviceidle whitelist +com.glossarion.app",
     ]
     assert ("input keyevent KEYCODE_BACK" in calls) == close_request
+    stops = [command for command in calls if command.startswith("am force-stop")]
+    assert stops == (["am force-stop com.google.android.apps.nexuslauncher"] if emulator else [])
 
 
 def test_device_conftest_patches_the_driver_and_starts_fresh(tmp_path, monkeypatch):

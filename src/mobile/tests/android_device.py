@@ -83,7 +83,10 @@ class Adb:
         Flet's widget tester can keep tapping the app behind a system dialog, but adb
         gestures cannot. Match the release smoke test's battery exemption, and close
         only an already-open battery request (never an arbitrary foreground screen).
-        This runs after each fresh test install, before the navigation flow.
+        This runs after each fresh test install, before the navigation flow. The
+        CI emulator's Pixel Launcher can also leave its own ANR dialog over the
+        test app after install/uninstall; stop that unrelated launcher on emulators
+        only. Never dismiss or suppress a Glossarion ANR.
         """
         self.shell(f"pm grant {package} android.permission.POST_NOTIFICATIONS", check=False)
         self.shell(f"dumpsys deviceidle whitelist +{package}")
@@ -91,6 +94,8 @@ class Adb:
                               check=False)
         if "com.android.settings/" in activity and "RequestIgnoreBatteryOptimizations" in activity:
             self.key("KEYCODE_BACK")
+        if self.shell("getprop ro.kernel.qemu", check=False).strip() == "1":
+            self.shell("am force-stop com.google.android.apps.nexuslauncher")
 
     def tap_xy(self, x: int, y: int) -> None:
         self.shell(f"input tap {x} {y}", check=False)
