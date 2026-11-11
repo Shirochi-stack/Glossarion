@@ -77,6 +77,21 @@ class Adb:
     def key(self, code: str) -> None:
         self.shell(f"input keyevent {code}", check=False)
 
+    def prepare_app_permissions(self, package: str) -> None:
+        """Keep Android permission activities from swallowing the test's real swipes.
+
+        Flet's widget tester can keep tapping the app behind a system dialog, but adb
+        gestures cannot. Match the release smoke test's battery exemption, and close
+        only an already-open battery request (never an arbitrary foreground screen).
+        This runs after each fresh test install, before the navigation flow.
+        """
+        self.shell(f"pm grant {package} android.permission.POST_NOTIFICATIONS", check=False)
+        self.shell(f"dumpsys deviceidle whitelist +{package}")
+        activity = self.shell("dumpsys activity activities | grep -m 1 -E 'topResumedActivity|mResumedActivity'",
+                              check=False)
+        if "com.android.settings/" in activity and "RequestIgnoreBatteryOptimizations" in activity:
+            self.key("KEYCODE_BACK")
+
     def tap_xy(self, x: int, y: int) -> None:
         self.shell(f"input tap {x} {y}", check=False)
 

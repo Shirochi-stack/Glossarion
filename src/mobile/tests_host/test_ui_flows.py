@@ -818,6 +818,30 @@ def _device_conftest():
     return module
 
 
+@pytest.mark.parametrize("activity,close_request", [
+    ("topResumedActivity=ActivityRecord{1 u0 com.android.settings/.fuelgauge.RequestIgnoreBatteryOptimizations}", True),
+    ("topResumedActivity=ActivityRecord{1 u0 com.glossarion.app/.MainActivity}", False),
+    ("topResumedActivity=ActivityRecord{1 u0 com.android.settings/.Settings}", False),
+])
+def test_device_permissions_unblock_native_swipes_without_closing_app(monkeypatch, activity, close_request):
+    from android_device import Adb
+
+    calls = []
+    device = Adb(adb="unused-test-adb")
+
+    def shell(command, **kwargs):
+        calls.append(command)
+        return activity if command.startswith("dumpsys activity activities") else ""
+
+    monkeypatch.setattr(device, "shell", shell)
+    device.prepare_app_permissions("com.glossarion.app")
+    assert calls[:2] == [
+        "pm grant com.glossarion.app android.permission.POST_NOTIFICATIONS",
+        "dumpsys deviceidle whitelist +com.glossarion.app",
+    ]
+    assert ("input keyevent KEYCODE_BACK" in calls) == close_request
+
+
 def test_device_conftest_patches_the_driver_and_starts_fresh(tmp_path, monkeypatch):
     """``pytest_configure`` of src/mobile/tests: on a `flet test android` run only, the provisioned
     driver is patched before any ``flutter test`` starts and a leftover app is uninstalled (every

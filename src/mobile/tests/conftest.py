@@ -111,9 +111,9 @@ def ui(flet_app, device, request):
         # off the event loop, like scroll(): the RemoteTester socket keeps being served while adb runs
         await asyncio.to_thread(device.key, "KEYCODE_BACK")
 
-    # The app asks for the notification permission before its first job (a system dialog the
-    # Flutter tester cannot answer): grant it up front, as android_smoke.sh installs with -g.
-    device.shell(f"pm grant {_package()} android.permission.POST_NOTIFICATIONS", check=False)
+    # WidgetTester taps bypass native dialogs, but adb swipes do not. Prepare both
+    # notification and battery permissions on every fresh install, like the APK smoke test.
+    device.prepare_app_permissions(_package())
 
     async def scroll() -> None:
         # a real swipe (the patched driver lets it through); off the event loop, so the
