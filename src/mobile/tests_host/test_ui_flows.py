@@ -191,7 +191,8 @@ def test_smoke_navigation_and_selftest_flows(app_env, first_run):
 
 @needs_flet
 @pytest.mark.skipif(not (_has("ebooklib") and _has("openai") and _has("tiktoken")), reason="backend packages missing")
-def test_chat_epub_migrate_library_flow(app_env, tmp_path, monkeypatch):
+@pytest.mark.parametrize("status_offscreen", [False, True], ids=["status-visible", "status-outside-lazy-viewport"])
+def test_chat_epub_migrate_library_flow(app_env, tmp_path, monkeypatch, status_offscreen):
     import shutil
 
     import flows
@@ -212,6 +213,15 @@ def test_chat_epub_migrate_library_flow(app_env, tmp_path, monkeypatch):
         app, tester, driver = await _host_driver(tf, {flows.CONFIG_NAME: config, flows.EPUB_NAME: epub},
                                                  width=DEVICE_WIDTH, tester_cls=_scanning_tester())
         try:
+            if status_offscreen:
+                # Flutter omits the status row above the viewport after the
+                # expanded result card scrolls to its bottom on a small phone.
+                count = driver.count
+
+                async def viewport_count(**spec):
+                    return 0 if spec == {"text": "Done"} else await count(**spec)
+
+                driver.count = viewport_count
             await flows.wait_home(driver)
             await flows.import_desktop_config(driver)
             assert app.config_store.get("openai_base_url") == server.url

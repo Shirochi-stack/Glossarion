@@ -191,8 +191,13 @@ async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: flo
     # would follow "Continue"); "Not now" starts the job without it.
     if await d.exists(text="Keep translations running", timeout=15):
         await d.tap(text="Not now")
-    index = await d.wait_any({"text": "Done"}, {"text": "Failed"}, {"text": "Stopped"}, timeout=timeout)
-    assert index == 0, "the translation job did not finish"
+    # Chat follows the bottom of the result card. At 320 dp its terminal status
+    # is above the lazy viewport, while the auto-migrated book action is visible.
+    # Either success signal is valid; library_book_chapters still checks the
+    # Completed shelf and zero untranslated/failed chapters, not just a button.
+    index = await d.wait_any({"text": "Done"}, {"text": "Open in Library"},
+                             {"text": "Failed"}, {"text": "Stopped"}, timeout=timeout)
+    assert index < 2, "the translation job did not finish"
     await d.wait(text="Open in Library", timeout=60)  # no "Added to the Library" snackbar (owner 2026-10-20)
 
 
