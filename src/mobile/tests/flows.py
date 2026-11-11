@@ -221,4 +221,5 @@ async def library_book_chapters(d: Any, title: str = EPUB_TITLE) -> None:
     await d.wait(key="ch-stats", timeout=60)
     await d.wait(contains="Not Translated 0", timeout=60)
     await d.wait(contains="Failed 0", timeout=30)
-    await d.wait(contains="Ch.001", timeout=30)
+    # Metadata, TOC and headers fill the small phone's chapter viewport first.
+    await d.wait(contains="Ch.001", timeout=30, scroll=True)

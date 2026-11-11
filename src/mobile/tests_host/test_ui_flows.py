@@ -222,6 +222,24 @@ def test_chat_epub_migrate_library_flow(app_env, tmp_path, monkeypatch, status_o
                     return 0 if spec == {"text": "Done"} else await count(**spec)
 
                 driver.count = viewport_count
+                find = driver.find
+                chapter_scrolled = False
+                chapter_waiting = False
+
+                async def viewport_find(**spec):
+                    nonlocal chapter_waiting
+                    if spec == {"contains": "Ch.001"} and not chapter_scrolled:
+                        chapter_waiting = True
+                        return await find(text="first chapter below the viewport")
+                    return await find(**spec)
+
+                async def scroll_chapters():
+                    nonlocal chapter_scrolled
+                    if chapter_waiting:
+                        chapter_scrolled = True
+
+                driver.find = viewport_find
+                driver._scroll = scroll_chapters
             await flows.wait_home(driver)
             await flows.import_desktop_config(driver)
             assert app.config_store.get("openai_base_url") == server.url
@@ -235,6 +253,8 @@ def test_chat_epub_migrate_library_flow(app_env, tmp_path, monkeypatch, status_o
             assert any(Path(m[4]).name == stem for m in chats.messages(cid) if m[0] == "assistant" and len(m) > 4
                        and m[4] and "Attachments" not in Path(m[4]).parts)
             await flows.library_book_chapters(driver)
+            if status_offscreen:
+                assert chapter_scrolled, "the first chapter must be scrolled into view on a small phone"
             assert tester.unflexed == {}, f"Row texts that overflow instead of ellipsizing: {tester.unflexed}"
             if os.environ.get("GLOSSARION_UI_DUMP"):
                 for row in tester.dump(600):
