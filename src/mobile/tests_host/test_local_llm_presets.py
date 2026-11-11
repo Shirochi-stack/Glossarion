@@ -40,7 +40,7 @@ def test_edit_rename_remove_restore_persist_in_prefs():
     presets.save_presets(prefs, [])
     assert presets.load_presets(prefs) == []  # an empty saved list wins over the defaults
     presets.restore_defaults(prefs)
-    assert [r["name"] for r in presets.load_presets(prefs)] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
+    assert [r["name"] for r in presets.load_presets(prefs)] == ["Garbage", "Light", "Medium", "Sigma"]
     garbage = [{"name": "", "repo": "x/y"}, "nope", {"name": "a", "repo": ""}, {"name": "ok", "repo": "a/b", "n_ctx": 5}]
     assert presets.save_presets(prefs, garbage) == [
         {"name": "ok", "repo": "a/b", "file": "", "quant": "", "note": "", "n_ctx": 0}]

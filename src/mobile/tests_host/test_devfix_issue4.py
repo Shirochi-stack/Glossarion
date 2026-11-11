@@ -402,7 +402,7 @@ def test_chat_book_joins_the_library_without_a_tap(iso, migrate_calls):
                 [c.action_reasons for c in _job_cards(view)]
             card = next(c for c in _job_cards(view) if c.action_reasons.get("library", "?") is None)
             assert "migrate" not in card.action_buttons and "library" in card.action_buttons
-            assert "migrate_job" in card.action_buttons
+            assert "migrate_job" not in card.action_buttons
             assert not _no_migrate_words(_texts(tester)), _no_migrate_words(_texts(tester))
             found = await driver.find(text="Open in Library")
             assert found.count >= 1

@@ -132,6 +132,67 @@ def test_sigma_quant_selection_persists_and_reopens_on_next_tap(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("saved_file,expected", [
+    ("gguf/sft3-Q4_K_M.gguf", "gguf/sft3-Q4_K_M.gguf"),
+    (presets.SIGMA_Q8_FILE, presets.SIGMA_Q8_FILE),
+    ("gguf/removed.gguf", presets.SIGMA_Q8_FILE),
+])
+def test_sigma_saved_quant_wins_over_ram_suggestion_and_cancel_keeps_it(tmp_path, saved_file, expected):
+    from glossarion_mobile.ui.screens.local_models_panel import OnDeviceFlow
+    service = make_service(tmp_path)
+    rows = presets.load_presets(service.prefs)
+    rows[3].update(name="Sigma (Best)", file=saved_file, n_ctx=8192)
+    presets.save_presets(service.prefs, rows)
+    q4 = hf.HfFile("gguf/sft3-Q4_K_M.gguf", 5302273856)
+    q8 = hf.HfFile(presets.SIGMA_Q8_FILE, 7972726592)
+    async def resolve(ref):
+        return hf.RepoFiles("main", (q4, q8), ())
+    service.resolve = resolve
+    async def choose(repo, files, selected):
+        assert selected.path == expected
+        return None
+    flow = OnDeviceFlow(service=service, prefs=service.prefs, choose=choose)
+    assert asyncio.run(flow.get_preset(3)) is None
+    saved = presets.load_presets(service.prefs)[3]
+    assert saved["name"] == "Sigma" and saved["file"] == saved_file and saved["n_ctx"] == 8192
+    assert not service.downloads.states
+
+
+def test_sigma_picker_marks_only_present_files_installed(tmp_path):
+    from types import SimpleNamespace
+    from glossarion_mobile.ui.screens.local_models_panel import OnDeviceFlow
+    service = make_service(tmp_path)
+    Path(service.registry.file_path("sigma-q4")).unlink()
+    q4 = hf.HfFile("gguf/sft3-Q4_K_M.gguf", 5302273856)
+    q8 = hf.HfFile(presets.SIGMA_Q8_FILE, 7972726592)
+    async def scenario():
+        flow = OnDeviceFlow(service=service, prefs=service.prefs,
+                            page=SimpleNamespace(width=400, height=800, show_dialog=lambda dialog: None))
+        task = asyncio.create_task(flow.choose(presets.SIGMA_REPO, [q4, q8], q4))
+        await asyncio.sleep(0)
+        chooser = flow.last_dialog
+        assert chooser.group.value == q4.path
+        assert "Installed" not in chooser.group.content.controls[0].subtitle.value
+        assert "Installed" in chooser.group.content.controls[1].subtitle.value
+        assert "Recommended" in chooser.group.content.controls[1].subtitle.value
+        assert chooser.title.value == "Sigma · choose a quant"
+        chooser.pick(None)
+        assert await task is None
+    asyncio.run(scenario())
+
+
+def test_sigma_welcome_shows_installed_without_best(tmp_path):
+    from test_welcome_drawer_compact import _engine_kwargs, screen, by_key
+    kwargs, service, _engine = _engine_kwargs(tmp_path)
+    Path(service.registry.root).mkdir(parents=True, exist_ok=True)
+    Path(service.registry.file_path("sigma-q8")).write_bytes(b"GGUF")
+    service.registry.add("sigma-q8", {"repo": presets.SIGMA_REPO, "file": presets.SIGMA_Q8_FILE})
+    view = screen(**kwargs)
+    cell = by_key(view.page_area.content)["welcome-ondevice-sigma"]
+    assert [line.value for line in cell.content.controls] == ["Sigma", "Installed"]
+    view.dispose()
+
+
 def test_switching_sigma_q8_restores_prompts_and_temperature(tmp_path, monkeypatch):
     from test_on_device_profiles import _store, _existing_config
     service = make_service(tmp_path)

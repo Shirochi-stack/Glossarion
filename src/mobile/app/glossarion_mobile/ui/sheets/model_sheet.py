@@ -1005,7 +1005,7 @@ class ModelSheet:
         stem = flow.stem_of_preset(preset)
         state, status = flow.row_state(preset, stem)
         loading = state in ("use", "in_use") and flow.preset_key(preset) in flow.busy
-        choose_sigma = (lp.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma (Best)"
+        choose_sigma = (lp.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma"
                         and state in ("download", "use", "in_use") and not loading)
         download = flow.active_download(stem)
         target = download.stem if download is not None else stem

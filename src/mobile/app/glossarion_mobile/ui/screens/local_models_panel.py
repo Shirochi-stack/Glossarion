@@ -240,10 +240,12 @@ class FileChooser:
     the automatic choice, is preselected and marked "Recommended"), Cancel / Next under the list (pinned
     when the list scrolls); ``future`` gets the HfFile or None."""
 
-    def __init__(self, repo: str, files: list, selected: Optional[hf.HfFile] = None) -> None:
+    def __init__(self, repo: str, files: list, selected: Optional[hf.HfFile] = None,
+                 *, installed: Optional[set[str]] = None) -> None:
         self.future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._page: Any = None
         self.files = list(files)
+        self.installed = set(installed or ())
         self.selected = selected if selected in self.files else None
         self.sigma = presets.is_sigma(repo)
         self.recommended = next((f for f in self.files if f.path == presets.SIGMA_Q8_FILE), None) \
@@ -254,7 +256,7 @@ class FileChooser:
             key="local-file-group")
         self.next_button = ft.FilledButton(content="Next", disabled=self.selected is None, key="local-file-next",
                                            on_click=lambda e: self.pick(self.chosen()))
-        self.title = ft.Text("Sigma (Best) · choose a quant" if self.sigma else f"Choose a file of {repo}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
+        self.title = ft.Text("Sigma · choose a quant" if self.sigma else f"Choose a file of {repo}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
                              weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
         self.actions = ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.pick(None)), self.next_button],
                               alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8)
@@ -263,10 +265,15 @@ class FileChooser:
 
     def _row(self, index: int, file: hf.HfFile) -> ft.ListTile:
         size = dl.format_bytes(file.size)
+        labels = [size]
+        if file.path in self.installed:
+            labels.append("Installed")
+        if file is self.recommended:
+            labels.append("Recommended")
         return ft.ListTile(leading=ft.Radio(value=file.path, key=f"local-file-radio-{index}"),
                            title=ft.Text(presets.quant_label(file.path) if self.sigma or presets.is_no_quant(file.path)
                                          else file.name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                           subtitle=ft.Text(f"{size} · Recommended" if file is self.recommended else size),
+                           subtitle=ft.Text(" · ".join(labels)),
                            dense=True, key=f"local-file-{index}", on_click=lambda e, f=file: self.select(f.path))
 
     def _body(self, *, compact: bool) -> ft.Column:
@@ -641,7 +648,9 @@ class OnDeviceFlow:
             return await result if asyncio.iscoroutine(result) else result
         if self.page is None:
             return selected
-        chooser = FileChooser(repo, files, selected)
+        installed = {entry.get("file") for entry in self.service.registry.load().values()
+                     if str(entry.get("repo", "")).casefold() == repo.casefold()}
+        chooser = FileChooser(repo, files, selected, installed=installed)
         self.last_dialog = chooser
         chooser.show(self.page)
         return await chooser.future
@@ -679,6 +688,12 @@ class OnDeviceFlow:
                     q8 = next((f for f in runnable if f.path == presets.SIGMA_Q8_FILE), None)
                     if q8 and self.service.preset_ram_check({**presets.SIGMA_PRESET, "size": q8.size})[0] == "ok":
                         default = q8
+                    # A previous explicit choice takes precedence over the first-use RAM suggestion.
+                    saved_file = (preset or {}).get("file")
+                    if not saved_file:
+                        saved_file = next((p.get("file") for p in self.presets()
+                                           if presets.is_sigma(p.get("repo")) and p.get("name") == "Sigma"), None)
+                    default = next((f for f in runnable if f.path == saved_file), default)
                 file = default if len(runnable) == 1 else await self.choose(ref.repo, runnable, default)
                 if file is None:
                     return None
@@ -721,10 +736,10 @@ class OnDeviceFlow:
                 self.say(f"Image support was not downloaded ({state.error}); the model still works for text")
             elif not state.done:
                 return None
-        if preset is not None and presets.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma (Best)":
+        if preset is not None and presets.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma":
             rows = self.presets()
             for row in rows:
-                if row["name"] == "Sigma (Best)" and presets.is_sigma(row["repo"]):
+                if row["name"] == "Sigma" and presets.is_sigma(row["repo"]):
                     row.update(file=file.path, quant="", size=file.size, sha256=file.sha256 or "")
             presets.save_presets(self.prefs, rows)
         return stem
@@ -838,7 +853,7 @@ class OnDeviceFlow:
         self.errors.pop(key, None)
         self.render()
         try:
-            sigma = presets.is_sigma(preset["repo"]) and preset["name"] == "Sigma (Best)"
+            sigma = presets.is_sigma(preset["repo"]) and preset["name"] == "Sigma"
             stem = self.stem_of_preset(preset)
             if sigma or not stem or self.service.registry.resolve(stem) is None:
                 if stem and self.downloads.running(stem):
@@ -1492,7 +1507,7 @@ class LocalModelsPanel(OnDeviceFlow):
         key = f"local-preset-action-{index}"
         rows = self.presets()
         if (state in ("download", "use", "in_use") and 0 <= index < len(rows)
-                and presets.is_sigma(rows[index].get("repo")) and rows[index].get("name") == "Sigma (Best)"):
+                and presets.is_sigma(rows[index].get("repo")) and rows[index].get("name") == "Sigma"):
             return ft.FilledTonalButton(content="Choose quant", icon=ft.Icons.TUNE, key=key,
                                         on_click=lambda e, i=index: self.spawn(self.get_preset(i)))
         if state == "downloading" and stem:

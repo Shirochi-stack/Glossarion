@@ -111,7 +111,7 @@ def test_the_table_has_the_four_families_and_real_looking_refs():
     assert presets.custom_size_for("UNSLOTH/qwen3.5-2b-gguf") == (QWEN, TWO_B)
     assert presets.custom_size_for("me/other") is None and presets.custom_family("nope") is None
     # the defaults stay the first-run data
-    assert [p["name"] for p in presets.DEFAULT_PRESETS] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
+    assert [p["name"] for p in presets.DEFAULT_PRESETS] == ["Garbage", "Light", "Medium", "Sigma"]
 
 
 @pytest.mark.parametrize("file,label,no_quant", [
@@ -328,7 +328,7 @@ def test_choosing_a_quant_downloads_it_as_an_ordinary_row_with_image_support(tmp
         row = presets.load_presets(prefs)[-1]
         assert row["name"] == "Qwen 3.5 2B · Q4_0" and row["repo"] == REPO and row["file"] == Q4_0
         assert row["mmproj"] == "mmproj-F16.gguf" and row["size"] == 4096 and row["mmproj_size"] == 1024
-        assert [p["name"] for p in presets.load_presets(prefs)][:4] == ["Garbage", "Light", "Medium", "Sigma (Best)"]
+        assert [p["name"] for p in presets.load_presets(prefs)][:4] == ["Garbage", "Light", "Medium", "Sigma"]
         stem = flow.stem_of_preset(row)
         assert service.registry.resolve(stem) and used == [f"local/{stem}"] and after == used
         assert flow.row_state(row, stem)[0] == "use" and flow.is_vision_preset(row, stem)
@@ -412,7 +412,7 @@ def test_downloaded_rows_stay_and_the_others_go(tmp_path):
     _download(service, "garbage-gpu", old[0])
     flow = lmp.OnDeviceFlow(service=service, prefs=prefs)
     rows = flow.presets()
-    assert [r["name"] for r in rows] == ["Garbage", "Light", "Medium", "Sigma (Best)", "Garbage · GPU (Q4_0)", "Mine", "My Heavy"]
+    assert [r["name"] for r in rows] == ["Garbage", "Light", "Medium", "Sigma", "Garbage · GPU (Q4_0)", "Mine", "My Heavy"]
     kept = rows[4]
     assert kept["n_ctx"] == 12288 and flow.row_state(kept, flow.stem_of_preset(kept))[0] == "use"
     assert service.context_for("garbage-gpu") == 12288

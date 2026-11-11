@@ -341,6 +341,8 @@ class WelcomeScreen(Screen):
             # tapping a downloading cell offers to cancel it (use_ondevice)
             detail = (f"{download.percent}% · ✕" if download.phase == "downloading"
                       else ONDEVICE_LABELS["checking"])
+        elif state == "use" and lp.is_sigma(preset.get("repo")):
+            detail = "Installed"
         elif state in ONDEVICE_LABELS:
             detail = ONDEVICE_LABELS[state]
         else:
@@ -354,7 +356,7 @@ class WelcomeScreen(Screen):
         tooltip = " · ".join(x for x in (str(preset.get("name") or "") if gpu else "", str(preset.get("note") or ""),
                                          words if state == "download" else status) if x)
         lines: list[ft.Control] = [
-            ft.Text("Sigma\n(Best)" if lp.is_sigma(preset.get("repo")) and name == "Sigma (Best)" else name,
+            ft.Text(name,
                     theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=2 if gpu or lp.is_sigma(preset.get("repo")) else 1,
                     overflow=ft.TextOverflow.ELLIPSIS, size=ONDEVICE_GPU_NAME_SIZE if gpu else None),
             ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,

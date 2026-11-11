@@ -403,20 +403,20 @@ def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path)
     assert "Run on this phone (no account needed)" in texts
     assert "authchatgpt/ and authnd/: no sign-in" not in texts
     cells = {k: rows[k] for k in ("welcome-ondevice-garbage", "welcome-ondevice-light", "welcome-ondevice-medium",
-                                "welcome-ondevice-sigma--best")}
+                                "welcome-ondevice-sigma")}
     lines = {k: [t.value for t in c.content.controls if isinstance(t, ft.Text)] for k, c in cells.items()}
     # the model alone (image support downloads on the first image); the engine's RAM gate on a 6 GB phone with 3 GB free
     assert lines["welcome-ondevice-garbage"] == ["Garbage", "559 MB ✓"]
     assert lines["welcome-ondevice-light"] == ["Light ⭐", "1.3 GB ⚠"]
     assert lines["welcome-ondevice-medium"] == ["Medium", "2.9 GB ⚠"]
-    assert lines["welcome-ondevice-sigma--best"] == ["Sigma\n(Best)", "Quants"]
+    assert lines["welcome-ondevice-sigma"] == ["Sigma", "Quants"]
     assert "Android may close Glossarion" in cells["welcome-ondevice-medium"].tooltip
-    assert "Q8_0 recommended" in cells["welcome-ondevice-sigma--best"].tooltip
+    assert "Q8_0 recommended" in cells["welcome-ondevice-sigma"].tooltip
     # a 2 GB phone: Light does not fit, the biggest preset that does is suggested instead
     kwargs, _service, _engine = _engine_kwargs(tmp_path / "small", total=2 * 1024 ** 3, available=1536 * 1024 ** 2)
     small = screen(**kwargs)
     names = [c.content.controls[0].value for c in by_key(small.page_area.content)["welcome-ondevice"].controls]
-    assert names == ["Garbage", "Light", "Medium", "Sigma\n(Best)", "Qwen 3.5", "Llama", "Gemma", "LFM2"]
+    assert names == ["Garbage", "Light", "Medium", "Sigma", "Qwen 3.5", "Llama", "Gemma", "LFM2"]
 
 
 def test_page_one_on_device_without_an_engine_points_to_the_model_manager():

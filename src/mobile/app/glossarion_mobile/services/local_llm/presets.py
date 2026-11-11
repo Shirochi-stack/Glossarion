@@ -35,7 +35,7 @@ MAX_CTX = 262144
 DEFAULT_CONTEXT = 24576
 SIGMA_REPO = "sigma6196/e4b-ko-en-novel-translator-sft3"
 SIGMA_Q8_FILE = "gguf/sft3-Q8_0.gguf"
-SIGMA_PRESET = {"name": "Sigma (Best)", "repo": SIGMA_REPO, "file": "", "quant": "",
+SIGMA_PRESET = {"name": "Sigma", "repo": SIGMA_REPO, "file": "", "quant": "",
                 "note": "Korean → English novels · choose a quant · Q8_0 recommended", "n_ctx": 0}
 
 
@@ -201,7 +201,11 @@ def load_presets(prefs: Any) -> list:
         return _defaults()
     rows = [row for row in (_clean(r) for r in saved) if row is not None]
     migrated = False
+    renamed = False
     for row in rows:
+        if is_sigma(row["repo"]) and row["name"] == "Sigma (Best)":
+            row["name"] = "Sigma"
+            renamed = True
         if row["repo"].casefold() == "unsloth/qwen3.5-9b-gguf" and (
                 row["name"] == "Heavy" or row["name"].startswith("Heavy · GPU (Q4_0)")):
             row["name"] = f"Qwen 3.5 9B · {quant_label(row['file'])}"
@@ -210,6 +214,8 @@ def load_presets(prefs: Any) -> list:
     if migrated:
         if len(rows) < MAX_PRESETS and not any(is_sigma(row["repo"]) for row in rows):
             rows.insert(3 if len(rows) >= 3 else len(rows), copy.deepcopy(SIGMA_PRESET))
+        return save_presets(prefs, rows)
+    if renamed:
         return save_presets(prefs, rows)
     return rows
 
