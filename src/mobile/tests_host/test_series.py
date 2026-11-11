@@ -669,7 +669,7 @@ def test_series_feature_end_to_end(tmp_path):
     screen.get_body()
     keys = [getattr(c, "key", "") for c in screen.holder.controls]
     books_card = screen.holder.controls[3]
-    assert len(books_card.content.controls) == 4                  # title, the 2 book rows, Open Library
+    assert len(books_card.content.content.controls) == 4          # Material card > padding > title, 2 books, Open Library
     assert [k.rsplit("-", 1)[0] for k in keys] == ["series-header", "series-defaults", "series-glossary",
                                                    "series-books", "series-chats"]
     assert defaults_summary(feature.store.defaults(saga.id)) == [("Model", "series-model")]

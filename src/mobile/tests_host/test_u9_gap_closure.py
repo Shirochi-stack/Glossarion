@@ -331,7 +331,7 @@ def test_notifications_page_is_shipped_and_requests_permissions():
     from glossarion_mobile.services.background import PREF_KEEP_SCREEN_ON
 
     assert prefs[PREF_KEEP_SCREEN_ON] is True
-    assert "30 seconds" in screen.get_body().controls[-1].content.controls[-1].value
+    assert "30 seconds" in screen.get_body().controls[-1].content.content.controls[-1].value
 
 
 @needs_flet

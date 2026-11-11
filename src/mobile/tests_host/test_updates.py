@@ -411,7 +411,7 @@ def test_screen_check_skip_startup_and_links():
     assert "Glossarion v9.15.0" in texts and "Released 2026-10-09" in texts
     assert any(t.startswith("Download APK (arm64-v8a, 150 MB)") for t in texts)
     assert any(k.startswith("updates-skip-") for k in card_keys) and any(k.startswith("updates-notes-") for k in card_keys)
-    apk_button = next(c for c in card.content.controls if str(getattr(c, "key", "")).startswith("updates-apk-"))
+    apk_button = next(c for c in card.content.content.controls if str(getattr(c, "key", "")).startswith("updates-apk-"))
     apk_button.on_click(None)
     assert opened == [GH + f"{PREFIX}_Android_arm64-v8a.apk"]
 
@@ -441,7 +441,7 @@ def test_screen_ios_and_desktop_only_rows():
     assert any(t.startswith("Unsigned IPA (") for t in texts) and any(t.startswith("Signed IPA (") for t in texts)
     assert not any("AltStore" in t or "SideStore" in t for t in texts)
     assert "This release has no file for this device." not in texts
-    ipa_tile = next(c for c in screen.release_holder.content.content.controls
+    ipa_tile = next(c for c in screen.release_holder.content.content.content.controls
                     if str(getattr(c, "key", "")).startswith("updates-ipa-") and "signed" not in str(c.key))
     ipa_tile.on_click(None)
     assert opened == [GH + f"{PREFIX}_iOS_unsigned.ipa"]
