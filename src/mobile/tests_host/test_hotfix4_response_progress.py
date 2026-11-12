@@ -51,3 +51,24 @@ def test_glossary_stage_keeps_its_planned_workspace(tmp_path):
     opened.clear()
     asyncio.run(view._open_progress_async(NS(index=0)))
     assert opened == [(('', 'book.epub'), {'chapters': True})]
+
+
+def test_real_progress_router_opens_source_when_planned_folder_has_no_output(tmp_path):
+    from glossarion_mobile.ui.chat.integration import ChatFeature
+
+    source = tmp_path / 'book.txt'
+    source.write_text('Chapter one\n\nText.')
+    books, routes, notes = [], [], []
+    async def run_io(fn, *args):
+        return fn(*args)
+    def bid_for(book):
+        books.append(book)
+        return 'source-book'
+    feature = ChatFeature.__new__(ChatFeature)
+    feature._run_io = run_io
+    feature.app = NS(library=NS(bid_for=bid_for, output_roots=lambda: [str(tmp_path / 'output')]),
+                     navigate_to=lambda *a, **kw: routes.append((a, kw)), notify=notes.append)
+    result = asyncio.run(feature.open_progress(str(tmp_path / 'planned'), str(source)))
+    assert result == 'source-book' and not notes
+    assert books[0]['raw_source_path'] == str(source) and books[0]['progress_file'] == ''
+    assert routes == [(('tools.progress', None, {'out': 'source-book'}), {'alone': True})]

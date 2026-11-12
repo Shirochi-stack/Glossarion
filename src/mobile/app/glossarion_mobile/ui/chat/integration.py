@@ -1213,6 +1213,12 @@ class ChatFeature:
                 return own
         else:
             found = await self._run_io(chapters_target if chapters else target)
+        if found is None and not glossary and source and os.path.isfile(source):
+            # A running/queued response can already name its output directory before
+            # any progress file exists. Open its source chapters just like Jobs does.
+            found = await self._run_io(chapters_target)
+            if found is not None:
+                jump = {"alone": True}
         if found is None:
             if notify is not None:
                 notify("No progress to show yet: nothing has been translated or extracted for this book")
