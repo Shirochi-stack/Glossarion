@@ -108,7 +108,7 @@ OTHER_CHAPTERS = 6
 #: What a resumed run's card may look like while it lives (never an ended one, never Resume / Retry failed)
 LIVE_PHASES = ("running", "queued", "stopping", "force_stopping")
 RESUME_BUTTONS = ("resume", "retry")
-RESUME_TEXTS = ("Resume", "Retry failed")
+RESUME_TEXTS = ("Translate", "Continue Translation?")
 _HEADING = re.compile(r"제\s*(\d+)\s*장")
 
 
@@ -309,7 +309,7 @@ async def _stop_mid_book(ctx) -> dict:
     assert len(cards) == 1, [probe.card_state(c) for c in cards]
     ended = cards[0]
     state = probe.card_state(ended)
-    assert state["phase"] == "stopped" and state["state"] == f"Stopped · {job['completed']}/{CHAPTERS} chapters", state
+    assert state["phase"] == "stopped" and state["state"] == "Continue Translation?" and ended.status == f"Stopped · {job['completed']}/{CHAPTERS} chapters", state
     assert "resume" in ended.action_buttons and probe.on_screen(ended.action_buttons["resume"]), state
     assert ended is not view.live_job_card
     return {"card": ended, "completed": job["completed"], "committed": probe.committed_labels(),
@@ -518,7 +518,7 @@ def test_retry_failed_turns_the_result_card_into_the_running_card(iso, offline):
         assert len(cards) == 1, [probe.card_state(c) for c in cards]
         ended = cards[0]
         state = probe.card_state(ended)
-        assert state["phase"] == "done" and state["state"] == f"Finished with issues · {len(refuse)} failed", \
+        assert state["phase"] == "done" and state["state"] == "Continue Translation?" and ended.status == f"Finished with issues · {len(refuse)} failed", \
             (state, sorted(set(server.refused)))
         assert "retry" in ended.action_buttons and probe.on_screen(ended.action_buttons["retry"]), state
         committed = probe.committed_labels()
@@ -650,7 +650,7 @@ def test_resume_after_a_relaunch_turns_the_card_into_the_running_card(iso, offli
         assert len(cards) == 1, [probe.card_state(c) for c in cards]
         ended = cards[0]
         state = probe.card_state(ended)
-        assert state["phase"] == "stopped" and state["state"] == f"Stopped · {floor}/{CHAPTERS} chapters", state
+        assert state["phase"] == "stopped" and state["state"] == "Continue Translation?" and ended.status == f"Stopped · {floor}/{CHAPTERS} chapters", state
         assert "resume" in ended.action_buttons and probe.on_screen(ended.action_buttons["resume"]), state
         before = _chat_jobs(service, cid)
         assert before == first["jobs"], (before, first["jobs"])

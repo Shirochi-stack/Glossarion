@@ -191,6 +191,10 @@ def test_device_parallel_probe_checks_overlap_and_cleanup(tmp_path):
     result = parallel_generation_check(service, "a")
     assert result["overlapping_requests"] == 2 and result["extra_context_unloaded"]
     assert len(result["answers"]) == 2 and len(made) == 2
+    # Admitted fake requests must not be reported as measured native inference.
+    assert result["native_decode_overlap_seconds"] == 0
+    assert result["decode_calls_per_context"] == [0, 0]
+    assert result["generation_threads"] == 0
     assert not service.parallel_requests()
 
 

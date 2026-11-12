@@ -828,6 +828,7 @@ class JobCard(ft.Container):
         self.ocr_tile = ft.ExpansionTile(title="OCR (0)", controls=[ft.Container(content=self.ocr_column, padding=8)],
                                          visible=False, dense=True, key="job-ocr")
         self.plan_box = ft.Column([], spacing=8, tight=True, visible=False)
+        self.setup_actions = ft.Row([], wrap=True, spacing=4, visible=False)
         # UI_SPEC §2.12.4 Result: the turn's output files (tap: open / share)
         self.outputs_row = ft.Row([], wrap=True, spacing=6, run_spacing=4, visible=False, key="job-outputs")
         # U10: the cloud status line and the saved share links (``set_u10``)
@@ -847,6 +848,10 @@ class JobCard(ft.Container):
         ext = str(self.attachment.get("extension") or "")
         if meta is None:
             meta = f"{attachment_kind_label(ext)} · {format_attachment_size(self.attachment.get('size'))}" if self.attachment else ""
+        self.result_details = ft.Column([
+            self.failed_chip, closes_on_tap_away(self.requests_tile), closes_on_tap_away(self.ocr_tile),
+            closes_on_tap_away(self.report_tile), self.outputs_row, self.u10_box,
+        ], spacing=6, tight=True)
         self.body = ft.Column(
             [
                 ft.Row(
@@ -860,15 +865,11 @@ class JobCard(ft.Container):
                 self.line_text,
                 self.current_text,
                 self.issue_chip,
-                self.failed_chip,
                 self.plan_box,
-                closes_on_tap_away(self.requests_tile),
-                closes_on_tap_away(self.ocr_tile),
-                closes_on_tap_away(self.report_tile),
-                self.outputs_row,
-                self.u10_box,
+                self.result_details,
                 self.resume_chips,
                 self.options_box,
+                self.setup_actions,
                 self.buttons,
             ],
             spacing=6,
@@ -988,7 +989,9 @@ class JobCard(ft.Container):
         self.ring.visible = live
         self.progress.visible = name in ("running", "stopping", "force_stopping")
         self.progress_link.visible = self.progress.visible
-        self.plan_box.visible = name == "plan"
+        self.plan_box.visible = name == "plan" or (self.offers_resume and bool(self.plan_box.controls))
+        self.result_details.visible = name != "plan" and not self.offers_resume
+        self.setup_actions.visible = self.offers_resume
         if hasattr(self, "outputs_row"):
             self.outputs_row.visible = bool(self.outputs) and not live and name not in ("plan", "queued")
         if hasattr(self, "u10_box"):
@@ -1010,6 +1013,11 @@ class JobCard(ft.Container):
                 self._button("progress", "Progress", "text"),
                 self._button("log", "Log", "text"),
             ]
+        elif self.offers_resume:
+            self.state_text.value = "Continue Translation?"
+            action = "resume" if name in ("stopped", "interrupted") else "retry"
+            buttons = [self._button(action, "Translate", "filled"),
+                       self._button("dismiss_resume", "Cancel", "text")]
         else:
             self.state_text.value = status or {"done": "Done", "stopped": "Stopped", "failed": "Failed",
                                                "interrupted": "Interrupted"}.get(name, "Done")
@@ -1026,6 +1034,10 @@ class JobCard(ft.Container):
             if name in ("stopped", "interrupted"):
                 buttons.insert(0, self._button("resume", "Resume", "filled"))
         self.buttons.controls = buttons
+        if self.offers_resume:
+            for button in self.setup_actions.controls:
+                if button.key == "result-progress":
+                    self.action_buttons["progress"] = button
         if hasattr(self, "options_box"):
             self.options_box.visible = bool(self.options_box.controls) and self.offers_resume
             self.resume_chips.visible = bool(self.resume_chips.controls) and self.offers_resume

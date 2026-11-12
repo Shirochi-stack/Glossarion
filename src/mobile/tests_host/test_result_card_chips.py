@@ -1,7 +1,7 @@
 """Owner request: "add the same buttons on top here that the initial response card had when we attached the
 file". A stopped / failed / interrupted Result (Resume / Retry failed) shows the Plan card's model, profile,
-language, glossary (+ Policy) and range chips above its Run options - not output mode / Save to - and Resume
-runs with what they show: the chat's model / profile / language / glossary now and the card's range.
+language, glossary (+ Policy) and output mode chips above Run options. Choose chapters carries the range;
+Translate runs with the displayed settings and the card's selected range.
 
 Run from src/mobile (mobile venv):
     python -m pytest -p no:cacheprovider -W ignore tests_host/test_result_card_chips.py -q
@@ -34,9 +34,8 @@ desktop_store_cls = TC.desktop_store_cls
 isolated_env = TC.isolated_env
 needs_flet = TC.needs_flet
 
-PLAN_KEYS = ["plan-model", "plan-profile", "plan-language", "plan-glossary", "plan-output", "plan-range",
-             "plan-destination"]
-RESULT_KEYS = ["result-model", "result-profile", "result-language", "result-glossary", "result-range"]
+PLAN_KEYS = ["plan-model", "plan-profile", "plan-language", "plan-glossary", "plan-output"]
+RESULT_KEYS = ["result-model", "result-profile", "result-language", "result-glossary", "result-output"]
 
 
 def _plan_chips(view) -> list:
@@ -88,7 +87,7 @@ def test_result_card_shows_the_plan_chips_and_resume_runs_with_them(desktop_stor
             assert list(chips) == RESULT_KEYS and card.resume_chips.visible
             body = card.body.controls
             assert body.index(card.resume_chips) == body.index(card.options_box) - 1
-            assert _label(chips["result-range"]) == panel.range_chip_label()
+            assert next(b for b in card.setup_actions.controls if b.key == "result-choose").content == "Choose chapters"
             opened: list = []
             view.open_model_sheet = lambda tab="model", **kw: opened.append(tab)
             # hotfix 5: profile and language open the compact preview (configured entries, custom at the end)
@@ -110,19 +109,21 @@ def test_result_card_shows_the_plan_chips_and_resume_runs_with_them(desktop_stor
             assert _label(chips["result-language"]) == "→ French"
             assert _label(chips["result-glossary"]) == "Glossary: Off"
             assert _label(chips["result-policy"]) == "Policy: Off"  # the chat's glossary policy chip
-            assert "result-output" not in chips and "result-destination" not in chips
+            assert "result-output" in chips and "result-destination" not in chips
 
             # the range chip writes this card's resume Run options ("Only for this run": its own values)
             panel = RO._resume_panel(view)
             panel.switch.value = True
             panel._on_switch()
-            chips["result-range"].on_click(None)
+            card = _result_card(view)
+            choose = next(b for b in card.setup_actions.controls if b.key == "result-choose")
+            choose.on_click(None)
             sheet = view.chapters_sheet
             assert sheet.store is panel.overlay
             assert sheet.apply("3-5")
             if sheet._task is not None:
                 sheet._task.cancel()
-            assert _label(chips["result-range"]) == panel.range_chip_label() != "All chapters"
+            assert panel.range_chip_label() in choose.content and choose.content.startswith("Choose chapters")
             assert panel.values["chapter_range"] == "3-5"
 
             config = await RO._resume(chat)

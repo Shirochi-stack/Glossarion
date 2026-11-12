@@ -490,7 +490,7 @@ def test_retry_failed_turns_the_card_into_the_running_card_at_once(desktop_store
             TC._finish_all(chat.runs)
             view.render_transcript()
             ended = next(c for c in _turn_cards(view) if c.title_text.value == "novel.epub")
-            assert ended.state_text.value.startswith("Finished with issues") and "retry" in ended.action_buttons
+            assert ended.state_text.value == "Continue Translation?" and ended.status.startswith("Finished with issues") and "retry" in ended.action_buttons
             before = len(jobs.submitted)
             ended.action_buttons["retry"].on_click(None)
             live = view.live_job_card

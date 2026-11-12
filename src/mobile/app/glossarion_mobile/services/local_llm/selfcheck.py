@@ -251,6 +251,7 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
             payload.update({"tokens": tokens, "tok_s": round(tokens / seconds, 2) if seconds > 0 else None,
                             "text": text[:120], "finish": finish, "system_info": (eng.system_info() or "")[:200]})
             payload["parallel"] = parallel_generation_check(service, stem)
+            assert payload["parallel"]["native_decode_overlap_seconds"] > 0.001
         finally:
             service.stop()
     payload["ok"] = bool(payload.get("text", "").strip()) and sha_ok
@@ -263,13 +264,17 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
 
 
 def parallel_generation_check(service: svc.LocalEngineService, stem: str) -> dict:
-    """Exercise two real llama contexts with overlapping admitted generations on device."""
+    """Measure concurrent native decode calls in two independent on-device contexts."""
     from concurrent.futures import ThreadPoolExecutor
+    import threading
 
     old = service.parallel_requests()
     service.save_parallel_requests(True)
     runs = []
     second = None
+    decoded = [[], []]
+    patched = []
+    decode_lock = threading.Lock()
     try:
         with ThreadPoolExecutor(max_workers=2) as workers:
             try:
@@ -282,6 +287,23 @@ def parallel_generation_check(service: svc.LocalEngineService, stem: str) -> dic
                 assert extra is not None and extra.engine is not service.engine
                 assert extra.engine.loaded and service.engine.loaded
                 assert len(service._parallel.active) == 2
+                # Time the actual native decode calls. No barrier or sleep is inserted:
+                # queued requests alone must not count as concurrent inference.
+                for index, engine in enumerate((service.engine, extra.engine)):
+                    context = getattr(getattr(engine, "llm", None), "_ctx", None)
+                    if context is None:  # host FakeEngine tests have no native context
+                        continue
+                    original = context.decode
+                    def measured(batch, original=original, index=index):
+                        began = time.perf_counter()
+                        try:
+                            return original(batch)
+                        finally:
+                            ended = time.perf_counter()
+                            with decode_lock:
+                                decoded[index].append((began, ended, threading.get_ident()))
+                    context.decode = measured
+                    patched.append((context, original))
                 def finish(run):
                     text = "".join(run.deltas)
                     return {"text": text[:120], "tokens": run.usage.get("completion_tokens", 0)}
@@ -298,9 +320,16 @@ def parallel_generation_check(service: svc.LocalEngineService, stem: str) -> dic
                             future.result().close()
                     second.add_done_callback(close_late)
         assert not service._parallel.active and not extra.engine.loaded
+        overlap = sum(max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+                      for a in decoded[0] for b in decoded[1])
         return {"overlapping_requests": 2, "independent_contexts": True,
-                "extra_context_unloaded": True, "answers": results}
+                "extra_context_unloaded": True, "answers": results,
+                "native_decode_overlap_seconds": overlap,
+                "decode_calls_per_context": [len(calls) for calls in decoded],
+                "generation_threads": len({row[2] for calls in decoded for row in calls})}
     finally:
+        for context, original in patched:
+            context.decode = original
         service.save_parallel_requests(old)
 
 

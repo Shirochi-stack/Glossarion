@@ -122,9 +122,9 @@ from glossarion_mobile.ui.chat.output_modes import (
     is_vision_attachment,
     normalize_mode,
 )
-from glossarion_mobile.ui.chat.plan_card import ChooseChaptersSheet, RunOptionsPanel, destination_label, destination_sheet
+from glossarion_mobile.ui.chat.plan_card import ChooseChaptersSheet, RunOptionsPanel
 from glossarion_mobile.ui.chat.plan_model import NO_FILES_TEXT, batch_files, glossary_chip_label, plan_facts, range_preview
-from glossarion_mobile.ui.chat.run_request import attachment_record, run_config_of, with_run_config
+from glossarion_mobile.ui.chat.run_request import attachment_record, run_config_of, with_run_config, with_chat_overrides
 from glossarion_mobile.ui.chat.send_state import (
     BLOCK_ATTACHMENT_MISSING,
     BLOCK_GLOSSARY_PENDING,
@@ -1117,6 +1117,9 @@ class ChatView:
 
             return self._card(slot_key, ("plan", self.cid, item.index, record, self._plan_signature(plan), context,
                                          glossary), build_plan)
+        dismissed = self.env.chats.meta(self.cid).get("dismissed_response_cards") or []
+        if not live and not resuming and (self._mid(item.index) or str(item.index)) in dismissed:
+            return None
         if getattr(item, "library", None) is not None and not live and not resuming:
             return self._library_job_control(item, messages, record)
         if live or resuming:
@@ -1186,9 +1189,8 @@ class ChatView:
             failed = progress_counts(elsewhere).get("failed", 0)
             ended_params = getattr(getattr(elsewhere, "spec", None), "params", None)
 
-        # the Plan chips a Result that offers Resume / Retry failed shows (their labels rebuild the card); not for
-        # the book's other job, whose Resume runs it as it was
-        chip_state = self._chip_state() if offers_resume(phase, status) and elsewhere is None else None
+        # Continuation cards share the ready card's settings; labels follow current chat overrides.
+        chip_state = self._chip_state() if offers_resume(phase, status) else None
 
         def build() -> JobCard:
             card = JobCard(attachment=record, phase=phase, on_action=lambda a, it=item: self._on_job_action(a, it),
@@ -1212,12 +1214,20 @@ class ChatView:
         shown = card.options_box.controls
         if (shown[0] if shown else None) is not control:
             card.set_run_options(panel.control if panel is not None else None)
-        # above them, the Plan card's chips: what Resume / Retry failed runs with (model, profile, language,
-        # glossary, range), so they can be changed first
-        chips_key = (chip_state, panel) if card.offers_resume and elsewhere is None else None
+        # Share the ready card's facts, settings and actions with resumable cards.
+        chips_key = (chip_state, panel) if card.offers_resume else None
         if card.chip_state != chips_key:
             card.chip_state = chips_key
-            card.set_resume_chips(self._result_chips(item, record, panel) if chips_key is not None else [])
+            if panel is not None:
+                if not hasattr(panel, "resume_plan"):
+                    params = ended_params if isinstance(ended_params, Mapping) else {}
+                    run_data = params.get("run") or {}
+                    config = params.get("config_overrides") or {}
+                    panel.resume_plan = {"attachment": dict(record or {}), "user_index": item.index,
+                                         "output_mode": run_data.get("output_mode") or config.get("output_mode") or "text"}
+                self._plan_controls(panel.resume_plan, card, panel=panel, resume_item=item)
+            else:
+                card.set_resume_chips([])
         # UI_SPEC §2.12.4 Result: the turn's output files as chips (its own workspace, on the io pool)
         key = ("outputs", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
                item.actions, phase.name)
@@ -2250,7 +2260,14 @@ class ChatView:
             return None, None
         keys = [k for k in self.run_panels if k[:3] == (self.cid, "resume", item.index)]
         panels = [self._drop_panel(k, commit=True) for k in keys]
-        return (panels[-1].config_overrides(), keys[-1][3]) if panels else (None, None)
+        if not panels:
+            return None, None
+        config = panels[-1].config_overrides()
+        mode = getattr(panels[-1], "resume_output_mode", None)
+        if mode is not None:
+            from glossarion_mobile.state.setting_writes import output_mode_values
+            config.update(output_mode_values(mode))
+        return config, keys[-1][3]
 
     def _drop_panel(self, key: tuple, *, commit: bool = False) -> Optional[RunOptionsPanel]:
         """Release a Run options panel (it stops observing the config); ``commit``: its run starts now, so a
@@ -2260,13 +2277,16 @@ class ChatView:
             if commit:
                 panel.commit()
             panel.release()
+            for slot, (_button, owner) in list(getattr(self, "_chapter_buttons", {}).items()):
+                if owner is panel:
+                    self._chapter_buttons.pop(slot, None)
         return panel
 
     def _refresh_range_chips(self) -> None:
-        for chip, panel in list(getattr(self, "_range_chips", {}).values()):
+        for button, panel in list(getattr(self, "_chapter_buttons", {}).values()):
             try:
-                chip.label = ft.Text(panel.range_chip_label())
-                chip.update()
+                button.content = "Choose chapters" + (f" · {panel.range_chip_label()}" if panel.get("chapter_range") else "")
+                button.update()
             except Exception:
                 pass
 
@@ -2298,44 +2318,29 @@ class ChatView:
                                  on_click=lambda e: self.open_chat_settings(), key=f"{key}-policy"))
         return chips
 
-    def _range_chip(self, panel: RunOptionsPanel, slot: Any, key: str, on_click: Callable[[Any], Any]) -> ft.Chip:
-        """The "All chapters" chip of ``panel`` (Choose chapters); ``_refresh_range_chips`` follows its range."""
-        chip = ft.Chip(label=ft.Text(panel.range_chip_label()), leading=ft.Icon(ft.Icons.FORMAT_LIST_NUMBERED, size=16),
-                       on_click=on_click, key=key)
-        if not isinstance(getattr(self, "_range_chips", None), dict):
-            self._range_chips = {}
-        self._range_chips[slot] = (chip, panel)
-        return chip
-
-    def _result_chips(self, item: Any, record: Optional[dict], panel: Optional[RunOptionsPanel]) -> list:
-        """A Result's Plan chips (no output mode / Save to: they cannot change on Resume); the range chip writes
-        the card's resume Run options."""
-        attachment = dict(record or {})
-        chips = self._setting_chips(str(attachment.get("path") or ""), "result")
-        if panel is not None:
-            chips.append(self._range_chip(panel, ("resume", item.index), "result-range",
-                                          lambda e, p=panel: self.open_choose_chapters({"attachment": attachment},
-                                                                                       panel=p)))
-        return chips
-
-    def _plan_controls(self, plan: dict, card: Any = None) -> list:
+    def _plan_controls(self, plan: dict, card: Any = None, *, panel: Optional[RunOptionsPanel] = None,
+                       resume_item: Any = None) -> list:
         from glossarion_mobile.ui.chat.output_modes import output_mode as _output_mode
 
         record = plan.get("attachment") if isinstance(plan.get("attachment"), dict) else {}
         path = str(record.get("path") or "")
-        panel = self._run_panel(plan)
+        panel = panel if panel is not None else self._run_panel(plan)
         mode = str(plan.get("output_mode") or "text")
-        destination = str(plan.get("destination") or "chat")
-        range_chip = self._range_chip(panel, "plan", "plan-range", lambda e: self.open_choose_chapters(plan))
-        chips = self._setting_chips(path, "plan")
-        chips += [
-            ft.Chip(label=ft.Text(f"{_output_mode(mode).emoji} {_output_mode(mode).label}"),
-                    on_click=lambda e: self.open_plan_mode(plan), key="plan-output"),
-            range_chip,
-            ft.Chip(label=ft.Text(destination_label(destination)),
-                    leading=ft.Icon(ft.Icons.LOCAL_LIBRARY if destination == "library" else ft.Icons.CHAT, size=16),
-                    on_click=lambda e: self.open_destination(plan), key="plan-destination"),
-        ]
+        prefix = "result" if resume_item is not None else "plan"
+        chips = self._setting_chips(path, prefix)
+        mode_chip = ft.Chip(label=ft.Text(f"{_output_mode(mode).emoji} {_output_mode(mode).label}"),
+                            key=f"{prefix}-output")
+        def open_mode(e):
+            if resume_item is None:
+                return self.open_plan_mode(plan)
+            def switched(value):
+                plan["output_mode"] = value
+                panel.resume_output_mode = value
+                mode_chip.label = ft.Text(f"{_output_mode(value).emoji} {_output_mode(value).label}")
+                self._push(mode_chip)
+            return self.open_mode_options(str(plan.get("output_mode") or "text"), on_switch=switched)
+        mode_chip.on_click = open_mode
+        chips.append(mode_chip)
         facts = ft.Text("estimating…", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                         key="plan-facts")
         conversion = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.TERTIARY, visible=False,
@@ -2350,7 +2355,11 @@ class ChatView:
             self._io_extra(("facts", self.cid, path), lambda p=path: plan_facts(p), apply_facts, card)
         loaded = self.env.config_get("manual_glossary_path", "") if self.env is not None else ""
         buttons: list = [ft.TextButton(content="Choose chapters", icon=ft.Icons.FORMAT_LIST_NUMBERED,
-                                       on_click=lambda e: self.open_choose_chapters(plan), key="plan-choose")]
+                                       on_click=lambda e: self.open_choose_chapters(plan, panel=panel), key=f"{prefix}-choose")]
+        if not hasattr(self, "_chapter_buttons"):
+            self._chapter_buttons = {}
+        self._chapter_buttons[(self.cid, prefix, plan.get("user_index"))] = (buttons[0], panel)
+        self._refresh_range_chips()
         if loaded and self.glossary_table_opener is not None:
             buttons.append(ft.TextButton(content="Review glossary", icon=ft.Icons.EDIT_NOTE, key="plan-review",
                                          on_click=lambda e, g=str(loaded): self.glossary_table_opener(g)))
@@ -2368,6 +2377,21 @@ class ChatView:
                 service = self._library_service()
                 self._io_extra(("libplan", self.cid, bid), lambda b=bid, s=service: library_line(s, b), apply_line,
                                card)
+        if resume_item is not None:
+            if not bid:
+                buttons.append(ft.TextButton(content="Open book", icon=ft.Icons.LOCAL_LIBRARY,
+                                             key="result-open-book",
+                                             on_click=lambda e: self._spawn(self.open_in_library(resume_item))))
+            progress = ft.TextButton(content="Progress", icon=ft.Icons.TIMELINE, key="result-progress",
+                                     on_click=lambda e: self._open_progress(resume_item))
+            buttons.append(progress)
+            card.action_buttons["progress"] = progress
+            card.plan_box.controls = [library_line_text, facts, conversion]
+            card.plan_box.visible = True
+            card.set_resume_chips(chips)
+            card.setup_actions.controls = buttons
+            card.setup_actions.visible = True
+            return []
         controls: list = [
             library_line_text,
             facts,
@@ -2430,25 +2454,6 @@ class ChatView:
                                                   spine_available=not str(path).lower().endswith(".pdf"))
         self.chapters_sheet.show(self.page)
         return self.chapters_sheet
-
-    def open_destination(self, plan: dict) -> Any:
-        """Save to: This chat / Library (the normal pipeline)."""
-        cid = self.cid
-        created = plan.get("created")
-        library_reason = None
-        jobs = getattr(self.env, "jobs", None) if self.env is not None else None
-        if jobs is None or not getattr(jobs, "has_kind", lambda _k: True)("translate"):
-            library_reason = "The job service is not running"
-
-        def choose(destination: str) -> None:
-            self._update_plan(cid, created, destination=destination)
-            self.render_transcript()
-
-        sheet = destination_sheet(plan.get("destination"), choose, tablet=bool(self.layout.persistent_sidebar),
-                                  library_reason=library_reason)
-        if self.page is not None:
-            sheet.show(self.page)
-        return sheet
 
     def start_plan(self) -> None:
         plan = self._pending_plan()
@@ -2941,6 +2946,16 @@ class ChatView:
             self._open_progress(item)
         elif action == "cancel_plan":
             self.cancel_plan()
+        elif action == "dismiss_resume" and item is not None:
+            key = self._mid(item.index) or str(item.index)
+            dismissed = list(self.env.chats.meta(self.cid).get("dismissed_response_cards") or [])
+            if key not in dismissed:
+                dismissed.append(key)
+            self.env.chats.set_meta(self.cid, "dismissed_response_cards", dismissed)
+            for panel_key in list(self.run_panels):
+                if panel_key[:3] == (self.cid, "resume", item.index):
+                    self._drop_panel(panel_key)
+            self.render_transcript(follow=False)
         elif action in ("stop", "cancel_queued", "force_stop"):
             if self._cancel_pending_resume():
                 return  # Resume was tapped and its run is not submitted yet: it stops as soon as it is
@@ -3185,6 +3200,8 @@ class ChatView:
                     if isinstance(original, Mapping) and config is not None:
                         params = dict(original)
                         params["config_overrides"] = with_run_config(params.get("config_overrides"), config)
+                        if callable(getattr(self, "run_overrides", None)):
+                            params["config_overrides"] = with_chat_overrides(params["config_overrides"], self.run_overrides(self.cid))
                 resumed = jobs.resume(job_id, params=params) if params is not None else jobs.resume(job_id)
             except Exception:
                 log.exception("resuming the book's job failed")

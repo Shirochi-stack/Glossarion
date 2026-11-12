@@ -513,7 +513,7 @@ def test_owner_issue12_book_card_stays_live_through_the_glossary_gate(desktop_st
             assert not run.live and view.live_job_card is None
             ended = _cards(view, JobCard)
             assert len(ended) == 1 and ended[0].title_text.value == "novel.epub"
-            assert ended[0].phase.name == "stopped" and ended[0].state_text.value.startswith("Stopped")
+            assert ended[0].phase.name == "stopped" and ended[0].state_text.value == "Continue Translation?" and ended[0].status.startswith("Stopped")
             assert "resume" in ended[0].action_buttons
             assert view._turn_source(view.items[-1]) == str(book)  # Reader / Library / QA know the turn's file
 
@@ -533,7 +533,7 @@ def test_owner_issue12_book_card_stays_live_through_the_glossary_gate(desktop_st
             view.load_chat("5")
             await _quiet(calls)
             card = _cards(view, JobCard)[0]
-            assert card.state_text.value == "Interrupted · 3/12 chapters" and "resume" in card.action_buttons
+            assert card.state_text.value == "Continue Translation?" and card.status == "Interrupted · 3/12 chapters" and "resume" in card.action_buttons
             assert run.user_index in asked and -1 not in asked
         finally:
             for task in calls.tasks:

@@ -184,8 +184,8 @@ def test_response_card_follows_defaults_and_keeps_options_for_library_job(deskto
             view.env.store.set('chapter_range', '3-9')
             await TC._settle(chat.calls)
             card = next(c for c in TC._cards(view, JobCard) if c.title_text.value == 'book.epub')
-            range_chip = next(c for c in card.resume_chips.controls if c.key == 'result-range')
-            assert '3-9' in range_chip.label.value.replace('\u2013', '-')
+            range_chip = next(c for c in card.setup_actions.controls if c.key == 'result-choose')
+            assert '3-9' in range_chip.content.replace('\u2013', '-')
 
             other = JobSnapshot(id='library', spec=JobSpec('translate', 'Book',
                 params={'input_files': ['book.epub'], 'config_overrides': {'batch_size': 2}}),

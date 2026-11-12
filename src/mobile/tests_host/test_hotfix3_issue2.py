@@ -904,9 +904,11 @@ def test_chat_save_to_library_job_library_button_running_and_finished(iso, offli
         await driver.wait(contains=Path(CHAT_LIBRARY_BOOK).stem, timeout=60)  # the composer pill
         await driver.tap(key="send-idle_ready", timeout=60)
         await driver.wait(text="Ready to translate", timeout=60)  # the Plan card
-        await driver.tap(key="plan-destination", timeout=30)
-        await driver.tap(key="dest-library", timeout=30)
-        await driver.wait(text="Save to: Library", timeout=30)
+        # Exercise a legacy saved Library plan; the destination selector was removed in hotfix 8.
+        plan = app.chat_view._pending_plan()
+        app.chat_view._update_plan(app.chat_view.cid, plan["created"], destination="library")
+        app.chat_view.render_transcript()
+
         await driver.tap(text="Start")
         jid = None
         deadline = time.monotonic() + 60
@@ -988,9 +990,11 @@ def test_sent_to_library_card_progress_opens_the_chapters_whatever_exists(iso, o
         await driver.wait(contains=Path(CHAT_LIBRARY_BOOK).stem, timeout=60)
         await driver.tap(key="send-idle_ready", timeout=60)
         await driver.wait(text="Ready to translate", timeout=60)
-        await driver.tap(key="plan-destination", timeout=30)
-        await driver.tap(key="dest-library", timeout=30)
-        await driver.wait(text="Save to: Library", timeout=30)
+        # Exercise a legacy saved Library plan; the destination selector was removed in hotfix 8.
+        plan = app.chat_view._pending_plan()
+        app.chat_view._update_plan(app.chat_view.cid, plan["created"], destination="library")
+        app.chat_view.render_transcript()
+
         await driver.tap(text="Start")
         jid = None
         deadline = time.monotonic() + 60

@@ -737,7 +737,8 @@ def _check_result(probe: Probe, committed: list, phase: str, status: str) -> dic
     c = result["cards"][0]
     ended = probe.job_cards()[0]
     assert c["mounted"] and not c["live"] and c["phase"] == phase, c
-    assert c["state"] == status, (c, status)
+    display = "Continue Translation?" if ended.offers_resume else status
+    assert c["state"] == display and ended.status == status, (c, status)
     assert c["title"] == EPUB_NAME, c
     item = probe.turn_item()
     assert item is not None and not item.detached and item.index == probe.run().user_index
@@ -745,7 +746,7 @@ def _check_result(probe: Probe, committed: list, phase: str, status: str) -> dic
     labels = _labels(ended)
     assert labels[:len(committed)] == committed and len(set(labels)) == len(labels), labels[:6]
     texts = probe.visible_texts()
-    assert status in texts and EPUB_NAME in texts and "Attachment" not in texts, sorted(t for t in texts if len(t) < 60)
+    assert display in texts and EPUB_NAME in texts and "Attachment" not in texts, sorted(t for t in texts if len(t) < 60)
     assert probe.on_screen(ended.state_text)
     source = probe.view._turn_source(item)  # Reader / Library / QA know the turn's file
     assert source and Path(source).name == EPUB_NAME, source
@@ -869,7 +870,7 @@ def test_stop_shows_stopped_with_resume(iso, offline):
         assert probe.on_screen(ended.action_buttons["resume"])
         assert len(result["item"].requests) >= len(committed) + 20, result["item"]
         texts = probe.visible_texts()
-        assert "Resume" in texts and not any(t == "Done" or t.startswith("Done ·") for t in texts)
+        assert "Translate" in texts and not any(t == "Done" or t.startswith("Done ·") for t in texts)
 
     with _server(0.05) as server:  # a run long enough to stop in the middle
         asyncio.run(_owner_flow(iso, server, body))

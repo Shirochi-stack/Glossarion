@@ -16,8 +16,7 @@ files the range translates (``plan_model.range_preview`` on the io pool: the des
 ``_preview_chapter_range_files`` texts), writing ``chapter_range`` / ``use_spine_order`` through
 the same store as the Run options.
 
-``DESTINATIONS`` / ``destination_sheet`` - "Save to: This chat" (Direct Text semantics) or
-"Save to: Library" (the normal pipeline: a ``translate`` job, the workspace in the output root).
+Document workspaces follow the automatic Library workflow; no destination chooser is exposed.
 """
 
 from __future__ import annotations
@@ -34,11 +33,10 @@ from glossarion_mobile.ui.theme import toggle
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.plan_model import (RUN_OPTION_KEYS, SUMMARY_KEYS, RunOverlayStore, range_label,
                                                   run_options_summary)
-from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 
-__all__ = ["ChooseChaptersSheet", "DESTINATIONS", "PANEL_KEYS", "RunOptionsPanel", "destination_sheet"]
+__all__ = ["ChooseChaptersSheet", "PANEL_KEYS", "RunOptionsPanel"]
 
 log = logging.getLogger("glossarion.chat.plan")
 
@@ -67,31 +65,6 @@ def _edited(tile: Any) -> bool:
     """``SettingTile.edited`` (False for a tile without a text field)."""
     edited = getattr(tile, "edited", None)
     return bool(edited()) if callable(edited) else False
-
-
-#: Plan destinations: (id, chip label, sheet subtitle)
-DESTINATIONS = (
-    ("chat", "Save to: This chat", "Direct Text: the run's files stay in this chat's workspace"),
-    ("library", "Save to: Library",
-     "The normal pipeline: the workspace goes to the output root and the book appears in the Library"),
-)
-
-
-def destination_label(destination: Optional[str]) -> str:
-    return next((label for did, label, _s in DESTINATIONS if did == destination), DESTINATIONS[0][1])
-
-
-def destination_sheet(current: Optional[str], on_choose: Callable[[str], Any], *, tablet: bool = False,
-                      library_reason: Optional[str] = None) -> ActionSheet:
-    items = []
-    for did, label, _subtitle in DESTINATIONS:
-        reason = library_reason if did == "library" else None
-        items.append(ActionItem(label + (" ✓" if did == (current or "chat") else ""),
-                                (lambda d=did: on_choose(d)), icon="CHAT" if did == "chat" else "LOCAL_LIBRARY",
-                                disabled_reason=reason, key=f"dest-{did}"))
-    return ActionSheet(items, title="Where should the output go?",
-                       subtitle=" · ".join(f"{label.split(': ')[-1]}: {sub}" for _d, label, sub in DESTINATIONS),
-                       tablet=tablet)
 
 
 class RunOptionsPanel:
@@ -335,7 +308,6 @@ class ChooseChaptersSheet:
         self.dialog = scroll_sheet("Choose chapters", [
             self.range_field, self.spine_switch, self.header, self.note, self.rows_box, self.legend,
         ], scroll=False, actions=[
-            ft.TextButton(content="All chapters", on_click=lambda e: self.apply(""), key="chapters-all"),
             ft.FilledButton(content="Apply", on_click=lambda e: self.apply(), key="chapters-apply"),
         ], key="chapters-sheet")
         self._page: Any = None

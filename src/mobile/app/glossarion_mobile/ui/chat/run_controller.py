@@ -1220,6 +1220,12 @@ class ChatRuns:
         params["user_index"] = user_index  # a new submission records the turn where it is now
         if run_config is not None and (run_config_for is None or run_config_for == turn_key(params)):
             params["config_overrides"] = with_run_config(params.get("config_overrides"), run_config)
+            if "output_mode" in run_config:
+                from glossarion_mobile.ui.chat.output_modes import normalize_mode
+                mode = normalize_mode(run_config["output_mode"])
+                run_dict = {**run_dict, "output_mode": mode}
+                params["run"] = run_dict
+                params["options"] = {**(params.get("options") or {}), "output_mode": mode}
         if overrides is not None:
             params["config_overrides"] = with_chat_overrides(params.get("config_overrides"), overrides)
         if settings is not None and kind != GENERATE_MEDIA_JOB_KIND and isinstance(params.get("options"), Mapping):
