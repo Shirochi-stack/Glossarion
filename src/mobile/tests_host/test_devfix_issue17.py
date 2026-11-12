@@ -409,7 +409,13 @@ def test_phone_drawer_with_200_chats_footer_pinned_and_keys_open_the_key_manager
             # padding must not exceed it, or a drag scrolls the whole drawer, footer included (the U8 box,
             # height - status bar, overshot it by exactly the navigation bar).
             viewport = height - STATUS_BAR
-            box = float(shell.drawer_box.height)
+            if shell.drawer_box.height is None:
+                from flet_glossarion_native.navigation_drawer import NavigationDrawer
+
+                assert isinstance(nav_drawer, NavigationDrawer) and shell.drawer_box.expand
+                box = viewport - nav  # native Drawer > SafeArea, no outer ListView
+            else:
+                box = float(shell.drawer_box.height)
             assert box + nav <= viewport, f"the NavigationDrawer list scrolls by {box + nav - viewport} dp"
             # ... and the fixed rows leave the chat list room, so the footer ends inside the box (on screen)
             room = box - _fixed_rows(drawer)
