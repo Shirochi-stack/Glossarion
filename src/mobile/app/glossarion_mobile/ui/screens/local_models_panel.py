@@ -1103,6 +1103,9 @@ class LocalModelsPanel(OnDeviceFlow):
                                           dense=True, expand=True, keyboard_type=ft.KeyboardType.NUMBER,
                                           key="local-threads")
         self.settings_error = ft.Text("", color=ft.Colors.ERROR, visible=False, theme_style=ft.TextThemeStyle.BODY_SMALL)
+        self.parallel_switch = toggle(label="Allow parallel requests", value=self.service.parallel_requests(),
+                                      key="local-parallel-requests",
+                                      on_change=lambda e: self.service.save_parallel_requests(self.parallel_switch.value))
         engine_card = SectionCard(title="🧠 On-device engine", key="local-engine", children=[
             _small("Models run inside Glossarion with llama.cpp: no server, no account. They show up as "
                    "local/<name> for chat, translation and glossaries."),
@@ -1118,6 +1121,10 @@ class LocalModelsPanel(OnDeviceFlow):
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.settings_error,
             *self._gpu_section(),
+            self.parallel_switch,
+            _small("Off by default. When enabled, up to two requests can run at once, using extra memory. "
+                   "Batch and extraction-worker settings control how many requests a job submits. "
+                   "Turning this off lets current answers finish before returning to one request at a time."),
             *self._sampling_section(),
         ])
         self.preset_column = ft.Column([], spacing=6, tight=True, key="local-presets")

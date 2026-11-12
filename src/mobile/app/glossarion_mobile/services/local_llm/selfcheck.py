@@ -246,6 +246,7 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
             tokens = int(usage.get("completion_tokens") or 0)
             payload.update({"tokens": tokens, "tok_s": round(tokens / seconds, 2) if seconds > 0 else None,
                             "text": text[:120], "finish": finish, "system_info": (eng.system_info() or "")[:200]})
+            payload["parallel"] = parallel_generation_check(service, stem)
         finally:
             service.stop()
     payload["ok"] = bool(payload.get("text", "").strip()) and sha_ok
@@ -254,6 +255,49 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
     if not payload["ok"]:
         raise AssertionError(f"llama suite failed: {payload}")
     return payload
+
+
+
+def parallel_generation_check(service: svc.LocalEngineService, stem: str) -> dict:
+    """Exercise two real llama contexts with overlapping admitted generations on device."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    old = service.parallel_requests()
+    service.save_parallel_requests(True)
+    runs = []
+    second = None
+    try:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            try:
+                body = lambda text: {"messages": [{"role": "user", "content": text}],
+                                     "max_tokens": 8, "temperature": 0.2}
+                runs.append(service.chat(stem, body("Say hello in English."), lambda: False))
+                second = workers.submit(service.chat, stem, body("Name one colour in English."), lambda: False)
+                runs.append(second.result(timeout=180))
+                extra = service._parallel.secondary
+                assert extra is not None and extra.engine is not service.engine
+                assert extra.engine.loaded and service.engine.loaded
+                assert len(service._parallel.active) == 2
+                def finish(run):
+                    text = "".join(run.deltas)
+                    return {"text": text[:120], "tokens": run.usage.get("completion_tokens", 0)}
+                futures = [workers.submit(finish, run) for run in runs]
+                results = [future.result(timeout=180) for future in futures]
+                assert all(result["text"].strip() and result["tokens"] > 0 for result in results)
+            finally:
+                service.stop_generation()
+                for run in runs:
+                    run.close()
+                if second is not None and len(runs) < 2:
+                    def close_late(future):
+                        if not future.cancelled() and future.exception() is None:
+                            future.result().close()
+                    second.add_done_callback(close_late)
+        assert not service._parallel.active and not extra.engine.loaded
+        return {"overlapping_requests": 2, "independent_contexts": True,
+                "extra_context_unloaded": True, "answers": results}
+    finally:
+        service.save_parallel_requests(old)
 
 
 def sample_image_png(size: int = 96) -> bytes:

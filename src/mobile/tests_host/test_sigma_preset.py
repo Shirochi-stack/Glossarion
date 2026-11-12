@@ -209,13 +209,22 @@ def test_switching_sigma_q8_restores_prompts_and_temperature(tmp_path, monkeypat
         assert store.get("translation_temperature") == .4
         sw.write_setting(store, "model", "local/sigma-q8")
         assert store.get("active_profile") == config["active_profile"]
-        assert store.get("translation_temperature") == .27 and store.get("batch_size") == 6
+        assert store.get("translation_temperature") == .27 and store.get("batch_size") == 1
         assert store.get("manual_glossary_prompt3") == config["manual_glossary_prompt3"]
         job = sw.with_mobile_streaming_defaults({"model": "local/sigma-q8", "batch_translation": True,
                                                 "enable_parallel_extraction": True})
-        assert job["batch_translation"] and job["enable_parallel_extraction"]
-        assert sw.default_batch_size("local/sigma-q8") == 5
+        assert not job["batch_translation"] and not job["enable_parallel_extraction"]
+        assert job["batch_size"] == 1
+        assert sw.default_batch_size("local/sigma-q8") == 1
         assert sw.default_batch_size("local/sigma-q4") == 1
+        service.save_parallel_requests(True)
+        job = sw.with_mobile_streaming_defaults({"model": "local/sigma-q8", "batch_translation": True,
+                                                "enable_parallel_extraction": True, "batch_size": 3,
+                                                "extraction_workers": 2})
+        assert job["batch_translation"] and job["enable_parallel_extraction"]
+        assert job["batch_size"] == 3 and job["extraction_workers"] == 2
+        sw.write_setting(store, "model", "gpt-6")
+        assert store.get("batch_size") == 6  # cloud setting survives the Q8/Q4 switches
         # Existing custom-HF Q8 users may still have an old on-device profile record.
         sw.write_setting(store, "model", "local/sigma-q4")
         store.set("model", "local/sigma-q8")

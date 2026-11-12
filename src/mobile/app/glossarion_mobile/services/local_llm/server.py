@@ -349,12 +349,16 @@ class _Handler(BaseHTTPRequestHandler):
                     text = (strip.feed(text) + strip.flush())
                 if gone[0]:
                     return
-                self._json(200, {
+                response = {
                     "id": rid, "object": "chat.completion", "created": created, "model": model_id,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                                  "finish_reason": run.finish_reason, "logprobs": None}],
                     "usage": _usage(run.usage),
-                })
+                }
+                # Snapshot metadata, then return the inference slot before the client
+                # observes completion (or a slow socket delays slot cleanup).
+                run.close()
+                self._json(200, response)
                 return
             self.close_connection = True
             try:
@@ -376,6 +380,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self._event(_chunk(rid, created, model_id, {"content": tail}))
                 final = _chunk(rid, created, model_id, {}, run.finish_reason)
                 final["usage"] = _usage(run.usage)
+                run.close()
                 self._event(final)
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()

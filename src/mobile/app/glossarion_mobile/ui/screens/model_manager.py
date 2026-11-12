@@ -144,7 +144,10 @@ class ModelManagerScreen(Screen):
         self.run_io = run_io
         self.tablet = tablet
         self.is_top = is_top  # shell: is this screen shown (top of the stack)? Hidden screens do not paint
-        self.tab = tab if tab in dict(TABS) else "models"
+        saved_tab = self.prefs.get("model_manager_tab", "models") if self.prefs is not None else "models"
+        self.tab = tab if tab in dict(TABS) else saved_tab if isinstance(saved_tab, str) and saved_tab in dict(TABS) else "models"
+        if self.prefs is not None:
+            self.prefs.set("model_manager_tab", self.tab)
         self.query = ""  # the search the list shows (the field's text applies SEARCH_DEBOUNCE later)
         self.filter = "all"  # all | custom | removed
         self.poll_status = READY_TEXT
@@ -794,6 +797,8 @@ class ModelManagerScreen(Screen):
 
     def set_tab(self, tab: str) -> None:
         self.tab = tab if tab in dict(TABS) else "models"
+        if self.prefs is not None:
+            self.prefs.set("model_manager_tab", self.tab)
         self.tabs.selected = [self.tab]
         self._render_now(whole=True)
 

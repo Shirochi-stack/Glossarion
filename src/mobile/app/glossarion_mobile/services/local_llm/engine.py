@@ -346,6 +346,11 @@ class FakeEngine(_Base):
                            "total_tokens": prompt + self.generated}
 
 
+# Backend registration and llama-cpp-python's first initialization are process-global.
+# Serialize model construction; independent contexts can decode concurrently afterwards.
+_NATIVE_LOAD_LOCK = threading.RLock()
+
+
 class LlamaEngine(_Base):
     """llama-cpp-python, one model at a time; the caller (``LocalEngineService``) serialises calls."""
 
@@ -371,7 +376,7 @@ class LlamaEngine(_Base):
              n_gpu_layers: int = DEFAULT_GPU_LAYERS) -> None:
         gpu = bool(gpu and n_gpu_layers != 0)
         llama_cpp = self._module()
-        with self._lock:
+        with self._lock, _NATIVE_LOAD_LOCK:
             self.unload()
             device = None
             if gpu:

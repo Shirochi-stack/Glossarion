@@ -6,7 +6,8 @@
 * **One model loaded at a time.** A request for a model that is not loaded loads it on the server thread
   under the generation gate (state ``loading`` then ``ready``); a request for another model unloads the
   current one first, unless the running job uses it (409, no thrash). Generations run one at a time in
-  arrival order (FIFO, at most ``MAX_WAITERS`` waiting, then 503).
+  arrival order (FIFO, at most ``MAX_WAITERS`` waiting, then 503). Opt-in parallel requests use two
+  independent contexts; the extra context is freed after its answer (``parallel.RequestSlots``).
 * **RAM gate** before every load: ``need = size * 1.15 + n_ctx * 64 KiB + 400 MiB``. Android refuses
   above total RAM; above available RAM it only warns ("confirm": the load goes ahead and the message is
   logged and shown, owner 2026-10-27: Use always loads, the warning is cosmetic); iOS refuses above
@@ -70,6 +71,7 @@ from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import engine as eng
 from glossarion_mobile.services.local_llm import hf, presets, script_ban, stem_of
 from glossarion_mobile.services.local_llm import vision as vis
+from glossarion_mobile.services.local_llm.parallel import PARALLEL_KEY, RequestSlots
 from glossarion_mobile.services.local_llm.server import ChatRun, LocalLLMError, LocalLLMServer, wants_thinking
 
 log = logging.getLogger("glossarion.local_llm")
@@ -366,7 +368,7 @@ class LocalEngineService:
                  clock: Callable[[], float] = time.monotonic, memory: Optional[Callable[[], tuple]] = None,
                  watch: bool = True, downloads: Optional[dl.DownloadManager] = None,
                  stop_state: Callable[[], Optional[str]] = process_stop_state,
-                 gpu_backend: Optional[str] = None) -> None:
+                 gpu_backend: Optional[str] = None, _parallel_child: bool = False) -> None:
         self.prefs = prefs
         self.stop_state = stop_state
         self.registry = registry or dl.Registry()
@@ -382,6 +384,7 @@ class LocalEngineService:
         self.gpu_backend = (gpu_backend if gpu_backend is not None else eng.gpu_offer(self.platform)) or None
         self._loaded_gpu = False  # the loaded model was asked for on the GPU (whatever it got)
         self._loaded_gpu_layers = 0
+        self._gpu_attempt_key = GPU_ATTEMPT_KEY + ("_parallel" if _parallel_child else "")
         self._gpu_attempt: Optional[str] = None  # stem of a GPU load whose first answer has not ended
         self.clock = clock
         self.memory = memory or memory_info
@@ -404,6 +407,7 @@ class LocalEngineService:
         self._holder_stops: Optional[int] = None  # ``_stops`` when the generation holding the gate arrived
         self._unload_when_idle = False  # the selection moved off the loaded model while it answered
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
+        self._parallel = None if _parallel_child else RequestSlots(self)
         self._migrate_sigma_defaults()
 
     def _migrate_sigma_defaults(self) -> None:
@@ -434,6 +438,17 @@ class LocalEngineService:
         if changed:
             presets.save_presets(self.prefs, rows)
         self._set_pref("sigma_defaults_v1", True)
+
+    def parallel_requests(self) -> bool:
+        return bool(self._pref(PARALLEL_KEY))
+
+    def save_parallel_requests(self, enabled: Any) -> bool:
+        value = bool(enabled)
+        self._set_pref(PARALLEL_KEY, value)
+        if self._parallel is not None:
+            self._parallel.changed()
+        self._notify()
+        return value
 
     def uses_normal_settings(self, stem: Optional[str] = None) -> bool:
         stem = str(stem or self._stem or "").removeprefix("local/")
@@ -470,20 +485,29 @@ class LocalEngineService:
     def snapshot(self) -> EngineSnapshot:
         available, reason = self.engine_status()
         loaded = self.loaded_stem
-        return EngineSnapshot(self._state if (loaded or self._state == "loading") else "idle",
+        snap = EngineSnapshot(self._state if (loaded or self._state == "loading") else "idle",
                               self._stem if (loaded or self._state == "loading") else None,
                               self.gate.waiting(), self._error, self._system_info, available, reason,
                               self._load_seconds, self.server.running,
                               bool(loaded and getattr(self.engine, "vision", False)),
                               getattr(self.engine, "device", None) if loaded else None, self.gpu_note())
+        pool = self._parallel
+        if pool is not None:
+            secondary = pool.secondary
+            if secondary is not None and secondary.gate.busy and not self.gate.busy:
+                snap = dataclasses.replace(secondary.snapshot(), running=self.server.running)
+            snap = dataclasses.replace(snap, queue=snap.queue + len(pool.queue))
+        return snap
 
     def health(self, model: Optional[str] = None) -> dict:
         """``{"state", "model", "queue"}`` (plus ``busy`` and ``load_seconds`` of the last load); with
         ``model`` also ``target``: ``{"stem", "size", "loaded"}`` of that model (``stem`` None when it is
         not downloaded). The shared client reads it before a request to log loading / waiting lines."""
         snap = self.snapshot()
-        out = {"state": snap.state, "model": snap.model, "queue": snap.queue, "busy": bool(self.gate.busy),
+        out = {"state": snap.state, "model": snap.model, "queue": snap.queue, "busy": bool(self.gate.busy or (self._parallel and self._parallel.active)),
                "load_seconds": self._load_seconds}
+        if self.parallel_requests() or (self._parallel and self._parallel.used):
+            out.update(parallel_requests=self.parallel_requests(), request_slots=2 if self.parallel_requests() else 1)
         if model:
             stem = self.registry.resolve(model)
             size = int((self.registry.load().get(stem) or {}).get("size") or 0) if stem else 0
@@ -784,21 +808,22 @@ class LocalEngineService:
 
     def _mark_gpu_attempt(self, stem: str) -> None:
         self._gpu_attempt = stem
-        self._set_pref(GPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time())})
+        self._set_pref(self._gpu_attempt_key, {"stem": stem, "at": int(time.time())})
 
     def _clear_gpu_attempt(self) -> None:
-        if self._gpu_attempt is not None or self._pref(GPU_ATTEMPT_KEY):
+        if self._gpu_attempt is not None or self._pref(self._gpu_attempt_key):
             self._gpu_attempt = None
-            self._set_pref(GPU_ATTEMPT_KEY, None)
+            self._set_pref(self._gpu_attempt_key, None)
 
     def _recover_gpu_attempt(self) -> Optional[str]:
         """At start: a GPU load whose first answer never ended means the process died on the GPU (a
         driver abort cannot be caught): keep that model on the CPU. Returns its stem."""
-        raw = self._pref(GPU_ATTEMPT_KEY)
+        raw = self._pref(GPU_ATTEMPT_KEY) or self._pref(GPU_ATTEMPT_KEY + "_parallel")
         if not isinstance(raw, dict) or not raw.get("stem"):
             return None
         stem = str(raw["stem"])
         self._set_pref(GPU_ATTEMPT_KEY, None)
+        self._set_pref(GPU_ATTEMPT_KEY + "_parallel", None)
         if self.use_gpu():
             self._gpu_failed(stem, CRASH_REASON)
         return stem
@@ -966,6 +991,8 @@ class LocalEngineService:
         go at its next stop check; nothing here touches the engine."""
         with self._lock:
             self._stops += 1
+        if self._parallel is not None:
+            self._parallel.stop_generation()
 
     def stopping(self) -> bool:
         """A generation that was told to stop, or one under any job Stop, still holds the engine."""
@@ -981,6 +1008,13 @@ class LocalEngineService:
         """Explicit Load (Model manager, Welcome): ``(True, None)`` or ``(False, message)``. Refused during
         a running job's live answer; an answer that was stopped or has no job behind it is waited for (it
         cannot be cut off under native code), then the model loads by itself."""
+        pool = self._parallel
+        if pool is not None and pool.secondary is not None and pool.secondary.gate.busy:
+            if not pool.secondary.stopping():
+                return False, "The on-device model is busy; try again when the current answers are done"
+            pool.secondary.unload(force=True)
+            if pool.secondary.gate.busy:
+                return False, "The on-device model is still stopping"
         if not self.gate.try_acquire():
             if not self.load_must_wait():
                 return False, "The on-device model is busy; try again when the current answer is done"
@@ -1004,8 +1038,11 @@ class LocalEngineService:
         """Unload now (False when a generation holds the engine, unless ``force``: then the running
         generation is stopped first and the model is unloaded once it has let go; never while native
         code still uses it)."""
+        if force:
+            self.stop_generation()
+        extra = self._parallel.unload(force=force) if self._parallel is not None else False
         if self.engine is None or not self.engine.loaded:
-            return False
+            return extra
         if not self.gate.try_acquire():
             if not force:
                 return False
@@ -1022,6 +1059,8 @@ class LocalEngineService:
         """The app's selected model changed (``local/A`` -> ``local/B`` or a cloud model): the loaded model
         is freed at once, or right after the answer it is giving (``"deferred"``), unless the new selection
         is that model or a running job uses it. Returns ``"unloaded"`` / ``"deferred"`` / None."""
+        if self._parallel is not None and self._parallel.secondary is not None:
+            self._parallel.secondary.selected_model_changed(model)
         loaded = self.loaded_stem
         text = str(model or "").strip()
         stem = self.registry.resolve(text) if text.lower().startswith("local/") else None
@@ -1087,6 +1126,11 @@ class LocalEngineService:
             return False
 
     def chat(self, model: str, body: dict, should_stop: Callable[[], bool]) -> ChatRun:
+        if self._parallel is not None:
+            return self._parallel.chat(model, body, should_stop)
+        return self._chat_serial(model, body, should_stop)
+
+    def _chat_serial(self, model: str, body: dict, should_stop: Callable[[], bool]) -> ChatRun:
         stem = self.registry.resolve(model)
         if stem is None:
             shown = model if str(model).lower().startswith("local/") else f"local/{model}"
@@ -1257,7 +1301,8 @@ class LocalEngineService:
 
     def busy_with(self, stem: str) -> bool:
         """True while ``stem`` is loading or generating (a delete must wait)."""
-        return self._stem == stem and (self.gate.busy or self._state in ("loading", "generating"))
+        return bool(self._parallel and self._parallel.busy_with(stem)) or (
+            self._stem == stem and (self.gate.busy or self._state in ("loading", "generating")))
 
     # ---- unload policy -------------------------------------------------------------------------------
 
@@ -1281,6 +1326,8 @@ class LocalEngineService:
 
     def on_lifecycle(self, name: str) -> Optional[str]:
         """``GlossarionApp.on_lifecycle``: returns what it did (tests)."""
+        if self._parallel is not None and self._parallel.secondary is not None:
+            self._parallel.secondary.on_lifecycle(name)
         name = str(name or "").lower()
         if name in ("hide", "pause", "inactive"):
             if name == "inactive":

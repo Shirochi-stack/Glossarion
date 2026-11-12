@@ -334,7 +334,7 @@ def streaming_enabled(source: Any) -> bool:
 def default_batch_size(model: Any) -> int:
     """``settings_rules.default_batch_size``: 1 for the web-chat routes (authds/, authchatgpt/), else 5;
     1 for an on-device ``local/`` model too (mobile only: its engine answers one request at a time)."""
-    if uses_on_device_defaults(model):
+    if _is_local_model(model):
         return 1
     rules = _rules()
     if rules is not None and hasattr(rules, "default_batch_size"):
@@ -347,6 +347,16 @@ def default_batch_size(model: Any) -> int:
 
 #: Job config of a ``local/`` (on-device) model, whatever the saved settings say.
 LOCAL_ENGINE_JOB_CONFIG = {"batch_translation": False, "enable_parallel_extraction": False, "extraction_workers": 1}
+LOCAL_BATCH_BEFORE_KEY = "batch_before_local"
+
+
+def local_parallel_requests() -> bool:
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+        service = default_service()
+        return bool(service and service.parallel_requests())
+    except Exception:
+        return False
 
 
 def local_output_limit(model: Any) -> Optional[int]:
@@ -422,9 +432,9 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
     if config.get("batch_size") in (None, ""):
         config["batch_size"] = default_batch_size(config.get("model"))
     if str(config.get("model") or "").strip().lower().startswith("local/"):
-        # the on-device engine (services.local_llm) answers one request at a time: parallel requests would
-        # only queue at its endpoint and spend the client's timeout waiting
-        if uses_on_device_defaults(config.get("model")):
+        # Serial by default for every on-device model, including Sigma Q8. The opt-in
+        # parallel mode honors the job's saved batching and extraction-worker settings.
+        if not local_parallel_requests():
             config.update(LOCAL_ENGINE_JOB_CONFIG)
         # the saved output budget (owner 2026-10-20: editable on the Welcome), never more than the model's
         # context; without one, half the context (owner 2026-10-18), the prompt keeping the rest
@@ -814,12 +824,31 @@ def uses_on_device_defaults(model: Any) -> bool:
 def _write_model(store: Any, value: Any) -> list:
     """The global model, plus the On-device prompt profiles when it moves to or from a ``local/`` model."""
     _present, old = _stored_value(store, "model")
-    changed = _set_many(store, {"model": value})
+    batch_present, batch = _stored_value(store, "batch_size")
+    had_batch_record, batch_record = _stored_value(store, LOCAL_BATCH_BEFORE_KEY)
+    changed = []
+    if _is_local_model(value) and not had_batch_record:
+        _present, profile_record = _stored_value(store, ON_DEVICE_BEFORE_KEY)
+        saved_batch = (profile_record.get("settings", {}).get("batch_size")
+                       if isinstance(profile_record, Mapping) else None)
+        batch_record = saved_batch if isinstance(saved_batch, (list, tuple)) and len(saved_batch) == 2 else [batch_present, batch]
+        changed += _set_many(store, {LOCAL_BATCH_BEFORE_KEY: batch_record})
+    changed += _set_many(store, {"model": value})
     if uses_on_device_defaults(value) and not uses_on_device_defaults(old):
         changed += _use_on_device_profiles(store, value)
     elif value and not uses_on_device_defaults(value) and (
             uses_on_device_defaults(old) or _stored_value(store, ON_DEVICE_BEFORE_KEY)[0]):
         changed += _restore_profiles_before_on_device(store)
+    if _is_local_model(value):
+        if (not _is_local_model(old)
+                or uses_on_device_defaults(value) != uses_on_device_defaults(old)
+                or (not had_batch_record and not uses_on_device_defaults(value))):
+            changed += _set_many(store, {"batch_size": 1})
+    elif had_batch_record:
+        if batch == 1 and isinstance(batch_record, (list, tuple)) and len(batch_record) == 2:
+            changed += (_set_many(store, {"batch_size": batch_record[1]}) if batch_record[0]
+                        else _unset(store, "batch_size"))
+        changed += _unset(store, LOCAL_BATCH_BEFORE_KEY)
     return changed
 
 
