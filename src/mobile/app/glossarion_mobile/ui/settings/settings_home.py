@@ -36,7 +36,7 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subti
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.router import ROUTES_BY_NAME, RouteError, RouteMatch, RouteSpec, build_route, parse_route
 from glossarion_mobile.ui.screens.base import HubScreen, unavailable_reason
-from glossarion_mobile.ui.settings.banners import JobBanner, notice
+from glossarion_mobile.ui.settings.banners import notice
 from glossarion_mobile.ui.settings.model import ANTI_DUPLICATE_SECTION, ordered_groups
 from glossarion_mobile.ui.settings.schema_access import SearchHit, SectionInfo
 from glossarion_mobile.ui.settings.search import SettingsSearch
@@ -142,7 +142,6 @@ class SettingsHome(HubScreen):
         self.group_titles: list[str] = []
         self.translation_tab = "Run"
         self._group_cards: Optional[list[ft.Control]] = None
-        self.banner = JobBanner(ctx)
         self._unsubs: list[Callable[[], None]] = []
         self.search = SettingsSearch(ctx, on_open=self.open_hit, on_change=self._search_changed)
         self.md: Optional[MasterDetail] = None  # wide screens: sections | section page
@@ -170,8 +169,13 @@ class SettingsHome(HubScreen):
         self.save_chip = chip("Save now", "SAVE_OUTLINED", self._on_save_now, "settings-quick-save")
         self.backup_chip = chip("Backup", "SETTINGS_BACKUP_RESTORE", self._on_backup, "settings-quick-backup")
         self.profiles_chip = chip("Move Profiles", "SWAP_VERT", self._on_profiles, "settings-quick-profiles")
-        self.quick_row = ft.Row([self.save_chip, self.backup_chip, self.profiles_chip], spacing=6, scroll=ft.ScrollMode.AUTO)
+        self.quick_row = self.search.filter_row
+        self.quick_row.controls.extend([self.save_chip, self.backup_chip, self.profiles_chip])
+        self.quick_row.key = "settings-actions"
+        for control in self.quick_row.controls:
+            control.label.size = 12
         self.notices = ft.Column(self._notice_controls(), spacing=6, tight=True)
+        self.notices.visible = bool(self.notices.controls)
         self.content = ft.ListView(expand=True, spacing=tokens.SPACING["md"],
                                    padding=ft.Padding.only(left=12, right=12, bottom=16, top=4))
         self.refresh(push=False)
@@ -179,9 +183,7 @@ class SettingsHome(HubScreen):
         master = ft.Column(
             [
                 ft.Container(padding=ft.Padding.only(left=12, right=12, top=8), content=self.search.field),
-                ft.Container(padding=gutter, content=self.search.filter_row),
                 ft.Container(padding=gutter, content=self.quick_row),
-                self.banner.control,
                 self.notices,
                 self.content,
             ],
@@ -226,6 +228,7 @@ class SettingsHome(HubScreen):
         else:
             self.content.controls = self.group_cards()
         self.notices.controls = self._notice_controls()
+        self.notices.visible = bool(self.notices.controls)
         if push:
             self.ctx.push(self.content, self.notices)
 
@@ -343,6 +346,13 @@ class SettingsHome(HubScreen):
             SectionCard(title=group, children=groups[group], key=f"settings-group-{group}")
             for group in self.group_titles
         ]
+        for group, card in zip(self.group_titles, self._group_cards):
+            if group == "General":
+                card.padding = ft.Padding.symmetric(horizontal=12, vertical=8)
+                card.content.spacing = 0
+                for tile in card.children:
+                    tile.content_padding = ft.Padding.symmetric(horizontal=4, vertical=0)
+                    tile.min_vertical_padding = 0
         return self._group_cards
 
     def _translation_tabs(self, tiles: dict[str, ft.Control]) -> ft.Tabs:
@@ -376,9 +386,7 @@ class SettingsHome(HubScreen):
     def did_show(self) -> None:
         if self._unsubs:
             return
-        self.banner.attach()
         self._unsubs = [
-            self.banner.detach,
             self.ctx.store.observe_all(lambda key, value: self.ctx.on_ui(self._on_config_change)),
             self.ctx.store.observe_saves(lambda ok, error: self.ctx.on_ui(self._on_saved)),
         ]
@@ -415,6 +423,7 @@ class SettingsHome(HubScreen):
         if not hasattr(self, "notices"):  # posted to a screen whose body was never built
             return
         self.notices.controls = self._notice_controls()
+        self.notices.visible = bool(self.notices.controls)
         self.ctx.push(self.notices)
 
     # ---- navigation / actions ---------------------------------------------------------------

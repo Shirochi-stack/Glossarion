@@ -787,6 +787,10 @@ class JobCard(ft.Container):
         self.state_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM)
         self.ring = ft.ProgressRing(width=20, height=20, stroke_width=2, visible=False)
         self.progress = ft.ProgressBar(value=None, visible=False)
+        self.progress_link = ft.Container(
+            content=self.progress, visible=False, padding=ft.Padding.symmetric(vertical=10),
+            tooltip="Open progress manager", key="response-progress-link",
+            on_click=lambda e: self.on_action("progress") if self.on_action else None)
         self.line_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED, visible=False)
         self.current_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, visible=False, max_lines=1,
                                     overflow=ft.TextOverflow.ELLIPSIS)
@@ -852,7 +856,7 @@ class JobCard(ft.Container):
                 ),
                 ft.Text(meta, theme_style=ft.TextThemeStyle.LABEL_SMALL, color=_MUTED, visible=bool(meta)),
                 self.state_text,
-                self.progress,
+                self.progress_link,
                 self.line_text,
                 self.current_text,
                 self.issue_chip,
@@ -983,6 +987,7 @@ class JobCard(ft.Container):
         live = phase.live
         self.ring.visible = live
         self.progress.visible = name in ("running", "stopping", "force_stopping")
+        self.progress_link.visible = self.progress.visible
         self.plan_box.visible = name == "plan"
         if hasattr(self, "outputs_row"):
             self.outputs_row.visible = bool(self.outputs) and not live and name not in ("plan", "queued")

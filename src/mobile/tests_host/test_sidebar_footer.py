@@ -206,6 +206,28 @@ def test_keys_button_sits_between_settings_and_help_and_navigates_like_a_destina
     assert calls == ["event"] and went == [KEYS_ROUTE]
 
 
+@needs_backend
+def test_native_fold_drawer_uses_flutter_constraints_across_navigation_modes(app_env):
+    from flet_glossarion_native.navigation_drawer import NavigationDrawer
+
+    async def scenario():
+        _m, conn, session, page, app = await uf._start("android", width=853)
+        try:
+            _many_chats(app)
+            assert await uf._wait(lambda: len(app.drawer.chat_rows) > 40)
+            for height, nav in [(818, 48), (818, 24), (412, 0), (860, 64)]:
+                session.apply_page_patch({"height": height, "media": _media(STATUS_BAR, nav)})
+                await session.dispatch_event(page._i, "media_change", _media(STATUS_BAR, nav))
+                await session.dispatch_event(page._i, "resize", {"width": 853, "height": height})
+                assert isinstance(page.views[0].drawer, NavigationDrawer)
+                assert app.shell.drawer_box.height is None and app.shell.drawer_box.expand
+                _assert_pinned_footer(app.drawer, page.views[0].drawer)
+        finally:
+            await uf._stop(app)
+
+    asyncio.run(scenario())
+
+
 # ==========================================================================
 # Phone: the NavigationDrawer box (the owner's complaint)
 # ==========================================================================
@@ -217,6 +239,9 @@ def test_phone_drawer_footer_never_scrolls_with_the_chat_list(app_env, monkeypat
     own list exactly, so only the chat list scrolls and the footer stays pinned above the bar."""
     import flet as ft
 
+    # The stock desktop/web Flet client still needs the height-based fallback.
+    from glossarion_mobile.ui.components import drag_sheet
+    monkeypatch.setattr(drag_sheet, "native_widget_class", lambda page, name: None)
     real_session = uf._fake_session
 
     def session_with_insets(platform):  # the client registers with its size and media (3-button nav)

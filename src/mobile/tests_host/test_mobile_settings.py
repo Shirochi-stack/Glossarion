@@ -1197,12 +1197,15 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
         home.section_tiles["glossary"].on_click(None)
         home.route_tiles["settings.env_preview"].on_click(None)
         assert navigated == ["/settings/s/glossary", "/settings/logs/env"]
-        # job banner
-        assert not home.banner.visible
+        # Hotfix 4: one action row, no informational job banner on the home screen.
+        assert home.quick_row is home.search.filter_row and len(home.quick_row.controls) == 6
+        assert not home.quick_row.wrap and not hasattr(home, "banner")
+        general = next(card for card in home.content.controls if card.title == "General")
+        assert general.content.spacing == 0 and general.padding.top == 8
+        assert all(tile.min_vertical_padding == 0 for tile in general.children)
         store.set_job_running(True)
-        assert home.banner.visible
+        assert not hasattr(home, "banner")
         store.set_job_running(False)
-        assert not home.banner.visible
         # quick chips: Save now, Backup, Move profiles
         store.set("batch_size", 30)
         assert await home._on_save_now() is True and "Settings saved" not in notes

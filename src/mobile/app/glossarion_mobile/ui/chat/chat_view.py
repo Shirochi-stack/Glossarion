@@ -2887,14 +2887,22 @@ class ChatView:
 
     async def _open_progress_async(self, item: Any = None) -> Optional[str]:
         opener = getattr(self.env, "open_progress", None) if self.env is not None else None
-        folder, source = await self.env.run_io(self._reader_target, item) if self.env is not None else ("", "")
-        run = self.env.runs.run_for(self.cid) if self.env is not None and self.env.runs is not None else None
-        # the glossary stage runs before the workspace exists: its name and place find the glossary's progress
-        folder = folder or str(getattr(run, "output_dir", "") or "")
-        if not folder or opener is None:
-            self.notify("No output folder for this chat yet")
+        if opener is None:
+            self.notify("The Progress manager is not available in this session")
             return None
-        return await self._await(opener(folder, source))
+        folder, source = await self.env.run_io(self._reader_target, item, False)
+        run = self.env.runs.run_for(self.cid) if self.env.runs is not None else None
+        index = getattr(item, "index", None)
+        # A planned workspace can locate glossary progress before translation output exists.
+        if run is not None and (index is None or self._run_turn(run) == index):
+            folder = folder or str(getattr(run, "output_dir", "") or "")
+        if folder:
+            return await self._await(opener(folder, source))
+        if source:
+            # Same source-chapter view as Jobs, even before the first output is written.
+            return await self._await(opener("", source, chapters=True))
+        self.notify("No source or output folder for this chat yet")
+        return None
 
     def cancel_plan(self) -> None:
         """Cancel removes the plan and the unsent user_file turn (§2.12.1)."""
@@ -3186,7 +3194,7 @@ class ChatView:
                 return str(message[2] or "")
         return ""
 
-    def _reader_target(self, item: Any = None) -> tuple:
+    def _reader_target(self, item: Any = None, latest_fallback: bool = True) -> tuple:
         """Blocking: (workspace folder, attachment path) of the job card's turn (default: the chat's run).
 
         The turn's own workspace comes first (``_job_workspace``: its ``Attachments/<stem>`` folder, or the
@@ -3200,7 +3208,7 @@ class ChatView:
             index = getattr(item, "index", None)
             if run is not None and (index is None or self._run_turn(run) == index):
                 folder = next((str(c) for c in (run.output_dir, run.output_folder) if c and os.path.isdir(str(c))), "")
-        return folder or self._last_output_folder(), source
+        return folder or (self._last_output_folder() if latest_fallback else ""), source
 
     def _last_output_folder(self) -> str:
         run = self.env.runs.run_for(self.cid) if self.env.runs is not None else None

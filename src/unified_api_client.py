@@ -26871,8 +26871,11 @@ class UnifiedClient:
                                             # first non-thought delta from the Gemini OpenAI endpoint
                                             if delta_content and isinstance(delta_content, str):
                                                 delta_content = delta_content.replace("</thought>", "").replace("<thought>", "")
-                                                if not delta_content.strip():
+                                                if not delta_content:
                                                     delta_content = None  # was ONLY the tag, skip
+                                                # Whitespace-only deltas are output too: local models often
+                                                # emit a newline or separator as its own token. Dropping it
+                                                # joins glossary entries and words in streamed responses.
 
                                         # Detect <think>...</think> inline reasoning tags
                                         # Models like Liquid LFM, QwQ, etc. embed thinking in content

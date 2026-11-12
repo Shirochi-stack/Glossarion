@@ -5,6 +5,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'draggable_sheet.dart';
 import 'native_service.dart';
+import 'navigation_drawer.dart';
 import 'scaled_switch.dart';
 import 'tap_away.dart';
 
@@ -23,6 +24,8 @@ class Extension extends FletExtension {
   @override
   Widget? createWidget(Key? key, Control control) {
     switch (control.type) {
+      case "GlossarionNavigationDrawer":
+        return GlossarionNavigationDrawerControl(key: key, control: control);
       case "GlossarionDraggableSheet":
         return GlossarionDraggableSheetControl(key: key, control: control);
       case "GlossarionTapAway":

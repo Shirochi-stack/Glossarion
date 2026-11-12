@@ -378,13 +378,13 @@ class LlamaEngine(_Base):
             else:
                 placement = {"n_gpu_layers": 0, "split_mode": SPLIT_MODE_NONE, "main_gpu": -1}
             try:
-                # mobile hotfix 1: a sliding-window model (Gemma 3 / 4) keeps only its window in the SWA layers'
-                # cache, not the whole context (llama.cpp's default swa_full=true), and the CPU runs flash
-                # attention (llama.cpp's "auto" picks it there; the GPU keeps it off as before), so Gemma 4's
-                # mixed V sizes are not padded. ``chat`` then starts every request on an empty cache.
+                # Keep SWA caches window-sized and enable Flash Attention on both CPU and GPU.
+                # The mobile OpenCL wheel includes the upstream DK512 Gemma 4 kernels; disabling FA
+                # pads Sigma's mixed-size V cache and prevents the fused GPU attention path.
+                # ``chat`` starts every sliding-window request on an empty cache.
                 llm = llama_cpp.Llama(model_path=str(path), n_ctx=int(n_ctx), n_threads=int(n_threads),
                                       n_threads_batch=int(n_threads), n_batch=512, n_ubatch=512, use_mmap=True,
-                                      use_mlock=False, verbose=False, swa_full=False, flash_attn=not gpu,
+                                      use_mlock=False, verbose=False, swa_full=False, flash_attn=True,
                                       **placement)
             except Exception as exc:
                 if gpu:

@@ -6,6 +6,7 @@ from flet_glossarion_native.documents import (
 from flet_glossarion_native.draggable_sheet import DraggableSheet, native_widgets_available
 from flet_glossarion_native.native import EXTENSION_VERSION, GlossarionNative
 from flet_glossarion_native.tap_away import TapAway
+from flet_glossarion_native.navigation_drawer import NavigationDrawer
 from flet_glossarion_native.web_pages import NATIVE_MAX_PAGES, WEB_PAGES_VERSION, WebPageError
 from flet_glossarion_native.types import (
     CHANNEL_JOBS_ACTION,
@@ -52,6 +53,7 @@ __all__ = [
     "GlossarionNative",
     "JOB_SERVICE_NOTIFICATION_ID",
     "NATIVE_MAX_PAGES",
+    "NavigationDrawer",
     "NotificationAction",
     "NotificationButton",
     "NotificationChannel",

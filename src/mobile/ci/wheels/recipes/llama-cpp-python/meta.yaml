@@ -106,3 +106,4 @@ requirements:
 
 patches:
   - mobile.patch
+  - opencl-flash-attention.patch

@@ -202,7 +202,7 @@ class AppShell:
         """``page.on_media_change`` (system bars, navigation mode, rotation): re-fit the phone drawer
         box. True when its height changed (the keyboard alone never changes it)."""
         box = self.drawer_box
-        if box is None:
+        if box is None or box.height is None:
             return False
         height = self._drawer_height()
         if box.height == height:
@@ -289,8 +289,14 @@ class AppShell:
             self.sidebar = None
             self.main_area = None
             self.sidebar_strip_slot = None
-            self.drawer_box = ft.Container(content=self.drawer.content, height=self._drawer_height())
-            self.nav_drawer = ft.NavigationDrawer(
+            from glossarion_mobile.ui.components.drag_sheet import native_widget_class
+
+            native_drawer = native_widget_class(self.page, "NavigationDrawer")
+            # Mobile: Flutter owns the bounded safe area, without a scrolling outer list.
+            # The stock desktop/web client keeps its compatible sized-box fallback.
+            self.drawer_box = ft.Container(content=self.drawer.content, expand=True,
+                                           height=None if native_drawer else self._drawer_height())
+            self.nav_drawer = (native_drawer or ft.NavigationDrawer)(
                 controls=[self.drawer_box],
                 width=layout.drawer_width,
                 bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
@@ -871,7 +877,7 @@ class AppShell:
 
     def _apply_layout(self, new: Layout) -> bool:
         old = self.layout
-        if self.drawer_box is not None:
+        if self.drawer_box is not None and self.drawer_box.height is not None:
             self.drawer_box.height = self._drawer_height()
         if new.size_class is old.size_class:
             self.layout = new

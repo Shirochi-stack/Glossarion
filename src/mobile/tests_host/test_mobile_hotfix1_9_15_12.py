@@ -290,8 +290,8 @@ def test_on_device_engine_limits_the_swa_cache_and_clears_it_per_request(monkeyp
         assert "".join(engine.chat(messages, {"max_tokens": 8}, lambda: False)) == "ok"
     assert llm.events == ["reset", "clear", "chat"] * 2  # never a reused prefix
 
-    engine.load("gemma-4-E2B-it-Q4_0.gguf", 4096, 4, gpu=True)  # the GPU keeps flash attention off
-    assert _SwaLlama.made[-1].kwargs["flash_attn"] is False and _SwaLlama.made[-1].kwargs["swa_full"] is False
+    engine.load("gemma-4-E2B-it-Q4_0.gguf", 4096, 4, gpu=True)  # the GPU also uses fused attention
+    assert _SwaLlama.made[-1].kwargs["flash_attn"] is True and _SwaLlama.made[-1].kwargs["swa_full"] is False
 
     engine.load("Qwen3.5-2B-Q4_0.gguf", 4096, 4)  # no sliding window: prompt-prefix reuse stays
     qwen = _SwaLlama.made[-1]
