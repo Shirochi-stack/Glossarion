@@ -323,6 +323,7 @@ def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_pa
     switch = rows["welcome-gpu"]
     assert switch.visible and switch.value is False and switch.label == "Use GPU (experimental)"
     assert "welcome-gpu-note" not in rows and "welcome-gpu-status" not in rows  # page 1 stays compact
+    assert "welcome-gpu-layers" not in rows  # the layer slider belongs in On-device settings
     assert "welcome-gpu-presets" not in rows  # the Custom cells replace that button
     # the K-quant hint (test_local_llm_gpu) lives here too; hidden while no local/ model is in use
     assert not rows["welcome-gpu-swap"].visible
