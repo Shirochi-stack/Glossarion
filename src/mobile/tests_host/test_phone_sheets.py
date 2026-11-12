@@ -791,7 +791,8 @@ def test_every_sheet_gets_close_menu(monkeypatch):
     sheet = ft.BottomSheet(content=first, show_drag_handle=True, open=True)
     sheet.before_update()
     sheet.before_update()  # idempotent
-    stack = sheet.content
+    assert isinstance(sheet.content, ft.SafeArea) and sheet.content.avoid_intrusions_bottom
+    stack = sheet.content.content
     assert isinstance(stack, ft.Stack) and not sheet.show_drag_handle
     body, strip = stack.controls
     assert body.content is first and body.padding.top == s.CLOSE_STRIP  # the content starts under the strip
@@ -804,10 +805,10 @@ def test_every_sheet_gets_close_menu(monkeypatch):
     second = ft.Text("other")
     sheet.content = second
     sheet.before_update()
-    assert sheet.content.controls[0].content is second
+    assert s.sheet_body(sheet) is second
     # a sheet without a drag handle: the button only
     plain = s.with_close_button(ft.BottomSheet(content=ft.Text("x")))
-    assert len(plain.content.controls[1].content.controls) == 1
+    assert len(plain.content.content.controls[1].content.controls) == 1
     # Close Menu closes it like page.pop_dialog
     button.on_click(None)
     assert sheet.open is False

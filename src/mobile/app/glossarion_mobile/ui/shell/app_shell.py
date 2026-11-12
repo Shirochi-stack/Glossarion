@@ -130,7 +130,7 @@ class AppShell:
         self.drawer_box: Optional[ft.Container] = None
         self.sidebar: Optional[ft.Container] = None
         self.sidebar_strip_slot: Optional[ft.Container] = None
-        self.main_area: Optional[ft.Container] = None
+        self.main_area: Optional[ft.SafeArea] = None
         self.tablet_back_button = ft.IconButton(
             icon=ft.Icons.ARROW_BACK, tooltip="Back", on_click=self._on_tablet_back, size_constraints=HIT_TARGET
         )
@@ -322,7 +322,12 @@ class AppShell:
             ),
         )
         self.side_panel.set_pin_available(layout.size_class is SizeClass.WIDE)
-        self.main_area = ft.Container(expand=True, content=self._main_content())
+        # Unlike a phone View, the tablet main pane has no Scaffold app bar or
+        # screen SafeArea. Keep its header and bottom actions clear of system
+        # bars (including a foldable's taskbar), even as panes/routes change.
+        # Descendant SafeAreas consume the remaining insets, so chat does not
+        # acquire a second navigation-bar gap.
+        self.main_area = ft.SafeArea(expand=True, content=self._main_content(), key="tablet-main-safe")
         self.root_view = ft.View(
             route="/",
             padding=0,

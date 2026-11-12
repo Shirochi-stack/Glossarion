@@ -15,8 +15,9 @@ height at 200 % text and keep a compact, non-scrolling body only when it surely 
 measures its content and stays as tall as that, scrolling once that passes the screen.
 
 Flutter's modal sheet wraps the content in ``SafeArea(bottom: false)``, so with Android 15
-edge-to-edge and 3-button navigation the last row sat under the navigation bar: ``sheet_frame``
-adds the bottom system inset.
+edge-to-edge and 3-button navigation the last row sat under the navigation bar. ``sheet_frame``
+protects standalone sheet bodies; the shared close-button wrapper also protects legacy/custom
+sheets that do not use it. Nested SafeAreas consume the inset only once.
 
 Closing (hotfix 3 issue 1, "the close menu button and slide to close is not working in some edge
 cases, I have to backspace"): every sheet has "Close Menu ✕" (``close_dialog``: by identity, frozen
@@ -187,9 +188,15 @@ def with_close_button(sheet: ft.BottomSheet) -> ft.BottomSheet:
     body = ft.Container(content=content, padding=ft.Padding.only(top=CLOSE_STRIP),
                         expand=getattr(content, "expand", None))
     stack = ft.Stack([body, close_strip(sheet, handle=handle)], expand=getattr(content, "expand", None))
-    object.__setattr__(stack, _CLOSE_MARK, True)
+    # BottomSheet.use_safe_area does not cover the bottom navigation/taskbar
+    # inset. Enforce it here for every sheet, including custom editors and
+    # content replaced after opening. Flutter updates this when bars, posture,
+    # or keyboard visibility change, and removes it for nested SafeAreas.
+    frame = ft.SafeArea(content=stack, avoid_intrusions_top=False,
+                        expand=getattr(content, "expand", None), key="sheet-system-safe")
+    object.__setattr__(frame, _CLOSE_MARK, True)
     sheet.show_drag_handle = False  # the strip draws the pill instead
-    sheet.content = stack
+    sheet.content = frame
     return sheet
 
 
@@ -197,7 +204,7 @@ def sheet_body(sheet: ft.BottomSheet) -> Any:
     """The sheet's own content, under the "Close Menu" strip once the sheet was shown."""
     content = getattr(sheet, "content", None)
     if getattr(content, _CLOSE_MARK, False):
-        return content.controls[0].content
+        return content.content.controls[0].content
     return content
 
 
