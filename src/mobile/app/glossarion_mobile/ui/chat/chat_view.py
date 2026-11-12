@@ -645,7 +645,7 @@ class ChatView:
             self._env_unsubs.append(observe_keys((*CONTEXT_CONFIG_KEYS, "chapter_range", "use_spine_order",
                                                    "auto_glossary_mode", "enable_auto_glossary", "manual_glossary_path",
                                                    "append_glossary", "append_glossary_auto_load"),
-                                                 lambda key, value: env.on_ui(self._on_context_config)))
+                                                 lambda key, value: env.on_ui(self._on_context_config, key)))
         self.load_chat(self.state.current_chat.value)
 
     @property
@@ -682,9 +682,10 @@ class ChatView:
             unsub()
         self._unsubs = []
 
-    def _on_context_config(self) -> None:
+    def _on_context_config(self, key: Optional[str] = None) -> None:
         """Refresh card chips and options when inherited translation defaults change."""
-        if self.bound:
+        if self.bound and (key not in CONTEXT_CONFIG_KEYS
+                           or self.chat_context_for(self.cid) != self.state.chat_context.value):
             self.apply_settings_changed()
 
     def _on_context(self, context: Any) -> None:
