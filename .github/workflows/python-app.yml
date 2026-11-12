@@ -108,6 +108,7 @@ jobs:
           tests/test_subtitle_failed_run.py \
           tests/test_nanogpt_quiet_stream.py \
           tests/test_stream_whitespace.py \
+          tests/test_glossary_joined_rows.py \
           tests/test_missing_tag_bracket.py \
           tests/test_glossary_progress_core.py \
           tests/test_image_glossary_header_only.py \

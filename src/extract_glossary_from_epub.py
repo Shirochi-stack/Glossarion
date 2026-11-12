@@ -8,7 +8,7 @@ import contextlib
 import hashlib
 import re
 import argparse
-from glossary_matching import section_name_for_type, type_for_section
+from glossary_matching import recover_glossary_row_breaks, section_name_for_type, type_for_section
 from gender_tracking import display_gender as _display_gender, normalize_entries_gender as _normalize_entries_gender
 from gender_tracking import looks_like_gender_value as _shared_looks_like_gender_value
 from gender_tracking import is_name_only_header as _is_name_only_header, name_only_row as _name_only_row
@@ -4395,7 +4395,7 @@ def _strip_unwanted_description_keys(entries):
     return entries
 
 
-def parse_api_response(response_text: str) -> List[Dict]:
+def parse_api_response(response_text: str, *, _recover_rows: bool = True) -> List[Dict]:
     """Parse API response to extract glossary entries - handles custom types"""
     entries = []
     import csv
@@ -4705,6 +4705,20 @@ def parse_api_response(response_text: str) -> List[Dict]:
             rejected = before - len(entries)
             if rejected:
                 print(f"🚫 [CJK Filter] Rejected {rejected} entries with no CJK in raw_name (auto-detected CJK source, non-CJK output)")
+
+    # Last resort only: a repeated type column can reveal CSV rows whose newlines
+    # the model omitted. Re-run all normal validation, once, and require 2+ entries.
+    valid_count = sum(bool(str(e.get('raw_name') or '').strip())
+                      and bool(str(e.get('translated_name') or '').strip()) for e in entries)
+    if _recover_rows and valid_count <= 1:
+        repaired = recover_glossary_row_breaks(response_text, enabled_types)
+        if repaired is not None:
+            recovered = parse_api_response(repaired, _recover_rows=False)
+            recovered_count = sum(bool(str(e.get('raw_name') or '').strip())
+                                  and bool(str(e.get('translated_name') or '').strip()) for e in recovered)
+            if recovered_count > max(1, valid_count):
+                print(f"[Glossary] Recovered missing row breaks: {len(recovered)} entries")
+                return recovered
 
     # Post-filter: if the user did NOT include ``description`` in their
     # custom fields list, strip any description value the AI may have

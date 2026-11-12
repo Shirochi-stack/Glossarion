@@ -4,7 +4,7 @@
 import os
 import re
 import os
-from glossary_matching import is_entry_type_token, section_name_for_type
+from glossary_matching import is_entry_type_token, recover_glossary_row_breaks, section_name_for_type
 from gender_tracking import (display_gender, is_name_only_header, looks_like_gender_value, name_only_row,
                              repair_gender_description)
 import sys
@@ -5599,9 +5599,27 @@ def _type_name_only_lines(lines):
         typed.append(sep.join(['character'] + name_only) if name_only else line)
     return typed
 
-def _process_ai_response(response_text, all_text, min_frequency, 
-                       strip_honorifics, fuzzy_threshold, language, filter_mode):
+def _process_ai_response(response_text, all_text, min_frequency,
+                       strip_honorifics, fuzzy_threshold, language, filter_mode, *, _recover_rows=True):
     """Process AI response and return CSV lines"""
+
+    original_response = response_text
+
+    def finish(csv_lines):
+        # All normal parsing paths finish here; never repair a healthy multi-row response.
+        count = max(0, len(csv_lines) - 1)  # every path returns a header
+        if _recover_rows and count <= 1:
+            known_types = _custom_entry_types_for_refinement()
+            repaired = recover_glossary_row_breaks(original_response, known_types)
+            if repaired is None and response_text != original_response:
+                repaired = recover_glossary_row_breaks(response_text, known_types)
+            if repaired is not None:
+                recovered = _process_ai_response(repaired, all_text, min_frequency, strip_honorifics,
+                                                 fuzzy_threshold, language, filter_mode, _recover_rows=False)
+                if len(recovered) - 1 > max(1, count):
+                    print(f"[Glossary] Recovered missing row breaks: {len(recovered) - 1} entries")
+                    return recovered
+        return csv_lines
 
     # Check if gender context and description are enabled (used throughout the function)
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
@@ -5716,7 +5734,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 csv_lines.append(GLOSSARY_SEP.join(row[:len(dynamic_header)]))
             if csv_lines:
                 print(f"📑 Dynamic header detected from AI: {dynamic_header}")
-                return csv_lines
+                return finish(csv_lines)
 
     csv_lines = []
     header_found = False
@@ -5813,7 +5831,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                         csv_lines.append(_gjoin(['term', raw_name, translated_name]))
         
         # print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
-        return csv_lines
+        return finish(csv_lines)
     
     # For "only_with_honorifics" mode, ALWAYS skip frequency check
     if filter_mode == "only_with_honorifics":
@@ -5995,7 +6013,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # Print final summary
     print(f"📑 Processing complete: {entries_accepted} terms accepted")
     
-    return csv_lines
+    return finish(csv_lines)
 
 def _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold):
     """Apply deduplication to glossary CSV lines using the shared 2-pass engine.

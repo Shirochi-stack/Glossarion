@@ -172,6 +172,94 @@ def type_for_section(section, type_map=None, default="terms"):
     return key
 
 
+def recover_glossary_row_breaks(text, known_types=()):
+    """Suggest repaired type-first CSV only when repeated type columns expose joined rows.
+
+    Callers must first parse normally and invoke this only for 0-1 valid entries,
+    then re-parse the suggestion through their usual validation. Quoted fields
+    are opaque, and every proposed row needs a type plus both names. A header,
+    when present, also supplies the minimum row width. No settings are read here.
+    """
+    import csv
+    import io
+
+    names = _known_type_names(known_types) | {
+        'character', 'term', 'location', 'skill', 'item', 'organization', 'title',
+    }
+    names |= {name + 's' for name in tuple(names) if not name.endswith('s')}
+    names |= {name[:-1] + 'ies' for name in tuple(names) if name.endswith('y')}
+    pattern = '|'.join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+    text = re.sub(r'<(?:thinking|think|thought)>.*?</(?:thinking|think|thought)>', '', str(text or ''),
+                  flags=re.DOTALL | re.IGNORECASE)
+    fenced = re.search(r'```(?:csv|text)?[ \t]*\r?\n?(.*?)```', text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1)
+    text = text.strip(' \t\r\n')
+    text = text.replace('\\x1F', '\x1f').replace('\\x1f', '\x1f')
+    sep = '\x1f' if '\x1f' in text else ','
+    # Ignore introductory prose, but require an explicit type-first row/header.
+    start = re.search(r'(?im)^[ \t]*(?:"?(?:type|' + pattern + r')"?)[ \t]*' + re.escape(sep), text)
+    if start is None:
+        return None
+    text = text[start.start():]
+    quoted, outside, i = False, set(), 0
+    while i < len(text):
+        if not quoted:
+            outside.add(i)
+        if text[i] == '"':
+            if quoted and i + 1 < len(text) and text[i + 1] == '"':
+                i += 2
+                continue
+            quoted = not quoted
+        i += 1
+    if quoted:
+        return None  # an unterminated quoted field is not evidence of a new row
+    marker = re.compile(r'(?:"(?:' + pattern + r')"|(?:' + pattern + r'))[ \t]*(?=' + re.escape(sep) + ')', re.I)
+    positions = [m.start() for m in marker.finditer(text) if m.start() in outside]
+    if len(positions) < 2:
+        return None
+
+    def read_segment(segment, boundary=False):
+        tail = segment[len(segment.rstrip(' \t\r\n')):]
+        segment = segment.rstrip(' \t\r\n')
+        if boundary and '\n' not in tail and segment.endswith(sep):
+            segment = segment[:-1]  # replace the comma BETWEEN rows; keep an empty last field
+        try:
+            rows = list(csv.reader(io.StringIO(segment), delimiter=sep, skipinitialspace=True, strict=True))
+        except csv.Error:
+            return None
+        return [cell.strip() for cell in rows[0]] if len(rows) == 1 else None
+
+    header = None
+    prefix = text[:positions[0]]
+    if prefix.strip():
+        header = read_segment(prefix, boundary=True)
+        if not header or header[0].lower() != 'type' or header[1:3] != ['raw_name', 'translated_name']:
+            return None
+    width = len(header) if header else 3
+
+    def valid(row):
+        return (row is not None and len(row) >= width and row[0].lower() in names
+                and bool(row[1]) and bool(row[2])
+                and row[1:3] != ['raw_name', 'translated_name'])
+
+    rows, current = [], positions[0]
+    joined = bool(prefix.strip()) and '\n' not in prefix
+    for pos in positions[1:]:
+        segment = text[current:pos]
+        row = read_segment(segment, boundary=True)
+        if valid(row):
+            rows.append(row)
+            joined = joined or '\n' not in segment
+            current = pos
+    last = read_segment(text[current:])
+    if not valid(last) or not rows or not joined:
+        return None
+    rows.append(last)
+    # Unit Separator lets both existing parsers preserve quoted commas as data.
+    return '\n'.join('\x1f'.join(row) for row in ([header] if header else []) + rows)
+
+
 # ─── Legacy matcher ──────────────────────────────────────────────────────────
 
 def legacy_text_contains_term(text, term, is_character=False):
