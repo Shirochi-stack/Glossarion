@@ -19,14 +19,15 @@ def make_service(tmp_path, prefs=None, memory=(24 * 1024**3, 20 * 1024**3)):
                                   engine_factory=engine.FakeEngine, platform="android", memory=lambda: memory)
 
 
-def test_sigma_q8_request_uses_normal_settings_only(tmp_path):
+def test_sigma_q8_request_uses_editable_model_defaults(tmp_path):
     service = make_service(tmp_path)
     body = {"temperature": .23, "top_p": .76, "presence_penalty": .1, "max_tokens": 999,
             "glossarion_task": "translation", "target_language": "English"}
     params = service._params(body, 500, stem="sigma-q8")
-    assert params["temperature"] == .23 and params["top_p"] == .76 and params["presence_penalty"] == .1
+    assert params["temperature"] == .23 and params["top_p"] == .95 and params["presence_penalty"] == 0
     assert params["max_tokens"] == 500
-    assert not {"ban_scripts", "forced_truncation_seconds", "dry_multiplier", "min_p"} & params.keys()
+    assert not {"ban_scripts", "forced_truncation_seconds"} & params.keys()
+    assert params["dry_multiplier"] == 0 and params["min_p"] == .05
     for stem in ("sigma-q4", "impostor"):
         small = service._params(body, 500, stem=stem)
         assert small["top_p"] == service.sampling()["top_p"]
@@ -121,9 +122,9 @@ def test_sigma_quant_selection_persists_and_reopens_on_next_tap(tmp_path):
         panel = LocalModelsPanel(service=service, prefs=service.prefs,
                                  current_model=lambda: "local/sigma-q8")
         panel.build()
-        assert panel.block_cjk_switch.disabled and not panel.block_cjk_switch.value
+        assert not panel.block_cjk_switch.disabled and not panel.block_cjk_switch.value
         assert not panel.forced_truncation_switch.value
-        assert all(field.disabled for field in panel.sampling_fields.values())
+        assert all(not field.disabled for field in panel.sampling_fields.values())
         panel.dispose()
         fresh = OnDeviceFlow(service=service, prefs=service.prefs, choose=choose, use_model=used.append)
         assert await fresh.get_preset(3) == "local/sigma-q4"
@@ -249,7 +250,8 @@ def test_sigma_engine_does_not_reintroduce_small_model_sampling(tmp_path):
     list(native.chat([{"role": "user", "content": "hi"}], params, lambda: False))
     kwargs = native.llm.kwargs[-1]
     assert kwargs["temperature"] == .23
-    assert not {"top_p", "top_k", "min_p", "presence_penalty", "logits_processor"} & kwargs.keys()
+    assert kwargs["top_p"] == .95 and kwargs["top_k"] == 40 and kwargs["min_p"] == .05
+    assert kwargs["presence_penalty"] == 0 and "logits_processor" not in kwargs
     assert native.llm.dry_sampling["multiplier"] == 0
 
 
@@ -292,3 +294,51 @@ def test_active_sigma_reopens_quant_picker_in_both_model_menus(tmp_path):
     assert button.content == "Choose quant" and not button.disabled
     button.on_click(None)
     assert calls == [3, 3]
+
+
+def test_q8_controls_save_apply_reset_and_stay_separate(tmp_path):
+    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
+    service = make_service(tmp_path)
+    service.save_sampling({"top_k": 9, "dry_multiplier": 1.2}, stem="sigma-q4")
+    selected = ["local/sigma-q8"]
+    panel = LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: selected[0])
+    panel.build()
+    try:
+        assert not panel.sampling_actions.disabled
+        assert panel.sampling_reset.content == "Model defaults"
+        assert panel.sampling_fields["top_k"].value == "40"
+        assert not panel.mark_glossary_complete_switch.value
+        panel.sampling_fields["top_k"].value = "60"
+        panel.sampling_fields["dry_multiplier"].value = "0.4"
+        assert panel.save_sampling() is None
+        panel.block_cjk_switch.value = True
+        assert panel.save_block_cjk()
+        panel.forced_truncation_switch.value = True
+        panel.forced_truncation_seconds.value = "9"
+        assert panel.save_forced_truncation() == (True, 9)
+        panel.mark_glossary_complete_switch.value = True
+        panel.mark_glossary_complete_switch.on_change(None)
+        body = {"temperature": .2, "glossarion_task": "translation", "target_language": "English",
+                "glossarion_allow_kaomoji": True, "glossarion_whitelist_source": True}
+        params = service._params(body, 200, stem="sigma-q8")
+        assert params["top_k"] == 60 and params["dry_multiplier"] == .4
+        assert params["ban_scripts"] and params["forced_truncation_seconds"] == 9
+        assert params["ban_allow_kaomoji"] and params["ban_source_whitelist"]
+        assert params["temperature"] == .2
+        assert service._params({"glossarion_task": "glossary"}, 200, stem="sigma-q8")["forced_truncation_finish"] == "stop"
+        fresh = make_service(tmp_path, service.prefs)
+        assert fresh.sampling("sigma-q8")["top_k"] == 60
+        assert fresh.block_cjk("sigma-q8") and fresh.mark_glossary_complete("sigma-q8")
+        assert panel.reset_sampling() is None
+        assert service.sampling("sigma-q8") == svc.DEFAULT_SIGMA_SAMPLING
+        assert service.sampling("sigma-q4")["top_k"] == 9
+        selected[0] = "local/sigma-q4"
+        panel.render()
+        assert panel.sampling_fields["top_k"].value == "9"
+        assert panel.sampling_reset.content == "Qwen defaults"
+        selected[0] = "local/sigma-q8"
+        panel.render()
+        assert panel.sampling_fields["top_k"].value == "40"
+        assert panel.block_cjk_switch.value
+    finally:
+        panel.dispose()

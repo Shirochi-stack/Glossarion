@@ -209,7 +209,7 @@ def test_llama_engine_places_layers_by_the_gpu_flag(fake_llama):
     assert not engine.on_gpu and engine.device == "CPU (android_armv8.6_1)" and not _FakeLlama.made[-1].evals
     engine.load("m.gguf", 2048, 4, gpu=True)
     gpu = _FakeLlama.made[-1]
-    assert (gpu.kwargs["n_gpu_layers"], gpu.kwargs["split_mode"], gpu.kwargs["main_gpu"]) == (-1, 0, 0)
+    assert (gpu.kwargs["n_gpu_layers"], gpu.kwargs["split_mode"], gpu.kwargs["main_gpu"]) == (eng.DEFAULT_GPU_LAYERS, 0, 0)
     assert engine.on_gpu and engine.device == "GPU: QUALCOMM Adreno(TM) 830 (OpenCL)"
     assert gpu.evals == [[1, 2, 3, 4], [4]] and gpu.resets == 2        # the check ran and left it reset
     assert _FakeLlama.made[0].closed                                    # the CPU copy was closed first
@@ -404,3 +404,87 @@ def test_smoke_check_fails_when_a_gpu_backend_registered_by_itself(monkeypatch):
     monkeypatch.setattr(eng, "gpu_offer", lambda platform=None, machine=None: "OpenCL")
     with pytest.raises(AssertionError, match="offers GPU backend 'OpenCL', the engine build ships None"):
         selfcheck.gpu_backend_check()
+
+
+def test_gpu_layer_count_persists_reloads_and_all_is_explicit(tmp_path):
+    service, engine = _gpu_service(tmp_path)
+    assert service.gpu_layers() == 8
+    _chat(service)
+    assert engine.n_gpu_layers == 8
+    assert service.save_gpu_layers(20) == 20 and service.loaded_stem is None
+    _chat(service)
+    assert engine.n_gpu_layers == 20
+    loads = len(engine.loads)
+    service.save_gpu_layers(20)
+    _chat(service)
+    assert len(engine.loads) == loads
+    assert svc.LocalEngineService(prefs=service.prefs, registry=service.registry, watch=False).gpu_layers() == 20
+    service.save_gpu_layers(-1)
+    _chat(service)
+    assert engine.n_gpu_layers == -1
+    service.save_gpu_layers(0)
+    _chat(service)
+    assert not engine.on_gpu and engine.n_gpu_layers == 0
+    for invalid in (-2, 999, "bad", None):
+        assert service.save_gpu_layers(invalid) == 0
+    service.save_gpu_layers(4)
+    _chat(service)
+    assert engine.on_gpu and engine.n_gpu_layers == 4
+
+
+def test_gpu_layer_change_during_generation_waits_for_next_request(tmp_path):
+    service, engine = _gpu_service(tmp_path)
+    run = service.chat("local/fake-echo", {"messages": [{"role": "user", "content": "hi"}]}, lambda: False)
+    with run:
+        assert engine.n_gpu_layers == 8
+        service.save_gpu_layers(12)
+        assert engine.loaded and engine.n_gpu_layers == 8
+        assert "".join(run.deltas) == "Echo: hi"
+    _chat(service)
+    assert engine.n_gpu_layers == 12
+
+
+@pytest.mark.parametrize("count", [0, 5, 24, -1])
+def test_native_gpu_placement_uses_selected_count(fake_llama, count):
+    engine = eng.LlamaEngine()
+    engine.load("m.gguf", 2048, 4, gpu=True, n_gpu_layers=count)
+    assert _FakeLlama.made[-1].kwargs["n_gpu_layers"] == count
+    assert engine.on_gpu == (count != 0)
+    assert bool(_FakeLlama.made[-1].evals) == (count != 0)
+
+
+def test_gpu_slider_maps_cpu_partial_and_all(tmp_path):
+    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
+    service, engine = _gpu_service(tmp_path)
+    panel = LocalModelsPanel(service=service, prefs=service.prefs)
+    panel.build()
+    try:
+        assert panel.gpu_layers_slider.value == 8 and not panel.gpu_layers_slider.disabled
+        for position, expected in ((16, 16), (0, 0), (svc.MAX_GPU_LAYERS + 1, -1)):
+            panel.gpu_layers_slider.value = position
+            panel.gpu_layers_slider.on_change(None)
+            panel.gpu_layers_slider.on_change_end(None)
+            assert service.gpu_layers() == expected
+        assert panel.gpu_layers_label.value == "GPU layers: All"
+        panel.gpu_switch.value = False
+        panel.save_gpu()
+        assert panel.gpu_layers_slider.disabled
+        panel.gpu_switch.value = True
+        panel.save_gpu()
+        assert not panel.gpu_layers_slider.disabled and service.gpu_layers() == -1
+    finally:
+        panel.dispose()
+
+
+def test_zero_selected_during_gpu_load_is_applied_on_next_request(tmp_path):
+    service, engine = _gpu_service(tmp_path)
+    original = engine.load
+    def load(*args, **kwargs):
+        original(*args, **kwargs)
+        if kwargs.get("gpu"):
+            service.save_gpu_layers(0)
+    engine.load = load
+    assert service.load_blocking("fake-echo") == (True, None)
+    assert engine.on_gpu
+    _chat(service)
+    assert not engine.on_gpu and engine.gpu_loads == [True, False]

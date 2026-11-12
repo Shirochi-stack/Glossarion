@@ -21,7 +21,7 @@ request asks otherwise (``chat_template_kwargs``), and the server strips a leadi
 GPU (optional, ``load(..., gpu=True)``; the service decides): Metal on iOS, OpenCL (Qualcomm Adreno) on
 Android arm64 (``gpu_offer``). Our llama-cpp-python build registers the GPU backend only on the first
 GPU load (``llama_cpp._ctypes_extensions.register_gpu_backend``), so with the GPU off no GPU code runs.
-A GPU load offloads every layer (``n_gpu_layers=-1``, one device), then evaluates a short prompt and
+A GPU load offloads the configured layers (eight by default, one device), then evaluates a short prompt and
 one more token and checks the logits are finite; when the backend has no device, the model does not
 load or that first token fails, it raises ``GpuUnavailable`` (the service reloads on the CPU). A CPU
 load uses ``split_mode`` NONE with ``main_gpu`` -1: no offload device at all, even after a GPU backend
@@ -60,6 +60,7 @@ __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine
 ENGINE_VERSION = "0.3.32"
 #: Qwen3.5 non-thinking sampling defaults (used when a request leaves them out).
 DEFAULT_SAMPLING = {"top_k": 20, "top_p": 0.8, "min_p": 0.0}
+DEFAULT_GPU_LAYERS = 8
 #: llama.cpp's default DRY sequence breakers: a repeat never counts across a line break, a colon, a
 #: quote or an asterisk, so a chapter's paragraph tags and dialogue lines stay free
 DRY_SEQUENCE_BREAKERS = ("\n", ":", '"', "*")
@@ -276,7 +277,10 @@ class FakeEngine(_Base):
         self.projector_loads = 0
         self._projector = False
 
-    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False) -> None:
+    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS) -> None:
+        gpu = bool(gpu and n_gpu_layers != 0)
+        self.n_gpu_layers = int(n_gpu_layers) if gpu else 0
         if self.load_delay:
             time.sleep(self.load_delay)
         self.gpu_loads.append(bool(gpu))
@@ -363,7 +367,9 @@ class LlamaEngine(_Base):
         except Exception as exc:
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
-    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False) -> None:
+    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS) -> None:
+        gpu = bool(gpu and n_gpu_layers != 0)
         llama_cpp = self._module()
         with self._lock:
             self.unload()
@@ -373,8 +379,8 @@ class LlamaEngine(_Base):
                 if not state.get("device"):
                     raise GpuUnavailable(state.get("error") or "no GPU device")
                 device = f"GPU: {state['device']} ({state.get('backend')})"
-                # every layer on the one GPU device (index 0: the only GPU backend this build registers)
-                placement = {"n_gpu_layers": -1, "split_mode": SPLIT_MODE_NONE, "main_gpu": 0}
+                # The UI chooses the count; -1 offloads all layers only when explicitly selected.
+                placement = {"n_gpu_layers": int(n_gpu_layers), "split_mode": SPLIT_MODE_NONE, "main_gpu": 0}
             else:
                 placement = {"n_gpu_layers": 0, "split_mode": SPLIT_MODE_NONE, "main_gpu": -1}
             try:

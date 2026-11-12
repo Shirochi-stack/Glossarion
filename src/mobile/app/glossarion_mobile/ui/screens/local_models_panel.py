@@ -979,6 +979,19 @@ class OnDeviceFlow:
         use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
         self.gpu_switch = toggle(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
                                     on_change=lambda e: self.save_gpu())
+        from glossarion_mobile.services.local_llm.service import MAX_GPU_LAYERS
+        layers = self.service.gpu_layers()
+        self.gpu_layers_label = _small("GPU layers: " + ("All" if layers == -1 else str(layers)))
+        self.gpu_layers_slider = ft.Slider(min=0, max=MAX_GPU_LAYERS + 1, divisions=MAX_GPU_LAYERS + 1,
+                                           value=MAX_GPU_LAYERS + 1 if layers == -1 else layers,
+                                           key=f"{key_prefix}-gpu-layers", disabled=not use,
+                                           on_change=self._gpu_layers_changed,
+                                           on_change_end=lambda e: self.save_gpu_layers())
+        self.gpu_layers_box = ft.Column([
+            self.gpu_layers_label, self.gpu_layers_slider,
+            _small("Starts at 8 layers. Lower this if the phone feels sluggish. 0 uses the CPU; "
+                   "the far right selects all layers. Changes apply to the next model load.")],
+            spacing=0, tight=True, visible=bool(backend), key=f"{key_prefix}-gpu-layers-box")
         if backend == "OpenCL":
             text = ("Runs the model on a Qualcomm Adreno GPU (Snapdragon) through OpenCL. Fastest with Q4_0 models; "
                     "other quantizations can be slower than the CPU. Other GPUs, or a failure, fall back to the "
@@ -996,14 +1009,30 @@ class OnDeviceFlow:
         self.gpu_swap_box = ft.Column([self.gpu_swap_text, self.gpu_swap_button], spacing=0, tight=True,
                                       key=f"{key_prefix}-gpu-swap")
         self._render_gpu_swap(push=False)
-        return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_swap_box]
+        return [self.gpu_switch, self.gpu_layers_box, self.gpu_note, self.gpu_status, self.gpu_swap_box]
+
+    def _gpu_layers_changed(self, e: Any = None) -> None:
+        from glossarion_mobile.services.local_llm.service import MAX_GPU_LAYERS
+        value = int(round(float(self.gpu_layers_slider.value or 0)))
+        self.gpu_layers_label.value = "GPU layers: " + ("All" if value > MAX_GPU_LAYERS else str(value))
+        _push(self.gpu_layers_label)
+
+    def save_gpu_layers(self) -> int:
+        from glossarion_mobile.services.local_llm.service import MAX_GPU_LAYERS
+        value = int(round(float(self.gpu_layers_slider.value or 0)))
+        saved = self.service.save_gpu_layers(-1 if value > MAX_GPU_LAYERS else value)
+        self.gpu_layers_slider.value = MAX_GPU_LAYERS + 1 if saved == -1 else saved
+        self._gpu_layers_changed()
+        _push(self.gpu_layers_slider)
+        return saved
 
     def save_gpu(self) -> bool:
         """The switch; every preset and file stays as it is."""
         value = bool(self.service.save_gpu(self.gpu_switch.value))
         self.gpu_switch.value = value
+        self.gpu_layers_slider.disabled = not value
         self._render_gpu_swap(push=False)
-        _push(self.gpu_switch, self.gpu_swap_box)
+        _push(self.gpu_switch, self.gpu_layers_slider, self.gpu_swap_box)
         return value
 
     def gpu_swap(self) -> Optional[tuple]:
@@ -1185,18 +1214,26 @@ class LocalModelsPanel(OnDeviceFlow):
         self.gpu_status.visible = bool(note)
         self._render_gpu_swap(push=False)  # a model was loaded / switched
         normal = self.service.uses_normal_settings(self.selected_stem())
+        if getattr(self, "_sampling_profile", None) != normal:
+            values = self.service.sampling(self.selected_stem())
+            for key, field in self.sampling_fields.items():
+                field.value = f"{values[key]:g}"
+            self._sampling_profile = normal
         for field in self.sampling_fields.values():
-            field.disabled = normal
-        self.sampling_actions.disabled = normal
-        self.sampling_note.value = ("Sigma Q8_0 uses your normal prompts, temperature and sampling settings. "
-                                    "On-device script bans are disabled; Forced Truncation starts off." if normal
+            field.disabled = False
+        self.sampling_actions.disabled = False
+        self.sampling_reset.content = "Model defaults" if normal else "Qwen defaults"
+        self.sampling_note.value = ("Sigma Q8_0 starts with the engine's normal sampling defaults, without Qwen's "
+                                    "penalties or DRY. These values are editable and saved separately. Temperature "
+                                    "uses your normal translation settings. Script blocking and truncation start off." if normal
                                    else self._small_model_sampling_note)
-        self.block_cjk_switch.disabled = normal
+        self.block_cjk_switch.disabled = False
         self.block_cjk_switch.value = self.service.block_cjk(self.selected_stem())
         self.forced_truncation_switch.value = self.service.forced_truncation(self.selected_stem())
+        self.mark_glossary_complete_switch.value = self.service.mark_glossary_complete(self.selected_stem())
         if push:
             _push(*self.sampling_fields.values(), self.sampling_actions, self.sampling_note,
-                  self.block_cjk_switch, self.forced_truncation_switch)
+                  self.block_cjk_switch, self.forced_truncation_switch, self.mark_glossary_complete_switch)
             _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text, self.gpu_status,
                   self.gpu_swap_box)
 
@@ -1217,7 +1254,7 @@ class LocalModelsPanel(OnDeviceFlow):
         anti-duplicate values for on-device models only."""
         from glossarion_mobile.services.local_llm.service import SAMPLING_LABELS
 
-        values = self.service.sampling()
+        values = self.service.sampling(self.selected_stem())
         self.sampling_fields = {
             key: ft.TextField(value=f"{values[key]:g}", label=label, dense=True, width=118,
                               keyboard_type=ft.KeyboardType.NUMBER, key=f"local-sampling-{key}")
@@ -1233,16 +1270,19 @@ class LocalModelsPanel(OnDeviceFlow):
                                                       on_blur=lambda e: self.save_forced_truncation(),
                                                       on_submit=lambda e: self.save_forced_truncation())
         self.mark_glossary_complete_switch = toggle(
-            value=self.service.mark_glossary_complete(), key="local-mark-glossary-complete",
-            on_change=lambda e: self.service.save_mark_glossary_complete(self.mark_glossary_complete_switch.value))
+            value=self.service.mark_glossary_complete(self.selected_stem()), key="local-mark-glossary-complete",
+            on_change=lambda e: self.service.save_mark_glossary_complete(
+                self.mark_glossary_complete_switch.value, stem=self.selected_stem()))
         self.block_cjk_switch = toggle(value=self.service.block_cjk(self.selected_stem()),
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         self._small_model_sampling_note = ("Qwen's recommended values and the DRY sampler reduce repetition loops. "
                                           "These replace the anti-duplicate settings for small on-device models.")
         self.sampling_note = _small(self._small_model_sampling_note)
+        self.sampling_reset = ft.TextButton(content="Model defaults", key="local-sampling-reset",
+                                             on_click=lambda e: self.reset_sampling())
         self.sampling_actions = ft.Row([
             ft.TextButton(content="Save", key="local-sampling-save", on_click=lambda e: self.save_sampling()),
-            ft.TextButton(content="Qwen defaults", key="local-sampling-reset", on_click=lambda e: self.reset_sampling())], spacing=4)
+            self.sampling_reset], spacing=4)
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
             self.sampling_note,
@@ -1308,11 +1348,12 @@ class LocalModelsPanel(OnDeviceFlow):
         return enabled, seconds
 
     def save_block_cjk(self) -> bool:
-        value = self.service.save_block_cjk(self.block_cjk_switch.value)
+        value = self.service.save_block_cjk(self.block_cjk_switch.value, stem=self.selected_stem())
         return value
 
     def save_sampling(self) -> Optional[str]:
-        values, error = self.service.save_sampling({k: f.value for k, f in self.sampling_fields.items()})
+        values, error = self.service.save_sampling({k: f.value for k, f in self.sampling_fields.items()},
+                                                  stem=self.selected_stem())
         self.sampling_error.value = error or ""
         self.sampling_error.visible = bool(error)
         _push(self.sampling_error)
@@ -1416,6 +1457,8 @@ class LocalModelsPanel(OnDeviceFlow):
     def render(self, push: bool = True) -> None:
         if self.control is None:
             return
+        if self._sampling_profile != self.service.uses_normal_settings(self.selected_stem()):
+            self.render_engine(self.service.snapshot(), push=push)
         rows: list = []
         preset_rows = self.presets()
         if not preset_rows:

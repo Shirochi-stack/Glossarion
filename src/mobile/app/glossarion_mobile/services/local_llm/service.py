@@ -45,7 +45,7 @@
   under the switch too) arrives as ``glossarion_allow_kaomoji`` and becomes ``params["ban_allow_kaomoji"]``.
 * **GPU (experimental, off by default;** Prefs ``GPU_KEY``, Model manager › On-device › engine card): offered
   where the build has a GPU backend (``engine.gpu_offer``: Metal on iOS, OpenCL / Adreno on Android
-  arm64). With it on, a load first tries the GPU (``engine.load(..., gpu=True)``); when that fails
+  arm64). With it on, a load offloads the saved layer count (eight by default; all is opt-in); when that fails
   (``GpuUnavailable``: no backend / device, the model or its first token failed) or a GPU answer fails,
   the reason is logged and kept (Prefs ``GPU_FALLBACK_KEY``), the model loads on the CPU, and that model
   stays on the CPU until the setting or the model changes; the engine card says "GPU unavailable: …".
@@ -95,6 +95,11 @@ SAMPLING_KEY = "local_llm_sampling"
 DEFAULT_ONDEVICE_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5,
                              "frequency_penalty": 0.0, "repeat_penalty": 1.0, "dry_multiplier": 0.8,
                              "dry_base": 1.75, "dry_allowed_length": 2}
+# Match the pinned llama-cpp-python defaults, without the small-model penalties.
+# Temperature continues to come from the request's normal translation settings.
+SIGMA_SAMPLING_KEY = "sigma_q8_sampling"
+DEFAULT_SIGMA_SAMPLING = {**DEFAULT_ONDEVICE_SAMPLING, "top_p": 0.95, "top_k": 40,
+                          "min_p": 0.05, "presence_penalty": 0.0, "dry_multiplier": 0.0}
 #: (low, high, type) of each sampling setting
 SAMPLING_LIMITS = {"top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
                    "min_p": (0.0, 1.0, float), "presence_penalty": (-2.0, 2.0, float),
@@ -117,6 +122,8 @@ FORCED_TRUNCATION_SECONDS_KEY = "local_llm_forced_truncation_seconds"
 MARK_GLOSSARY_COMPLETE_KEY = "local_llm_mark_glossary_complete"
 #: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
 GPU_KEY = "local_llm_gpu"
+GPU_LAYERS_KEY = "local_llm_gpu_layers"
+MAX_GPU_LAYERS = 128
 #: Prefs key of the GPU fallback: ``{"stem", "reason"}`` (that model runs on the CPU until the setting or
 #: the model changes)
 GPU_FALLBACK_KEY = "local_llm_gpu_fallback"
@@ -374,6 +381,7 @@ class LocalEngineService:
         # the GPU backend offered here ("Metal" / "OpenCL"; "" or None: no GPU option)
         self.gpu_backend = (gpu_backend if gpu_backend is not None else eng.gpu_offer(self.platform)) or None
         self._loaded_gpu = False  # the loaded model was asked for on the GPU (whatever it got)
+        self._loaded_gpu_layers = 0
         self._gpu_attempt: Optional[str] = None  # stem of a GPU load whose first answer has not ended
         self.clock = clock
         self.memory = memory or memory_info
@@ -594,14 +602,15 @@ class LocalEngineService:
         """Save only the Context default (0 or blank: each model's own, ``context_for``); Threads stay."""
         return self.save_settings(n_ctx, self.settings()["n_threads"])
 
-    def sampling(self) -> dict:
-        """The on-device sampling settings: the saved ones, Qwen's recommended value for the rest."""
+    def sampling(self, stem: Optional[str] = None) -> dict:
+        """Editable defaults for the selected model, with Q8 choices saved separately."""
+        normal = self.uses_normal_settings(stem)
         try:
-            raw = self.prefs.get(SAMPLING_KEY, None) if self.prefs is not None else None
+            raw = self.prefs.get(SIGMA_SAMPLING_KEY if normal else SAMPLING_KEY, None) if self.prefs is not None else None
         except Exception:
             raw = None
         raw = raw if isinstance(raw, dict) else {}
-        out = dict(DEFAULT_ONDEVICE_SAMPLING)
+        out = dict(DEFAULT_SIGMA_SAMPLING if normal else DEFAULT_ONDEVICE_SAMPLING)
         for key, (low, high, kind) in SAMPLING_LIMITS.items():
             try:
                 value = kind(raw[key])
@@ -611,13 +620,15 @@ class LocalEngineService:
                 out[key] = value
         return out
 
-    def save_sampling(self, values: dict) -> tuple:
-        """(sampling, None) or (None, message); a blank value goes back to Qwen's recommendation."""
+    def save_sampling(self, values: dict, *, stem: Optional[str] = None) -> tuple:
+        """(sampling, None) or (None, message); blanks restore this model's defaults."""
+        normal = self.uses_normal_settings(stem)
+        defaults = DEFAULT_SIGMA_SAMPLING if normal else DEFAULT_ONDEVICE_SAMPLING
         out = {}
         for key, (low, high, kind) in SAMPLING_LIMITS.items():
             text = str((values or {}).get(key, "") if (values or {}).get(key) is not None else "").strip()
             if not text:
-                out[key] = DEFAULT_ONDEVICE_SAMPLING[key]
+                out[key] = defaults[key]
                 continue
             try:
                 number = kind(float(text)) if kind is int else kind(text)
@@ -629,13 +640,13 @@ class LocalEngineService:
                 return None, f"{SAMPLING_LABELS[key]} must be between {low:g} and {high:g}"
             out[key] = number
         if self.prefs is not None:
-            self.prefs.set(SAMPLING_KEY, dict(out))
+            self.prefs.set(SIGMA_SAMPLING_KEY if normal else SAMPLING_KEY, dict(out))
         return out, None
 
     def block_cjk(self, stem: Optional[str] = None) -> bool:
         """"Block other scripts in translations (adaptive)": on unless switched off."""
         if self.uses_normal_settings(stem):
-            return False
+            return bool(self._pref("sigma_q8_block_cjk"))
         try:
             raw = self.prefs.get(BLOCK_CJK_KEY, None) if self.prefs is not None else None
         except Exception:
@@ -655,15 +666,18 @@ class LocalEngineService:
         except (TypeError, ValueError):
             return 3
 
-    def mark_glossary_complete(self) -> bool:
+    def mark_glossary_complete(self, stem: Optional[str] = None) -> bool:
         """"Mark glossary forced truncation as complete": on unless switched off."""
+        if self.uses_normal_settings(stem):
+            return bool(self._pref("sigma_q8_mark_glossary_complete"))
         raw = self._pref(MARK_GLOSSARY_COMPLETE_KEY)
         return raw is None or bool(raw)
 
-    def save_mark_glossary_complete(self, enabled: Any) -> bool:
+    def save_mark_glossary_complete(self, enabled: Any, *, stem: Optional[str] = None) -> bool:
         value = bool(enabled)
         if self.prefs is not None:
-            self.prefs.set(MARK_GLOSSARY_COMPLETE_KEY, value)
+            key = "sigma_q8_mark_glossary_complete" if self.uses_normal_settings(stem) else MARK_GLOSSARY_COMPLETE_KEY
+            self.prefs.set(key, value)
         return value
 
     def save_forced_truncation(self, enabled: Any, seconds: Any = None, *, stem: Optional[str] = None) -> tuple:
@@ -678,10 +692,10 @@ class LocalEngineService:
                     pass
         return self.forced_truncation(stem), self.forced_truncation_seconds()
 
-    def save_block_cjk(self, enabled: Any) -> bool:
+    def save_block_cjk(self, enabled: Any, *, stem: Optional[str] = None) -> bool:
         value = bool(enabled)
         if self.prefs is not None:
-            self.prefs.set(BLOCK_CJK_KEY, value)
+            self.prefs.set("sigma_q8_block_cjk" if self.uses_normal_settings(stem) else BLOCK_CJK_KEY, value)
         return value
 
     # ---- GPU -------------------------------------------------------------------------------------------
@@ -703,6 +717,29 @@ class LocalEngineService:
     def use_gpu(self) -> bool:
         """"Use GPU (experimental)": off unless switched on, and only where a GPU backend is offered."""
         return bool(self.gpu_backend) and bool(self._pref(GPU_KEY))
+
+    def gpu_layers(self) -> int:
+        """Eight layers by default; zero uses CPU, -1 is an explicit all-layers choice."""
+        try:
+            value = int(self._pref(GPU_LAYERS_KEY))
+        except (TypeError, ValueError, OverflowError):
+            return eng.DEFAULT_GPU_LAYERS
+        return value if -1 <= value <= MAX_GPU_LAYERS else eng.DEFAULT_GPU_LAYERS
+
+    def save_gpu_layers(self, layers: Any) -> int:
+        try:
+            value = int(layers)
+        except (TypeError, ValueError, OverflowError):
+            return self.gpu_layers()
+        if not -1 <= value <= MAX_GPU_LAYERS:
+            return self.gpu_layers()
+        if value != self.gpu_layers():
+            self._set_pref(GPU_LAYERS_KEY, value)
+            self._set_pref(GPU_FALLBACK_KEY, None)
+            if self.loaded_stem is not None and self._loaded_gpu:
+                self.unload()  # busy generations finish; the next request uses the new count
+            self._notify()
+        return value
 
     def gpu_fallback(self) -> Optional[dict]:
         """``{"stem", "reason"}`` of the model kept on the CPU after a GPU failure, else None."""
@@ -733,7 +770,7 @@ class LocalEngineService:
         return value
 
     def _gpu_wanted(self, stem: str) -> bool:
-        if not self.use_gpu():
+        if not self.use_gpu() or self.gpu_layers() == 0:
             return False
         fallback = self.gpu_fallback()
         return not (fallback and fallback["stem"] == stem)
@@ -853,9 +890,10 @@ class LocalEngineService:
         if fallback and fallback["stem"] != stem:
             self._set_pref(GPU_FALLBACK_KEY, None)  # another model: the GPU gets a new try
         gpu = self._gpu_wanted(stem)
+        gpu_layers = self.gpu_layers() if gpu else 0
         # a changed Context (Model manager or Welcome slider) or GPU setting reloads the model on the next request
         if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
-                and self._loaded_gpu == gpu:
+                and self._loaded_gpu == gpu and self._loaded_gpu_layers == gpu_layers:
             if vision and not engine.vision_loaded:  # the projector loads with the first image
                 self._gate_ram(stem, engine.n_ctx or self.context_for(stem), vision=True,
                                gpu=bool(getattr(engine, "on_gpu", False)))
@@ -880,7 +918,7 @@ class LocalEngineService:
             if gpu:
                 self._mark_gpu_attempt(stem)
                 try:
-                    engine.load(path, n_ctx, self.threads(), mmproj=mmproj, gpu=True)
+                    engine.load(path, n_ctx, self.threads(), mmproj=mmproj, gpu=True, n_gpu_layers=gpu_layers)
                 except Exception as exc:  # GpuUnavailable, or anything else the GPU path raised
                     self._gpu_failed(stem, str(exc) or type(exc).__name__)
                     engine.load(path, n_ctx, self.threads(), mmproj=mmproj)
@@ -892,7 +930,8 @@ class LocalEngineService:
             self._set("idle", None, f"Could not load {stem}: {exc}")
             log.exception("loading %s failed", stem)
             raise LocalLLMError(500, "load_failed", f"Could not load local/{stem}: {exc}", "server_error") from exc
-        self._loaded_gpu = self._gpu_wanted(stem)  # False after a fallback: no reload loop
+        self._loaded_gpu = bool(getattr(engine, "on_gpu", False))  # record what loaded, not a setting changed during load
+        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu else 0
         self._load_seconds = round(time.monotonic() - started, 2)
         self.log.append((stem, self._load_seconds))
         log.info("on-device model %s loaded in %.1f s (n_ctx %d, %d threads, %s)", stem, self._load_seconds, n_ctx,
@@ -1137,7 +1176,6 @@ class LocalEngineService:
                        finish=lambda: getattr(engine, "last_finish", "stop"), release=release)
 
     def _params(self, body: dict, room: int, *, stem: Optional[str] = None) -> dict:
-        normal = self.uses_normal_settings(stem)
         wanted = body.get("max_completion_tokens") or body.get("max_tokens")
         try:
             wanted = int(wanted) if wanted else 0
@@ -1149,13 +1187,7 @@ class LocalEngineService:
                 params[key] = body[key]
         # the on-device sampling settings, never the request's (the global anti-duplicate values are for
         # cloud models)
-        if normal:
-            params["normal_settings"] = True
-            for key in SAMPLING_LIMITS:
-                if body.get(key) is not None:
-                    params[key] = body[key]
-        else:
-            params.update(self.sampling())
+        params.update(self.sampling(stem))
         stop = body.get("stop")
         if isinstance(stop, str):
             stop = [stop]
@@ -1164,10 +1196,8 @@ class LocalEngineService:
         params["enable_thinking"] = wants_thinking(body)
         if self.forced_truncation(stem):
             params["forced_truncation_seconds"] = self.forced_truncation_seconds()
-            if self.mark_glossary_complete() and "glossary" in str(body.get("glossarion_task") or "").lower():
+            if self.mark_glossary_complete(stem) and "glossary" in str(body.get("glossarion_task") or "").lower():
                 params["forced_truncation_finish"] = "stop"
-        if normal:
-            return params
         scripts = script_ban.banned_scripts(body.get("glossarion_task"), body.get("target_language"),
                                             single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk(stem))
         always = script_ban.source_whitelisted(body.get("glossarion_task"), single_pass=body.get("glossarion_single_pass"))

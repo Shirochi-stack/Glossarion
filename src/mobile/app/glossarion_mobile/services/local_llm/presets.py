@@ -44,7 +44,7 @@ def is_sigma(repo: Any) -> bool:
 
 
 def uses_normal_settings(entry: dict) -> bool:
-    """Only the verified Sigma Q8_0 file opts out of small-model overrides."""
+    """Sigma Q8_0 uses normal defaults; its on-device controls remain editable."""
     return is_sigma(entry.get("repo")) and entry.get("file") == SIGMA_Q8_FILE
 
 #: First-run presets (verified on Hugging Face 2026-10-16: size and sha256 = the LFS oid; the vision
