@@ -453,19 +453,21 @@ def test_native_gpu_placement_uses_selected_count(fake_llama, count):
     assert bool(_FakeLlama.made[-1].evals) == (count != 0)
 
 
-def test_gpu_slider_maps_cpu_partial_and_all(tmp_path):
+def test_gpu_slider_maps_cpu_partial_and_all(tmp_path, monkeypatch):
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
     service, engine = _gpu_service(tmp_path)
+    monkeypatch.setattr(service, "gpu_layer_limit", lambda stem=None: 24)
     panel = LocalModelsPanel(service=service, prefs=service.prefs)
     panel.build()
     try:
+        assert panel.gpu_layers_slider.max == 24
         assert panel.gpu_layers_slider.value == 8 and not panel.gpu_layers_slider.disabled
-        for position, expected in ((16, 16), (0, 0), (svc.MAX_GPU_LAYERS + 1, -1)):
+        for position, expected in ((16, 16), (0, 0), (24, -1)):
             panel.gpu_layers_slider.value = position
             panel.gpu_layers_slider.on_change(None)
             panel.gpu_layers_slider.on_change_end(None)
             assert service.gpu_layers() == expected
-        assert panel.gpu_layers_label.value == "GPU layers: All"
+        assert panel.gpu_layers_label.value == "GPU layers: 24 / 24"
         panel.gpu_switch.value = False
         panel.save_gpu()
         assert panel.gpu_layers_slider.disabled

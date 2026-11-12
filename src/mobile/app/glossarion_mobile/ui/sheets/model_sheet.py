@@ -342,7 +342,9 @@ class ModelSheet:
         self.field_mode = field_mode
         self.heading = "Use once" if one_shot else (title or "Model")
         self.tab_ids = self._tab_ids()
-        self.tab = tab if tab in self.tab_ids else "model"
+        saved_tab = self.env.prefs.get("model_picker_tab", "model") if self.env.prefs is not None else "model"
+        wanted = saved_tab if tab == "model" else tab
+        self.tab = wanted if isinstance(wanted, str) and wanted in self.tab_ids else "model"
         self.ondevice: Any = None  # OnDeviceFlow of Model manager › On-device, made when the tab first shows
         self._ondevice_unsubs: list = []
         self._ondevice_loading: set = set()  # stems of downloaded models whose load + use runs
@@ -1684,7 +1686,9 @@ class ModelSheet:
 
     def _on_tab(self, e: Any = None) -> None:
         selected = list(getattr(e.control, "selected", []) or []) if e is not None else []
-        self.tab = selected[0] if selected else "model"
+        self.tab = selected[0] if selected and selected[0] in self.tab_ids else "model"
+        if self.env.prefs is not None:
+            self.env.prefs.set("model_picker_tab", self.tab)
         self.query = ""
         self.search.value = ""
         self.refresh()

@@ -126,7 +126,7 @@ def test_ram_gate(tmp_path):
 
 def test_thread_and_context_defaults(tmp_path, monkeypatch):
     monkeypatch.delattr(os, "sched_getaffinity", raising=False)
-    for cpus, threads in ((8, 4), (6, 4), (4, 2), (2, 2), (16, 4)):
+    for cpus, threads in ((8, 4), (6, 4), (4, 2), (2, 1), (16, 4)):
         monkeypatch.setattr(os, "cpu_count", lambda c=cpus: c)
         assert eng.default_threads() == threads
     prefs = fakes.FakePrefs()

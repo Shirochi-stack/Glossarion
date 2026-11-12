@@ -83,6 +83,11 @@ KAOMOJI_KEY = "script_ban_allow_kaomoji"
 WHITELIST_SOURCE_KEY = "script_ban_whitelist_source"
 
 
+def usage_color(used: int, total: int) -> Any:
+    """Strict thresholds: yellow above half, red above 90 percent."""
+    return ft.Colors.ERROR if used * 10 > total * 9 else ft.Colors.AMBER if used * 2 > total else None
+
+
 def _push(*controls: Any) -> None:
     for control in controls:
         if control is None:
@@ -979,19 +984,17 @@ class OnDeviceFlow:
         use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
         self.gpu_switch = toggle(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
                                     on_change=lambda e: self.save_gpu())
-        from glossarion_mobile.services.local_llm.service import MAX_GPU_LAYERS
-        layers = self.service.gpu_layers()
-        self.gpu_layers_label = _small("GPU layers: " + ("All" if layers == -1 else str(layers)))
-        self.gpu_layers_slider = ft.Slider(min=0, max=MAX_GPU_LAYERS + 1, divisions=MAX_GPU_LAYERS + 1,
-                                           value=MAX_GPU_LAYERS + 1 if layers == -1 else layers,
-                                           key=f"{key_prefix}-gpu-layers", disabled=not use,
+        self.gpu_layers_label = _small("")
+        self.gpu_layers_slider = ft.Slider(min=0, max=1, divisions=1, value=0,
+                                           key=f"{key_prefix}-gpu-layers", disabled=True,
                                            on_change=self._gpu_layers_changed,
                                            on_change_end=lambda e: self.save_gpu_layers())
+        self.gpu_layers_note = _small("")
         self.gpu_layers_box = ft.Column([
-            self.gpu_layers_label, self.gpu_layers_slider,
-            _small("Starts at 8 layers. Lower this if the phone feels sluggish. 0 uses the CPU; "
-                   "the far right selects all layers. Changes apply to the next model load.")],
+            self.gpu_layers_label, self.gpu_layers_slider, self.gpu_layers_note],
             spacing=0, tight=True, visible=bool(backend), key=f"{key_prefix}-gpu-layers-box")
+        self._gpu_limits_state = None
+        self._refresh_gpu_limits()
         if backend == "OpenCL":
             text = ("Runs the model on a Qualcomm Adreno GPU (Snapdragon) through OpenCL. Fastest with Q4_0 models; "
                     "other quantizations can be slower than the CPU. Other GPUs, or a failure, fall back to the "
@@ -1011,26 +1014,51 @@ class OnDeviceFlow:
         self._render_gpu_swap(push=False)
         return [self.gpu_switch, self.gpu_layers_box, self.gpu_note, self.gpu_status, self.gpu_swap_box]
 
+    def _refresh_gpu_limits(self) -> None:
+        if not hasattr(self, "gpu_layers_slider"):
+            return
+        stem = self.selected_stem()
+        total = self.service.gpu_layer_limit(stem)
+        layers = self.service.gpu_layers(stem)
+        state = (stem, total, layers, self.service.use_gpu())
+        if state == self._gpu_limits_state:
+            return
+        self._gpu_limits_state = state
+        self._gpu_total = total
+        self.gpu_layers_slider.max = total or 1
+        self.gpu_layers_slider.divisions = total or 1
+        self.gpu_layers_slider.value = (total if layers == -1 else min(layers, total)) if total else 0
+        self.gpu_layers_slider.disabled = not total or not self.service.use_gpu()
+        self.gpu_layers_note.value = (
+            "Includes the output layer. 0 uses CPU; the far right offloads all layers. "
+            "Lower this if the phone feels sluggish. Changes apply to the next model load."
+            if total else "Select a downloaded model to detect its GPU layer limit.")
+        self._gpu_layers_changed()
+        _push(self.gpu_layers_box)
+
     def _gpu_layers_changed(self, e: Any = None) -> None:
-        from glossarion_mobile.services.local_llm.service import MAX_GPU_LAYERS
         value = int(round(float(self.gpu_layers_slider.value or 0)))
-        self.gpu_layers_label.value = "GPU layers: " + ("All" if value > MAX_GPU_LAYERS else str(value))
-        _push(self.gpu_layers_label)
+        total = self._gpu_total
+        self.gpu_layers_label.value = f"GPU layers: {value} / {total}" if total else "GPU layers: not detected"
+        color = usage_color(value, total) if total else None
+        self.gpu_layers_slider.active_color = color
+        self.gpu_layers_slider.thumb_color = color
+        self.gpu_layers_label.color = color or ft.Colors.ON_SURFACE_VARIANT
+        _push(self.gpu_layers_label, self.gpu_layers_slider)
 
     def save_gpu_layers(self) -> int:
-        from glossarion_mobile.services.local_llm.service import MAX_GPU_LAYERS
-        value = int(round(float(self.gpu_layers_slider.value or 0)))
-        saved = self.service.save_gpu_layers(-1 if value > MAX_GPU_LAYERS else value)
-        self.gpu_layers_slider.value = MAX_GPU_LAYERS + 1 if saved == -1 else saved
-        self._gpu_layers_changed()
-        _push(self.gpu_layers_slider)
+        if not self._gpu_total:
+            return self.service.gpu_layers(self.selected_stem())
+        value = max(0, min(self._gpu_total, int(round(float(self.gpu_layers_slider.value or 0)))))
+        saved = self.service.save_gpu_layers(-1 if value == self._gpu_total else value, self.selected_stem())
+        self._refresh_gpu_limits()
         return saved
 
     def save_gpu(self) -> bool:
         """The switch; every preset and file stays as it is."""
         value = bool(self.service.save_gpu(self.gpu_switch.value))
         self.gpu_switch.value = value
-        self.gpu_layers_slider.disabled = not value
+        self._refresh_gpu_limits()
         self._render_gpu_swap(push=False)
         _push(self.gpu_switch, self.gpu_layers_slider, self.gpu_swap_box)
         return value
@@ -1101,7 +1129,8 @@ class LocalModelsPanel(OnDeviceFlow):
         self.ctx_field = self.context.field
         self.threads_field = ft.TextField(value=str(settings["n_threads"] or ""), label="Threads", hint_text="auto",
                                           dense=True, expand=True, keyboard_type=ft.KeyboardType.NUMBER,
-                                          key="local-threads")
+                                          key="local-threads", on_change=self._threads_changed)
+        self._threads_changed()
         self.settings_error = ft.Text("", color=ft.Colors.ERROR, visible=False, theme_style=ft.TextThemeStyle.BODY_SMALL)
         self.parallel_switch = toggle(label="Allow parallel requests", value=self.service.parallel_requests(),
                                       key="local-parallel-requests",
@@ -1220,6 +1249,8 @@ class LocalModelsPanel(OnDeviceFlow):
         self.gpu_status.value = note or ""
         self.gpu_status.visible = bool(note)
         self._render_gpu_swap(push=False)  # a model was loaded / switched
+        self._refresh_gpu_limits()
+        self._threads_changed()
         normal = self.service.uses_normal_settings(self.selected_stem())
         if getattr(self, "_sampling_profile", None) != normal:
             values = self.service.sampling(self.selected_stem())
@@ -1374,6 +1405,21 @@ class LocalModelsPanel(OnDeviceFlow):
         for field in self.sampling_fields.values():
             field.value = ""
         return self.save_sampling()
+
+    def _threads_changed(self, e: Any = None) -> None:
+        from glossarion_mobile.services.local_llm.engine import default_threads
+        field = self.threads_field
+        total = self.service.thread_limit()
+        field.label = f"Threads (1-{total})"
+        field.hint_text = f"Auto: {default_threads()}"
+        field.helper_text = f"{total} CPU cores available; blank = auto"
+        try:
+            used = int(str(field.value or "").strip() or "0") or default_threads()
+        except ValueError:
+            used = 0
+        color = usage_color(used, total)
+        field.border_color = field.focused_border_color = field.color = color
+        _push(field)
 
     def save_settings(self) -> Optional[str]:
         values, error = self.service.save_settings(self.ctx_field.value, self.threads_field.value)

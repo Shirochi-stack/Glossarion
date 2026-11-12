@@ -226,13 +226,7 @@ class RunOptionsPanel:
             self._push(self.control)
 
     def refresh_summary(self) -> None:
-        self.summary_text.value = self.summary()
-        for tile in self.tiles.values():
-            try:
-                tile.refresh(push=False)
-            except Exception:
-                pass
-        self._push(self.control)
+        self._store_changed()
 
     # ---- events ------------------------------------------------------------------------------------
 
@@ -255,13 +249,15 @@ class RunOptionsPanel:
         """A config key the summary reads changed (a tile with the switch off, Settings, another panel): the
         summary and the tiles show it (a field holding a number typed and not submitted yet keeps it), so a
         card built before a Settings change shows, and its Start / Resume runs with, the settings now."""
-        self.summary_text.value = self.summary()
+        from glossarion_mobile.ui.components.dialogs import _unmark
+        _unmark(self.control, "_frozen")
         for tile in list(self.tiles.values()):
             if not _edited(tile):
                 try:
                     tile.refresh(push=False)
                 except Exception:
                     log.debug("refreshing the %s run option failed", getattr(tile, "key", "?"), exc_info=True)
+        self.summary_text.value = self.summary()
         self._push(self.control)
 
     def commit(self) -> None:

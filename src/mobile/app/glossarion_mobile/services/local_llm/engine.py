@@ -194,8 +194,8 @@ def image_count(messages: Sequence[dict]) -> int:
     return count(messages)
 
 
-def default_threads() -> int:
-    """``max(2, min(4, cpus - 2))``: 4 on 8- and 6-core phones, 2 on 4-core ones."""
+def available_cpus() -> int:
+    """Logical cores available to this process, including Android cpuset restrictions."""
     cpus = 0
     affinity = getattr(os, "sched_getaffinity", None)
     if affinity is not None:
@@ -204,7 +204,12 @@ def default_threads() -> int:
         except OSError:
             cpus = 0
     cpus = cpus or os.cpu_count() or 4
-    return max(2, min(4, cpus - 2))
+    return max(1, cpus)
+
+
+def default_threads() -> int:
+    """Leave CPU room for the UI, with at most four automatic inference threads."""
+    return min(4, cpu_budget(available_cpus()))
 
 
 def cpu_budget(cpus: int) -> int:

@@ -124,7 +124,7 @@ from glossarion_mobile.ui.chat.output_modes import (
 )
 from glossarion_mobile.ui.chat.plan_card import ChooseChaptersSheet, RunOptionsPanel, destination_label, destination_sheet
 from glossarion_mobile.ui.chat.plan_model import NO_FILES_TEXT, batch_files, glossary_chip_label, plan_facts, range_preview
-from glossarion_mobile.ui.chat.run_request import attachment_record, run_config_of
+from glossarion_mobile.ui.chat.run_request import attachment_record, run_config_of, with_run_config
 from glossarion_mobile.ui.chat.send_state import (
     BLOCK_ATTACHMENT_MISSING,
     BLOCK_GLOSSARY_PENDING,
@@ -642,7 +642,9 @@ class ChatView:
         if callable(observe_keys):
             # mobile hotfix 1 #1: a model / profile / language chosen outside the chat (Settings › Profiles,
             # Settings) - the header and the Plan / Result chips follow it, as the run does
-            self._env_unsubs.append(observe_keys(CONTEXT_CONFIG_KEYS,
+            self._env_unsubs.append(observe_keys((*CONTEXT_CONFIG_KEYS, "chapter_range", "use_spine_order",
+                                                   "auto_glossary_mode", "enable_auto_glossary", "manual_glossary_path",
+                                                   "append_glossary", "append_glossary_auto_load"),
                                                  lambda key, value: env.on_ui(self._on_context_config)))
         self.load_chat(self.state.current_chat.value)
 
@@ -681,8 +683,8 @@ class ChatView:
         self._unsubs = []
 
     def _on_context_config(self) -> None:
-        """A ``CONTEXT_CONFIG_KEYS`` write: re-render only when the chat's model · profile · language moved."""
-        if self.bound and self.chat_context_for(self.cid) != self.state.chat_context.value:
+        """Refresh card chips and options when inherited translation defaults change."""
+        if self.bound:
             self.apply_settings_changed()
 
     def _on_context(self, context: Any) -> None:
@@ -1181,6 +1183,7 @@ class ChatView:
                 name, status = ended_card(ended_kind(elsewhere), elsewhere)
                 phase = CardPhase(name)
             failed = progress_counts(elsewhere).get("failed", 0)
+            ended_params = getattr(getattr(elsewhere, "spec", None), "params", None)
 
         # the Plan chips a Result that offers Resume / Retry failed shows (their labels rebuild the card); not for
         # the book's other job, whose Resume runs it as it was
@@ -1203,14 +1206,14 @@ class ChatView:
         card = slot.card
         # owner #5: a Result that offers Resume / Retry failed keeps the Plan card's Run options (the values the
         # job ran with), so they can be changed before resuming; the same panel object across renders
-        panel = self._resume_panel(item, ended_params) if card.offers_resume and elsewhere is None else None
-        control = panel.control if panel is not None else None
+        panel = self._resume_panel(item, ended_params, job_id=str(elsewhere.id) if elsewhere else None) if card.offers_resume else None
+        control = closes_on_tap_away(panel.control) if panel is not None else None
         shown = card.options_box.controls
         if (shown[0] if shown else None) is not control:
-            card.set_run_options(control)
+            card.set_run_options(panel.control if panel is not None else None)
         # above them, the Plan card's chips: what Resume / Retry failed runs with (model, profile, language,
         # glossary, range), so they can be changed first
-        chips_key = (chip_state, panel) if card.offers_resume else None
+        chips_key = (chip_state, panel) if card.offers_resume and elsewhere is None else None
         if card.chip_state != chips_key:
             card.chip_state = chips_key
             card.set_resume_chips(self._result_chips(item, record, panel) if chips_key is not None else [])
@@ -2217,15 +2220,17 @@ class ChatView:
             self.run_panels[key] = panel
         return panel
 
-    def _resume_panel(self, item: Any, params: Any) -> Optional[RunOptionsPanel]:
+    def _resume_panel(self, item: Any, params: Any, job_id: Optional[str] = None) -> Optional[RunOptionsPanel]:
         """Owner #5: the Run options of an ended turn's card (stopped / failed / interrupted, or done with
         failed chapters), starting from what its job ran with (``run_request.run_config_of``); Resume /
-        Retry failed resubmits with them (``_resume_turn``). None when the job's params are unknown."""
-        if not isinstance(params, Mapping) or not isinstance(params.get("run"), Mapping) or self.env is None:
+        Retry failed resubmits with them. Library jobs and legacy records without a DirectTextRun
+        still get a panel, inheriting current defaults."""
+        if self.env is None:
             return None
+        params = params if isinstance(params, Mapping) else {}
         from glossarion_mobile.ui.chat.run_controller import turn_key
 
-        key = (self.cid, "resume", item.index, turn_key(params))
+        key = (self.cid, "resume", item.index, turn_key(params, job_id))
         panel = self.run_panels.get(key)
         if panel is None:
             panel = RunOptionsPanel(self.env, values=run_config_of(params.get("config_overrides")),
@@ -2925,7 +2930,7 @@ class ChatView:
 
     def _on_job_action(self, action: str, item: Any = None) -> None:
         book_job = self._book_jobs.get((self.cid, getattr(item, "index", None))) if item is not None else None
-        if book_job and self._book_job_action(action, book_job):
+        if book_job and self._book_job_action(action, book_job, item):
             return
         if action == "start":
             self.start_plan()
@@ -3154,7 +3159,7 @@ class ChatView:
                 return None  # an ended job of this chat (another turn's): that turn's card shows it
         return found
 
-    def _book_job_action(self, action: str, job_id: str) -> bool:
+    def _book_job_action(self, action: str, job_id: str, item: Any = None) -> bool:
         """Stop / Force stop / Log / Resume on a Result card that shows its book's other job act on that job;
         False for the actions the card handles as its own (Read, Compile, Progress, ...)."""
         jobs = self.env.jobs if self.env is not None else None
@@ -3171,7 +3176,15 @@ class ChatView:
             return True
         if action in ("resume", "retry"):
             try:
-                resumed = jobs.resume(job_id)
+                params = None
+                if item is not None:
+                    snapshot = jobs.snapshot_of(job_id)
+                    original = getattr(getattr(snapshot, "spec", None), "params", None)
+                    config, _key = self._take_resume_config(item)
+                    if isinstance(original, Mapping) and config is not None:
+                        params = dict(original)
+                        params["config_overrides"] = with_run_config(params.get("config_overrides"), config)
+                resumed = jobs.resume(job_id, params=params) if params is not None else jobs.resume(job_id)
             except Exception:
                 log.exception("resuming the book's job failed")
                 resumed = None
@@ -3893,6 +3906,9 @@ class ChatView:
         if not self.bound:
             return
         self.state.chat_context.set(self.chat_context_for(self.cid))
+        for panel in self.run_panels.values():
+            panel.config_changed()
+        self._refresh_range_chips()
         self.apply_chat_text_scale()
         self.composer.set_pills(self.option_pills())
         self.render_transcript()

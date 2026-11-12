@@ -236,6 +236,10 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
             ok, error = service.load_blocking(stem)
             if not ok:
                 raise AssertionError(f"load failed: {error}")
+            payload["limits"] = {"cpu_cores": service.thread_limit(), "threads": service.threads(),
+                                 "gpu_layers": service.gpu_layer_limit(stem)}
+            assert 1 <= payload["limits"]["threads"] <= payload["limits"]["cpu_cores"]
+            assert payload["limits"]["gpu_layers"] is not None and payload["limits"]["gpu_layers"] > 1
             payload["load_s"] = service.log[-1][1] if service.log else None
             started = time.monotonic()
             text, finish = _client_send(f"local/{stem}", [

@@ -595,18 +595,18 @@ class LocalEngineService:
             raw = None
         raw = raw if isinstance(raw, dict) else {}
         out = {"n_ctx": 0, "n_threads": 0}
-        for key, low, high in (("n_ctx", 512, presets.MAX_CTX), ("n_threads", 1, 64)):
+        for key, low, high in (("n_ctx", 512, presets.MAX_CTX), ("n_threads", 1, self.thread_limit())):
             try:
                 value = int(raw.get(key) or 0)
             except (TypeError, ValueError):
                 value = 0
-            out[key] = value if low <= value <= high else 0
+            out[key] = min(value, high) if key == "n_threads" and value > 0 else value if low <= value <= high else 0
         return out
 
     def save_settings(self, n_ctx: Any = 0, n_threads: Any = 0) -> tuple:
         """(settings, None) or (None, message)."""
         values = {}
-        for key, value, low, high in (("n_ctx", n_ctx, 512, presets.MAX_CTX), ("n_threads", n_threads, 1, 64)):
+        for key, value, low, high in (("n_ctx", n_ctx, 512, presets.MAX_CTX), ("n_threads", n_threads, 1, self.thread_limit())):
             text = str(value or "").strip()
             if not text or text == "0":
                 values[key] = 0
@@ -742,22 +742,31 @@ class LocalEngineService:
         """"Use GPU (experimental)": off unless switched on, and only where a GPU backend is offered."""
         return bool(self.gpu_backend) and bool(self._pref(GPU_KEY))
 
-    def gpu_layers(self) -> int:
+    def gpu_layer_limit(self, stem: Optional[str] = None) -> Optional[int]:
+        """Transformer blocks plus the output layer of the selected downloaded GGUF."""
+        from .model_limits import gpu_layer_limit
+        stem = self.registry.resolve(stem) if stem else self.loaded_stem
+        return gpu_layer_limit(self.registry.file_path(stem)) if stem else None
+
+    def gpu_layers(self, stem: Optional[str] = None) -> int:
         """Eight layers by default; zero uses CPU, -1 is an explicit all-layers choice."""
         try:
             value = int(self._pref(GPU_LAYERS_KEY))
         except (TypeError, ValueError, OverflowError):
-            return eng.DEFAULT_GPU_LAYERS
-        return value if -1 <= value <= MAX_GPU_LAYERS else eng.DEFAULT_GPU_LAYERS
+            value = eng.DEFAULT_GPU_LAYERS
+        limit = self.gpu_layer_limit(stem)
+        if value < -1 or value > 10_000:
+            value = eng.DEFAULT_GPU_LAYERS
+        return min(value, limit) if limit is not None and value >= 0 else value
 
-    def save_gpu_layers(self, layers: Any) -> int:
+    def save_gpu_layers(self, layers: Any, stem: Optional[str] = None) -> int:
         try:
             value = int(layers)
         except (TypeError, ValueError, OverflowError):
             return self.gpu_layers()
-        if not -1 <= value <= MAX_GPU_LAYERS:
+        if not -1 <= value <= (self.gpu_layer_limit(stem) or MAX_GPU_LAYERS):
             return self.gpu_layers()
-        if value != self.gpu_layers():
+        if value != self._pref(GPU_LAYERS_KEY):
             self._set_pref(GPU_LAYERS_KEY, value)
             self._set_pref(GPU_FALLBACK_KEY, None)
             if self.loaded_stem is not None and self._loaded_gpu:
@@ -842,8 +851,11 @@ class LocalEngineService:
                 fallback = row
         return fallback
 
+    def thread_limit(self) -> int:
+        return eng.available_cpus()
+
     def threads(self) -> int:
-        return self.settings()["n_threads"] or eng.default_threads()
+        return min(self.thread_limit(), self.settings()["n_threads"] or eng.default_threads())
 
     def context_for(self, stem: str) -> int:
         row = self.preset_for(stem) or {}
@@ -915,10 +927,10 @@ class LocalEngineService:
         if fallback and fallback["stem"] != stem:
             self._set_pref(GPU_FALLBACK_KEY, None)  # another model: the GPU gets a new try
         gpu = self._gpu_wanted(stem)
-        gpu_layers = self.gpu_layers() if gpu else 0
+        gpu_layers = self.gpu_layers(stem) if gpu else 0
         # a changed Context (Model manager or Welcome slider) or GPU setting reloads the model on the next request
         if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
-                and self._loaded_gpu == gpu and self._loaded_gpu_layers == gpu_layers:
+                and self._loaded_gpu == gpu and self._loaded_gpu_layers == gpu_layers and engine.n_threads == self.threads():
             if vision and not engine.vision_loaded:  # the projector loads with the first image
                 self._gate_ram(stem, engine.n_ctx or self.context_for(stem), vision=True,
                                gpu=bool(getattr(engine, "on_gpu", False)))
