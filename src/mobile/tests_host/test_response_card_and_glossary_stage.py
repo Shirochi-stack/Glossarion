@@ -129,7 +129,7 @@ def test_a_list_that_opened_by_itself_stays_until_the_user_toggles_it(tap_away_i
     from glossarion_mobile.ui.chat.cards import JobCard
 
     card = JobCard(attachment={"name": "Book.epub"}, requests_expanded=True)
-    region = next(c for c in card.body.controls if getattr(c, "content", None) is card.requests_tile)
+    region = next(c for c in card.result_details.controls if getattr(c, "content", None) is card.requests_tile)
     assert card.requests_tile.expanded is True and region.enabled is False
     card.requests_tile.on_change(_event(False))
     card.requests_tile.on_change(_event(True))
@@ -190,7 +190,7 @@ def test_every_dropdown_of_the_response_card_closes_on_a_tap_away(tap_away_insta
     from glossarion_mobile.ui.chat.cards import JobCard
 
     card = JobCard(attachment={"name": "Book.epub"})
-    held = [c.content for c in card.body.controls if isinstance(c, tap_away_installed)]
+    held = [c.content for c in card.result_details.controls if isinstance(c, tap_away_installed)]
     assert held == [card.requests_tile, card.ocr_tile, card.report_tile]
     options = ft.ExpansionTile(title="Run options")
     card.set_run_options(options)

@@ -84,3 +84,19 @@ def test_resume_output_mode_is_applied_without_changing_workspace(desktop_store_
             assert resumed['input_path']==original['input_path']
         finally:TC._close(chat)
     asyncio.run(scenario())
+
+
+def test_ready_output_mode_chip_opens_switching_sheet(desktop_store_cls, isolated_env):
+    async def scenario():
+        chat=TC._chat_view(desktop_store_cls,isolated_env);view=chat.view
+        try:
+            await _settle(chat.calls)
+            path=isolated_env/'ready.epub';path.write_bytes(b'PK\x03\x04')
+            view.attach_file(str(path));view.begin_send();await _settle(chat.calls)
+            card=next(c for c in TC._cards(view,JobCard) if c.phase.name=='plan')
+            chips=[c for row in card.plan_box.controls for c in getattr(row,'controls',[])]
+            opened=[];view.open_plan_mode=lambda plan:opened.append(plan)
+            next(c for c in chips if c.key=='plan-output').on_click(None)
+            assert len(opened)==1 and opened[0]['attachment']['path']==str(path)
+        finally:TC._close(chat)
+    asyncio.run(scenario())

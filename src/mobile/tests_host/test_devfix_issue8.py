@@ -338,7 +338,8 @@ def test_owner_issue8_library_book_attached_and_translated_from_the_chat(isolate
             # ---- Send: the Plan card defaults to "Save to: Library" (the book's own workspace) ----------
             await driver.tap(key="send-idle_ready", timeout=10)
             await driver.wait(text="Ready to translate", timeout=30)
-            await driver.wait(text="Save to: Library", timeout=10)
+            await driver.wait(text="Ready to translate", timeout=10)
+            assert not await driver.count(text="Save to: Library")
             await driver.wait(contains="📚 Library · ", timeout=10)
             plan = chats.meta(cid).get("pending_plan") or {}
             assert plan.get("destination") == "library" and plan.get("library_bid") == gamma["bid"]
@@ -461,7 +462,8 @@ def test_owner_issue8_library_book_attached_and_translated_from_the_chat(isolate
             await driver.wait(text="Gamma Tales.epub", timeout=30)
             assert chats.meta(cid4).get(LIBRARY_ATTACHMENT_META) == {"bid": gamma["bid"], "path": gamma["raw"]}
             await driver.tap(key="send-idle_ready", timeout=10)
-            await driver.wait(text="Save to: Library", timeout=30)
+            await driver.wait(text="Ready to translate", timeout=30)
+            assert not await driver.count(text="Save to: Library")
             line = await _until(lambda: next((c for c in tester._walk() if _key(c) == "plan-library"
                                               and "Not started" not in str(c.value or "")
                                               and str(c.value or "").startswith("📚 Library · ")), None), 15)

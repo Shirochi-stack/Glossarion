@@ -745,12 +745,9 @@ def test_the_plan_cards_output_sheet_switches_modes():
 
 
 def test_the_plan_card_output_chip_opens_the_switching_sheet():
-    import inspect
-
     from glossarion_mobile.ui.chat.chat_view import ChatView
 
-    source = inspect.getsource(ChatView._plan_controls)
-    assert 'on_click=lambda e: self.open_plan_mode(plan), key="plan-output"' in source
+    # The chip's click is exercised by test_hotfix8_continue_card; check the sheet's saved choice here.
     opened: list = []
     plans: list = []
     view = types.SimpleNamespace(cid="7", _update_plan=lambda cid, created, **kw: plans.append((cid, created, kw)),

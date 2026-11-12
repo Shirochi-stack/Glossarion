@@ -694,7 +694,9 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key=_visible(tester, r"^share-key-save-pixeldrain-\d+$")[0][0])
             assert not any("Key saved" in n for n in notes), notes[-5:]  # no snackbar (owner 2026-10-20)
             assert await _until(lambda: shares.provider_state("pixeldrain").ready, 15)
-            assert all(not (f.value or "") for f in cloud.key_fields.values()), "the key stayed on screen"
+            # Service readiness is published by the worker before save_key resumes on the UI loop.
+            assert await _until(lambda: all(not (f.value or "") for f in cloud.key_fields.values()), 15), \
+                "the key stayed on screen"
             check = await _until(lambda: _visible(tester, r"^share-key-check-pixeldrain-\d+$"), 15)
             await d.tap(key=check[0][0])
             assert await note("The key works"), notes[-5:]
