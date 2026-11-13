@@ -720,6 +720,11 @@ def _text_file(name: str, text: str) -> Dict[str, Any]:
 
 #: An HTML line longer than this is broken up before it is attached.
 MAX_HTML_LINE_CHARS = 1500
+#: Characters of answer text an HTML answer may have outside its code block: a lead-in or a
+#: closing line. More than that is the rest of the HTML, which AI Mode shows without its tags.
+#: A fixed number: an allowance that grows with the code block lets the end of a long chapter
+#: be dropped and the answer still be taken as complete.
+MAX_TEXT_OUTSIDE_CODE_BLOCK = 300
 _BLOCK_END = re.compile(
     r"(</(?:p|div|h[1-6]|li|ul|ol|table|tr|blockquote|section|article|head|body|html)>)(?=<)", re.IGNORECASE)
 
@@ -1258,7 +1263,7 @@ def _extract_rendered_content(
         blocks = [block for block in blocks if block.strip()]
         code = "\n".join(blocks).strip()
         outside = _clean_answer_text(re.sub(r"(?s)```.*?(```|\Z)", "", _clean_answer_text(answer_text)))
-        if len(outside) > max(300, len(code) // 5):
+        if len(outside) > MAX_TEXT_OUTSIDE_CODE_BLOCK:
             # HTML outside a code block is shown rendered: its tags are gone from the page.
             raise AIModeError(
                 "Google AI Mode did not keep the HTML answer inside its code block "
@@ -1465,6 +1470,15 @@ def _model_ids(labels: Iterable[str]) -> List[str]:
     return names
 
 
+def _staged_length(value: Any) -> int:
+    """The staged length one ``_ai_mode_stage_file_script`` run returned (a number: an int, a
+    float from QtWebEngine), or -1 when the page gave none: the script failed or timed out."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return -1
+
+
 def _attach_ai_mode_files(
     files: List[Dict[str, Any]],
     run_js: Callable[..., Any],
@@ -1476,18 +1490,29 @@ def _attach_ai_mode_files(
 
     The files are handed to the page in base64 pieces, given to its file inputs as a file
     picker would, and shown by AI Mode as chips in the prompt box while it uploads them.
+    Every piece is checked against the length the page then holds: a piece the page did not
+    take would leave base64 that still decodes, and a damaged file would be uploaded.
     """
     import base64
 
     for index, item in enumerate(files):
         encoded = base64.b64encode(item["data"]).decode("ascii")
+        sent = 0
         for start in range(0, max(1, len(encoded)), FILE_CHUNK_CHARS):
             _raise_if_cancelled()
-            run_js(
-                _ai_mode_stage_file_script(index, item["name"], item["mime"], item["kind"],
-                                           encoded[start:start + FILE_CHUNK_CHARS]),
+            piece = encoded[start:start + FILE_CHUNK_CHARS]
+            sent += len(piece)
+            held = _staged_length(run_js(
+                _ai_mode_stage_file_script(index, item["name"], item["mime"], item["kind"], piece),
                 js_timeout_ms=20000,
-            )
+            ))
+            if held != sent:
+                detail = ("the page did not answer" if held < 0
+                          else f"the page holds {held:,} of {sent:,} characters")
+                raise AIModeError(
+                    f"The attachment {item['name']} did not reach the AI Mode page whole ({detail}).",
+                    KIND_UPLOAD,
+                )
     names = [str(item["name"]) for item in files]
     for kind in ("file", "image"):
         if not any(item["kind"] == kind for item in files):

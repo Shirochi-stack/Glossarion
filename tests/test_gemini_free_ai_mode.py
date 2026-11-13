@@ -227,6 +227,34 @@ def test_code_block_that_ended_early_is_refused():
     assert empty.value.kind == gf.KIND_INCOMPLETE
 
 
+def test_tail_outside_a_long_code_block_is_refused():
+    # the allowance for text outside the block is fixed: it does not grow with the block
+    code = ("<p>" + "x" * 80 + "</p>\n") * 100
+    tail = ("word " * 400)[:1519]
+    assert len(code) == 8800 and len(tail) == 1519
+    page = snapshot("html\n\n```\n" + code + "```\n\nUse code with caution.\n\n" + tail, codeBlocks=[code])
+    with pytest.raises(gf.AIModeError, match="1,519 after it without their tags") as caught:
+        gf._extract_rendered_content(page, prefer_html=True)
+    assert caught.value.kind == gf.KIND_INCOMPLETE
+    # one character over the allowance is refused, the allowance itself is not
+    limit = gf.MAX_TEXT_OUTSIDE_CODE_BLOCK
+    for extra, refused in ((limit, False), (limit + 1, True)):
+        page = snapshot("html\n\n```\n" + code + "```\n\n" + "y" * extra, codeBlocks=[code])
+        if refused:
+            with pytest.raises(gf.AIModeError) as over:
+                gf._extract_rendered_content(page, prefer_html=True)
+            assert over.value.kind == gf.KIND_INCOMPLETE
+        else:
+            assert gf._extract_rendered_content(page, prefer_html=True) == code.strip()
+
+
+def test_lead_in_and_closing_line_around_the_code_block_are_accepted():
+    code = ("<p>" + "x" * 80 + "</p>\n") * 100
+    page = snapshot("Here is the translated chapter:\n\nhtml\n\n```\n" + code + "```\n\nUse code with caution."
+                    "\n\nLet me know if you want any changes.", codeBlocks=[code])
+    assert gf._extract_rendered_content(page, prefer_html=True) == code.strip()
+
+
 def test_plain_answer_loses_ai_modes_own_lines():
     answer = ("Paris is the capital.\n\npython\n\n```\nprint(1)\n```\n\nUse code with caution.\n\n"
               "<FollowUp>\nShall I continue?\n</FollowUp>\n\nAI can make mistakes, so double-check responses")
@@ -282,9 +310,10 @@ class Page:
     """A scripted AI Mode page: ``run_js`` answers the route's scripts and records them."""
 
     def __init__(self, answer="Bonjour", models=("Auto", "3.8 Flash", "4 Carbon"), code_blocks=(), first=None,
-                 chips=True, uploads=True):
+                 chips=True, uploads=True, lose=0, lose_answers=False):
         self.answer, self.models, self.code_blocks = answer, list(models), list(code_blocks)
         self.first, self.chips, self.uploads = first, chips, uploads
+        self.lose, self.lose_answers = lose, lose_answers                     # the staging run that is lost
         self.calls, self.staged, self.attached = [], {}, []
         self.sent, self.selected, self.prompt, self.waited = False, None, None, 0
 
@@ -318,8 +347,10 @@ class Page:
                 r'\{name: (".*?"), mime: (".*?"), kind: (".*?"), b64: ""\}; staged\[index\]\.b64 \+= (".*?");',
                 script).groups())
             entry = self.staged.setdefault(index, {"name": name, "mime": mime, "kind": kind, "b64": ""})
+            if self.calls.count("stage") == self.lose:
+                return len(entry["b64"]) if self.lose_answers else None       # the piece is not in the page
             entry["b64"] += chunk
-            return len(entry["b64"])
+            return float(len(entry["b64"]))                                   # QtWebEngine numbers are floats
         if "new DataTransfer()" in script:
             kind = json.loads(re.search(r'const kind = (".*?");', script).group(1))
             self.calls.append(f"attach:{kind}")
@@ -415,6 +446,23 @@ def test_flow_fails_when_an_attachment_is_not_taken(clean):
         submit(page, gf._build_ai_mode_request([{"role": "system", "content": "Translate."},
                                                 {"role": "user", "content": "<p>안녕</p>"}]))
     assert caught.value.kind == gf.KIND_UPLOAD and not page.sent
+
+
+@pytest.mark.parametrize("answers", [False, True])
+def test_flow_fails_when_a_piece_of_an_attachment_is_lost(clean, answers):
+    # a script that failed or timed out (run_js gives None), or a page that did not add the piece
+    clean.setattr(gf, "FILE_CHUNK_CHARS", 16)                                 # a multiple of 4, like the real size:
+    page = Page(lose=3, lose_answers=answers)                                 # what is left still decodes
+    request = gf._build_ai_mode_request([{"role": "system", "content": "Translate."},
+                                         {"role": "user", "content": "<p>안녕하세요, 형님.</p>\n<p>둘째 문단입니다.</p>"}])
+    with pytest.raises(gf.AIModeError, match="chapter.html did not reach the AI Mode page whole") as caught:
+        submit(page, request)
+    assert caught.value.kind == gf.KIND_UPLOAD and caught.value.kind not in gf.FATAL_KINDS
+    assert ("did not answer" in str(caught.value)) is (not answers)
+    assert ("holds 32 of 48 characters" in str(caught.value)) is answers
+    assert page.calls.count("stage") == 3                                     # nothing after the lost piece,
+    assert not page.attached and page.prompt is None and not page.sent        # nothing attached, typed or sent
+    assert [gf._staged_length(value) for value in (48, 48.0, "48", None, "", "x")] == [48, 48, 48, -1, -1, -1]
 
 
 def test_flow_lists_the_models_of_the_page():
