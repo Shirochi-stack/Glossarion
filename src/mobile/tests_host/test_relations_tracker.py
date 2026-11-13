@@ -568,7 +568,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         node = next(c for c in diagram.node_controls if c.key.endswith("서윤") or "Seo-yun" in c.content.value)
         node.on_click(None)
         sheet = diagram.history_sheet
-        assert sheet is not None and sheet.key == "rel-history-sheet" and _open_dialogs(session.page)[-1] is sheet
+        assert sheet is not None and sheet.key.startswith("rel-history-sheet-") and _open_dialogs(session.page)[-1] is sheet
         rows = diagram.history_rows(next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤"))
         assert {r["current"] for r in rows} == {"Enemy", "Brother"}
         # the history stops at the slider's chapter, like the picture
@@ -579,7 +579,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         node = next(c for c in diagram.node_controls if c.key.endswith("서윤") or "Seo-yun" in c.content.value)
         node.on_click(None)  # again: the previous sheet is closed first, one live sheet per key
         await _settle()
-        live = [d for d in _open_dialogs(session.page) if d.key == "rel-history-sheet"]
+        live = [d for d in _open_dialogs(session.page) if (d.key or "").startswith("rel-history-sheet-")]
         assert len(live) == 1 and live[0] is diagram.history_sheet
         store._saver.close()
 
@@ -847,6 +847,446 @@ def test_fresh_config_shows_the_toggles_on_and_asks_no_prompt_question(engine_se
             await panel.check_task
         assert store.get(TOGGLE) is True and not ctx.extras.get("asked") and panel.warning.visible is False
         panel.detach()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+# ==========================================================================
+# Relations & Gender Tracker: name taps, auto-update, editing, gender, filters, no "?" (owner 2026-11-13)
+# ==========================================================================
+
+GLOSSARY_CSV = ("type,raw_name,translated_name,gender\ncharacter,서윤,Seo-yun,female\n"
+                "character,하린,Ha-rin,female\ncharacter,민준,Min-jun,male\ncharacter,지우,Ji-woo,\n")
+
+
+def _walk(control):
+    """Every control under ``control`` (content / controls / leading / title / actions)."""
+    if control is None:
+        return
+    yield control
+    for name in ("content", "title", "leading"):
+        child = getattr(control, name, None)
+        if child is not None and hasattr(child, "__dict__") and not isinstance(child, str):
+            yield from _walk(child)
+    for name in ("controls", "actions"):
+        for child in getattr(control, name, None) or []:
+            yield from _walk(child)
+
+
+def _find(control, key):
+    found = [c for c in _walk(control) if getattr(c, "key", None) == key]
+    assert found, f"no control {key!r}"
+    return found[0]
+
+
+def _keys(control) -> set:
+    return {getattr(c, "key", None) for c in _walk(control)} - {None}
+
+
+def _texts(control) -> list:
+    out = []
+    for c in _walk(control):
+        if type(c).__name__ == "Text":
+            out.append(c.value)
+        elif type(c).__name__ in ("TextButton", "FilledButton") and isinstance(getattr(c, "content", None), str):
+            out.append(c.content)
+    return out
+
+
+def _book(tmp_path, *, tracker=None, gender=None):
+    """A glossary file with its relations tracker (and optionally gender tracker) beside it."""
+    rt = importlib.import_module("relations_tracking")
+    glossary = tmp_path / "Book_glossary.csv"
+    glossary.write_text(GLOSSARY_CSV, encoding="utf-8")
+    Path(rt.tracker_path_for_glossary(str(glossary))).write_text(
+        json.dumps(tracker if tracker is not None else _tracker(), ensure_ascii=False), encoding="utf-8")
+    for raw, value, chapter in gender or ():
+        rt.set_gender(str(glossary), raw, value, chapter)
+    return rt, glossary
+
+
+def _id(diagram, raw):
+    return diagram.core.tracker_key(raw)
+
+
+def _saved(rt, glossary):
+    return json.loads(Path(rt.tracker_path_for_glossary(str(glossary))).read_text(encoding="utf-8"))
+
+
+def test_one_sided_relations_have_no_question_mark(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram, edge_label_text
+
+    rt = importlib.import_module("relations_tracking")
+    tracker = rt.empty_tracker()
+    rt.record_relations(tracker, [{"raw_name": "서윤", "translated_name": "Seo-yun", "relations": "하린: Club Member"}],
+                        field="relations", chapter_index=0, chapter_num=1, chapter_file="ch1.html")
+    assert edge_label_text({"label_ab": "", "label_ba": ""}) == ""
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker)
+        texts = [s.value for s in diagram.canvas.shapes if type(s).__name__ == "Text"]
+        assert texts == ["Club Member"] and not any("?" in t for t in texts)
+        sheet = diagram.show_history(_id(diagram, "하린"))
+        shown = _texts(sheet)
+        assert not any("?" in str(t) for t in shown)
+        assert "Seo-yun is Club Member to 하린" in shown  # who is what to whom (하린 has no translated name)
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_tapping_a_name_in_the_sheet_opens_that_characters_sheet(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations_diagram import TITLE, RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker())
+        assert TITLE == "Relations & Gender Tracker" and _find(diagram.view.appbar, "rel-title").value == TITLE
+        seo, harin = _id(diagram, "서윤"), _id(diagram, "하린")
+        first = diagram.show_history(seo)
+        assert diagram.selected == seo
+        _find(first, f"rel-open-{harin}").on_click(None)
+        await _settle()
+        assert diagram.selected == harin and diagram.history_sheet is not first
+        assert diagram.history_sheet.key.startswith("rel-history-sheet-") and _open_dialogs(session.page)[-1] is diagram.history_sheet
+        assert "Ha-rin" in _texts(diagram.history_sheet)
+        live = [d for d in _open_dialogs(session.page) if (d.key or "").startswith("rel-history-sheet-")]
+        assert len(live) == 1
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_editing_from_the_sheet_writes_the_tracker_sticks_and_undoes(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        assert diagram.watch_task is not None and diagram.undo_button.disabled
+        seo, harin, minjun = _id(diagram, "서윤"), _id(diagram, "하린"), _id(diagram, "민준")
+        sheet = diagram.show_history(seo)
+        assert {f"rel-edit-{harin}", f"rel-delete-{harin}", "rel-history-add"} <= _keys(sheet)
+        # edit one side of a relation (what Ha-rin is to Seo-yun)
+        _find(sheet, f"rel-edit-{harin}").on_click(None)
+        form = diagram.form_sheet
+        assert form.key.startswith("rel-form-sheet-") and diagram.editing == 1
+        assert await diagram.check_for_update() is False  # no reload while a form is open
+        assert _find(form, "rel-form-ab").value == "Enemy"
+        _find(form, "rel-form-ab").value = "Rival"
+        _find(form, "rel-form-save").on_click(None)
+        await diagram.task
+        assert diagram.editing == 0
+        saved = _saved(rt, glossary)
+        assert rt.relation_labels(saved, "서윤", "하린") == ("Rival", "Best Friend")
+        assert diagram.stamps[0] == rt.file_stamp(rt.tracker_path_for_glossary(str(glossary)))
+        assert await diagram.check_for_update() is False and diagram.reloads == 0  # its own write: no reload
+        assert not diagram.undo_button.disabled
+        assert any("Rival" in str(s.value) for s in diagram.canvas.shapes if type(s).__name__ == "Text")
+        # the correction sticks: a later extraction that repeats "Enemy" records "Rival"
+        rt.record_relations(saved, [{"raw_name": "하린", "translated_name": "Ha-rin", "relations": "서윤: Enemy"}],
+                            field="relations", chapter_index=5, chapter_num=6, chapter_file="ch6.html")
+        assert rt.relation_labels(saved, "서윤", "하린")[0] == "Rival"
+        # undo
+        assert await diagram.undo() is True
+        assert rt.relation_labels(_saved(rt, glossary), "서윤", "하린") == ("Enemy", "Best Friend")
+        assert diagram.undo_button.disabled
+        # delete asks first: No keeps it, Yes deletes the pair
+        ctx.extras["answers"] = [False]
+        await diagram.delete_relation(seo, minjun)
+        assert minjun in _saved(rt, glossary)["entries"][seo]["relations"]
+        ctx.extras["answers"] = [True]
+        await diagram.delete_relation(seo, minjun)
+        saved = _saved(rt, glossary)
+        assert minjun not in saved["entries"][seo]["relations"] and seo not in saved["entries"].get(minjun, {}).get("relations", {})
+        assert [t for _k, t, _b in ctx.extras["asked"]] == ["Delete relation", "Delete relation"]
+        assert diagram.edge_count() == 1
+        # add a relation: pick the other name from the suggestions, one direction, chapter 3
+        diagram.add_relation_form(seo)
+        form = diagram.form_sheet
+        assert _find(form, "rel-add-name-a").value == "Seo-yun" and _find(form, "rel-add-chapter").value == "5"
+        field_b = _find(form, "rel-add-name-b")
+        field_b.value = "min"
+        field_b.on_change(None)
+        _find(form, f"rel-add-pick-b-{minjun}").on_click(None)
+        assert field_b.value == "Min-jun"
+        assert _find(form, "rel-add-label-ab").label == "What Min-jun is to Seo-yun"
+        _find(form, "rel-add-save").on_click(None)  # no label yet: the form stays open with an error
+        assert diagram.form_sheet is form and _find(form, "rel-add-error").visible
+        _find(form, "rel-add-label-ab").value = "Cousin"
+        _find(form, "rel-add-chapter").value = "3"
+        _find(form, "rel-add-save").on_click(None)
+        await diagram.task
+        rel = _saved(rt, glossary)["entries"][seo]["relations"][minjun]
+        assert [(o["label"], o["chapter_num"], o.get("manual")) for o in rel["occurrences"]] == [("Cousin", 3, True)]
+        # a junk name typed by hand, then removed from the tracker
+        diagram.add_relation_form(seo)
+        _find(diagram.form_sheet, "rel-add-name-b").value = "Older Sibling"
+        _find(diagram.form_sheet, "rel-add-label-ab").value = "Older Sibling"
+        _find(diagram.form_sheet, "rel-add-save").on_click(None)
+        await diagram.task
+        junk = rt.tracker_key("Older Sibling")
+        assert junk in _saved(rt, glossary)["entries"][seo]["relations"]
+        ctx.extras["answers"] = [True]
+        await diagram.remove_character(junk)
+        saved = _saved(rt, glossary)
+        assert junk not in saved["entries"] and junk not in saved["entries"][seo]["relations"]
+        assert junk in saved["edits"]["removed"]
+        # one history entry: Best Friend (ch 1) of what Ha-rin is to Seo-yun
+        diagram.set_chapter(5)
+        sheet = diagram.show_history(seo)
+        ctx.extras["answers"] = [True]
+        _find(sheet, f"rel-run-delete-{harin}-0").on_click(None)
+        await diagram.task
+        labels = [o["label"] for o in _saved(rt, glossary)["entries"][seo]["relations"][harin]["occurrences"]]
+        assert labels == ["Enemy"]
+        # descriptions: write one at the slider's chapter, edit it, delete it (asked)
+        diagram.description_form(seo)
+        _find(diagram.form_sheet, "rel-desc-text").value = "The heir"
+        _find(diagram.form_sheet, "rel-desc-save").on_click(None)
+        await diagram.task
+        assert [(d["text"], d["chapter_num"], d.get("edited")) for d in _saved(rt, glossary)["entries"][seo]["descriptions"]] \
+            == [("The heir", 5, True)]
+        sheet = diagram.history_sheet  # refreshed after the write
+        assert "The heir" in _texts(sheet)
+        _find(sheet, "rel-desc-edit-0").on_click(None)
+        _find(diagram.form_sheet, "rel-desc-text").value = "The heir, older"
+        _find(diagram.form_sheet, "rel-desc-save").on_click(None)
+        await diagram.task
+        assert _saved(rt, glossary)["entries"][seo]["descriptions"][0]["text"] == "The heir, older"
+        ctx.extras["answers"] = [True]
+        _find(diagram.history_sheet, "rel-desc-delete-0").on_click(None)
+        await diagram.task
+        assert not _saved(rt, glossary)["entries"][seo].get("descriptions")
+        assert len(diagram.undo_stack) >= 5
+        diagram.close()
+        assert diagram.closed and diagram.watch_task is None and ctx.overlays == []
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_long_press_menu_offers_the_name_actions(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        minjun = _id(diagram, "민준")
+        node = next(c for c in diagram.node_controls if c.key == f"rel-node-{minjun}")
+        node.on_long_press(None)
+        menu = diagram.form_sheet
+        assert menu.key.startswith("rel-menu-sheet-")
+        assert {"rel-menu-add", "rel-menu-description", "rel-menu-gender", "rel-menu-hide", "rel-menu-remove"} <= _keys(menu)
+        _find(menu, "rel-menu-gender").on_click(None)
+        assert diagram.form_sheet.key.startswith("rel-gender-sheet-")
+        _find(diagram.form_sheet, "rel-gender-cancel").on_click(None)
+        assert diagram.form_sheet is None and diagram.editing == 0
+        node.on_long_press(None)
+        _find(diagram.form_sheet, "rel-menu-hide").on_click(None)
+        await diagram.task
+        assert _saved(rt, glossary)["view"]["hidden"] == [minjun]
+        assert all(c.key != f"rel-node-{minjun}" for c in diagram.node_controls)
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_gender_tints_history_gender_only_names_and_gender_edits(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+    from glossarion_mobile.ui.glossary.relations_diagram import GENDER_TINTS, NEUTRAL_TINT
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path, gender=[("민준", "male", 1), ("민준", "female", 5), ("지우", "female", None)])
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        minjun, jiwoo = _id(diagram, "민준"), _id(diagram, "지우")
+
+        def tint(node_id):
+            node = next(c for c in diagram.node_controls if c.key == f"rel-node-{node_id}")
+            return node.border.top.color
+
+        assert tint(minjun) == GENDER_TINTS["female"]  # the gender tracker at chapter 5 wins over the glossary
+        diagram.set_chapter(1)
+        assert tint(minjun) == GENDER_TINTS["male"]
+        diagram.set_chapter(5)
+        # Ji-woo has gender tracking and no relations: a name without lines
+        node = next(n for n in diagram.graph["nodes"] if n["id"] == jiwoo)
+        assert node["gender_only"] and node["degree"] == 0 and tint(jiwoo) == GENDER_TINTS["female"]
+        sheet = diagram.show_history(minjun)
+        assert _find(sheet, "rel-history-gender").value == "Gender: Male (Ch. 1), Female (Ch. 5)"
+        # set the gender for all chapters through the gender tracker's writer; undo it
+        _find(sheet, "rel-gender-edit").on_click(None)
+        form = diagram.form_sheet
+        assert _find(form, "rel-gender-value").value == "female"
+        _find(form, "rel-gender-value").value = "male"
+        _find(form, "rel-gender-all").value = True
+        _find(form, "rel-gender-save").on_click(None)
+        await diagram.task
+        gender_file = Path(rt.gender_tracker_path_for_glossary(str(glossary)))
+        assert json.loads(gender_file.read_text(encoding="utf-8"))["entries"][minjun]["decision"] == "male"
+        assert diagram.stamps[1] == rt.file_stamp(str(gender_file))
+        assert await diagram.check_for_update() is False
+        assert tint(minjun) == GENDER_TINTS["male"]
+        assert _find(diagram.history_sheet, "rel-history-gender").value == "Gender: Male (all chapters)"
+        assert await diagram.undo() is True
+        assert json.loads(gender_file.read_text(encoding="utf-8"))["entries"][minjun]["decision"] == "auto"
+        # one chapter cleared: asked first
+        diagram.gender_form(minjun)
+        _find(diagram.form_sheet, "rel-gender-value").value = "auto"
+        _find(diagram.form_sheet, "rel-gender-all").value = False
+        ctx.extras["answers"] = [True]
+        _find(diagram.form_sheet, "rel-gender-save").on_click(None)
+        await diagram.task
+        assert ctx.extras["asked"][-1][1] == "Clear gender"
+        assert rt.gender_history(json.loads(gender_file.read_text(encoding="utf-8")), "민준")["timeline"][-1]["gender"] == "male"
+        # Gender off: neutral tints, no gender-only names, no gender history
+        diagram.set_gender_shown(False)
+        await diagram.task
+        assert tint(minjun) == NEUTRAL_TINT and all(c.key != f"rel-node-{jiwoo}" for c in diagram.node_controls)
+        assert "rel-history-gender" not in _keys(diagram.show_history(minjun))
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_filters_hide_names_and_are_stored_in_the_tracker_view(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        seo, harin, minjun = _id(diagram, "서윤"), _id(diagram, "하린"), _id(diagram, "민준")
+        assert diagram.edge_count() == 2 and "view" not in _saved(rt, glossary)
+        positions = dict(diagram.positions)
+        relations_before = _saved(rt, glossary)["entries"]
+        # Hide: a searchable checklist
+        hide = diagram.hide_sheet()
+        assert hide.key.startswith("rel-hide-sheet-") and diagram.editing == 0
+        search = _find(hide, "rel-hide-search")
+        search.value = "min"
+        search.on_change(None)
+        assert _find(hide, f"rel-hide-{minjun}").visible and not _find(hide, f"rel-hide-{seo}").visible
+        box = _find(hide, f"rel-hide-{minjun}")
+        box.value = True
+        box.on_change(types.SimpleNamespace(control=box))
+        await diagram.task
+        assert _saved(rt, glossary)["view"] == {"hidden": [minjun], "show_relations": True, "show_gender": True}
+        assert _saved(rt, glossary)["entries"] == relations_before  # relations data untouched
+        assert diagram.node_count() == 2 and diagram.edge_count() == 1
+        assert diagram.positions == positions  # the others keep their places
+        assert diagram.hide_chip.label.value == "Hidden (1)"
+        assert await diagram.check_for_update() is False and diagram.reloads == 0  # its own write: no redraw
+        _find(hide, "rel-hide-all").on_click(None)
+        await diagram.task
+        assert "view" not in _saved(rt, glossary) and diagram.node_count() == 3
+        # Relations off: no lines, no labels, no relation history
+        diagram.relations_chip.on_select(None)
+        await diagram.task
+        assert _saved(rt, glossary)["view"]["show_relations"] is False
+        assert diagram.edge_count() == 0 and not diagram.canvas.shapes
+        assert not any(k and k.startswith("rel-relation-") for k in _keys(diagram.show_history(seo)))
+        # a second screen on the same book starts from the stored view (desktop shares it)
+        other = await open_diagram(ctx, str(glossary))
+        assert other.view_choice["show_relations"] is False and other.relations_chip.selected is False
+        other.close()
+        diagram.relations_chip.on_select(None)
+        await diagram.task
+        assert "view" not in _saved(rt, glossary) and diagram.edge_count() == 2
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_auto_update_reloads_external_changes_and_keeps_the_view(iso, tmp_path, monkeypatch):
+    from glossarion_mobile.ui.glossary import relations_diagram as module
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+    tracker_file = Path(rt.tracker_path_for_glossary(str(glossary)))
+
+    def extraction(chapter, relations):
+        rt.edit_tracker(str(tracker_file), lambda t: rt.record_relations(
+            t, relations, field="relations", chapter_index=chapter - 1, chapter_num=chapter,
+            chapter_file=f"ch{chapter}.html"))
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        seo, harin = _id(diagram, "서윤"), _id(diagram, "하린")
+        assert await diagram.check_for_update() is False  # nothing changed: stat only
+        diagram.set_focus(seo)
+        diagram.show_history(harin)
+        viewer = diagram.viewer
+        # at the last chapter: follows the new last chapter
+        extraction(7, [{"raw_name": "민준", "translated_name": "Min-jun", "relations": "하린: Friend"}])
+        assert await diagram.check_for_update() is True
+        assert diagram.chapter == 7 and diagram.slider.max == 7 and diagram.chapter_label.value == "Up to chapter 7"
+        assert diagram.focus == seo and diagram.selected == harin and diagram.viewer is viewer
+        assert "Min-jun: Friend" in _texts(diagram.history_sheet)  # the open sheet shows the update
+        # not at the last chapter: keeps its chapter
+        diagram.set_chapter(1)
+        extraction(9, [{"raw_name": "서윤", "translated_name": "Seo-yun", "relations": "하린: Rival"}])
+        assert await diagram.check_for_update() is True and diagram.chapter == 1 and diagram.slider.max == 9
+        # a file mid-write is skipped (not shown as empty) and read on a later check
+        edges = diagram.edge_count()
+        good = tracker_file.read_bytes()
+        tracker_file.write_bytes(good[: len(good) // 2])
+        assert await diagram.check_for_update() is False and diagram.edge_count() == edges
+        tracker_file.write_bytes(good + b" ")
+        assert await diagram.check_for_update() is True and diagram.edge_count() == edges
+        # the glossary changes too: a name renamed there is redrawn
+        glossary.write_text(GLOSSARY_CSV.replace("Ha-rin", "Harin"), encoding="utf-8")
+        assert await diagram.check_for_update() is True
+        assert any(c.content.value == "Harin" for c in diagram.node_controls)
+        # the loop: once a second (sped up here), stopped by close
+        monkeypatch.setattr(module, "POLL_SECONDS", 0.01)
+        diagram.close()
+        again = await open_diagram(ctx, str(glossary))
+        extraction(10, [{"raw_name": "지우", "translated_name": "Ji-woo", "relations": "서윤: Maid"}])
+        for _ in range(100):
+            if again.reloads:
+                break
+            await asyncio.sleep(0.02)
+        assert again.reloads == 1 and again.chapter == 10
+        task = again.watch_task
+        again.close()
+        await asyncio.sleep(0.05)
+        assert task.done() and again.watch_task is None
         store._saver.close()
 
     asyncio.run(scenario())
