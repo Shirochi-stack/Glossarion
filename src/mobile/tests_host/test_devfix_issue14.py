@@ -390,7 +390,13 @@ def test_fresh_phone_one_streaming_switch_on_by_default(phone):
             store.flush()
             disk = _disk(phone)
             assert "streaming" not in disk
-            assert disk == {**disk_before, **{key: False for key in WRITES}}, disk
+            # A fresh config's Relations Tracker defaults are held like loaded values and go to disk with the
+            # first real save (setting_writes.apply_relations_fresh_defaults); nothing else rides along.
+            seeded = {"glossary_relations_fresh_defaults": ["glossary_enable_relations_tracker",
+                                                           "glossary_minimal_include_relations"],
+                      "glossary_enable_relations_tracker": True, "glossary_minimal_include_relations": True,
+                      "custom_glossary_fields": ["description", "relations"]}
+            assert disk == {**disk_before, **seeded, **{key: False for key in WRITES}}, disk
             env = await _env_preview(app)
             assert {name: env.get(name) for name in STREAM_ENV} == {name: "0" for name in STREAM_ENV}, env
 
@@ -402,7 +408,7 @@ def test_fresh_phone_one_streaming_switch_on_by_default(phone):
             assert writes.take() == [("set_many", {key: True for key in WRITES})]
             assert tile.switch.value is True and tile.value_text.value == "On"
             store.flush()
-            assert _disk(phone) == {**disk_before, **{key: True for key in WRITES}}
+            assert _disk(phone) == {**disk_before, **seeded, **{key: True for key in WRITES}}
         finally:
             await _stop_app(tf, app)
 
