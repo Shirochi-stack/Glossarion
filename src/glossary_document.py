@@ -1572,6 +1572,50 @@ def reload_flash_rows(old_rows, new_row_keys):
 # Save, Save As, Export selection, Convert format
 # ---------------------------------------------------------------------------
 
+def relations_free_save_config(doc, config):
+    """The config to save with: with the Relations Tracker on, the relations column is never written.
+
+    Removes the relations field from the document's list entries and returns a copy of
+    ``config`` whose ``custom_glossary_fields`` lacks it. With the tracker off ``config``
+    is returned unchanged and nothing is touched.
+    """
+    try:
+        import relations_tracking
+    except ImportError:
+        return config
+    if not isinstance(config, dict) or not relations_tracking.tracking_enabled(config):
+        return config
+    data = getattr(doc, 'current_glossary_data', None)
+    if getattr(doc, 'current_glossary_format', '') in ['list', 'token_csv'] and isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            for key in [k for k in entry if isinstance(k, str) and relations_tracking.is_relations_field(k, config)]:
+                entry.pop(key, None)
+    fields = config.get('custom_glossary_fields', [])
+    if not isinstance(fields, (list, tuple)):
+        return config
+    persisted = relations_tracking.persisted_custom_fields(fields, config)
+    if persisted == list(fields):
+        return config
+    saved = dict(config)
+    saved['custom_glossary_fields'] = persisted
+    return saved
+
+
+def _sync_relations_tracker(entries, path, config):
+    """Re-key the relations tracker after an editor save (merged or renamed raw names)."""
+    try:
+        import relations_tracking
+        if not relations_tracking.tracking_enabled(config if isinstance(config, dict) else None):
+            return None
+        from extract_glossary_from_epub import sync_relations_tracker_with_glossary
+        return sync_relations_tracker_with_glossary(entries, path, enabled=True)
+    except Exception as exc:
+        print(f"⚠️ Could not update the relations tracker: {exc}")
+        return None
+
+
 def write_token_csv(entries, path_out, sections, custom_glossary_fields):
     """Write ``entries`` in the token-efficient format (``save_current_glossary.save_token_csv``).
 
@@ -1654,8 +1698,19 @@ def save_document(doc, path, config):
 
     List / token CSV glossaries first apply pending gender decisions and fold tracked gender
     variants (extract_glossary_from_epub), then sync the tracker with the saved glossary.
+    With the Relations Tracker on, the relations column is never written and the relations
+    tracker is re-keyed after the save.
     Returns False when there is nothing to save; raises on I/O errors (the editor shows them).
     """
+    config = relations_free_save_config(doc, config)
+    saved = _write_document(doc, path, config)
+    if saved and doc.current_glossary_format in ['list', 'token_csv']:
+        _sync_relations_tracker(doc.current_glossary_data, path, config)
+    return saved
+
+
+def _write_document(doc, path, config):
+    """The save itself (the desktop editor's ``save_current_glossary`` body)."""
     if not path or doc.current_glossary_data is None:
         return False
     if doc.current_glossary_format in ['list', 'token_csv']:
@@ -1815,6 +1870,7 @@ def convert_to_csv(doc, csv_path, config):
     Old JSON shapes are normalised to typed entries first. Returns the format label
     ("token-efficient" / "legacy CSV"), or None when there are no entries.
     """
+    config = relations_free_save_config(doc, config)
     # Check whether to use legacy CSV or token-efficient format
     use_legacy = config.get('glossary_use_legacy_csv', False)
 

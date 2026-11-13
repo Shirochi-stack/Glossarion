@@ -199,6 +199,17 @@ EDITS = {
          "            payload_summary.auto_update(self)\n"
          "            return successful > 0 and failed == 0 and not self.stop_requested\n\n", 1),
     ],
+    # Relations Tracker: its *_relations_tracker.json sidecar is never a glossary candidate
+    "_auto_load_glossary_after_extraction": [
+        ("                            or stem_lower.endswith('_gender_tracker')\n",
+         "                            or stem_lower.endswith('_gender_tracker')\n"
+         "                            or _is_relations_tracker_file(fn)\n", 1),
+    ],
+    "_get_glossary_dir_candidates": [
+        ("                        or stem_cf.endswith('_gender_tracker')\n",
+         "                        or stem_cf.endswith('_gender_tracker')\n"
+         "                        or _is_relations_tracker_file(fn)\n", 1),
+    ],
 }
 PREPARE_EDITS = [
     ('                    QMessageBox.critical(self, "Error", "Please select file(s) to translate.")\n',

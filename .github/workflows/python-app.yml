@@ -168,6 +168,10 @@ jobs:
           tests/test_gemini_future_and_br_chapters.py \
           tests/test_webtoon_run_fixes.py \
           tests/test_console_window.py \
+          tests/test_relations_tracking.py \
+          tests/test_relations_extraction.py \
+          tests/test_relations_translation.py \
+          tests/test_relations_desktop_ui.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \
@@ -225,6 +229,8 @@ jobs:
             "update_core", "browser_driver", "authnd_auth", "gemini_free",
             # multi-instance translation: the instance plan / key scope and the instance process
             "instance_plan", "instance_worker",
+            # Relations Tracker rules (extractor, translator, desktop and mobile share them)
+            "relations_tracking",
         )
         failed = []
         for name in SHARED:

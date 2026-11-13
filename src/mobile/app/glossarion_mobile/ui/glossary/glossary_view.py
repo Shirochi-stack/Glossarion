@@ -53,7 +53,8 @@ class GlossaryScreen(Screen):
         self.initial_tab = tab if tab in GLOSSARY_TABS else "editor"
         self.title = os.path.basename(self.path) if self.path else "Glossary"
         self.editor = EditorPane(self)
-        self.settings_tabs = {name: GlossarySettingsTab(ctx, name) for name in GLOSSARY_TABS[1:]}
+        self.settings_tabs = {name: GlossarySettingsTab(ctx, name, glossary_path=lambda: self.path)
+                              for name in GLOSSARY_TABS[1:]}
         self._unsubs: list = []
         self.shown = False
         self.listing_task: Any = None  # the Glossaries list being read (load_listing)
@@ -185,12 +186,20 @@ class GlossaryScreen(Screen):
                              on_click=quiet(lambda: self.ctx.spawn(self.editor.reload(force=True)))),
             ft.PopupMenuItem(content="Share file", icon=ft.Icons.SHARE,
                              on_click=quiet(lambda: self.ctx.spawn(self.editor.share_file()))),
+            ft.PopupMenuItem(content="Relationship diagram", icon=ft.Icons.ACCOUNT_TREE_OUTLINED,
+                             on_click=quiet(self.open_relations)),
             ft.PopupMenuItem(content="Search settings", icon=ft.Icons.SEARCH,
                              on_click=quiet(self.search_settings)),
             ft.PopupMenuItem(content="Discard settings changes since opening", icon=ft.Icons.UNDO,
                              on_click=quiet(self.discard_settings_changes)),
         ])
         return [self.extract_button, self.menu]
+
+    def open_relations(self) -> Any:
+        """⋯ › Relationship diagram: the Relations Tracker's diagram of the open glossary."""
+        from glossarion_mobile.ui.glossary.relations import open_diagram
+
+        return self.ctx.spawn(open_diagram(self.ctx, self.path)) if self.path else None
 
     def _settings_page(self) -> Any:
         """The SectionPage of the selected settings tab (None on the Editor tab)."""

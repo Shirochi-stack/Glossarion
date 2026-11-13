@@ -158,6 +158,9 @@ class SectionPage(Screen):
         self.keys: list[str] = []
         self.headings: dict[str, str] = {}  # key -> sub-heading (desktop group box / nested path)
         self.tiles: dict[str, SettingTile] = {}
+        # controls a page owner shows directly under a tile (Glossary › General: the Relations Tracker's
+        # prompt notice and diagram link under its toggle)
+        self.after_tiles: dict[str, ft.Control] = {}
         self.pool_tiles: list[SettingTile] = []  # SECTION_POOL_KEYS (outside the window)
         self.window: tuple[int, int] = (0, 0)
         self.list_view: Optional[ft.ListView] = None
@@ -317,6 +320,8 @@ class SectionPage(Screen):
             tile = self.tile(key)
             tile.refresh(push=False)
             controls.append(tile.control)
+            if key in self.after_tiles:
+                controls.append(self.after_tiles[key])
         if tab is None and end < total:
             self.later_button.content = f"Show more settings ({total - end})"
             controls.append(self.later_button)

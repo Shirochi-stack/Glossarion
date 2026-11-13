@@ -35,6 +35,7 @@ from glossarion_mobile.state.setting_writes import (
     EXTRACTION_KEY,
     MOBILE_STREAMING_DEFAULT,
     PROFILE_KEY,
+    RELATIONS_TRACKER_KEY,
     RULE_KEYS,
     STREAMING_KEY,
     STREAMING_KEYS,
@@ -455,10 +456,11 @@ class SettingTile:
             extra = self.implied_writes(value)
             if extra:  # keys the desktop control writes together with this one, in one store write
                 self.store.set_many({self.path: value, **extra})
-            elif len(self.path) == 1 and (self.key in RULE_KEYS or self.key in (PROFILE_KEY, EXTRACTION_KEY)):
+            elif len(self.path) == 1 and (self.key in RULE_KEYS
+                                         or self.key in (PROFILE_KEY, EXTRACTION_KEY, RELATIONS_TRACKER_KEY)):
                 # the desktop control's side effects (output-mode flags, glossary-mode toggles,
                 # thoughts lock, target-language fan-out, profile extraction method, the On-device
-                # translation profile of the extraction method)
+                # translation profile of the extraction method, the Relations Tracker's custom field)
                 write_setting(self.store, self.key, value)
             else:
                 self.store.set(self.path, value)
@@ -1275,16 +1277,57 @@ class ListSettingTile(SettingTile):
 class CustomFieldsTile(ListSettingTile):
     """Glossary › Custom Fields (``custom_glossary_fields``): removing "description" sets
     ``custom_field_description_removed`` and adding it back clears it (the desktop Add / Remove
-    buttons, ``glossary_document.description_removed_flag``), in the same store write."""
+    buttons, ``glossary_document.description_removed_flag``), in the same store write.
+
+    While the Relations Tracker is on, its column is the editor's locked row (amber, no Remove; renaming
+    it writes ``glossary_relations_field_name`` with the list, GlossaryManager_GUI
+    ``_on_custom_field_item_changed``)."""
+
+    def relations_field(self) -> Optional[str]:
+        """The relations column's name while the tracker is on, else None."""
+        from glossarion_mobile.state.setting_writes import RELATIONS_TRACKER_KEY, relations_field_name
+
+        if not self.store.get(RELATIONS_TRACKER_KEY):
+            return None
+        return relations_field_name(self.store)
+
+    def activate(self) -> ListEditor:
+        value = self.value()
+        self.editor = ListEditor(self.ctx, title=self.label, subtitle=self.key,
+                                 value=list(value) if isinstance(value, (list, tuple)) else [],
+                                 on_save=self.save_from_editor, locked=self.relations_field(),
+                                 locked_tooltip="Relations Tracker column: it is never saved in the glossary. "
+                                                "Rename it here; turn the tracker off to remove it.",
+                                 locked_check=self.relations_name_problem).show()
+        return self.editor
+
+    @staticmethod
+    def relations_name_problem(name: str, others: list) -> str:
+        """Why the relations column cannot take ``name`` (``relations_tracking.field_name_problem``)."""
+        try:
+            import relations_tracking
+        except Exception:
+            log.debug("relations_tracking unavailable", exc_info=True)
+            from glossarion_mobile.state.setting_writes import RELATIONS_RESERVED_FIELDS
+
+            folded = str(name or "").strip().casefold()
+            return f"'{name}' is a built-in glossary column." if folded in RELATIONS_RESERVED_FIELDS else ""
+        return relations_tracking.field_name_problem(name, others)
 
     def implied_writes(self, value: Any) -> dict:
+        extra: dict = {}
         try:
             import glossary_document
 
-            return dict(glossary_document.custom_fields_flag_updates(self.value() or [], value or []))
+            extra.update(glossary_document.custom_fields_flag_updates(self.value() or [], value or []))
         except Exception:
             log.debug("custom fields flag rule unavailable", exc_info=True)
-            return {}
+        renamed = getattr(getattr(self, "editor", None), "locked_value", None)
+        if renamed and self.relations_field() is not None and renamed != self.relations_field():
+            from glossarion_mobile.state.setting_writes import RELATIONS_FIELD_KEY
+
+            extra[RELATIONS_FIELD_KEY] = renamed
+        return extra
 
 
 def configured_entry_type_names(store: Any) -> list:

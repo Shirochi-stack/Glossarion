@@ -1652,14 +1652,27 @@ def _is_glossary_header_line(stripped):
     return lowered.startswith('glossary columns:') or lowered.startswith('glossary:')
 
 
-def merge_glossary_texts(texts):
+def _glossary_header_base(stripped, extra_columns):
+    """A ``Glossary Columns:`` header without ``extra_columns``, for comparing headers."""
+    label, _sep, columns = stripped.partition(':')
+    kept = tuple(c.strip() for c in columns.split(',')
+                 if c.strip() and c.strip().casefold() not in extra_columns)
+    return label.strip().casefold(), kept
+
+
+def merge_glossary_texts(texts, extra_header_columns=()):
     """The glossaries one request carries (book glossary, extension, unified glossary) as one block.
 
     Token-efficient glossaries (a ``Glossary Columns:`` header, ``=== SECTION ===`` headers and
     ``* `` entries) are merged: one header, each section once (in first-seen order) holding the
     entries of every glossary, one blank line between sections - so sections that matched nothing
     leave no blank runs and a section shared by two glossaries is not repeated. Anything else
-    (CSV, JSON, free text) is joined as it was, with blank-line runs collapsed."""
+    (CSV, JSON, free text) is joined as it was, with blank-line runs collapsed.
+
+    ``extra_header_columns`` names columns only some glossaries add (the Relations Tracker's
+    column on the book glossary): headers that differ only by them still merge, under the
+    header that has them."""
+    extra_columns = {str(c).strip().casefold() for c in extra_header_columns or () if str(c or '').strip()}
     texts = [t for t in texts if t and t.strip()]
     if not texts:
         return ""
@@ -1676,7 +1689,13 @@ def merge_glossary_texts(texts):
                 if header is None:
                     header = stripped
                 elif stripped != header:
-                    return _join_glossary_texts(texts)  # different columns: keep them apart
+                    if not extra_columns or (
+                        _glossary_header_base(stripped, extra_columns)
+                        != _glossary_header_base(header, extra_columns)
+                    ):
+                        return _join_glossary_texts(texts)  # different columns: keep them apart
+                    if len(stripped.split(',')) > len(header.split(',')):
+                        header = stripped
                 continue
             if stripped.startswith('==='):
                 current = stripped.strip('= ').strip().upper()

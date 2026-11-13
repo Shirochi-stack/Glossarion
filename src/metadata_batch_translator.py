@@ -61,6 +61,9 @@ _GLOSSARY_CONFIG_OPTIONS = {
     'glossary_skip_gender_tracking': 'GLOSSARY_SKIP_GENDER_TRACKING',
     'glossary_gender_noise_threshold': 'GLOSSARY_GENDER_NOISE_THRESHOLD',
     'glossary_gender_tracking_bias': 'GLOSSARY_GENDER_TRACKING_BIAS',
+    'glossary_enable_relations_tracker': 'GLOSSARY_ENABLE_RELATIONS_TRACKER',
+    'glossary_relations_history_mode': 'GLOSSARY_RELATIONS_HISTORY_MODE',
+    'glossary_relations_field_name': 'GLOSSARY_RELATIONS_FIELD',
     'compress_glossary_strict_matching_mode': 'COMPRESS_GLOSSARY_STRICT_MATCHING_MODE',
     'compress_glossary_strict_matching_custom_types': 'COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES',
     'compress_glossary_consider_translated_column': 'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN',
@@ -94,10 +97,18 @@ def _prepare_artifact_glossary_request(
     client,
     *,
     chapter_ref=None,
+    relations=True,
 ):
-    """Use the chapter translation glossary pipeline for metadata artifacts."""
+    """Use the chapter translation glossary pipeline for metadata artifacts.
+
+    ``relations=False`` leaves the Relations Tracker column (and its log line) out:
+    a request that is not one chapter's translation.
+    """
     config = config or {}
     settings = _glossary_request_settings(config)
+    if not relations:
+        settings = dict(settings or {})
+        settings['GLOSSARY_ENABLE_RELATIONS_TRACKER'] = '0'
     output_dir = (
         config.get('output_dir')
         or getattr(client, 'output_dir', None)
@@ -2454,6 +2465,7 @@ class BatchHeaderTranslator:
                         self.config,
                         self.client,
                         chapter_ref=_first_header_chapter_ref(batch_headers),
+                        relations=False,
                     )
                 )
                 titles_json = json.dumps(

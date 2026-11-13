@@ -14,10 +14,29 @@ _WINDOWS_RESERVED_NAMES = {
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 }
 
+try:
+    from relations_tracking import (
+        TRACKER_SUFFIX as RELATIONS_TRACKER_SUFFIX,
+        is_tracker_file as _is_relations_tracker_file,
+    )
+except ImportError:  # a bundle without the Relations Tracker
+    RELATIONS_TRACKER_SUFFIX = "_relations_tracker.json"
+
+    def _is_relations_tracker_file(name):
+        base = os.path.basename(str(name or "")).lower()
+        return base == "relations_tracker.json" or base.endswith(RELATIONS_TRACKER_SUFFIX)
+
+
+def is_relations_tracker_file(name) -> bool:
+    """True for a relations tracker sidecar (``*_relations_tracker.json`` / ``relations_tracker.json``)."""
+    return _is_relations_tracker_file(name)
+
+
 _LEGACY_GLOSSARY_SUFFIXES = (
     "_glossary_progress.json",
     "_glossary_history.json",
     "_gender_tracker.json",
+    RELATIONS_TRACKER_SUFFIX,
     "_glossary.json",
     "_glossary.csv",
     "_glossary.txt",
@@ -31,6 +50,7 @@ _AUTO_GLOSSARY_RENAME_SUFFIXES = (
     "_glossary.md",
     "_glossary_progress.json",
     "_gender_tracker.json",
+    RELATIONS_TRACKER_SUFFIX,
     "_glossary_history.json",
 )
 
@@ -206,7 +226,8 @@ def glossary_book_base_from_output(output_path_or_name: str) -> str:
 
     stem, ext = os.path.splitext(raw_name)
     name = stem if ext.lower() in {".json", ".csv", ".txt", ".md"} else raw_name
-    for suffix in ("_glossary_progress", "_glossary_history", "_gender_tracker", "_glossary"):
+    for suffix in ("_glossary_progress", "_glossary_history", "_gender_tracker",
+                   os.path.splitext(RELATIONS_TRACKER_SUFFIX)[0], "_glossary"):
         if name.lower().endswith(suffix):
             return name[:-len(suffix)] or "book"
     return name or "book"
@@ -388,6 +409,7 @@ def migrate_legacy_glossary_files(shared_glossary_dir: str, book_name: str, logg
         f"{base}_glossary.md",
         f"{base}_glossary_progress.json",
         f"{base}_gender_tracker.json",
+        f"{base}{RELATIONS_TRACKER_SUFFIX}",
         f"{base}_glossary_history.json",
     ]
 

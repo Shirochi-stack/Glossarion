@@ -169,6 +169,10 @@ SCAN_EXCLUDE = {
 # The label / tooltip texts still come from the dialog source.
 WIDGET_KEY_PINS = {
     ("translator_gui.py", "show_assistant_prompt_dialog", "profile_combo"): ("active_assistant_prompt_profile",),
+    # Relations Tracker "Earlier relations shown:" combo: its index is set through
+    # _RELATIONS_HISTORY_MODES.index(relations_tracking.history_mode(self.config)), which names no key.
+    ("GlossaryManager_GUI.py", "_setup_glossary_general_tab", "self.relations_history_mode_combo"):
+        ("glossary_relations_history_mode",),
 }
 # Shared widget-row builders a dialog calls (``row = glossary_entry_types_row(self, ...)``): the keys
 # the row edits. Group and tab come from the call site, as they did when the widgets were built there
@@ -1822,6 +1826,10 @@ class Collector:
                             base = ctx.path_of(tgt.value)
                             if base:
                                 touched.add(".".join(base + (key,)))
+                # a pinned widget shows its keys, so the function's UI site is theirs too
+                for (pin_mod, pin_fn, _wid), pin_keys in WIDGET_KEY_PINS.items():
+                    if pin_mod == name and pin_fn == fn.name:
+                        touched.update(pin_keys)
                 for key in touched:
                     info = self.info(key)
                     if site_info:

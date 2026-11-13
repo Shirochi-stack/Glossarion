@@ -69,7 +69,12 @@ __all__ = [
     "ON_DEVICE_TRANSLATION_PROFILES",
     "on_device_translation_profile",
     "PROFILE_KEY",
+    "RELATIONS_FIELD_KEY",
+    "RELATIONS_TRACKER_KEY",
     "RULE_KEYS",
+    "effective_custom_fields",
+    "relations_field_name",
+    "relations_tracker_writes",
     "STREAMING_KEY",
     "STREAMING_KEYS",
     "STREAMING_WRITES",
@@ -143,6 +148,15 @@ EXTRACTION_KEY = "text_extraction_method"
 #: the glossary's extra columns (desktop Glossary Manager › Custom Fields) and its "description was
 #: removed on purpose" flag (owner_state adds "description" back to an empty list without it)
 CUSTOM_FIELDS_KEY = "custom_glossary_fields"
+#: Glossary › General "Enable Relations Tracker" (``relations_tracking.CONFIG_ENABLE``; literals: this module
+#: loads before the backend): turning it on adds the relations column to the custom fields, off removes it
+#: (GlossaryManager_GUI ``_sync_relations_custom_field``), in the same store write
+RELATIONS_TRACKER_KEY = "glossary_enable_relations_tracker"
+#: the relations column's name (renamed on the locked row of the Custom Fields editor)
+RELATIONS_FIELD_KEY = "glossary_relations_field_name"
+RELATIONS_DEFAULT_FIELD = "relations"
+#: names the relations column can never take (``relations_tracking.RESERVED_FIELD_NAMES``; literals as above)
+RELATIONS_RESERVED_FIELDS = ("type", "raw_name", "translated_name", "gender", "description")
 #: the temperature an on-device model sets (owner 2026-10-21: 0.4; was Qwen's 0.7 until 2026-10-20). Only
 #: on-device models get it; cloud models keep the saved / desktop default, and leaving restores it.
 ON_DEVICE_TEMPERATURE = 0.4
@@ -852,6 +866,51 @@ def _write_model(store: Any, value: Any) -> list:
     return changed
 
 
+def relations_field_name(source: Any) -> str:
+    """The relations column's name stored in ``source`` (a config store or mapping), else "relations"."""
+    _present, name = _stored_value(source, RELATIONS_FIELD_KEY)
+    name = str(name or "").strip()
+    if name.casefold() in RELATIONS_RESERVED_FIELDS:
+        name = ""
+    return name or RELATIONS_DEFAULT_FIELD
+
+
+def effective_custom_fields(source: Any) -> list:
+    """``custom_glossary_fields`` as the desktop loads it: the stored list, else ["description"] unless
+    the user removed it (``owner_state``: an empty list without ``custom_field_description_removed``)."""
+    _present, fields = _stored_value(source, CUSTOM_FIELDS_KEY)
+    fields = list(fields) if isinstance(fields, (list, tuple)) else []
+    if not fields:
+        _present, removed = _stored_value(source, DESCRIPTION_REMOVED_KEY)
+        if not removed:
+            fields = ["description"]
+    return fields
+
+
+def relations_tracker_writes(source: Any, on: Any) -> dict:
+    """What turning the Relations Tracker on / off writes: the toggle and, when it changes, the custom
+    fields with the relations column added / removed (``relations_tracking.apply_relations_field``)."""
+    values: dict = {RELATIONS_TRACKER_KEY: bool(on)}
+    try:
+        core = importlib.import_module("relations_tracking")
+    except Exception:
+        log.debug("relations_tracking unavailable; writing the toggle alone", exc_info=True)
+        return values
+    fields = effective_custom_fields(source)
+    name = relations_field_name(source)
+    _present, was_on = _stored_value(source, RELATIONS_TRACKER_KEY)
+    if on and not was_on:
+        # turned on: a field that already has the name is the user's own column (enable_field_name)
+        free = str(core.enable_field_name(fields, name))
+        if free != name:
+            name = free
+            values[RELATIONS_FIELD_KEY] = name
+    updated = list(core.apply_relations_field(fields, bool(on), name))
+    if updated != fields:
+        values[CUSTOM_FIELDS_KEY] = updated
+    return values
+
+
 def write_setting(store: Any, key: Any, value: Any) -> list:
     """Store one global setting the way its desktop control does; returns the changed keys."""
     if store is None:
@@ -870,6 +929,8 @@ def write_setting(store: Any, key: Any, value: Any) -> list:
         return _write_model(store, value)
     if key == EXTRACTION_KEY:
         return _write_extraction_method(store, value)
+    if key == RELATIONS_TRACKER_KEY:
+        return _set_many(store, relations_tracker_writes(store, value))
     snapshot = getattr(store, "snapshot", None)
     if key not in RULE_KEYS or not callable(snapshot):
         return _set_many(store, {key: value})

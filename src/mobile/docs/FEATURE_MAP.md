@@ -1222,3 +1222,15 @@ Not desktop features (no inventory rows; tests/parity/DISCREPANCIES.md "U10"). U
 | d | Per-book Default / Always / Never and Send now | Book › Output › Cloud & sharing; chat Result card "Send to cloud" | **New** (U10) |
 | e | Share file via link: transfer.it hand-off, Gofile, Send (end-to-end encrypted), pixeldrain (user's key) | Book › Output › Share file via link + Saved links; chat Result card; Data › Cloud sync & sharing (service switches, consent sheets, pixeldrain key, Send options) | **New** (U10): tap only, every service off until enabled with consent; transfer.it is a browser hand-off (no API call); secrets encrypted |
 | f | Cloud / upload failure and "needs a save location" notifications | `jobs.action` notifications (routes only) | **New** (U10): failures only; progress in the shared foreground notification |
+
+## 19. desktop-additions: desktop features added after the inventory
+
+Desktop features shipped after the planning inventory (no inventory rows), mapped like the rest.
+
+| # | Feature | Mobile surface | Notes |
+|---|---|---|---|
+| a | Relations Tracker: Enable Relations Tracker + Earlier relations shown (Previous one only / Full history / Current only) | Glossary › General (schema tiles, directly above Skip Gender Tracking; the dropdown is locked while the toggle is off) | Turning it on / off adds / removes the relations column in Custom Fields in the same write (`state.setting_writes.relations_tracker_writes`) |
+| b | Relations Tracker: prompt check + "- {relations_instruction}" warning row with Copy | Glossary › General, under the toggle (Reset-to-default question per prompt, then a warning notice with the line and Copy) | Shared rules: `relations_tracking.prompts_missing_placeholder`; the On-device profile is never offered a reset, as on desktop |
+| c | Relations Tracker: locked relations column in Custom Fields (amber, no Remove, rename) | Glossary › Balanced/Full › Custom Fields (ListEditor locked row) | A rename writes `glossary_relations_field_name` with the list; blank or duplicate names are refused; EntrySheet never offers the column |
+| d | Relations Tracker: {relations_instruction} placeholder | Balanced/Full and Minimal prompt editors (placeholder chips) |  |
+| e | Relations Tracker: relationship diagram with chapter slider | Glossary › ⋯ › Relationship diagram; Glossary › General › View diagram… | Canvas inside an InteractiveViewer (pinch zoom, pan); focus character, Former relations, Unlisted names; tap a name for its relation history sheet |

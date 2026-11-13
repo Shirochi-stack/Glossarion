@@ -390,6 +390,8 @@ SECTION_OVERRIDES = {
     "glossary_refinement_chunking_mode": "glossary.refinement",
     # U9: bookkeeping of the Custom Fields editor (removing the default 'description' field), not a setting
     "custom_field_description_removed": "internal.state",
+    # the Relations Tracker's column name: renamed on the locked row of the Custom Fields editor
+    "glossary_relations_field_name": "internal.state",
     # legacy keys that desktop startup migrates or removes (kept so old configs round-trip)
     "conservative_batching": "internal.state",
     "conservative_batch_multiplier": "internal.state",
@@ -642,6 +644,9 @@ CHOICES_OVERRIDES = {
                                  ("cascading", "Cascading - Basic first, then AI Hunter")),
     "emergency_glossary_compliance_mode": (("characters", "Characters"), ("all", "All"), ("custom", "Custom")),
     "glossary_name_check_mode": (("auto", "Auto-fix"), ("review", "Review first")),  # name_check_mode_combo
+    # GlossaryManager_GUI relations_history_mode_combo (_RELATIONS_HISTORY_MODES / _RELATIONS_HISTORY_LABELS)
+    "glossary_relations_history_mode": (("previous", "Previous one only"), ("full", "Full history"),
+                                        ("current", "Current only")),
     "image_compression_format": (("auto", "Auto (Best quality/size ratio)"), ("webp", "WebP (Best compression)"),
                                  ("jpeg", "JPEG (Wide compatibility)"), ("png", "PNG (Lossless)")),
     "compress_glossary_strict_matching_mode": (("all", "All"), ("gender", "Gender Entries"),   # "Whole term for"
