@@ -9,12 +9,17 @@
   scanner's glossary name review, Other Settings' payload summary).
 * ``center_messagebox_buttons`` - centered, optionally larger message-box buttons (Other Settings,
   the QA scanner's glossary name check).
+* ``HalgakosLoadingWidget`` - the spinning Halgakos over one line of text (the EPUB Library's
+  loading screen as a widget; the Relations Diagram shows it while its data is read).
 """
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+import os
+import time
+
+from PySide6.QtCore import QRect, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                               QStyle, QStyledItemDelegate, QStyleOptionViewItem, QWidget)
+                               QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget)
 
 # Context menus without the empty icon gutter (Progress Manager rows, the QA scanner's glossary
 # name review)
@@ -277,3 +282,71 @@ def run_with_progress(parent, title, work, *, text="Working...", on_tick=None, t
     if outcome["error"] is not None:
         raise outcome["error"]
     return outcome["result"]
+
+
+class HalgakosLoadingWidget(QWidget):
+    """A spinning Halgakos over one line of text, centred: "something is loading".
+
+    The same look as the EPUB Library's loading screen (64 px icon, one turn in 1.2 s,
+    grey 11 pt text). The frames are rendered once; each tick shows the frame for the time
+    that has passed, so the icon keeps its pace when the UI thread is busy between ticks.
+    It spins while it is visible.
+    """
+
+    ICON_SIZE = 64
+    PERIOD_S = 1.2
+    STEP_DEGREES = 6
+
+    def __init__(self, text="Loading…", parent=None, icon_path=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setContentsMargins(0, 20, 0, 20)
+        layout.setSpacing(8)
+        self.icon_label = QLabel()
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        # The icon turned 45 degrees is 64 * sqrt(2) = 91 px across: room for every frame.
+        self.icon_label.setFixedSize(96, 96)
+        if icon_path is None:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        self._frames = []
+        pixmap = QPixmap(icon_path) if icon_path and os.path.exists(icon_path) else QPixmap()
+        if not pixmap.isNull():
+            base = pixmap.scaled(self.ICON_SIZE, self.ICON_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.icon_label.setPixmap(base)
+            self._frames = [base.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+                            for angle in range(0, 360, self.STEP_DEGREES)]
+        layout.addWidget(self.icon_label, 0, Qt.AlignCenter)
+        self.text_label = QLabel(text)
+        self.text_label.setAlignment(Qt.AlignCenter)
+        self.text_label.setStyleSheet("color: #888; font-size: 11pt; padding-top: 4px;")
+        layout.addWidget(self.text_label, 0, Qt.AlignCenter)
+        self._frame = -1
+        self._started = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(lambda: self.tick())
+
+    def set_text(self, text):
+        self.text_label.setText(text)
+
+    def is_spinning(self):
+        return self._timer.isActive()
+
+    def tick(self):
+        """Show the frame that matches the time since the widget was shown."""
+        if not self._frames:
+            return
+        index = int((time.perf_counter() - self._started) / self.PERIOD_S * len(self._frames)) % len(self._frames)
+        if index != self._frame:
+            self._frame = index
+            self.icon_label.setPixmap(self._frames[index])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._started = time.perf_counter()
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)

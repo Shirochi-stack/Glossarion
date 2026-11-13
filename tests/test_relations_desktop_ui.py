@@ -565,6 +565,138 @@ def test_diagram_uses_the_configured_manual_glossary(gui, tmp_path):
     assert gui._relations_glossary_path() == str(glossary)
 
 
+def _write_book(folder, tracker):
+    """A glossary file with a relations tracker beside it."""
+    import json
+    glossary = folder / "Book_glossary.csv"
+    names = sorted({str(item.get("raw_name") or key) for key, item in tracker["entries"].items()})
+    glossary.write_text("type,raw_name,translated_name\n" + "".join(f"character,{n},{n}\n" for n in names),
+                        encoding="utf-8")
+    (folder / "Book_relations_tracker.json").write_text(json.dumps(tracker, ensure_ascii=False), encoding="utf-8")
+    return glossary
+
+
+def _wait_loaded(qapp, dialog, seconds=20.0):
+    import time
+    deadline = time.monotonic() + seconds
+    while dialog.is_loading() and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    qapp.processEvents()
+    assert not dialog.is_loading()
+
+
+def test_diagram_opens_at_once_with_a_loading_screen(qapp, tmp_path, monkeypatch):
+    """The owner's "View Diagram takes too long to appear": the window comes first, the data after."""
+    import threading
+    import relations_diagram_dialog as mod
+    glossary = _write_book(tmp_path, _team_tracker())
+    gate = threading.Event()
+    reads = []
+    real_read = mod.RelationsDiagramDialog._read_data.__func__
+
+    def slow_read(cls, path, tracker=None, glossary_entries=None):
+        reads.append(threading.current_thread().name)
+        gate.wait(20)  # hold the loading thread: the constructor must not wait for it
+        return real_read(cls, path, tracker, glossary_entries)
+
+    monkeypatch.setattr(mod.RelationsDiagramDialog, "_read_data", classmethod(slow_read))
+    dialog = mod.RelationsDiagramDialog(None, glossary_path=str(glossary), load_async=True)
+    try:
+        # Back at once: the files have not been read, the loading screen is up and spinning.
+        assert dialog.is_loading() and dialog._stack.currentWidget() is dialog.loading_widget
+        assert dialog.loading_widget.text_label.text() == mod.LOADING_TEXT
+        assert dialog._page is None and dialog.node_count() == 0 and dialog.edge_count() == 0
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.loading_widget.is_spinning() and len(dialog.loading_widget._frames) == 60
+        dialog.rebuild()  # a no-op while loading
+        assert dialog._stack.currentWidget() is dialog.loading_widget
+        gate.set()
+        _wait_loaded(qapp, dialog)
+        assert reads == ["RelationsDiagramLoad"]  # read on the thread, not on the UI thread
+        assert dialog._stack.currentWidget() is dialog._page
+        assert dialog.node_count() == 10 and dialog.edge_count() == 15
+        assert not dialog.loading_widget.is_spinning()  # hidden: its timer is stopped
+        # The same layout as the synchronous dialog gives.
+        sync = mod.RelationsDiagramDialog(None, tracker=dialog.tracker, glossary_entries=dialog.glossary_entries)
+        try:
+            assert sync._positions == dialog._positions and not sync.is_loading()
+        finally:
+            sync.close()
+            sync.deleteLater()
+    finally:
+        gate.set()
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_diagram_async_empty_state_and_early_close(qapp, tmp_path):
+    from relations_diagram_dialog import EMPTY_TEXT, RelationsDiagramDialog
+    glossary = tmp_path / "Book_glossary.csv"
+    glossary.write_text("type,raw_name,translated_name\ncharacter,서윤,Seo-yun\n", encoding="utf-8")
+    dialog = RelationsDiagramDialog(None, glossary_path=str(glossary), load_async=True)
+    try:
+        _wait_loaded(qapp, dialog)
+        assert dialog._stack.currentWidget() is dialog.empty_label and dialog.empty_label.text() == EMPTY_TEXT
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+    # Closed (and deleted) before the data arrives: the late result is dropped quietly.
+    early = RelationsDiagramDialog(None, glossary_path=str(_write_book(tmp_path, _team_tracker())), load_async=True)
+    early.close()
+    early.deleteLater()
+    for _ in range(40):
+        qapp.processEvents()
+    # A tracker handed in needs no loading, whatever was asked.
+    ready = RelationsDiagramDialog(None, tracker=_team_tracker(), load_async=True)
+    try:
+        assert not ready.is_loading() and ready.node_count() == 10
+    finally:
+        ready.close()
+        ready.deleteLater()
+
+
+def test_view_diagram_button_opens_the_window_before_the_data(gui, tmp_path):
+    from PySide6.QtWidgets import QApplication
+    glossary = _write_book(tmp_path, _team_tracker())
+    dialog = gui._open_relations_diagram(None, glossary_path=str(glossary))
+    try:
+        assert dialog is gui._relations_diagram_dialog and dialog.isVisible()
+        assert dialog.is_loading() or dialog.node_count() == 10  # shown first; the data follows
+        _wait_loaded(QApplication.instance(), dialog)
+        assert dialog.node_count() == 10 and dialog.edge_count() == 15
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_halgakos_loading_widget_spins_only_while_shown(qapp):
+    import time
+    from qt_widget_helpers import HalgakosLoadingWidget
+    widget = HalgakosLoadingWidget("Loading relations…")
+    try:
+        assert widget.text_label.text() == "Loading relations…" and not widget.is_spinning()
+        assert len(widget._frames) == 60  # one turn in 6-degree steps, rendered once
+        widget.show()
+        qapp.processEvents()
+        assert widget.is_spinning()
+        widget._started = time.perf_counter() - widget.PERIOD_S / 2  # half a turn ago
+        widget.tick()
+        assert widget._frame == 30
+        widget.set_text("Almost there")
+        assert widget.text_label.text() == "Almost there"
+        widget.hide()
+        assert not widget.is_spinning()
+        # No icon file: text only, nothing to spin, no error.
+        plain = HalgakosLoadingWidget("x", icon_path="missing.ico")
+        plain.tick()
+        assert plain._frames == []
+        plain.deleteLater()
+    finally:
+        widget.deleteLater()
+
+
 def test_diagram_click_on_a_large_graph_rebuilds_after_the_press(qapp):
     """Over MAX_LABELLED_EDGES a click rebuilds the scene; it must not run inside the press handler."""
     from PySide6.QtCore import QPoint, Qt

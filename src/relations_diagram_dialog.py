@@ -8,16 +8,19 @@ this module only draws them (PySide6 only, no manga-tier imports).
 import html
 import math
 import os
+import threading
 
-from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QGraphicsPathItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsView, QHBoxLayout, QLabel, QSlider, QSplitter,
                                QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 import relations_tracking
+from qt_widget_helpers import HalgakosLoadingWidget
 
 ALL_CHARACTERS = "All characters"
+LOADING_TEXT = "Loading relations…"
 HISTORY_HINT = "Click a character to see their relation history."
 EMPTY_TEXT = ("No relations tracked for this glossary yet.\n\n"
               "Turn on Enable Relations Tracker in Glossary Manager → General Settings, "
@@ -226,9 +229,18 @@ class _NodeItem(QGraphicsPathItem):
 
 
 class RelationsDiagramDialog(QDialog):
-    """Graph of the tracked relations with a chapter slider, focus search and history panel."""
+    """Graph of the tracked relations with a chapter slider, focus search and history panel.
 
-    def __init__(self, parent=None, glossary_path=None, tracker=None, glossary_entries=None):
+    ``load_async=True`` (the Glossary Manager's buttons): the window is built empty with a
+    loading screen and returns at once; the tracker, the glossary and the layout are worked
+    out on a thread and the diagram appears when they are ready. Otherwise everything is
+    ready when the constructor returns.
+    """
+
+    #: (tracker, glossary entries, layout key, positions) from the loading thread
+    _loaded = Signal(object)
+
+    def __init__(self, parent=None, glossary_path=None, tracker=None, glossary_entries=None, load_async=False):
         super().__init__(parent)
         self.setWindowTitle("Relations Diagram")
         self.setModal(False)
@@ -252,13 +264,16 @@ class RelationsDiagramDialog(QDialog):
             pass
 
         self.glossary_path = glossary_path or ''
-        if tracker is None:
-            tracker_path = relations_tracking.tracker_path_for_glossary(self.glossary_path) if self.glossary_path else ''
-            tracker = relations_tracking.load_tracker(tracker_path) if tracker_path else relations_tracking.empty_tracker()
-        self.tracker = tracker if isinstance(tracker, dict) else relations_tracking.empty_tracker()
-        if glossary_entries is None and self.glossary_path:
-            glossary_entries = self._load_glossary_entries(self.glossary_path)
-        self.glossary_entries = list(glossary_entries) if glossary_entries is not None else None
+        # Reading the files and laying the graph out is the slow part (over a second on a
+        # 15-name book before the layout was sped up): with load_async it happens after the
+        # window is on screen.
+        self._loading = bool(load_async) and tracker is None and bool(self.glossary_path)
+        if self._loading:
+            tracker, glossary_entries = relations_tracking.empty_tracker(), None
+        else:
+            tracker, glossary_entries = self._read_data(self.glossary_path, tracker, glossary_entries)
+        self.tracker = tracker
+        self.glossary_entries = glossary_entries
 
         self._node_items = {}
         self._edge_count = 0
@@ -272,10 +287,65 @@ class RelationsDiagramDialog(QDialog):
         self._node_font.setBold(True)
         self._label_font = QFont("Segoe UI", 8)
 
-        self._build_ui()
-        self.rebuild()
+        self._build_shell()
+        if self._loading:
+            self._stack.setCurrentWidget(self.loading_widget)
+            self._loaded.connect(self._on_loaded)
+            threading.Thread(target=self._load_in_background, name="RelationsDiagramLoad", daemon=True).start()
+        else:
+            self._build_diagram_page()
+            self.rebuild()
 
     # ── data ────────────────────────────────────────────────────────────
+    @classmethod
+    def _read_data(cls, glossary_path, tracker=None, glossary_entries=None):
+        """``(tracker, glossary entries)``: what was passed in, else read from beside ``glossary_path``."""
+        if tracker is None:
+            tracker_path = relations_tracking.tracker_path_for_glossary(glossary_path) if glossary_path else ''
+            tracker = relations_tracking.load_tracker(tracker_path) if tracker_path else relations_tracking.empty_tracker()
+        if not isinstance(tracker, dict):
+            tracker = relations_tracking.empty_tracker()
+        if glossary_entries is None and glossary_path:
+            glossary_entries = cls._load_glossary_entries(glossary_path)
+        return tracker, (list(glossary_entries) if glossary_entries is not None else None)
+
+    @staticmethod
+    def _layout_size(node_count):
+        width = max(900.0, 230.0 * math.sqrt(max(1, node_count)) * 1.6)
+        return width, width * 0.68
+
+    @classmethod
+    def _compute_layout(cls, tracker, glossary_entries, show_unlisted, focus):
+        """Positions from the graph of ALL chapters, so nodes stay put while the slider moves."""
+        full = relations_tracking.build_graph(tracker, glossary_entries, None, show_unlisted=show_unlisted)
+        width, height = cls._layout_size(len(full.get('nodes') or []))
+        return relations_tracking.layout_graph(full, width, height, focus=focus)
+
+    def _load_in_background(self):
+        """The loading thread: plain data only, no Qt objects. The result goes back by signal."""
+        try:
+            tracker, entries = self._read_data(self.glossary_path)
+            key = (False, None)  # the layout the diagram opens with
+            payload = (tracker, entries, key, self._compute_layout(tracker, entries, *key))
+        except Exception:
+            payload = (relations_tracking.empty_tracker(), None, None, {})
+        try:
+            self._loaded.emit(payload)
+        except RuntimeError:  # the window was closed before the data was ready
+            pass
+
+    def _on_loaded(self, payload):
+        tracker, entries, key, positions = payload
+        self.tracker, self.glossary_entries = tracker, entries
+        self._loading = False
+        self._build_diagram_page()
+        if key is not None:
+            self._install_layout(key, positions)
+        self.rebuild()
+
+    def is_loading(self):
+        return self._loading
+
     @staticmethod
     def _load_glossary_entries(path):
         try:
@@ -293,7 +363,8 @@ class RelationsDiagramDialog(QDialog):
         return any(isinstance(item, dict) and item.get('relations') for item in entries.values())
 
     # ── UI ──────────────────────────────────────────────────────────────
-    def _build_ui(self):
+    def _build_shell(self):
+        """What the window needs to appear: the empty-state text and the loading screen."""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
         self._stack = QStackedWidget()
@@ -305,7 +376,13 @@ class RelationsDiagramDialog(QDialog):
         self.empty_label.setStyleSheet("color: #9ca3af; font-size: 11pt;")
         self._stack.addWidget(self.empty_label)
 
-        page = QWidget()
+        self.loading_widget = HalgakosLoadingWidget(LOADING_TEXT)
+        self._stack.addWidget(self.loading_widget)
+        self._page = None
+
+    def _build_diagram_page(self):
+        """The controls, the diagram and the history panel (needs the tracker: chapter range, names)."""
+        page = self._page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         self._stack.addWidget(page)
@@ -417,34 +494,34 @@ class RelationsDiagramDialog(QDialog):
     def _on_controls_changed(self, *_args):
         self.rebuild()
 
+    def _install_layout(self, key, positions):
+        self._positions = positions
+        self._layout_key = key
+        self._refit = True
+        if positions:
+            xs = [p[0] for p in positions.values()]
+            ys = [p[1] for p in positions.values()]
+            # Room for the name boxes around the outermost positions.
+            self._view.set_content_rect(QRectF(min(xs) - 90, min(ys) - 26,
+                                               max(xs) - min(xs) + 180, max(ys) - min(ys) + 52))
+
     def _layout_for(self, show_unlisted, focus):
         """Positions from the graph of ALL chapters, so nodes stay put while the slider moves."""
         key = (bool(show_unlisted), focus)
         if key != self._layout_key:
-            full = relations_tracking.build_graph(self.tracker, self.glossary_entries, None,
-                                                  show_unlisted=show_unlisted)
-            count = max(1, len(full.get('nodes') or []))
-            width = max(900.0, 230.0 * math.sqrt(count) * 1.6)
-            height = width * 0.68
-            self._positions = relations_tracking.layout_graph(full, width, height, focus=focus)
-            self._layout_key = key
-            self._refit = True
-            if self._positions:
-                xs = [p[0] for p in self._positions.values()]
-                ys = [p[1] for p in self._positions.values()]
-                # Room for the name boxes around the outermost positions.
-                self._view.set_content_rect(QRectF(min(xs) - 90, min(ys) - 26,
-                                                   max(xs) - min(xs) + 180, max(ys) - min(ys) + 52))
+            self._install_layout(key, self._compute_layout(self.tracker, self.glossary_entries, *key))
         return self._positions
 
     def rebuild(self):
         """Redraw the scene for the current controls (only called when a control changes)."""
+        if self._loading:
+            return  # nothing to draw yet: the loading screen is up
         if not self._has_relations():
-            self._stack.setCurrentIndex(0)
+            self._stack.setCurrentWidget(self.empty_label)
             self._edge_count = 0
             self._node_items = {}
             return
-        self._stack.setCurrentIndex(1)
+        self._stack.setCurrentWidget(self._page)
         chapter = self.up_to_chapter()
         shown = chapter if chapter is not None else self._chapter_high
         self.chapter_label.setText(f"Up to chapter {shown}" if shown is not None else "All chapters")

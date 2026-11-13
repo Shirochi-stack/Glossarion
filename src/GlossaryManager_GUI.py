@@ -1905,7 +1905,7 @@ class GlossaryManagerMixin:
             if not path:
                 return None
         from relations_diagram_dialog import RelationsDiagramDialog
-        dialog = RelationsDiagramDialog(parent or getattr(self, 'dialog', None), glossary_path=path)
+        dialog = RelationsDiagramDialog(parent or getattr(self, 'dialog', None), glossary_path=path, load_async=True)
         self._relations_diagram_dialog = dialog
         dialog.show()
         return dialog
