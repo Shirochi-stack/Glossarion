@@ -1290,3 +1290,85 @@ def test_auto_update_reloads_external_changes_and_keeps_the_view(iso, tmp_path, 
         store._saver.close()
 
     asyncio.run(scenario())
+
+
+def test_android_back_stops_the_watch_loop(iso, tmp_path, monkeypatch):
+    """Review: the system back gesture pops the View through the shell without ``close``."""
+    from glossarion_mobile.ui.glossary import relations_diagram as module
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+    monkeypatch.setattr(module, "POLL_SECONDS", 0.01)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        ctx.shell = types.SimpleNamespace(overlays=ctx.overlays)
+        diagram = await open_diagram(ctx, str(glossary))
+        task = diagram.watch_task
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        ctx.overlays.remove(diagram.view)  # shell.pop_view on Android back
+        for _ in range(50):
+            if task.done():
+                break
+            await asyncio.sleep(0.02)
+        assert task.done() and diagram.closed and diagram.watch_task is None
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_slider_range_covers_the_gender_trackers_chapters(iso, tmp_path):
+    """Review: the same range as desktop (relations 1-5, gender up to chapter 8)."""
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+    from glossarion_mobile.ui.glossary.relations_diagram import GENDER_TINTS
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path, gender=[("민준", "female", 6), ("민준", "male", 8)])
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        minjun = _id(diagram, "민준")
+        assert (diagram.low, diagram.high, diagram.chapter) == (1, 8, 8)
+        node = next(c for c in diagram.node_controls if c.key == f"rel-node-{minjun}")
+        assert node.border.top.color == GENDER_TINTS["male"]
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_undoing_an_edit_keeps_a_later_view_choice(iso, tmp_path):
+    """Review: a filter changed after an edit is not part of that edit's undo."""
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        seo, harin = _id(diagram, "서윤"), _id(diagram, "하린")
+        _find(diagram.show_history(seo), f"rel-edit-{harin}").on_click(None)
+        _find(diagram.form_sheet, "rel-form-ab").value = "Rival"
+        _find(diagram.form_sheet, "rel-form-save").on_click(None)
+        await diagram.task
+        diagram.set_gender_shown(False)
+        await diagram.task
+        assert _saved(rt, glossary)["view"]["show_gender"] is False
+        assert await diagram.undo() is True
+        saved = _saved(rt, glossary)
+        assert rt.relation_labels(saved, "서윤", "하린")[0] == "Enemy"
+        assert saved["view"]["show_gender"] is False and diagram.view_choice["show_gender"] is False
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())

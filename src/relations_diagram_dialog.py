@@ -790,7 +790,13 @@ class RelationsDiagramDialog(QDialog):
             if job['read_gender']:
                 out['new_gender'] = self._read_gender(self.glossary_path)
             if job['read_glossary']:
-                out['new_entries'] = self._load_glossary_entries(self.glossary_path)
+                # The Glossary Editor rewrites the file in place: an empty file, or one whose stamp
+                # moved during the read, is mid-save (None: keep what is shown, read it next time).
+                stamp = (job.get('stamps') or {}).get(self.glossary_path)
+                if stamp is None or stamp[1] > 0:
+                    entries = self._load_glossary_entries(self.glossary_path)
+                    if relations_tracking.file_stamp(self.glossary_path) == stamp:
+                        out['new_entries'] = entries
             tracker = out.get('new_tracker') or job['tracker']
             gender = out['new_gender'] if out.get('new_gender') is not None else job['gender']
             entries = out['new_entries'] if out.get('new_entries') is not None else job['entries']
@@ -976,18 +982,7 @@ class RelationsDiagramDialog(QDialog):
 
     def _chapter_bounds(self):
         """The slider's range: the relations tracker's chapters and the gender tracker's."""
-        low, high = relations_tracking.chapter_bounds(self.tracker)
-        numbers = [n for n in (low, high) if isinstance(n, (int, float))]
-        entries = self.gender_tracker.get('entries') if isinstance(self.gender_tracker, dict) else None
-        for item in (entries.values() if isinstance(entries, dict) else ()):
-            for occurrence in (item.get('occurrences') or []) if isinstance(item, dict) else []:
-                try:
-                    numbers.append(float(occurrence.get('chapter_num')))
-                except (TypeError, ValueError, AttributeError):
-                    pass
-        if not numbers:
-            return None, None
-        return int(math.floor(min(numbers))), int(math.ceil(max(numbers)))
+        return relations_tracking.diagram_chapter_bounds(self.tracker, self.gender_tracker)
 
     def _update_chapter_range(self, initial=False):
         """Set the slider's range from the data. At the last chapter it stays at the (new) last
@@ -1182,8 +1177,10 @@ class RelationsDiagramDialog(QDialog):
         if self._refit:
             self._refit = False
             self._view.fit_all()
-        if selected is not None:
-            self.show_history(selected)  # the slider moved: the description written at that chapter
+        if self._selected is not None and self._selected in self._node_info:
+            # the slider moved or the data changed: the panel follows, also for a name selected from
+            # the panel that is not drawn
+            self.show_history(self._selected)
 
     @staticmethod
     def _overlap(box, others):
@@ -1763,7 +1760,7 @@ class RelationsDiagramDialog(QDialog):
             return None
         number = chapter.value()
         return self._edit(lambda t: relations_tracking.edit_relation(
-            t, na['raw_name'], nb['raw_name'], label_ab, label_ba, old_ab=old_ab or None, old_ba=old_ba or None,
+            t, na['raw_name'], nb['raw_name'], label_ab, label_ba, old_ab=old_ab, old_ba=old_ba,
             chapter=number, translated_a=na['translated'], translated_b=nb['translated']),
             f"edit relation {na['label']} – {nb['label']}")
 
@@ -1873,6 +1870,9 @@ class RelationsDiagramDialog(QDialog):
             return None
         value, where = gender.currentData(), scope.currentData()
         target = chapter if where == 'chapter' else None
+        if value == 'auto' and target is not None and not self._confirm(
+                "Clear gender", f"Delete the gender recorded for {me['label']} at chapter {_chapter_text(target)}?"):
+            return None
         try:
             result = relations_tracking.set_gender(self.glossary_path, me['raw_name'], value, target,
                                                    translated_name=me['translated'])

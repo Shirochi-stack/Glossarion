@@ -32,6 +32,7 @@ the next check. A glossary without a tracker shows an empty state.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 import os
@@ -121,7 +122,7 @@ class RelationsDiagram:
         #: (relations tracker, gender tracker, glossary) file stamps seen at the last load
         self.stamps = tuple(stamps) if isinstance(stamps, (tuple, list)) and len(stamps) == 3 else (None, None, None)
         self.view_choice = self._view_settings()
-        low, high = self.core.chapter_bounds(self.tracker) if self.core is not None else (None, None)
+        low, high = self._bounds()
         self.low, self.high = low, high
         self.chapter = high
         self.focus: Optional[str] = None
@@ -239,6 +240,10 @@ class RelationsDiagram:
                 await asyncio.sleep(POLL_SECONDS)
                 if self.closed:
                     break
+                if self._left():  # Android back popped the View: stop watching
+                    self.closed = True
+                    self.watch_task = None
+                    break
                 try:
                     await self.check_for_update()
                 except Exception:
@@ -271,6 +276,18 @@ class RelationsDiagram:
         self._apply_state(**parts)
         return True
 
+    def _bounds(self) -> tuple:
+        """The slider's range: the relations tracker's chapters and the gender tracker's (as on desktop)."""
+        if self.core is None:
+            return None, None
+        return self.core.diagram_chapter_bounds(self.tracker, self.gender)
+
+    def _left(self) -> bool:
+        """True once this screen's View is off the page (Android back pops it without ``close``)."""
+        shell = getattr(self.ctx, "shell", None)
+        overlays = getattr(shell, "overlays", None) if shell is not None else None
+        return isinstance(overlays, list) and self.view not in overlays
+
     def _view_settings(self) -> dict:
         if self.core is None:
             return {"hidden": [], "show_relations": True, "show_gender": True}
@@ -288,11 +305,13 @@ class RelationsDiagram:
         if "gender" in parts:
             self.gender = parts["gender"] if isinstance(parts["gender"], dict) else None
         self.view_choice = self._view_settings()
-        self.low, self.high = self.core.chapter_bounds(self.tracker)
+        self.low, self.high = self._bounds()
         if at_end or self.chapter is None:
             self.chapter = self.high
         elif self.high is not None and self._num(self.chapter) > self._num(self.high):
             self.chapter = self.high
+        elif self.low is not None and self._num(self.chapter) < self._num(self.low):
+            self.chapter = self.low
         self.all_graph = self._all_graph()
         if self.empty != was_empty:
             self.safe.content = self._build_body()
@@ -579,6 +598,9 @@ class RelationsDiagram:
     def save_view(self, **choice: Any) -> Any:
         """Show the choice now, then store it in the tracker file (one locked write of the ``view`` key;
         its stamp is kept, so the update check does not redraw this write again)."""
+        # A copy: the tracker object may be an undo record's "after" snapshot, which must not take in
+        # this view choice (undoing that edit would then drop it).
+        self.tracker = copy.deepcopy(self.tracker)
         self.core.set_view(self.tracker, **choice)
         self.view_choice = self._view_settings()
         self._update_filters()

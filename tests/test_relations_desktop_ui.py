@@ -1248,6 +1248,118 @@ def test_filters_hide_names_and_persist_in_the_trackers_view(qapp, tmp_path):
         _close(qapp, dialog)
 
 
+def _two_sided_later_tracker():
+    """갑 says 을 is a Friend at chapter 1; 을's row says what 을 is to 갑 (Rival) only at chapter 10."""
+    tracker = rt.empty_tracker()
+    rt.record_relations(tracker, [{"raw_name": "갑", "relations": "을: Friend"}, {"raw_name": "을"}],
+                        field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    rt.record_relations(tracker, [{"raw_name": "을", "relations": "갑: Rival"}, {"raw_name": "갑"}],
+                        field="relations", chapter_index=9, chapter_num=10, chapter_file="c10.xhtml")
+    return tracker
+
+
+def test_filling_a_side_unknown_at_the_sliders_chapter_keeps_its_later_label(qapp, tmp_path, monkeypatch):
+    """Review: an empty side at the slider's chapter is added there, never a rename of a later label."""
+    glossary = _write_book(tmp_path, _two_sided_later_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    a, b = rt.tracker_key("갑"), rt.tracker_key("을")
+    try:
+        dialog.chapter_slider.setValue(3)
+        assert rt.relation_labels(rt.load_tracker(path), "갑", "을", 3) == ("", "Friend")
+
+        def fill(d):
+            assert d.fields[0].text() == ""
+            d.fields[0].setText("Classmate")  # the side unknown at chapter 3
+            d.fields[2].setValue(3)
+            return True
+
+        _answer_dialogs(monkeypatch, fill)
+        dialog.edit_relation_between(a, b)
+        saved = rt.load_tracker(path)
+        assert rt.relation_labels(saved, "갑", "을", 3) == ("Classmate", "Friend")
+        assert rt.relation_labels(saved, "갑", "을", 10) == ("Rival", "Friend")  # not renamed
+        assert not (saved.get("edits") or {}).get("corrections")  # nothing remembered as a correction
+    finally:
+        _close(qapp, dialog)
+
+
+def test_panel_of_a_name_that_is_not_drawn_follows_edits(qapp, tmp_path, isolated):
+    """Review: a name selected from the panel but not drawn (unlisted) still gets its panel redrawn."""
+    calls, answer = isolated
+    answer["value"] = True
+    tracker = rt.empty_tracker()
+    rt.record_relations(tracker, [{"raw_name": "갑", "relations": "을: Friend"},
+                                  {"raw_name": "을", "relations": "병: Rival"}, {"raw_name": "병"}],
+                        field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    glossary = _write_book(tmp_path, tracker)
+    glossary.write_text("type,raw_name,translated_name\ncharacter,갑,Gap\n", encoding="utf-8")  # 을, 병 unlisted
+    dialog = _open_book(qapp, glossary)
+    a, b = rt.tracker_key("갑"), rt.tracker_key("을")
+    try:
+        assert b not in dialog._node_items and b in dialog._node_info
+        dialog.select(b)
+        assert dialog._selected == b and "Friend" in dialog.history_panel.toPlainText()
+        dialog.delete_relation_between(b, a)
+        assert a not in (rt.load_tracker(rt.tracker_path_for_glossary(str(glossary)))["entries"][b].get("relations") or {})
+        assert dialog._selected == b and "Friend" not in dialog.history_panel.toPlainText()
+    finally:
+        _close(qapp, dialog)
+
+
+def test_clearing_one_chapters_gender_asks_first_and_gender_only_names_can_be_removed(qapp, tmp_path, monkeypatch,
+                                                                                       isolated):
+    calls, answer = isolated
+    glossary = _write_book(tmp_path, _chapters_tracker(), extra_names=("외톨이",))
+    rt.set_gender(str(glossary), "민", "female", 5)
+    rt.set_gender(str(glossary), "외톨이", "female", 2)
+    gender_path = rt.gender_tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    leader, loner = rt.tracker_key("민"), rt.tracker_key("외톨이")
+    try:
+        def clear_chapter(d):
+            d.fields[0].setCurrentIndex(d.fields[0].findData("auto"))
+            d.fields[1].setCurrentIndex(d.fields[1].findData("chapter"))
+            return True
+
+        _answer_dialogs(monkeypatch, clear_chapter)
+        answer["value"] = False
+        assert dialog.set_gender_for(leader) is None
+        assert calls and "Delete the gender recorded for" in calls[-1]
+        assert rt.gender_history(rt.read_gender_tracker(gender_path), "민")["timeline"]
+        answer["value"] = True
+        dialog.set_gender_for(leader)
+        assert not rt.gender_history(rt.read_gender_tracker(gender_path), "민")["timeline"]
+        # A name only the gender tracker knows: Remove from tracker takes it off the diagram for good.
+        assert loner in dialog._node_items
+        dialog.remove_character_for(loner)
+        assert loner not in dialog._node_items
+        assert loner in rt.load_tracker(rt.tracker_path_for_glossary(str(glossary)))["edits"]["removed"]
+    finally:
+        _close(qapp, dialog)
+
+
+def test_auto_update_skips_a_glossary_mid_save(qapp, tmp_path):
+    """Review: the Glossary Editor rewrites the CSV in place; an empty file is not shown as no names."""
+    glossary = _write_book(tmp_path, _team_tracker())
+    dialog = _open_book(qapp, glossary)
+    try:
+        entries = dialog.glossary_entries
+        good = glossary.read_bytes()
+        glossary.write_bytes(b"")  # truncated, mid-save
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert dialog.glossary_entries is entries and dialog.node_count() == 10
+        assert dialog._poll() is True  # tried again at the next check
+        _wait_idle(qapp, dialog)
+        glossary.write_bytes(good)
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert dialog._poll() is False and dialog.node_count() == 10
+    finally:
+        _close(qapp, dialog)
+
+
 def test_tracker_window_still_appears_at_once(qapp, tmp_path):
     """Nothing new runs before the window is shown: constructor + show stay around 0.1 s."""
     import time

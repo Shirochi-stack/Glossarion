@@ -1179,8 +1179,7 @@ def _corrected(edits: Optional[Mapping[str, Any]], key: str, tkey: str, label: s
 
 def _label_ignored(edits: Optional[Mapping[str, Any]], key: str, tkey: str, label: Any,
                    chapter_num: Any, chapter_file: Any) -> bool:
-    wanted = _label_key(label)
-    return any(_on_edge(r, key, tkey) and _label_key(r.get("label")) == wanted
+    return any(_on_edge(r, key, tkey) and labels_equivalent(r.get("label"), label)
                and _record_matches_chapter(r, chapter_num, chapter_file)
                for r in _records(edits, "ignored"))
 
@@ -1397,10 +1396,9 @@ def _lift_label_ignores(edits: Optional[Dict[str, Any]], key: str, tkey: str, la
                         chapter_num: Any = None, chapter_file: Any = "", every_chapter: bool = True) -> None:
     if not edits or "ignored" not in edits:
         return
-    wanted = _label_key(label)
     edits["ignored"] = [
         r for r in _records(edits, "ignored")
-        if not (_on_edge(r, key, tkey) and _label_key(r.get("label")) == wanted
+        if not (_on_edge(r, key, tkey) and labels_equivalent(r.get("label"), label)
                 and (every_chapter or _record_matches_chapter(r, chapter_num, chapter_file)))]
 
 
@@ -1703,8 +1701,11 @@ def remove_character(tracker: Dict[str, Any], raw_name: Any) -> Dict[str, Any]:
             relations.pop(key, None)
             result["relations"] += 1
             found = True
-    if not found:
+    edits = _edits(tracker)
+    if not found and _is_removed(edits, key):
         return result
+    # A name with no entry (one only the gender tracker knows) is still remembered as removed:
+    # it is no longer drawn and later extractions do not add it.
     edits = _edits(tracker, create=True)
     if key not in _records(edits, "removed"):
         _edit_list(edits, "removed").append(key)
@@ -2125,6 +2126,22 @@ def chapter_bounds(tracker: Optional[Mapping[str, Any]]) -> Tuple[Any, Any]:
     if not numbers:
         return (None, None)
     return (_display_num(min(numbers)), _display_num(max(numbers)))
+
+
+def diagram_chapter_bounds(tracker: Optional[Mapping[str, Any]],
+                           gender_tracker: Optional[Mapping[str, Any]] = None) -> Tuple[Optional[int], Optional[int]]:
+    """The diagram slider's whole-chapter range: the relations tracker's chapters and the gender
+    tracker's (desktop and mobile use the same range)."""
+    numbers = [_num(n) for n in chapter_bounds(tracker)]
+    entries = gender_tracker.get("entries") if isinstance(gender_tracker, Mapping) else None
+    for item in (entries.values() if isinstance(entries, Mapping) else ()):
+        for occurrence in (item.get("occurrences") or []) if isinstance(item, Mapping) else []:
+            if isinstance(occurrence, Mapping):
+                numbers.append(_num(occurrence.get("chapter_num")))
+    numbers = [n for n in numbers if n is not None]
+    if not numbers:
+        return None, None
+    return int(math.floor(min(numbers))), int(math.ceil(max(numbers)))
 
 
 # ---------------------------------------------------------------------------

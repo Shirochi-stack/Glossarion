@@ -1279,6 +1279,56 @@ def test_delete_relation_and_remove_character_are_remembered():
     assert "older sibling" in tracker["entries"] and "removed" not in tracker.get("edits", {})
 
 
+def test_removing_a_name_only_the_gender_tracker_knows_is_remembered():
+    tracker = rt.empty_tracker()
+    gender = {"entries": {"older sibling": {"raw_name": "Older Sibling",
+                                            "occurrences": [{"gender": "female", "chapter_num": 2}]}}}
+
+    def drawn():
+        graph = rt.build_graph(tracker, gender_tracker=gender, include_gender_only=True, show_unlisted=True)
+        return {n["id"] for n in graph["nodes"]}
+
+    assert "older sibling" in drawn()
+    result = rt.remove_character(tracker, "Older Sibling")
+    assert result["changed"] and tracker["edits"]["removed"] == ["older sibling"]
+    assert rt.remove_character(tracker, "Older Sibling")["changed"] is False  # already removed
+    assert "older sibling" not in drawn()
+
+
+def test_a_cleared_side_stays_cleared_for_a_slightly_different_wording():
+    tracker = rt.empty_tracker()
+    _record(tracker, 1, [_entry("서윤", "Seo-yun", "하린: Club Member"), _entry("하린", "Ha-rin", "")])
+    rt.set_relation_label(tracker, "서윤", "하린", "")
+    _record(tracker, 2, [_entry("서윤", "Seo-yun", "하린: Club Members"), _entry("하린", "Ha-rin", "")])
+    assert _labels(tracker, "서윤", "하린") == ("", "")
+    # a qualifier names another relation: not caught by the ignore
+    _record(tracker, 3, [_entry("서윤", "Seo-yun", "하린: Ex-Club Member"), _entry("하린", "Ha-rin", "")])
+    assert _labels(tracker, "서윤", "하린")[0] == "Ex-Club Member"
+
+
+def test_side_unknown_at_a_chapter_is_added_there_not_renamed_later():
+    tracker = rt.empty_tracker()
+    _record(tracker, 1, [_entry("갑", "", "을: Friend"), _entry("을", "", "")])
+    _record(tracker, 10, [_entry("을", "", "갑: Rival"), _entry("갑", "", "")])
+    assert rt.relation_labels(tracker, "을", "갑", 3) == ("", "Friend")
+    rt.edit_relation(tracker, "을", "갑", "Classmate", None, old_ab="", chapter=3)
+    assert rt.relation_labels(tracker, "을", "갑", 3) == ("Classmate", "Friend")
+    assert rt.relation_labels(tracker, "을", "갑", 10) == ("Rival", "Friend")
+    assert not (tracker.get("edits") or {}).get("corrections")
+
+
+def test_diagram_chapter_bounds_cover_both_trackers():
+    tracker = rt.empty_tracker()
+    _record(tracker, 3, [_entry("갑", "", "을: Friend"), _entry("을", "", "")])
+    _record(tracker, 5, [_entry("갑", "", "을: Friend"), _entry("을", "", "")])
+    gender = {"entries": {"병": {"occurrences": [{"gender": "female", "chapter_num": 1},
+                                                {"gender": "male", "chapter_num": 8}]}}}
+    assert rt.diagram_chapter_bounds(tracker) == (3, 5)
+    assert rt.diagram_chapter_bounds(tracker, gender) == (1, 8)
+    assert rt.diagram_chapter_bounds(rt.empty_tracker(), gender) == (1, 8)
+    assert rt.diagram_chapter_bounds(rt.empty_tracker(), None) == (None, None)
+
+
 def test_delete_history_entry_drops_one_run_for_its_chapters_only():
     tracker = _story_tracker()
     result = rt.delete_history_entry(tracker, "서윤", "하린", "Rival", 20, 21)
