@@ -209,6 +209,14 @@ class ConfigStateMixin:
         except Exception:
             self.manual_glossary_map = {}
 
+        # A fresh config (no config.json at all, or one Reset Settings to Defaults wrote) starts with the
+        # Relations Tracker toggles on; an existing config (or a restored / set-aside one) is never touched.
+        import relations_tracking
+        if (not self.config and not getattr(self, '_config_recovery_notice', None)
+                and not os.path.exists(self.config_file_path)):
+            self.config[relations_tracking.FRESH_DEFAULTS_KEY] = list(relations_tracking.FRESH_DEFAULT_KEYS)
+        relations_tracking.apply_fresh_defaults(self.config)
+
         # Ensure default values exist
         if 'auto_update_check' not in self.config:
             self.config['auto_update_check'] = True

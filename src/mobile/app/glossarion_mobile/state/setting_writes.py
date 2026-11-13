@@ -71,6 +71,13 @@ __all__ = [
     "PROFILE_KEY",
     "RELATIONS_FIELD_KEY",
     "RELATIONS_TRACKER_KEY",
+    "MINIMAL_RELATIONS_KEY",
+    "RELATIONS_FRESH_KEY",
+    "RELATIONS_FRESH_DEFAULT_KEYS",
+    "apply_relations_fresh_defaults",
+    "is_sigma_q8_model",
+    "relations_default_for_model",
+    "relations_fresh_defaults_writes",
     "RULE_KEYS",
     "effective_custom_fields",
     "relations_field_name",
@@ -155,6 +162,12 @@ RELATIONS_TRACKER_KEY = "glossary_enable_relations_tracker"
 #: the relations column's name (renamed on the locked row of the Custom Fields editor)
 RELATIONS_FIELD_KEY = "glossary_relations_field_name"
 RELATIONS_DEFAULT_FIELD = "relations"
+#: Minimal Generation "Include Relations Column" (``relations_tracking.CONFIG_MINIMAL``)
+MINIMAL_RELATIONS_KEY = "glossary_minimal_include_relations"
+#: A fresh config's mark (``relations_tracking.FRESH_DEFAULTS_KEY``): the Relations Tracker toggles it lists
+#: follow the selected model (``relations_default_for_model``) until the user sets them
+RELATIONS_FRESH_KEY = "glossary_relations_fresh_defaults"
+RELATIONS_FRESH_DEFAULT_KEYS = (RELATIONS_TRACKER_KEY, MINIMAL_RELATIONS_KEY)
 #: names the relations column can never take (``relations_tracking.RESERVED_FIELD_NAMES``; literals as above)
 RELATIONS_RESERVED_FIELDS = ("type", "raw_name", "translated_name", "gender", "description")
 #: the temperature an on-device model sets (owner 2026-10-21: 0.4; was Qwen's 0.7 until 2026-10-20). Only
@@ -863,6 +876,8 @@ def _write_model(store: Any, value: Any) -> list:
             changed += (_set_many(store, {"batch_size": batch_record[1]}) if batch_record[0]
                         else _unset(store, "batch_size"))
         changed += _unset(store, LOCAL_BATCH_BEFORE_KEY)
+    # a fresh config's Relations Tracker toggles the user has not set follow the model
+    changed += _set_many(store, relations_fresh_defaults_writes(store))
     return changed
 
 
@@ -911,6 +926,88 @@ def relations_tracker_writes(source: Any, on: Any) -> dict:
     return values
 
 
+def is_sigma_q8_model(model: Any) -> bool:
+    """The on-device Sigma Korean-to-English model in its Q8_0 quant (``presets.uses_normal_settings``: the
+    registry entry's repository and file, whatever its stem); False without the engine service."""
+    if not _is_local_model(model):
+        return False
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+        service = default_service()
+        return bool(service and service.uses_normal_settings(str(model).strip()))
+    except Exception:
+        log.debug("sigma check failed", exc_info=True)
+        return False
+
+
+def relations_default_for_model(model: Any) -> bool:
+    """A fresh config's Relations Tracker toggles with ``model`` selected (owner 2026-11-13): off for Sigma Q8,
+    on for every other model (no saved model: ``MOBILE_DEFAULT_MODEL``)."""
+    return not is_sigma_q8_model(model or MOBILE_DEFAULT_MODEL)
+
+
+def relations_fresh_defaults_writes(store: Any) -> dict:
+    """What a fresh config's toggles need now: each key ``RELATIONS_FRESH_KEY`` still lists (the user has not
+    set it) takes the selected model's default; turning the tracker on / off adds / removes its column
+    (``relations_tracking.apply_relations_field``, the name kept: the column is the seeded one). ``{}``
+    for an existing config (no ``RELATIONS_FRESH_KEY``) and when everything already matches."""
+    present, following = _stored_value(store, RELATIONS_FRESH_KEY)
+    if not present or not isinstance(following, (list, tuple)):
+        return {}
+    _present, model = _stored_value(store, "model")
+    on = relations_default_for_model(model)
+    values: dict = {}
+    for key in RELATIONS_FRESH_DEFAULT_KEYS:
+        if key not in following:
+            continue
+        present, current = _stored_value(store, key)
+        if not present or bool(current) != on:
+            values[key] = on
+    if RELATIONS_TRACKER_KEY in values:
+        try:
+            core = importlib.import_module("relations_tracking")
+        except Exception:
+            log.debug("relations_tracking unavailable; writing the toggles alone", exc_info=True)
+            return values
+        fields = effective_custom_fields(store)
+        updated = list(core.apply_relations_field(fields, on, relations_field_name(store)))
+        if updated != fields or (on and not _stored_value(store, CUSTOM_FIELDS_KEY)[0]):
+            values[CUSTOM_FIELDS_KEY] = updated
+    return values
+
+
+def _relations_set_by_user(store: Any, key: str) -> list:
+    """The user set ``key`` (a Relations Tracker toggle): it stops following the model."""
+    present, following = _stored_value(store, RELATIONS_FRESH_KEY)
+    if not present or not isinstance(following, (list, tuple)) or key not in following:
+        return []
+    rest = [item for item in following if item != key]
+    return _set_many(store, {RELATIONS_FRESH_KEY: rest}) if rest else _unset(store, RELATIONS_FRESH_KEY)
+
+
+def apply_relations_fresh_defaults(store: Any, fresh: bool = False) -> list:
+    """At load: a fresh config (``fresh``: no config.json) is marked ``RELATIONS_FRESH_KEY``, then the marked
+    toggles take the selected model's default. A fresh config gets them as loaded values (``store.seed``:
+    nothing is written until the first real save); a config that already carried the mark (Reset Settings
+    to Defaults) gets ordinary writes. Returns the keys set."""
+    if store is None:
+        return []
+    seed = getattr(store, "seed", None)
+    if fresh and not _stored_value(store, RELATIONS_FRESH_KEY)[0]:
+        marker = {RELATIONS_FRESH_KEY: list(RELATIONS_FRESH_DEFAULT_KEYS)}
+        if callable(seed):
+            seed(marker)
+        else:
+            _set_many(store, marker)
+    values = relations_fresh_defaults_writes(store)
+    if not values:
+        return []
+    if fresh and callable(seed):
+        seed(values)
+        return list(values)
+    return _set_many(store, values)
+
+
 def write_setting(store: Any, key: Any, value: Any) -> list:
     """Store one global setting the way its desktop control does; returns the changed keys."""
     if store is None:
@@ -929,8 +1026,12 @@ def write_setting(store: Any, key: Any, value: Any) -> list:
         return _write_model(store, value)
     if key == EXTRACTION_KEY:
         return _write_extraction_method(store, value)
-    if key == RELATIONS_TRACKER_KEY:
-        return _set_many(store, relations_tracker_writes(store, value))
+    if key in RELATIONS_FRESH_DEFAULT_KEYS:
+        # set by the user: from now on the toggle keeps this value whatever the model
+        changed = _relations_set_by_user(store, key)
+        if key == RELATIONS_TRACKER_KEY:
+            return changed + _set_many(store, relations_tracker_writes(store, value))
+        return changed + _set_many(store, {key: value})
     snapshot = getattr(store, "snapshot", None)
     if key not in RULE_KEYS or not callable(snapshot):
         return _set_many(store, {key: value})

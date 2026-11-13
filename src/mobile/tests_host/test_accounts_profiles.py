@@ -1859,7 +1859,11 @@ def test_reset_settings_and_wipe(tmp_path, test_key):
     assert kept == {"api_key": "sk-keep-me-0000000", "model": "m", "prompt_profiles": {"A": "a"},
                     "qa_scanner_settings": {"excluded_characters": "x"}}
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert set(raw) == set(kept) and raw["api_key"].startswith("ENC:") and "temperature" not in raw
+    # plus the fresh-config mark and the Relations Tracker toggles it seeds (setting_writes)
+    fresh = {"glossary_relations_fresh_defaults", "glossary_enable_relations_tracker",
+             "glossary_minimal_include_relations", "custom_glossary_fields"}
+    assert set(raw) == set(kept) | fresh and raw["api_key"].startswith("ENC:") and "temperature" not in raw
+    assert raw["glossary_enable_relations_tracker"] is True and "relations" in raw["custom_glossary_fields"]
     assert list((path.parent / "config_backups").glob("config_*.json.bak"))
     store.close()
 

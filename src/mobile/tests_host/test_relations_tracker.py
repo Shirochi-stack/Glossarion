@@ -667,3 +667,186 @@ def test_diagram_without_a_tracker_is_an_empty_state_and_opens_as_an_overlay(iso
         store._saver.close()
 
     asyncio.run(scenario())
+
+
+# ==========================================================================
+# Fresh configs: both toggles on, except while Sigma Q8 is selected (owner 2026-11-13)
+# ==========================================================================
+
+MINIMAL_TOGGLE = "glossary_minimal_include_relations"
+FRESH = "glossary_relations_fresh_defaults"
+SIGMA = "local/sigma-q8"
+QWEN = "local/garbage"
+
+
+@pytest.fixture
+def engine_service(tmp_path, monkeypatch):
+    """The app's on-device engine service with Sigma Q8, Sigma Q4 and a Qwen model downloaded."""
+    from local_llm_fakes import FakePrefs
+    from glossarion_mobile.services.local_llm import downloads as dl, engine, presets, service as svc
+
+    registry = dl.Registry(str(tmp_path / "models"))
+    for stem, repo, file in (("sigma-q8", presets.SIGMA_REPO, presets.SIGMA_Q8_FILE),
+                             ("sigma-q4", presets.SIGMA_REPO, "gguf/sft3-Q4_K_M.gguf"),
+                             ("garbage", "unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-UD-Q4_K_XL.gguf")):
+        registry.add(stem, {"repo": repo, "file": file, "size": 100})
+        Path(registry.file_path(stem)).write_bytes(b"GGUF")
+    service = svc.LocalEngineService(prefs=FakePrefs(), registry=registry, watch=False,
+                                     engine_factory=engine.FakeEngine, platform="android",
+                                     memory=lambda: (24 * 1024**3, 20 * 1024**3))
+    monkeypatch.setattr(svc, "_DEFAULT", service)
+    return service
+
+
+def _plain_store(path: Path):
+    from glossarion_mobile.state.config_store import MobileConfigStore
+
+    store = MobileConfigStore(path, debounce=10,
+                              reader=lambda p, decrypt=True: json.loads(Path(p).read_text(encoding="utf-8")),
+                              writer=lambda disk, p, backup=False: Path(p).write_text(json.dumps(disk),
+                                                                                        encoding="utf-8"))
+    store.load()
+    return store
+
+
+def _toggles(store) -> tuple:
+    return store.get(TOGGLE), store.get(MINIMAL_TOGGLE)
+
+
+def test_sigma_q8_is_recognised_by_its_file(engine_service):
+    from glossarion_mobile.state import setting_writes as sw
+
+    assert sw.is_sigma_q8_model(SIGMA)
+    assert not sw.is_sigma_q8_model("local/sigma-q4") and not sw.is_sigma_q8_model(QWEN)
+    assert not sw.is_sigma_q8_model("authchatgpt/auto") and not sw.is_sigma_q8_model(None)
+    assert sw.relations_default_for_model(None) is True and sw.relations_default_for_model(SIGMA) is False
+
+
+def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_service, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    store = _plain_store(path)
+    assert not store.exists
+    sw.apply_relations_fresh_defaults(store, fresh=True)
+    # no model saved (the default is a cloud model): both on, the relations column in Custom Fields
+    assert _toggles(store) == (True, True)
+    assert store.get(FIELDS) == ["description", "relations"]
+    assert store.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    assert not store.flush() and not path.exists()  # seeded like loaded values: nothing written by itself
+    # the job gets the same values
+    snapshot = sw.with_mobile_streaming_defaults(store.snapshot())
+    assert snapshot[TOGGLE] is True and snapshot[MINIMAL_TOGGLE] is True and "relations" in snapshot[FIELDS]
+
+    # the on-device Sigma Q8 model chosen first (e.g. on the Welcome): both off, the column removed
+    sw.write_setting(store, "model", SIGMA)
+    assert _toggles(store) == (False, False) and "relations" not in (store.get(FIELDS) or [])
+    # another model: on again by themselves
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
+    sw.write_setting(store, "model", QWEN)  # any other model, on-device too
+    assert _toggles(store) == (True, True)
+    sw.write_setting(store, "model", SIGMA)
+    assert _toggles(store) == (False, False)
+
+    # the user turns the tracker on by hand on Sigma: it stays on; the Minimal toggle still follows
+    sw.write_setting(store, TOGGLE, True)
+    assert store.get(FRESH) == [MINIMAL_TOGGLE]
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    assert _toggles(store) == (True, True)
+    # ... and off by hand: it stays off whatever the model
+    sw.write_setting(store, TOGGLE, False)
+    for model in (SIGMA, "authchatgpt/auto", QWEN, SIGMA, "authchatgpt/auto"):
+        sw.write_setting(store, "model", model)
+        assert store.get(TOGGLE) is False
+        assert store.get(MINIMAL_TOGGLE) is (model != SIGMA)
+    # Minimal set by hand too: nothing follows the model any more
+    sw.write_setting(store, MINIMAL_TOGGLE, False)
+    assert not store.has(FRESH)
+    sw.write_setting(store, "model", QWEN)
+    assert _toggles(store) == (False, False)
+    store.flush()
+    assert json.loads(path.read_text(encoding="utf-8"))[TOGGLE] is False
+    store._saver.close()
+
+
+def test_existing_config_without_the_keys_stays_off_on_every_model(engine_service, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    original = json.dumps({"model": "authchatgpt/auto", "temperature": 0.5})
+    path.write_text(original, encoding="utf-8")
+    store = _plain_store(path)
+    assert sw.apply_relations_fresh_defaults(store, fresh=False) == []
+    assert not store.has(TOGGLE) and not store.has(MINIMAL_TOGGLE) and not store.has(FRESH)
+    assert not store.flush() and path.read_text(encoding="utf-8") == original  # byte-identical
+    for model in (SIGMA, QWEN, "authchatgpt/auto"):
+        sw.write_setting(store, "model", model)
+        assert not store.get(TOGGLE) and not store.get(MINIMAL_TOGGLE) and not store.has(FRESH)
+    store._saver.close()
+
+
+def test_settings_load_marks_only_a_missing_config_fresh(engine_service, tmp_path):
+    from glossarion_mobile.ui.settings.integration import SettingsFeature
+
+    fresh = _plain_store(tmp_path / "fresh" / "config.json")
+    asyncio.run(SettingsFeature(page=None, store=fresh).load())
+    assert _toggles(fresh) == (True, True) and fresh.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    old_path = tmp_path / "old" / "config.json"
+    old_path.parent.mkdir()
+    old_path.write_text(json.dumps({"model": "m"}), encoding="utf-8")
+    old = _plain_store(old_path)
+    asyncio.run(SettingsFeature(page=None, store=old).load())
+    assert old.snapshot() == {"model": "m"}
+    fresh._saver.close()
+    old._saver.close()
+
+
+def test_reset_settings_starts_a_fresh_config(engine_service, tmp_path):
+    from glossarion_mobile.ui.screens.danger_zone import reset_settings
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": SIGMA, "temperature": 0.9, TOGGLE: True}), encoding="utf-8")
+    store = _plain_store(path)
+    store.backup_now = lambda: None
+    kept = reset_settings(store)
+    assert kept == {"model": SIGMA}
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved[FRESH] == [TOGGLE, MINIMAL_TOGGLE] and saved[TOGGLE] is False and saved[MINIMAL_TOGGLE] is False
+    store._saver.close()
+
+
+def test_fresh_config_shows_the_toggles_on_and_asks_no_prompt_question(engine_service, iso, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+    from glossarion_mobile.ui.glossary.relations import RelationsPanel, missing_prompts
+
+    schema = _schema()
+    from glossarion_mobile.state.config_store import MobileConfigStore
+
+    store = MobileConfigStore(tmp_path / "config.json", debounce=10, defaults=schema.effective_default,
+                              reader=lambda p, decrypt=True: json.loads(Path(p).read_text(encoding="utf-8")),
+                              writer=lambda disk, p, backup=False: Path(p).write_text(json.dumps(disk),
+                                                                                        encoding="utf-8"))
+    store.load()
+    sw.apply_relations_fresh_defaults(store, fresh=True)
+    assert store.effective(TOGGLE) is True and store.effective(MINIMAL_TOGGLE) is True
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        panel = RelationsPanel(ctx)
+        panel.attach()
+        assert panel.enabled and missing_prompts(ctx) == []  # the built-in prompts hold the line
+        assert await panel.check_prompts() == [] and not ctx.extras.get("asked")
+        # Sigma, then another model: the tracker turns on by itself, and still no question
+        sw.write_setting(store, "model", SIGMA)
+        await _settle()
+        sw.write_setting(store, "model", "authchatgpt/auto")
+        await _settle()
+        if panel.check_task is not None:
+            await panel.check_task
+        assert store.get(TOGGLE) is True and not ctx.extras.get("asked") and panel.warning.visible is False
+        panel.detach()
+        store._saver.close()
+
+    asyncio.run(scenario())

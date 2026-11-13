@@ -1863,7 +1863,13 @@ def test_settings_feature_wires_screens_lifecycle_and_job_banner(app_env, monkey
             feature.store.set("batch_size", 42)
             assert feature.store.dirty and not config_path.exists()
             await session.dispatch_event(page._i, "app_lifecycle_state_change", {"state": "hide"})
-            assert json.loads(config_path.read_text(encoding="utf-8")) == {"batch_size": 42}
+            # a fresh install also saves its seeded Relations Tracker toggles (on: the default model is
+            # not Sigma Q8; setting_writes.apply_relations_fresh_defaults)
+            assert json.loads(config_path.read_text(encoding="utf-8")) == {
+                "batch_size": 42, "glossary_enable_relations_tracker": True,
+                "glossary_minimal_include_relations": True, "custom_glossary_fields": ["description", "relations"],
+                "glossary_relations_fresh_defaults": ["glossary_enable_relations_tracker",
+                                                      "glossary_minimal_include_relations"]}
             assert app.lifecycle and app.lifecycle[-1].endswith("hide")  # the app's own handler still ran
 
             # JobStrip -> "Changes apply to the next run"; the model key -> chat header context
