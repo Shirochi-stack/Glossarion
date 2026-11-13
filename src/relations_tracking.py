@@ -3184,6 +3184,8 @@ _REFINED_LAYOUT_BUDGET = 300_000
 _REFINED_LAYOUT_MAX_TRIES = 8  # measured: as tidy as 16 on a real book's shape, in half the time
 #: Past this many lines no move untangles much, and trying costs seconds.
 _UNTANGLE_MAX_EDGES = 60
+#: How many of the tried layouts (the tidiest ones) get the untangling pass.
+_UNTANGLE_TRIES = 2
 
 
 def _force_positions(ids: List[str], edge_list: List[Tuple[str, str]], width: float, height: float,
@@ -3422,18 +3424,25 @@ def _refined_layout(ids: List[str], edge_list: List[Tuple[str, str]], width: flo
     pairs = max(1, n * (n - 1) // 2)
     tries = max(1, min(_REFINED_LAYOUT_MAX_TRIES,
                        _REFINED_LAYOUT_BUDGET // (_REFINED_LAYOUT_ITERATIONS * pairs)))
-    best: Optional[Dict[str, List[float]]] = None
-    best_score = 0.0
+    # The force passes are cheap (8 of them on 15 names: 0.05 s); untangling is not (0.15 s
+    # each), so only the most promising few are untangled. Untangling all of them made a
+    # 15-name diagram take 1.3 s to open.
+    scored = []
     for attempt in range(tries):
         rng = random.Random(int(seed) * 1_000_003 + attempt)
         positions = _force_positions(ids, edge_list, width, height, rng, _REFINED_LAYOUT_ITERATIONS)
+        score = layout_untidiness(positions, edge_list)
+        scored.append((score, attempt, positions))
+        if score == 0.0:
+            return positions
+    scored.sort(key=lambda item: (item[0], item[1]))
+    best_score, _attempt, best = scored[0]
+    for score, _attempt, positions in scored[:_UNTANGLE_TRIES]:
         _untangle(positions, edge_list)
         score = layout_untidiness(positions, edge_list)
-        if best is None or score < best_score:
+        if score < best_score:
             best, best_score = positions, score
-            if score == 0.0:
-                break
-    return best or {}
+    return best
 
 
 def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, height: float = 700.0,
