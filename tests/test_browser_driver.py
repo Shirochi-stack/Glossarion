@@ -581,8 +581,8 @@ def test_gemini_attachments_and_model_run_on_driver_pages(mobile, no_spawn):
     assert base64.b64decode(staged[0]["b64"]).decode("utf-8") == chapter
     assert base64.b64decode(staged[1]["b64"]) == picture
     assert site.attached == ["chapter.html", "image001.png"]
-    # the chapter is not in the prompt box: only the instructions and what to do with the file
-    assert site.prompt.startswith("Translate to English.\n\n") and "chapter.html" in site.prompt
+    # the chapter is not in the prompt box: only the system prompt, with nothing added to it
+    assert site.prompt == "Translate to English."
     assert "안녕" not in site.prompt and "System instructions" not in site.prompt
     assert [item["name"] for item in result["raw_response"]["attachments"]] == ["chapter.html", "image001.png"]
 

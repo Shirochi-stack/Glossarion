@@ -672,12 +672,6 @@ def test_instruction_text_is_one_block():
     assert rt.render_relations(rt.relations_at(tracker, "서윤", 1)) == "Do-hyun: Older Brother"
 
 
-def test_legend_line_uses_the_field_name():
-    assert rt.legend_line() == ('- relations: "Name: role" means that named character is this entry\'s <role>; '
-                                '[formerly ...] is their earlier role.')
-    assert rt.legend_line("bonds").startswith('- bonds: "Name: role"')
-
-
 # --------------------------------------------------------------------------- reciprocal flips
 
 def _flip_tracker(order):
@@ -870,3 +864,12 @@ def test_edge_label_text_both_directions():
     assert rt.edge_label_text(edge) == "Enemy / Father"
     assert rt.edge_label_text(edge, True) == "Enemy [Best Friend] / Father"
     assert rt.edge_label_text({"label_ab": "", "label_ba": "Rival"}) == "? / Rival"
+
+
+def test_reset_question_is_one_question_for_one_or_both_prompts():
+    one = rt.reset_question(["Minimal"])
+    assert one == ("The Minimal prompt has no {relations_instruction} line, so the AI will not return relations."
+                   "\n\nReset the Minimal prompt to default?")
+    both = rt.reset_question(["Balanced/Full", "Minimal"])
+    assert both == ("The Balanced/Full and Minimal prompts have no {relations_instruction} line, so the AI will "
+                    "not return relations.\n\nReset both prompts to default?")

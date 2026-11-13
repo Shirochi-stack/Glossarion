@@ -291,19 +291,34 @@ def test_accepting_the_reset_restores_the_default_prompt(iso, tmp_path):
     async def scenario():
         conn, session = _TB._fake_session("android")
         ctx = _ctx(session.page, store, schema)
-        ctx.extras["answers"] = [True, False]
+        ctx.extras["answers"] = [False, True]
         tab = _general_tab(ctx)
         _mount(session.page, tab.build())
         tab.did_show()
         tab.page.tiles[TOGGLE].apply(True)
         await _settle()
         await tab.relations.check_task
-        assert [title for _k, title, _b in ctx.extras["asked"]] == ["Relations Tracker", "Relations Tracker"]
-        assert "{relations_instruction}" in store.get(BALANCED)
-        assert store.get(BALANCED) == schema.effective_default(BALANCED)
-        assert store.get(MINIMAL) == "Custom minimal"
-        assert tab.relations.missing == ["minimal"]
-        assert "Minimal prompt is missing" in tab.relations.notice_text.value
+        # both prompts lack the line: ONE question that names both
+        asked = ctx.extras["asked"]
+        assert [title for _k, title, _b in asked] == ["Relations Tracker"]
+        assert "The Balanced/Full and Minimal prompts have no {relations_instruction} line" in asked[0][2]
+        assert asked[0][2].endswith("Reset both prompts to default?")
+        # declined: both kept, both named in the notice
+        assert store.get(BALANCED) == "Custom balanced" and store.get(MINIMAL) == "Custom minimal"
+        assert tab.relations.missing == ["balanced_full", "minimal"]
+        assert "Balanced/Full and Minimal prompts are missing" in tab.relations.notice_text.value
+        # off and on again, accepted: the one answer resets both
+        tab.page.tiles[TOGGLE].apply(False)
+        await _settle()
+        tab.page.tiles[TOGGLE].apply(True)
+        await _settle()
+        await tab.relations.check_task
+        assert len(ctx.extras["asked"]) == 2
+        # allow_import: the built-in text is a lazy default (None until its module is imported)
+        assert store.get(BALANCED) == schema.effective_default(BALANCED, allow_import=True)
+        assert store.get(MINIMAL) == schema.effective_default(MINIMAL, allow_import=True)
+        assert "{relations_instruction}" in store.get(BALANCED) and "{relations_instruction}" in store.get(MINIMAL)
+        assert tab.relations.missing == [] and tab.relations.warning.visible is False
         tab.dispose()
         store._saver.close()
 

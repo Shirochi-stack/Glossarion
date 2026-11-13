@@ -76,7 +76,7 @@ needs_openai = pytest.mark.skipif(bool(_missing("openai")), reason="openai not i
 EXTRACTION_SYSTEM = (
     "You are a novel glossary extraction assistant.\n\nYou must strictly return ONLY CSV format with columns "
     "separated by commas.\nColumns and entry types in this exact order provided:\n\nColumns:\n"
-    "type, raw_name, translated_name, gender, description\\nEntry Types:\ncharacter, term"
+    "type, raw_name, translated_name, gender, description\nEntry Types:\ncharacter, term"
 )
 TRANSLATION_SYSTEM = (
     "You are a professional novel translator. You MUST translate the following text to English.\n"

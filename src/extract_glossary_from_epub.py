@@ -5618,7 +5618,7 @@ def build_prompt(chapter_text: str) -> tuple:
             fields1_spec.append(f"Columns (separated by Unit Separator character \\x1F):\n{_sep_joined}")
             if type_names:
                 fields1_spec.append(f"Entry Types:\n{', '.join(type_names)}")
-            fields1_str = '\\n'.join(fields1_spec)
+            fields1_str = '\n'.join(fields1_spec)
             custom_prompt = custom_prompt.replace('{fields1}', fields1_str)
 
         # {fields} → comma-separated columns (legacy/backward compatible)
@@ -5629,7 +5629,7 @@ def build_prompt(chapter_text: str) -> tuple:
                 fields_spec.append(f"Columns:\n{', '.join(header_parts)}")
                 if type_names:
                     fields_spec.append(f"Entry Types:\n{', '.join(type_names)}")
-                fields_str = '\\n'.join(fields_spec)
+                fields_str = '\n'.join(fields_spec)
             else:
                 # JSON format (fallback for prompts that don't mention CSV)
                 fields_spec = []

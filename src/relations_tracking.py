@@ -1362,15 +1362,6 @@ def inject_relations_column(
     return "".join(out), stats
 
 
-_LEGEND_TEMPLATE = ('- {field}: "Name: role" means that named character is this entry\'s <role>; '
-                    '[formerly ...] is their earlier role.')
-
-
-def legend_line(field: Optional[str] = None) -> str:
-    """How to read the injected column; build_system_prompt puts it above the glossary block."""
-    return _LEGEND_TEMPLATE.replace("{field}", (field or "").strip() or field_name())
-
-
 def relations_log_line(stats: Optional[Mapping[str, Any]]) -> Optional[str]:
     if not isinstance(stats, Mapping) or not stats.get("enabled"):
         return None
@@ -1445,6 +1436,22 @@ def prompts_missing_placeholder(prompts: Optional[Mapping[str, Any]]) -> List[st
         return []
     return [key for key, text in prompts.items()
             if not isinstance(text, str) or RELATIONS_PLACEHOLDER not in text]
+
+
+def reset_question(names: Iterable[Any]) -> str:
+    """The one question asked when the tracker is turned on and prompts lack the placeholder.
+
+    ``names`` are the display names of those prompts ("Balanced/Full", "Minimal").
+    """
+    names = [str(name) for name in names or [] if str(name or "").strip()]
+    if len(names) <= 1:
+        name = names[0] if names else "glossary"
+        return (f"The {name} prompt has no {RELATIONS_PLACEHOLDER} line, so the AI will not return relations.\n\n"
+                f"Reset the {name} prompt to default?")
+    listed = " and ".join([", ".join(names[:-1]), names[-1]])
+    every = "both" if len(names) == 2 else "these"
+    return (f"The {listed} prompts have no {RELATIONS_PLACEHOLDER} line, so the AI will not return relations.\n\n"
+            f"Reset {every} prompts to default?")
 
 
 # ---------------------------------------------------------------------------

@@ -233,24 +233,25 @@ class RelationsPanel:
         return list(self.missing)
 
     async def check_prompts(self) -> list:
-        """Offer a reset to default for each prompt without the line; returns the ones still missing."""
+        """Offer, in one question, a reset to default for the prompts without the line; returns the ones
+        still missing."""
         if self._checking:
             return list(self.missing)
         self._checking = True
         self.checks += 1
         try:
-            for bucket in missing_prompts(self.ctx):
-                if _on_device_active(self.ctx, bucket):
-                    continue  # the built-in On-device profile stays as it is: the notice only
-                name = PROMPT_NAMES.get(bucket, bucket)
-                if await ask(self.ctx, title="Relations Tracker",
-                             body=f"The {name} prompt has no {{relations_instruction}} line, so the AI will not "
-                                  f"return relations.\n\nReset the {name} prompt to default?",
+            # the built-in On-device profile stays as it is: the notice only
+            buckets = [b for b in missing_prompts(self.ctx) if not _on_device_active(self.ctx, b)]
+            core = relations_core(self.ctx)
+            if buckets and core is not None:
+                names = [PROMPT_NAMES.get(bucket, bucket) for bucket in buckets]
+                if await ask(self.ctx, title="Relations Tracker", body=core.reset_question(names),
                              confirm="Reset", cancel="Keep it"):
-                    # the built-in text may need its module imported (seconds): off the UI loop
-                    key = PROMPT_KEYS[bucket]
-                    default = await self.ctx.io(lambda k=key: _default_prompt(self.ctx, k, allow_import=True))
-                    reset_prompt_to_default(self.ctx, bucket, default)
+                    for bucket in buckets:
+                        # the built-in text may need its module imported (seconds): off the UI loop
+                        key = PROMPT_KEYS[bucket]
+                        default = await self.ctx.io(lambda k=key: _default_prompt(self.ctx, k, allow_import=True))
+                        reset_prompt_to_default(self.ctx, bucket, default)
         finally:
             self._checking = False
         return self.refresh()

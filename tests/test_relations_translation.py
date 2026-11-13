@@ -106,10 +106,8 @@ def _build(tk, glossary, ref, source_text=None, settings=None):
 
 
 def _glossary_block(prompt):
-    """The glossary block after the append prompt (and after the relations legend, if any)."""
-    block = prompt.split(APPEND_PROMPT + "\n", 1)[1]
-    legend = rt.legend_line() + "\n"
-    return block[len(legend):] if block.startswith(legend) else block
+    """The glossary block after the append prompt."""
+    return prompt.split(APPEND_PROMPT + "\n", 1)[1]
 
 
 # --------------------------------------------------------------------------- toggle off
@@ -159,9 +157,9 @@ def test_uncompressed_token_glossary_gets_column(tk, env, tmp_path, capsys):
             "(relations: Do-hyeon: Older Brother; Ha-rin: Rival [formerly Best Friend])") in lines
     assert "* 하린 = Ha-rin [Female]: Apprentice healer (relations: Seo-yun: Best Friend)" in lines
     assert "* 청월검 = Azure Moon Sword: Heirloom blade" in lines
-    # The legend sits on its own line between the append prompt and the glossary block.
-    assert (APPEND_PROMPT + "\n" + rt.legend_line() + "\n" + HEADER + ", relations\n") in prompt
-    assert prompt.count(rt.legend_line()) == 1
+    # Owner, 2026-11-13: no line of ours explains the column; the glossary follows the append prompt.
+    assert (APPEND_PROMPT + "\n" + HEADER + ", relations\n") in prompt
+    assert '"Name: role"' not in prompt and "earlier role" not in prompt
     out = capsys.readouterr().out
     assert "🔗 Relations: 3 shown for 2 characters (up to Ch. 25) | changed here:" not in out
     assert "🔗 Relations: 3 shown for 2 characters (up to Ch. 25)" in out
@@ -215,21 +213,20 @@ def test_metadata_requests_and_missing_chapter_get_nothing(tk, env, tmp_path, ca
     assert "🔗" not in capsys.readouterr().out
 
 
-def test_legend_only_when_something_was_injected_and_uses_the_field_name(tk, env, tmp_path, capsys):
+def test_nothing_before_any_relation_and_the_column_uses_the_field_name(tk, env, tmp_path, capsys):
     env.setenv(rt.ENV_ENABLE, "1")
     glossary = _write_book(tmp_path)
     before_any = _build(tk, glossary, {"chapter_num": 0.5, "chapter_file": "prologue.xhtml"})
-    assert '"Name: role"' not in before_any and "relations" not in before_any
+    assert "relations" not in before_any
     bonds = _build(tk, glossary, {"chapter_num": 45}, settings={rt.ENV_ENABLE: "1", rt.ENV_FIELD: "bonds"})
-    assert (APPEND_PROMPT + "\n" + rt.legend_line("bonds") + "\n" + HEADER + ", bonds\n") in bonds
-    # JSON glossary: the legend is outside the JSON, so the block still parses.
+    assert (APPEND_PROMPT + "\n" + HEADER + ", bonds\n") in bonds
+    # JSON glossary: the block is the JSON and nothing else.
     as_json = json.dumps([{"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun"},
                           {"type": "character", "raw_name": "하린", "translated_name": "Ha-rin"}],
                          ensure_ascii=False)
     json_glossary = _write_book(tmp_path, as_json, "Json_glossary.json")
     prompt = _build(tk, json_glossary, {"chapter_num": 45})
     block = _glossary_block(prompt)
-    assert prompt.count(rt.legend_line()) == 1
     assert json.loads(block)[0]["relations"] == "Ha-rin: Enemy [formerly Rival]"
     capsys.readouterr()
 
@@ -347,3 +344,81 @@ def test_env_passthrough_lists_the_relations_settings(tk):
     source = inspect.getsource(tk)
     assert ("'GLOSSARY_ENABLE_RELATIONS_TRACKER', 'GLOSSARY_RELATIONS_HISTORY_MODE', "
             "'GLOSSARY_RELATIONS_FIELD',") in source
+
+
+# ---------------------------------------------------------------------------
+# Single Pass Glossary: the glossary block of a translation response feeds the tracker
+# ---------------------------------------------------------------------------
+
+SINGLE_PASS_BLOCK = (
+    "type,raw_name,translated_name,gender,description,relations\n"
+    "character,서윤,Seo-yun,female,Heir,하린: Best Friend; 무진: Daughter\n"
+    "character,하린,Ha-rin,female,Healer,서윤: Best Friend\n"
+    "character,무진,Mu-jin,male,Head of the house,서윤: Father\n"
+)
+
+
+def _single_pass(env, tmp_path, tracker_on=True):
+    for name in ("GLOSSARY_SHARED_DIR", "OUTPUT_DIR", "CURRENT_CHAPTER_FILE", "CURRENT_CHAPTER_NUM",
+                 "GLOSSARY_USE_LEGACY_CSV", "GLOSSARY_OUTPUT_LEGACY_JSON"):
+        env.delenv(name, raising=False)
+    env.setenv("SINGLE_PASS_GLOSSARY_MODE", "1")
+    env.setenv("EPUB_PATH", str(tmp_path / "Book.epub"))
+    env.setenv("GLOSSARY_INCLUDE_BOOK_TITLE", "0")
+    env.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps(["description", "relations"]))
+    if tracker_on:
+        env.setenv(rt.ENV_ENABLE, "1")
+    out = tmp_path / "Book"
+    out.mkdir()
+    return out
+
+
+def _relation(tracker, source, target):
+    return tracker["entries"][source.casefold()]["relations"][target.casefold()]
+
+
+def test_single_pass_response_feeds_the_tracker_and_never_the_glossary_file(tk, env, tmp_path):
+    out = _single_pass(env, tmp_path)
+    saved = tk._persist_single_pass_glossary(str(out), SINGLE_PASS_BLOCK, chapter_num=3,
+                                             source_text="서윤 하린 무진", chapter_file="ch003.xhtml")
+    assert saved == 3
+    _dir, json_path, csv_path, _progress = tk._single_pass_glossary_paths(str(out))
+    for path in (json_path, csv_path, str(out / "glossary.csv")):
+        if os.path.exists(path):
+            text = open(path, encoding="utf-8").read()
+            assert "Best Friend" not in text and "relations" not in text
+    assert os.path.exists(csv_path)
+    tracker = rt.load_tracker(rt.tracker_path_for_glossary(csv_path))
+    # the model writes what the row's own character is; the tracker stores who the other one is
+    father = _relation(tracker, "서윤", "무진")["occurrences"]
+    assert [(o["label"], o["chapter_num"], o["chapter_file"]) for o in father] == [("Father", 3, "ch003.xhtml")]
+    assert _relation(tracker, "무진", "서윤")["occurrences"][0]["label"] == "Daughter"
+    assert _relation(tracker, "하린", "서윤")["occurrences"][0]["label"] == "Best Friend"
+
+
+def test_single_pass_merged_request_files_a_relation_under_the_chapter_that_shows_it(tk, env, tmp_path):
+    out = _single_pass(env, tmp_path)
+    units = [(1, "ch001.xhtml", "서윤은 혼자였다."), (2, "ch002.xhtml", "서윤과 하린, 그리고 무진.")]
+    tk._persist_single_pass_glossary(str(out), SINGLE_PASS_BLOCK, chapter_num=1, source_text="merged",
+                                     chapter_file="ch001.xhtml", merged_units=units)
+    csv_path = tk._single_pass_glossary_paths(str(out))[2]
+    tracker = rt.load_tracker(rt.tracker_path_for_glossary(csv_path))
+    occurrence = _relation(tracker, "하린", "서윤")["occurrences"][0]
+    assert (occurrence["chapter_num"], occurrence["chapter_file"]) == (2, "ch002.xhtml")
+
+
+def test_single_pass_merged_units_come_from_the_merged_chapters(tk):
+    data = [(4, "<p>a</p>", None, {"original_basename": "ch004.xhtml"}, None),
+            (5, "<p>b</p>", None, {"original_basename": "ch005.xhtml"}, None)]
+    units = tk._single_pass_merged_units(data)
+    assert [(n, t) for n, _f, t in units] == [(4, "<p>a</p>"), (5, "<p>b</p>")]
+    assert all(f for _n, f, _t in units)
+
+
+def test_single_pass_with_the_tracker_off_keeps_a_users_relations_column(tk, env, tmp_path):
+    out = _single_pass(env, tmp_path, tracker_on=False)
+    tk._persist_single_pass_glossary(str(out), SINGLE_PASS_BLOCK, chapter_num=3,
+                                     source_text="서윤 하린 무진", chapter_file="ch003.xhtml")
+    csv_path = tk._single_pass_glossary_paths(str(out))[2]
+    assert "Best Friend" in open(csv_path, encoding="utf-8").read()
+    assert not os.path.exists(rt.tracker_path_for_glossary(csv_path))

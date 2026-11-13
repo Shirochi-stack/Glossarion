@@ -84,10 +84,9 @@ def test_html_chapter_is_attached_and_never_typed_in():
     attached = request["files"][0]
     assert attached["data"].decode("utf-8") == chapter and attached["mime"] == "text/plain"
     assert request["expects_html"] is True
-    assert request["prompt"] == (
-        "Translate to English.\n\n"
-        "Apply the instructions above to the attached file chapter.html. Reply with only the complete "
-        "result as HTML inside one ```html code block, with no follow-up questions or commentary.")
+    # owner, 2026-11-13: the prompt box holds the system prompt and nothing of the route's own
+    assert request["prompt"] == "Translate to English."
+    assert request["file_follow_up"] == gf.FILE_FOLLOW_UP_PROMPT == "Output the same response as an HTML file."
     # no role labels: with an attachment AI Mode answers those with "no response available"
     for label in ("System instructions", "User:", "Assistant:"):
         assert label not in request["prompt"]
@@ -112,11 +111,10 @@ def test_long_plain_text_is_attached_as_text():
     request = gf._build_ai_mode_request([{"role": "system", "content": "Extract the names."},
                                          {"role": "user", "content": text}])
     assert names(request) == [("text.txt", "file")] and not request["expects_html"]
-    assert request["prompt"].endswith(
-        "Apply the instructions above to the attached file text.txt. Reply with only the complete result, "
-        "with no follow-up questions or commentary.")
+    assert request["prompt"] == "Extract the names." and request["file_follow_up"] == ""
+    # without a system prompt the request itself is the prompt box text: nothing is attached
     alone = gf._build_ai_mode_request([{"role": "user", "content": text}])
-    assert alone["prompt"].startswith("Read the attached file text.txt and do what it asks.")
+    assert alone["prompt"] == text.strip() and alone["files"] == []
 
 
 def test_images_are_attached_as_images():
@@ -130,8 +128,7 @@ def test_images_are_attached_as_images():
     assert names(request) == [("image001.png", "image"), ("image002.jpg", "image")]
     assert request["files"][0]["data"] == picture and request["files"][0]["mime"] == "image/png"
     assert request["files"][1]["data"] == b"jpeg" and request["files"][1]["mime"] == "image/jpeg"
-    assert request["prompt"] == ("Translate the text in the image.\n\nPage 3\n\n"
-                                 "The 2 attached images belong to the request.")
+    assert request["prompt"] == "Translate the text in the image.\n\nPage 3"
     assert "[image omitted]" not in request["prompt"]
 
 
@@ -144,7 +141,7 @@ def test_earlier_messages_go_into_a_context_file():
     assert request["files"][0]["data"].decode("utf-8") == (
         "Earlier request:\n<p>하나</p>\n\nEarlier reply:\n<p>One</p>")
     assert request["files"][1]["data"].decode("utf-8") == "<p>둘</p>"
-    assert "context.txt holds the earlier messages" in request["prompt"]
+    assert request["prompt"] == "Translate."
 
 
 def test_long_system_prompt_moves_into_an_instructions_file():
@@ -155,9 +152,14 @@ def test_long_system_prompt_moves_into_an_instructions_file():
                                          {"role": "user", "content": "<p>안녕</p>"}])
     assert names(request) == [("instructions.txt", "file"), ("chapter.html", "file")]
     assert request["files"][0]["data"].decode("utf-8") == system and request["instructions_attached"]
-    assert request["prompt"].startswith("Follow the instructions in the attached file instructions.txt.")
-    assert "Apply them to the attached file chapter.html." in request["prompt"]
-    assert len(gf._build_search_url(request["prompt"])) < 2000
+    # the prompt box keeps the leading part of the system prompt that fits; no sentence is added
+    assert request["prompt"] and system.startswith(request["prompt"])
+    assert len(gf._build_search_url(request["prompt"])) <= gf.MAX_PROMPT_URL_CHARS
+    paragraphs = "Rule one.\n\nRule two.\n\n" + glossary
+    split = gf._build_ai_mode_request([{"role": "system", "content": paragraphs},
+                                       {"role": "user", "content": "<p>안녕</p>"}])
+    assert split["prompt"] == "Rule one.\n\nRule two."
+    assert split["files"][0]["data"].decode("utf-8") == paragraphs and split["instructions_attached"]
 
 
 @pytest.mark.parametrize("model, choice", [
@@ -209,43 +211,38 @@ def test_code_block_closed_late_is_cut_at_the_models_fence():
     assert gf._extract_rendered_content(page, prefer_html=True) == "<p>One</p>\n<p>Two</p>"
 
 
-def test_code_block_that_ended_early_is_refused():
+def test_code_block_that_ended_early_keeps_the_rest_as_paragraphs():
+    # owner, 2026-11-13: no error for this; the answer is returned whole
     code = "<p>First half.</p>\n" * 40
-    rest = "\n\n".join(f"Paragraph {index} of the second half, shown without its tags." for index in range(40))
+    lines = [f"Paragraph {index} of the second half, shown without its tags & <marks>." for index in range(40)]
+    rest = "\n\n".join(lines)
     page = snapshot("html\n\n```\n" + code + "```\n\nUse code with caution.\n\n" + rest, codeBlocks=[code])
-    with pytest.raises(gf.AIModeError, match="did not keep the HTML answer inside its code block") as caught:
-        gf._extract_rendered_content(page, prefer_html=True)
-    assert caught.value.kind == gf.KIND_INCOMPLETE and caught.value.kind in gf.FATAL_KINDS
-    assert "sign in with Google Login" in str(caught.value)
-    with pytest.raises(gf.AIModeError) as signed_in:
-        gf._extract_rendered_content(dict(page, signed_in=True), prefer_html=True)
-    assert "Google Login" not in str(signed_in.value)
-    # an empty code block with the whole text beside it (an answer of one very long line)
-    with pytest.raises(gf.AIModeError) as empty:
-        gf._extract_rendered_content(snapshot("html\n\n```\n\n```\n\nUse code with caution.\n\n" + rest,
-                                              codeBlocks=[""]), prefer_html=True)
-    assert empty.value.kind == gf.KIND_INCOMPLETE
+    notes = []
+    content = gf._extract_rendered_content(page, prefer_html=True, notes=notes)
+    assert content.startswith(code.strip() + "\n<p>Paragraph 0 of the second half")
+    tail = content[len(code.strip()) + 1:].split("\n")
+    assert len(tail) == 40 and all(line.startswith("<p>") and line.endswith("</p>") for line in tail)
+    assert "shown without its tags &amp; &lt;marks&gt;.</p>" in tail[0]
+    assert len(notes) == 1 and "closed its HTML code block early" in notes[0] and "plain paragraphs" in notes[0]
+    # works without a notes list, and never raises the old "incomplete" error
+    assert gf._extract_rendered_content(page, prefer_html=True) == content
 
 
-def test_tail_outside_a_long_code_block_is_refused():
-    # the allowance for text outside the block is fixed: it does not grow with the block
+def test_tail_outside_a_long_code_block_is_kept_and_a_short_closing_line_is_dropped():
     code = ("<p>" + "x" * 80 + "</p>\n") * 100
-    tail = ("word " * 400)[:1519]
-    assert len(code) == 8800 and len(tail) == 1519
+    tail = ("word " * 400)[:1519].strip()
+    assert len(code) == 8800
     page = snapshot("html\n\n```\n" + code + "```\n\nUse code with caution.\n\n" + tail, codeBlocks=[code])
-    with pytest.raises(gf.AIModeError, match="1,519 after it without their tags") as caught:
-        gf._extract_rendered_content(page, prefer_html=True)
-    assert caught.value.kind == gf.KIND_INCOMPLETE
-    # one character over the allowance is refused, the allowance itself is not
+    content = gf._extract_rendered_content(page, prefer_html=True)
+    assert content == code.strip() + "\n<p>" + tail + "</p>"
+    # up to the allowance the text outside the block is a lead-in or closing line: dropped
     limit = gf.MAX_TEXT_OUTSIDE_CODE_BLOCK
-    for extra, refused in ((limit, False), (limit + 1, True)):
+    for extra, kept in ((limit, False), (limit + 1, True)):
+        notes = []
         page = snapshot("html\n\n```\n" + code + "```\n\n" + "y" * extra, codeBlocks=[code])
-        if refused:
-            with pytest.raises(gf.AIModeError) as over:
-                gf._extract_rendered_content(page, prefer_html=True)
-            assert over.value.kind == gf.KIND_INCOMPLETE
-        else:
-            assert gf._extract_rendered_content(page, prefer_html=True) == code.strip()
+        content = gf._extract_rendered_content(page, prefer_html=True, notes=notes)
+        assert content == code.strip() + ("\n<p>" + "y" * extra + "</p>" if kept else "")
+        assert bool(notes) == kept
 
 
 def test_lead_in_and_closing_line_around_the_code_block_are_accepted():
@@ -310,12 +307,14 @@ class Page:
     """A scripted AI Mode page: ``run_js`` answers the route's scripts and records them."""
 
     def __init__(self, answer="Bonjour", models=("Auto", "3.8 Flash", "4 Carbon"), code_blocks=(), first=None,
-                 chips=True, uploads=True, lose=0, lose_answers=False):
+                 chips=True, uploads=True, lose=0, lose_answers=False, files=(), follow_ups=()):
         self.answer, self.models, self.code_blocks = answer, list(models), list(code_blocks)
         self.first, self.chips, self.uploads = first, chips, uploads
         self.lose, self.lose_answers = lose, lose_answers                     # the staging run that is lost
+        self.files, self.follow_ups = list(files), list(follow_ups)           # generated files; later answers
         self.calls, self.staged, self.attached = [], {}, []
         self.sent, self.selected, self.prompt, self.waited = False, None, None, 0
+        self.sends, self.prompts = 0, []
 
     def wait(self, ms):
         self.waited += ms
@@ -325,8 +324,13 @@ class Page:
             self.calls.append("snapshot")
             if self.first is not None and not self.sent:
                 return json.dumps(self.first)
+            if self.sends >= 2:                                               # the answer to a follow-up
+                extra = dict(self.follow_ups[min(self.sends - 2, len(self.follow_ups) - 1)])
+                return json.dumps(snapshot(extra.pop("answer", ""), aiMode=True, complete=True,
+                                           answerCount=self.sends, **extra))
             return json.dumps(snapshot(self.answer if self.sent else "", codeBlocks=self.code_blocks if self.sent else [],
-                                       aiMode=self.sent, complete=self.sent))
+                                       aiMode=self.sent, complete=self.sent, answerCount=self.sends,
+                                       files=self.files if self.sent else []))
         if script == gf.AI_MODE_MENU_SCRIPT:
             self.calls.append("menu")
             return json.dumps({"ok": True, "opener": True, "clicked": False, "inputs": ["image/png", ""],
@@ -366,10 +370,12 @@ class Page:
         if "AI Mode textarea not found" in script:
             self.calls.append("prompt")
             self.prompt = json.loads(re.search(r'const promptText = (".*?");', script).group(1))
+            self.prompts.append(self.prompt)
             return json.dumps({"ok": True})
         if "AI Mode send button not ready" in script:
             self.calls.append("send")
             self.sent = True
+            self.sends += 1
             return json.dumps({"ok": True, "label": "Send"})
         raise AssertionError(f"unexpected script: {script[:80]}")
 
@@ -416,6 +422,104 @@ def test_flow_attaches_files_then_images_before_typing(clean):
     assert "안녕" not in page.prompt
     assert gf._extract_rendered_content(result, prefer_html=True) == code.strip()
     assert result["submit_state"]["upload"] == {"chips": ["chapter.html", "image001.png"], "uploads": 2}
+
+
+FILE_URL = ("https://lens.usercontent.google.com/banana?agsi="
+            + base64.urlsafe_b64encode(b"x/uploads-clone/global:1\x10\x02\x18\x01\"\ttext/html*\x0echapter_1.html")
+            .decode().rstrip("="))
+HTML_REQUEST = [{"role": "system", "content": "translate this to english, return an html file in response"},
+                {"role": "user", "content": "<h1>1화</h1>\n<p>안녕.</p>"}]
+FILE_HTML = "<h1>Chapter 1</h1>\n<p>Hello.</p>"
+
+
+def test_generated_file_is_the_answer():
+    page = Page(answer="Here is your file:\n\nchapter 1\n\nhtml\n\nThe file contains the translation.",
+                files=[{"url": FILE_URL, "host": "lens.usercontent.google.com", "label": "chapter 1 html"}])
+    result = submit(page, gf._build_ai_mode_request(HTML_REQUEST))
+    assert page.sends == 1 and page.prompts == ["translate this to english, return an html file in response"]
+    fetched, notes = [], []
+
+    def fetch(url):
+        fetched.append(url)
+        return ("﻿" + FILE_HTML + "\n").encode("utf-8")
+
+    content = gf._extract_rendered_content(result, prefer_html=True, notes=notes, fetch_file=fetch)
+    assert content == FILE_HTML and fetched == [FILE_URL]
+    assert notes == ["Gemini Free: read AI Mode's file chapter_1.html (32 characters)"]
+    assert gf._answer_file_meta(FILE_URL) == ("text/html", "chapter_1.html")
+    # a file that cannot be read: the page text is used, with a note
+    def broken(url):
+        raise OSError("offline")
+    notes = []
+    assert gf._extract_rendered_content(result, prefer_html=True, notes=notes, fetch_file=broken).startswith("Here is")
+    assert "could not read AI Mode's file chapter_1.html: offline" in notes[0]
+    # without a reader the page text is the answer (no network in this function by itself)
+    assert gf._extract_rendered_content(result, prefer_html=True).startswith("Here is your file:")
+
+
+@pytest.mark.parametrize("url", [
+    "http://lens.usercontent.google.com/banana?agsi=x", "https://evil.example/lens.usercontent.google.com",
+    "https://xusercontent.google.com/a", "https://usercontent.google.com.evil.example/a", "javascript:alert(1)", ""])
+def test_only_googles_file_host_is_ever_fetched(url):
+    assert not gf._is_answer_file_url(url)
+    with pytest.raises(ValueError):
+        gf._download_answer_file(url)
+    page = snapshot("Here is your file:", files=[{"url": url, "host": "x", "label": "x"}])
+    called = []
+    gf._extract_rendered_content(page, prefer_html=True, fetch_file=lambda u: called.append(u) or b"<p>x</p>")
+    assert called == []
+
+
+def test_answer_without_structure_gets_one_follow_up_for_an_html_file():
+    # the first answer is a single line of text: ask once, in the same conversation, for an HTML file
+    follow_up = {"answer": "Here is your file:\n\nchapter 1\n\nhtml",
+                 "files": [{"url": FILE_URL, "host": "lens.usercontent.google.com", "label": "chapter 1 html"}]}
+    page = Page(answer="Chapter 1 Hello.", follow_ups=[follow_up])
+    result = submit(page, gf._build_ai_mode_request(HTML_REQUEST))
+    assert page.sends == 2
+    assert page.prompts == ["translate this to english, return an html file in response",
+                            "Output the same response as an HTML file."]
+    assert result["file_follow_up"] == "file" and result["answerText"] == "Chapter 1 Hello."
+    assert gf._extract_rendered_content(result, prefer_html=True,
+                                        fetch_file=lambda url: FILE_HTML.encode("utf-8")) == FILE_HTML
+    # a code block that ended early (the rest outside it, without tags) is asked for as a file too
+    code = "<p>First half.</p>\n" * 30
+    tail = "\n\n".join(f"Paragraph {index} of the second half, without its tags." for index in range(30))
+    early = Page(answer="html\n\n```\n" + code + "```\n\n" + tail, code_blocks=[code], follow_ups=[follow_up])
+    assert submit(early, gf._build_ai_mode_request(HTML_REQUEST))["file_follow_up"] == "file" and early.sends == 2
+
+
+def test_no_follow_up_for_a_whole_code_block_a_file_or_a_plain_request(clean):
+    code = "<h1>Chapter 1</h1>\n<p>Hello.</p>\n"
+    whole = Page(answer="html\n\n```\n" + code + "```", code_blocks=[code])
+    result = submit(whole, gf._build_ai_mode_request(HTML_REQUEST))
+    assert whole.sends == 1 and "file_follow_up" not in result
+    with_file = Page(answer="Here is your file:", files=[{"url": FILE_URL, "host": "h", "label": "f"}])
+    assert "file_follow_up" not in submit(with_file, gf._build_ai_mode_request(HTML_REQUEST)) and with_file.sends == 1
+    plain = Page(answer="Bonjour")
+    submit(plain, gf._build_ai_mode_request([{"role": "user", "content": "Say hello in French."}]))
+    assert plain.sends == 1
+    # "no response available" is not an answer to follow up on
+    none = Page(answer="It looks like there's no response available for this search. Try asking something else.")
+    submit(none, gf._build_ai_mode_request(HTML_REQUEST))
+    assert none.sends == 1
+    # the follow-up text can be replaced or switched off
+    clean.setenv("GEMINI_FREE_FILE_FOLLOW_UP", "Give me that as an .html file")
+    assert gf._build_ai_mode_request(HTML_REQUEST)["file_follow_up"] == "Give me that as an .html file"
+    clean.setenv("GEMINI_FREE_FILE_FOLLOW_UP", "off")
+    off = Page(answer="Chapter 1 Hello.")
+    assert gf._build_ai_mode_request(HTML_REQUEST)["file_follow_up"] == ""
+    submit(off, gf._build_ai_mode_request(HTML_REQUEST))
+    assert off.sends == 1
+
+
+def test_follow_up_without_a_file_keeps_the_first_answer(clean):
+    clean.setenv("GEMINI_FREE_STABLE_MS", "0")
+    page = Page(answer="Chapter 1 Hello.", follow_ups=[{"answer": "I cannot create files here."}])
+    result = submit(page, gf._build_ai_mode_request(HTML_REQUEST))
+    assert page.sends == 2 and result["file_follow_up"] == "the follow-up answer had no file"
+    assert not result.get("files")
+    assert gf._extract_rendered_content(result, prefer_html=True, fetch_file=lambda url: b"") == "Chapter 1 Hello."
 
 
 def test_flow_refuses_a_model_the_page_does_not_offer():
