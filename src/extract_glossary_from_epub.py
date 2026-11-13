@@ -3131,6 +3131,11 @@ def _relations_tracker_log_line(stats: Dict, chapter_num) -> str:
         line += f" ({'; '.join(shown)}{more})"
     return line
 
+def _row_has_description(entry) -> bool:
+    return isinstance(entry, dict) and any(
+        isinstance(k, str) and k.strip().casefold() == "description" and isinstance(v, str) and v.strip()
+        for k, v in entry.items())
+
 def _record_relations_batches(batches, output_path: str, source_path: str = None) -> List[Dict]:
     """Record several chapters' relations cells with one load -> record -> write.
 
@@ -3142,13 +3147,16 @@ def _record_relations_batches(batches, output_path: str, source_path: str = None
     batches = [b for b in batches or [] if b and b[0]]
     if not batches:
         return []
-    if not any(cell for b in batches for _raw, _translated, cell in _peek_relations_cells(b[0])):
-        # Nothing to record: drop the (empty) fields without touching the sidecar.
+    tracker_path = _relations_tracker_path_for_output(output_path)
+    if not any(cell for b in batches for _raw, _translated, cell in _peek_relations_cells(b[0])) and not (
+            os.path.exists(tracker_path) and any(_row_has_description(e) for b in batches for e in b[0])):
+        # Nothing to record: drop the (empty) fields without touching the sidecar. (A chapter
+        # with descriptions but no relations is still recorded once a tracker exists: the
+        # diagram shows the description written at each chapter.)
         for b in batches:
             _pop_relations_cells(b[0])
-        return [{"new": 0, "changed": 0, "changes": [], "pairs": 0} for _b in batches]
+        return [{"new": 0, "changed": 0, "changes": [], "pairs": 0, "descriptions": 0} for _b in batches]
     field = relations_tracking.field_name()
-    tracker_path = _relations_tracker_path_for_output(output_path)
     source_path = source_path or os.getenv("EPUB_PATH", "")
     results = []
     with _relations_tracker_guard(tracker_path):
@@ -3165,7 +3173,7 @@ def _record_relations_batches(batches, output_path: str, source_path: str = None
                 source_path=source_path or None,
                 glossary_path=output_path,
             )
-            recorded += int(stats.get("pairs") or 0)
+            recorded += int(stats.get("pairs") or 0) + int(stats.get("descriptions") or 0)
             results.append((chapter_num, stats))
         if recorded:
             _write_relations_tracker(tracker_path, tracker)
@@ -3244,12 +3252,26 @@ def record_relations_for_chapters(cells, units, fallback_index, output_path: str
     targets' translated names. Chapter numbers come from ``chapter_positions`` (else
     index + 1) and files from ``chapter_filenames``.
     """
-    if not relations_tracking.tracking_enabled() or not cells or not output_path:
+    described = [n for n in names or [] if _row_has_description(n) and str(n.get("raw_name") or "").strip()]
+    if not relations_tracking.tracking_enabled() or not (cells or described) or not output_path:
         return []
     chapter_positions = chapter_positions or {}
     chapter_filenames = chapter_filenames or {}
     field = relations_tracking.field_name()
     buckets = _bucket_relations_by_chapter(cells, units, fallback_index, field=field)
+    # A row's description is filed under the first chapter of the group that names the entry.
+    unit_texts = [(idx, str(text or "")) for idx, text in units or []]
+    for row in described:
+        raw = str(row.get("raw_name")).strip()
+        index = next((idx for idx, text in unit_texts if raw in text), fallback_index)
+        buckets.setdefault(index, []).append({
+            "type": row.get("type", ""),
+            "raw_name": raw,
+            "translated_name": row.get("translated_name", ""),
+            "description": next(v for k, v in row.items()
+                                if isinstance(k, str) and k.strip().casefold() == "description"
+                                and isinstance(v, str) and v.strip()),
+        })
     name_entries = [
         {"raw_name": n.get("raw_name", ""), "translated_name": n.get("translated_name", "")}
         for n in names or [] if isinstance(n, dict) and n.get("raw_name")
@@ -3276,7 +3298,7 @@ def update_relations_tracker_for_group(entries: List[Dict], output_path: str, un
     if not relations_tracking.tracking_enabled() or not entries or not output_path:
         return []
     cells = _pop_relations_cells(entries)
-    if not cells:
+    if not cells and not any(_row_has_description(e) for e in entries):
         return []
     return record_relations_for_chapters(
         cells,

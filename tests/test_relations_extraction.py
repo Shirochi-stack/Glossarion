@@ -412,6 +412,60 @@ def test_merged_group_bucketing(eg, _env, tmp_path):
     assert entries["하린"]["relations"]["설화"]["occurrences"][0]["chapter_index"] == 10
 
 
+def test_each_chapters_description_is_recorded_beside_the_relations(eg, _env, tmp_path):
+    """The diagram shows the description a character had at the chapter it looks at."""
+    _on(_env)
+    output = tmp_path / "Book_glossary.csv"
+    tracker_path = tmp_path / "Book_relations_tracker.json"
+    # No relation anywhere yet: descriptions alone do not start a tracker file.
+    rows = [{"type": "character", "raw_name": "민", "translated_name": "Min", "description": "A playful hunter"}]
+    eg.update_relations_tracker(rows, str(output), chapter_index=1, chapter_num=2, chapter_file="c2.xhtml")
+    assert not tracker_path.exists()
+    rows = [{"type": "character", "raw_name": "민", "translated_name": "Min",
+             "description": "Team leader of the Night Wind clan", "relations": "진: Team Leader"},
+            {"type": "character", "raw_name": "진", "translated_name": "Jin", "description": "A new sniper",
+             "relations": "민: Subordinate"},
+            {"type": "term", "raw_name": "마석", "translated_name": "Mana Stone", "description": "A crystal"}]
+    eg.update_relations_tracker(rows, str(output), chapter_index=7, chapter_num=8, chapter_file="c8.xhtml")
+    # The description stays on the rows (it is a glossary column); only relations are taken off.
+    assert [r.get("description") for r in rows] == ["Team leader of the Night Wind clan", "A new sniper", "A crystal"]
+    assert all("relations" not in r for r in rows)
+    # A later chapter with a new description and no relations is recorded too, now that a tracker exists.
+    rows = [{"type": "character", "raw_name": "민", "translated_name": "Min", "description": "Feared by the Red Tigers"}]
+    eg.update_relations_tracker(rows, str(output), chapter_index=16, chapter_num=17, chapter_file="c17.xhtml")
+    tracker = rt.load_tracker(str(tracker_path))
+    assert [(d["chapter_num"], d["text"]) for d in rt.description_history(tracker, "민")] == [
+        (8, "Team leader of the Night Wind clan"), (17, "Feared by the Red Tigers")]
+    assert rt.description_at(tracker, "진", 8)["text"] == "A new sniper"
+    assert "마석" not in tracker["entries"]
+    # Nothing of it reaches the glossary file beyond its own description column.
+    eg.save_glossary_csv([{"type": "character", "raw_name": "민", "translated_name": "Min", "gender": "female",
+                           "description": "Feared by the Red Tigers"}], str(output))
+    assert "Team leader of the Night Wind clan" not in output.read_text(encoding="utf-8")
+
+
+def test_merged_group_files_a_description_under_the_chapter_that_names_the_entry(eg, _env, tmp_path):
+    _on(_env)
+    units = [(10, "서윤은 혼자였다."), (11, "서윤과 하린이 처음 만났다.")]
+    entries = [
+        {"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun", "description": "The heir",
+         "relations": "하린: Best Friend"},
+        {"type": "character", "raw_name": "하린", "translated_name": "Ha-rin", "description": "A healer"},
+        {"type": "character", "raw_name": "설화", "translated_name": "Seol-hwa", "description": "Named nowhere"},
+    ]
+    output = tmp_path / "Book_glossary.csv"
+    eg.update_relations_tracker_for_group(
+        entries, str(output), units, 10, chapter_positions={10: 11, 11: 12},
+        chapter_filenames={10: "c11.xhtml", 11: "c12.xhtml"})
+    assert [e["description"] for e in entries] == ["The heir", "A healer", "Named nowhere"]
+    tracker = rt.load_tracker(str(tmp_path / "Book_relations_tracker.json"))
+    assert [(d["chapter_num"], d["text"]) for d in rt.description_history(tracker, "서윤")] == [(11, "The heir")]
+    assert [(d["chapter_num"], d["text"]) for d in rt.description_history(tracker, "하린")] == [(12, "A healer")]
+    assert rt.description_history(tracker, "설화")[0]["chapter_num"] == 11  # the parent chapter
+    # The relation itself is still filed under the chapter that shows both names.
+    assert tracker["entries"]["하린"]["relations"]["서윤"]["occurrences"][0]["chapter_num"] == 12
+
+
 def test_sync_after_dedup_rekeys_merged_names(eg, _env, tmp_path):
     _on(_env)
     output = tmp_path / "Book_glossary.csv"

@@ -678,7 +678,9 @@ REWIRE_SPANS = (
     (11811, 11823, 17), (11833, 11875, 8), (11882, 11885, 3), (11927, 11928, 2), (12072, 12129, 3),
     (12139, 12139, 1),  # ... and the glossary editor's selected EPUBs read it
     (12269, 12269, 0),
-    (12275, 12290, 4), (12296, 12307, 6), (12467, 12528, 8), (12677, 12679, 1), (12685, 12713, 5), (12803, 12808, 2),
+    (12275, 12290, 4), (12296, 12307, 6),
+    (12330, 12329, 19),  # the file row's "Open Folder" button (shows the glossary in the file manager)
+    (12467, 12528, 8), (12677, 12679, 1), (12685, 12713, 5), (12803, 12808, 2),
     (12822, 12984, 5),
 )
 
@@ -3014,6 +3016,17 @@ def test_glossary_manager_editor_tab_smoke(tmp_path, monkeypatch, isolated_gm):
     side.apply("save", {"answers": ["yes", "yes"]})
     reloaded = gd.GlossaryDocument.open(str(side.glossary), owner.config)
     assert any(" Smoke" in str(e.get("translated_name", "")) for e in reloaded.current_glossary_data)
+    # "Open Folder" in the file row shows the browsed glossary in the file manager.
+    import epub_library
+    opened = []
+    monkeypatch.setattr(epub_library, "_open_folder_in_explorer", opened.append)
+    button = owner.editor_open_folder_btn
+    assert button.text().endswith("Open Folder") and not button.isHidden()
+    button.click()
+    assert opened == [os.path.abspath(str(side.glossary))]
+    owner.editor_file_entry.setText(str(tmp_path / "gone.csv"))
+    button.click()
+    assert len(opened) == 1  # a file that is not there opens nothing (a "No File" box instead)
 
 
 # =============================================================================================

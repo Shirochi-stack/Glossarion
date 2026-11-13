@@ -10590,6 +10590,25 @@ Do not stop after the glossary."""
         )
         file_layout.addWidget(load_btn)
 
+        def open_glossary_folder():
+            """Show the browsed glossary file in the file manager, inside the folder it is in."""
+            path = self.editor_file_entry.text().strip()
+            if not path or not os.path.exists(path):
+                QMessageBox.warning(parent, "No File", "No glossary file is loaded.")
+                return
+            from epub_library import _open_folder_in_explorer
+            _open_folder_in_explorer(os.path.abspath(path))
+
+        open_folder_btn = QPushButton("\U0001F4C2 Open Folder")
+        open_folder_btn.setFixedWidth(110)
+        open_folder_btn.setToolTip(_wrapped_tooltip_html(
+            "Open the folder this glossary is in, with the file selected"
+        ))
+        open_folder_btn.clicked.connect(open_glossary_folder)
+        open_folder_btn.setStyleSheet(load_btn.styleSheet())
+        file_layout.addWidget(open_folder_btn)
+        self.editor_open_folder_btn = open_folder_btn
+
         # Advanced editing toggle and button grid placed above the tree
         advanced_toggle_widget = QWidget()
         advanced_toggle_layout = QHBoxLayout(advanced_toggle_widget)

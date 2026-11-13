@@ -420,6 +420,46 @@ def test_diagram_is_tidy_and_fitted(qapp):
         dialog.deleteLater()
 
 
+def test_diagram_panel_shows_the_description_written_at_the_sliders_chapter(qapp):
+    from relations_diagram_dialog import RelationsDiagramDialog
+    tracker = _synthetic_tracker()  # chapters 1 to 40
+    entries = [{"raw_name": "서윤", "translated_name": "Seo-yun", "gender": "female",
+                "description": "The glossary's present text"},
+               {"raw_name": "도현", "translated_name": "Do-hyeon", "gender": "male", "description": "Her brother"},
+               {"raw_name": "하린", "translated_name": "Ha-rin", "gender": "female"},
+               {"raw_name": "무진", "translated_name": "Mu-jin", "gender": "male"},
+               {"raw_name": "강우", "translated_name": "Kang-woo", "gender": "male"}]
+    for chapter, text in ((1, "The heir of the Baek house"), (40, "The heir, betrayed by <Ha-rin>")):
+        rt.record_relations(tracker, [{"type": "character", "raw_name": "서윤", "description": text}],
+                            field="relations", chapter_index=chapter - 1, chapter_num=chapter,
+                            chapter_file=f"ch{chapter:03d}.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker, glossary_entries=entries)
+    try:
+        seo, brother, harin = (rt.tracker_key(n) for n in ("서윤", "도현", "하린"))
+        dialog._on_node_clicked(seo)
+        text = dialog.history_panel.toPlainText()
+        assert "Description written at chapter 40" in text and "The heir, betrayed by <Ha-rin>" in text
+        assert "Earlier descriptions" in text and "Ch. 1: The heir of the Baek house" in text
+        assert "The glossary's present text" not in text
+        assert "Enemy" in text  # the relation history still follows
+        # Moving the slider shows what was written by then, with the panel left open.
+        dialog.chapter_slider.setValue(20)
+        text = dialog.history_panel.toPlainText()
+        assert "Description written at chapter 1" in text and "The heir of the Baek house" in text
+        assert "betrayed" not in text and "Earlier descriptions" not in text
+        assert "The heir of the Baek house" in dialog._node_items[seo].toolTip()
+        # No description recorded for him: the glossary's own, said to be undated.
+        dialog._on_node_clicked(brother)
+        text = dialog.history_panel.toPlainText()
+        assert "Her brother" in text and "not recorded per chapter" in text
+        # None anywhere: the panel is the relation history alone.
+        dialog._on_node_clicked(harin)
+        assert "Description" not in dialog.history_panel.toPlainText()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
 def test_diagram_uses_the_configured_manual_glossary(gui, tmp_path):
     glossary = tmp_path / "Book_glossary.csv"
     glossary.write_text("type,raw_name,translated_name\n", encoding="utf-8")

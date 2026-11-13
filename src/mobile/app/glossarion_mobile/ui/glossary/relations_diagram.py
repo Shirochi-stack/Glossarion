@@ -87,7 +87,8 @@ class RelationsDiagram:
         self.graph: dict = {"nodes": [], "edges": []}
         self.drawn_edges: list = []
         self.history_sheet: Any = None
-        count = len(self.tracker.get("entries") or {})
+        # Names that have a relation: an entry may hold only its per-chapter descriptions.
+        count = len(self._all_graph().get("nodes") or []) if self.core is not None else 0
         self.height = float(max(520, int(150 * math.sqrt(max(count, 1)))))
         self.width = round(self.height * 1.3)
         self.view = self._build_view()
@@ -125,7 +126,9 @@ class RelationsDiagram:
 
     @property
     def empty(self) -> bool:
-        return self.core is None or not (self.tracker.get("entries") or {})
+        entries = self.tracker.get("entries") or {}
+        return self.core is None or not any(
+            isinstance(item, dict) and item.get("relations") for item in entries.values())
 
     # ---- view --------------------------------------------------------------------------------------
 
@@ -297,10 +300,32 @@ class RelationsDiagram:
         raw = (node or {}).get("raw_name") or node_id
         return self.core.character_history(self.tracker, raw)
 
+    def description_rows(self, node_id: str) -> tuple:
+        """``(written, earlier, source)``: the description written at the slider's chapter
+        (core ``descriptions_shown``, shared with the desktop diagram)."""
+        node = next((n for n in self.graph.get("nodes", []) if n["id"] == node_id), None)
+        raw = (node or {}).get("raw_name") or node_id
+        return self.core.descriptions_shown(self.tracker, raw, self.chapter, self.entries)
+
+    def _description_controls(self, node_id: str) -> list:
+        written, earlier, source = self.description_rows(node_id)
+        small = dict(theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+        if written is None:
+            if source != "chapter":
+                return []
+            return [ft.Text(f"No description written up to chapter {_chapter_text(self.chapter)}.", **small)]
+        heading = (f"Description written at chapter {_chapter_text(written.get('chapter_num'))}"
+                   if source == "chapter" else "Description (from the glossary; not recorded per chapter yet)")
+        lines = [ft.Text(heading, **small), ft.Text(written["text"], selectable=True)]
+        for old in earlier:
+            lines.append(ft.Text(f"ch {_chapter_text(old.get('chapter_num'))}: {old['text']}", selectable=True, **small))
+        return [ft.Column(lines, spacing=2, tight=True, key="rel-history-description")]
+
     def show_history(self, node_id: str) -> Any:
-        """The character's relation history (``character_history``) in a sheet."""
+        """The character's description at the slider's chapter and relation history, in a sheet."""
         node = next((n for n in self.graph.get("nodes", []) if n["id"] == node_id), {"label": node_id})
-        controls: list = []
+        controls: list = self._description_controls(node_id)
+        described = bool(controls)
         for item in self.history_rows(node_id):
             name = item.get("target_translated") or item.get("target_raw") or item.get("target_key")
             spans = []
@@ -319,7 +344,7 @@ class RelationsDiagram:
                                      theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True,
                                      color=ft.Colors.ON_SURFACE_VARIANT))
             controls.append(ft.Column(lines, spacing=2, tight=True))
-        if not controls:
+        if len(controls) == (1 if described else 0):
             controls.append(ft.Text("No relations recorded for this character.",
                                     color=ft.Colors.ON_SURFACE_VARIANT))
         page = getattr(self.ctx, "page", None)

@@ -516,6 +516,56 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
     asyncio.run(scenario())
 
 
+def test_history_sheet_shows_the_description_written_at_the_sliders_chapter(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = _tracker()
+    entries = [{"raw_name": "서윤", "translated_name": "Seo-yun", "description": "The glossary's present text"},
+               {"raw_name": "하린", "translated_name": "Ha-rin", "description": "A healer, as the glossary has it"},
+               {"raw_name": "민준", "translated_name": "Min-jun"}]
+
+    def texts(control):
+        found = [control.value] if type(control).__name__ == "Text" else []
+        for child in getattr(control, "controls", None) or []:
+            found += texts(child)
+        return found
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        # A tracker from before descriptions were recorded: the glossary's own, said to be undated.
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=entries)
+        seo = next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤")
+        written, earlier, source = diagram.description_rows(seo)
+        assert (written["text"], earlier, source) == ("The glossary's present text", [], "glossary")
+        for chapter, text in ((1, "The heir, first seen"), (5, "The heir who lost her friend")):
+            rt.record_relations(tracker, [{"type": "character", "raw_name": "서윤", "description": text}],
+                                chapter_index=chapter - 1, chapter_num=chapter, chapter_file=f"c{chapter}.xhtml")
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=entries)
+        assert diagram.node_count() == 3  # a name kept only for its descriptions adds no node
+        sheet = diagram.show_history(seo)
+        shown = [t for c in sheet.content.controls for t in texts(c)] if hasattr(sheet.content, "controls") else []
+        column = diagram._description_controls(seo)[0]
+        assert column.key == "rel-history-description"
+        assert texts(column) == ["Description written at chapter 5", "The heir who lost her friend",
+                                 "ch 1: The heir, first seen"]
+        assert not shown or "The heir who lost her friend" in shown
+        # 하린 has none recorded: the glossary's; 민준 has none anywhere: no description block
+        harin = next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "하린")
+        assert texts(diagram._description_controls(harin)[0])[1] == "A healer, as the glossary has it"
+        minjun = next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "민준")
+        assert diagram._description_controls(minjun) == []
+        diagram.set_chapter(3)
+        assert texts(diagram._description_controls(seo)[0]) == ["Description written at chapter 1",
+                                                                "The heir, first seen"]
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_diagram_without_a_tracker_is_an_empty_state_and_opens_as_an_overlay(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations import open_diagram
 
