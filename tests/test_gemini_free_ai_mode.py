@@ -209,43 +209,38 @@ def test_code_block_closed_late_is_cut_at_the_models_fence():
     assert gf._extract_rendered_content(page, prefer_html=True) == "<p>One</p>\n<p>Two</p>"
 
 
-def test_code_block_that_ended_early_is_refused():
+def test_code_block_that_ended_early_keeps_the_rest_as_paragraphs():
+    # owner, 2026-11-13: no error for this; the answer is returned whole
     code = "<p>First half.</p>\n" * 40
-    rest = "\n\n".join(f"Paragraph {index} of the second half, shown without its tags." for index in range(40))
+    lines = [f"Paragraph {index} of the second half, shown without its tags & <marks>." for index in range(40)]
+    rest = "\n\n".join(lines)
     page = snapshot("html\n\n```\n" + code + "```\n\nUse code with caution.\n\n" + rest, codeBlocks=[code])
-    with pytest.raises(gf.AIModeError, match="did not keep the HTML answer inside its code block") as caught:
-        gf._extract_rendered_content(page, prefer_html=True)
-    assert caught.value.kind == gf.KIND_INCOMPLETE and caught.value.kind in gf.FATAL_KINDS
-    assert "sign in with Google Login" in str(caught.value)
-    with pytest.raises(gf.AIModeError) as signed_in:
-        gf._extract_rendered_content(dict(page, signed_in=True), prefer_html=True)
-    assert "Google Login" not in str(signed_in.value)
-    # an empty code block with the whole text beside it (an answer of one very long line)
-    with pytest.raises(gf.AIModeError) as empty:
-        gf._extract_rendered_content(snapshot("html\n\n```\n\n```\n\nUse code with caution.\n\n" + rest,
-                                              codeBlocks=[""]), prefer_html=True)
-    assert empty.value.kind == gf.KIND_INCOMPLETE
+    notes = []
+    content = gf._extract_rendered_content(page, prefer_html=True, notes=notes)
+    assert content.startswith(code.strip() + "\n<p>Paragraph 0 of the second half")
+    tail = content[len(code.strip()) + 1:].split("\n")
+    assert len(tail) == 40 and all(line.startswith("<p>") and line.endswith("</p>") for line in tail)
+    assert "shown without its tags &amp; &lt;marks&gt;.</p>" in tail[0]
+    assert len(notes) == 1 and "closed its HTML code block early" in notes[0] and "plain paragraphs" in notes[0]
+    # works without a notes list, and never raises the old "incomplete" error
+    assert gf._extract_rendered_content(page, prefer_html=True) == content
 
 
-def test_tail_outside_a_long_code_block_is_refused():
-    # the allowance for text outside the block is fixed: it does not grow with the block
+def test_tail_outside_a_long_code_block_is_kept_and_a_short_closing_line_is_dropped():
     code = ("<p>" + "x" * 80 + "</p>\n") * 100
-    tail = ("word " * 400)[:1519]
-    assert len(code) == 8800 and len(tail) == 1519
+    tail = ("word " * 400)[:1519].strip()
+    assert len(code) == 8800
     page = snapshot("html\n\n```\n" + code + "```\n\nUse code with caution.\n\n" + tail, codeBlocks=[code])
-    with pytest.raises(gf.AIModeError, match="1,519 after it without their tags") as caught:
-        gf._extract_rendered_content(page, prefer_html=True)
-    assert caught.value.kind == gf.KIND_INCOMPLETE
-    # one character over the allowance is refused, the allowance itself is not
+    content = gf._extract_rendered_content(page, prefer_html=True)
+    assert content == code.strip() + "\n<p>" + tail + "</p>"
+    # up to the allowance the text outside the block is a lead-in or closing line: dropped
     limit = gf.MAX_TEXT_OUTSIDE_CODE_BLOCK
-    for extra, refused in ((limit, False), (limit + 1, True)):
+    for extra, kept in ((limit, False), (limit + 1, True)):
+        notes = []
         page = snapshot("html\n\n```\n" + code + "```\n\n" + "y" * extra, codeBlocks=[code])
-        if refused:
-            with pytest.raises(gf.AIModeError) as over:
-                gf._extract_rendered_content(page, prefer_html=True)
-            assert over.value.kind == gf.KIND_INCOMPLETE
-        else:
-            assert gf._extract_rendered_content(page, prefer_html=True) == code.strip()
+        content = gf._extract_rendered_content(page, prefer_html=True, notes=notes)
+        assert content == code.strip() + ("\n<p>" + "y" * extra + "</p>" if kept else "")
+        assert bool(notes) == kept
 
 
 def test_lead_in_and_closing_line_around_the_code_block_are_accepted():

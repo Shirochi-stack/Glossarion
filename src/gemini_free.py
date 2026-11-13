@@ -31,6 +31,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from html import escape as _html_escape
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse
@@ -609,8 +610,9 @@ KIND_GENERATION_FAILURE = "generation_failure"
 KIND_TOO_LONG = "too_long"
 #: An attachment was not accepted or did not finish uploading.
 KIND_UPLOAD = "upload"
-#: AI Mode closed the HTML code block before the end of the answer (the text is too long for
-#: one answer of this model): the tags of the rest are lost, so the answer is refused.
+#: AI Mode closed the HTML code block before the end of the answer. No longer raised: the rest
+#: is kept as plain paragraphs (``_extract_rendered_content``). The kind stays for callers that
+#: name it.
 KIND_INCOMPLETE = "incomplete"
 #: The Chrome/Edge page of the signed-in profile failed (``cdp_browser`` error types).
 KIND_BROWSER = "browser_error"
@@ -721,9 +723,9 @@ def _text_file(name: str, text: str) -> Dict[str, Any]:
 #: An HTML line longer than this is broken up before it is attached.
 MAX_HTML_LINE_CHARS = 1500
 #: Characters of answer text an HTML answer may have outside its code block: a lead-in or a
-#: closing line. More than that is the rest of the HTML, which AI Mode shows without its tags.
-#: A fixed number: an allowance that grows with the code block lets the end of a long chapter
-#: be dropped and the answer still be taken as complete.
+#: closing line, which is dropped. More than that is the rest of the HTML, which AI Mode shows
+#: without its tags: it is kept, as plain paragraphs after the code block. A fixed number: an
+#: allowance that grows with the code block would drop the end of a long chapter.
 MAX_TEXT_OUTSIDE_CODE_BLOCK = 300
 _BLOCK_END = re.compile(
     r"(</(?:p|div|h[1-6]|li|ul|ol|table|tr|blockquote|section|article|head|body|html)>)(?=<)", re.IGNORECASE)
@@ -1216,18 +1218,27 @@ def _clean_answer_text(value: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+def _plain_text_as_paragraphs(text: str) -> str:
+    """Rendered answer text as ``<p>`` paragraphs, one per non-empty line."""
+    lines = [line.strip() for line in str(text or "").replace("\r\n", "\n").split("\n")]
+    return "\n".join(f"<p>{_html_escape(line, quote=False)}</p>" for line in lines if line)
+
+
 def _extract_rendered_content(
     page_data: Dict[str, Any],
     *,
     prefer_html: bool = False,
     prefer_markdown: bool = False,
     prompt_url_chars: int = 0,
+    notes: Optional[List[str]] = None,
 ) -> str:
     """The model reply in an AI Mode page snapshot (``AI_MODE_SNAPSHOT_SCRIPT``).
 
     A request for HTML gets the code block(s) of the answer: AI Mode shows HTML only inside
-    one, the request asks for it there. Otherwise the answer text, as Markdown when the request
-    works in Markdown. Raises :class:`AIModeError` for a page that is not an answer.
+    one, the request asks for it there. Text that follows a block that ended early is added as
+    plain paragraphs (a line for the log goes into ``notes``). Otherwise the answer text, as
+    Markdown when the request works in Markdown. Raises :class:`AIModeError` for a page that is
+    not an answer.
     """
     problem = _page_problem(page_data)
     if problem:
@@ -1263,17 +1274,17 @@ def _extract_rendered_content(
         blocks = [block for block in blocks if block.strip()]
         code = "\n".join(blocks).strip()
         outside = _clean_answer_text(re.sub(r"(?s)```.*?(```|\Z)", "", _clean_answer_text(answer_text)))
-        if len(outside) > MAX_TEXT_OUTSIDE_CODE_BLOCK:
-            # HTML outside a code block is shown rendered: its tags are gone from the page.
-            raise AIModeError(
-                "Google AI Mode did not keep the HTML answer inside its code block "
-                f"({len(code):,} characters inside it, {len(outside):,} after it without their tags). "
-                "The text is too long for one answer of this AI Mode model: translate in smaller chunks "
-                "(lower the input token limit)"
-                + ("" if page_data.get("signed_in") else ", or sign in with Google Login for the larger models")
-                + ".",
-                KIND_INCOMPLETE,
-            )
+        if code and len(outside) > MAX_TEXT_OUTSIDE_CODE_BLOCK:
+            # AI Mode closed the code block before the end of the answer and showed the rest
+            # rendered, so the tags of that part are gone from the page. The answer is kept whole:
+            # the rest follows the code block as plain paragraphs (owner: no error for this).
+            if notes is not None:
+                notes.append(
+                    "Gemini Free: AI Mode closed its HTML code block early "
+                    f"({len(code):,} characters inside it); the {len(outside):,} characters after it "
+                    "arrived without their tags and were kept as plain paragraphs."
+                )
+            return code + "\n" + _plain_text_as_paragraphs(outside)
         if code:
             return code
     content = _clean_answer_text((markdown or answer_text) if prefer_markdown else (answer_text or markdown))
@@ -2082,12 +2093,16 @@ def _complete_ai_mode_request(
     )
     _log(log_fn, f"Gemini Free debug URL: {_build_search_base_url()[:1000]}", debug_only=True)
     page_data = loader(request, timeout=timeout, **(loader_kwargs or {}))
+    notes: List[str] = []
     content = _extract_rendered_content(
         page_data,
         prefer_html=bool(request.get("expects_html")),
         prefer_markdown=bool(request.get("expects_markdown")),
         prompt_url_chars=prompt_url_chars,
+        notes=notes,
     )
+    for note in notes:
+        _log(log_fn, f"⚠️ {note}")
     return {
         "content": content,
         "finish_reason": "stop",
