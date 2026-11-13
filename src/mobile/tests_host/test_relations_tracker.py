@@ -507,6 +507,12 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         assert sheet is not None and sheet.key == "rel-history-sheet" and _open_dialogs(session.page)[-1] is sheet
         rows = diagram.history_rows(next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤"))
         assert {r["current"] for r in rows} == {"Enemy", "Brother"}
+        # the history stops at the slider's chapter, like the picture
+        seo = next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤")
+        diagram.set_chapter(1)
+        assert {r["current"] for r in diagram.history_rows(seo)} == {"Best Friend"}
+        diagram.set_chapter(5)
+        node = next(c for c in diagram.node_controls if c.key.endswith("서윤") or "Seo-yun" in c.content.value)
         node.on_click(None)  # again: the previous sheet is closed first, one live sheet per key
         await _settle()
         live = [d for d in _open_dialogs(session.page) if d.key == "rel-history-sheet"]

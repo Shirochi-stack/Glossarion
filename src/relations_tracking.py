@@ -1098,14 +1098,23 @@ def render_relations(relations: Sequence[Mapping[str, Any]],
     return "; ".join(parts)
 
 
-def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> List[Dict[str, Any]]:
-    """Full per-target timeline: runs of labels with their chapter span, plus blips."""
+def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any,
+                      up_to_chapter: Any = None) -> List[Dict[str, Any]]:
+    """Per-target timeline: runs of labels with their chapter span, plus blips.
+
+    With ``up_to_chapter`` it stops there, like the diagram it is shown beside: nothing
+    from a later chapter, and a relation first seen later is left out.
+    """
     entries = tracker.get("entries") if isinstance(tracker, Mapping) else None
     if not isinstance(entries, Mapping):
         return []
     item = entries.get(tracker_key(raw_name))
     if not isinstance(item, Mapping):
         return []
+    if up_to_chapter is None:
+        visible: Callable[[Mapping[str, Any]], bool] = lambda occurrence: True  # noqa: E731
+    else:
+        visible = _visible_predicate(tracker, chapter_cutoff({"chapter_num": up_to_chapter}))
     result = []
     for tkey, rel in (item.get("relations") or {}).items():
         if not isinstance(rel, Mapping):
@@ -1113,7 +1122,7 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
         timeline: List[Dict[str, Any]] = []
         blips = []
         for occurrence in rel.get("occurrences", []) or []:
-            if not isinstance(occurrence, Mapping) or not occurrence.get("label"):
+            if not isinstance(occurrence, Mapping) or not occurrence.get("label") or not visible(occurrence):
                 continue
             if _ignored(occurrence):  # blips and direction flips
                 blips.append({"label": occurrence["label"], "chapter_num": occurrence.get("chapter_num"),
@@ -1133,6 +1142,8 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
                 "to_file": occurrence.get("chapter_file", ""),
                 "count": 1,
             })
+        if not timeline and not blips and up_to_chapter is not None:
+            continue  # nothing of this relation had been seen by then
         target_item = entries.get(tkey)
         result.append({
             "target_key": tkey,
@@ -1141,7 +1152,7 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
                 str(target_item.get("translated_name") or "") if isinstance(target_item, Mapping) else ""),
             "current": timeline[-1]["label"] if timeline else "",
             "timeline": timeline,
-            "changes": [dict(c) for c in rel.get("changes", []) or [] if isinstance(c, Mapping)],
+            "changes": [dict(c) for c in rel.get("changes", []) or [] if isinstance(c, Mapping) and visible(c)],
             "blips": blips,
         })
     return result
@@ -1510,28 +1521,20 @@ _INSTRUCTION_TEMPLATE = (
     'different word only when the relationship itself changed in this text. Do not guess, do not describe events '
     'or feelings, never use commas inside this column. Leave it empty for non-character entries, surname-only '
     'entries, and when no relationship is shown.\n'
-    '{column_rule}\n'
     'Example rows that mirror each other: `{row_a}` and `{row_b}`'
 )
 _DECLARE_TEMPLATE = 'Add a `{field}` column as one extra LAST column of every row. '
-_COLUMN_RULE = '`{field}` is its own column: never write relationships in another column.'
-_COLUMN_RULE_POSITION = (
-    '`{field}` is its own column, column {index} of {total} ({columns}): never write relationships in '
-    'another column.'
-)
 
 _BASE_COLUMNS = ("type", "raw_name", "translated_name", "gender")
 #: The two made-up characters of the glossary prompt's own example rows. They are not
 #: real names, so a model cannot take them for characters of the book it is reading.
+#: Kept SHORT: a long instruction made a 7B model that followed the short one ignore it
+#: (owner, 2026-11-13). The description cell is only there to hold the column's place.
 _EXAMPLE_ROWS = (
     {"type": "character", "raw_name": "이히리ᐐ 나애", "translated_name": "Dihirit Ade", "gender": "female",
-     "description": '"The enigmatic guild leader of the Shadow Lotus who operates from the concealed '
-                    'backrooms of the capital"',
-     "relations": "뢤사난: Older Sister"},
+     "description": '"Guild leader"', "relations": "뢤사난: Older Sister"},
     {"type": "character", "raw_name": "뢤사난", "translated_name": "Kim Sang-hyu", "gender": "male",
-     "description": '"A master swordsman from the Northern Sect known for his icy demeanor and '
-                    'unparalleled skill with the Frost Blade technique"',
-     "relations": "이히리ᐐ 나애: Younger Brother"},
+     "description": '"Swordsman"', "relations": "이히리ᐐ 나애: Younger Brother"},
 )
 
 
@@ -1557,21 +1560,15 @@ def instruction_text(field: Optional[str] = None, language: Optional[str] = "Eng
                      declare_column: bool = False, columns: Optional[Iterable[Any]] = None) -> str:
     """The ``{relations_instruction}`` expansion.
 
-    ``columns`` is the row layout the prompt asks for. With it the example rows have every
-    column in its place and the text says which column the relations go in; a prompt whose
-    other examples end at ``description`` otherwise teaches the model to write them there.
+    ``columns`` is the row layout the prompt asks for. With it the two example rows have
+    every column in its place; a prompt whose other examples end at ``description``
+    otherwise teaches the model to write the relations there. Nothing else is added for
+    it: the text stays as short as it was with the five-column examples.
     """
     field = (field or "").strip() or field_name()
     language = (language or "").strip() or "English"
-    if columns:
-        layout = instruction_columns(columns, field)
-        index = next(i for i, name in enumerate(layout) if name.casefold() == field.casefold()) + 1
-        rule = (_COLUMN_RULE_POSITION.replace("{index}", str(index)).replace("{total}", str(len(layout)))
-                .replace("{columns}", ", ".join(layout)))
-    else:
-        layout = instruction_columns(_BASE_COLUMNS, field)
-        rule = _COLUMN_RULE
-    text = _INSTRUCTION_TEMPLATE.replace("{column_rule}", rule)
+    layout = instruction_columns(columns if columns else _BASE_COLUMNS, field)
+    text = _INSTRUCTION_TEMPLATE
     text = text.replace("{row_a}", _example_row(_EXAMPLE_ROWS[0], layout, field))
     text = text.replace("{row_b}", _example_row(_EXAMPLE_ROWS[1], layout, field))
     text = text.replace("{field}", field).replace("{language}", language)

@@ -663,15 +663,14 @@ def test_prompts_missing_placeholder():
 def test_instruction_text_is_one_block():
     text = rt.instruction_text()
     assert text.startswith("The `relations` column: for character entries only")
-    assert text.count("\n") == 2
+    assert text.count("\n") == 1
     # The model writes what THIS row's character is to the other one, shown both ways.
     assert "role is what THIS row's character is to that other character" in text
     assert "a father's row has `<his daughter's raw_name>: Father`" in text
     assert "the daughter's row has `<her father's raw_name>: Daughter`" in text
     assert "never filler such as Acquaintance, Stranger or Unknown, and never a note such as Surname" in text
-    # Without a known layout: the four fixed columns and the relations, no position claimed.
+    # Without a known layout: the four fixed columns and the relations.
     assert text.endswith(
-        "\n`relations` is its own column: never write relationships in another column."
         "\nExample rows that mirror each other: `character,이히리ᐐ 나애,Dihirit Ade,female,뢤사난: Older Sister` "
         "and `character,뢤사난,Kim Sang-hyu,male,이히리ᐐ 나애: Younger Brother`")
     # Recording the example rows gives the tracker's own meaning (she is his Older Sister).
@@ -691,28 +690,34 @@ def test_instruction_examples_follow_the_prompt_columns():
     """A relation written in the description's place taught the model to merge the two."""
     columns = ["type", "raw_name", "translated_name", "gender", "description", "relations"]
     text = rt.instruction_text(columns=columns)
-    assert ("`relations` is its own column, column 6 of 6 (type, raw_name, translated_name, gender, "
-            "description, relations): never write relationships in another column.") in text
+    assert text.endswith(
+        '\nExample rows that mirror each other: `character,이히리ᐐ 나애,Dihirit Ade,female,"Guild leader",'
+        '뢤사난: Older Sister` and `character,뢤사난,Kim Sang-hyu,male,"Swordsman",이히리ᐐ 나애: Younger Brother`')
     rows = _example_rows(text)
     assert [len(row) for row in rows] == [6, 6]
     assert rows[0][5] == "뢤사난: Older Sister" and rows[1][5] == "이히리ᐐ 나애: Younger Brother"
     for row in rows:
         assert row[0] == "character" and row[3] in ("female", "male")
-        assert len(row[4]) > 20 and ":" not in row[4]  # a description, not a relation
+        assert row[4] and ":" not in row[4]  # a description holds the column's place, not a relation
+
+    # SHORT: a longer instruction made a 7B model that followed the short one ignore it
+    # (owner, 2026-11-13). The whole text with description and relations columns is within
+    # 40 characters of what it was with the five-column examples, and it is still two lines.
+    base = rt.instruction_text()
+    assert text.count("\n") == 1 and len(text) - len(base) <= 40 and len(text) < 1300
+    assert "is its own column" not in text and "column 6 of 6" not in text
 
     # The field keeps its place and its name wherever the user put it; other custom fields stay empty.
     text = rt.instruction_text(field="bonds", columns=["type", "raw_name", "translated_name", "gender",
                                                        "Bonds", "notes", "description"])
-    assert "`bonds` is its own column, column 5 of 7 (" in text
     rows = _example_rows(text)
     assert [len(row) for row in rows] == [7, 7]
-    assert rows[0][4] == "뢤사난: Older Sister" and rows[0][5] == "" and len(rows[0][6]) > 20
+    assert rows[0][4] == "뢤사난: Older Sister" and rows[0][5] == "" and rows[0][6] == "Guild leader"
 
     # A layout without the field (Minimal's fixed list): the relations are the extra last column.
     text = rt.instruction_text(declare_column=True,
                                columns=["type", "raw_name", "translated_name", "gender", "description"])
     assert text.startswith("Add a `relations` column as one extra LAST column of every row. ")
-    assert "column 6 of 6" in text
     assert [len(row) for row in _example_rows(text)] == [6, 6]
 
 
@@ -901,6 +906,33 @@ def test_layout_disconnected_and_focus():
     state = random.getstate()
     rt.layout_graph(_big_graph(50), seed=9)
     assert random.getstate() == state
+
+
+def test_character_history_stops_at_a_chapter():
+    """The diagram's history panel shows what was known at the slider's chapter, no later."""
+    tracker = _story_tracker()
+
+    def harin(chapter):
+        rows = {r["target_raw"]: r for r in rt.character_history(tracker, "서윤", chapter)}
+        return rows.get("하린")
+
+    whole = harin(None)
+    assert whole["current"] == "Enemy" and [run["label"] for run in whole["timeline"]] == [
+        "Best Friend", "Rival", "Enemy"]
+    assert whole == {r["target_raw"]: r for r in rt.character_history(tracker, "서윤")}["하린"]
+    early = harin(15)
+    assert early["current"] == "Best Friend" and len(early["timeline"]) == 1
+    assert early["timeline"][0]["to_chapter"] == 10 and early["changes"] == []
+    middle = harin(25)
+    assert middle["current"] == "Rival" and [c["to"] for c in middle["changes"]] == ["Rival"]
+    assert harin(40)["current"] == "Enemy"
+    # A relation first seen later is left out, and before the first chapter there is nothing.
+    late = rt.empty_tracker()
+    _record(late, 3, [_entry("a", "A", "b: Friend")])
+    _record(late, 9, [_entry("a", "A", "c: Rival")])
+    assert [r["target_raw"] for r in rt.character_history(late, "a", 5)] == ["b"]
+    assert [r["target_raw"] for r in rt.character_history(late, "a")] == ["b", "c"]
+    assert rt.character_history(late, "a", 2) == []
 
 
 def test_edge_label_text_both_directions():
