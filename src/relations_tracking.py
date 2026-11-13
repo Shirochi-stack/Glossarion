@@ -1362,15 +1362,6 @@ def inject_relations_column(
     return "".join(out), stats
 
 
-_LEGEND_TEMPLATE = ('- {field}: "Name: role" means that named character is this entry\'s <role>; '
-                    '[formerly ...] is their earlier role.')
-
-
-def legend_line(field: Optional[str] = None) -> str:
-    """How to read the injected column; build_system_prompt puts it above the glossary block."""
-    return _LEGEND_TEMPLATE.replace("{field}", (field or "").strip() or field_name())
-
-
 def relations_log_line(stats: Optional[Mapping[str, Any]]) -> Optional[str]:
     if not isinstance(stats, Mapping) or not stats.get("enabled"):
         return None

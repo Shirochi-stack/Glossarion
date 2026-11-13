@@ -106,10 +106,8 @@ def _build(tk, glossary, ref, source_text=None, settings=None):
 
 
 def _glossary_block(prompt):
-    """The glossary block after the append prompt (and after the relations legend, if any)."""
-    block = prompt.split(APPEND_PROMPT + "\n", 1)[1]
-    legend = rt.legend_line() + "\n"
-    return block[len(legend):] if block.startswith(legend) else block
+    """The glossary block after the append prompt."""
+    return prompt.split(APPEND_PROMPT + "\n", 1)[1]
 
 
 # --------------------------------------------------------------------------- toggle off
@@ -159,9 +157,9 @@ def test_uncompressed_token_glossary_gets_column(tk, env, tmp_path, capsys):
             "(relations: Do-hyeon: Older Brother; Ha-rin: Rival [formerly Best Friend])") in lines
     assert "* 하린 = Ha-rin [Female]: Apprentice healer (relations: Seo-yun: Best Friend)" in lines
     assert "* 청월검 = Azure Moon Sword: Heirloom blade" in lines
-    # The legend sits on its own line between the append prompt and the glossary block.
-    assert (APPEND_PROMPT + "\n" + rt.legend_line() + "\n" + HEADER + ", relations\n") in prompt
-    assert prompt.count(rt.legend_line()) == 1
+    # Owner, 2026-11-13: no line of ours explains the column; the glossary follows the append prompt.
+    assert (APPEND_PROMPT + "\n" + HEADER + ", relations\n") in prompt
+    assert '"Name: role"' not in prompt and "earlier role" not in prompt
     out = capsys.readouterr().out
     assert "🔗 Relations: 3 shown for 2 characters (up to Ch. 25) | changed here:" not in out
     assert "🔗 Relations: 3 shown for 2 characters (up to Ch. 25)" in out
@@ -215,21 +213,20 @@ def test_metadata_requests_and_missing_chapter_get_nothing(tk, env, tmp_path, ca
     assert "🔗" not in capsys.readouterr().out
 
 
-def test_legend_only_when_something_was_injected_and_uses_the_field_name(tk, env, tmp_path, capsys):
+def test_nothing_before_any_relation_and_the_column_uses_the_field_name(tk, env, tmp_path, capsys):
     env.setenv(rt.ENV_ENABLE, "1")
     glossary = _write_book(tmp_path)
     before_any = _build(tk, glossary, {"chapter_num": 0.5, "chapter_file": "prologue.xhtml"})
-    assert '"Name: role"' not in before_any and "relations" not in before_any
+    assert "relations" not in before_any
     bonds = _build(tk, glossary, {"chapter_num": 45}, settings={rt.ENV_ENABLE: "1", rt.ENV_FIELD: "bonds"})
-    assert (APPEND_PROMPT + "\n" + rt.legend_line("bonds") + "\n" + HEADER + ", bonds\n") in bonds
-    # JSON glossary: the legend is outside the JSON, so the block still parses.
+    assert (APPEND_PROMPT + "\n" + HEADER + ", bonds\n") in bonds
+    # JSON glossary: the block is the JSON and nothing else.
     as_json = json.dumps([{"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun"},
                           {"type": "character", "raw_name": "하린", "translated_name": "Ha-rin"}],
                          ensure_ascii=False)
     json_glossary = _write_book(tmp_path, as_json, "Json_glossary.json")
     prompt = _build(tk, json_glossary, {"chapter_num": 45})
     block = _glossary_block(prompt)
-    assert prompt.count(rt.legend_line()) == 1
     assert json.loads(block)[0]["relations"] == "Ha-rin: Enemy [formerly Rival]"
     capsys.readouterr()
 

@@ -644,7 +644,18 @@ _IMAGE_EXTENSIONS = {
     "image/gif": "gif", "image/bmp": "bmp", "image/avif": "avif", "image/heic": "heic",
     "image/heif": "heif", "image/tiff": "tiff",
 }
-_NO_FOLLOW_UP = "with no follow-up questions or commentary"
+#: The second message of an HTML request whose first answer came without a file (owner,
+#: 2026-11-13: "send a 2nd request to the same conversation to output the same response as an
+#: html file"). ``GEMINI_FREE_FILE_FOLLOW_UP`` replaces the text; "0" / "off" sends none.
+FILE_FOLLOW_UP_PROMPT = "Output the same response as an HTML file."
+
+
+def _file_follow_up_prompt() -> str:
+    value = os.getenv("GEMINI_FREE_FILE_FOLLOW_UP")
+    if value is None:
+        return FILE_FOLLOW_UP_PROMPT
+    value = value.strip()
+    return "" if value.lower() in ("", "0", "off", "false", "no") else value
 
 
 def _content_images(content: Any) -> List[tuple[str, bytes]]:
@@ -745,15 +756,33 @@ def _one_block_per_line(markup: str) -> str:
     return _BLOCK_END.sub(r"\1\n", text)
 
 
+def _leading_paragraphs(text: str, inline: str = "") -> str:
+    """The leading paragraphs of ``text`` that fit the prompt box next to ``inline`` (at least
+    the first one, cut to fit when it is too long by itself)."""
+    kept: List[str] = []
+    for paragraph in [part for part in re.split(r"\n\s*\n", str(text or "").strip()) if part.strip()]:
+        candidate = "\n\n".join(part for part in (*kept, paragraph, inline) if part)
+        if len(_build_search_url(candidate)) > MAX_PROMPT_URL_CHARS:
+            break
+        kept.append(paragraph)
+    if kept:
+        return "\n\n".join(kept)
+    head = str(text or "").strip()
+    while head and len(_build_search_url("\n\n".join(part for part in (head, inline) if part))) > MAX_PROMPT_URL_CHARS:
+        head = head[: max(1, len(head) * 3 // 4)].rstrip() if len(head) > 1 else ""
+    return head
+
+
 def _build_ai_mode_request(messages: Iterable[Dict[str, Any]], model: str = DEFAULT_MODEL) -> Dict[str, Any]:
     """What one chat request puts on the AI Mode page: the prompt box text and the attachments.
 
-    The system prompt is typed into the prompt box. The text to work on (the last user message)
-    is attached as a file when it is HTML or long, so its size never meets AI Mode's prompt
-    limit and its tags reach the model untouched; images are attached as images; earlier
-    messages of the conversation go into ``context.txt``. A short plain request with nothing to
-    attach is typed in as it is. Role labels ("System instructions:", "User:") are never
-    written: with an attachment AI Mode answers such a prompt with "no response available".
+    The system prompt is typed into the prompt box, as it is: the route adds no sentence of its
+    own. The text to work on (the last user message) is attached as a file when it is HTML or
+    long, so its size never meets AI Mode's prompt limit and its tags reach the model
+    untouched; images are attached as images; earlier messages of the conversation go into
+    ``context.txt``. A request without a system prompt is typed in as it is. Role labels
+    ("System instructions:", "User:") are never written: with an attachment AI Mode answers
+    such a prompt with "no response available".
     """
     system_parts: List[str] = []
     turns: List[tuple[str, str]] = []
@@ -785,22 +814,18 @@ def _build_ai_mode_request(messages: Iterable[Dict[str, Any]], model: str = DEFA
     expects_markdown = bool(
         not expects_html and _messages_expect_markdown_response([{"role": "user", "content": payload}])
     )
-    attach_payload = bool(payload) and (
+    # The prompt box needs some text: with no system prompt the request itself is typed in.
+    attach_payload = bool(payload) and bool(system_text) and (
         expects_html or len(system_text) + len(payload) > INLINE_PROMPT_CHARS
     )
 
     files: List[Dict[str, Any]] = []
-    notes: List[str] = []
     payload_name = HTML_FILE_NAME if expects_html else TEXT_FILE_NAME
     if history:
         context = "\n\n".join(
             ("Earlier request:\n" if role == "user" else "Earlier reply:\n") + text for role, text in history
         )
         files.append(_text_file(CONTEXT_FILE_NAME, context))
-        notes.append(
-            f"The attached file {CONTEXT_FILE_NAME} holds the earlier messages of this conversation, "
-            "for reference only."
-        )
     if attach_payload:
         files.append(_text_file(payload_name, _one_block_per_line(payload) if expects_html else payload))
     for number, (mime, data) in enumerate(images, start=1):
@@ -811,36 +836,26 @@ def _build_ai_mode_request(messages: Iterable[Dict[str, Any]], model: str = DEFA
             "kind": "image",
             "data": data,
         })
-    if images:
-        notes.append("The attached image belongs to the request." if len(images) == 1
-                     else f"The {len(images)} attached images belong to the request.")
 
-    task = ""
-    if attach_payload:
-        task = (f"Apply the instructions above to the attached file {payload_name}." if system_text
-                else f"Read the attached file {payload_name} and do what it asks.")
-        task += (f" Reply with only the complete result as HTML inside one ```html code block, {_NO_FOLLOW_UP}."
-                 if expects_html else f" Reply with only the complete result, {_NO_FOLLOW_UP}.")
-
-    def compose(instructions: str, task_line: str) -> str:
-        inline = payload if payload and not attach_payload else ""
-        tail = " ".join(part for part in (*notes, task_line) if part)
-        return "\n\n".join(part for part in (instructions, inline, tail) if part).strip()
-
-    prompt = compose(system_text, task)
+    # Owner, 2026-11-13: the route writes no sentence of its own. The prompt box holds the
+    # system prompt as it is (and the request, when that is not attached); nothing is added
+    # about the attachments or the shape of the reply.
+    inline = payload if payload and not attach_payload else ""
+    prompt = "\n\n".join(part for part in (system_text, inline) if part).strip()
     instructions_attached = False
     if system_text and len(_build_search_url(prompt)) > MAX_PROMPT_URL_CHARS:
-        # A long system prompt (a glossary appended to it): it goes into a file as well.
+        # A long system prompt (a glossary appended to it): the whole of it goes into a file, and
+        # the prompt box keeps its leading paragraphs, as many as fit.
         instructions_attached = True
         files.insert(0, _text_file(INSTRUCTIONS_FILE_NAME, system_text))
-        lead = f"Follow the instructions in the attached file {INSTRUCTIONS_FILE_NAME}."
-        prompt = compose(lead, task.replace("Apply the instructions above", "Apply them", 1))
+        prompt = "\n\n".join(part for part in (_leading_paragraphs(system_text, inline), inline) if part).strip()
     return {
         "prompt": prompt,
         "files": files,
         "model": _ai_mode_model_choice(model),
         "expects_html": expects_html,
         "expects_markdown": expects_markdown,
+        "file_follow_up": _file_follow_up_prompt() if expects_html else "",
         "instructions_attached": instructions_attached,
         "prompt_chars": len(system_text) + len(payload) + sum(len(text) for _role, text in history),
     }
@@ -961,10 +976,17 @@ AI_MODE_SNAPSHOT_SCRIPT = r"""
     aiMode: turns.length > 0 || answers.length > 0 || !!doc.querySelector('[data-xid="aim-mars-turn-root"]'),
     promptBox: doc.querySelectorAll("textarea").length > 0,
     answerFound: !!root,
+    answerCount: Math.max(answers.length, turns.length),
     answerText: root ? tidy(render(root, false)) : "",
     answerMarkdown: root ? tidy(render(root, true)) : "",
     codeBlocks: root ? Array.from(root.querySelectorAll("pre")).filter((block) => !hidden(block))
       .map((block) => String(block.textContent || "")) : [],
+    files: root ? Array.from(root.querySelectorAll("a[href]")).map((link) => {
+      let host = "";
+      try { host = new URL(link.href).hostname; } catch (error) { host = ""; }
+      return {url: String(link.href || ""), host: host,
+              label: String(link.innerText || link.textContent || "").replace(/\s+/g, " ").trim()};
+    }).filter((file) => /(^|\.)usercontent\.google\.com$/i.test(file.host)).slice(0, 8) : [],
     complete: announcements.some((text) => /AI Mode response is ready/i.test(text)),
     pending: root ? root.querySelectorAll('[data-complete="false"]').length : 0,
     htmlLength: doc.documentElement ? doc.documentElement.outerHTML.length : 0
@@ -1218,6 +1240,96 @@ def _clean_answer_text(value: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+#: A file AI Mode generated for its answer ("Here is your file:") is a link to this host.
+ANSWER_FILE_HOST_SUFFIX = "usercontent.google.com"
+#: Largest generated file that is read (bytes).
+MAX_ANSWER_FILE_BYTES = 20 * 1024 * 1024
+_ANSWER_FILE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36"
+)
+
+
+def _is_answer_file_url(url: str) -> bool:
+    """True for an https link to Google's generated-file host. The page is not trusted: nothing
+    else it links to is ever fetched."""
+    try:
+        parsed = urlparse(str(url or ""))
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (
+        host == ANSWER_FILE_HOST_SUFFIX or host.endswith("." + ANSWER_FILE_HOST_SUFFIX))
+
+
+def _answer_file_meta(url: str) -> tuple:
+    """``(mime type, file name)`` of a generated-file link, read from its ``agsi`` parameter (a
+    base64 record that ends with both); empty strings when it holds neither."""
+    import base64
+
+    try:
+        token = dict(parse_qsl(urlparse(url).query)).get("agsi", "")
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8", errors="replace")
+    except Exception:
+        return "", ""
+    mimes = re.findall(r"\b((?:text|application|image|audio|video)/[a-z0-9.+-]+)", raw, flags=re.IGNORECASE)
+    name = re.search(r"([\w .()\[\]-]+\.[a-z0-9]{1,8})\s*$", raw, flags=re.IGNORECASE)
+    return (mimes[-1].lower() if mimes else ""), (name.group(1).strip() if name else "")
+
+
+def _download_answer_file(url: str, timeout: float = 60.0) -> bytes:
+    """The bytes of a file AI Mode generated (the link needs no sign-in)."""
+    import urllib.request
+
+    if not _is_answer_file_url(url):
+        raise ValueError("not a generated-file link")
+    request = urllib.request.Request(url, headers={"User-Agent": _ANSWER_FILE_USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 - https, host checked
+        data = response.read(MAX_ANSWER_FILE_BYTES + 1)
+    if len(data) > MAX_ANSWER_FILE_BYTES:
+        raise ValueError("the generated file is larger than 20 MB")
+    return data
+
+
+def _answer_file_text(
+    page_data: Dict[str, Any],
+    fetch_file: Optional[Callable[[str], bytes]],
+    *,
+    prefer_html: bool = False,
+    notes: Optional[List[str]] = None,
+) -> str:
+    """The text of the file AI Mode generated for this answer, "" when there is none.
+
+    Asked to return a file, AI Mode answers "Here is your file:" with a link, and the file holds
+    the whole result with its tags. With several files the HTML one comes first for an HTML
+    request. A file that cannot be read is reported in ``notes`` and the page text is used.
+    """
+    if fetch_file is None:
+        return ""
+    candidates = []
+    for item in page_data.get("files") or []:
+        url = str((item or {}).get("url") or "") if isinstance(item, dict) else ""
+        if not _is_answer_file_url(url):
+            continue
+        mime, name = _answer_file_meta(url)
+        if mime.startswith(("image/", "audio/", "video/")):
+            continue
+        is_html = mime == "text/html" or name.lower().endswith((".html", ".htm", ".xhtml"))
+        candidates.append((0 if is_html == bool(prefer_html) else 1, len(candidates), url, name))
+    for _rank, _order, url, name in sorted(candidates):
+        try:
+            text = fetch_file(url).decode("utf-8-sig", errors="replace").strip()
+        except Exception as error:
+            if notes is not None:
+                notes.append(f"Gemini Free: could not read AI Mode's file {name or 'answer'}: {error}")
+            continue
+        if text:
+            if notes is not None:
+                notes.append(f"Gemini Free: read AI Mode's file {name or 'answer'} ({len(text):,} characters)")
+            return text
+    return ""
+
+
 def _plain_text_as_paragraphs(text: str) -> str:
     """Rendered answer text as ``<p>`` paragraphs, one per non-empty line."""
     lines = [line.strip() for line in str(text or "").replace("\r\n", "\n").split("\n")]
@@ -1231,6 +1343,7 @@ def _extract_rendered_content(
     prefer_markdown: bool = False,
     prompt_url_chars: int = 0,
     notes: Optional[List[str]] = None,
+    fetch_file: Optional[Callable[[str], bytes]] = None,
 ) -> str:
     """The model reply in an AI Mode page snapshot (``AI_MODE_SNAPSHOT_SCRIPT``).
 
@@ -1268,6 +1381,11 @@ def _extract_rendered_content(
                 KIND_TOO_LONG,
             )
         raise AIModeError("Google AI Mode answered with web results only instead of an AI answer.", KIND_NO_ANSWER)
+
+    # A generated file is the answer itself (``fetch_file`` reads it; None: the page text only).
+    file_text = _answer_file_text(page_data, fetch_file, prefer_html=prefer_html, notes=notes)
+    if file_text:
+        return file_text
 
     if prefer_html:
         blocks = [_code_block_payload(block) for block in (page_data.get("codeBlocks") or [])]
@@ -1694,10 +1812,106 @@ def _submit_ai_mode_request(
         timeout=timeout,
         wait_after_load_ms=wait_after_load_ms,
     )
+    follow_up = str(request.get("file_follow_up") or "")
+    if follow_up and _needs_file_follow_up(result):
+        asked = _ask_for_answer_file(follow_up, result, run_js=run_js, wait_ms=wait_ms, deadline=deadline)
+        result["file_follow_up"] = asked.get("state") or ""
+        if asked.get("files"):
+            # the first answer stays the page text; the file of the second one is the result
+            result["files"] = asked["files"]
     result["search_base_url"] = base_url
     result["model_label"] = model_label
     result["submit_state"] = {"set": set_state, "click": click_state, "upload": upload_state}
     return result
+
+
+def _html_code_and_outside(page_data: Dict[str, Any]) -> tuple:
+    """``(code, outside)`` of an answer: the text of its code block(s) and the answer text that
+    is not inside one."""
+    blocks = [_code_block_payload(block) for block in (page_data.get("codeBlocks") or [])]
+    code = "\n".join(block for block in blocks if block.strip()).strip()
+    answer_text = str(page_data.get("answerText") or "")
+    outside = _clean_answer_text(re.sub(r"(?s)```.*?(```|\Z)", "", _clean_answer_text(answer_text)))
+    return code, outside
+
+
+def _needs_file_follow_up(page_data: Dict[str, Any]) -> bool:
+    """True when an HTML request got a real answer without its structure: no generated file, and
+    either no HTML at all (plain text, a single line) or a code block that ended early, with the
+    rest outside it and stripped of its tags. A whole code block is structure enough (owner,
+    2026-11-13: only then ask once more, in the same conversation, for the same response as an
+    HTML file)."""
+    if not isinstance(page_data, dict) or _page_problem(page_data) or page_data.get("notAiMode"):
+        return False
+    answer_text = str(page_data.get("answerText") or "").strip()
+    if not answer_text or NO_RESPONSE_MARKER in answer_text.lower() or _web_results_only(answer_text):
+        return False
+    if _contains_generation_failure(answer_text.splitlines()):
+        return False
+    if any(_is_answer_file_url(str((item or {}).get("url") or "")) for item in page_data.get("files") or []
+           if isinstance(item, dict)):
+        return False
+    code, outside = _html_code_and_outside(page_data)
+    if code:
+        return len(outside) > MAX_TEXT_OUTSIDE_CODE_BLOCK
+    # no code block: the answer has structure only if its text shows the tags themselves
+    return len(re.findall(r"</(?:p|div|h[1-6]|li|tr|blockquote)>", answer_text, flags=re.IGNORECASE)) < 2
+
+
+def _ask_for_answer_file(
+    follow_up: str,
+    first: Dict[str, Any],
+    *,
+    run_js: Callable[..., Any],
+    wait_ms: Callable[[int], None],
+    deadline: Optional[float],
+) -> Dict[str, Any]:
+    """Type ``follow_up`` into the same conversation and wait for the file of the new answer.
+
+    Returns ``{"state": ..., "files": [...]}``. Never raises for the page's sake: without a file
+    the first answer is used as it is.
+    """
+    before = int(first.get("answerCount") or 0)
+    set_state = _run_page_json(run_js, _ai_mode_set_prompt_script(follow_up), js_timeout_ms=15000)
+    if not set_state.get("ok"):
+        return {"state": "no prompt box for the follow-up", "files": []}
+    clicked = False
+    click_deadline = time.time() + 10
+    while time.time() < click_deadline and not _deadline_expired(deadline):
+        _raise_if_cancelled()
+        wait_ms(250)
+        if _run_page_json(run_js, AI_MODE_CLICK_SEND_SCRIPT, js_timeout_ms=10000).get("ok"):
+            clicked = True
+            break
+    if not clicked:
+        return {"state": "the follow-up could not be sent", "files": []}
+
+    stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 8000)
+    first_text = str(first.get("answerText") or "")
+    last_answer = ""
+    last_change_at = time.time()
+    while not _deadline_expired(deadline):
+        _raise_if_cancelled()
+        wait_ms(500)
+        snapshot = _run_page_json(run_js, AI_MODE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+        if not snapshot or _page_problem(snapshot):
+            if snapshot:
+                return {"state": "the page needed the user during the follow-up", "files": []}
+            continue
+        answer = str(snapshot.get("answerText") or "")
+        new_answer = int(snapshot.get("answerCount") or 0) > before or (answer and answer != first_text)
+        if not new_answer or not answer:
+            continue
+        files = [item for item in snapshot.get("files") or []
+                 if isinstance(item, dict) and _is_answer_file_url(str(item.get("url") or ""))]
+        if files:
+            return {"state": "file", "files": files}
+        if answer != last_answer:
+            last_answer = answer
+            last_change_at = time.time()
+        elif (time.time() - last_change_at) * 1000 >= stable_ms and not snapshot.get("pending"):
+            return {"state": "the follow-up answer had no file", "files": []}
+    return {"state": "the follow-up did not finish in time", "files": []}
 
 
 def load_ai_mode_answer(
@@ -2100,9 +2314,10 @@ def _complete_ai_mode_request(
         prefer_markdown=bool(request.get("expects_markdown")),
         prompt_url_chars=prompt_url_chars,
         notes=notes,
+        fetch_file=_download_answer_file,
     )
     for note in notes:
-        _log(log_fn, f"⚠️ {note}")
+        _log(log_fn, note if "read AI Mode's file" in note and "could not" not in note else f"⚠️ {note}")
     return {
         "content": content,
         "finish_reason": "stop",

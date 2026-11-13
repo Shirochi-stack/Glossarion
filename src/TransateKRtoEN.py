@@ -23892,13 +23892,9 @@ def build_system_prompt(
             if merged_glossary:
                 if system:
                     system += "\n\n"
-                if relations_field:
-                    # How to read the relations column: a line of its own above the
-                    # glossary block, so the block's header and rows stay untouched.
-                    from relations_tracking import legend_line as _relations_legend_line
-                    system += f"{custom_prompt}\n{_relations_legend_line(relations_field)}\n{merged_glossary}"
-                else:
-                    system += f"{custom_prompt}\n{merged_glossary}"
+                # Nothing is written about the relations column: the user explains
+                # it in their own prompt if they want it explained.
+                system += f"{custom_prompt}\n{merged_glossary}"
 
             # One line for everything glossary-related in this request, e.g.
             # 🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens

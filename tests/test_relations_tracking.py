@@ -672,12 +672,6 @@ def test_instruction_text_is_one_block():
     assert rt.render_relations(rt.relations_at(tracker, "서윤", 1)) == "Do-hyun: Older Brother"
 
 
-def test_legend_line_uses_the_field_name():
-    assert rt.legend_line() == ('- relations: "Name: role" means that named character is this entry\'s <role>; '
-                                '[formerly ...] is their earlier role.')
-    assert rt.legend_line("bonds").startswith('- bonds: "Name: role"')
-
-
 # --------------------------------------------------------------------------- reciprocal flips
 
 def _flip_tracker(order):
