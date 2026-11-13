@@ -9718,7 +9718,8 @@ class TranslationProcessor:
                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
                     # Check stop flag before retrying
                     if self.check_stop():
-                        print("❌ Translation stopped by user during timeout retry")
+                        # Stop closed the request: nothing timed out
+                        print("❌ Translation stopped by user during API call")
                         _restore_single_pass_glossary_in_progress(
                             self.out_dir,
                             chapter_num=actual_num,
@@ -10924,7 +10925,8 @@ class BatchTranslationProcessor:
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
                             # Check stop flag before retrying
                             if local_stop_cb():
-                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                # Stop closed the request: nothing timed out
+                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during API call")
                                 _restore_single_pass_glossary_in_progress(
                                     self.out_dir,
                                     chapter_num=actual_num,

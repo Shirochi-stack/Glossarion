@@ -397,6 +397,36 @@ def test_a_stopped_run_is_over_when_the_next_one_starts(fake, monkeypatch, caplo
         assert not [record.getMessage() for record in caplog.records if "Still waiting" in record.getMessage()]
 
 
+def test_a_waiting_request_ends_only_on_the_configured_timeout(fake, monkeypatch):
+    """A request of a batch waits its turn in silence. That wait had a fixed limit of 600 s which no setting
+    reached; the limit is the app's own timeout settings now, and there is none while they are off."""
+    for name in ("TRANSLATION_CANCELLED", "GRACEFUL_STOP", "GRACEFUL_STOP_COMPLETED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ollamapull, "ensure_ready", lambda *a, **k: None)
+    fake.loaded = True
+    fake.release.clear()
+    sent = []
+    real_post = ollamapull._post
+    monkeypatch.setattr(ollamapull, "_post", lambda *a, **k: sent.append(k.get("timeout")) or real_post(*a, **k))
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")  # Auto-retry Slow Processing off
+    monkeypatch.setenv("ENABLE_HTTP_TUNING", "0")  # HTTP timeout overrides off
+    threads, results, _errors = _run(1, lambda _i: _client()._send_ollamapull(MESSAGES, 0.2, 64, None))
+    assert _until(lambda: fake.open_chats == 1)
+    assert sent[-1][1] is None, "a limit on the wait although both timeout settings are off"
+    fake.release.set()
+    assert not _join(threads, 5) and results[0].content == "ok"
+
+    fake.release.clear()
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("ENABLE_HTTP_TUNING", "1")
+    monkeypatch.setenv("CONNECT_TIMEOUT", "5")
+    monkeypatch.setenv("READ_TIMEOUT", "0.5")
+    with pytest.raises(Exception, match="timed out"):
+        _client()._send_ollamapull(MESSAGES, 0.2, 64, None)
+    assert sent[-1] == (5.0, 0.5)
+
+
 # ---- 4. Block other scripts: our llama-server ----------------------------------------------------------------
 
 class FakeLlamaServer:

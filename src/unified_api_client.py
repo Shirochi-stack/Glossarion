@@ -29986,6 +29986,8 @@ class UnifiedClient:
                 stop_before_send=stopped_before_chat,
                 on_response_open=register,
                 on_response_close=unregister,
+                # The app's own timeout settings; with both off a request waits for Ollama without a limit.
+                timeout=self._get_timeouts(),
             )
             if repeat_watch is not None and repeat_watch.fired:
                 self._note_forced_truncation(repeat_watch)
