@@ -267,7 +267,7 @@ class _Exchange:
     the response headers with the first token (after the model has loaded and the prompt is processed), and
     ``requests`` hands out nothing to close until then. Offers what this module reads of ``requests.Response``."""
 
-    def __init__(self, url: str, payload: dict[str, Any], timeout: tuple[float, float]) -> None:
+    def __init__(self, url: str, payload: dict[str, Any], timeout: tuple[float, Optional[float]]) -> None:
         parts = urllib.parse.urlsplit(url)
         self._headers = {"Content-Type": "application/json"}
         if parts.username:
@@ -366,11 +366,15 @@ class _Exchange:
                 pass
 
 
+_NO_READ_LIMIT: tuple[float, Optional[float]] = (5.0, None)
+
+
 def _post(url: str, *, json: dict[str, Any], should_stop: Optional[Callable[[], bool]] = None,
-          timeout: tuple[float, float] = (5.0, 600.0)) -> _Exchange:
+          timeout: Optional[tuple[float, Optional[float]]] = None) -> _Exchange:
     """POST ``json`` and wait for the response headers. Stop (``should_stop``, ``cancel_stream``) closes the
-    connection in every phase, so nothing of a stopped request stays with the server."""
-    exchange = _Exchange(url, json, timeout)
+    connection in every phase, so nothing of a stopped request stays with the server. ``timeout``: (connect,
+    longest silence of the server), default ``_NO_READ_LIMIT``: a request of a batch waits its turn in silence."""
+    exchange = _Exchange(url, json, timeout or _NO_READ_LIMIT)
     with _cancel_lock:
         _open_exchanges.add(exchange)
     _watch_stop(exchange.abort, should_stop, exchange.finished)
@@ -1117,7 +1121,8 @@ def _loaded_entry(name: str) -> Optional[dict[str, Any]]:
 
 
 def _load_model(name: str, options: dict[str, Any], progress: Optional[Callable[[str], None]],
-                should_stop: Optional[Callable[[], bool]]) -> None:
+                should_stop: Optional[Callable[[], bool]],
+                timeout: Optional[tuple[float, Optional[float]]] = None) -> None:
     """Have Ollama load ``name`` with the request's ``options`` and wait until it is in memory. One request of a
     batch does it; the others wait here and find it loaded, so nothing is sent to a model that is still loading."""
     with _held(_load_lock, should_stop):
@@ -1136,7 +1141,7 @@ def _load_model(name: str, options: dict[str, Any], progress: Optional[Callable[
         started = time.monotonic()
         response: Optional[_Exchange] = None
         try:
-            response = _post(f"{base_url()}/api/generate", json=body, should_stop=should_stop)
+            response = _post(f"{base_url()}/api/generate", json=body, should_stop=should_stop, timeout=timeout)
             if not response.ok:
                 raise _http_error(response, "model load")
         except requests.RequestException as exc:
@@ -1525,8 +1530,12 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
          should_stop: Optional[Callable[[], bool]] = None,
          stop_before_send: Optional[Callable[[], bool]] = None,
          on_response_open: Optional[Callable[[requests.Response], None]] = None,
-         on_response_close: Optional[Callable[[requests.Response], None]] = None) -> dict[str, Any]:
+         on_response_close: Optional[Callable[[requests.Response], None]] = None,
+         timeout: Optional[tuple[float, Optional[float]]] = None) -> dict[str, Any]:
     """Send one native chat request and return text, finish reason, and usage.
+
+    ``timeout``: (connect, longest silence of Ollama) for the model load and the chat request; by default there
+    is no limit on the silence.
 
     ``ban_scripts``: the ``script_ban_core.SCRIPTS`` the answer may not use: the request goes to llama-server with a
     token ban (``_token_ban_request``), except tokens that only need ``ban_exempt_chars``. Only on this PC: a
@@ -1592,7 +1601,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                                                    progress, stop_before_send, ban_exempt_chars)
         else:
             _stop_ban_server()  # its GPU memory is Ollama's again
-            _load_model(name, payload["options"], progress, stop_before_send)
+            _load_model(name, payload["options"], progress, stop_before_send, timeout)
         _check_stop(stop_before_send)
         waiting, first = _wait_begin(
             ("response", name),
@@ -1604,7 +1613,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
             _chat_status(progress, f"Sending request for {name}; waiting for Ollama to respond.")
         reload_deadline = time.monotonic() + _LLAMA_START_SECONDS
         while True:
-            response = _post(chat_url, json=payload, should_stop=should_stop)
+            response = _post(chat_url, json=payload, should_stop=should_stop, timeout=timeout)
             if response.ok:
                 break
             error = _http_error(response, "chat")
