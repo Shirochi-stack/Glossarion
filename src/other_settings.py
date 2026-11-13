@@ -2566,6 +2566,10 @@ def _create_danger_zone_section(self, parent):
                         # Write temporary config with just the preserved keys
                         # This effectively resets everything else since the app will fill in defaults
                         from app_paths import _atomic_json_write
+                        # the reset config is a fresh one: the Relations Tracker toggles start on
+                        import relations_tracking
+                        keys_to_preserve[relations_tracking.FRESH_DEFAULTS_KEY] = list(
+                            relations_tracking.FRESH_DEFAULT_KEYS)
                         _atomic_json_write(config_path, keys_to_preserve)
                             
                         # Restart

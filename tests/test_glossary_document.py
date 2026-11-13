@@ -2987,7 +2987,12 @@ def test_editor_owner_matches_headless_owner(tmp_path, monkeypatch):
     pytest.importorskip("PySide6")
     from _headless_env import headless_owner
 
-    configs = [{}, {"custom_glossary_fields": ["fun fact"], "glossary_gender_noise_threshold": 25},
+    # {} with no config.json is a fresh config (owner_state seeds the Relations Tracker toggles); the
+    # editor owner gets a loaded config, where a fresh one carries the mark
+    configs = [{"glossary_relations_fresh_defaults": ["glossary_enable_relations_tracker",
+                                                      "glossary_minimal_include_relations"]},
+               {"model": "m"},
+               {"custom_glossary_fields": ["fun fact"], "glossary_gender_noise_threshold": 25},
                {"custom_entry_types": {"skills": {"enabled": True, "has_gender": False}},
                 "custom_field_description_removed": True, "enable_parallel_extraction": False,
                 "extraction_workers": 6, "glossary_gender_tracking_bias": "male"}]

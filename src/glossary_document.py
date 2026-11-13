@@ -326,6 +326,9 @@ class EditorOwner:
 
     def __init__(self, config=None):
         config = dict(config or {})
+        # a config carrying the fresh-config mark (_init_config_state: the Relations Tracker toggles on)
+        import relations_tracking
+        relations_tracking.apply_fresh_defaults(config)
         if (
             not config.get('custom_glossary_fields', [])
             and not config.get('custom_field_description_removed', False)

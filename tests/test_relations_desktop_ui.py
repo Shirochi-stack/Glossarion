@@ -287,6 +287,25 @@ def test_on_device_profile_is_not_offered_a_reset(qapp, isolated):
         window.deleteLater()
 
 
+def test_fresh_config_has_both_toggles_on_and_asks_no_prompt_question(qapp, isolated):
+    """A fresh desktop config (translator_gui marks it; relations_tracking.apply_fresh_defaults) shows both
+    toggles on with the amber relations column, and its built-in prompts need no reset."""
+    calls, answer = isolated
+    answer["value"] = True
+    config = {rt.FRESH_DEFAULTS_KEY: list(rt.FRESH_DEFAULT_KEYS)}
+    rt.apply_fresh_defaults(config)
+    window = _make_gui(config)
+    try:
+        assert window.enable_relations_tracker_checkbox.isChecked()
+        assert window.minimal_include_relations_checkbox.isChecked()
+        assert window.config["custom_glossary_fields"] == ["description", "relations"]
+        assert window._check_relations_prompts() == [] and calls == []
+        assert window.relations_warning_widget.isHidden()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_minimal_include_relations_checkbox(qapp, isolated):
     """Minimal tab: "Include Relations Column" right under "Include Description Column", off by default;
     it writes config + env at once and, turned on with the tracker on, checks the Minimal prompt."""

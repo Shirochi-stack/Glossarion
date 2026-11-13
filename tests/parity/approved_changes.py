@@ -4400,6 +4400,25 @@ def _minimal_relations_rows():
 _MINIMAL_RELATIONS_ROWS = _minimal_relations_rows()
 
 
+# 2026-11-13 a fresh config starts with both Relations Tracker toggles on: the startup config block
+# (owner_state._init_config_state, moved from TranslatorGUI.__init__) gets the fresh check before
+# "Ensure default values exist" (the pinned sources predate it).
+_FRESH_RELATIONS_LINES = (
+    "        # A fresh config (no config.json at all, or one Reset Settings to Defaults wrote) starts with the\n"
+    "        # Relations Tracker toggles on; an existing config (or a restored / set-aside one) is never touched.\n"
+    "        import relations_tracking\n"
+    "        if (not self.config and not getattr(self, '_config_recovery_notice', None)\n"
+    "                and not os.path.exists(self.config_file_path)):\n"
+    "            self.config[relations_tracking.FRESH_DEFAULTS_KEY] = list(relations_tracking.FRESH_DEFAULT_KEYS)\n"
+    "        relations_tracking.apply_fresh_defaults(self.config)\n"
+    "\n"
+)
+_FRESH_RELATIONS_PAIR = ("        # Ensure default values exist\n",
+                         _FRESH_RELATIONS_LINES + "        # Ensure default values exist\n")
+_FRESH_RELATIONS_ROWS = {'src/translator_gui.py': [_FRESH_RELATIONS_PAIR],
+                         'src/owner_state.py': [_FRESH_RELATIONS_PAIR]}
+
+
 # 2026-11-13 search/gemini overhaul (google.com AI Mode with attachments): the "Gemini Free Browser
 # Chunking" settings and their env vars are removed. Each row is deleted where a pinned source has it
 # (whole lines: the leading newline keeps a 12-space row from matching inside a 16-space one).
@@ -6127,6 +6146,15 @@ APPROVED = (
                 "sent as GLOSSARY_MINIMAL_INCLUDE_RELATIONS: Minimal Glossary Generation asks for and records "
                 "relations only with it and Enable Relations Tracker on (it used to follow the tracker alone)",
         "source": _MINIMAL_RELATIONS_ROWS,
+        "values": {},
+    },
+    {
+        "date": "2026-11-13",
+        "what": "A fresh config (no config.json, or one Reset Settings to Defaults wrote) starts with Enable "
+                "Relations Tracker and Include Relations Column on and the relations column in Custom Fields "
+                "(translator_gui marks it, relations_tracking.apply_fresh_defaults); existing configs are not "
+                "touched, so only the fresh_install scenario changes",
+        "source": _FRESH_RELATIONS_ROWS,
         "values": {},
     },
 )

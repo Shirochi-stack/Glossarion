@@ -58,6 +58,13 @@ def reset_settings(store: Any) -> dict:
         log.info("backup before reset failed: %s", exc)
     kept = preserved_reset_keys(store.snapshot())
     store.revert_to(kept)
+    # the reset config is a fresh one (the desktop reset writes the same mark): the Relations Tracker
+    # toggles follow the model until the user sets them
+    from glossarion_mobile.state.setting_writes import (RELATIONS_FRESH_DEFAULT_KEYS, RELATIONS_FRESH_KEY,
+                                                        apply_relations_fresh_defaults)
+
+    store.set(RELATIONS_FRESH_KEY, list(RELATIONS_FRESH_DEFAULT_KEYS))
+    apply_relations_fresh_defaults(store)
     store.flush()
     return kept
 

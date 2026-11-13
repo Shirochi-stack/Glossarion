@@ -565,6 +565,22 @@ class MobileConfigStore:
             self._saver.schedule()
         return changed
 
+    def seed(self, values: Mapping[str, Any]) -> list[str]:
+        """Top-level values a fresh config starts with (``setting_writes.apply_relations_fresh_defaults``):
+        held like loaded ones, so they are no change on their own (nothing is written for them) and go to
+        disk with the next real save. Observers are told."""
+        changed: list[str] = []
+        with self._lock:
+            for key, value in values.items():
+                if same_value(self._data.get(key, MISSING), value):
+                    continue
+                self._data[key] = copy.deepcopy(value)
+                self._baseline[key] = copy.deepcopy(value)
+                changed.append(key)
+        for key in changed:
+            self._notify(key, values[key])
+        return changed
+
     def unset(self, key: KeyPath) -> bool:
         """Remove ``key`` ("Reset to default": the owner then uses its fresh-install default).
 

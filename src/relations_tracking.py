@@ -51,6 +51,13 @@ CONFIG_FIELD = "glossary_relations_field_name"
 #: Minimal Glossary Generation asks for (and records) relations only with this on as well.
 ENV_MINIMAL = "GLOSSARY_MINIMAL_INCLUDE_RELATIONS"
 CONFIG_MINIMAL = "glossary_minimal_include_relations"
+#: A fresh config (no config.json yet, or one "Reset Settings to Defaults" wrote) starts with both
+#: toggles on (owner 2026-11-13: its prompts are the built-in ones, so no prompt reset is needed).
+#: The key lists the toggles that still take that default: desktop sets them on once at startup
+#: (``apply_fresh_defaults``); Glossarion Mobile keeps them following the selected model until the
+#: user sets one (``state.setting_writes``). An existing config never has it.
+FRESH_DEFAULTS_KEY = "glossary_relations_fresh_defaults"
+FRESH_DEFAULT_KEYS = (CONFIG_ENABLE, CONFIG_MINIMAL)
 
 TRACKER_SUFFIX = "_relations_tracker.json"
 TRACKER_BASENAME = "relations_tracker.json"
@@ -1616,6 +1623,37 @@ def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None
             return _PLACEHOLDER_LINE_RE.sub("", prompt_text).replace(RELATIONS_PLACEHOLDER, "")
         return prompt_text.replace(RELATIONS_PLACEHOLDER, text)
     return _PLACEHOLDER_LINE_RE.sub("", prompt_text)
+
+
+def fresh_config_fields(config: Mapping[str, Any]) -> List[Any]:
+    """The custom fields of ``config`` with the relations column added, as turning the tracker on adds it
+    (``enable_field_name`` + ``apply_relations_field``). An absent list is the desktop's own start
+    (owner_state: ["description"] unless the user removed it)."""
+    fields = config.get("custom_glossary_fields")
+    fields = list(fields) if isinstance(fields, (list, tuple)) else []
+    if not fields and not config.get("custom_field_description_removed", False):
+        fields = ["description"]
+    name = str(config.get(CONFIG_FIELD) or "").strip()
+    if not name or name.casefold() in RESERVED_FIELD_NAMES:
+        name = DEFAULT_FIELD_NAME
+    return apply_relations_field(fields, True, enable_field_name(fields, name))
+
+
+def apply_fresh_defaults(config: Any) -> bool:
+    """Desktop startup: a config carrying ``FRESH_DEFAULTS_KEY`` gets the listed toggles on (each one it
+    does not hold yet) and, with the tracker, the relations column; the key is consumed. Returns True
+    when it applied. A config without the key (every existing one) is not touched."""
+    if not isinstance(config, dict) or FRESH_DEFAULTS_KEY not in config:
+        return False
+    keys = config.pop(FRESH_DEFAULTS_KEY)
+    keys = [key for key in (keys if isinstance(keys, (list, tuple)) else ()) if key in FRESH_DEFAULT_KEYS]
+    for key in keys:
+        if key in config:
+            continue
+        if key == CONFIG_ENABLE:
+            config["custom_glossary_fields"] = fresh_config_fields(config)
+        config[key] = True
+    return True
 
 
 def minimal_relations_requested(settings: Optional[Mapping[str, Any]] = None) -> bool:

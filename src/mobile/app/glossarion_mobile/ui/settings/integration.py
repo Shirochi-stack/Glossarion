@@ -135,6 +135,15 @@ class SettingsFeature:
                 self.store.load()
             except Exception:
                 log.exception("loading config.json failed")
+            try:
+                # no config.json at all: a fresh config, whose Relations Tracker toggles follow the model
+                from glossarion_mobile.state.setting_writes import apply_relations_fresh_defaults
+
+                fresh = bool(getattr(self.store, "loaded", False)) and not self.store.exists \
+                    and not getattr(self.store, "load_error", None)
+                apply_relations_fresh_defaults(self.store, fresh=fresh)
+            except Exception:
+                log.exception("applying the fresh-config relations defaults failed")
             if self.prefs is not None:
                 try:
                     self.prefs.load()

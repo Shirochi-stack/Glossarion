@@ -660,6 +660,72 @@ def test_prompts_missing_placeholder():
     assert rt.prompts_missing_placeholder({}) == []
 
 
+def test_fresh_desktop_config_gets_both_toggles_and_the_relations_column():
+    config = {rt.FRESH_DEFAULTS_KEY: list(rt.FRESH_DEFAULT_KEYS)}
+    assert rt.apply_fresh_defaults(config) is True
+    assert config == {"custom_glossary_fields": ["description", "relations"],
+                      rt.CONFIG_ENABLE: True, rt.CONFIG_MINIMAL: True}
+    # a reset config (the kept keys plus the mark): the same, the kept keys untouched
+    reset = {"model": "m", "api_key": "k", rt.FRESH_DEFAULTS_KEY: list(rt.FRESH_DEFAULT_KEYS)}
+    assert rt.apply_fresh_defaults(reset) is True
+    assert reset["model"] == "m" and reset[rt.CONFIG_ENABLE] is True and rt.FRESH_DEFAULTS_KEY not in reset
+    # a toggle the config already holds is kept
+    held = {rt.FRESH_DEFAULTS_KEY: list(rt.FRESH_DEFAULT_KEYS), rt.CONFIG_ENABLE: False}
+    rt.apply_fresh_defaults(held)
+    assert held[rt.CONFIG_ENABLE] is False and held[rt.CONFIG_MINIMAL] is True and "custom_glossary_fields" not in held
+
+
+def test_existing_desktop_config_is_not_touched():
+    import copy
+
+    for config in ({}, {"model": "m"}, {"model": "m", rt.CONFIG_ENABLE: False},
+                   {"custom_glossary_fields": ["description"], "auto_update_check": True}):
+        before = copy.deepcopy(config)
+        assert rt.apply_fresh_defaults(config) is False
+        assert config == before and json.dumps(config) == json.dumps(before)
+
+
+def test_desktop_startup_seeds_only_a_fresh_config(tmp_path, monkeypatch):
+    """owner_state._init_config_state (TranslatorGUI.__init__'s config block; HeadlessOwner runs it too)."""
+    import app_paths
+    from headless_owner import HeadlessOwner
+
+    for key in ("GLOSSARION_APP_DIR", "GLOSSARION_LIBRARY_DIR", "OUTPUT_DIRECTORY"):
+        (tmp_path / key).mkdir()
+        monkeypatch.setenv(key, str(tmp_path / key))
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(app_paths, "CONFIG_FILE", str(config_file))
+    fresh = HeadlessOwner({})  # no config.json
+    assert fresh.config[rt.CONFIG_ENABLE] is True and fresh.config[rt.CONFIG_MINIMAL] is True
+    assert fresh.config["custom_glossary_fields"] == ["description", "relations"]
+    assert fresh.custom_glossary_fields == ["description", "relations"]
+    assert fresh.glossary_enable_relations_tracker_var is True
+    assert fresh.glossary_minimal_include_relations_var is True
+    assert rt.FRESH_DEFAULTS_KEY not in fresh.config
+    # an existing config without the keys: read as off, nothing added
+    old = HeadlessOwner({"model": "gpt-x"})
+    assert not old.config.get(rt.CONFIG_ENABLE) and not old.config.get(rt.CONFIG_MINIMAL)
+    assert old.glossary_enable_relations_tracker_var is False and old.glossary_minimal_include_relations_var is False
+    assert "relations" not in old.config.get("custom_glossary_fields", [])
+    # an empty config while config.json exists (unreadable and protected): not fresh
+    config_file.write_text("{}", encoding="utf-8")
+    assert not HeadlessOwner({}).config.get(rt.CONFIG_ENABLE)
+    # the reset mark (Reset Settings to Defaults) works on a non-empty config too
+    reset = HeadlessOwner({"model": "gpt-x", rt.FRESH_DEFAULTS_KEY: list(rt.FRESH_DEFAULT_KEYS)})
+    assert reset.config[rt.CONFIG_ENABLE] is True and reset.config[rt.CONFIG_MINIMAL] is True
+
+
+def test_desktop_reset_writes_the_fresh_mark():
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    settings = (src / "other_settings.py").read_text(encoding="utf-8-sig")
+    start = settings.index("    def _reset_config_to_defaults():")
+    reset = settings[start:settings.index("reset_btn = QPushButton", start)]
+    mark = reset.index("keys_to_preserve[relations_tracking.FRESH_DEFAULTS_KEY]")
+    assert mark < reset.index("_atomic_json_write(config_path, keys_to_preserve)")
+
+
 def test_minimal_prompt_is_checked_only_with_its_toggle(monkeypatch):
     prompts = {"balanced_full": "b", "minimal": "m"}
     assert rt.prompts_to_check(prompts, {rt.CONFIG_MINIMAL: False}) == {"balanced_full": "b"}
