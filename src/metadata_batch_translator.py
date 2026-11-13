@@ -64,6 +64,7 @@ _GLOSSARY_CONFIG_OPTIONS = {
     'glossary_enable_relations_tracker': 'GLOSSARY_ENABLE_RELATIONS_TRACKER',
     'glossary_relations_history_mode': 'GLOSSARY_RELATIONS_HISTORY_MODE',
     'glossary_relations_field_name': 'GLOSSARY_RELATIONS_FIELD',
+    'glossary_placeholder_texts': 'GLOSSARY_PLACEHOLDER_TEXTS',
     'compress_glossary_strict_matching_mode': 'COMPRESS_GLOSSARY_STRICT_MATCHING_MODE',
     'compress_glossary_strict_matching_custom_types': 'COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES',
     'compress_glossary_consider_translated_column': 'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN',

@@ -4344,6 +4344,28 @@ _RELATIONS_TRACKER_ROWS = {'src/owner_state.py': [('        self.glossary_gender
                             "'strict', str),\n")]}
 
 
+# 2026-11-13 editable placeholder texts (glossary_placeholder_texts / GLOSSARY_PLACEHOLDER_TEXTS): the row
+# goes after the GLOSSARY_RELATIONS_FIELD row added above; each pair is (row before + row after) ->
+# (before + new row + after), so it applies at every pin and is a no-op where the row already exists.
+def _placeholder_texts_rows():
+    value = "json.dumps(self.config.get('glossary_placeholder_texts') or {}, ensure_ascii=False)"
+    dict_field = "'GLOSSARY_RELATIONS_FIELD': str(self.config.get('glossary_relations_field_name', 'relations')),\n"
+    dict_next = "'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, 'glossary_partial_ratio_gender_only_var', False) else '0',\n"
+    tuple_field = "('GLOSSARY_RELATIONS_FIELD', str(self.config.get('glossary_relations_field_name', 'relations'))),\n"
+    tuple_next = "('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),\n"
+    pairs = []
+    for indent in (" " * 12, " " * 20):
+        pairs.append((indent + dict_field + indent + dict_next,
+                      indent + dict_field + indent + f"'GLOSSARY_PLACEHOLDER_TEXTS': {value},\n" + indent + dict_next))
+    indent = " " * 12
+    pairs.append((indent + tuple_field + indent + tuple_next,
+                  indent + tuple_field + indent + f"('GLOSSARY_PLACEHOLDER_TEXTS', {value}),\n" + indent + tuple_next))
+    return {'src/run_env.py': pairs, 'src/translator_gui.py': pairs}
+
+
+_PLACEHOLDER_TEXTS_ROWS = _placeholder_texts_rows()
+
+
 # 2026-11-13 search/gemini overhaul (google.com AI Mode with attachments): the "Gemini Free Browser
 # Chunking" settings and their env vars are removed. Each row is deleted where a pinned source has it
 # (whole lines: the leading newline keeps a 12-space row from matching inside a 16-space one).
@@ -6053,6 +6075,16 @@ APPROVED = (
                 "(glossary_relations_field_name, relations): the glossary AI returns a relations column that is "
                 "kept in a *_relations_tracker.json sidecar, never in the glossary file",
         "source": _RELATIONS_TRACKER_ROWS,
+        "values": {},
+    },
+    {
+        "date": "2026-11-13",
+        "what": "New glossary setting glossary_placeholder_texts ({}: none stored), sent as GLOSSARY_PLACEHOLDER_TEXTS "
+                "(JSON): the texts the user wrote for the editable glossary prompt placeholders "
+                "({relations_instruction}, {subject_tracking_instruction}, {description_example}, ...) in Glossary "
+                "Manager > right-click 'Available placeholders' > 'Edit placeholder text…'. With nothing stored "
+                "every prompt is unchanged",
+        "source": _PLACEHOLDER_TEXTS_ROWS,
         "values": {},
     },
 )

@@ -392,6 +392,8 @@ SECTION_OVERRIDES = {
     "custom_field_description_removed": "internal.state",
     # the Relations Tracker's column name: renamed on the locked row of the Custom Fields editor
     "glossary_relations_field_name": "internal.state",
+    # the user-edited placeholder texts (Glossary Manager > right-click "Available placeholders")
+    "glossary_placeholder_texts": "internal.state",
     # legacy keys that desktop startup migrates or removes (kept so old configs round-trip)
     "conservative_batching": "internal.state",
     "conservative_batch_multiplier": "internal.state",

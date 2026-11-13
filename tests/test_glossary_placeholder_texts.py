@@ -1,0 +1,550 @@
+# -*- coding: utf-8 -*-
+"""Editable placeholder texts (owner 2026-11-13): "let users update the available placeholder prompts".
+
+The fixed texts that ``{relations_instruction}``, ``{subject_tracking_instruction}``, ``{description_example}``
+and the other editable placeholders expand to can be replaced from Glossary Manager (right-click the
+"Available placeholders" line > "Edit placeholder text…"). The texts are stored in the config key
+``glossary_placeholder_texts`` and reach the extraction through ``GLOSSARY_PLACEHOLDER_TEXTS`` (JSON).
+
+With nothing stored every prompt is byte-for-byte what it was before the feature: the digests in
+``BASELINE_DIGESTS`` were recorded from origin/main aae300f4 (before the change) with ``capture_prompts``.
+
+Run (repository root)::
+
+    python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \\
+        tests/test_glossary_placeholder_texts.py
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("GLOSSARION_HTTP_LOG", "0")
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC = REPO_ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+ENV = "GLOSSARY_PLACEHOLDER_TEXTS"
+CONFIG_KEY = "glossary_placeholder_texts"
+
+_PROMPT_ENV_KEYS = (
+    "GLOSSARY_SYSTEM_PROMPT", "GLOSSARY_CUSTOM_FIELDS", "GLOSSARY_CUSTOM_ENTRY_TYPES",
+    "GLOSSARY_TARGET_LANGUAGE", "GLOSSARY_INCLUDE_GENDER_CONTEXT", "GLOSSARY_INCLUDE_DESCRIPTION",
+    "GLOSSARY_ENABLE_RELATIONS_TRACKER", "GLOSSARY_RELATIONS_FIELD", "GLOSSARY_RELATIONS_HISTORY_MODE",
+    "GLOSSARY_INCLUDE_BOOK_TITLE", "GLOSSARY_USE_SMART_FILTER", "GLOSSARY_FORCE_DISABLE_SMART_FILTER",
+    ENV,
+)
+
+#: Entry types without any ``has_gender``: ``{gender_instruction}`` expands to nothing.
+NO_GENDER_TYPES = {"character": {"enabled": True, "has_gender": False},
+                   "term": {"enabled": True, "has_gender": False}}
+
+
+# =============================================================================================
+# prompt capture (the real Balanced/Full build_prompt and the real Minimal request path)
+# =============================================================================================
+
+def _set_env(values):
+    """Set the prompt env to exactly ``values`` (others removed); returns a restore callable."""
+    saved = {key: os.environ.get(key) for key in set(_PROMPT_ENV_KEYS) | set(values)}
+    for key in _PROMPT_ENV_KEYS:
+        os.environ.pop(key, None)
+    os.environ.update({key: str(value) for key, value in values.items()})
+
+    def restore():
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return restore
+
+
+def balanced_prompt(env):
+    import extract_glossary_from_epub as eg
+
+    restore = _set_env(env)
+    try:
+        system, _user = eg.build_prompt("서윤은 도현을 보았다.")
+    finally:
+        restore()
+    return system
+
+
+def minimal_prompt(env, prompt=None):
+    """The system message the Minimal path sends (GlossaryManager._extract_with_custom_prompt)."""
+    import GlossaryManager as GM
+    import extract_glossary_from_epub as eg
+    import unified_api_client as uac
+
+    sent = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.context = None
+
+    def send(messages, **kwargs):
+        sent.append(messages[0]["content"])
+        return SimpleNamespace(content="type,raw_name,translated_name\ncharacter,서윤,Seoyun"), "stop", None
+
+    extra = {"MODEL": "local/Qwen3.5-0.8B-UD-Q4_K_XL", "API_KEY": "test-key", "GLOSSARY_DEFER_SAVE": "1",
+             "_CHUNK_ALREADY_FILTERED": "1", "THREAD_SUBMISSION_DELAY_SECONDS": "0",
+             "GLOSSARY_MAX_OUTPUT_TOKENS": "4096"}
+    saved_extra = {key: os.environ.get(key) for key in extra}
+    os.environ.update(extra)
+    saved_attrs = (uac.UnifiedClient, GM.send_with_interrupt, GM._stop_requested, GM._get_stop_file_path)
+    uac.UnifiedClient, GM.send_with_interrupt = FakeClient, send
+    GM._stop_requested, GM._get_stop_file_path = False, (lambda: None)
+    restore = _set_env(env)
+    try:
+        GM._extract_with_custom_prompt(prompt or eg.DEFAULT_AUTO_GLOSSARY_PROMPT,
+                                       "서윤은 도현을 보았다.\n=== CONTEXT 1 END ===", "korean",
+                                       1, 50, 50, None, ".", raise_on_failure=True)
+    finally:
+        restore()
+        uac.UnifiedClient, GM.send_with_interrupt, GM._stop_requested, GM._get_stop_file_path = saved_attrs
+        for key, value in saved_extra.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    assert len(sent) == 1
+    return sent[0]
+
+
+def scenarios():
+    """name -> (kind, env): description on/off, gender context on/off, Relations Tracker on/off."""
+    out = {}
+    for desc in (0, 1):
+        for gender in (0, 1):
+            for relations in (0, 1):
+                tag = f"desc{desc}_gender{gender}_rel{relations}"
+                out["balanced_" + tag] = ("balanced", {
+                    "GLOSSARY_TARGET_LANGUAGE": "English",
+                    "GLOSSARY_INCLUDE_BOOK_TITLE": "0",
+                    "GLOSSARY_CUSTOM_FIELDS": json.dumps(["description"] if desc else []),
+                    # gender off: no entry type has gender, so {gender_instruction} is empty
+                    "GLOSSARY_CUSTOM_ENTRY_TYPES": json.dumps({} if gender else NO_GENDER_TYPES),
+                    "GLOSSARY_INCLUDE_GENDER_CONTEXT": str(gender),
+                    "GLOSSARY_ENABLE_RELATIONS_TRACKER": str(relations),
+                })
+                out["minimal_" + tag] = ("minimal", {
+                    "GLOSSARY_TARGET_LANGUAGE": "English",
+                    "GLOSSARY_INCLUDE_BOOK_TITLE": "0",
+                    "GLOSSARY_INCLUDE_DESCRIPTION": str(desc),
+                    "GLOSSARY_INCLUDE_GENDER_CONTEXT": str(gender),
+                    "GLOSSARY_ENABLE_RELATIONS_TRACKER": str(relations),
+                })
+    return out
+
+
+def capture_prompts(extra_env=None):
+    prompts = {}
+    for name, (kind, env) in scenarios().items():
+        env = dict(env, **(extra_env or {}))
+        prompts[name] = balanced_prompt(env) if kind == "balanced" else minimal_prompt(env)
+    return prompts
+
+
+def digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+#: sha256 of every scenario prompt on origin/main aae300f4, before editable placeholder texts existed.
+#: A deliberate change of a default prompt or default placeholder text must update these.
+BASELINE_DIGESTS = {
+    'balanced_desc0_gender0_rel0': '8ed32e943e7da11540627a982cb052591e6306b06902c6b6acff757d253e4d36',
+    'minimal_desc0_gender0_rel0': 'a229226ab9748b5db444ef1a8a564038c4f3a37dfd0b824de2c41aeafcbb2467',
+    'balanced_desc0_gender0_rel1': '78bf05669c32456d83657462901534a36412add23ba6c90fb5db0fbe4b737fee',
+    'minimal_desc0_gender0_rel1': 'cb3972220439b055ce335d7c9cca17e4fe822ed3f68b6400b53f14386ae9c6a9',
+    'balanced_desc0_gender1_rel0': 'ace88a61fb379bc862e261e5e918f0d2b42e4cebbe2f7d3ca2ac425619a88fc4',
+    'minimal_desc0_gender1_rel0': '6b2df2c634c9927cd16a0b5e19814047d853844cace328a405bf45c95d530526',
+    'balanced_desc0_gender1_rel1': '64b63e89ff06f4a97942aebe30aa2d46fa960abd8453490050f3958c5c059bec',
+    'minimal_desc0_gender1_rel1': '8c6cca561c3290bbd270c28b6d8a37fa07b377ed173e4cec17e43e8474af6508',
+    'balanced_desc1_gender0_rel0': '5f22426aa7993ac3188d1f420de5d26ea766fed06782e46e87c4a5e2ac38776a',
+    'minimal_desc1_gender0_rel0': '304e8160b556070b21d425e50d659cdf4c4c291d72953c4ba540cfa2abc23291',
+    'balanced_desc1_gender0_rel1': '059f1b029846756a69ef2d209a39c9c59a5326728218ca63be98682874ae3ede',
+    'minimal_desc1_gender0_rel1': '9788369fdf96cf40203d3f6d40e8ab1163c5c7e3102a5ea81c38ab57b6376ec6',
+    'balanced_desc1_gender1_rel0': 'd6383bc77291767d7b2a8c2ba78d8d835b2d528ca24363eedfecff7fa15934fe',
+    'minimal_desc1_gender1_rel0': '96289a686645912f070833bdcbe559c097a8b60d06fd1d8c89cc330393fcf171',
+    'balanced_desc1_gender1_rel1': 'f56a3425c75b158f6b56f20f4821d1b3401ef7d6f75b11b6095ba508ec2a6cb0',
+    'minimal_desc1_gender1_rel1': '3b31011afe5cbea04f46f130386bf125719758834aeeec7c090160895ae3514b',
+}
+
+EDITABLE = [
+    "description_mandatory", "description_detailed", "description_in_language", "description_excluded_note",
+    "description_example", "example", "description_name_split_example", "name_split_example",
+    "gender_instruction", "subject_tracking_instruction", "relations_instruction",
+]
+
+
+@pytest.fixture(autouse=True)
+def isolated(tmp_path, monkeypatch):
+    for key, sub in (("GLOSSARION_APP_DIR", "app"), ("GLOSSARION_LIBRARY_DIR", "lib"),
+                     ("OUTPUT_DIRECTORY", "out")):
+        path = tmp_path / sub
+        path.mkdir()
+        monkeypatch.setenv(key, str(path))
+    for key in _PROMPT_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    yield
+
+
+@pytest.fixture(scope="module")
+def eg():
+    import extract_glossary_from_epub
+    return extract_glossary_from_epub
+
+
+# =============================================================================================
+# nothing stored: byte-for-byte the prompts of before
+# =============================================================================================
+
+@pytest.mark.parametrize("extra_env", [None, {ENV: "{}"}, {ENV: "not json"}],
+                         ids=["no-env", "empty-dict", "bad-json"])
+def test_default_prompts_are_byte_identical_to_before(extra_env):
+    prompts = capture_prompts(extra_env)
+    assert set(prompts) == set(BASELINE_DIGESTS)
+    changed = [name for name, text in prompts.items() if digest(text) != BASELINE_DIGESTS[name]]
+    assert not changed
+
+
+def test_texts_equal_to_the_defaults_change_nothing(eg):
+    stored = {item["name"]: item["default"] for item in eg.editable_placeholders()}
+    prompts = capture_prompts({ENV: json.dumps(stored, ensure_ascii=False)})
+    assert {name: digest(text) for name, text in prompts.items()} == BASELINE_DIGESTS
+
+
+def test_the_scenarios_cover_every_switch():
+    prompts = capture_prompts()
+    assert len(set(prompts.values())) == len(prompts)  # every switch changes the prompt
+    on = prompts["balanced_desc1_gender1_rel1"]
+    assert "The `relations` column:" in on and "The gender column applies only to" in on
+    off = prompts["balanced_desc0_gender0_rel0"]
+    assert "`relations`" not in off and "The gender column applies only to" not in off
+    assert "Subject Tracking" in prompts["minimal_desc0_gender1_rel0"]
+    assert "Subject Tracking" not in prompts["minimal_desc0_gender0_rel0"]
+
+
+# =============================================================================================
+# the lookup
+# =============================================================================================
+
+def test_editable_placeholders_list(eg):
+    items = eg.editable_placeholders()
+    assert [item["name"] for item in items] == EDITABLE
+    assert all(item["note"] for item in items)
+    defaults = {item["name"]: item["default"] for item in items}
+    assert defaults["relations_instruction"].endswith("`{example_row_1}` and `{example_row_2}`")
+    assert defaults["gender_instruction"] == (
+        "The gender column applies only to {gender_types} entries — determine gender from context clues, "
+        "leave empty if insufficient.\nFor all other entry types, leave gender empty.")
+    for dynamic in ("fields", "fields1", "language", "entries", "min_frequency", "max_names", "max_titles",
+                    "marker"):
+        assert dynamic not in defaults
+
+
+def test_overrides_parse_tolerantly(eg, monkeypatch):
+    monkeypatch.setenv(ENV, "{broken")
+    assert eg.placeholder_text_overrides() == {}
+    assert eg.placeholder_text("example", "DEFAULT") == "DEFAULT"
+    monkeypatch.setenv(ENV, json.dumps(["not", "a", "dict"]))
+    assert eg.placeholder_text_overrides() == {}
+    monkeypatch.setenv(ENV, json.dumps({"example": "Mine", "bad": 3, "empty": ""}))
+    assert eg.placeholder_text_overrides() == {"example": "Mine", "empty": ""}
+    assert eg.placeholder_text("example", "DEFAULT") == "Mine"
+    assert eg.placeholder_text("empty", "DEFAULT") == ""
+    monkeypatch.delenv(ENV)
+    assert eg.placeholder_text("example", "DEFAULT") == "DEFAULT"
+
+
+# =============================================================================================
+# each override changes its own expansion, and only that
+# =============================================================================================
+
+def _scenario_env(name):
+    return scenarios()[name][1]
+
+
+#: placeholder -> a scenario in which the default prompt expands it, and the default text it expands to
+_ACTIVE_IN = {
+    "description_mandatory": "balanced_desc1_gender0_rel0",
+    "description_detailed": "balanced_desc1_gender0_rel0",
+    "description_in_language": "balanced_desc1_gender0_rel0",
+    "description_excluded_note": "balanced_desc1_gender0_rel0",
+    "description_example": "minimal_desc1_gender0_rel0",
+    "example": "minimal_desc0_gender0_rel0",
+    "description_name_split_example": "minimal_desc1_gender0_rel0",
+    "name_split_example": "minimal_desc0_gender0_rel0",
+    "gender_instruction": "balanced_desc0_gender1_rel0",
+    "subject_tracking_instruction": "minimal_desc0_gender1_rel0",
+    "relations_instruction": "minimal_desc0_gender0_rel1",
+}
+
+
+def _prompt(name, stored=None):
+    kind, env = scenarios()[name]
+    if stored is not None:
+        env = dict(env, **{ENV: json.dumps(stored, ensure_ascii=False)})
+    return balanced_prompt(env) if kind == "balanced" else minimal_prompt(env)
+
+
+@pytest.mark.parametrize("placeholder", EDITABLE)
+def test_an_override_replaces_only_its_own_text(eg, placeholder):
+    scenario = _ACTIVE_IN[placeholder]
+    default = {item["name"]: item["default"] for item in eg.editable_placeholders()}[placeholder]
+    before = _prompt(scenario)
+    marker = f"MY-OWN-{placeholder.upper()}-TEXT"
+    after = _prompt(scenario, {placeholder: marker})
+    assert marker in after and marker not in before
+    if placeholder == "gender_instruction":
+        expected_text = default.replace("{gender_types}", "character, titles, nicknames")
+    elif placeholder == "relations_instruction":
+        start = before.index("Add a `relations` column")
+        end = before.index("\n", before.index("Example rows that mirror each other"))
+        expected_text = before[start:end]
+        marker = "Add a `relations` column as one extra LAST column of every row. " + marker
+    else:
+        expected_text = default
+    assert expected_text in before
+    assert after == before.replace(expected_text, marker, 1)
+
+
+@pytest.mark.parametrize("placeholder", [p for p in EDITABLE if p != "gender_instruction"])
+def test_an_empty_override_expands_to_nothing(eg, placeholder):
+    scenario = _ACTIVE_IN[placeholder]
+    default = {item["name"]: item["default"] for item in eg.editable_placeholders()}[placeholder]
+    after = _prompt(scenario, {placeholder: ""})
+    if placeholder == "description_in_language":
+        assert "Critical Requirement: The translated name column must be in" in after
+        return
+    if placeholder == "description_excluded_note":
+        assert '"Still", "But"\n' in after
+        return
+    probe = default.strip().splitlines()[0][:40] if placeholder != "relations_instruction" else "The `relations` column"
+    assert probe not in after
+    # a placeholder that owns its line drops the line: no orphan "- " bullet is left behind
+    assert "\n- \n" not in after and not after.endswith("\n- ")
+    if placeholder == "relations_instruction":
+        # Minimal declares the extra column in front of the text, so that sentence stays
+        assert "Add a `relations` column as one extra LAST column of every row. " in after
+
+
+def test_empty_relations_text_drops_the_line_when_nothing_is_declared(eg):
+    after = _prompt("balanced_desc0_gender0_rel1", {"relations_instruction": ""})
+    assert "relations_instruction" not in after
+    assert "\n- \n" not in after
+    assert "The `relations` column:" not in after
+
+
+def test_gender_override_uses_gender_types_and_stays_empty_without_gender(eg):
+    stored = {"gender_instruction": "Gender only for: {gender_types}."}
+    on = _prompt("balanced_desc0_gender1_rel0", stored)
+    assert "Gender only for: character, titles, nicknames." in on
+    off = _prompt("balanced_desc0_gender0_rel0", stored)
+    assert "Gender only for" not in off
+    assert digest(off) == BASELINE_DIGESTS["balanced_desc0_gender0_rel0"]
+
+
+def test_relations_override_with_and_without_tokens(eg, monkeypatch):
+    import relations_tracking as rt
+
+    with_tokens = "Column {field} in {language}: `{example_row_1}` / `{example_row_2}`"
+    text = rt.instruction_text("bonds", "German", template=with_tokens)
+    assert text == ("Column bonds in German: `character,이히리ᐐ 나애,Dihirit Ade,female,뢤사난: Older Sister` / "
+                    "`character,뢤사난,Kim Sang-hyu,male,이히리ᐐ 나애: Younger Brother`")
+    assert rt.instruction_text("bonds", "German", template="No tokens here.") == "No tokens here."
+    assert rt.instruction_text("bonds", "German", declare_column=True, template="Plain.") == (
+        "Add a `bonds` column as one extra LAST column of every row. Plain.")
+    assert rt.instruction_text("bonds", "German", template=None) == rt.instruction_text("bonds", "German")
+
+    after = _prompt("balanced_desc0_gender0_rel1", {"relations_instruction": with_tokens})
+    assert "- Column relations in English: `character,이히리ᐐ 나애,Dihirit Ade,female,뢤사난: Older Sister`" in after
+    assert "{example_row_1}" not in after and "{field}" not in after
+
+
+def test_relations_template_uses_the_new_token_names():
+    import relations_tracking as rt
+
+    assert "{example_row_1}" in rt._INSTRUCTION_TEMPLATE and "{example_row_2}" in rt._INSTRUCTION_TEMPLATE
+    assert "{row_a}" not in rt._INSTRUCTION_TEMPLATE and "{row_b}" not in rt._INSTRUCTION_TEMPLATE
+    assert "{example_row" not in rt.instruction_text("relations", "English")
+
+
+def test_relations_tracking_does_not_import_the_extractor():
+    source = (SRC / "relations_tracking.py").read_text(encoding="utf-8")
+    assert "extract_glossary_from_epub" not in source
+
+
+# =============================================================================================
+# Glossary Manager: right-click menu and the Placeholder Text dialog (offscreen Qt)
+# =============================================================================================
+
+@pytest.fixture(scope="module")
+def qapp():
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def gui(qapp, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+    from GlossaryManager_GUI import GlossaryManagerMixin
+    import review_dialog
+
+    answers = {"value": True, "asked": []}
+
+    def _confirm(parent, title, text):
+        answers["asked"].append(text)
+        return answers["value"]
+
+    monkeypatch.setattr(review_dialog, "confirm_prompt_profile_action", _confirm)
+
+    class Harness(GlossaryManagerMixin, QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.config = {}
+            self.saves = 0
+            self._screen = QApplication.primaryScreen().geometry()
+            self.dialog = self
+
+        def save_config(self, show_message=False):
+            self.saves += 1
+            return True
+
+        def append_log(self, text):
+            pass
+
+    window = Harness()
+    window.pages = {}
+    for name in ("_setup_manual_glossary_tab", "_setup_auto_glossary_tab"):
+        page = QWidget()
+        getattr(window, name)(page)
+        window.pages[name] = page
+    window.answers = answers
+    yield window
+    dialog = getattr(window, "_placeholder_text_dialog", None)
+    if dialog is not None:
+        try:
+            dialog.hide()
+            dialog.deleteLater()
+        except RuntimeError:
+            pass
+    window.deleteLater()
+
+
+def _placeholder_line(page):
+    from PySide6.QtWidgets import QLineEdit
+    lines = [w for w in page.findChildren(QLineEdit) if w.text().startswith("Available placeholders:")
+             and "{relations_instruction}" in w.text()]
+    assert len(lines) == 1
+    return lines[0]
+
+
+@pytest.mark.parametrize("tab", ["_setup_manual_glossary_tab", "_setup_auto_glossary_tab"])
+def test_both_placeholder_lines_have_the_new_action(gui, tab):
+    from PySide6.QtCore import Qt
+
+    line = _placeholder_line(gui.pages[tab])
+    assert line.contextMenuPolicy() == Qt.CustomContextMenu
+    menu = gui._placeholder_line_menu(line)
+    texts = [a.text().replace("&", "") for a in menu.actions() if not a.isSeparator()]
+    assert any(t.startswith("Copy") for t in texts)
+    assert any(t.startswith("Select All") for t in texts)
+    assert texts[-1] == "Edit placeholder text…"
+    menu.actions()[-1].trigger()
+    dialog = gui._placeholder_text_dialog
+    assert dialog.windowTitle() == "Placeholder Text"
+    assert not dialog.isModal()
+    menu.deleteLater()
+
+
+def test_dialog_lists_exactly_the_editable_placeholders(gui, eg):
+    dialog = gui._open_placeholder_text_dialog()
+    combo = dialog.placeholder_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == EDITABLE
+    assert [combo.itemText(i) for i in range(combo.count())] == ["{" + n + "}" for n in EDITABLE]
+    assert not combo.itemIcon(0).isNull()  # Halgakos.ico, like the profile dropdown
+    assert dialog.placeholder_editor.toPlainText() == eg.editable_placeholders()[0]["default"]
+    assert dialog.placeholder_status.text() == "Default text"
+    assert dialog.placeholder_note.text()
+
+
+def test_save_and_reset_write_config_and_env(gui, eg):
+    dialog = gui._open_placeholder_text_dialog()
+    combo, editor = dialog.placeholder_combo, dialog.placeholder_editor
+    buttons = dialog.placeholder_buttons
+    combo.setCurrentIndex(EDITABLE.index("relations_instruction"))
+    default = editor.toPlainText()
+    assert default == eg.editable_placeholders()[-1]["default"]
+
+    editor.setPlainText("Relations in {language}.")
+    assert dialog.placeholder_status.text() == "Default text (unsaved changes)"
+    saves = gui.saves
+    buttons["save"].click()
+    assert gui.config[CONFIG_KEY] == {"relations_instruction": "Relations in {language}."}
+    assert json.loads(os.environ[ENV]) == {"relations_instruction": "Relations in {language}."}
+    assert gui.saves == saves + 1
+    assert dialog.placeholder_status.text() == "Edited"
+    assert eg.placeholder_text("relations_instruction", "x") == "Relations in {language}."
+
+    # empty text is stored (the placeholder expands to nothing)
+    combo.setCurrentIndex(EDITABLE.index("example"))
+    editor.setPlainText("")
+    buttons["save"].click()
+    assert gui.config[CONFIG_KEY] == {"relations_instruction": "Relations in {language}.", "example": ""}
+
+    # a text equal to the default is not stored
+    editor.setPlainText(eg.editable_placeholders()[EDITABLE.index("example")]["default"])
+    buttons["save"].click()
+    assert gui.config[CONFIG_KEY] == {"relations_instruction": "Relations in {language}."}
+
+    combo.setCurrentIndex(EDITABLE.index("relations_instruction"))
+    assert editor.toPlainText() == "Relations in {language}."
+    buttons["reset"].click()
+    assert gui.answers["asked"]  # Reset of a stored text asks first
+    assert gui.config[CONFIG_KEY] == {}
+    assert json.loads(os.environ[ENV]) == {}
+    assert editor.toPlainText() == default
+    assert dialog.placeholder_status.text() == "Default text"
+
+
+def test_switching_keeps_unsaved_drafts_and_close_asks(gui):
+    dialog = gui._open_placeholder_text_dialog()
+    combo, editor = dialog.placeholder_combo, dialog.placeholder_editor
+    combo.setCurrentIndex(EDITABLE.index("example"))
+    editor.setPlainText("draft text")
+    combo.setCurrentIndex(EDITABLE.index("gender_instruction"))
+    combo.setCurrentIndex(EDITABLE.index("example"))
+    assert editor.toPlainText() == "draft text"
+    assert dialog.placeholder_status.text() == "Default text (unsaved changes)"
+    assert CONFIG_KEY not in gui.config
+
+    gui.answers["value"] = False  # "Discard the unsaved changes?" -> No: the dialog stays open
+    dialog.placeholder_buttons["close"].click()
+    assert dialog.isVisible()
+    assert editor.toPlainText() == "draft text"
+    gui.answers["value"] = True
+    dialog.placeholder_buttons["close"].click()
+    assert not dialog.isVisible()
+    assert CONFIG_KEY not in gui.config
+
+    again = gui._open_placeholder_text_dialog()
+    assert again is dialog
+    assert editor.toPlainText() != "draft text"  # drafts end at Close
+
+
+if __name__ == "__main__":  # print the digests (used to record BASELINE_DIGESTS before the change)
+    for _name, _text in capture_prompts().items():
+        print(f"    {_name!r}: {digest(_text)!r},")
