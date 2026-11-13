@@ -174,7 +174,8 @@ def test_a_remote_ollama_runs_unbanned_and_says_so(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(ollamapull.requests, "post", lambda url, **kw: posted.append(url) or Response())
+    monkeypatch.setattr(ollamapull, "_post", lambda url, **kw: posted.append(url) or Response())
+    monkeypatch.setattr(ollamapull, "_load_model", lambda *_args: None)
     result = ollamapull.chat("ollamapull/m", [{"role": "user", "content": "x"}], stream=False, ban_scripts=ENGLISH,
                              progress=status.append)
     assert result["content"] == "hi" and posted == ["http://192.168.1.5:11434/api/chat"]

@@ -132,7 +132,8 @@ def test_ollama_answer_ends_with_length_when_the_watch_fires(monkeypatch):
         posted.update(json or {})
         return response
 
-    monkeypatch.setattr(ollamapull.requests, "post", post)
+    monkeypatch.setattr(ollamapull, "_post", post)
+    monkeypatch.setattr(ollamapull, "_load_model", lambda *_args: None)
     monkeypatch.setattr(ollamapull, "model_settings", lambda _n: {})
     monkeypatch.delenv("OLLAMAPULL_BASE_URL", raising=False)
     monkeypatch.setattr(ollamapull, "_stop_ban_server", lambda: None)

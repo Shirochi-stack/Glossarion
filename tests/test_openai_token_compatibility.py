@@ -211,7 +211,8 @@ def test_ollamapull_native_chat_strips_prefix_and_applies_model_settings(monkeyp
         captured.update(url=url, **kwargs)
         return Response()
 
-    monkeypatch.setattr(ollamapull.requests, 'post', post)
+    monkeypatch.setattr(ollamapull, '_post', post)
+    monkeypatch.setattr(ollamapull, '_load_model', lambda *_args: None)
     result = ollamapull.chat('ollamapull/qwen3:8b', [{'role': 'user', 'content': 'Hi'}],
                              temperature=0.3, max_tokens=200, stream=True)
     payload = captured['json']
@@ -243,7 +244,8 @@ def test_ollamapull_native_stream_logs_reasoning_separately(monkeypatch, capsys)
             yield b'{"done":true,"eval_count":2,"prompt_eval_count":3}'
         def close(self): pass
 
-    monkeypatch.setattr(ollamapull.requests, 'post', lambda *a, **k: Response())
+    monkeypatch.setattr(ollamapull, '_post', lambda *a, **k: Response())
+    monkeypatch.setattr(ollamapull, '_load_model', lambda *_args: None)
     result = ollamapull.chat('ollamapull/test', [{'role': 'user', 'content': 'Hi'}],
                              log_stream=True, log_thinking=True,
                              progress=progress.append)
@@ -274,7 +276,8 @@ def test_ollamapull_native_stream_hides_reasoning_when_disabled(monkeypatch, cap
             yield b'{"done":true}'
         def close(self): pass
 
-    monkeypatch.setattr(ollamapull.requests, 'post', lambda *a, **k: Response())
+    monkeypatch.setattr(ollamapull, '_post', lambda *a, **k: Response())
+    monkeypatch.setattr(ollamapull, '_load_model', lambda *_args: None)
     result = ollamapull.chat('ollamapull/test', [], log_stream=True,
                              log_thinking=False)
     output = capsys.readouterr().out

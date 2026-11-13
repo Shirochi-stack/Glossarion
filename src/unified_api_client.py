@@ -5241,7 +5241,16 @@ class UnifiedClient:
                 _search_gemini_cancel_stream()
         except Exception:
             pass
-    
+
+        # End the local Ollama route's requests, also the ones still waiting for
+        # the model or for the first byte (only when the route has been used).
+        try:
+            _ollamapull = sys.modules.get('ollamapull')
+            if _ollamapull is not None:
+                _ollamapull.cancel_stream()
+        except Exception:
+            pass
+
     @classmethod
     def is_globally_cancelled(cls) -> bool:
         """Check if globally cancelled"""
@@ -29905,15 +29914,20 @@ class UnifiedClient:
     def _send_ollamapull(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Use the managed local Ollama server and its native chat API."""
         from ollamapull import (
-            OllamaPullCancelled, OllamaPullError, chat, ensure_ready,
-            native_model_name,
+            OllamaPullCancelled, OllamaPullError, capture_cancel_generation, chat, ensure_ready,
+            is_cancel_generation_cancelled, native_model_name,
         )
 
         model = self._get_active_request_model()
+        # A hard stop ends this request for good: the stop flags are cleared when the next run starts, and a
+        # request that was still blocked then must not wake up in that run (hard_cancel_all advances it).
+        cancel_generation = capture_cancel_generation()
         try:
             native_model_name(model)  # Give an actionable error for an empty prefix.
 
             def hard_stopped() -> bool:
+                if is_cancel_generation_cancelled(cancel_generation):
+                    return True
                 if os.environ.get('TRANSLATION_CANCELLED') == '1':
                     return True
                 # The GUI's stop callback becomes true for both stop modes.
@@ -29930,9 +29944,6 @@ class UnifiedClient:
                     or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
                 ) and not getattr(self, '_ignore_graceful_stop', False)
 
-            # The GUI forwards this logger into its run log, so an automatic
-            # first-use model pull has visible progress outside the settings
-            # dialog as well.
             try:
                 tls = self._get_thread_local_client()
                 request_label = getattr(tls, 'current_request_label', None) or 'request'
@@ -29944,11 +29955,9 @@ class UnifiedClient:
                 threading.current_thread().name, request_label, request_context,
                 native_model_name(model),
             )
-            ensure_ready(
-                model,
-                progress=lambda message: logger.info("Ollama: %s", message),
-                should_stop=stopped_before_chat,
-            )
+            # No progress callback: ollamapull prints its setup lines (install, update, server start, pull) and
+            # the run log shows what is printed, so logging them here as well showed every line twice.
+            ensure_ready(model, should_stop=stopped_before_chat)
             if stopped_before_chat():
                 raise OllamaPullCancelled("Ollama request stopped before chat began")
             use_streaming = self._streaming_enabled()
@@ -29971,8 +29980,10 @@ class UnifiedClient:
                 log_thinking=self._stream_thinking_logging_enabled(),
                 progress=lambda message: logger.info("Ollama: %s", message),
                 # Once /api/chat starts, graceful stop must allow its response
-                # to finish; only a hard stop may close the active stream.
+                # to finish; only a hard stop may close the active stream. The
+                # wait for the model before that ends on either stop.
                 should_stop=hard_stopped,
+                stop_before_send=stopped_before_chat,
                 on_response_open=register,
                 on_response_close=unregister,
             )
