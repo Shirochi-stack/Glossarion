@@ -693,6 +693,10 @@ class GlossaryManagerMixin:
 
     def _placeholder_line_menu(self, line_edit):
         menu = line_edit.createStandardContextMenu()
+        # The line's own blue text colour reaches its menu and is the colour of the highlight: a hovered item
+        # was a plain blue bar. White text, grey when disabled.
+        menu.setStyleSheet("QMenu { color: white; } QMenu::item { color: white; } "
+                           "QMenu::item:disabled { color: #808080; }")
         menu.addSeparator()
         action = menu.addAction(self.PLACEHOLDER_TEXT_MENU_ACTION)
         action.triggered.connect(lambda _checked=False: self._open_placeholder_text_dialog(line_edit.window()))

@@ -623,7 +623,7 @@ REWIRE_SPANS = (
     # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
     (735, 735, 4),
     # Placeholder Text editor (right-click an "Available placeholders" line); the profile combo style is shared
-    (758, 757, 298), (782, 794, 1),  # 298: its Save flashes "Saved!" (qt_widget_helpers.flash_saved)
+    (758, 757, 302), (782, 794, 1),  # its Save flashes "Saved!"; its context menu has readable text
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1799, 379),  # Relations Tracker
     (1800, 1810, 3),

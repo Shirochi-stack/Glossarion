@@ -18449,19 +18449,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
 
         def save_and_confirm():
-            """Save, then show the saved confirmation (green "Saved!" and the Windows sound, like the Multi
-            API Key Manager) for a moment before the window closes. A failed save leaves the window open."""
-            from qt_widget_helpers import flash_saved, saved_flash_active
-            if saved_flash_active(save_btn):
-                return
-            closing = []
-            dialog.accept = lambda: closing.append(True)  # the save closes the window: hold that back
-            try:
-                self._save_model_manager_state(list_widget, prefix_table, dialog)
-            finally:
-                del dialog.accept
-            if closing:
-                flash_saved(save_btn, ms=700, then=lambda: dialog.isVisible() and dialog.accept())
+            """Save. A successful save closes the window at once (owner, 2026-11-14: no wait) and plays the
+            Windows sound of a save, like the Multi API Key Manager; a failed save leaves the window open."""
+            dialog._model_manager_saved = False
+            self._save_model_manager_state(list_widget, prefix_table, dialog)
+            if dialog._model_manager_saved:
+                from qt_widget_helpers import saved_beep
+                saved_beep()
 
         save_btn.clicked.connect(save_and_confirm)
         button_layout.addWidget(save_btn)
