@@ -3,7 +3,7 @@
 `ocz/` translation calls and `search/opera` (including `search/opera-think`)
 chat POSTs optionally use a managed Tor HTTP CONNECT proxy. Tor is disabled by
 default. Configure **TOR proxy rotation** in Other Settings, in the **search/opera
-and ocz/ TOR Proxy Rotation** section above Gemini Free Browser Chunking.
+and ocz/ TOR Proxy Rotation** section above Parallel Extraction.
 The toggle is saved with settings and passed to translation subprocesses.
 When disabled, these routes retain their normal transport without Tor setup.
 A unique proxy

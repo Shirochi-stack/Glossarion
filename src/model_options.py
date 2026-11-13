@@ -442,8 +442,13 @@ def _get_static_model_options() -> List[str]:
         "antigravity/claude-opus-5-5-high",
         "antigravity/gpt-oss-120b-medium",
 
-        # Google Search / Gemini browser-backed route (no API key needed)
+        # google.com AI Mode in a browser page (no API key needed). search/gemini is AI Mode's
+        # own choice ("Auto"); the others are entries of its model menu, offered to a signed-in
+        # Google account (Google Login button). Polling reads the menu itself.
         "search/gemini",
+        "search/gemini-3.8-flash",
+        "search/gemini-4-hydrogen",
+        "search/gemini-4-carbon",
 
         # Opera "Ask AI" (Aria) backend route (no API key; auto-mints token via installed Opera)
         "search/opera",
@@ -748,6 +753,8 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
     ProviderCatalogSpec("autharena", "autharena/", "http://127.0.0.1/v1/models", public=True),
     # chatgpt.com's picker, read in the authchatgpt/ browser page (Cloudflare blocks plain HTTP).
     ProviderCatalogSpec("authchatgpt", "authchatgpt/", "https://chatgpt.com/backend-api/models", public=True),
+    # google.com AI Mode's model menu, read in the search/gemini browser page.
+    ProviderCatalogSpec("search-gemini", "search/gemini", "https://www.google.com/search", public=True),
     ProviderCatalogSpec(
         "antigravity", "antigravity/", "http://localhost:3000/v1/models",
         public=True, base_url_env="ANTIGRAVITY_PROXY_URL", models_path="/v1/models",
@@ -757,7 +764,7 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
 
 STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
     "vertex/": "Vertex catalogs are project and region specific",
-    "search/": "Search route is a fixed service rather than a model catalog",
+    "search/opera": "Opera Aria is a fixed service rather than a model catalog",
     "perplexity/": "The provider catalog currently lists Agent API models, not this chat route",
 }
 
@@ -774,6 +781,7 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("ocagy/", "ocagy"),
     ("antigravity/", "antigravity"),
     ("vertex/", "static"),
+    ("search/gemini", "search-gemini"),
     ("search/", "static"),
     ("chutes/", "chutes"),
     ("groq/", "groq"),
@@ -1324,6 +1332,9 @@ def _fetch_provider_catalog(
         return ["autharena/" + m["id"] for m in list_models(timeout=max(timeout, 120))]
     if spec.name == "authchatgpt":
         from authchatgpt_auth import list_models
+        return list_models(timeout=max(timeout, 90), log_fn=lambda _message: None)
+    if spec.name == "search-gemini":
+        from gemini_free import list_models
         return list_models(timeout=max(timeout, 90), log_fn=lambda _message: None)
     url = _provider_models_url(spec)
     headers = {
@@ -1887,6 +1898,10 @@ def refresh_provider_model_catalogs(
         if spec.name == "authchatgpt" and only_provider != "authchatgpt" and active_provider != "authchatgpt":
             # its poll opens a browser page: only when asked for, or when an authchatgpt/ model is selected
             statuses[spec.name] = "polled when an authchatgpt/ model is selected"
+            continue
+        if spec.name == "search-gemini" and only_provider != "search-gemini" and active_provider != "search-gemini":
+            # the same: AI Mode's model menu is read in a browser page
+            statuses[spec.name] = "polled when a search/gemini model is selected"
             continue
         key = _provider_key(spec, active_provider, active_api_key, provider_keys)
         if spec.name.startswith("custom:") and active_api_key:

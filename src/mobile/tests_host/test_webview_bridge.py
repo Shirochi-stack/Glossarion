@@ -109,7 +109,12 @@ def test_page_script_wraps_every_route_script(tmp_path):
         authnd_auth.CAPTCHA_STATE_SCRIPT,
         gemini_free._ai_mode_set_prompt_script("User:\nhello \"quoted\" `tick` ${x}"),
         gemini_free.AI_MODE_CLICK_SEND_SCRIPT,
-        gemini_free._page_snapshot_script("User:\nhello"),
+        gemini_free.AI_MODE_SNAPSHOT_SCRIPT,
+        gemini_free.AI_MODE_MENU_SCRIPT,
+        gemini_free._ai_mode_select_model_script("4 carbon"),
+        gemini_free._ai_mode_stage_file_script(0, "chapter \"1\" `x` ${y}.html", "text/plain", "file", "QUJD"),
+        gemini_free._ai_mode_attach_script("image"),
+        gemini_free._ai_mode_upload_state_script(["chapter.html", "image001.png"]),
     ]
     for index, script in enumerate(scripts):
         path = tmp_path / f"script{index}.js"
@@ -169,17 +174,26 @@ class AiModeSite(Site):
     title = "Google Search"
 
     def __init__(self, answer_text="Bonjour", big=False):
-        self.answer_text = "Bonjour " * 4000 if big else answer_text
+        self.answer_text = ("Bonjour " * 4000).strip() if big else answer_text
+        self.sent = False
 
     def answer(self, expression):
         if "AI Mode textarea not found" in expression:
             return json.dumps({"ok": True, "textareaCount": 1, "valueLength": 3})
         if "AI Mode send button not ready" in expression:
+            self.sent = True
             return json.dumps({"ok": True, "label": "Send", "buttonCount": 1})
+        if "const want = " in expression:  # plain search/gemini asks for "Auto": this page has no such entry
+            return json.dumps({"ok": False, "error": "not listed", "models": ["4 Hydrogen"]})
+        if "menuitemradio" in expression:
+            return json.dumps({"ok": True, "opener": True, "clicked": False, "inputs": [""],
+                               "models": [{"label": "4 Hydrogen", "checked": True, "disabled": False}]})
         if "answerMarkdown" in expression:
-            prompt = json.loads(re.search(r"const promptText = (\".*?\");", expression).group(1))
-            return json.dumps({"url": "https://www.google.com/search?udm=50", "title": "AI Mode", "busy": False,
-                               "text": f"You said:\n{prompt}\n{self.answer_text}\nAI can make mistakes"})
+            answer = self.answer_text if self.sent else ""
+            return json.dumps({"url": "https://www.google.com/search?udm=50&hl=en", "title": "AI Mode",
+                               "ready": "complete", "text": "Ask anything", "aiMode": self.sent, "promptBox": True,
+                               "answerFound": self.sent, "answerText": answer, "answerMarkdown": answer,
+                               "codeBlocks": [], "complete": self.sent, "pending": 0})
         return None
 
 
@@ -262,6 +276,7 @@ def mobile_env(monkeypatch, tmp_path):
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("GEMINI_FREE_WAIT_AFTER_LOAD_MS", "0")
     monkeypatch.setenv("GEMINI_FREE_STABLE_MS", "0")
+    monkeypatch.setenv("GEMINI_FREE_SETTLE_MS", "0")
     monkeypatch.setattr(authnd_auth, "CAPTCHA_DOCUMENT_STABLE_SECONDS", 0.05)
 
     def no_popen(*args, **kwargs):

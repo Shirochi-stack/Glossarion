@@ -1,19 +1,23 @@
 """
-gemini_free.py - browser-backed Google Search / Gemini route.
+gemini_free.py - the ``search/gemini`` route: google.com with AI Mode on, in a browser page.
 
-This module is intentionally not an official Gemini API client. It uses Qt
-WebEngine to open Google Search's AI/search page and extract the rendered page
-text. The public entry point mirrors the other browser-backed auth modules:
-send_chat_completion(...) returns a dict with content/finish_reason/raw_response.
-Where a browser_driver is in use (Glossarion Mobile's hidden WebView, no helper
-processes), the same AI Mode flow runs on the driver's pages instead.
+This module is intentionally not an official Gemini API client. One chat request is one AI
+Mode question on its own page: the page opens ``google.com/search?udm=50`` (AI Mode), the
+system prompt is typed into the prompt box, the text to work on and any images are attached
+as files, and the finished answer is read from the page. The public entry point mirrors the
+other browser-backed auth modules: send_chat_completion(...) returns a dict with
+content/finish_reason/raw_response.
+
+Three browsers can hold the page: the QtWebEngine helper (desktop, signed out); a headless tab
+of Glossarion's own Chrome/Edge profile once the user signed in to Google with ``login()``
+(signed in, AI Mode offers its larger models: ``search/gemini-<model>``); and, where a
+browser_driver is in use (Glossarion Mobile's hidden WebView, no helper processes), a page of
+the driver.
 """
 
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import html
 import json
 import os
 import queue
@@ -26,267 +30,32 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import browser_driver
+import cdp_browser
 import mobile_runtime
 
 
 SEARCH_BASE_URL = "https://www.google.com/search"
+# google.com with AI Mode on: ``udm=50`` is the AI Mode tab; ``hl=en`` keeps the page's own
+# texts (the "response is ready" announcement, the menu labels) in English.
 DEFAULT_SEARCH_PARAMS = {
     "udm": "50",
-    "aep": "46",
-    "source": "25q2-US-SearchSites-Site-CTA",
     "hl": "en",
 }
 DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
-DEFAULT_SUBMIT_MODE = "ui"
-DEFAULT_SUBCHUNK_PROMPT_CHARS = 7000
-DEFAULT_SUBCHUNK_URL_CHARS = 14500
-DEFAULT_SUBCHUNK_SAFETY_CHARS = 600
-DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
-DEFAULT_SUBCHUNK_TIMEOUT = 0
-DEFAULT_SUBCHUNK_START_DELAY = 5.0
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
-GENERATION_FAILURE_MARKERS = (
-    "something went wrong and the content wasn't generated",
-    "something went wrong and the content was not generated",
-    "content wasn't generated",
-    "content was not generated",
-)
-PAGE_SNAPSHOT_SCRIPT = """
-JSON.stringify({
-  url: location.href,
-  title: document.title || "",
-  ready: document.readyState || "",
-  text: document.body ? document.body.innerText || "" : "",
-  htmlLength: document.documentElement ? document.documentElement.outerHTML.length : 0,
-  busy: Array.from(document.querySelectorAll('button,[role="button"]')).some((button) => {
-    const style = window.getComputedStyle(button);
-    const rect = button.getBoundingClientRect();
-    const visible = style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-    const label = [
-      button.getAttribute("aria-label") || "",
-      button.getAttribute("title") || "",
-      button.innerText || ""
-    ].join(" ").toLowerCase();
-    return visible && label.includes("stop") && !button.disabled && button.getAttribute("aria-disabled") !== "true";
-  })
-})
-"""
 
-
-def _page_snapshot_script(prompt: str = "") -> str:
-    prompt_json = json.dumps(str(prompt or ""), ensure_ascii=False)
-    return f"""
-(() => {{
-  const promptText = {prompt_json};
-  const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-  const bodyText = document.body ? document.body.innerText || "" : "";
-  const promptLines = new Set(
-    String(promptText || "")
-      .replace(/\\r/g, "\\n")
-      .split("\\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-  );
-  const roleMarkers = new Set(["user:", "assistant:", "system instructions:"]);
-  const endMarkers = [
-    "ai can make mistakes",
-    "ai mode response is ready",
-    "search results",
-    "people also ask",
-    "related searches"
-  ];
-
-  const lines = bodyText.replace(/\\r/g, "\\n").split("\\n").map((line) => line.trim()).filter(Boolean);
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) {{
-    if (lines[i].toLowerCase() === "you said:") {{
-      start = i + 1;
-      break;
-    }}
-  }}
-  if (start >= 0) {{
-    while (start < lines.length) {{
-      const current = lines[start] || "";
-      const lower = current.toLowerCase();
-      if (!current || roleMarkers.has(lower) || promptLines.has(current)) {{
-        start += 1;
-        continue;
-      }}
-      break;
-    }}
-  }}
-  let end = start >= 0 ? lines.length : 0;
-  for (let i = Math.max(0, start); i < lines.length; i++) {{
-    const lower = (lines[i] || "").toLowerCase();
-    if (endMarkers.some((marker) => lower.includes(marker)) || /^\\d+\\s+sites?$/.test(lower)) {{
-      end = i;
-      break;
-    }}
-  }}
-  const answerLines = start >= 0
-    ? lines.slice(start, end).filter((line) => line && !/^\\+\\d+$/.test(line))
-    : [];
-  const answerText = answerLines.join("\\n").trim();
-
-  const visible = (element) => {{
-    if (!element || !element.getBoundingClientRect) return false;
-    const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-  }};
-  const cleanMarkdown = (value) => String(value || "")
-    .replace(/[\\t ]+\\n/g, "\\n")
-    .replace(/\\n{3,}/g, "\\n\\n")
-    .trim();
-  const inlineChildrenMarkdown = (element, state = {{}}) =>
-    Array.from(element.childNodes || []).map((node) => nodeMarkdown(node, state)).join("");
-  const blockChildrenMarkdown = (element, state = {{}}) => cleanMarkdown(inlineChildrenMarkdown(element, state));
-  const wrapInline = (text, marker, active) => {{
-    const value = String(text || "").trim();
-    if (!value || active) return text;
-    return `${{marker}}${{value}}${{marker}}`;
-  }};
-  const nodeMarkdown = (node, state = {{}}) => {{
-    if (!node) return "";
-    if (node.nodeType === Node.TEXT_NODE) {{
-      return String(node.nodeValue || "").replace(/\\u00a0/g, " ").replace(/\\s+/g, " ");
-    }}
-    if (node.nodeType !== Node.ELEMENT_NODE) return "";
-    const element = node;
-    if (!visible(element)) return "";
-    const tag = String(element.tagName || "").toLowerCase();
-    const style = window.getComputedStyle(element);
-    const display = String(style.display || "").toLowerCase();
-    if (tag === "br") return "\\n";
-    if (tag === "hr") return "\\n\\n---\\n\\n";
-    if (tag === "img") {{
-      const attrs = Array.from(element.attributes || [])
-        .filter((attr) => ["src", "alt", "title", "width", "height"].includes(String(attr.name || "").toLowerCase()))
-        .map((attr) => `${{attr.name}}="${{String(attr.value || "").replace(/"/g, "&quot;")}}"`)
-        .join(" ");
-      return attrs ? `<img ${{attrs}}>` : "";
-    }}
-    if (tag === "pre") return `\\n\\n\\`\\`\\`\\n${{element.innerText || ""}}\\n\\`\\`\\`\\n\\n`;
-    if (tag === "code") return state.pre ? (element.innerText || "") : `\\`${{(element.innerText || "").trim()}}\\``;
-    const headingRole = String(element.getAttribute("role") || "").toLowerCase() === "heading";
-    const ariaLevel = parseInt(element.getAttribute("aria-level") || "", 10);
-    if (/^h[1-6]$/.test(tag) || headingRole || (ariaLevel >= 1 && ariaLevel <= 6)) {{
-      const level = /^h[1-6]$/.test(tag) ? parseInt(tag.slice(1), 10) : Math.min(6, Math.max(1, ariaLevel || 2));
-      return `\\n\\n${{"#".repeat(level)}} ${{blockChildrenMarkdown(element, state)}}\\n\\n`;
-    }}
-    if (tag === "ul" || tag === "ol") {{
-      const items = Array.from(element.children || []).filter((child) => String(child.tagName || "").toLowerCase() === "li");
-      const rendered = items.map((item, index) => {{
-        const marker = tag === "ol" ? `${{index + 1}}. ` : "- ";
-        const body = blockChildrenMarkdown(item, state).replace(/\\n/g, "\\n  ");
-        return `${{marker}}${{body}}`;
-      }}).join("\\n");
-      return rendered ? `\\n\\n${{rendered}}\\n\\n` : "";
-    }}
-    if (tag === "li" || display === "list-item") return `\\n- ${{blockChildrenMarkdown(element, state)}}\\n`;
-    if (tag === "blockquote") {{
-      const body = blockChildrenMarkdown(element, state).split("\\n").map((line) => `> ${{line}}`).join("\\n");
-      return `\\n\\n${{body}}\\n\\n`;
-    }}
-    if (tag === "table") return `\\n\\n${{(element.innerText || "").trim()}}\\n\\n`;
-    if (tag === "a") {{
-      const body = blockChildrenMarkdown(element, state) || String(element.getAttribute("href") || "").trim();
-      const href = String(element.getAttribute("href") || "").trim();
-      return href && body ? `[${{body}}](${{href}})` : body;
-    }}
-    let rendered = inlineChildrenMarkdown(element, state);
-    if (tag === "strong" || tag === "b") rendered = wrapInline(rendered, "**", state.bold);
-    if (tag === "em" || tag === "i") rendered = wrapInline(rendered, "*", state.italic);
-    if (tag === "s" || tag === "del" || tag === "strike") rendered = wrapInline(rendered, "~~", state.strike);
-    if (!["strong", "b", "em", "i", "s", "del", "strike"].includes(tag)) {{
-      const weight = parseInt(style.fontWeight || "0", 10);
-      const nextState = {{
-        bold: state.bold || weight >= 600,
-        italic: state.italic || String(style.fontStyle || "").toLowerCase() === "italic",
-        strike: state.strike || String(style.textDecorationLine || "").toLowerCase().includes("line-through")
-      }};
-      if (nextState.bold || nextState.italic || nextState.strike) {{
-        rendered = inlineChildrenMarkdown(element, nextState);
-        if (nextState.bold && !state.bold) rendered = wrapInline(rendered, "**", false);
-        if (nextState.italic && !state.italic) rendered = wrapInline(rendered, "*", false);
-        if (nextState.strike && !state.strike) rendered = wrapInline(rendered, "~~", false);
-      }}
-    }}
-    if (["p", "div", "section", "article", "main"].includes(tag) || display === "block") {{
-      const body = cleanMarkdown(rendered);
-      return body ? `\\n\\n${{body}}\\n\\n` : "";
-    }}
-    return rendered;
-  }};
-  const elementToMarkdown = (element) => cleanMarkdown(nodeMarkdown(element));
-  const firstNeedle = normalize(answerLines[0] || "").slice(0, 100);
-  const lastNeedle = normalize(answerLines[answerLines.length - 1] || "").slice(0, 100);
-  const promptNeedle = normalize(String(promptText || "").split("\\n").find((line) => line.trim()) || "").slice(0, 100);
-  const candidates = Array.from(document.body ? document.body.querySelectorAll("article, main, section, div, [role='article'], [data-md], [data-attrid]") : []);
-  let best = null;
-  for (const element of candidates) {{
-    if (!visible(element)) continue;
-    const text = normalize(element.innerText || "");
-    if (!text) continue;
-    let score = 0;
-    if (firstNeedle && text.includes(firstNeedle)) score += 80;
-    if (lastNeedle && text.includes(lastNeedle)) score += 80;
-    if (answerText && text.includes(normalize(answerText).slice(0, Math.min(160, normalize(answerText).length)))) score += 30;
-    if (/\\byou said:\\b/i.test(text)) score -= 120;
-    if (promptNeedle && text.includes(promptNeedle)) score -= 80;
-    if (/ai can make mistakes|search results|people also ask|related searches/i.test(text)) score -= 35;
-    const answerLength = Math.max(1, normalize(answerText).length);
-    score -= Math.abs(text.length - answerLength) / Math.max(60, answerLength / 10);
-    score += Math.min(40, element.querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,table,br").length * 3);
-    if (!best || score > best.score || (score === best.score && text.length < best.textLength)) {{
-      best = {{
-        element,
-        score,
-        textLength: text.length,
-        html: element.innerHTML || "",
-        text: element.innerText || "",
-        tag: element.tagName || ""
-      }};
-    }}
-  }}
-
-  return JSON.stringify({{
-    url: location.href,
-    title: document.title || "",
-    ready: document.readyState || "",
-    text: bodyText,
-    answerText,
-    answerHtml: best ? best.html : "",
-    answerMarkdown: best ? elementToMarkdown(best.element) : "",
-    answerContainerText: best ? best.text : "",
-    answerContainerTag: best ? best.tag : "",
-    answerContainerScore: best ? best.score : null,
-    htmlLength: document.documentElement ? document.documentElement.outerHTML.length : 0,
-    busy: Array.from(document.querySelectorAll('button,[role="button"]')).some((button) => {{
-      const style = window.getComputedStyle(button);
-      const rect = button.getBoundingClientRect();
-      const visibleButton = style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-      const label = [
-        button.getAttribute("aria-label") || "",
-        button.getAttribute("title") || "",
-        button.innerText || ""
-      ].join(" ").toLowerCase();
-      return visibleButton && label.includes("stop") && !button.disabled && button.getAttribute("aria-disabled") !== "true";
-    }})
-  }});
-}})()
-"""
 
 # browser_driver page owner: cancel_stream() cancels only this route's in-app browser pages.
 BROWSER_OWNER = "gemini_free"
@@ -549,226 +318,6 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _messages_to_prompt(messages: Iterable[Dict[str, Any]]) -> str:
-    parts: List[str] = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "user").strip().lower() or "user"
-        text = _content_to_text(message.get("content")).strip()
-        if not text:
-            continue
-        if role == "system":
-            parts.append(f"System instructions:\n{text}")
-        elif role == "assistant":
-            parts.append(f"Assistant:\n{text}")
-        else:
-            parts.append(f"User:\n{text}")
-    return "\n\n".join(parts).strip()
-
-
-def _prepare_ai_mode_messages(
-    messages: Iterable[Dict[str, Any]],
-    *,
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> List[Dict[str, Any]]:
-    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    if not source_messages:
-        return []
-
-    user_indices = [
-        idx for idx, message in enumerate(source_messages)
-        if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
-    ]
-    if not user_indices:
-        return source_messages
-
-    split_idx = user_indices[-1]
-    fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
-    if not fixed_messages:
-        return source_messages
-
-    fixed_probe_user = dict(source_messages[split_idx])
-    fixed_probe_user["content"] = "x"
-    fixed_probe_messages = fixed_messages + [fixed_probe_user]
-    fixed_prompt_chars = max(0, len(_messages_to_prompt(fixed_probe_messages)) - 1)
-    fixed_url_chars = max(0, _messages_to_search_url_chars(fixed_probe_messages) - 1)
-    prompt_limit_chars = max(1, _subchunk_prompt_chars() - _subchunk_safety_chars())
-    url_limit_chars = _subchunk_url_chars()
-    if fixed_prompt_chars > prompt_limit_chars:
-        _log(
-            log_fn,
-            "⚠️ Gemini Free: fixed/system prompt is larger than the AI Mode planning budget; "
-            "it will be sent unchanged, but AI Mode may fail until you shorten it "
-            f"(fixed prompt chars: {fixed_prompt_chars:,}, budget: {prompt_limit_chars:,}).",
-        )
-    if fixed_url_chars > url_limit_chars:
-        _log(
-            log_fn,
-            "⚠️ Gemini Free: fixed/system prompt alone exceeds the encoded Google AI Mode URL budget; "
-            "it will be sent unchanged, but chunking user text cannot fully fix this "
-            f"(fixed URL chars: {fixed_url_chars:,}, budget: {url_limit_chars:,}).",
-        )
-    return source_messages
-
-
-def _messages_to_search_url_chars(messages: Iterable[Dict[str, Any]]) -> int:
-    return len(_build_search_url(_messages_to_prompt(messages)))
-
-
-def _generation_failure_error(error: Any) -> bool:
-    text = str(error or "").lower()
-    return (
-        "generation failure" in text
-        or "content wasn't generated" in text
-        or "content was not generated" in text
-    )
-
-
-def _adaptive_split_enabled() -> bool:
-    return os.getenv("GEMINI_FREE_ADAPTIVE_SPLIT", "1").strip().lower() not in ("0", "false", "no", "off")
-
-
-def _html_text_node_transport_enabled() -> bool:
-    return os.getenv("GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT", "1").strip().lower() not in ("0", "false", "no", "off")
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return str(value).strip().lower() not in ("0", "false", "no", "off")
-
-
-def _auto_token_limits() -> tuple[int, int]:
-    cores = max(1, int(os.cpu_count() or 1))
-    token_limit = min(4, max(1, cores // 2))
-    subprocess_limit = min(8, max(token_limit, cores))
-    return token_limit, subprocess_limit
-
-
-def _subchunk_concurrency_limit() -> int:
-    explicit = _env_int("GEMINI_FREE_SUBCHUNK_CONCURRENCY", 0)
-    if explicit > 0:
-        return max(1, explicit)
-
-    if _env_bool("AUTHND_TOKEN_CONCURRENCY_AUTO", False):
-        token_limit, subprocess_limit = _auto_token_limits()
-    else:
-        token_limit = max(1, _env_int("AUTHND_TOKEN_CONCURRENCY", 1))
-        subprocess_limit = max(1, _env_int("AUTHND_TOKEN_SUBPROCESS_CONCURRENCY", token_limit))
-    return max(1, min(token_limit, subprocess_limit))
-
-
-def _subchunk_prompt_chars() -> int:
-    configured = max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
-    ai_mode_ceiling = max(300, _env_int("GEMINI_FREE_AI_MODE_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
-    return min(configured, ai_mode_ceiling)
-
-
-def _subchunk_url_chars() -> int:
-    return max(1000, _env_int("GEMINI_FREE_SUBCHUNK_URL_CHARS", DEFAULT_SUBCHUNK_URL_CHARS))
-
-
-def _subchunk_safety_chars() -> int:
-    return max(0, _env_int("GEMINI_FREE_SUBCHUNK_SAFETY_CHARS", DEFAULT_SUBCHUNK_SAFETY_CHARS))
-
-
-def _min_subchunk_body_chars() -> int:
-    return max(1, _env_int("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", DEFAULT_MIN_SUBCHUNK_BODY_CHARS))
-
-
-def _message_budget_usage(messages: Iterable[Dict[str, Any]]) -> tuple[int, int]:
-    prompt_chars = len(_messages_to_prompt(messages))
-    url_chars = _messages_to_search_url_chars(messages)
-    return prompt_chars, url_chars
-
-
-def _requires_adaptive_split(
-    messages: Iterable[Dict[str, Any]],
-    *,
-    enforce_url_budget: bool = False,
-) -> tuple[bool, int, int]:
-    prompt_chars, url_chars = _message_budget_usage(messages)
-    return (
-        prompt_chars > _subchunk_prompt_chars() or (enforce_url_budget and url_chars > _subchunk_url_chars()),
-        prompt_chars,
-        url_chars,
-    )
-
-
-def _fallback_subchunk_prompt_chars(prompt_chars: int) -> int:
-    configured = _subchunk_prompt_chars()
-    if prompt_chars <= 0:
-        return configured
-    return max(1000, min(configured, int(prompt_chars * 0.6)))
-
-
-def _subchunk_timeout_seconds(request_timeout: int) -> int:
-    configured = _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT)
-    if configured <= 0:
-        inherited = _timeout_seconds(request_timeout, DEFAULT_TIMEOUT)
-        return DEFAULT_TIMEOUT if inherited is None else max(30, int(inherited))
-    return max(30, configured)
-
-
-def _subchunk_start_delay_seconds() -> float:
-    return max(0.0, _env_float("GEMINI_FREE_SUBCHUNK_START_DELAY", DEFAULT_SUBCHUNK_START_DELAY))
-
-
-def _subchunk_balancer_mode() -> str:
-    mode = os.getenv("GEMINI_FREE_SUBCHUNK_BALANCER", "balanced").strip().lower()
-    return mode if mode in ("balanced", "greedy") else "balanced"
-
-
-def _subchunk_payload_format_mode() -> str:
-    mode = os.getenv("GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT", "auto").strip().lower()
-    return mode if mode in ("auto", "html", "text") else "auto"
-
-
-def _html_splitter_mode() -> str:
-    mode = os.getenv("GEMINI_FREE_HTML_SPLITTER", "beautifulsoup4").strip().lower()
-    if mode in ("bs", "beautifulsoup", "beautifulsoup4"):
-        return "beautifulsoup4"
-    if mode in ("regex", "fallback"):
-        return "regex"
-    return "beautifulsoup4"
-
-
-def _sleep_with_cancel(seconds: float) -> None:
-    deadline = time.time() + max(0.0, float(seconds or 0.0))
-    while True:
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            return
-        time.sleep(min(0.1, remaining))
-
-
-def _split_user_instruction_prefix(text: str) -> tuple[str, str]:
-    raw = str(text or "")
-    if not raw:
-        return "", ""
-    html_match = re.search(r"<(?:\?xml|!doctype|html|head|body|h[1-6]|p|div|img|ruby|br|ul|ol|li|table|span)\b", raw, re.IGNORECASE)
-    if html_match and html_match.start() > 0:
-        lead = raw[: html_match.start()].strip()
-        if lead.startswith("[") and len(lead) <= 200:
-            return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
-        if len(lead) <= 1500 and re.search(
-            r"\b(translate|translation|return|respond|output|preserve|valid\s+html|html|tags|markdown|code\s+fence)\b",
-            lead,
-            re.IGNORECASE,
-        ):
-            return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
-    first_line = re.match(r"^([^\r\n]{1,200})(\r\n|\n|\r)(.*)$", raw, flags=re.DOTALL)
-    if first_line:
-        lead = first_line.group(1).strip()
-        if lead.startswith("[") and lead.endswith("]"):
-            return first_line.group(1).rstrip(), first_line.group(3).lstrip()
-    return "", raw
-
-
 def _configured_text_extraction_method() -> str:
     method = os.getenv("TEXT_EXTRACTION_METHOD", "").strip().lower()
     extraction_mode = os.getenv("EXTRACTION_MODE", "").strip().lower()
@@ -778,11 +327,6 @@ def _configured_text_extraction_method() -> str:
     if method in ("standard", "beautifulsoup", "bs"):
         return "standard"
     return ""
-
-
-def _looks_like_html_payload(text: str) -> bool:
-    raw = str(text or "")
-    return bool(re.search(r"<[A-Za-z][A-Za-z0-9:_-]*(?:\s[^<>]*)?/?>|</[A-Za-z][A-Za-z0-9:_-]*>", raw))
 
 
 def _content_looks_like_html_payload(text: str) -> bool:
@@ -798,505 +342,6 @@ def _content_looks_like_html_payload(text: str) -> bool:
     )
 
 
-def _payload_format_for_split(text: str) -> str:
-    payload_mode = _subchunk_payload_format_mode()
-    if payload_mode in ("html", "text"):
-        return payload_mode
-    raw = str(text or "")
-    configured_method = _configured_text_extraction_method()
-    if configured_method == "enhanced":
-        return "text"
-    if configured_method == "standard" and _looks_like_html_payload(raw):
-        return "html"
-    if re.search(r"<(?:!doctype|html|head|body|article|section|main|div|p|h[1-6]|ul|ol|li|table|tr|td|blockquote)\b|</(?:div|p|h[1-6]|ul|ol|li|table|tr|td|blockquote)>", raw, re.IGNORECASE):
-        return "html"
-    return "text"
-
-
-def _splitter_name_for_payload(payload_format: str) -> str:
-    if payload_format == "html":
-        return _html_splitter_mode()
-    return "text"
-
-
-def _split_plain_text_units(text: str) -> List[str]:
-    raw = str(text or "")
-    if not raw:
-        return []
-    units = re.findall(r".*?(?:\n\s*\n|$)", raw, flags=re.DOTALL)
-    units = [unit for unit in units if unit]
-    if len(units) <= 1:
-        units = [line + "\n" for line in raw.splitlines() if line.strip()]
-    return units or [raw]
-
-
-def _split_html_units_beautifulsoup(text: str) -> List[str]:
-    raw = str(text or "")
-    if not raw:
-        return []
-    try:
-        from bs4 import BeautifulSoup
-        from bs4.element import NavigableString, Tag
-
-        soup = BeautifulSoup(raw, "html.parser")
-        container = soup.body if soup.body else soup
-        block_names = {
-            "article", "aside", "blockquote", "br", "center", "dd", "div", "dl", "dt",
-            "figure", "figcaption", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
-            "header", "hr", "li", "main", "nav", "ol", "p", "pre", "ruby", "section",
-            "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
-        }
-
-        def child_units(parent: Any) -> List[str]:
-            found: List[str] = []
-            for child in getattr(parent, "children", []):
-                if isinstance(child, NavigableString):
-                    text_value = str(child)
-                    if text_value.strip():
-                        found.append(text_value)
-                    continue
-                if isinstance(child, Tag):
-                    if child.name and child.name.lower() in block_names:
-                        found.append(str(child))
-                    elif str(child).strip():
-                        found.append(str(child))
-            return found
-
-        units = child_units(container)
-        if len(units) == 1:
-            only = BeautifulSoup(units[0], "html.parser")
-            only_tags = [child for child in only.contents if isinstance(child, Tag)]
-            if len(only_tags) == 1:
-                nested_units = child_units(only_tags[0])
-                if len(nested_units) > 1:
-                    units = nested_units
-        return units or [raw]
-    except Exception:
-        return _split_html_units_regex(raw)
-
-
-def _split_html_units_regex(text: str) -> List[str]:
-    raw = str(text or "")
-    if not raw:
-        return []
-    html_pattern = re.compile(
-        r".*?</(?:p|div|h[1-6]|li|tr|table|blockquote)>\s*|<img\b[^>]*>\s*|<br\s*/?>\s*|.+$",
-        re.IGNORECASE | re.DOTALL,
-    )
-    if re.search(r"</(?:p|div|h[1-6]|li|tr|table|blockquote)>|<img\b|<br\b", raw, re.IGNORECASE):
-        return [match.group(0) for match in html_pattern.finditer(raw) if match.group(0)] or [raw]
-    return _split_plain_text_units(raw)
-
-
-def _split_text_units(text: str, *, payload_format: Optional[str] = None) -> List[str]:
-    raw = str(text or "")
-    if not raw:
-        return []
-    if (payload_format or _payload_format_for_split(raw)) == "html":
-        if _html_splitter_mode() == "regex":
-            return _split_html_units_regex(raw)
-        return _split_html_units_beautifulsoup(raw)
-    return _split_plain_text_units(raw)
-
-
-def _avoid_split_inside_tag(raw: str, end: int) -> int:
-    if end <= 0 or end >= len(raw):
-        return end
-    last_lt = raw.rfind("<", 0, end)
-    last_gt = raw.rfind(">", 0, end)
-    if last_lt <= last_gt:
-        return end
-    next_gt = raw.find(">", end)
-    if next_gt >= 0 and next_gt - end <= 80:
-        return min(len(raw), next_gt + 1)
-    if last_lt > 0:
-        return last_lt
-    return end
-
-
-def _split_large_unit(unit: str, max_chars: int) -> List[str]:
-    raw = str(unit or "")
-    if len(raw) <= max_chars:
-        return [raw]
-    pieces: List[str] = []
-    start = 0
-    while start < len(raw):
-        end = min(len(raw), start + max_chars)
-        if end < len(raw):
-            window = raw[start:end]
-            split_at = max(
-                window.rfind("\n"),
-                window.rfind(". "),
-                window.rfind("。"),
-                window.rfind("! "),
-                window.rfind("? "),
-                window.rfind("</"),
-            )
-            if split_at > max_chars * 0.45:
-                end = start + split_at + 1
-        end = _avoid_split_inside_tag(raw, end)
-        if end <= start:
-            end = min(len(raw), start + max_chars)
-        pieces.append(raw[start:end])
-        start = end
-    return pieces
-
-
-def _split_messages_for_search_budget(
-    messages: Iterable[Dict[str, Any]],
-    max_prompt_chars: int,
-    *,
-    enforce_url_budget: bool = False,
-    return_metadata: bool = False,
-) -> Any:
-    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    if not source_messages:
-        return ([], {}) if return_metadata else []
-    user_indices = [
-        idx for idx, message in enumerate(source_messages)
-        if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
-    ]
-    if not user_indices:
-        return ([source_messages], {}) if return_metadata else [source_messages]
-
-    split_idx = user_indices[-1]
-    original_user = source_messages[split_idx]
-    user_text = _content_to_text(original_user.get("content"))
-    prefix, body = _split_user_instruction_prefix(user_text)
-    if not body.strip():
-        return ([source_messages], {}) if return_metadata else [source_messages]
-
-    payload_format = "html" if _content_looks_like_html_payload(body) else _payload_format_for_split(body)
-    splitter_name = _splitter_name_for_payload(payload_format)
-    fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
-    def make_messages(chunk_text: str) -> List[Dict[str, Any]]:
-        content_parts = [part for part in (prefix, chunk_text.strip()) if part]
-        chunk_user = dict(original_user)
-        chunk_user["content"] = "\n".join(content_parts)
-        return fixed_messages + [chunk_user]
-
-    def fits_budget(chunk_text: str) -> bool:
-        probe_messages = make_messages(chunk_text)
-        chunk_chars = len(str(chunk_text or ""))
-        prompt_ok = len(_messages_to_prompt(probe_messages)) <= prompt_limit_chars or (
-            fixed_prompt_over_budget and chunk_chars <= body_budget
-        )
-        url_ok = (
-            not enforce_url_budget
-            or _messages_to_search_url_chars(probe_messages) <= url_limit_chars
-            or (fixed_url_over_budget and chunk_chars <= body_budget)
-        )
-        return prompt_ok and url_ok
-
-    units: List[str] = []
-    fixed_probe = "x"
-    fixed_prompt_chars = max(0, len(_messages_to_prompt(make_messages(fixed_probe))) - len(fixed_probe))
-    fixed_url_chars = max(0, _messages_to_search_url_chars(make_messages(fixed_probe)) - len(fixed_probe))
-    safety_chars = _subchunk_safety_chars()
-    url_limit_chars = _subchunk_url_chars()
-    prompt_limit_chars = max(1, max_prompt_chars - safety_chars)
-    fixed_prompt_over_budget = fixed_prompt_chars > prompt_limit_chars
-    fixed_url_over_budget = bool(enforce_url_budget and fixed_url_chars > url_limit_chars)
-    available_body_chars = prompt_limit_chars - fixed_prompt_chars
-    min_body_chars = _min_subchunk_body_chars()
-    if available_body_chars <= 0:
-        body_budget = max(
-            min_body_chars,
-            min(len(body), max(min_body_chars, max_prompt_chars // 4)),
-        )
-    else:
-        body_budget = max(1, available_body_chars)
-    if fixed_url_over_budget:
-        body_budget = min(body_budget, max(min_body_chars, max_prompt_chars // 8))
-    if fixed_prompt_chars + body_budget > prompt_limit_chars:
-        prompt_limit_chars = fixed_prompt_chars + body_budget
-
-    def split_piece_to_budget(piece: str) -> List[str]:
-        raw_piece = str(piece or "")
-        if not raw_piece or fits_budget(raw_piece):
-            return [raw_piece] if raw_piece else []
-        if len(raw_piece) <= 1:
-            return [raw_piece]
-
-        split_at = len(raw_piece) // 2
-        window = raw_piece[:split_at]
-        boundary = max(window.rfind("\n"), window.rfind(" "), window.rfind(">"))
-        if boundary > max(1, split_at // 3):
-            split_at = boundary + 1
-        split_at = _avoid_split_inside_tag(raw_piece, split_at)
-        if split_at <= 0 or split_at >= len(raw_piece):
-            split_at = len(raw_piece) // 2
-        left = raw_piece[:split_at]
-        right = raw_piece[split_at:]
-        return [*split_piece_to_budget(left), *split_piece_to_budget(right)]
-
-    for unit in _split_text_units(body, payload_format=payload_format):
-        pieces = [unit] if payload_format == "html" else _split_large_unit(unit, body_budget)
-        for piece in pieces:
-            units.extend(split_piece_to_budget(piece))
-
-    def pack_units(max_chunk_body_chars: Optional[int] = None) -> List[str]:
-        packed: List[str] = []
-        current = ""
-        current_chars = 0
-        for unit in units:
-            unit_text = str(unit or "")
-            if not unit_text:
-                continue
-            unit_chars = len(unit_text)
-            candidate = current + unit_text
-            over_target = (
-                max_chunk_body_chars is not None
-                and current
-                and current_chars + unit_chars > max_chunk_body_chars
-            )
-            if current and (over_target or not fits_budget(candidate)):
-                packed.append(current)
-                current = unit_text
-                current_chars = unit_chars
-            else:
-                current = candidate
-                current_chars += unit_chars
-        if current:
-            packed.append(current)
-        return packed
-
-    greedy_chunks = pack_units()
-    target_chunk_count = len(greedy_chunks)
-    chunks = greedy_chunks
-    balanced_target_chars: Optional[int] = None
-    balancer_mode = _subchunk_balancer_mode()
-    if balancer_mode == "balanced" and target_chunk_count > 1 and units:
-        unit_lengths = [len(unit) for unit in units if unit]
-        total_unit_chars = sum(unit_lengths)
-        low = max(max(unit_lengths), (total_unit_chars + target_chunk_count - 1) // target_chunk_count)
-        high = max(low, total_unit_chars)
-        while low < high:
-            mid = (low + high) // 2
-            if len(pack_units(mid)) <= target_chunk_count:
-                high = mid
-            else:
-                low = mid + 1
-        balanced_target_chars = low
-        balanced_chunks = pack_units(balanced_target_chars)
-        if len(balanced_chunks) <= target_chunk_count:
-            chunks = balanced_chunks
-
-    result = [source_messages] if len(chunks) <= 1 else [make_messages(chunk) for chunk in chunks]
-    metadata = {
-        "target_prompt_chars": max_prompt_chars,
-        "fixed_prompt_chars": fixed_prompt_chars,
-        "safety_chars": safety_chars,
-        "prompt_limit_chars": prompt_limit_chars,
-        "url_limit_chars": url_limit_chars,
-        "url_budget_enforced": bool(enforce_url_budget),
-        "fixed_prompt_over_budget": fixed_prompt_over_budget,
-        "fixed_url_over_budget": fixed_url_over_budget,
-        "available_body_chars": available_body_chars,
-        "body_budget_chars": body_budget,
-        "fixed_url_chars": fixed_url_chars,
-        "body_chars": len(body),
-        "prefix_chars": len(prefix),
-        "subchunk_count": len(result),
-        "subchunk_balancer": "balanced" if balanced_target_chars is not None else "greedy",
-        "subchunk_balancer_mode": balancer_mode,
-        "balanced_target_body_chars": balanced_target_chars,
-        "payload_format": payload_format,
-        "splitter": splitter_name,
-    }
-    return (result, metadata) if return_metadata else result
-
-
-def _html_text_node_skip_parent_names() -> set:
-    return {"script", "style", "textarea", "noscript"}
-
-
-def _collect_html_text_nodes(soup: Any) -> List[Any]:
-    try:
-        from bs4.element import NavigableString
-    except Exception:
-        return []
-
-    nodes: List[Any] = []
-    for node in soup.find_all(string=True):
-        if not isinstance(node, NavigableString):
-            continue
-        raw = str(node)
-        if not raw.strip():
-            continue
-        parent = getattr(node, "parent", None)
-        parent_name = str(getattr(parent, "name", "") or "").lower()
-        if parent_name in _html_text_node_skip_parent_names():
-            continue
-        nodes.append(node)
-    return nodes
-
-
-def _build_html_text_node_transport(messages: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not _html_text_node_transport_enabled():
-        return None
-
-    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    user_indices = [
-        idx for idx, message in enumerate(source_messages)
-        if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
-    ]
-    if not user_indices:
-        return None
-
-    split_idx = user_indices[-1]
-    original_user = source_messages[split_idx]
-    user_text = _content_to_text(original_user.get("content"))
-    prefix, body = _split_user_instruction_prefix(user_text)
-    if not _content_looks_like_html_payload(body):
-        return None
-
-    try:
-        from bs4 import BeautifulSoup
-    except Exception:
-        return None
-
-    soup = BeautifulSoup(body, "html.parser")
-    text_nodes = _collect_html_text_nodes(soup)
-    if not text_nodes:
-        return None
-
-    segments: List[tuple[int, str]] = []
-    for index, node in enumerate(text_nodes, start=1):
-        text = re.sub(r"\s+", " ", str(node).strip())
-        if text:
-            segments.append((index, text))
-    if not segments:
-        return None
-
-    fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
-    segment_lines = [f"[{index}] {text}" for index, text in segments]
-    instruction_parts = []
-    if prefix.strip():
-        instruction_parts.append(prefix.strip())
-    instruction_parts.append(
-        "Translate each numbered text segment below. Preserve the segment numbers exactly. "
-        "Return only one translated line per segment in the form [number] translated text. "
-        "Do not output HTML tags; tags will be restored automatically."
-    )
-    instruction_parts.append("Text segments:\n" + "\n".join(segment_lines))
-
-    transport_user = dict(original_user)
-    transport_user["content"] = "\n\n".join(instruction_parts)
-    return {
-        "messages": fixed_messages + [transport_user],
-        "html": body,
-        "count": len(segments),
-    }
-
-
-def _strip_response_noise_line(line: str) -> bool:
-    current = str(line or "").strip().lower()
-    return current in {
-        "",
-        "```",
-        "```text",
-        "```html",
-        "```json",
-        "use code with caution.",
-        "use code with caution",
-    }
-
-
-def _parse_html_text_node_translations(content: str, expected_count: int) -> Dict[int, str]:
-    raw = str(content or "").strip()
-    if not raw or expected_count <= 0:
-        return {}
-
-    fenced = re.match(r"^```(?:json|text)?\s*(.*?)\s*```$", raw, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        raw = fenced.group(1).strip()
-
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return {
-                idx: str(value).strip()
-                for idx, value in enumerate(parsed, start=1)
-                if idx <= expected_count and str(value).strip()
-            }
-        if isinstance(parsed, dict):
-            translations: Dict[int, str] = {}
-            for key, value in parsed.items():
-                try:
-                    idx = int(str(key).strip().strip("[]"))
-                except Exception:
-                    continue
-                if 1 <= idx <= expected_count and str(value).strip():
-                    translations[idx] = str(value).strip()
-            if translations:
-                return translations
-    except Exception:
-        pass
-
-    translations: Dict[int, str] = {}
-    current_idx: Optional[int] = None
-    current_parts: List[str] = []
-
-    def flush_current() -> None:
-        nonlocal current_idx, current_parts
-        if current_idx is not None and current_parts:
-            value = "\n".join(part for part in current_parts if part).strip()
-            if value:
-                translations[current_idx] = value
-        current_idx = None
-        current_parts = []
-
-    marker = re.compile(r"^\s*(?:\[?(\d{1,5})\]?|segment\s+(\d{1,5}))\s*[\]\).:\-–—]*\s*(.*)$", re.IGNORECASE)
-    for line in raw.replace("\r", "\n").split("\n"):
-        if _strip_response_noise_line(line):
-            continue
-        match = marker.match(line)
-        if match:
-            idx = int(match.group(1) or match.group(2))
-            if 1 <= idx <= expected_count:
-                flush_current()
-                current_idx = idx
-                remainder = match.group(3).strip()
-                if remainder:
-                    current_parts.append(remainder)
-                continue
-    flush_current()
-    if translations:
-        return translations
-
-    fallback_lines = [
-        line.strip()
-        for line in raw.replace("\r", "\n").split("\n")
-        if line.strip() and not _strip_response_noise_line(line)
-    ]
-    if len(fallback_lines) >= expected_count:
-        return {idx: fallback_lines[idx - 1] for idx in range(1, expected_count + 1)}
-    return {}
-
-
-def _apply_html_text_node_translations(html_fragment: str, translations: Dict[int, str]) -> str:
-    raw_html = str(html_fragment or "")
-    if not raw_html or not translations:
-        return raw_html
-    try:
-        from bs4 import BeautifulSoup
-    except Exception:
-        return raw_html
-
-    soup = BeautifulSoup(raw_html, "html.parser")
-    text_nodes = _collect_html_text_nodes(soup)
-    for index, node in enumerate(text_nodes, start=1):
-        translated = translations.get(index)
-        if translated is None:
-            continue
-        original = str(node)
-        leading = re.match(r"^\s*", original).group(0)
-        trailing = re.search(r"\s*$", original).group(0)
-        node.replace_with(f"{leading}{translated}{trailing}")
-    return str(soup)
-
-
 def _strip_search_prefix(model: str) -> str:
     raw = str(model or "").strip()
     match = re.match(r"^search\d{0,4}/", raw, flags=re.IGNORECASE)
@@ -1305,77 +350,6 @@ def _strip_search_prefix(model: str) -> str:
     elif raw.lower().startswith("search"):
         raw = raw[len("search"):].lstrip("/")
     return raw.strip("/") or DEFAULT_MODEL
-
-
-def _search_params() -> Dict[str, str]:
-    params = dict(DEFAULT_SEARCH_PARAMS)
-    extra = os.getenv("GEMINI_FREE_SEARCH_PARAMS", "").strip()
-    if extra:
-        for key, value in parse_qsl(extra.lstrip("?"), keep_blank_values=True):
-            if key:
-                params[key] = value
-    return params
-
-
-def _build_search_base_url() -> str:
-    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
-    params = _search_params()
-    params.pop("q", None)
-    return f"{base}?{urlencode(params)}"
-
-
-def _build_search_url(prompt: str) -> str:
-    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
-    params = _search_params()
-    params["q"] = prompt
-    return f"{base}?{urlencode(params)}"
-
-
-def _google_blocked(page_data: Dict[str, Any]) -> bool:
-    url = str(page_data.get("url") or "").lower()
-    text = str(page_data.get("text") or "")
-    text_l = text.lower()
-    return (
-        "google.com/sorry/" in url
-        or "our systems have detected unusual traffic" in text_l
-        or ("about this page" in text_l and "unusual traffic" in text_l)
-        or "to continue, please type the characters" in text_l
-    )
-
-
-def _contains_generation_failure(lines: Iterable[str]) -> bool:
-    for line in lines or []:
-        current = str(line or "").strip().lower()
-        if any(marker in current for marker in GENERATION_FAILURE_MARKERS):
-            return True
-    return False
-
-
-def _raise_if_generation_failure_text(value: str) -> None:
-    lines = [
-        line.strip()
-        for line in str(value or "").replace("\r", "\n").split("\n")
-        if line.strip()
-    ]
-    if _contains_generation_failure(lines):
-        raise RuntimeError(
-            "Google Search AI Mode returned a generation failure: "
-            "Something went wrong and the content wasn't generated."
-        )
-
-
-def _messages_expect_html_response(messages: Iterable[Dict[str, Any]]) -> bool:
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "user").strip().lower() or "user"
-        if role in ("system", "assistant"):
-            continue
-        text = _content_to_text(message.get("content"))
-        _prefix, body = _split_user_instruction_prefix(text)
-        if _content_looks_like_html_payload(body):
-            return True
-    return False
 
 
 def _messages_expect_markdown_response(messages: Iterable[Dict[str, Any]]) -> bool:
@@ -1391,249 +365,6 @@ def _messages_expect_markdown_response(messages: Iterable[Dict[str, Any]]) -> bo
         if "html2text" in text or "markdown" in text:
             return True
     return False
-
-
-def _html_has_block_structure(value: str) -> bool:
-    return bool(re.search(r"<(?:html|body|article|section|main|div|p|h[1-6]|ul|ol|li|table|tr|blockquote|br)\b|</(?:p|div|h[1-6]|li|tr|blockquote)>", str(value or ""), re.IGNORECASE))
-
-
-def _normalize_visible_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def _html_visible_text(value: str) -> str:
-    raw = str(value or "")
-    if not raw:
-        return ""
-    try:
-        from bs4 import BeautifulSoup
-
-        return BeautifulSoup(raw, "html.parser").get_text(" ")
-    except Exception:
-        return re.sub(r"<[^>]+>", " ", raw)
-
-
-def _answer_html_matches_text(answer_html: str, answer_text: str) -> bool:
-    if not _html_has_block_structure(answer_html):
-        return False
-    html_text = _normalize_visible_text(_html_visible_text(answer_html))
-    expected_text = _normalize_visible_text(answer_text)
-    if not html_text:
-        return False
-    ui_markers = (
-        "copy share public link",
-        "good response",
-        "bad response",
-        "thanks for letting us know",
-        "google may use account",
-        "ai can make mistakes",
-    )
-    html_text_l = html_text.lower()
-    if any(marker in html_text_l for marker in ui_markers):
-        return False
-    if expected_text:
-        expected_l = expected_text.lower()
-        if expected_l not in html_text_l and html_text_l not in expected_l:
-            return False
-        if len(html_text) > max(250, len(expected_text) * 3):
-            return False
-    return True
-
-
-def _clean_answer_html(answer_html: str) -> str:
-    raw = str(answer_html or "").strip()
-    if not raw:
-        return ""
-    if "&lt;" in raw and not _html_has_block_structure(raw):
-        raw = html.unescape(raw)
-    try:
-        from bs4 import BeautifulSoup
-
-        soup = BeautifulSoup(raw, "html.parser")
-        for tag in soup(["script", "style", "button", "svg", "form", "input", "textarea", "noscript"]):
-            tag.decompose()
-        for tag in soup.find_all(True):
-            for attr in list(tag.attrs):
-                if attr not in ("href", "src", "alt", "title", "colspan", "rowspan"):
-                    del tag.attrs[attr]
-        container = soup.body if soup.body else soup
-        cleaned = "".join(str(child) for child in container.children if str(child).strip()).strip()
-        return cleaned
-    except Exception:
-        return raw
-
-
-def _answer_html_to_markdown(answer_html: str, answer_text: str = "") -> str:
-    html_content = _clean_answer_html(answer_html)
-    if not html_content or not _answer_html_matches_text(html_content, answer_text):
-        return ""
-    try:
-        import html2text
-
-        converter = html2text.HTML2Text()
-        converter.body_width = 0
-        converter.unicode_snob = True
-        converter.escape_snob = os.getenv("HTML2TEXT_ESCAPE_SNOB", "0") == "1"
-        converter.use_automatic_links = False
-        converter.ignore_links = False
-        converter.ignore_images = False
-        converter.ignore_anchors = False
-        converter.skip_internal_links = False
-        converter.ignore_tables = False
-        converter.images_as_html = True
-        converter.images_to_alt = False
-        converter.images_with_size = True
-        converter.wrap_links = False
-        converter.wrap_list_items = False
-        converter.protect_links = True
-        converter.ignore_emphasis = False
-        converter.mark_code = True
-        return converter.handle(html_content).strip()
-    except Exception:
-        return ""
-
-
-def _markdown_visible_text(value: str) -> str:
-    raw = str(value or "")
-    raw = re.sub(r"```.*?```", " ", raw, flags=re.DOTALL)
-    raw = re.sub(r"`([^`]*)`", r"\1", raw)
-    raw = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", raw)
-    raw = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw)
-    raw = re.sub(r"^\s{0,3}#{1,6}\s+", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"^\s{0,3}>\s?", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw, flags=re.MULTILINE)
-    raw = raw.replace("**", "").replace("__", "").replace("~~", "")
-    raw = raw.replace("*", "").replace("_", "")
-    return _html_visible_text(raw)
-
-
-def _markdown_matches_text(markdown_content: str, answer_text: str) -> bool:
-    markdown_text = _normalize_visible_text(_markdown_visible_text(markdown_content))
-    expected_text = _normalize_visible_text(answer_text)
-    if not markdown_text:
-        return False
-    if not expected_text:
-        return True
-    expected_l = expected_text.lower()
-    markdown_l = markdown_text.lower()
-    if expected_l in markdown_l or markdown_l in expected_l:
-        return True
-    return len(markdown_text) <= max(250, len(expected_text) * 3)
-
-
-def _extract_rendered_content(
-    page_data: Dict[str, Any],
-    *,
-    prompt: str = "",
-    prefer_html: bool = False,
-    prefer_markdown: bool = False,
-) -> str:
-    if _google_blocked(page_data):
-        raise RuntimeError(
-            "Google Search returned a verification page instead of a Gemini/Search response. "
-            "Open Google in a regular browser/profile and clear the verification, or retry later."
-    )
-    if prefer_html:
-        answer_text = str(page_data.get("answerText") or "").strip()
-        _raise_if_generation_failure_text(answer_text)
-        html_content = _clean_answer_html(str(page_data.get("answerHtml") or ""))
-        if _answer_html_matches_text(html_content, answer_text):
-            failure_probe = html_content
-            try:
-                from bs4 import BeautifulSoup
-
-                failure_probe = BeautifulSoup(html_content, "html.parser").get_text("\n")
-            except Exception:
-                pass
-            _raise_if_generation_failure_text(failure_probe)
-            return html_content
-        if _html_has_block_structure(answer_text):
-            return answer_text
-        if answer_text:
-            return answer_text
-
-    if prefer_markdown:
-        answer_text = str(page_data.get("answerText") or "").strip()
-        _raise_if_generation_failure_text(answer_text)
-        browser_markdown = str(page_data.get("answerMarkdown") or "").strip()
-        if browser_markdown and _markdown_matches_text(browser_markdown, answer_text):
-            _raise_if_generation_failure_text(browser_markdown)
-            return browser_markdown
-        markdown_content = _answer_html_to_markdown(str(page_data.get("answerHtml") or ""), answer_text)
-        if markdown_content:
-            _raise_if_generation_failure_text(markdown_content)
-            return markdown_content
-        if answer_text:
-            return answer_text
-
-    text = str(page_data.get("text") or "")
-    lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
-    lines = [line for line in lines if line]
-    content_lines = _extract_ai_answer_lines(lines, prompt)
-    _raise_if_generation_failure_text("\n".join(content_lines or lines))
-    content = "\n".join(content_lines or lines).strip()
-    if not content:
-        title = str(page_data.get("title") or "").strip()
-        raise RuntimeError(f"Google Search returned an empty rendered page. title={title!r}")
-    return content
-
-
-def _extract_ai_answer_lines(lines: List[str], prompt: str = "") -> List[str]:
-    """Best-effort cleanup for Google AI mode rendered page text."""
-    if not lines:
-        return []
-
-    start = 0
-    for idx, line in enumerate(lines):
-        if line.strip().lower() == "you said:":
-            start = idx + 1
-            break
-    else:
-        return []
-
-    prompt_lines = {
-        line.strip()
-        for line in str(prompt or "").replace("\r", "\n").split("\n")
-        if line.strip()
-    }
-    role_markers = {"user:", "assistant:", "system instructions:"}
-    while start < len(lines):
-        current = lines[start].strip()
-        current_l = current.lower()
-        if not current:
-            start += 1
-            continue
-        if current_l in role_markers or current in prompt_lines:
-            start += 1
-            continue
-        break
-
-    end = len(lines)
-    end_markers = (
-        "ai can make mistakes",
-        "ai mode response is ready",
-        "search results",
-        "people also ask",
-        "related searches",
-    )
-    for idx in range(start, len(lines)):
-        current_l = lines[idx].strip().lower()
-        if any(marker in current_l for marker in end_markers):
-            end = idx
-            break
-        if re.match(r"^\d+\s+sites?$", current_l):
-            end = idx
-            break
-
-    extracted = []
-    for line in lines[start:end]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if re.match(r"^\+\d+$", stripped):
-            continue
-        extracted.append(stripped)
-    return extracted
 
 
 def _setup_qt_environment() -> None:
@@ -1848,183 +579,702 @@ def run_qtwebengine_request(
         _cleanup_profile_root(profile_root)
 
 
-def load_rendered_page_text(
-    url: str,
-    *,
-    prompt: str = "",
-    timeout: int = DEFAULT_TIMEOUT,
-    wait_after_load_ms: Optional[int] = None,
-    user_agent: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Load a page in Qt WebEngine and return rendered body text."""
-    _setup_qt_environment()
+class AIModeError(RuntimeError):
+    """A google.com AI Mode request that failed for a named reason.
 
-    from PySide6.QtCore import QEventLoop, QTimer, QUrl
-    from PySide6.QtWebEngineCore import QWebEnginePage
-    from PySide6.QtWidgets import QApplication
+    ``kind`` (also ``error_type``, the name ``cdp_browser`` reads) tells the caller whether a
+    retry can help: see the ``KIND_*`` constants. The helper process reports it next to the
+    error text (``error_kind``), so it survives the process boundary.
+    """
 
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(["gemini-free-page"])
+    def __init__(self, message: str, kind: str = "") -> None:
+        super().__init__(message)
+        self.kind = kind or ""
+        self.error_type = self.kind or "api_error"
 
-    profile, profile_root = _create_profile(app, user_agent=user_agent)
-    page = QWebEnginePage(profile, app)
-    _set_default_page_viewport(page)
-    timeout_seconds = _timeout_seconds(timeout)
 
-    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
-        holder: Dict[str, Any] = {}
-        loop = QEventLoop()
+#: Google asks for a CAPTCHA ("unusual traffic"): the user has to clear it; never retried.
+KIND_VERIFICATION = "verification"
+#: Google's cookie consent page came up instead of AI Mode.
+KIND_CONSENT = "consent"
+#: A Google sign-in page came up, the saved session ended, or the model needs an account.
+KIND_SIGN_IN = "sign_in"
+#: AI Mode did not open (region, account or browser without AI Mode).
+KIND_UNAVAILABLE = "unavailable"
+#: AI Mode answered with web results or "no response available" instead of an AI answer.
+KIND_NO_ANSWER = "no_answer"
+#: AI Mode said the content was not generated.
+KIND_GENERATION_FAILURE = "generation_failure"
+#: The prompt box text is too long for AI Mode even with the texts moved into attachments.
+KIND_TOO_LONG = "too_long"
+#: An attachment was not accepted or did not finish uploading.
+KIND_UPLOAD = "upload"
+#: AI Mode closed the HTML code block before the end of the answer (the text is too long for
+#: one answer of this model): the tags of the rest are lost, so the answer is refused.
+KIND_INCOMPLETE = "incomplete"
+#: The Chrome/Edge page of the signed-in profile failed (``cdp_browser`` error types).
+KIND_BROWSER = "browser_error"
+KIND_CANCELLED = "cancelled"
+#: Kinds a new attempt cannot fix: the unified client reports them at once.
+FATAL_KINDS = (KIND_VERIFICATION, KIND_CONSENT, KIND_SIGN_IN, KIND_UNAVAILABLE, KIND_TOO_LONG,
+               KIND_INCOMPLETE)
+#: The entry of AI Mode's model menu that plain ``search/gemini`` asks for (where it exists).
+AUTO_MODEL = "auto"
 
-        def _done(value: Any) -> None:
-            holder["value"] = value
-            loop.quit()
+#: A request this short, with plain text and no images, is typed into AI Mode's prompt box as
+#: it is; anything longer, any HTML and any image goes in as an attachment.
+INLINE_PROMPT_CHARS = 2000
+#: AI Mode puts the prompt box text into the result URL (``q=``) and answers with web results
+#: only once that URL passes roughly 48,000 characters (measured: 47,700 answered, 53,600 did
+#: not; a Hangul character is nine URL characters). The instructions move into an attached file
+#: before that.
+MAX_PROMPT_URL_CHARS = 40000
+#: Names of the attached files.
+HTML_FILE_NAME = "chapter.html"
+TEXT_FILE_NAME = "text.txt"
+CONTEXT_FILE_NAME = "context.txt"
+INSTRUCTIONS_FILE_NAME = "instructions.txt"
+#: Attached texts are uploaded as plain text whatever their name: AI Mode then reads the raw
+#: markup. Uploaded as ``text/html`` it reads the rendered page and the reply loses tags.
+TEXT_FILE_MIME = "text/plain"
+_IMAGE_EXTENSIONS = {
+    "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp",
+    "image/gif": "gif", "image/bmp": "bmp", "image/avif": "avif", "image/heic": "heic",
+    "image/heif": "heif", "image/tiff": "tiff",
+}
+_NO_FOLLOW_UP = "with no follow-up questions or commentary"
 
-        page.runJavaScript(script, _done)
-        QTimer.singleShot(js_timeout_ms, loop.quit)
-        loop.exec()
-        return holder.get("value")
 
-    try:
-        load_loop = QEventLoop()
-        load_state: Dict[str, Any] = {"ok": False}
+def _content_images(content: Any) -> List[tuple[str, bytes]]:
+    """The images of one message's content as ``(mime type, bytes)``.
 
-        def _loaded(ok: bool) -> None:
-            load_state["ok"] = bool(ok)
-            load_loop.quit()
+    Reads the shapes the unified client sends: ``image_url`` parts (a ``data:`` URL, directly
+    or under ``url``), ``input_image`` parts and Anthropic-style ``image`` parts with a base64
+    ``source``. An image given only by a web address is skipped: AI Mode takes uploads.
+    """
+    import base64
 
-        page.loadFinished.connect(_loaded)
-        page.load(QUrl(url))
-        if timeout_seconds is not None:
-            QTimer.singleShot(max(1000, int(timeout_seconds * 1000)), load_loop.quit)
-        load_loop.exec()
-        if not load_state.get("ok"):
-            raise RuntimeError(f"Qt WebEngine failed to load {url}")
-
-        wait_ms = wait_after_load_ms
-        if wait_ms is None:
-            wait_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
-        deadline = _timeout_deadline(timeout)
-        min_ready_at = time.time() + max(0, int(wait_ms)) / 1000.0
-        last_result: Dict[str, Any] = {}
-
-        while not _deadline_expired(deadline):
-            if _is_cancelled():
-                raise RuntimeError("stream cancelled")
-            raw = run_js(_page_snapshot_script(prompt), js_timeout_ms=5000)
-            try:
-                result = json.loads(raw or "{}")
-            except Exception:
-                result = {}
-            last_result = result
-            text = str(result.get("text") or "")
-            if _google_blocked(result):
-                return result
-            if text.strip() and time.time() >= min_ready_at:
-                return result
-
-            wait_loop = QEventLoop()
-            QTimer.singleShot(500, wait_loop.quit)
-            wait_loop.exec()
-
-        return last_result
-    finally:
+    images: List[tuple[str, bytes]] = []
+    if not isinstance(content, list):
+        return images
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").lower()
+        if item_type not in ("image_url", "input_image", "image"):
+            continue
+        mime = ""
+        encoded = ""
+        source = item.get("source")
+        if isinstance(source, dict) and source.get("data"):
+            mime = str(source.get("media_type") or source.get("mime_type") or "image/png")
+            encoded = str(source.get("data") or "")
+        else:
+            url = item.get("image_url")
+            if isinstance(url, dict):
+                url = url.get("url")
+            url = str(url or item.get("url") or "")
+            match = re.match(r"^data:([\w.+/-]+)?(?:;[\w=.+-]+)*;base64,(.*)$", url, flags=re.DOTALL | re.IGNORECASE)
+            if not match:
+                continue
+            mime = match.group(1) or "image/png"
+            encoded = match.group(2)
         try:
-            page.deleteLater()
-            profile.deleteLater()
-            cleanup_loop = QEventLoop()
-            QTimer.singleShot(100, cleanup_loop.quit)
-            cleanup_loop.exec()
+            data = base64.b64decode(re.sub(r"\s+", "", encoded), validate=False)
         except Exception:
-            pass
-        _cleanup_profile_root(profile_root)
+            continue
+        if data:
+            images.append((mime.lower(), data))
+    return images
 
 
-def load_ai_mode_prompt_text(
-    prompt: str,
+def _message_text(content: Any) -> str:
+    """``_content_to_text`` without the image placeholders (images go in as attachments)."""
+    text = _content_to_text(content)
+    return "\n".join(line for line in text.split("\n") if line.strip() != "[image omitted]").strip()
+
+
+def _ai_mode_model_choice(model: str) -> str:
+    """The AI Mode model a ``search/`` model name asks for, lower case; "" for the page's own.
+
+    ``search/gemini`` is AI Mode's own choice: its "Auto" entry where the menu has one, else the
+    model the page has selected. ``search/gemini-<name>`` picks the entry of AI Mode's model
+    menu whose name contains ``<name>`` (``search/gemini-4-carbon``: "4 Carbon",
+    ``search/gemini-3.8-flash``: "3.8 Flash"); ``list_models()`` reads the names an account is
+    offered. A signed-out page offers one model only.
+    """
+    actual = _strip_search_prefix(model).lower()
+    if actual == DEFAULT_MODEL:
+        return ""
+    if actual.startswith(DEFAULT_MODEL + "-") and len(actual) > len(DEFAULT_MODEL) + 1:
+        return actual[len(DEFAULT_MODEL) + 1:].replace("_", " ").replace("-", " ").strip()
+    raise RuntimeError(
+        f"Gemini Free supports search/{DEFAULT_MODEL} and search/{DEFAULT_MODEL}-<AI Mode model>; "
+        f"got search/{actual}"
+    )
+
+
+def _text_file(name: str, text: str) -> Dict[str, Any]:
+    return {"name": name, "mime": TEXT_FILE_MIME, "kind": "file", "data": str(text).encode("utf-8")}
+
+
+#: An HTML line longer than this is broken up before it is attached.
+MAX_HTML_LINE_CHARS = 1500
+_BLOCK_END = re.compile(
+    r"(</(?:p|div|h[1-6]|li|ul|ol|table|tr|blockquote|section|article|head|body|html)>)(?=<)", re.IGNORECASE)
+
+
+def _one_block_per_line(markup: str) -> str:
+    """``markup`` with a line break after each closing block tag that another tag follows.
+
+    Chapters often come as one line of many thousand characters. The model returns HTML the
+    way it got it, and AI Mode shows an HTML answer that is one very long line as an empty code
+    block with the text, stripped of its tags, beside it. A break between two blocks changes
+    nothing in the rendered chapter. Markup whose lines are short already is left alone.
+    """
+    text = str(markup or "")
+    if max((len(line) for line in text.split("\n")), default=0) <= MAX_HTML_LINE_CHARS:
+        return text
+    return _BLOCK_END.sub(r"\1\n", text)
+
+
+def _build_ai_mode_request(messages: Iterable[Dict[str, Any]], model: str = DEFAULT_MODEL) -> Dict[str, Any]:
+    """What one chat request puts on the AI Mode page: the prompt box text and the attachments.
+
+    The system prompt is typed into the prompt box. The text to work on (the last user message)
+    is attached as a file when it is HTML or long, so its size never meets AI Mode's prompt
+    limit and its tags reach the model untouched; images are attached as images; earlier
+    messages of the conversation go into ``context.txt``. A short plain request with nothing to
+    attach is typed in as it is. Role labels ("System instructions:", "User:") are never
+    written: with an attachment AI Mode answers such a prompt with "no response available".
+    """
+    system_parts: List[str] = []
+    turns: List[tuple[str, str]] = []
+    images: List[tuple[str, bytes]] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        content = message.get("content")
+        text = _message_text(content)
+        if role == "system":
+            if text:
+                system_parts.append(text)
+            continue
+        if role != "assistant":
+            role = "user"
+            images.extend(_content_images(content))
+        if text:
+            turns.append((role, text))
+
+    payload = ""
+    for index in range(len(turns) - 1, -1, -1):
+        if turns[index][0] == "user":
+            payload = turns.pop(index)[1]
+            break
+    history = turns
+    system_text = "\n\n".join(system_parts).strip()
+    expects_html = _content_looks_like_html_payload(payload)
+    expects_markdown = bool(
+        not expects_html and _messages_expect_markdown_response([{"role": "user", "content": payload}])
+    )
+    attach_payload = bool(payload) and (
+        expects_html or len(system_text) + len(payload) > INLINE_PROMPT_CHARS
+    )
+
+    files: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    payload_name = HTML_FILE_NAME if expects_html else TEXT_FILE_NAME
+    if history:
+        context = "\n\n".join(
+            ("Earlier request:\n" if role == "user" else "Earlier reply:\n") + text for role, text in history
+        )
+        files.append(_text_file(CONTEXT_FILE_NAME, context))
+        notes.append(
+            f"The attached file {CONTEXT_FILE_NAME} holds the earlier messages of this conversation, "
+            "for reference only."
+        )
+    if attach_payload:
+        files.append(_text_file(payload_name, _one_block_per_line(payload) if expects_html else payload))
+    for number, (mime, data) in enumerate(images, start=1):
+        extension = _IMAGE_EXTENSIONS.get(mime, "png")
+        files.append({
+            "name": f"image{number:03d}.{extension}",
+            "mime": mime if mime in _IMAGE_EXTENSIONS else "image/png",
+            "kind": "image",
+            "data": data,
+        })
+    if images:
+        notes.append("The attached image belongs to the request." if len(images) == 1
+                     else f"The {len(images)} attached images belong to the request.")
+
+    task = ""
+    if attach_payload:
+        task = (f"Apply the instructions above to the attached file {payload_name}." if system_text
+                else f"Read the attached file {payload_name} and do what it asks.")
+        task += (f" Reply with only the complete result as HTML inside one ```html code block, {_NO_FOLLOW_UP}."
+                 if expects_html else f" Reply with only the complete result, {_NO_FOLLOW_UP}.")
+
+    def compose(instructions: str, task_line: str) -> str:
+        inline = payload if payload and not attach_payload else ""
+        tail = " ".join(part for part in (*notes, task_line) if part)
+        return "\n\n".join(part for part in (instructions, inline, tail) if part).strip()
+
+    prompt = compose(system_text, task)
+    instructions_attached = False
+    if system_text and len(_build_search_url(prompt)) > MAX_PROMPT_URL_CHARS:
+        # A long system prompt (a glossary appended to it): it goes into a file as well.
+        instructions_attached = True
+        files.insert(0, _text_file(INSTRUCTIONS_FILE_NAME, system_text))
+        lead = f"Follow the instructions in the attached file {INSTRUCTIONS_FILE_NAME}."
+        prompt = compose(lead, task.replace("Apply the instructions above", "Apply them", 1))
+    return {
+        "prompt": prompt,
+        "files": files,
+        "model": _ai_mode_model_choice(model),
+        "expects_html": expects_html,
+        "expects_markdown": expects_markdown,
+        "instructions_attached": instructions_attached,
+        "prompt_chars": len(system_text) + len(payload) + sum(len(text) for _role, text in history),
+    }
+
+
+def _search_params() -> Dict[str, str]:
+    params = dict(DEFAULT_SEARCH_PARAMS)
+    extra = os.getenv("GEMINI_FREE_SEARCH_PARAMS", "").strip()
+    if extra:
+        for key, value in parse_qsl(extra.lstrip("?"), keep_blank_values=True):
+            if key:
+                params[key] = value
+    return params
+
+
+def _build_search_base_url() -> str:
+    """google.com with AI Mode on and an empty prompt box: the page every request opens."""
+    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
+    params = _search_params()
+    params.pop("q", None)
+    return f"{base}?{urlencode(params)}"
+
+
+def _build_search_url(prompt: str) -> str:
+    """The AI Mode address of ``prompt`` (what the page navigates to when the prompt is sent)."""
+    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
+    params = _search_params()
+    params["q"] = prompt
+    return f"{base}?{urlencode(params)}"
+
+
+# Page script: the state of the AI Mode page and its latest answer (a JSON string).
+#
+# The answer is the page's answer column (``data-container-id="main-col"``; the whole turn,
+# ``data-subtree="aimc"``, when that name is gone). It is read from the DOM, not from
+# ``innerText``, so the sources chips and the feedback form (buttons, hidden blocks) stay out and
+# a code block comes back whole. Visibility is judged by ``display`` / ``visibility`` alone: a
+# hidden page (the mobile WebView, a headless tab) lays out nothing, and AI Mode's wrappers are
+# ``display: contents``, so box sizes say nothing there. ``complete`` is AI Mode's own "response
+# is ready" announcement (``hl=en``).
+AI_MODE_SNAPSHOT_SCRIPT = r"""
+(() => {
+  const doc = document;
+  const styleOf = (element) => window.getComputedStyle(element);
+  const hidden = (element) => {
+    if (element.getAttribute("aria-hidden") === "true") return true;
+    const style = styleOf(element);
+    return style.display === "none" || style.visibility === "hidden";
+  };
+  const SKIP = new Set(["BUTTON", "SVG", "TEXTAREA", "INPUT", "SELECT", "SCRIPT", "STYLE", "NOSCRIPT",
+    "IMG", "VIDEO", "AUDIO", "IFRAME", "CANVAS"]);
+  const BLOCK = /^(block|flex|grid|list-item|table|flow-root)$/;
+  const headingLevel = (element) => {
+    const tag = String(element.tagName || "").toUpperCase();
+    if (/^H[1-6]$/.test(tag)) return parseInt(tag.slice(1), 10);
+    if ((element.getAttribute("role") || "") === "heading") {
+      return Math.min(6, Math.max(1, parseInt(element.getAttribute("aria-level") || "2", 10) || 2));
+    }
+    return 0;
+  };
+  const answers = Array.from(doc.querySelectorAll('[data-container-id="main-col"]'));
+  const turns = Array.from(doc.querySelectorAll('[data-subtree="aimc"]'));
+  const root = answers.length ? answers[answers.length - 1] : (turns.length ? turns[turns.length - 1] : null);
+  let topLevel = 7;
+  if (root) {
+    for (const element of root.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')) {
+      const level = headingLevel(element);
+      if (level && level < topLevel) topLevel = level;
+    }
+  }
+  const tidy = (value) => String(value || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const render = (node, markdown) => {
+    if (node.nodeType === 3) return String(node.nodeValue || "").replace(/ /g, " ").replace(/\s+/g, " ");
+    if (node.nodeType !== 1) return "";
+    const tag = String(node.tagName || "").toUpperCase();
+    if (SKIP.has(tag) || hidden(node)) return "";
+    if (tag === "BR") return "\n";
+    if (tag === "HR") return "\n\n---\n\n";
+    if (tag === "PRE") return "\n\n```\n" + String(node.textContent || "").replace(/\s+$/, "") + "\n```\n\n";
+    const inner = (element) => Array.from(element.childNodes).map((child) => render(child, markdown)).join("");
+    const level = headingLevel(node);
+    if (level) {
+      const title = tidy(inner(node));
+      if (!title) return "";
+      return "\n\n" + (markdown ? "#".repeat(Math.max(1, level - topLevel + 1)) + " " : "") + title + "\n\n";
+    }
+    if (tag === "UL" || tag === "OL") {
+      const rows = [];
+      for (const item of Array.from(node.children)) {
+        if (String(item.tagName || "").toUpperCase() !== "LI" || hidden(item)) continue;
+        const body = tidy(inner(item));
+        if (!body) continue;
+        rows.push((tag === "OL" ? (rows.length + 1) + ". " : "- ") + body.replace(/\n/g, "\n  "));
+      }
+      return rows.length ? "\n\n" + rows.join("\n") + "\n\n" : "";
+    }
+    if (tag === "TABLE") {
+      const rows = Array.from(node.querySelectorAll("tr")).map((row) =>
+        Array.from(row.querySelectorAll("th,td")).map((cell) => tidy(inner(cell)).replace(/\n+/g, " ")).join(" | "));
+      return rows.length ? "\n\n" + rows.filter(Boolean).join("\n") + "\n\n" : "";
+    }
+    const text = inner(node);
+    if (markdown && (tag === "STRONG" || tag === "B")) return text.trim() ? "**" + text.trim() + "**" : "";
+    if (markdown && (tag === "EM" || tag === "I")) return text.trim() ? "*" + text.trim() + "*" : "";
+    if (tag === "P" || tag === "LI" || tag === "BLOCKQUOTE" || BLOCK.test(styleOf(node).display)) {
+      const body = tidy(text);
+      return body ? "\n\n" + body + "\n\n" : "";
+    }
+    return text;
+  };
+  const bodyText = doc.body ? doc.body.innerText || "" : "";
+  const announcements = Array.from(doc.querySelectorAll("[aria-live]")).map((element) => element.textContent || "");
+  return JSON.stringify({
+    url: location.href,
+    title: doc.title || "",
+    ready: doc.readyState || "",
+    text: bodyText.slice(0, 6000),
+    aiMode: turns.length > 0 || answers.length > 0 || !!doc.querySelector('[data-xid="aim-mars-turn-root"]'),
+    promptBox: doc.querySelectorAll("textarea").length > 0,
+    answerFound: !!root,
+    answerText: root ? tidy(render(root, false)) : "",
+    answerMarkdown: root ? tidy(render(root, true)) : "",
+    codeBlocks: root ? Array.from(root.querySelectorAll("pre")).filter((block) => !hidden(block))
+      .map((block) => String(block.textContent || "")) : [],
+    complete: announcements.some((text) => /AI Mode response is ready/i.test(text)),
+    pending: root ? root.querySelectorAll('[data-complete="false"]').length : 0,
+    htmlLength: doc.documentElement ? doc.documentElement.outerHTML.length : 0
+  });
+})()
+"""
+
+# Page script (shared head): ``modelItems()`` is the model entries of AI Mode's attach menu, the
+# menu that holds "Add images" / "Add files". Other menus of the page have radio entries too
+# (the phone layout's search filters: "Past hour", "Verbatim").
+_AI_MODE_MODEL_ITEMS_JS = r"""
+  const textOf = (item) => (item.innerText || item.textContent || "").replace(/\s+/g, " ").trim();
+  const modelItems = () => {
+    const menu = Array.from(document.querySelectorAll('[role="menu"]')).find((entry) =>
+      Array.from(entry.querySelectorAll('[role="menuitem"]')).some((item) =>
+        /^add (files|images)/i.test(item.getAttribute("aria-label") || textOf(item))));
+    return menu ? Array.from(menu.querySelectorAll('[role="menuitemradio"]')) : [];
+  };
+"""
+
+# Page script: open AI Mode's "Add files, tools, and select a model" menu when its file inputs
+# and model entries are not in the page yet, and list them (JSON: ok, inputs, models).
+AI_MODE_MENU_SCRIPT = r"""
+(() => {
+  const labelOf = (element) => element.getAttribute("aria-label") || "";
+__MODEL_ITEMS__
+  const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+  const opener = buttons.find((button) => /^add files/i.test(labelOf(button))) ||
+    buttons.find((button) => button.getAttribute("aria-haspopup") === "menu" &&
+      /\b(add|attach|upload)\b/i.test(labelOf(button)));
+  const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+  const models = modelItems().map((item) => ({
+    label: textOf(item),
+    checked: item.getAttribute("aria-checked") === "true",
+    disabled: item.getAttribute("aria-disabled") === "true"
+  }));
+  let clicked = false;
+  if (opener && !inputs.length && !models.length && opener.getAttribute("aria-expanded") !== "true") {
+    opener.click();
+    clicked = true;
+  }
+  return JSON.stringify({
+    ok: inputs.length > 0 || models.length > 0,
+    opener: !!opener,
+    clicked,
+    inputs: inputs.map((input) => input.accept || ""),
+    models
+  });
+})()
+""".replace("__MODEL_ITEMS__", _AI_MODE_MODEL_ITEMS_JS.strip("\n"))
+
+#: Characters of base64 one page script carries when a file is handed to the page.
+FILE_CHUNK_CHARS = 240000
+
+
+def _ai_mode_select_model_script(choice: str) -> str:
+    """Page script: tick the model menu entry whose name contains ``choice`` (JSON: ok, label,
+    error, models). The name is the part before the "•" ("4 Carbon • Most complex work")."""
+    return r"""
+(() => {
+  const want = __WANT__;
+__MODEL_ITEMS__
+  const items = modelItems();
+  const models = items.map(textOf);
+  const item = items.find((entry) => textOf(entry).toLowerCase().split("•")[0].includes(want)) ||
+    items.find((entry) => textOf(entry).toLowerCase().includes(want));
+  if (!item) return JSON.stringify({ok: false, error: "not listed", models});
+  if (item.getAttribute("aria-disabled") === "true" && item.getAttribute("aria-checked") !== "true") {
+    return JSON.stringify({ok: false, error: "disabled", models});
+  }
+  const already = item.getAttribute("aria-checked") === "true";
+  if (!already) item.click();
+  return JSON.stringify({ok: true, label: textOf(item), already, models});
+})()
+""".replace("__MODEL_ITEMS__", _AI_MODE_MODEL_ITEMS_JS.strip("\n")).replace(
+        "__WANT__", json.dumps(str(choice or "").lower(), ensure_ascii=False))
+
+
+def _ai_mode_stage_file_script(index: int, name: str, mime: str, kind: str, chunk: str) -> str:
+    """Page script: add one base64 ``chunk`` of attachment ``index`` to the page's staging list
+    (the files reach the page in pieces; returns the staged length)."""
+    return (
+        "(() => { const staged = (window.__glossarionAiFiles = window.__glossarionAiFiles || []);"
+        f" const index = {int(index)};"
+        " staged[index] = staged[index] || {name: " + json.dumps(str(name), ensure_ascii=False)
+        + ", mime: " + json.dumps(str(mime)) + ", kind: " + json.dumps(str(kind)) + ', b64: ""};'
+        " staged[index].b64 += " + json.dumps(str(chunk)) + ";"
+        " return staged[index].b64.length; })()"
+    )
+
+
+def _ai_mode_attach_script(kind: str) -> str:
+    """Page script: give the staged attachments of ``kind`` ("file" / "image") to AI Mode's file
+    input, as a file picker would (JSON: ok, names, error, inputs). Images go to the image input
+    (its ``accept`` lists image types), everything else to the general one."""
+    return r"""
+(() => {
+  const kind = __KIND__;
+  const staged = (window.__glossarionAiFiles || []).filter((file) => file && file.kind === kind);
+  const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+  const takesImages = (input) => /image\//i.test(input.accept || "");
+  // the phone layout has camera inputs (``capture``) before its image picker
+  const picker = (entry) => takesImages(entry) && !entry.hasAttribute("capture") && entry.multiple;
+  const input = kind === "image"
+    ? (inputs.find(picker) || inputs.find(takesImages) || inputs.find((entry) => !entry.accept))
+    : (inputs.find((entry) => !takesImages(entry)) || null);
+  if (!input) {
+    return JSON.stringify({ok: false, error: "AI Mode file input not found", inputs: inputs.map((entry) => entry.accept || "")});
+  }
+  const transfer = new DataTransfer();
+  for (const file of staged) {
+    const binary = atob(file.b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    transfer.items.add(new File([bytes], file.name, {type: file.mime}));
+  }
+  input.files = transfer.files;
+  input.dispatchEvent(new Event("change", {bubbles: true}));
+  return JSON.stringify({ok: true, names: staged.map((file) => file.name)});
+})()
+""".replace("__KIND__", json.dumps(str(kind)))
+
+
+def _ai_mode_upload_state_script(names: Iterable[str]) -> str:
+    """Page script: which of the attachments ``names`` show as a chip in the prompt box, and how
+    many uploads the page finished (JSON: chips, uploads; ``uploads`` -1 when the page cannot
+    tell)."""
+    return r"""
+(() => {
+  const names = __NAMES__;
+  const labels = new Set(Array.from(document.querySelectorAll("[aria-label]")).map((element) => element.getAttribute("aria-label")));
+  let uploads = -1;
+  try {
+    uploads = performance.getEntriesByType("resource")
+      .filter((entry) => /\/crupload(\?|$)/.test(entry.name) && entry.responseEnd > 0).length;
+  } catch (error) {}
+  return JSON.stringify({chips: names.filter((name) => labels.has(name)), uploads});
+})()
+""".replace("__NAMES__", json.dumps([str(name) for name in names], ensure_ascii=False))
+
+
+GENERATION_FAILURE_MARKERS = (
+    "something went wrong and the content wasn't generated",
+    "something went wrong and the content was not generated",
+    "content wasn't generated",
+    "content was not generated",
+)
+#: AI Mode's answer when it has nothing to say for a request.
+NO_RESPONSE_MARKER = "no response available for this search"
+#: Lines of AI Mode's own that are not part of an answer.
+_ANSWER_NOISE_LINES = ("use code with caution.",)
+_ANSWER_NOISE_PREFIXES = ("ai can make mistakes", "ai responses may include mistakes", "ai mode reply for")
+
+
+def _google_blocked(page_data: Dict[str, Any]) -> bool:
+    url = str(page_data.get("url") or "").lower()
+    text = str(page_data.get("text") or "")
+    text_l = text.lower()
+    return (
+        "google.com/sorry/" in url
+        or "our systems have detected unusual traffic" in text_l
+        or ("about this page" in text_l and "unusual traffic" in text_l)
+        or "to continue, please type the characters" in text_l
+    )
+
+
+def _page_problem(page_data: Dict[str, Any]) -> Optional[tuple[str, str]]:
+    """``(kind, message)`` when the page is not AI Mode but a page of Google's that needs the
+    user: a verification (CAPTCHA) page, the cookie consent page, a sign-in page, or the notice
+    that AI Mode is not available. None for anything else (AI Mode itself, a page still loading).
+    """
+    url = str(page_data.get("url") or "")
+    host = (urlparse(url).netloc or "").lower()
+    text_l = str(page_data.get("text") or "").lower()
+    if _google_blocked(page_data):
+        return (
+            KIND_VERIFICATION,
+            "Google Search returned a verification page instead of AI Mode. "
+            "Open Google in a regular browser on this network and clear the verification, or retry later.",
+        )
+    if host.startswith("consent.") or "before you continue to google" in text_l:
+        return (
+            KIND_CONSENT,
+            "Google showed its cookie consent page instead of AI Mode, and Glossarion does not answer it. "
+            "Sign in with the Google Login button next to the model (the consent is saved with the "
+            "account's browser profile), or use another route.",
+        )
+    if host.startswith("accounts.google."):
+        return (
+            KIND_SIGN_IN,
+            "Google asked to sign in before showing AI Mode. Use the Google Login button next to the model.",
+        )
+    if re.search(r"ai mode (is not|isn't|isn’t) (currently )?available", text_l) or (
+        "ai mode" in text_l and "not available in your" in text_l
+    ):
+        return (
+            KIND_UNAVAILABLE,
+            "Google says AI Mode is not available here (region, account or language). "
+            "search/gemini needs google.com AI Mode.",
+        )
+    return None
+
+
+def _contains_generation_failure(lines: Iterable[str]) -> bool:
+    for line in lines or []:
+        current = str(line or "").strip().lower()
+        if any(marker in current for marker in GENERATION_FAILURE_MARKERS):
+            return True
+    return False
+
+
+def _raise_if_generation_failure_text(value: str) -> None:
+    lines = [line.strip() for line in str(value or "").replace("\r", "\n").split("\n") if line.strip()]
+    if _contains_generation_failure(lines):
+        raise AIModeError(
+            "Google Search AI Mode returned a generation failure: "
+            "Something went wrong and the content wasn't generated.",
+            KIND_GENERATION_FAILURE,
+        )
+
+
+def _web_results_only(answer_text: str) -> bool:
+    """AI Mode's answer when it does not generate one: a list of web results."""
+    head = str(answer_text or "").strip()[:300].lower()
+    return bool(re.match(r"^\d+\s+sites?\b", head)) or "here are top web results" in head
+
+
+def _code_block_payload(block: str) -> str:
+    """The code of one answer code block. AI Mode sometimes closes the block late: the model's
+    own closing fence and whatever it wrote after it are then inside the block, and are cut."""
+    text = str(block or "").replace("\r\n", "\n")
+    match = re.search(r"(?m)^[ \t]*```[ \t]*$", text)
+    if match:
+        text = text[: match.start()]
+    return text.strip("\n").rstrip()
+
+
+def _clean_answer_text(value: str) -> str:
+    """An answer without AI Mode's own lines: the "AI can make mistakes" note, a code block's
+    language label (it becomes the fence's) and its "Use code with caution." line, and the
+    model's ``<FollowUp>`` block."""
+    text = str(value or "").replace("\r\n", "\n")
+    text = re.sub(r"<FollowUp>.*?(</FollowUp>|\Z)", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"(?m)^([a-z][a-z0-9+#.-]{0,19})\n+```\n", r"```\1\n", text)
+    lines = []
+    for line in text.split("\n"):
+        probe = line.strip().lower()
+        if probe in _ANSWER_NOISE_LINES or any(probe.startswith(prefix) for prefix in _ANSWER_NOISE_PREFIXES):
+            continue
+        lines.append(line.rstrip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _extract_rendered_content(
+    page_data: Dict[str, Any],
     *,
-    timeout: int = DEFAULT_TIMEOUT,
-    wait_after_load_ms: Optional[int] = None,
-    user_agent: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Open AI Mode, submit the prompt through the page UI, and return rendered text."""
-    if browser_driver.use_driver("GEMINI_FREE_MODE"):
-        # Glossarion Mobile (no helper processes) or GEMINI_FREE_MODE=driver: the same flow
-        # on a page of the registered browser driver (hidden WebView).
-        return _load_ai_mode_prompt_text_driver(
-            prompt,
-            timeout=timeout,
-            wait_after_load_ms=wait_after_load_ms,
-            user_agent=user_agent,
+    prefer_html: bool = False,
+    prefer_markdown: bool = False,
+    prompt_url_chars: int = 0,
+) -> str:
+    """The model reply in an AI Mode page snapshot (``AI_MODE_SNAPSHOT_SCRIPT``).
+
+    A request for HTML gets the code block(s) of the answer: AI Mode shows HTML only inside
+    one, the request asks for it there. Otherwise the answer text, as Markdown when the request
+    works in Markdown. Raises :class:`AIModeError` for a page that is not an answer.
+    """
+    problem = _page_problem(page_data)
+    if problem:
+        raise AIModeError(problem[1], problem[0])
+    title = str(page_data.get("title") or "").strip()
+    if page_data.get("notAiMode"):
+        raise AIModeError(
+            "AI Mode did not open: Google served another page "
+            f"(title={title!r}, url={_safe_url_for_log(page_data.get('url'))}). "
+            "AI Mode may not be available for this region, account or browser.",
+            KIND_UNAVAILABLE,
         )
-    _setup_qt_environment()
-
-    from PySide6.QtCore import QEventLoop, QTimer, QUrl
-    from PySide6.QtWebEngineCore import QWebEnginePage
-    from PySide6.QtWidgets import QApplication
-
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(["gemini-free-ai-mode"])
-
-    profile, profile_root = _create_profile(app, user_agent=user_agent)
-    page = QWebEnginePage(profile, app)
-    _set_default_page_viewport(page)
-    base_url = _build_search_base_url()
-    timeout_seconds = _timeout_seconds(timeout)
-
-    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
-        holder: Dict[str, Any] = {}
-        loop = QEventLoop()
-
-        def _done(value: Any) -> None:
-            holder["value"] = value
-            loop.quit()
-
-        page.runJavaScript(script, _done)
-        QTimer.singleShot(js_timeout_ms, loop.quit)
-        loop.exec()
-        return holder.get("value")
-
-    def wait_ms(ms: int) -> None:
-        wait_loop = QEventLoop()
-        QTimer.singleShot(max(1, int(ms)), wait_loop.quit)
-        wait_loop.exec()
-
-    try:
-        load_loop = QEventLoop()
-        load_state: Dict[str, Any] = {"ok": False}
-
-        def _loaded(ok: bool) -> None:
-            load_state["ok"] = bool(ok)
-            load_loop.quit()
-
-        page.loadFinished.connect(_loaded)
-        page.load(QUrl(base_url))
-        if timeout_seconds is not None:
-            QTimer.singleShot(max(1000, int(timeout_seconds * 1000)), load_loop.quit)
-        load_loop.exec()
-        if not load_state.get("ok"):
-            raise RuntimeError(f"Qt WebEngine failed to load {base_url}")
-
-        return _submit_ai_mode_prompt(
-            prompt,
-            run_js=run_js,
-            wait_ms=wait_ms,
-            base_url=base_url,
-            timeout=timeout,
-            wait_after_load_ms=wait_after_load_ms,
+    answer_text = str(page_data.get("answerText") or "").strip()
+    markdown = str(page_data.get("answerMarkdown") or "").strip()
+    _raise_if_generation_failure_text(answer_text or str(page_data.get("text") or ""))
+    if NO_RESPONSE_MARKER in answer_text.lower():
+        raise AIModeError(
+            "Google AI Mode had no response for this request (\"no response available for this search\").",
+            KIND_NO_ANSWER,
         )
-    finally:
-        try:
-            page.deleteLater()
-            profile.deleteLater()
-            cleanup_loop = QEventLoop()
-            QTimer.singleShot(100, cleanup_loop.quit)
-            cleanup_loop.exec()
-        except Exception:
-            pass
-        _cleanup_profile_root(profile_root)
+    if _web_results_only(answer_text):
+        if prompt_url_chars > MAX_PROMPT_URL_CHARS:
+            raise AIModeError(
+                "Google AI Mode answered with web results only: the prompt box text is too long for it "
+                f"(its address is {prompt_url_chars:,} characters, AI Mode answers up to about 48,000). "
+                "Shorten the system prompt or the glossary appended to it.",
+                KIND_TOO_LONG,
+            )
+        raise AIModeError("Google AI Mode answered with web results only instead of an AI answer.", KIND_NO_ANSWER)
+
+    if prefer_html:
+        blocks = [_code_block_payload(block) for block in (page_data.get("codeBlocks") or [])]
+        blocks = [block for block in blocks if block.strip()]
+        code = "\n".join(blocks).strip()
+        outside = _clean_answer_text(re.sub(r"(?s)```.*?(```|\Z)", "", _clean_answer_text(answer_text)))
+        if len(outside) > max(300, len(code) // 5):
+            # HTML outside a code block is shown rendered: its tags are gone from the page.
+            raise AIModeError(
+                "Google AI Mode did not keep the HTML answer inside its code block "
+                f"({len(code):,} characters inside it, {len(outside):,} after it without their tags). "
+                "The text is too long for one answer of this AI Mode model: translate in smaller chunks "
+                "(lower the input token limit)"
+                + ("" if page_data.get("signed_in") else ", or sign in with Google Login for the larger models")
+                + ".",
+                KIND_INCOMPLETE,
+            )
+        if code:
+            return code
+    content = _clean_answer_text((markdown or answer_text) if prefer_markdown else (answer_text or markdown))
+    if not content:
+        raise RuntimeError(f"Google AI Mode returned an empty answer. title={title!r}")
+    return content
 
 
 def _ai_mode_set_prompt_script(prompt: str) -> str:
@@ -2122,107 +1372,396 @@ AI_MODE_CLICK_SEND_SCRIPT = """
 """
 
 
-def _submit_ai_mode_prompt(
-    prompt: str,
+def _run_page_json(run_js: Callable[..., Any], script: str, js_timeout_ms: int = 15000) -> Dict[str, Any]:
+    raw = run_js(script, js_timeout_ms=js_timeout_ms)
+    try:
+        value = json.loads(raw or "{}")
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _raise_if_cancelled() -> None:
+    if _is_cancelled():
+        raise RuntimeError("stream cancelled")
+
+
+def _open_ai_mode_menu(run_js: Callable[..., Any], wait_ms: Callable[[int], None], *, seconds: float = 12.0) -> Dict[str, Any]:
+    """Open AI Mode's attach / model menu and return its listing (``AI_MODE_MENU_SCRIPT``)."""
+    deadline = time.time() + seconds
+    state: Dict[str, Any] = {}
+    while True:
+        _raise_if_cancelled()
+        state = _run_page_json(run_js, AI_MODE_MENU_SCRIPT, js_timeout_ms=10000)
+        if state.get("ok"):
+            return state
+        if time.time() >= deadline:
+            raise RuntimeError(
+                "AI Mode's attach / model menu did not open"
+                + ("" if state.get("opener") else " (its button was not found)")
+            )
+        wait_ms(300)
+
+
+def _select_ai_mode_model(
+    choice: str,
+    run_js: Callable[..., Any],
+    wait_ms: Callable[[int], None],
+    *,
+    required: bool = True,
+) -> str:
+    """Tick the AI Mode model named by ``choice``; returns its menu label.
+
+    ``required`` False is plain ``search/gemini`` asking for "Auto": a page without that entry
+    (or without the menu) keeps the model it has, and "" is returned.
+    """
+    try:
+        _open_ai_mode_menu(run_js, wait_ms, seconds=12.0 if required else 4.0)
+    except RuntimeError:
+        if required or _is_cancelled():
+            raise
+        return ""
+    state = _run_page_json(run_js, _ai_mode_select_model_script(choice), js_timeout_ms=10000)
+    if not state.get("ok") and not required:
+        return ""
+    if not state.get("ok"):
+        offered = ", ".join(str(label) for label in (state.get("models") or [])) or "none"
+        raise AIModeError(
+            f"AI Mode does not offer the model {choice!r} here (offered: {offered}). "
+            "Signed out, AI Mode has one model: use the Google Login button next to the model, "
+            f"or pick search/{DEFAULT_MODEL}.",
+            KIND_SIGN_IN,
+        )
+    if not state.get("already"):
+        wait_ms(800)
+    return str(state.get("label") or choice)
+
+
+def _read_ai_mode_models(run_js: Callable[..., Any], wait_ms: Callable[[int], None]) -> List[str]:
+    """The labels of AI Mode's model menu on this page (the account's models)."""
+    deadline = time.time() + 6
+    while True:
+        state = _open_ai_mode_menu(run_js, wait_ms)
+        labels = [str(item.get("label") or "") for item in (state.get("models") or []) if item.get("label")]
+        if labels or time.time() >= deadline:
+            return labels
+        wait_ms(300)  # the menu's file inputs can be in the page a moment before its model entries
+
+
+def _model_ids(labels: Iterable[str]) -> List[str]:
+    """``search/gemini`` model names for AI Mode's model menu labels.
+
+    "4 Carbon • Most complex work" is ``search/gemini-4-carbon``; "Auto" is plain
+    ``search/gemini``, which is always listed first.
+    """
+    names = [f"search/{DEFAULT_MODEL}"]
+    for label in labels or []:
+        slug = re.sub(r"[^a-z0-9.]+", "-", str(label).split("\u2022")[0].strip().lower()).strip("-.")
+        if not slug or slug == AUTO_MODEL:
+            continue
+        name = f"search/{DEFAULT_MODEL}-{slug}"
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _attach_ai_mode_files(
+    files: List[Dict[str, Any]],
+    run_js: Callable[..., Any],
+    wait_ms: Callable[[int], None],
+    *,
+    deadline: Optional[float],
+) -> Dict[str, Any]:
+    """Attach ``files`` to the AI Mode prompt box and wait until the page uploaded them.
+
+    The files are handed to the page in base64 pieces, given to its file inputs as a file
+    picker would, and shown by AI Mode as chips in the prompt box while it uploads them.
+    """
+    import base64
+
+    for index, item in enumerate(files):
+        encoded = base64.b64encode(item["data"]).decode("ascii")
+        for start in range(0, max(1, len(encoded)), FILE_CHUNK_CHARS):
+            _raise_if_cancelled()
+            run_js(
+                _ai_mode_stage_file_script(index, item["name"], item["mime"], item["kind"],
+                                           encoded[start:start + FILE_CHUNK_CHARS]),
+                js_timeout_ms=20000,
+            )
+    names = [str(item["name"]) for item in files]
+    for kind in ("file", "image"):
+        if not any(item["kind"] == kind for item in files):
+            continue
+        _open_ai_mode_menu(run_js, wait_ms)
+        state = _run_page_json(run_js, _ai_mode_attach_script(kind), js_timeout_ms=20000)
+        if not state.get("ok"):
+            raise AIModeError(str(state.get("error") or "AI Mode file input not found"), KIND_UPLOAD)
+        wait_ms(500)
+
+    upload_seconds = max(10, _env_int("GEMINI_FREE_UPLOAD_TIMEOUT", 90))
+    upload_deadline = time.time() + upload_seconds
+    if deadline is not None:
+        upload_deadline = min(upload_deadline, deadline)
+    # Without the page's upload count (a renamed endpoint): how long the chips are given.
+    settle_seconds = max(2, _env_int("GEMINI_FREE_UPLOAD_SETTLE_SECONDS", 15))
+    chips_since: Optional[float] = None
+    state = {}
+    while True:
+        _raise_if_cancelled()
+        state = _run_page_json(run_js, _ai_mode_upload_state_script(names), js_timeout_ms=10000)
+        chips = state.get("chips") or []
+        uploads = state.get("uploads")
+        if len(chips) >= len(names):
+            if chips_since is None:
+                chips_since = time.time()
+            if isinstance(uploads, int) and uploads >= len(names):
+                return state
+            if time.time() - chips_since >= settle_seconds:
+                return state
+        if time.time() >= upload_deadline:
+            missing = [name for name in names if name not in chips]
+            raise AIModeError(
+                "Google AI Mode did not take the attachment"
+                + (f" {', '.join(missing)}" if missing else "s")
+                + f" within {upload_seconds}s.",
+                KIND_UPLOAD,
+            )
+        wait_ms(400)
+
+
+def _wait_for_ai_mode_answer(
+    run_js: Callable[..., Any],
+    wait_ms: Callable[[int], None],
+    *,
+    base_url: str,
+    timeout: int,
+    wait_after_load_ms: Optional[int],
+) -> Dict[str, Any]:
+    """Poll the page until AI Mode's answer is finished and return its snapshot.
+
+    Finished means AI Mode announced "response is ready"; without the announcement (another
+    page language), an answer that stopped changing for ``GEMINI_FREE_STABLE_MS``. A page of
+    Google's that needs the user (verification, consent, sign-in) is returned at once.
+    """
+    wait_after_ms = wait_after_load_ms
+    if wait_after_ms is None:
+        wait_after_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 0)
+    stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 8000)
+    settle_ms = _env_int("GEMINI_FREE_SETTLE_MS", 400)
+    no_ai_mode_seconds = max(5, _env_int("GEMINI_FREE_NO_AI_MODE_SECONDS", 25))
+    deadline = _timeout_deadline(timeout)
+    started = time.time()
+    min_ready_at = started + max(0, int(wait_after_ms)) / 1000.0
+    last_result: Dict[str, Any] = {}
+    last_answer = ""
+    last_change_at = time.time()
+
+    while not _deadline_expired(deadline):
+        _raise_if_cancelled()
+        result = _run_page_json(run_js, AI_MODE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+        if result:
+            last_result = result
+        if _page_problem(result):
+            return result
+        answer = str(result.get("answerText") or "")
+        if _contains_generation_failure(answer.splitlines()):
+            return result
+        if answer != last_answer:
+            last_answer = answer
+            last_change_at = time.time()
+        now = time.time()
+        if result.get("answerFound") and answer and now >= min_ready_at:
+            stable = (now - last_change_at) * 1000 >= max(0, int(stable_ms)) and not result.get("pending")
+            if result.get("complete") or stable:
+                if settle_ms > 0:
+                    # the announcement can come a moment before the last piece of the answer
+                    wait_ms(settle_ms)
+                    final = _run_page_json(run_js, AI_MODE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+                    if final.get("answerFound") and str(final.get("answerText") or ""):
+                        result = final
+                return result
+        if (
+            result
+            and not result.get("aiMode")
+            and not result.get("promptBox")
+            and str(result.get("ready") or "") == "complete"
+            and now - started >= no_ai_mode_seconds
+        ):
+            result["notAiMode"] = True
+            return result
+        wait_ms(500)
+
+    title = str(last_result.get("title") or "").strip()
+    url = _safe_url_for_log(last_result.get("url") or base_url)
+    raise RuntimeError(
+        "Google AI Mode did not finish an answer in "
+        f"{_timeout_label(timeout)}. title={title!r} url={url}"
+    )
+
+
+def _submit_ai_mode_request(
+    request: Dict[str, Any],
     *,
     run_js: Callable[..., Any],
     wait_ms: Callable[[int], None],
     base_url: str,
     timeout: int,
-    wait_after_load_ms: Optional[int],
+    wait_after_load_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Type the prompt into the loaded AI Mode page, press Send and wait for a stable answer.
+    """Run one request on a loaded AI Mode page: pick the model, attach the files, type the
+    prompt, press Send and wait for the finished answer (its page snapshot).
 
-    Shared by ``load_ai_mode_prompt_text``'s QtWebEngine page and a browser-driver page
-    (``_load_ai_mode_prompt_text_driver``, Glossarion Mobile's hidden WebView): same scripts
-    and timing. ``run_js(script, js_timeout_ms)`` returns the expression's value or None;
-    ``wait_ms(ms)`` lets the page run.
+    Shared by the QtWebEngine helper page, the signed-in Chrome/Edge tab and a browser-driver
+    page (Glossarion Mobile's hidden WebView): same scripts and timing. ``run_js(script,
+    js_timeout_ms)`` returns the expression's value or None; ``wait_ms(ms)`` lets the page run.
     """
     timeout_seconds = _timeout_seconds(timeout)
+    deadline = _timeout_deadline(timeout)
 
-    def run_json(script: str, js_timeout_ms: int = 15000) -> Dict[str, Any]:
-        raw = run_js(script, js_timeout_ms=js_timeout_ms)
-        try:
-            return json.loads(raw or "{}")
-        except Exception:
-            return {}
+    first = _run_page_json(run_js, AI_MODE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+    if _page_problem(first):
+        return first
 
-    set_prompt_script = _ai_mode_set_prompt_script(prompt)
-    set_state = run_json(set_prompt_script, js_timeout_ms=15000)
+    if request.get("list_models"):
+        first["models"] = _read_ai_mode_models(run_js, wait_ms)
+        return first
+
+    choice = str(request.get("model") or "")
+    model_label = _select_ai_mode_model(choice or AUTO_MODEL, run_js, wait_ms, required=bool(choice))
+    files = list(request.get("files") or [])
+    upload_state: Dict[str, Any] = {}
+    if files:
+        upload_state = _attach_ai_mode_files(files, run_js, wait_ms, deadline=deadline)
+
+    set_state = _run_page_json(run_js, _ai_mode_set_prompt_script(str(request.get("prompt") or "")), js_timeout_ms=15000)
     if not set_state.get("ok"):
         detail = str(set_state.get("error") or "AI Mode textarea not found")
         raise RuntimeError(detail)
 
-    click_send_script = AI_MODE_CLICK_SEND_SCRIPT
     click_state: Dict[str, Any] = {}
     click_timeout = min(10, max(2, int(timeout_seconds or 10)))
     click_deadline = time.time() + click_timeout
     while time.time() < click_deadline:
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
+        _raise_if_cancelled()
         wait_ms(250)
-        click_state = run_json(click_send_script, js_timeout_ms=10000)
+        click_state = _run_page_json(run_js, AI_MODE_CLICK_SEND_SCRIPT, js_timeout_ms=10000)
         if click_state.get("ok"):
             break
     if not click_state.get("ok"):
         detail = str(click_state.get("error") or "AI Mode send button not ready")
         raise RuntimeError(detail)
 
-    wait_after_ms = wait_after_load_ms
-    if wait_after_ms is None:
-        wait_after_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
-    stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 2500)
-    deadline = _timeout_deadline(timeout)
-    min_ready_at = time.time() + max(0, int(wait_after_ms)) / 1000.0
-    last_result: Dict[str, Any] = {}
-    last_answer = ""
-    last_change_at = time.time()
-
-    while not _deadline_expired(deadline):
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        result = run_json(_page_snapshot_script(prompt), js_timeout_ms=5000)
-        result["submit_mode"] = "ui"
-        result["search_base_url"] = base_url
-        result["submit_state"] = {"set": set_state, "click": click_state}
-        last_result = result
-        if _google_blocked(result):
-            return result
-
-        text = str(result.get("text") or "")
-        lines = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
-        answer = "\n".join(_extract_ai_answer_lines(lines, prompt)).strip()
-        if _contains_generation_failure(answer.splitlines() or lines):
-            return result
-        if answer and answer != last_answer:
-            last_answer = answer
-            last_change_at = time.time()
-        if (
-            answer
-            and time.time() >= min_ready_at
-            and not result.get("busy")
-            and (time.time() - last_change_at) * 1000 >= max(0, int(stable_ms))
-        ):
-            return result
-
-        wait_ms(500)
-
-    title = str(last_result.get("title") or "").strip()
-    url = _safe_url_for_log(last_result.get("url") or base_url)
-    raise RuntimeError(f"Google Search AI Mode did not produce a response after UI submit. title={title!r} url={url}")
+    result = _wait_for_ai_mode_answer(
+        run_js,
+        wait_ms,
+        base_url=base_url,
+        timeout=timeout,
+        wait_after_load_ms=wait_after_load_ms,
+    )
+    result["search_base_url"] = base_url
+    result["model_label"] = model_label
+    result["submit_state"] = {"set": set_state, "click": click_state, "upload": upload_state}
+    return result
 
 
-def _load_ai_mode_prompt_text_driver(
-    prompt: str,
+def load_ai_mode_answer(
+    request: Dict[str, Any],
     *,
     timeout: int = DEFAULT_TIMEOUT,
     wait_after_load_ms: Optional[int] = None,
     user_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """``load_ai_mode_prompt_text`` on a page of the registered browser driver.
+    """Open google.com in AI Mode, run ``request`` on it and return the answer's page snapshot."""
+    if browser_driver.use_driver("GEMINI_FREE_MODE"):
+        # Glossarion Mobile (no helper processes) or GEMINI_FREE_MODE=driver: the same flow
+        # on a page of the registered browser driver (hidden WebView).
+        return _load_ai_mode_answer_driver(
+            request,
+            timeout=timeout,
+            wait_after_load_ms=wait_after_load_ms,
+            user_agent=user_agent,
+        )
+    _setup_qt_environment()
+
+    from PySide6.QtCore import QEventLoop, QTimer, QUrl
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(["gemini-free-ai-mode"])
+
+    profile, profile_root = _create_profile(app, user_agent=user_agent)
+    page = QWebEnginePage(profile, app)
+    _set_default_page_viewport(page)
+    base_url = _build_search_base_url()
+    timeout_seconds = _timeout_seconds(timeout)
+
+    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+        holder: Dict[str, Any] = {}
+        loop = QEventLoop()
+
+        def _done(value: Any) -> None:
+            holder["value"] = value
+            loop.quit()
+
+        page.runJavaScript(script, _done)
+        QTimer.singleShot(js_timeout_ms, loop.quit)
+        loop.exec()
+        return holder.get("value")
+
+    def wait_ms(ms: int) -> None:
+        wait_loop = QEventLoop()
+        QTimer.singleShot(max(1, int(ms)), wait_loop.quit)
+        wait_loop.exec()
+
+    try:
+        load_loop = QEventLoop()
+        load_state: Dict[str, Any] = {"ok": False}
+
+        def _loaded(ok: bool) -> None:
+            load_state["ok"] = bool(ok)
+            load_loop.quit()
+
+        page.loadFinished.connect(_loaded)
+        page.load(QUrl(base_url))
+        if timeout_seconds is not None:
+            QTimer.singleShot(max(1000, int(timeout_seconds * 1000)), load_loop.quit)
+        load_loop.exec()
+        if not load_state.get("ok"):
+            raise RuntimeError(f"Qt WebEngine failed to load {base_url}")
+
+        return _submit_ai_mode_request(
+            request,
+            run_js=run_js,
+            wait_ms=wait_ms,
+            base_url=base_url,
+            timeout=timeout,
+            wait_after_load_ms=wait_after_load_ms,
+        )
+    finally:
+        try:
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
+        except Exception:
+            pass
+        _cleanup_profile_root(profile_root)
+
+
+def _load_ai_mode_answer_driver(
+    request: Dict[str, Any],
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    wait_after_load_ms: Optional[int] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """``load_ai_mode_answer`` on a page of the registered browser driver.
 
     Glossarion Mobile's hidden WebView loads AI Mode and runs the QtWebEngine helper's flow
-    (``_submit_ai_mode_prompt``) in this worker thread. Like the helper it waits for the first
+    (``_submit_ai_mode_request``) in this worker thread. Like the helper it waits for the first
     finished load (or the request timeout); a Stop (``cancel_stream``) ends the page's calls.
     """
     driver = browser_driver.require_driver("Gemini Free")
@@ -2238,8 +1777,8 @@ def _load_ai_mode_prompt_text_driver(
         page.load(base_url)
         if not browser_driver.wait_until_loaded(page, timeout_seconds):
             raise RuntimeError(f"The in-app browser failed to load {base_url}")
-        return _submit_ai_mode_prompt(
-            prompt,
+        return _submit_ai_mode_request(
+            request,
             run_js=page.run_js,
             wait_ms=page.wait,
             base_url=base_url,
@@ -2250,182 +1789,305 @@ def _load_ai_mode_prompt_text_driver(
         page.close()
 
 
-def _send_chat_completion_qt_once(
+# ---------------------------------------------------------------------------
+# Signed in: a dedicated, persistent Chrome/Edge profile (optional).
+#
+# Signed out, AI Mode has one small model. Signed in to a Google account it offers the larger
+# ones. Google refuses its sign-in page to embedded browsers (QtWebEngine), so the account lives
+# in a Chrome/Edge profile of Glossarion's own, the way ``authds/`` keeps its DeepSeek session:
+# the Google Login button opens that profile's window on Google's sign-in page, the user signs
+# in there, and requests then run in headless tabs of the same profile. Glossarion never sees
+# the password. Desktop only.
+# ---------------------------------------------------------------------------
+
+GOOGLE_SIGN_IN_URL = "https://accounts.google.com/ServiceLogin"
+#: Cookies a signed-in google.com session has.
+_GOOGLE_SESSION_COOKIES = ("SID", "__Secure-1PSID", "__Secure-3PSID")
+_login_gate = threading.Lock()
+
+
+def profile_dir() -> Path:
+    """The Chrome/Edge profile that holds the Google sign-in (``GEMINI_FREE_PROFILE_DIR``)."""
+    return Path(os.environ.get("GEMINI_FREE_PROFILE_DIR") or (Path.home() / ".glossarion" / "search_gemini_google"))
+
+
+def has_session() -> bool:
+    """Whether a Google sign-in was saved. A hint: every request checks the cookies itself."""
+    return (profile_dir() / ".signed_in").exists()
+
+
+def _mark_session(present: bool) -> None:
+    marker = profile_dir() / ".signed_in"
+    if present:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(mode=0o600)
+    else:
+        marker.unlink(missing_ok=True)
+
+
+def _check(cancel_check: Optional[Callable[[], bool]] = None) -> None:
+    if _is_cancelled() or (cancel_check and cancel_check()):
+        raise AIModeError("stream cancelled", KIND_CANCELLED)
+
+
+def _login_check(cancel_check: Optional[Callable[[], bool]] = None) -> None:
+    """The cancel check of the sign-in window: only its own ``cancel_check`` ends it (a Stop of
+    an earlier translation must not close a sign-in the user just opened)."""
+    if cancel_check and cancel_check():
+        raise AIModeError("Google sign-in cancelled.", KIND_CANCELLED)
+
+
+class _GooglePage(cdp_browser.CdpPage):
+    command_failed = "Gemini Free browser command failed."
+    command_timed_out = "Gemini Free browser command timed out."
+    script_failed = "Gemini Free browser script failed."
+
+    def check(self, cancel_check):
+        _check(cancel_check)
+
+    def error(self, message, error_type):
+        return AIModeError(message, error_type)
+
+
+class _GoogleLoginPage(_GooglePage):
+    def check(self, cancel_check):
+        _login_check(cancel_check)
+
+
+def _browser_binary() -> str:
+    found = cdp_browser.find_browser_binary(
+        "GEMINI_FREE_BROWSER_BINARY", lambda message: AIModeError(message, "config_error"))
+    if found:
+        return found
+    raise AIModeError(
+        "The Google sign-in for search/gemini needs Google Chrome or Microsoft Edge installed. "
+        "You can also set GEMINI_FREE_BROWSER_BINARY.",
+        "config_error",
+    )
+
+
+@contextmanager
+def _launch_google_browser(*, visible: bool = False, cancel_check=None):
+    # Keep the process-spawn gate in the same function for the mobile collector.
+    if not mobile_runtime.subprocesses_available():
+        raise AIModeError("The Google sign-in for search/gemini needs the desktop app and Chrome/Edge.", "config_error")
+    width, height = _default_viewport_size()
+    with cdp_browser.launch(
+            binary=_browser_binary(), profile=profile_dir(), start_url="about:blank",
+            ready=lambda page, check: None,
+            page_factory=lambda url, check: (_GoogleLoginPage if visible else _GooglePage)(url, check),
+            check=_login_check if visible else _check, error=AIModeError,
+            closed_message="The Gemini Free browser closed. Close any other Google Login window of Glossarion and try again.",
+            connect_message="Gemini Free could not connect to its browser.", visible=visible,
+            # Remote debugging sets navigator.webdriver; Google treats such a browser as automated.
+            extra_args=("--disable-blink-features=AutomationControlled", f"--window-size={width},{height}"),
+            cancel_check=cancel_check) as page:
+        yield page
+
+
+def _prepare_google_tab(page) -> None:
+    """Before a tab's first navigation: a headless browser names itself HeadlessChrome."""
+    agent = str(page.call("Browser.getVersion").get("userAgent") or "")
+    if "HeadlessChrome" in agent:
+        page.call("Emulation.setUserAgentOverride", {"userAgent": agent.replace("HeadlessChrome", "Chrome")})
+
+
+_TAB_READY = "document.readyState === 'complete' && /(^|\\.)google\\.[a-z.]+$/.test(location.hostname)"
+
+
+def _google_tab_ready(page, cancel_check) -> None:
+    cdp_browser.wait_until(
+        page, _TAB_READY, timeout=40, check=_check, error=AIModeError,
+        message="Google AI Mode did not finish loading. Check your connection and try again.",
+        cancel_check=cancel_check, tolerate=("browser_error", "timeout", "api_error"))
+
+
+_LEASES = cdp_browser.BrowserLeases(
+    launch=lambda **kwargs: _launch_google_browser(**kwargs),
+    page_factory=lambda url, check: _GooglePage(url, check),
+    check=_check, url=SEARCH_BASE_URL, ready=_google_tab_ready, prepare=_prepare_google_tab)
+
+
+def _google_signed_in(page) -> bool:
+    """Whether the profile's google.com cookies hold a signed-in session."""
+    cookies = page.call("Network.getCookies", {"urls": ["https://www.google.com/"]}).get("cookies") or []
+    return any(str(cookie.get("name") or "") in _GOOGLE_SESSION_COOKIES and cookie.get("value") for cookie in cookies)
+
+
+def login(log_fn: Callable[[str], None] = print, cancel_check=None, timeout: int = 300) -> None:
+    """Open the profile's browser window on Google's sign-in page and wait until the user
+    signed in there (``timeout`` seconds). The session stays in the profile."""
+    target = f"{GOOGLE_SIGN_IN_URL}?{urlencode({'hl': 'en', 'continue': _build_search_base_url()})}"
+    with _login_gate:
+        with _LEASES.open_interactive(cancel_check) as page:
+            page.call("Page.navigate", {"url": target})
+            log_fn("Gemini Free: Sign in on the Google window that opened. "
+                   "Glossarion does not receive your Google password.")
+            deadline = time.monotonic() + timeout
+            while True:
+                _login_check(cancel_check)
+                try:
+                    if _google_signed_in(page):
+                        break
+                except AIModeError as exc:
+                    if exc.kind == KIND_CANCELLED:
+                        raise
+                except Exception as exc:
+                    raise AIModeError("The Google sign-in window was closed before the sign-in finished.",
+                                      KIND_SIGN_IN) from exc
+                if time.monotonic() >= deadline:
+                    raise AIModeError("Google sign-in timed out. Select Google Login and try again.", KIND_SIGN_IN)
+                time.sleep(.5)
+            _mark_session(True)
+            time.sleep(1.5)  # let the browser write the session cookies before it closes
+    log_fn("Gemini Free: Google session saved.")
+
+
+def logout(cancel_check=None) -> None:
+    """Forget the saved Google session: the marker, and the profile's cookies."""
+    _mark_session(False)
+    with _login_gate:
+        with _LEASES.open(cancel_check=cancel_check, prepare=lambda page: None) as page:
+            page.call("Network.clearBrowserCookies")
+
+
+def _load_ai_mode_answer_chrome(
+    request: Dict[str, Any],
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    wait_after_load_ms: Optional[int] = None,
+) -> Dict[str, Any]:
+    """``load_ai_mode_answer`` in a headless tab of the signed-in Chrome/Edge profile."""
+    base_url = _build_search_base_url()
+
+    def prepare(page) -> None:
+        _prepare_google_tab(page)
+        if not _google_signed_in(page):
+            _mark_session(False)
+            raise AIModeError(
+                "The saved Google session ended. Use the Google Login button next to the model to sign in "
+                "again (search/gemini then runs signed in), or send the request again to run signed out.",
+                KIND_SIGN_IN,
+            )
+
+    _LEASES.url = base_url
+    with _LEASES.open(cancel_check=_is_cancelled, prepare=prepare) as page:
+        def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+            try:
+                return page.evaluate(script)
+            except AIModeError as exc:
+                if exc.kind == KIND_CANCELLED:
+                    raise RuntimeError("stream cancelled") from exc
+                return None  # a navigation replaced the page's script context: asked again
+
+        def wait_ms(ms: int) -> None:
+            end = time.monotonic() + max(1, int(ms)) / 1000.0
+            while True:
+                _raise_if_cancelled()
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return
+                time.sleep(min(.1, remaining))
+
+        result = _submit_ai_mode_request(
+            request,
+            run_js=run_js,
+            wait_ms=wait_ms,
+            base_url=base_url,
+            timeout=timeout,
+            wait_after_load_ms=wait_after_load_ms,
+        )
+        result["signed_in"] = True
+        return result
+
+
+def list_models(timeout: int = 90, log_fn: Optional[Callable[[str], None]] = None, cancel_check=None) -> List[str]:
+    """The ``search/gemini`` model names this browser's AI Mode offers (its model menu).
+
+    Read on the page a request would use: the signed-in Chrome/Edge profile when the user used
+    Google Login (an account's models), else the signed-out helper (one model), or the browser
+    driver's page on Glossarion Mobile. ``search/gemini`` (Auto) is always first.
+    """
+    del cancel_check
+    request = {"list_models": True}
+    timeout_value = int(timeout or DEFAULT_TIMEOUT)
+    _log(log_fn, "Gemini Free: reading google.com AI Mode's models")
+    if browser_driver.use_driver("GEMINI_FREE_MODE"):
+        data = load_ai_mode_answer(request, timeout=timeout_value)
+    elif has_session():
+        try:
+            data = _load_ai_mode_answer_chrome(request, timeout=timeout_value)
+        except AIModeError as exc:
+            if exc.kind == KIND_CANCELLED:
+                raise RuntimeError("stream cancelled") from exc
+            raise
+    else:
+        data = _run_search_subprocess_once(
+            messages=[], model=DEFAULT_MODEL, timeout=timeout_value, max_tokens=None, list_models=True)
+    problem = _page_problem(data)
+    if problem:
+        raise AIModeError(problem[1], problem[0])
+    return _model_ids(data.get("models") or [])
+
+
+def _complete_ai_mode_request(
     *,
     messages: Iterable[Dict[str, Any]],
-    model: str = DEFAULT_MODEL,
-    timeout: int = DEFAULT_TIMEOUT,
-    max_tokens: Optional[int] = None,
-    log_fn: Optional[Callable[[str], None]] = None,
-    user_agent: Optional[str] = None,
+    model: str,
+    timeout: int,
+    log_fn: Optional[Callable[[str], None]],
+    loader: Callable[..., Dict[str, Any]],
+    loader_kwargs: Optional[Dict[str, Any]] = None,
+    signed_in: bool = False,
 ) -> Dict[str, Any]:
-    actual_model = _strip_search_prefix(model)
-    if actual_model.lower() != DEFAULT_MODEL:
-        raise RuntimeError(f"Gemini Free only supports search/{DEFAULT_MODEL}; got search/{actual_model}")
-
-    messages = _prepare_ai_mode_messages(messages, log_fn=log_fn)
-    prompt = _messages_to_prompt(messages)
-    if not prompt:
+    """One chat request on an AI Mode page opened by ``loader``; the chat-completion result."""
+    request = _build_ai_mode_request(messages, model)
+    prompt = str(request.get("prompt") or "")
+    files = list(request.get("files") or [])
+    if not prompt and not files:
         raise RuntimeError("Gemini Free request has an empty prompt")
-    prefer_html = _messages_expect_html_response(messages)
-    prefer_markdown = bool(not prefer_html and _messages_expect_markdown_response(messages))
-    html_text_node_transport = _build_html_text_node_transport(messages) if prefer_html else None
-    send_messages = html_text_node_transport["messages"] if html_text_node_transport else messages
-    prompt = _messages_to_prompt(send_messages)
-
-    search_url = _build_search_base_url()
-    _log(log_fn, f"Gemini Free: opening Google Search AI Mode UI route (model={actual_model})")
-    _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
-    page_data = load_ai_mode_prompt_text(
-        prompt,
-        timeout=timeout,
-        user_agent=user_agent,
+    prompt_url_chars = len(_build_search_url(prompt))
+    attached = ", ".join(f"{item['name']} ({len(item['data']):,} bytes)" for item in files)
+    _log(
+        log_fn,
+        "Gemini Free: opening google.com AI Mode"
+        + (" (signed in)" if signed_in else "")
+        + (f", model {request['model']}" if request.get("model") else "")
+        + (f"; attaching {attached}" if attached else ""),
     )
+    _log(log_fn, f"Gemini Free debug URL: {_build_search_base_url()[:1000]}", debug_only=True)
+    page_data = loader(request, timeout=timeout, **(loader_kwargs or {}))
     content = _extract_rendered_content(
         page_data,
-        prompt=prompt,
-        prefer_html=bool(prefer_html and not html_text_node_transport),
-        prefer_markdown=prefer_markdown,
+        prefer_html=bool(request.get("expects_html")),
+        prefer_markdown=bool(request.get("expects_markdown")),
+        prompt_url_chars=prompt_url_chars,
     )
-    html_text_node_count = int(html_text_node_transport.get("count") or 0) if html_text_node_transport else 0
-    html_text_node_translated = 0
-    if html_text_node_transport:
-        translations = _parse_html_text_node_translations(content, html_text_node_count)
-        html_text_node_translated = len(translations)
-        if translations:
-            content = _apply_html_text_node_translations(
-                str(html_text_node_transport.get("html") or ""),
-                translations,
-            )
     return {
         "content": content,
         "finish_reason": "stop",
         "usage": {
-            "prompt_chars": len(prompt),
+            "prompt_chars": int(request.get("prompt_chars") or 0),
             "completion_chars": len(content),
-        },
-        "raw_response": {
-            "model": actual_model,
-            "submit_mode": page_data.get("submit_mode") or DEFAULT_SUBMIT_MODE,
-            "search_url": _safe_url_for_log(search_url),
-            "page_url": _safe_url_for_log(page_data.get("url")),
-            "page_url_chars": len(str(page_data.get("url") or "")),
-            "title": page_data.get("title"),
-            "ready": page_data.get("ready"),
-            "html_length": page_data.get("htmlLength"),
-            "answer_html_length": len(str(page_data.get("answerHtml") or "")),
-            "answer_markdown_length": len(str(page_data.get("answerMarkdown") or "")),
-            "prefer_html_response": prefer_html,
-            "prefer_markdown_response": prefer_markdown,
-            "html_text_node_transport": bool(html_text_node_transport),
-            "html_text_node_count": html_text_node_count,
-            "html_text_node_translated": html_text_node_translated,
-            "url_load_fallback": False,
-        },
-    }
-
-
-def _send_chat_completion_split(
-    *,
-    messages: Iterable[Dict[str, Any]],
-    model: str = DEFAULT_MODEL,
-    timeout: int = DEFAULT_TIMEOUT,
-    max_tokens: Optional[int] = None,
-    log_fn: Optional[Callable[[str], None]] = None,
-    user_agent: Optional[str] = None,
-    target_prompt_chars: Optional[int] = None,
-    enforce_url_budget: bool = True,
-) -> Dict[str, Any]:
-    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    max_prompt_chars = int(target_prompt_chars or _subchunk_prompt_chars())
-    chunks, split_metadata = _split_messages_for_search_budget(
-        source_messages,
-        max_prompt_chars,
-        enforce_url_budget=enforce_url_budget,
-        return_metadata=True,
-    )
-    if len(chunks) <= 1:
-        return _send_chat_completion_qt_once(
-            messages=source_messages,
-            model=model,
-            timeout=timeout,
-            max_tokens=max_tokens,
-            log_fn=log_fn,
-            user_agent=user_agent,
-        )
-
-    _log(
-        log_fn,
-        f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
-        f"(target prompt chars: {max_prompt_chars}, "
-        f"payload format: {split_metadata.get('payload_format')}, "
-        f"splitter: {split_metadata.get('splitter')}, "
-        f"balancer: {split_metadata.get('subchunk_balancer')}, "
-        f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
-        f"url limit chars: {split_metadata.get('url_limit_chars')}, "
-        f"url budget enforced: {split_metadata.get('url_budget_enforced')}, "
-        f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
-        f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
-        f"body budget chars: {split_metadata.get('body_budget_chars')})"
-    )
-    contents: List[str] = []
-    raw_parts: List[Dict[str, Any]] = []
-    prompt_chars_total = 0
-    completion_chars_total = 0
-    for index, chunk_messages in enumerate(chunks, start=1):
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        chunk_prompt_chars = len(_messages_to_prompt(chunk_messages))
-        prompt_chars_total += chunk_prompt_chars
-        _log(log_fn, f"🧩 Gemini Free: subchunk {index}/{len(chunks)} ({chunk_prompt_chars:,} prompt chars)")
-        result = _send_chat_completion_qt_once(
-            messages=chunk_messages,
-            model=model,
-            timeout=timeout,
-            max_tokens=max_tokens,
-            log_fn=log_fn,
-            user_agent=user_agent,
-        )
-        content = str(result.get("content") or "")
-        _raise_if_generation_failure_text(content)
-        contents.append(content)
-        completion_chars_total += len(content)
-        raw_response = dict(result.get("raw_response") or {})
-        raw_response.pop("content", None)
-        raw_parts.append({
-            "index": index,
-            "prompt_chars": chunk_prompt_chars,
-            "completion_chars": len(content),
-            "raw_response": raw_response,
-        })
-
-    combined = "\n".join(part for part in contents if part).strip()
-    return {
-        "content": combined,
-        "finish_reason": "stop",
-        "usage": {
-            "prompt_chars": len(_messages_to_prompt(source_messages)),
-            "subchunk_prompt_chars": prompt_chars_total,
-            "completion_chars": completion_chars_total,
         },
         "raw_response": {
             "model": _strip_search_prefix(model),
-            "submit_mode": "adaptive_split",
-            "subchunk_count": len(chunks),
-            "subchunk_prompt_target_chars": max_prompt_chars,
-            "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
-            "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
-            "subchunk_prompt_limit_chars": split_metadata.get("prompt_limit_chars"),
-            "subchunk_url_limit_chars": split_metadata.get("url_limit_chars"),
-            "subchunk_url_budget_enforced": split_metadata.get("url_budget_enforced"),
-            "subchunk_body_budget_chars": split_metadata.get("body_budget_chars"),
-            "subchunk_safety_chars": split_metadata.get("safety_chars"),
-            "subchunk_payload_format": split_metadata.get("payload_format"),
-            "subchunk_splitter": split_metadata.get("splitter"),
-            "subchunk_balancer": split_metadata.get("subchunk_balancer"),
-            "subchunk_balancer_mode": split_metadata.get("subchunk_balancer_mode"),
-            "subchunk_balanced_target_body_chars": split_metadata.get("balanced_target_body_chars"),
-            "parts": raw_parts,
+            "ai_mode_model": page_data.get("model_label") or "",
+            "signed_in": bool(signed_in),
+            "search_url": _safe_url_for_log(_build_search_base_url()),
+            "page_url": _safe_url_for_log(page_data.get("url")),
+            "title": page_data.get("title"),
+            "ready": page_data.get("ready"),
+            "html_length": page_data.get("htmlLength"),
+            "attachments": [
+                {"name": item["name"], "kind": item["kind"], "bytes": len(item["data"])} for item in files
+            ],
+            "prompt_box_chars": len(prompt),
+            "prompt_url_chars": prompt_url_chars,
+            "instructions_attached": bool(request.get("instructions_attached")),
+            "code_blocks": len(page_data.get("codeBlocks") or []),
+            "prefer_html_response": bool(request.get("expects_html")),
+            "prefer_markdown_response": bool(request.get("expects_markdown")),
         },
     }
 
@@ -2439,71 +2101,31 @@ def _send_chat_completion_qt(
     log_fn: Optional[Callable[[str], None]] = None,
     user_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
-    source_messages = _prepare_ai_mode_messages(messages, log_fn=log_fn)
-    should_split, prompt_chars, url_chars = _requires_adaptive_split(source_messages, enforce_url_budget=True)
-    if _adaptive_split_enabled() and should_split:
-        html_text_node_transport = _build_html_text_node_transport(source_messages)
-        if html_text_node_transport:
-            transport_should_split, transport_prompt_chars, transport_url_chars = _requires_adaptive_split(
-                html_text_node_transport["messages"],
-                enforce_url_budget=True,
-            )
-            if not transport_should_split:
-                _log(
-                    log_fn,
-                    f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
-                    f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
-                    f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
-                )
-                return _send_chat_completion_qt_once(
-                    messages=source_messages,
-                    model=model,
-                    timeout=timeout,
-                    max_tokens=max_tokens,
-                    log_fn=log_fn,
-                    user_agent=user_agent,
-                )
-            _log(
-                log_fn,
-                f"🧩 Gemini Free: HTML text-node transport still exceeds single-request budget; "
-                f"using raw HTML adaptive split "
-                f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
-                f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
-            )
-        _log(
-            log_fn,
-            f"🧩 Gemini Free: prompt exceeds single-request budget "
-            f"({prompt_chars:,} prompt chars, {url_chars:,} URL chars); using adaptive subchunks"
-        )
-        return _send_chat_completion_split(
-            messages=source_messages,
-            model=model,
-            timeout=timeout,
-            max_tokens=max_tokens,
-            log_fn=log_fn,
-            user_agent=user_agent,
-        )
+    """The request on a signed-out page: the helper's QtWebEngine page, or a browser-driver
+    page (``load_ai_mode_answer`` picks)."""
+    del max_tokens
+    return _complete_ai_mode_request(
+        messages=messages, model=model, timeout=timeout, log_fn=log_fn,
+        loader=load_ai_mode_answer, loader_kwargs={"user_agent": user_agent},
+    )
+
+
+def _send_chat_completion_chrome(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    timeout: int = DEFAULT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """The request in the signed-in Chrome/Edge profile."""
     try:
-        return _send_chat_completion_qt_once(
-            messages=source_messages,
-            model=model,
-            timeout=timeout,
-            max_tokens=max_tokens,
-            log_fn=log_fn,
-            user_agent=user_agent,
+        return _complete_ai_mode_request(
+            messages=messages, model=model, timeout=timeout, log_fn=log_fn,
+            loader=_load_ai_mode_answer_chrome, signed_in=True,
         )
-    except RuntimeError as exc:
-        if _adaptive_split_enabled() and _generation_failure_error(exc):
-            fallback_target = _fallback_subchunk_prompt_chars(prompt_chars)
-            return _send_chat_completion_split(
-                messages=source_messages,
-                model=model,
-                timeout=timeout,
-                max_tokens=max_tokens,
-                log_fn=log_fn,
-                user_agent=user_agent,
-                target_prompt_chars=fallback_target,
-            )
+    except AIModeError as exc:
+        if exc.kind == KIND_CANCELLED:
+            raise RuntimeError("stream cancelled") from exc
         raise
 
 
@@ -2530,14 +2152,13 @@ def _run_search_driver_once(
     timeout: int,
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
-    wait_log_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """One helper request, in this worker thread, on a browser-driver page.
 
     The desktop helper process (``--search-helper``) runs ``_send_chat_completion_qt`` with
     the request's messages, model, max tokens and helper timeout on its QtWebEngine page;
     without helper processes (Glossarion Mobile) the same call runs here and
-    ``load_ai_mode_prompt_text`` opens a page of the registered browser driver. The helper's
+    ``load_ai_mode_answer`` opens a page of the registered browser driver. The helper's
     error text is kept; a Stop ends it with "stream cancelled".
     """
     browser_driver.require_driver("Gemini Free")
@@ -2547,10 +2168,7 @@ def _run_search_driver_once(
     wait_timer: Optional[threading.Timer] = None
     if log_fn:
         def _log_still_waiting() -> None:
-            should_log_wait = wait_log_event is None or not wait_log_event.is_set()
-            if wait_log_event is not None:
-                wait_log_event.set()
-            if should_log_wait and not _is_cancelled():
+            if not _is_cancelled():
                 _log(log_fn, "⏳ Gemini Free: still waiting for the in-app browser...")
 
         wait_timer = threading.Timer(10, _log_still_waiting)
@@ -2562,13 +2180,16 @@ def _run_search_driver_once(
             model=model,
             timeout=helper_timeout_arg,
             max_tokens=max_tokens,
+            log_fn=log_fn,
         )
     except browser_driver.BrowserUnavailable:
         raise
     except Exception as exc:
         if _is_cancelled():
             raise RuntimeError("stream cancelled") from exc
-        raise RuntimeError(f"Gemini Free browser helper failed: {_short_error(exc)}") from exc
+        raise AIModeError(
+            f"Gemini Free browser helper failed: {_short_error(exc)}", getattr(exc, "kind", "")
+        ) from exc
     finally:
         if wait_timer is not None:
             wait_timer.cancel()
@@ -2581,8 +2202,7 @@ def _run_search_subprocess_once(
     timeout: int,
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
-    wait_log_event: Optional[threading.Event] = None,
-    ephemeral_profile: bool = False,
+    list_models: bool = False,
 ) -> Dict[str, Any]:
     if not mobile_runtime.subprocesses_available() or browser_driver.use_driver("GEMINI_FREE_MODE"):
         # The helper boundary. Glossarion Mobile has no helper processes (GEMINI_FREE_MODE=driver
@@ -2594,7 +2214,6 @@ def _run_search_subprocess_once(
             timeout=timeout,
             max_tokens=max_tokens,
             log_fn=log_fn,
-            wait_log_event=wait_log_event,
         )
     message_list = list(messages or [])
     helper_timeout = _timeout_seconds(timeout)
@@ -2630,13 +2249,13 @@ def _run_search_subprocess_once(
             ]
         if max_tokens:
             cmd.extend(["--max-tokens", str(int(max_tokens))])
+        if list_models:
+            cmd.append("--list-models")  # the helper answers with AI Mode's model menu instead
 
         env = os.environ.copy()
         env["GEMINI_FREE_HELPER"] = "1"
         env["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
         env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-        if ephemeral_profile:
-            env["GEMINI_FREE_EPHEMERAL_PROFILE"] = "1"
 
         try:
             from shutdown_utils import subprocess_no_window_kwargs
@@ -2693,285 +2312,28 @@ def _run_search_subprocess_once(
                     _terminate_process_tree(proc, kill=True)
                     raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout_arg}s")
                 if log_fn and not wait_log_printed and time.time() >= next_wait_log:
-                    should_log_wait = wait_log_event is None or not wait_log_event.is_set()
-                    if wait_log_event is not None:
-                        wait_log_event.set()
-                    if should_log_wait:
-                        _log(log_fn, "⏳ Gemini Free: still waiting for Qt WebEngine helper...")
+                    _log(log_fn, "⏳ Gemini Free: still waiting for Qt WebEngine helper...")
                     wait_log_printed = True
         finally:
             with _active_helper_lock:
                 _active_helper_processes.discard(proc)
 
         result = _extract_json_from_process(stdout)
+        error_kind = str(result.get("error_kind") or "")
         if proc.returncode != 0:
             error = str(result.get("error") or "").strip()
             if error:
-                raise RuntimeError(f"Gemini Free helper failed ({proc.returncode}): {error}")
+                raise AIModeError(f"Gemini Free helper failed ({proc.returncode}): {error}", error_kind)
             detail = (stderr or stdout or "").strip()
             raise RuntimeError(f"Gemini Free helper failed ({proc.returncode}): {detail[-1200:]}")
         if result.get("error"):
-            raise RuntimeError(str(result.get("error")))
+            raise AIModeError(str(result.get("error")), error_kind)
         return result
     finally:
         try:
             shutil.rmtree(temp_dir, ignore_errors=True)
         except Exception:
             pass
-
-
-def _run_search_subprocess_sequential(
-    *,
-    source_messages: List[Dict[str, Any]],
-    chunks: List[List[Dict[str, Any]]],
-    split_metadata: Dict[str, Any],
-    model: str,
-    timeout: int,
-    max_tokens: Optional[int],
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    max_prompt_chars = int(split_metadata.get("target_prompt_chars") or _subchunk_prompt_chars())
-    subchunk_timeout = _subchunk_timeout_seconds(timeout)
-    subchunk_timeout_label = _timeout_label(subchunk_timeout, DEFAULT_SUBCHUNK_TIMEOUT)
-    subchunk_concurrency = min(len(chunks), _subchunk_concurrency_limit())
-    parallel_helpers = subchunk_concurrency > 1
-    subchunk_start_delay = _subchunk_start_delay_seconds() if parallel_helpers else 0.0
-    _log(
-        log_fn,
-        f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
-        f"({'parallel' if parallel_helpers else 'sequential'} helpers, "
-        f"concurrency: {subchunk_concurrency}, start delay: {subchunk_start_delay:g}s, "
-        f"subchunk timeout: {subchunk_timeout_label}, "
-        f"target prompt chars: {max_prompt_chars}, "
-        f"payload format: {split_metadata.get('payload_format')}, "
-        f"splitter: {split_metadata.get('splitter')}, "
-        f"balancer: {split_metadata.get('subchunk_balancer')}, "
-        f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
-        f"url limit chars: {split_metadata.get('url_limit_chars')}, "
-        f"url budget enforced: {split_metadata.get('url_budget_enforced')}, "
-        f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
-        f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
-        f"body budget chars: {split_metadata.get('body_budget_chars')})"
-    )
-
-    wait_log_event = threading.Event()
-    chunk_jobs: List[tuple[int, List[Dict[str, Any]], int]] = []
-    for index, chunk_messages in enumerate(chunks, start=1):
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        chunk_prompt_chars = len(_messages_to_prompt(chunk_messages))
-        chunk_jobs.append((index, chunk_messages, chunk_prompt_chars))
-
-    def _run_chunk(index: int, chunk_messages: List[Dict[str, Any]], chunk_prompt_chars: int) -> Dict[str, Any]:
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        chunk_started_at = time.time()
-        _log(log_fn, f"🧩 Gemini Free: subchunk {index}/{len(chunks)} helper start ({chunk_prompt_chars:,} prompt chars)")
-        try:
-            result = _run_search_subprocess_once(
-                messages=chunk_messages,
-                model=model,
-                timeout=subchunk_timeout,
-                max_tokens=max_tokens,
-                log_fn=log_fn,
-                wait_log_event=wait_log_event,
-                ephemeral_profile=parallel_helpers,
-            )
-        except Exception as exc:
-            elapsed = time.time() - chunk_started_at
-            _log(log_fn, f"❌ Gemini Free: subchunk {index}/{len(chunks)} failed after {elapsed:.1f}s: {_short_error(exc)}")
-            raise
-        content = str(result.get("content") or "")
-        _raise_if_generation_failure_text(content)
-        raw_response = dict(result.get("raw_response") or {})
-        raw_response.pop("content", None)
-        elapsed = time.time() - chunk_started_at
-        _log(log_fn, f"✅ Gemini Free: subchunk {index}/{len(chunks)} complete ({len(content):,} chars, {elapsed:.1f}s)")
-        return {
-            "index": index,
-            "content": content,
-            "prompt_chars": chunk_prompt_chars,
-            "completion_chars": len(content),
-            "raw_response": raw_response,
-        }
-
-    completed_results: List[Dict[str, Any]] = []
-    if subchunk_concurrency <= 1:
-        for index, chunk_messages, chunk_prompt_chars in chunk_jobs:
-            completed_results.append(_run_chunk(index, chunk_messages, chunk_prompt_chars))
-    else:
-        with ThreadPoolExecutor(max_workers=subchunk_concurrency, thread_name_prefix="GeminiFreeSubchunk") as executor:
-            future_map = {}
-            for job_position, (index, chunk_messages, chunk_prompt_chars) in enumerate(chunk_jobs):
-                if job_position > 0 and subchunk_start_delay > 0:
-                    _sleep_with_cancel(subchunk_start_delay)
-                if _is_cancelled():
-                    for pending in future_map:
-                        pending.cancel()
-                    raise RuntimeError("stream cancelled")
-                future_map[executor.submit(_run_chunk, index, chunk_messages, chunk_prompt_chars)] = index
-            for future in as_completed(future_map):
-                if _is_cancelled():
-                    for pending in future_map:
-                        pending.cancel()
-                    raise RuntimeError("stream cancelled")
-                completed_results.append(future.result())
-
-    _log(log_fn, f"✅ Gemini Free: all {len(completed_results)}/{len(chunks)} subchunks complete; merging responses")
-    completed_results.sort(key=lambda result: int(result.get("index") or 0))
-    prompt_chars_total = sum(int(result.get("prompt_chars") or 0) for result in completed_results)
-    completion_chars_total = sum(int(result.get("completion_chars") or 0) for result in completed_results)
-    contents = [str(result.get("content") or "") for result in completed_results]
-    raw_parts = [
-        {
-            "index": int(result.get("index") or 0),
-            "prompt_chars": int(result.get("prompt_chars") or 0),
-            "completion_chars": int(result.get("completion_chars") or 0),
-            "raw_response": dict(result.get("raw_response") or {}),
-        }
-        for result in completed_results
-    ]
-    combined = "\n".join(part for part in contents if part).strip()
-    return {
-        "content": combined,
-        "finish_reason": "stop",
-        "usage": {
-            "prompt_chars": len(_messages_to_prompt(source_messages)),
-            "subchunk_prompt_chars": prompt_chars_total,
-            "completion_chars": completion_chars_total,
-        },
-        "raw_response": {
-            "model": _strip_search_prefix(model),
-            "submit_mode": "adaptive_split_parallel" if parallel_helpers else "adaptive_split_sequential",
-            "subchunk_count": len(chunks),
-            "subchunk_sequential": not parallel_helpers,
-            "subchunk_concurrency": subchunk_concurrency,
-            "subchunk_start_delay_seconds": subchunk_start_delay,
-            "subchunk_timeout_seconds": subchunk_timeout,
-            "subchunk_prompt_target_chars": max_prompt_chars,
-            "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
-            "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
-            "subchunk_prompt_limit_chars": split_metadata.get("prompt_limit_chars"),
-            "subchunk_url_limit_chars": split_metadata.get("url_limit_chars"),
-            "subchunk_url_budget_enforced": split_metadata.get("url_budget_enforced"),
-            "subchunk_body_budget_chars": split_metadata.get("body_budget_chars"),
-            "subchunk_safety_chars": split_metadata.get("safety_chars"),
-            "subchunk_payload_format": split_metadata.get("payload_format"),
-            "subchunk_splitter": split_metadata.get("splitter"),
-            "subchunk_balancer": split_metadata.get("subchunk_balancer"),
-            "subchunk_balancer_mode": split_metadata.get("subchunk_balancer_mode"),
-            "subchunk_balanced_target_body_chars": split_metadata.get("balanced_target_body_chars"),
-            "parts": raw_parts,
-        },
-    }
-
-
-def _run_search_subprocess(
-    *,
-    messages: Iterable[Dict[str, Any]],
-    model: str,
-    timeout: int,
-    max_tokens: Optional[int],
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    message_list = _prepare_ai_mode_messages(messages, log_fn=log_fn)
-    should_split, prompt_chars, url_chars = _requires_adaptive_split(message_list, enforce_url_budget=True)
-    if _adaptive_split_enabled() and should_split:
-        html_text_node_transport = _build_html_text_node_transport(message_list)
-        if html_text_node_transport:
-            transport_should_split, transport_prompt_chars, transport_url_chars = _requires_adaptive_split(
-                html_text_node_transport["messages"],
-                enforce_url_budget=True,
-            )
-            if not transport_should_split:
-                _log(
-                    log_fn,
-                    f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
-                    f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
-                    f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
-                )
-                return _run_search_subprocess_once(
-                    messages=message_list,
-                    model=model,
-                    timeout=timeout,
-                    max_tokens=max_tokens,
-                    log_fn=log_fn,
-                )
-            _log(
-                log_fn,
-                f"🧩 Gemini Free: HTML text-node transport still exceeds single-request budget; "
-                f"using raw HTML adaptive split "
-                f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
-                f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
-            )
-        target_chars = _subchunk_prompt_chars()
-        planned_chunks, split_metadata = _split_messages_for_search_budget(
-            message_list,
-            target_chars,
-            enforce_url_budget=True,
-            return_metadata=True,
-        )
-        estimated_subchunks = max(1, len(planned_chunks))
-        _log(
-            log_fn,
-            f"🧩 Gemini Free: large prompt will use adaptive browser subchunks "
-            f"({estimated_subchunks}, {prompt_chars:,} prompt chars, "
-            f"{url_chars:,} URL chars, "
-            f"payload format: {split_metadata.get('payload_format')}, "
-            f"splitter: {split_metadata.get('splitter')}, "
-            f"balancer: {split_metadata.get('subchunk_balancer')}, "
-            f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
-            f"url limit chars: {split_metadata.get('url_limit_chars')}, "
-            f"url budget enforced: {split_metadata.get('url_budget_enforced')}, "
-            f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
-            f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
-            f"body budget chars: {split_metadata.get('body_budget_chars')})"
-        )
-        if len(planned_chunks) > 1:
-            return _run_search_subprocess_sequential(
-                source_messages=message_list,
-                chunks=planned_chunks,
-                split_metadata=split_metadata,
-                model=model,
-                timeout=timeout,
-                max_tokens=max_tokens,
-                log_fn=log_fn,
-            )
-
-    try:
-        return _run_search_subprocess_once(
-            messages=message_list,
-            model=model,
-            timeout=timeout,
-            max_tokens=max_tokens,
-            log_fn=log_fn,
-        )
-    except RuntimeError as exc:
-        if not _adaptive_split_enabled() or not _generation_failure_error(exc):
-            raise
-        fallback_target = _fallback_subchunk_prompt_chars(prompt_chars)
-        planned_chunks, split_metadata = _split_messages_for_search_budget(
-            message_list,
-            fallback_target,
-            enforce_url_budget=True,
-            return_metadata=True,
-        )
-        if len(planned_chunks) <= 1:
-            raise
-        _log(
-            log_fn,
-            f"🧩 Gemini Free: single browser request failed at {prompt_chars:,} prompt chars; "
-            f"retrying as {len(planned_chunks)} adaptive subchunks"
-        )
-        return _run_search_subprocess_sequential(
-            source_messages=message_list,
-            chunks=planned_chunks,
-            split_metadata=split_metadata,
-            model=model,
-            timeout=timeout,
-            max_tokens=max_tokens,
-            log_fn=log_fn,
-        )
 
 
 def send_chat_completion(
@@ -2984,15 +2346,22 @@ def send_chat_completion(
     log_fn: Optional[Callable[[str], None]] = None,
     **_: Any,
 ) -> Dict[str, Any]:
-    """Send a chat-style prompt through the browser-backed Search/Gemini route."""
+    """Send a chat-style prompt to google.com AI Mode and return its answer.
+
+    One request is one AI Mode question on its own page: the system prompt is typed into the
+    prompt box, the text to work on and any images are attached as files. Where the answer
+    comes from: a browser-driver page (Glossarion Mobile's hidden WebView), a headless tab of
+    the signed-in Chrome/Edge profile when the user used Google Login, else the signed-out
+    QtWebEngine helper (a subprocess; ``GEMINI_FREE_MODE=inline`` runs it in this process).
+    """
     del temperature
     timeout_value = int(timeout or _env_int("GEMINI_FREE_TIMEOUT", DEFAULT_TIMEOUT))
+    _ai_mode_model_choice(model)  # an unknown search/ model fails before any browser starts
     if browser_driver.use_driver("GEMINI_FREE_MODE"):
-        # Glossarion Mobile (no helper processes) or GEMINI_FREE_MODE=driver: the helper
-        # orchestration (adaptive sub-chunks, concurrency, start delay, sub-chunk timeout) with
-        # each helper request on a page of the registered browser driver (hidden WebView).
+        # Glossarion Mobile (no helper processes) or GEMINI_FREE_MODE=driver: the helper's
+        # request on a page of the registered browser driver (hidden WebView).
         _log(log_fn, "🌐 Gemini Free: opening the in-app browser (hidden WebView)")
-        return _run_search_subprocess(
+        return _run_search_subprocess_once(
             messages=messages,
             model=model,
             timeout=timeout_value,
@@ -3008,8 +2377,16 @@ def send_chat_completion(
             max_tokens=max_tokens,
             log_fn=log_fn,
         )
-    _log(log_fn, "🌐 Gemini Free: starting Qt WebEngine helper subprocess")
-    return _run_search_subprocess(
+    if has_session():
+        _log(log_fn, "🌐 Gemini Free: using the signed-in Google profile (Chrome/Edge)")
+        return _send_chat_completion_chrome(
+            messages=messages,
+            model=model,
+            timeout=timeout_value,
+            log_fn=log_fn,
+        )
+    _log(log_fn, "🌐 Gemini Free: starting Qt WebEngine helper subprocess (signed out)")
+    return _run_search_subprocess_once(
         messages=messages,
         model=model,
         timeout=timeout_value,
@@ -3063,10 +2440,11 @@ def _main() -> int:
                 pass
 
     parser = argparse.ArgumentParser(
-        description="Use Qt WebEngine for Google Search/Gemini browser-backed requests.",
+        description="Ask google.com AI Mode from a Qt WebEngine page (the search/gemini route).",
     )
     parser.add_argument("url", nargs="?", default=DEFAULT_URL, help="Raw request URL for fetch mode.")
     parser.add_argument("--search-helper", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--list-models", action="store_true", help="Print AI Mode's model menu as JSON.")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--prompt", help="Prompt text. Use '-' to read stdin.")
     parser.add_argument("--prompt-file", help="UTF-8 file containing prompt text.")
@@ -3082,7 +2460,14 @@ def _main() -> int:
     args = parser.parse_args()
 
     try:
-        if args.search_helper or args.prompt or args.prompt_file or args.messages:
+        if args.list_models:
+            page_data = load_ai_mode_answer({"list_models": True}, timeout=args.timeout)
+            problem = _page_problem(page_data)
+            if problem:
+                raise AIModeError(problem[1], problem[0])
+            result = {"content": "", "models": page_data.get("models") or [], "url": page_data.get("url")}
+            args.json = True
+        elif args.search_helper or args.prompt or args.prompt_file or args.messages:
             result = _send_chat_completion_qt(
                 messages=_load_cli_messages(args),
                 model=args.model,
@@ -3107,7 +2492,12 @@ def _main() -> int:
             _print_summary(result)
         return 0 if not result.get("error") else 1
     except Exception as exc:
-        error = {"content": "", "finish_reason": "error", "error": _short_error(exc)}
+        error = {
+            "content": "",
+            "finish_reason": "error",
+            "error": _short_error(exc),
+            "error_kind": str(getattr(exc, "kind", "") or ""),
+        }
         if args.json or args.search_helper:
             print(json.dumps(error, ensure_ascii=False, separators=(",", ":")))
         else:
