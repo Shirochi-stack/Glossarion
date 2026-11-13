@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -198,20 +199,20 @@ BASELINE_DIGESTS = {
 CURRENT_DIGESTS = {
     'balanced_desc0_gender0_rel0': 'f936e7c05efd38dce48746aa86f86306c5476e97d84749a9dfe59ac79051e597',
     'minimal_desc0_gender0_rel0': '05a635f37a44a8256649bd3f1ef16d18cb186643173a3bef2ee3da5d064540bb',
-    'balanced_desc0_gender0_rel1': '17ab80067acde09eacdbf770208603d9199c1fd4c2afc7051b42c4507901f4a7',
-    'minimal_desc0_gender0_rel1': '8524b23153522c8b81a082fbec5e92e5f1114ed31238f80553c2252aedd17c34',
+    'balanced_desc0_gender0_rel1': 'ef9907e996e4071703c64ffcdf1d7027158c3a5ac648cbbffdedf8d52416e6b7',
+    'minimal_desc0_gender0_rel1': 'cdea66fc237863813125b10c285a459bc5e5a4ba8a71a9d492f46ec5f29d6dd6',
     'balanced_desc0_gender1_rel0': 'cf81dd24ca606a71e62e623d526d14a0d5443397bb3a43c197873ba50aa1c139',
     'minimal_desc0_gender1_rel0': 'cde38f84294d833efc7d7d6b64ced3a1397dcc182c2a469e728d4a61fbb4d0fc',
-    'balanced_desc0_gender1_rel1': '7acbd23645d1f12fc6ffccef88c75f5fac9359bfa50f2f7a440e51c3ea90bc23',
-    'minimal_desc0_gender1_rel1': '438e7b8a0ae96b5f0a98fa837b5bcbf3e6df19eeb9d192f50a42f3776e0a2941',
+    'balanced_desc0_gender1_rel1': '4aa402b0991c3dd8240ed4c7bda82fafbd2fae989f0af5a493195765de918e85',
+    'minimal_desc0_gender1_rel1': 'b430a95cdaf577260b9a1ae74af474900f776a6b15a0be9901b1654372bed9b8',
     'balanced_desc1_gender0_rel0': 'd0d8bf230f9f5d4a432a090ad0ca012302ed9bc378a41a4dcb6a3ec054b3507a',
     'minimal_desc1_gender0_rel0': '2c16930db10f5ddd35ef5b398fcda808ba0fd9d6144023b482a7c93fb574ddd9',
-    'balanced_desc1_gender0_rel1': '204cdaa61728d485502f6afedee4fec18b8ca8e65c49c8a98fc18ae23b490931',
-    'minimal_desc1_gender0_rel1': 'a1cb38443dfc0234ac1985a16a22b105c5961251d9b6bf03ae449f6efa0e003b',
+    'balanced_desc1_gender0_rel1': '6baa36719158698c6965a4932b64ddab8d1863395ec06f2e9ee03d0b558a23f5',
+    'minimal_desc1_gender0_rel1': 'a150ac3b2bfd9d96a0c5d97833fcc328772f83fea0f2b534134c23b25f172a9b',
     'balanced_desc1_gender1_rel0': '1c05621d24c05a2115bb5aea03d65b671cc9d6ef177e3e721fe40ca39f7c66c1',
     'minimal_desc1_gender1_rel0': '48b4ea7fdb3d1c7b2de65d158a854e05c74be28efcd11d904a12725ac58862aa',
-    'balanced_desc1_gender1_rel1': '1203b98f14a914848ced495288f7ccf8c1f67953fd30f462a7c2f8e5a1c49dd9',
-    'minimal_desc1_gender1_rel1': '86fff5871c6aab501ecc9b47b385bd34f92093fcaf67b5e5738912fc942865e3',
+    'balanced_desc1_gender1_rel1': 'bcddc9adf115239440378e4f1371a7f9a325fedba6c9e092c4bc2cb5f0b65602',
+    'minimal_desc1_gender1_rel1': '45cd2c338e8ca91c8fb7ab6b2c97b9a5e5361f8164bde48cc775acbd3f96076a',
 }
 
 #: {gender_instruction} with the built-in text and the default entry types (character, titles, nicknames)
@@ -221,8 +222,43 @@ LANGUAGE_BEFORE = "must be in {language}, While the raw name"
 LANGUAGE_NOW = "must be in English, While the raw name"
 
 
+#: {relations_instruction} is the long form again, without "Fiancé" (owner, 2026-11-14): a line that says
+#: which column the relations go in, and full descriptions in its two example rows.
+RELATIONS_LABELS_BEFORE = "Older Sister, Wife, Fiancé, Best Friend,"
+RELATIONS_LABELS_NOW = "Older Sister, Wife, Best Friend,"
+RELATIONS_COLUMN_RULE = re.compile(r"`relations` is its own column[^\n]*: never write relationships in another "
+                                   r"column\.\n")
+RELATIONS_EXAMPLE_LINE = re.compile(r"^Example rows that mirror each other: [^\n]*$", re.MULTILINE)
+RELATIONS_DESCRIPTIONS = (
+    ('"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital"',
+     '"Guild leader"'),
+    ('"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost '
+     'Blade technique"', '"Swordsman"'),
+)
+
+
+def relations_as_before(text):
+    """The prompt with the short {relations_instruction} of aae300f4 (no change without the instruction)."""
+    if "The `relations` column:" not in text:
+        assert "is its own column" not in text
+        return text
+    assert text.count(RELATIONS_LABELS_NOW) == 1 and len(RELATIONS_COLUMN_RULE.findall(text)) == 1
+    assert len(RELATIONS_EXAMPLE_LINE.findall(text)) == 1
+    text = RELATIONS_COLUMN_RULE.sub("", text.replace(RELATIONS_LABELS_NOW, RELATIONS_LABELS_BEFORE))
+
+    def short(match):
+        line = match.group(0)
+        for long_text, short_text in RELATIONS_DESCRIPTIONS:
+            line = line.replace(long_text, short_text)
+        return line
+
+    return RELATIONS_EXAMPLE_LINE.sub(short, text)
+
+
 def as_before(name, text):
-    """The prompt with the two intended fixes undone (Minimal: {gender_instruction}; Balanced/Full: {language})."""
+    """The prompt with the intended changes undone (Minimal: {gender_instruction}; Balanced/Full: {language};
+    both: the long {relations_instruction})."""
+    text = relations_as_before(text)
     if name.startswith("minimal"):
         assert "{gender_instruction}" not in text and text.count(GENDER_EXPANDED) == 1
         return text.replace(GENDER_EXPANDED, "{gender_instruction}")

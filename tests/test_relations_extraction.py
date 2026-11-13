@@ -164,13 +164,16 @@ def test_build_prompt_examples_put_relations_in_their_own_column(eg, _env):
     system, _ = eg.build_prompt("text")
     rows = _instruction_example_rows(system)
     assert [len(row) for row in rows] == [6, 6]
-    assert rows[0][5] == "뢤사난: Older Sister" and rows[0][4] == "Guild leader"
-    assert "is its own column" not in system  # no extra sentence: the rows alone show the place
+    assert rows[0][5] == "뢤사난: Older Sister" and rows[0][4].startswith("The enigmatic guild leader")
+    assert ("`relations` is its own column, column 6 of 6 (type, raw_name, translated_name, gender, description, "
+            "relations): never write relationships in another column.") in system
+    assert "Fianc" not in system
 
-    # Without a description field the relations are the fifth column, and the rows say so.
+    # Without a description field the relations are the fifth column, and the rows and the text say so.
     _env.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps([]))
     system, _ = eg.build_prompt("text")
     assert [len(row) for row in _instruction_example_rows(system)] == [5, 5]
+    assert "`relations` is its own column, column 5 of 5 (" in system
 
 
 def test_instruction_example_names_are_the_prompt_example_names(eg):

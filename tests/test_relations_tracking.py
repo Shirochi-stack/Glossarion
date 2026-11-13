@@ -745,7 +745,10 @@ def test_minimal_prompt_is_checked_only_with_its_toggle(monkeypatch):
 def test_instruction_text_is_one_block():
     text = rt.instruction_text()
     assert text.startswith("The `relations` column: for character entries only")
-    assert text.count("\n") == 1
+    assert text.count("\n") == 2
+    assert text.split("\n")[1] == "`relations` is its own column: never write relationships in another column."
+    # Left out on purpose (owner, 2026-11-14): small models copied it into books without one.
+    assert "Fianc" not in text and "(Father, Mother, Daughter, Older Sister, Wife, Best Friend, Master," in text
     # The model writes what THIS row's character is to the other one, shown both ways.
     assert "role is what THIS row's character is to that other character" in text
     assert "a father's row has `<his daughter's raw_name>: Father`" in text
@@ -773,8 +776,10 @@ def test_instruction_examples_follow_the_prompt_columns():
     columns = ["type", "raw_name", "translated_name", "gender", "description", "relations"]
     text = rt.instruction_text(columns=columns)
     assert text.endswith(
-        '\nExample rows that mirror each other: `character,이히리ᐐ 나애,Dihirit Ade,female,"Guild leader",'
-        '뢤사난: Older Sister` and `character,뢤사난,Kim Sang-hyu,male,"Swordsman",이히리ᐐ 나애: Younger Brother`')
+        '\nExample rows that mirror each other: `character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild '
+        'leader of the Shadow Lotus who operates from the concealed backrooms of the capital",뢤사난: Older Sister` '
+        'and `character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy '
+        'demeanor and unparalleled skill with the Frost Blade technique",이히리ᐐ 나애: Younger Brother`')
     rows = _example_rows(text)
     assert [len(row) for row in rows] == [6, 6]
     assert rows[0][5] == "뢤사난: Older Sister" and rows[1][5] == "이히리ᐐ 나애: Younger Brother"
@@ -782,19 +787,19 @@ def test_instruction_examples_follow_the_prompt_columns():
         assert row[0] == "character" and row[3] in ("female", "male")
         assert row[4] and ":" not in row[4]  # a description holds the column's place, not a relation
 
-    # SHORT: a longer instruction made a 7B model that followed the short one ignore it
-    # (owner, 2026-11-13). The whole text with description and relations columns is within
-    # 40 characters of what it was with the five-column examples, and it is still two lines.
-    base = rt.instruction_text()
-    assert text.count("\n") == 1 and len(text) - len(base) <= 40 and len(text) < 1300
-    assert "is its own column" not in text and "column 6 of 6" not in text
+    # The long form is back (owner, 2026-11-14: the short one of 2026-11-13 was followed worse):
+    # the text says which column the relations go in, and the descriptions are full ones.
+    assert text.count("\n") == 2 and len(text) == 1599
+    assert text.split("\n")[1] == ("`relations` is its own column, column 6 of 6 (type, raw_name, translated_name, "
+                                   "gender, description, relations): never write relationships in another column.")
 
     # The field keeps its place and its name wherever the user put it; other custom fields stay empty.
     text = rt.instruction_text(field="bonds", columns=["type", "raw_name", "translated_name", "gender",
                                                        "Bonds", "notes", "description"])
     rows = _example_rows(text)
     assert [len(row) for row in rows] == [7, 7]
-    assert rows[0][4] == "뢤사난: Older Sister" and rows[0][5] == "" and rows[0][6] == "Guild leader"
+    assert rows[0][4] == "뢤사난: Older Sister" and rows[0][5] == "" and rows[0][6].startswith("The enigmatic guild")
+    assert "`bonds` is its own column, column 5 of 7 (" in text
 
     # A layout without the field (Minimal's fixed list): the relations are the extra last column.
     text = rt.instruction_text(declare_column=True,
