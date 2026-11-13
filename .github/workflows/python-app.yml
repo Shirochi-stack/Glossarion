@@ -173,6 +173,7 @@ jobs:
           tests/test_relations_extraction.py \
           tests/test_relations_translation.py \
           tests/test_relations_desktop_ui.py \
+          tests/test_glossary_placeholder_texts.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \

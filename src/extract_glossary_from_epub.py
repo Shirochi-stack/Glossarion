@@ -5321,6 +5321,104 @@ _NAME_SPLIT_EXAMPLE_TEXT = (
     '  character,김,Kim,\n'
     '  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male) — always split into given name + surname.'
 )
+# {gender_instruction} (Balanced/Full): {gender_types} is the comma list of the entry types with gender.
+_GENDER_INSTRUCTION_TEXT = (
+    "The gender column applies only to {gender_types} entries — determine gender from context clues, leave empty if insufficient.\n"
+    "For all other entry types, leave gender empty."
+)
+
+# ── User-edited placeholder texts ──────────────────────────────────
+# Glossary Manager > right-click "Available placeholders" > "Edit placeholder text…" stores
+# {name: text} in the config key glossary_placeholder_texts; run_env passes it as JSON in
+# GLOSSARY_PLACEHOLDER_TEXTS. A stored text replaces the built-in default above; an empty text
+# makes the placeholder expand to nothing (a placeholder that owns its line drops the line).
+PLACEHOLDER_TEXTS_ENV = 'GLOSSARY_PLACEHOLDER_TEXTS'
+PLACEHOLDER_TEXTS_CONFIG_KEY = 'glossary_placeholder_texts'
+_placeholder_overrides_cache = (None, {})
+
+_DESCRIPTION_ON_NOTE = ("Active when the description column is on (Balanced/Full: 'description' in Custom Fields; "
+                        "Minimal: Include Description Column)")
+_DESCRIPTION_OFF_NOTE = ("Active when the description column is off (Balanced/Full: no 'description' in Custom Fields; "
+                         "Minimal: Include Description Column off)")
+_LINE_NOTE = "; its line is removed otherwise. An empty text removes the line. No tokens."
+_INLINE_NOTE = "; empty otherwise (the sentence stays). No tokens."
+
+
+def placeholder_text_overrides(raw=None):
+    """The stored placeholder texts ({name: text}) from GLOSSARY_PLACEHOLDER_TEXTS; bad JSON is ignored."""
+    global _placeholder_overrides_cache
+    if raw is None:
+        raw = os.environ.get(PLACEHOLDER_TEXTS_ENV, '') or ''
+    if _placeholder_overrides_cache[0] == raw:
+        return dict(_placeholder_overrides_cache[1])
+    try:
+        data = json.loads(raw) if str(raw).strip() else {}
+    except Exception:
+        data = {}
+    overrides = {}
+    if isinstance(data, dict):
+        overrides = {str(name): text for name, text in data.items() if isinstance(text, str)}
+    _placeholder_overrides_cache = (raw, overrides)
+    return dict(overrides)
+
+
+def placeholder_text(name, default):
+    """The text placeholder ``name`` (no braces) expands to: the stored text, else ``default``."""
+    text = placeholder_text_overrides().get(name)
+    return default if text is None else text
+
+
+def editable_placeholders():
+    """[{name, default, note}] for the placeholder text editor, in the order of the placeholder line."""
+    return [
+        {'name': 'description_mandatory', 'default': _DESCRIPTION_MANDATORY_TEXT,
+         'note': _DESCRIPTION_ON_NOTE + _LINE_NOTE},
+        {'name': 'description_detailed', 'default': _DESCRIPTION_DETAILED_TEXT,
+         'note': _DESCRIPTION_ON_NOTE + _LINE_NOTE},
+        {'name': 'description_in_language', 'default': _DESCRIPTION_IN_LANGUAGE_TEXT,
+         'note': _DESCRIPTION_ON_NOTE + _INLINE_NOTE + " Inline: keep the leading space."},
+        {'name': 'description_excluded_note', 'default': _DESCRIPTION_EXCLUDED_NOTE_TEXT,
+         'note': _DESCRIPTION_ON_NOTE + _INLINE_NOTE + " Inline: keep the leading space."},
+        {'name': 'description_example', 'default': _DESCRIPTION_EXAMPLE_TEXT,
+         'note': _DESCRIPTION_ON_NOTE + _LINE_NOTE},
+        {'name': 'example', 'default': _EXAMPLE_TEXT,
+         'note': _DESCRIPTION_OFF_NOTE + _LINE_NOTE},
+        {'name': 'description_name_split_example', 'default': _DESCRIPTION_NAME_SPLIT_EXAMPLE_TEXT,
+         'note': _DESCRIPTION_ON_NOTE + _LINE_NOTE},
+        {'name': 'name_split_example', 'default': _NAME_SPLIT_EXAMPLE_TEXT,
+         'note': _DESCRIPTION_OFF_NOTE + _LINE_NOTE},
+        {'name': 'gender_instruction', 'default': _GENDER_INSTRUCTION_TEXT,
+         'note': "Balanced/Full prompt: active when at least one entry type has gender; empty otherwise. "
+                 "Token: {gender_types} (the entry types with gender, comma-separated)."},
+        {'name': 'subject_tracking_instruction', 'default': _SUBJECT_TRACKING_INSTRUCTION_TEXT,
+         'note': "Active when Include Gender Context is on" + _LINE_NOTE},
+        {'name': 'relations_instruction', 'default': relations_tracking._INSTRUCTION_TEMPLATE,
+         'note': "Active when the Relations Tracker is on; its line is removed otherwise. Tokens (all optional): "
+                 "{field} (the relations column name), {language} (target language), {example_row_1} and "
+                 "{example_row_2} (two example rows in the prompt's column layout). Minimal: when the prompt's "
+                 "own column list does not include the relations column, \"Add a `{field}` column as one extra "
+                 "LAST column of every row. \" is put in front."},
+    ]
+
+
+def _strip_placeholder_line(prompt_text, placeholder):
+    """Remove every line that holds only ``placeholder`` (with an optional "- " bullet)."""
+    import re as _re_pl
+    return _re_pl.sub(
+        r'^[ \t]*-?[ \t]*'
+        + _re_pl.escape(placeholder)
+        + r'[ \t]*\r?\n?',
+        '',
+        prompt_text,
+        flags=_re_pl.MULTILINE,
+    )
+
+
+def _expand_line_placeholder(prompt_text, placeholder, text):
+    """Expand a line-owning placeholder; an empty text removes its line instead."""
+    if text == '':
+        prompt_text = _strip_placeholder_line(prompt_text, placeholder)
+    return prompt_text.replace(placeholder, text)
 
 # ── Canonical default glossary prompt ──────────────────────────────
 # This is the **single source of truth** for the Balanced/Full default
@@ -5432,17 +5530,10 @@ def _apply_subject_tracking_placeholder(prompt_text, include_gender_context=None
     if include_gender_context is None:
         include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
     if include_gender_context:
-        return prompt_text.replace('{subject_tracking_instruction}', _SUBJECT_TRACKING_INSTRUCTION_TEXT)
-
-    import re as _re_st
-    return _re_st.sub(
-        r'^[ \t]*-?[ \t]*'
-        + _re_st.escape('{subject_tracking_instruction}')
-        + r'[ \t]*\r?\n?',
-        '',
-        prompt_text,
-        flags=_re_st.MULTILINE,
-    )
+        return _expand_line_placeholder(
+            prompt_text, '{subject_tracking_instruction}',
+            placeholder_text('subject_tracking_instruction', _SUBJECT_TRACKING_INSTRUCTION_TEXT))
+    return _strip_placeholder_line(prompt_text, '{subject_tracking_instruction}')
 
 
 def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False, columns=None):
@@ -5452,6 +5543,7 @@ def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False
     adds "one extra LAST column" for prompts with a fixed column list (Minimal).
     ``columns`` is the row layout the prompt asks for: the instruction's example rows
     follow it, so the relations sit in their own column and not in the description's.
+    A stored ``relations_instruction`` text (see ``placeholder_text``) replaces the built-in one.
     """
     return relations_tracking.apply_relations_placeholder(
         prompt_text,
@@ -5460,6 +5552,7 @@ def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False
         language=os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English'),
         declare_column=declare_column,
         columns=columns,
+        template=placeholder_text_overrides().get('relations_instruction'),
     )
 
 
@@ -5514,40 +5607,39 @@ def _apply_description_rule_placeholders(prompt_text, custom_fields=None, descri
     import re as _re_dr
     if active:
         result = prompt_text
-        result = result.replace('{description_mandatory}', _DESCRIPTION_MANDATORY_TEXT)
-        result = result.replace('{description_detailed}', _DESCRIPTION_DETAILED_TEXT)
-        result = result.replace('{description_in_language}', _DESCRIPTION_IN_LANGUAGE_TEXT)
-        result = result.replace('{description_excluded_note}', _DESCRIPTION_EXCLUDED_NOTE_TEXT)
-        result = result.replace('{description_example}', _DESCRIPTION_EXAMPLE_TEXT)
-        result = result.replace('{description_name_split_example}', _DESCRIPTION_NAME_SPLIT_EXAMPLE_TEXT)
+        result = _expand_line_placeholder(
+            result, '{description_mandatory}',
+            placeholder_text('description_mandatory', _DESCRIPTION_MANDATORY_TEXT))
+        result = _expand_line_placeholder(
+            result, '{description_detailed}',
+            placeholder_text('description_detailed', _DESCRIPTION_DETAILED_TEXT))
+        result = result.replace(
+            '{description_in_language}',
+            placeholder_text('description_in_language', _DESCRIPTION_IN_LANGUAGE_TEXT))
+        result = result.replace(
+            '{description_excluded_note}',
+            placeholder_text('description_excluded_note', _DESCRIPTION_EXCLUDED_NOTE_TEXT))
+        result = _expand_line_placeholder(
+            result, '{description_example}',
+            placeholder_text('description_example', _DESCRIPTION_EXAMPLE_TEXT))
+        result = _expand_line_placeholder(
+            result, '{description_name_split_example}',
+            placeholder_text('description_name_split_example', _DESCRIPTION_NAME_SPLIT_EXAMPLE_TEXT))
         # Strip the no-description placeholders (they are the inverse)
         for placeholder in _NO_DESCRIPTION_LINE_PLACEHOLDERS:
-            result = _re_dr.sub(
-                r'^[ \t]*-?[ \t]*'
-                + _re_dr.escape(placeholder)
-                + r'[ \t]*\r?\n?',
-                '',
-                result,
-                flags=_re_dr.MULTILINE,
-            )
+            result = _strip_placeholder_line(result, placeholder)
         result = _re_dr.sub(r'\n{3,}', '\n\n', result)
         return result
     # Inactive path: strip description line-owners, expand no-description ones.
     cleaned = prompt_text
     for placeholder in _DESCRIPTION_LINE_PLACEHOLDERS:
-        cleaned = _re_dr.sub(
-            r'^[ \t]*-?[ \t]*'
-            + _re_dr.escape(placeholder)
-            + r'[ \t]*\r?\n?',
-            '',
-            cleaned,
-            flags=_re_dr.MULTILINE,
-        )
+        cleaned = _strip_placeholder_line(cleaned, placeholder)
     for placeholder in _DESCRIPTION_INLINE_PLACEHOLDERS:
         cleaned = cleaned.replace(placeholder, '')
     # Expand the no-description placeholders
-    cleaned = cleaned.replace('{example}', _EXAMPLE_TEXT)
-    cleaned = cleaned.replace('{name_split_example}', _NAME_SPLIT_EXAMPLE_TEXT)
+    cleaned = _expand_line_placeholder(cleaned, '{example}', placeholder_text('example', _EXAMPLE_TEXT))
+    cleaned = _expand_line_placeholder(
+        cleaned, '{name_split_example}', placeholder_text('name_split_example', _NAME_SPLIT_EXAMPLE_TEXT))
     cleaned = _re_dr.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned
 
@@ -5588,10 +5680,8 @@ def build_prompt(chapter_text: str) -> tuple:
                      if cfg.get('enabled', True) and cfg.get('has_gender', False)]
     if _gender_types:
         _gender_labels = ', '.join(_gender_types)
-        _gender_instruction = (
-            f"The gender column applies only to {_gender_labels} entries — determine gender from context clues, leave empty if insufficient.\n"
-            f"For all other entry types, leave gender empty."
-        )
+        _gender_instruction = placeholder_text('gender_instruction', _GENDER_INSTRUCTION_TEXT).replace(
+            '{gender_types}', _gender_labels)
     else:
         _gender_instruction = ""
     

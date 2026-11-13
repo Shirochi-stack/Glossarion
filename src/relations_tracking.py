@@ -1521,7 +1521,7 @@ _INSTRUCTION_TEMPLATE = (
     'different word only when the relationship itself changed in this text. Do not guess, do not describe events '
     'or feelings, never use commas inside this column. Leave it empty for non-character entries, surname-only '
     'entries, and when no relationship is shown.\n'
-    'Example rows that mirror each other: `{row_a}` and `{row_b}`'
+    'Example rows that mirror each other: `{example_row_1}` and `{example_row_2}`'
 )
 _DECLARE_TEMPLATE = 'Add a `{field}` column as one extra LAST column of every row. '
 
@@ -1557,20 +1557,23 @@ def _example_row(example: Mapping[str, str], columns: Sequence[str], field: str)
 
 
 def instruction_text(field: Optional[str] = None, language: Optional[str] = "English",
-                     declare_column: bool = False, columns: Optional[Iterable[Any]] = None) -> str:
+                     declare_column: bool = False, columns: Optional[Iterable[Any]] = None,
+                     template: Optional[str] = None) -> str:
     """The ``{relations_instruction}`` expansion.
 
     ``columns`` is the row layout the prompt asks for. With it the two example rows have
     every column in its place; a prompt whose other examples end at ``description``
     otherwise teaches the model to write the relations there. Nothing else is added for
     it: the text stays as short as it was with the five-column examples.
+    ``template`` replaces the built-in text (a user-edited one); it may use the tokens
+    ``{field}``, ``{language}``, ``{example_row_1}`` and ``{example_row_2}``, or none.
     """
     field = (field or "").strip() or field_name()
     language = (language or "").strip() or "English"
     layout = instruction_columns(columns if columns else _BASE_COLUMNS, field)
-    text = _INSTRUCTION_TEMPLATE
-    text = text.replace("{row_a}", _example_row(_EXAMPLE_ROWS[0], layout, field))
-    text = text.replace("{row_b}", _example_row(_EXAMPLE_ROWS[1], layout, field))
+    text = _INSTRUCTION_TEMPLATE if template is None else str(template)
+    text = text.replace("{example_row_1}", _example_row(_EXAMPLE_ROWS[0], layout, field))
+    text = text.replace("{example_row_2}", _example_row(_EXAMPLE_ROWS[1], layout, field))
     text = text.replace("{field}", field).replace("{language}", language)
     if declare_column:
         text = _DECLARE_TEMPLATE.replace("{field}", field) + text
@@ -1585,8 +1588,12 @@ _PLACEHOLDER_LINE_RE = re.compile(
 
 def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None, field: Optional[str] = None,
                                 language: Optional[str] = None, declare_column: bool = False,
-                                columns: Optional[Iterable[Any]] = None) -> Any:
-    """Expand ``{relations_instruction}`` when tracking is on; remove its whole line when off."""
+                                columns: Optional[Iterable[Any]] = None, template: Optional[str] = None) -> Any:
+    """Expand ``{relations_instruction}`` when tracking is on; remove its whole line when off.
+
+    ``template``: a user-edited instruction text (``instruction_text``); one that expands to
+    nothing removes the line as when tracking is off.
+    """
     if not isinstance(prompt_text, str) or RELATIONS_PLACEHOLDER not in prompt_text:
         return prompt_text
     if enabled is None:
@@ -1594,9 +1601,11 @@ def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None
     if enabled:
         if language is None:
             language = os.environ.get("GLOSSARY_TARGET_LANGUAGE", "English")
-        return prompt_text.replace(
-            RELATIONS_PLACEHOLDER,
-            instruction_text(field, language, declare_column=declare_column, columns=columns))
+        text = instruction_text(field, language, declare_column=declare_column, columns=columns,
+                                template=template)
+        if not text:
+            return _PLACEHOLDER_LINE_RE.sub("", prompt_text).replace(RELATIONS_PLACEHOLDER, "")
+        return prompt_text.replace(RELATIONS_PLACEHOLDER, text)
     return _PLACEHOLDER_LINE_RE.sub("", prompt_text)
 
 

@@ -666,6 +666,272 @@ class GlossaryManagerMixin:
         if hasattr(self, 'append_log'):
             self.append_log(f"🗑️ Deleted glossary prompt profile: '{name}'")
 
+    def _style_glossary_profile_combo(self, combo):
+        """The look of the Balanced/Full and Minimal profile dropdowns (also the placeholder text editor's)."""
+        combo.setStyleSheet("""
+            QComboBox {
+                padding-right: 28px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        self._disable_combobox_mousewheel(combo)
+        self._add_combobox_arrow(combo)
+
+    # ── Placeholder Text editor (right-click an "Available placeholders" line) ──────────────────
+    PLACEHOLDER_TEXT_MENU_ACTION = "Edit placeholder text…"
+
+    def _attach_placeholder_text_menu(self, line_edit):
+        """Right-click: the line's own Copy / Select All plus "Edit placeholder text…"."""
+        line_edit.setContextMenuPolicy(Qt.CustomContextMenu)
+        line_edit.customContextMenuRequested.connect(
+            lambda pos, widget=line_edit: self._show_placeholder_line_menu(widget, pos))
+
+    def _placeholder_line_menu(self, line_edit):
+        menu = line_edit.createStandardContextMenu()
+        menu.addSeparator()
+        action = menu.addAction(self.PLACEHOLDER_TEXT_MENU_ACTION)
+        action.triggered.connect(lambda _checked=False: self._open_placeholder_text_dialog(line_edit.window()))
+        return menu
+
+    def _show_placeholder_line_menu(self, line_edit, pos):
+        menu = self._placeholder_line_menu(line_edit)
+        try:
+            menu.exec(line_edit.mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
+
+    def _stored_placeholder_texts(self):
+        from extract_glossary_from_epub import PLACEHOLDER_TEXTS_CONFIG_KEY
+        stored = self.config.get(PLACEHOLDER_TEXTS_CONFIG_KEY)
+        return {str(k): v for k, v in stored.items() if isinstance(v, str)} if isinstance(stored, dict) else {}
+
+    def _store_placeholder_texts(self, texts):
+        """Config + env at once (the next extraction uses them), then save like the other live toggles."""
+        from extract_glossary_from_epub import PLACEHOLDER_TEXTS_CONFIG_KEY, PLACEHOLDER_TEXTS_ENV
+        self.config[PLACEHOLDER_TEXTS_CONFIG_KEY] = dict(texts)
+        os.environ[PLACEHOLDER_TEXTS_ENV] = json.dumps(dict(texts), ensure_ascii=False)
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+
+    def _open_placeholder_text_dialog(self, parent=None):
+        """Non-modal "Placeholder Text" dialog: pick an editable placeholder, edit its text, Save / Reset."""
+        existing = getattr(self, '_placeholder_text_dialog', None)
+        if existing is not None:
+            try:
+                existing.reload_placeholder_texts()
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return existing
+            except RuntimeError:
+                self._placeholder_text_dialog = None
+        from extract_glossary_from_epub import editable_placeholders
+        from review_dialog import confirm_prompt_profile_action
+        items = editable_placeholders()
+        defaults = {item['name']: item['default'] for item in items}
+        notes = {item['name']: item['note'] for item in items}
+        names = [item['name'] for item in items]
+
+        dialog = QDialog(parent)
+        dialog.setObjectName("placeholder_text_dialog")
+        dialog.setWindowTitle("Placeholder Text")
+        dialog.setModal(False)
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+        dialog.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; color: white; }
+            QLabel { color: white; background-color: transparent; border: none; }
+            QTextEdit { background-color: #252526; color: white; border: 1px solid #4a5568;
+                        border-radius: 3px; padding: 4px; }
+            QTextEdit:focus { border-color: #5a9fd4; }
+            QComboBox { background-color: #2d2d2d; color: white; border: 1px solid #4a5568;
+                        border-radius: 3px; padding: 4px; }
+            QComboBox QAbstractItemView { background-color: #2d2d2d; color: white;
+                                          selection-background-color: #5a9fd4; }
+            QPushButton:disabled { background-color: #3a3a3a; color: #777777; border-color: #444444; }
+        """)
+        try:
+            screen = QApplication.primaryScreen().geometry()
+            dialog.resize(max(640, int(screen.width() * 0.45)), max(420, int(screen.height() * 0.5)))
+        except Exception:
+            dialog.resize(720, 480)
+        layout = QVBoxLayout(dialog)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Placeholder:"))
+        combo = QComboBox()
+        combo.setObjectName("placeholder_text_combo")
+        combo.setMinimumWidth(260)
+        combo.setMaximumWidth(420)
+        self._style_glossary_profile_combo(combo)
+        for name in names:
+            combo.addItem("{" + name + "}", name)
+        self._apply_halgakos_combo_icons(combo)
+        row.addWidget(combo)
+        row.addStretch()
+        layout.addLayout(row)
+
+        note = QLabel()
+        note.setObjectName("placeholder_text_note")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #9aa0a6; font-size: 9pt;")
+        layout.addWidget(note)
+
+        editor = QTextEdit()
+        editor.setObjectName("placeholder_text_editor")
+        editor.setAcceptRichText(False)
+        editor.setLineWrapMode(QTextEdit.WidgetWidth)
+        layout.addWidget(editor, 1)
+
+        status = QLabel()
+        status.setObjectName("placeholder_text_status")
+        status.setStyleSheet("color: #9aa0a6; font-size: 9pt;")
+        layout.addWidget(status)
+
+        buttons_row = QHBoxLayout()
+        buttons = {}
+        for key, text, background, border, hover in (
+                ('save', "💾 Save", '#2f5f8f', '#4a78a8', '#3f78ad'),
+                ('reset', "Reset to Default", '#6f2f2f', '#944545', '#8a3a3a'),
+                ('close', "Close", '#3a3a3a', '#555555', '#4a4a4a')):
+            button = QPushButton(text)
+            button.setObjectName(f"placeholder_text_{key}_button")
+            button.setAutoDefault(False)
+            button.setFixedHeight(28)
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {background}; color: #ffffff; font-size: 11px;
+                    font-weight: bold; border: 1px solid {border}; border-radius: 4px; padding: 0px 12px; }}
+                QPushButton:hover {{ background-color: {hover}; }}
+            """)
+            buttons[key] = button
+        buttons_row.addWidget(buttons['save'])
+        buttons_row.addWidget(buttons['reset'])
+        buttons_row.addStretch()
+        buttons_row.addWidget(buttons['close'])
+        layout.addLayout(buttons_row)
+
+        # Unsaved edits per placeholder, kept while the dialog is open (switching does not lose them).
+        state = {'name': None, 'drafts': {}, 'closing': False}
+
+        def effective(name):
+            stored = self._stored_placeholder_texts()
+            return stored[name] if name in stored else defaults[name]
+
+        def remember():
+            name = state['name']
+            if name is None:
+                return
+            text = editor.toPlainText()
+            if text != effective(name):
+                state['drafts'][name] = text
+            else:
+                state['drafts'].pop(name, None)
+
+        def refresh_status():
+            name = state['name']
+            if name is None:
+                return
+            stored = name in self._stored_placeholder_texts()
+            text = editor.toPlainText()
+            label = "Edited" if stored else "Default text"
+            if text != effective(name):
+                label += " (unsaved changes)"
+            status.setText(label)
+            buttons['reset'].setEnabled(stored or text != defaults[name])
+
+        def load(name):
+            state['name'] = name
+            editor.blockSignals(True)
+            try:
+                editor.setPlainText(state['drafts'].get(name, effective(name)))
+            finally:
+                editor.blockSignals(False)
+            note.setText(notes[name])
+            refresh_status()
+
+        def on_select(index):
+            if index < 0:
+                return
+            remember()
+            load(combo.itemData(index))
+
+        def save():
+            name = state['name']
+            text = editor.toPlainText()
+            texts = self._stored_placeholder_texts()
+            if text == defaults[name]:
+                texts.pop(name, None)
+            else:
+                texts[name] = text
+            self._store_placeholder_texts(texts)
+            state['drafts'].pop(name, None)
+            refresh_status()
+
+        def reset():
+            name = state['name']
+            texts = self._stored_placeholder_texts()
+            if name in texts and not confirm_prompt_profile_action(
+                    dialog, "Placeholder Text", f"Reset {{{name}}} to the built-in default text?"):
+                return
+            texts.pop(name, None)
+            self._store_placeholder_texts(texts)
+            state['drafts'].pop(name, None)
+            load(name)
+
+        def may_close():
+            remember()
+            if state['drafts'] and not confirm_prompt_profile_action(
+                    dialog, "Placeholder Text", "Discard the unsaved placeholder text changes?"):
+                return False
+            state['drafts'].clear()
+            return True
+
+        def close_dialog():
+            if may_close():
+                state['closing'] = True
+                try:
+                    QDialog.reject(dialog)
+                finally:
+                    state['closing'] = False
+
+        def close_event(event):
+            if state['closing'] or may_close():
+                event.accept()
+            else:
+                event.ignore()
+
+        def reload_placeholder_texts():
+            load(combo.itemData(max(combo.currentIndex(), 0)))
+
+        combo.currentIndexChanged.connect(on_select)
+        editor.textChanged.connect(refresh_status)
+        buttons['save'].clicked.connect(lambda _checked=False: save())
+        buttons['reset'].clicked.connect(lambda _checked=False: reset())
+        buttons['close'].clicked.connect(lambda _checked=False: close_dialog())
+        dialog.reject = close_dialog  # Esc
+        dialog.closeEvent = close_event  # the title bar's X
+        dialog.reload_placeholder_texts = reload_placeholder_texts
+        dialog.placeholder_combo = combo
+        dialog.placeholder_editor = editor
+        dialog.placeholder_note = note
+        dialog.placeholder_status = status
+        dialog.placeholder_buttons = buttons
+        load(names[0])
+        self._placeholder_text_dialog = dialog
+        dialog.show()
+        return dialog
+
     def _create_glossary_prompt_profile_controls(self, profile_key, editor):
         """Create New/Save/Delete controls for one glossary prompt editor."""
         self._ensure_glossary_prompt_profiles()
@@ -690,19 +956,7 @@ class GlossaryManagerMixin:
             combo.lineEdit().setPlaceholderText("Profile name")
         except Exception:
             pass
-        combo.setStyleSheet("""
-            QComboBox {
-                padding-right: 28px;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 26px;
-                border-left: 1px solid #4a5568;
-            }
-        """)
-        self._disable_combobox_mousewheel(combo)
-        self._add_combobox_arrow(combo)
+        self._style_glossary_profile_combo(combo)
         layout.addWidget(combo)
 
         new_btn = QPushButton("+ New Profile")
@@ -3498,6 +3752,7 @@ class GlossaryManagerMixin:
         placeholders_line.setFrame(False)
         placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         placeholders_line.setCursorPosition(0)
+        self._attach_placeholder_text_menu(placeholders_line)
         placeholders_line.setToolTip(
             "<qt><table width='600' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
             "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{fields}</b></td>"
@@ -4940,6 +5195,7 @@ Do not stop after the glossary."""
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
+        self._attach_placeholder_text_menu(placeholder_line)
         placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         placeholder_line.setToolTip(
             "<qt><table width='600' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"

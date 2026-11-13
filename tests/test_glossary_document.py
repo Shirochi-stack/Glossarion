@@ -622,6 +622,8 @@ REWIRE_SPANS = (
     (563, 568, 1),
     # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
     (735, 735, 4),
+    # Placeholder Text editor (right-click an "Available placeholders" line); the profile combo style is shared
+    (758, 757, 266), (782, 794, 1),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1799, 379),  # Relations Tracker
     (1800, 1810, 3),
@@ -643,11 +645,13 @@ REWIRE_SPANS = (
     # settings_rules glossary compression rule (tests/parity/test_u9_gap_round3.py)
     (3186, 3185, 8),  # Relations Tracker
     (3648, 3648, 1),  # Relations Tracker
+    (3654, 3653, 1),  # Placeholder Text editor
     (3711, 3710, 1),  # Relations Tracker
     (3770, 3770, 1),  # Relations Tracker
     (3979, 3992, 7), (3998, 3998, 1), (4000, 4008, 2),
     (4144, 4149, 2), (4151, 4156, 2),
     (5113, 5113, 1),  # Relations Tracker
+    (5117, 5116, 1),  # Placeholder Text editor
     (5171, 5170, 1),  # Relations Tracker
     (5189, 5189, 3),  # Relations Tracker
     (5208, 5208, 1),  # Relations Tracker
