@@ -106,7 +106,7 @@
 - `page.views` is a stack:
   - `View("/")` is the chat home: `appbar=ChatHeader`, `drawer=ChatDrawer`, and body `SafeArea(Column[Transcript(expand), JobStrip?, StatusCaption?, Composer])`.
 - Every destination is pushed as its own `View(route)`. Back pops it.
-- A screen opened from another screen (Files or the Reader from the Book page, a job's detail from the Overview) is pushed on top of it, so back returns there. A drawer destination and a top-level destination (Library, Jobs, Glossaries, Tools, Settings) start from the route's static parents instead, and so does a deep link or notification, unless it opens a full-screen surface or its static parents are already open. Re-opening a screen that is already on the stack returns to that depth.
+- A screen opened from another screen (Files or the Reader from the Book page, a job's detail from the Overview) is pushed on top of it, so back returns there. A screen opened from the chat (Progress from the chat's shortcuts, a book from a chat card) is pushed alone, so back returns to the chat and not to the route's static parents. A drawer destination and a top-level destination (Library, Jobs, Glossaries, Tools, Settings) start from the route's static parents instead, and so does a deep link or notification, unless it opens a full-screen surface or its static parents are already open. Re-opening a screen that is already on the stack returns to that depth.
 - Views that are not routes (the keyword delete confirmation, the device checks) carry a `View.route` that no other View uses: the client keys Views by route, and back resolves to the first View with the popped route.
 
 **Tablet**

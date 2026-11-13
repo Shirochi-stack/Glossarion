@@ -583,13 +583,17 @@ class AppShell:
         pushed View pops; §7.2: a quick look returns to context). A link from outside the app
         (deep link, notification) goes on top only when its static parents are already on
         the stack. Re-opening a screen already on the stack -- the same route, or another
-        instance of it such as a second book -- returns to that depth first. The static chain
-        stays for an empty stack (cold deep links, the chat root), for top-level destinations
-        without parents (Library, Jobs, Glossaries, Tools, Settings) and for drawer
-        navigation (``show(reset=True)``).
+        instance of it such as a second book -- returns to that depth first. A screen opened
+        from the chat (``in_app`` with an empty stack: Progress from the chat's shortcuts, a
+        book from a chat card) goes on the stack alone, so Back returns to the chat and not
+        to the route's static parents (owner, 2026-11-14: Back from Progress showed Tools,
+        Back from a book showed the Library). The static chain stays for a link from outside
+        the app with an empty stack (cold deep links), for top-level destinations without
+        parents (Library, Jobs, Glossaries, Tools, Settings) and for drawer navigation
+        (``show(reset=True)``).
         """
         if not self.stack:
-            return None
+            return [] if in_app and len(wanted) >= 2 else None
         if match.presentation != FULLSCREEN:
             if len(wanted) < 2:
                 return None
