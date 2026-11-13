@@ -5256,7 +5256,8 @@ def editable_placeholders():
         {'name': 'relations_instruction', 'default': relations_tracking._INSTRUCTION_TEMPLATE,
          'note': "Active when the Relations Tracker is on (Minimal: and its Include Relations Column); its line "
                  "is removed otherwise. Tokens (all optional): "
-                 "{field} (the relations column name), {language} (target language), {example_row_1} and "
+                 "{field} (the relations column name), {language} (target language), {column_rule} (the sentence "
+                 "that says which column the relations go in), {example_row_1} and "
                  "{example_row_2} (two example rows in the prompt's column layout). Minimal: when the prompt's "
                  "own column list does not include the relations column, \"Add a `{field}` column as one extra "
                  "LAST column of every row. \" is put in front."},

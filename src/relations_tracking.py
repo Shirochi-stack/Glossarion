@@ -2442,27 +2442,38 @@ _INSTRUCTION_TEMPLATE = (
     'characters that are shown or stated in THIS text. Write each as `raw_name: role`, separated by "; ", '
     'where raw_name is the other character\'s raw_name exactly as in their own entry and role is what THIS '
     'row\'s character is to that other character, in {language}, 1–3 words (Father, Mother, Daughter, Older '
-    'Sister, Wife, Fiancé, Best Friend, Master, Disciple, Subordinate, Rival, Enemy). Both directions: a '
+    'Sister, Wife, Best Friend, Master, Disciple, Subordinate, Rival, Enemy). Both directions: a '
     'father\'s row has `<his daughter\'s raw_name>: Father` and the daughter\'s row has `<her father\'s '
     'raw_name>: Daughter`. List only real, specific relationships; never filler such as Acquaintance, Stranger '
     'or Unknown, and never a note such as Surname. Keep the same wording for the same relationship; use a '
     'different word only when the relationship itself changed in this text. Do not guess, do not describe events '
     'or feelings, never use commas inside this column. Leave it empty for non-character entries, surname-only '
     'entries, and when no relationship is shown.\n'
+    '{column_rule}\n'
     'Example rows that mirror each other: `{example_row_1}` and `{example_row_2}`'
 )
 _DECLARE_TEMPLATE = 'Add a `{field}` column as one extra LAST column of every row. '
+_COLUMN_RULE = '`{field}` is its own column: never write relationships in another column.'
+_COLUMN_RULE_POSITION = (
+    '`{field}` is its own column, column {index} of {total} ({columns}): never write relationships in '
+    'another column.'
+)
 
 _BASE_COLUMNS = ("type", "raw_name", "translated_name", "gender")
 #: The two made-up characters of the glossary prompt's own example rows. They are not
 #: real names, so a model cannot take them for characters of the book it is reading.
-#: Kept SHORT: a long instruction made a 7B model that followed the short one ignore it
-#: (owner, 2026-11-13). The description cell is only there to hold the column's place.
+#: The long form (column rule + full descriptions) is the owner's choice (2026-11-14): the
+#: short one of 2026-11-13 was followed worse. "Fiancé" is left out of the label examples
+#: on purpose: small models copied it into books that have no fiancé.
 _EXAMPLE_ROWS = (
     {"type": "character", "raw_name": "이히리ᐐ 나애", "translated_name": "Dihirit Ade", "gender": "female",
-     "description": '"Guild leader"', "relations": "뢤사난: Older Sister"},
+     "description": '"The enigmatic guild leader of the Shadow Lotus who operates from the concealed '
+                    'backrooms of the capital"',
+     "relations": "뢤사난: Older Sister"},
     {"type": "character", "raw_name": "뢤사난", "translated_name": "Kim Sang-hyu", "gender": "male",
-     "description": '"Swordsman"', "relations": "이히리ᐐ 나애: Younger Brother"},
+     "description": '"A master swordsman from the Northern Sect known for his icy demeanor and '
+                    'unparalleled skill with the Frost Blade technique"',
+     "relations": "이히리ᐐ 나애: Younger Brother"},
 )
 
 
@@ -2490,16 +2501,25 @@ def instruction_text(field: Optional[str] = None, language: Optional[str] = "Eng
     """The ``{relations_instruction}`` expansion.
 
     ``columns`` is the row layout the prompt asks for. With it the two example rows have
-    every column in its place; a prompt whose other examples end at ``description``
-    otherwise teaches the model to write the relations there. Nothing else is added for
-    it: the text stays as short as it was with the five-column examples.
+    every column in its place and the text says which column the relations go in; a prompt
+    whose other examples end at ``description`` otherwise teaches the model to write them
+    there.
     ``template`` replaces the built-in text (a user-edited one); it may use the tokens
-    ``{field}``, ``{language}``, ``{example_row_1}`` and ``{example_row_2}``, or none.
+    ``{field}``, ``{language}``, ``{column_rule}``, ``{example_row_1}`` and
+    ``{example_row_2}``, or none.
     """
     field = (field or "").strip() or field_name()
     language = (language or "").strip() or "English"
-    layout = instruction_columns(columns if columns else _BASE_COLUMNS, field)
+    if columns:
+        layout = instruction_columns(columns, field)
+        index = next(i for i, name in enumerate(layout) if name.casefold() == field.casefold()) + 1
+        rule = (_COLUMN_RULE_POSITION.replace("{index}", str(index)).replace("{total}", str(len(layout)))
+                .replace("{columns}", ", ".join(layout)))
+    else:
+        layout = instruction_columns(_BASE_COLUMNS, field)
+        rule = _COLUMN_RULE
     text = _INSTRUCTION_TEMPLATE if template is None else str(template)
+    text = text.replace("{column_rule}", rule)
     text = text.replace("{example_row_1}", _example_row(_EXAMPLE_ROWS[0], layout, field))
     text = text.replace("{example_row_2}", _example_row(_EXAMPLE_ROWS[1], layout, field))
     text = text.replace("{field}", field).replace("{language}", language)
