@@ -37,6 +37,8 @@ CHANGED_COLOR = QColor("#f59e0b")  # amber: the relation changed
 LABEL_BG = QColor("#1b1d21")
 #: Above this many visible edges, labels are drawn only for the selected character's edges.
 MAX_LABELLED_EDGES = 120
+#: How long a name stays outlined after a jump from the side panel.
+FLASH_MS = 1600
 #: Lines and names that do not belong to the selected character fade to this.
 DIMMED_OPACITY = 0.22
 #: Where along its line a label may sit (middle first), so it never floats beside the line.
@@ -155,6 +157,16 @@ class _GraphView(QGraphicsView):
                 self.scale(1.4, 1.4)
             self.centerOn(rect.center())
 
+    def bring_into_view(self, item):
+        """Centre ``item`` when it is not wholly in sight (the user zoomed in or panned away).
+        A diagram that already shows it is left where it is. True when the view moved."""
+        visible = self.mapToScene(self.viewport().rect()).boundingRect()
+        if visible.contains(item.sceneBoundingRect()):
+            return False
+        self._auto_fit = False
+        self.centerOn(item)
+        return True
+
 
 class _NodeItem(QGraphicsPathItem):
     """A rounded name label; a click shows that character's history."""
@@ -186,10 +198,21 @@ class _NodeItem(QGraphicsPathItem):
         self.setAcceptedMouseButtons(Qt.LeftButton)
 
     def set_selected_look(self, selected):
+        self._selected_look = bool(selected)
         pen = self.pen()
         pen.setWidthF(3.0 if selected else 1.4)
         pen.setColor(QColor("#ffffff") if selected else self._border)
         self.setPen(pen)
+
+    def set_flash(self, on):
+        """A thick amber outline for a moment: "here it is" after a jump from the side panel."""
+        if on:
+            pen = self.pen()
+            pen.setWidthF(4.5)
+            pen.setColor(CHANGED_COLOR)
+            self.setPen(pen)
+        else:
+            self.set_selected_look(getattr(self, '_selected_look', False))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self._on_click is not None:
@@ -243,6 +266,7 @@ class RelationsDiagramDialog(QDialog):
         self._layout_key = None
         self._refit = False
         self._label_boxes = []
+        self._history_links = []
         self._selected = None
         self._node_font = QFont("Segoe UI", 10)
         self._node_font.setBold(True)
@@ -342,6 +366,9 @@ class RelationsDiagramDialog(QDialog):
         side_layout.addWidget(self.history_title)
         self.history_panel = QTextBrowser()
         self.history_panel.setOpenLinks(False)
+        # A name in the list is a link to that name in the diagram.
+        self.history_panel.anchorClicked.connect(self._on_history_link)
+        self.history_panel.setToolTip("Click a name to find it in the diagram")
         side_layout.addWidget(self.history_panel, 1)
         splitter.addWidget(side)
         splitter.setStretchFactor(0, 4)
@@ -547,6 +574,35 @@ class RelationsDiagramDialog(QDialog):
         self.rebuild()
         self.show_history(node_id)
 
+    def _on_history_link(self, url):
+        """A name clicked in the side panel (``node:<index into the names listed>``)."""
+        if url.scheme() != 'node':
+            return
+        try:
+            node_id = self._history_links[int(url.path())]
+        except (ValueError, IndexError):
+            return
+        self.jump_to(node_id)
+
+    def jump_to(self, node_id):
+        """Show where ``node_id`` is in the diagram: bring it into view when it is out of
+        sight and outline it for a moment. The selection and the panel stay as they are."""
+        item = self._node_items.get(node_id)
+        if item is None:
+            return False
+        self._view.bring_into_view(item)
+        item.set_flash(True)
+        QTimer.singleShot(FLASH_MS, lambda: self._end_flash(node_id, item))
+        return True
+
+    def _end_flash(self, node_id, item):
+        # Only while that very item is still drawn: a rebuild in between deleted it.
+        if self._node_items.get(node_id) is item:
+            try:
+                item.set_flash(False)
+            except RuntimeError:  # the window was closed meanwhile
+                pass
+
     def clear_selection(self):
         """Back to the whole picture (a click on empty space, or on the selected name again)."""
         if self._selected is None:
@@ -589,6 +645,7 @@ class RelationsDiagramDialog(QDialog):
         # Like the picture beside it, the history stops at the slider's chapter.
         chapter = self.up_to_chapter()
         history = relations_tracking.character_history(self.tracker, raw, chapter)
+        self._history_links = []
         parts = self._description_html(node_id, raw)
         if not history:
             upto = f" up to chapter {chapter}" if chapter is not None else ""
@@ -597,6 +654,10 @@ class RelationsDiagramDialog(QDialog):
             return history
         for rel in history:
             target = html.escape(str(rel.get('target_translated') or rel.get('target_raw') or ''))
+            if rel.get('target_key') in self._node_items:  # drawn: the name jumps to it
+                self._history_links.append(rel['target_key'])
+                target = (f"<a href='node:{len(self._history_links) - 1}' "
+                          f"style='color:#e5e7eb'>{target}</a>")
             parts.append(f"<p style='margin:8px 0 2px 0'><b>{target}</b>: "
                          f"<span style='color:#f59e0b'>{html.escape(str(rel.get('current') or ''))}</span></p><ul style='margin:0'>")
             for run in rel.get('timeline') or []:
