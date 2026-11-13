@@ -1690,7 +1690,7 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authnd_reasoning_status_label = None
     AUTHND_AVAILABLE = False
 
-# Search/Gemini Free - Google Search browser-backed route (optional, no API key)
+# Search/Gemini Free - google.com AI Mode in a browser page (optional, no API key)
 try:
     from gemini_free import send_chat_completion as _search_gemini_send
     from gemini_free import cancel_stream as _search_gemini_cancel_stream
@@ -30590,11 +30590,13 @@ class UnifiedClient:
         )
 
     def _send_search_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request through Google Search's browser-backed Gemini/Search route.
+        """Send request to google.com AI Mode through a browser page.
 
-        Model names should be prefixed with 'search/' (currently search/gemini).
-        This route does not use an API key; gemini_free.py opens Google Search in
-        a Qt WebEngine helper process and extracts the rendered page text.
+        Model names are prefixed with 'search/': search/gemini is AI Mode's own choice
+        ("Auto"), search/gemini-<name> an entry of its model menu (search/gemini-4-carbon).
+        This route does not use an API key; gemini_free.py opens google.com in AI Mode
+        (a Qt WebEngine helper process, or the signed-in Chrome/Edge profile after Google
+        Login), attaches the text and images as files and reads the answer from the page.
         """
         if not SEARCH_GEMINI_AVAILABLE or _search_gemini_send is None:
             raise UnifiedClientError(
@@ -30625,7 +30627,7 @@ class UnifiedClient:
                 "Gemini Free: Translation stopped by user",
                 error_type="cancelled"
             )
-        print(f"🔎 Gemini Free: Sending request via Google Search AI Mode UI route (model={actual_model})")
+        print(f"🔎 Gemini Free: Sending request to google.com AI Mode (model={actual_model})")
         try:
             tls = self._get_thread_local_client()
             _label = getattr(tls, 'current_request_label', None) or 'request'
@@ -30712,6 +30714,13 @@ class UnifiedClient:
                         f"Gemini Free blocked by Google verification: {error_str}",
                         error_type="auth_error"
                     )
+                # Pages of Google's that need the user, and answers a new attempt cannot fix
+                # (gemini_free.AIModeError.kind): reported at once instead of retried.
+                error_kind = str(getattr(exc, "kind", "") or "")
+                if error_kind in ("consent", "sign_in"):
+                    raise UnifiedClientError(f"Gemini Free: {error_str}", error_type="auth_error")
+                if error_kind in ("unavailable", "too_long", "incomplete"):
+                    raise UnifiedClientError(f"Gemini Free: {error_str}", error_type="config_error")
                 if (
                     "generation failure" in error_str.lower()
                     or "content wasn't generated" in error_str.lower()

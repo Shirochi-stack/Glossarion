@@ -206,12 +206,6 @@ CURATED_SECTIONS: tuple = (
         ("Parallel extraction", ("enable_parallel_extraction", "extraction_workers")),
         ("NIM / AuthND helpers", ("authnd_token_concurrency", "authnd_token_concurrency_auto",
                                   "authnd_token_subprocess_concurrency", "authnd_token_timeout")),
-        ("Gemini Free chunking", ("gemini_free_adaptive_split", "gemini_free_html_splitter",
-                                  "gemini_free_html_text_node_transport", "gemini_free_min_subchunk_body_chars",
-                                  "gemini_free_subchunk_balancer", "gemini_free_subchunk_concurrency",
-                                  "gemini_free_subchunk_payload_format", "gemini_free_subchunk_prompt_chars",
-                                  "gemini_free_subchunk_safety_chars", "gemini_free_subchunk_start_delay",
-                                  "gemini_free_subchunk_timeout", "gemini_free_subchunk_url_chars")),
     )),
     ("epub_output", "EPUB output", "Translation", (
         ("Layout & navigation", ("epub_layout_mode", "force_ncx_only", "epub_use_html_method")),

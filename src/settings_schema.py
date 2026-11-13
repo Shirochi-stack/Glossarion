@@ -421,9 +421,9 @@ UNAVAILABLE_RULES = (
     (r"^(authza_|glm_)|_authza_|authza_use_general_api|glm_access_mode|glm_proxy", ("mobile",),
      "AuthZA / GLM access modes use desktop-only routes (excluded on mobile)."),
     # U9: AuthND / Gemini Free run in the hidden in-app browser (browser_driver + the mobile
-    # WebViewBridge), so their NIM / AuthND token helper and browser chunking settings apply on
-    # mobile; only the helper-subprocess limit has nothing to limit there (FEATURE_MAP
-    # auth-routes #21, other-settings #57).
+    # WebViewBridge), so the NIM / AuthND token helper settings apply on mobile; only the
+    # helper-subprocess limit has nothing to limit there (FEATURE_MAP auth-routes #21,
+    # other-settings #57).
     (r"^authnd_token_subprocess_concurrency$", ("mobile",),
      "No helper subprocesses on mobile: AuthND tokens come from the hidden in-app browser, "
      "limited by Token concurrency."),

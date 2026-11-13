@@ -277,18 +277,6 @@ class FrozenDesktopTables:
             ('authnd_token_timeout', ['authnd_token_timeout_var'], 180, lambda v: min(600, max(30, safe_int(v, 180)))),
             ('dispatch_order_timeout', ['dispatch_order_timeout_var'], 3, lambda v: min(120, max(0, safe_int(v, 3)))),
             ('tor_proxy_enabled', ['tor_proxy_enabled_checkbox', 'tor_proxy_enabled_var'], False, bool),
-            ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),
-            ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),
-            ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 7000, lambda v: min(7000, max(300, safe_int(v, 7000)))),
-            ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),
-            ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),
-            ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),
-            ('gemini_free_subchunk_concurrency', ['gemini_free_subchunk_concurrency_var'], 0, lambda v: min(64, max(0, safe_int(v, 0)))),
-            ('gemini_free_subchunk_start_delay', ['gemini_free_subchunk_start_delay_var'], 5.0, lambda v: min(60.0, max(0.0, safe_float(v, 5.0)))),
-            ('gemini_free_subchunk_timeout', ['gemini_free_subchunk_timeout_var'], 0, lambda v: min(7200, max(0, safe_int(v, 0)))),
-            ('gemini_free_subchunk_payload_format', ['gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format_combo'], 'auto', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('auto', 'html', 'text') else 'auto'),
-            ('gemini_free_html_splitter', ['gemini_free_html_splitter_var', 'gemini_free_html_splitter_combo'], 'beautifulsoup4', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('beautifulsoup4', 'regex') else 'beautifulsoup4'),
-            ('gemini_free_subchunk_balancer', ['gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer_combo'], 'balanced', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('balanced', 'greedy') else 'balanced'),
 
             # Gemini/GPT/DeepSeek Thinking
             ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),

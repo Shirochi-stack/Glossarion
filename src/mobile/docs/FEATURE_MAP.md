@@ -326,7 +326,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 48 | OcAgy (ocagy/, ocagy0/, ocagyN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 49 | AuthArena (autharena/, autharena0/, autharenaN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 50 | AuthND (authnd/, authndN/) NVIDIA Build browser route | Accounts › Experimental (WebViewBridge); Settings › Response handling › NIM/AuthND helpers | Experimental (U9): a hidden in-app page runs the desktop page scripts through `browser_driver` (hotfix 3: a native page the extension owns, which screen changes never rebuild; flet-webview fallback); limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
-| 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge); Settings › Response handling › Gemini Free chunking | Experimental (U9): a hidden in-app page runs the desktop page scripts through `browser_driver` (hotfix 3: a native page the extension owns, which screen changes never rebuild; flet-webview fallback); limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
+| 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge) | Experimental (U9): a hidden in-app page opens google.com in AI Mode with the prompt and reads the answer with the desktop page script through `browser_driver` (hotfix 3: a native page the extension owns, which screen changes never rebuild; flet-webview fallback); limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
 | 52 | Opera Aria (search/opera) | ModelSheet search/opera rows + Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 53 | Tor proxy for provider traffic | Settings › Response handling & retries › "Tor proxy" (disabled row + ReasonChip) | **Excluded**; value preserved |
 | 54 | Streaming responses | Settings › Response handling › Streaming (one switch) |  |
@@ -397,7 +397,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 21 | NIM / AuthND token helper settings | Settings › Response handling › NIM/AuthND helpers | Adapted: the subprocess-limit field is shown disabled with a ReasonChip (no subprocesses on mobile) |
 | 22 | AuthND model catalog polling | Models › Poll providers |  |
 | 23 | Gemini Free (search/gemini) | Accounts › Experimental | Experimental (U9): AI Mode runs in the hidden in-app WebView; Google consent / verification pages surface as errors |
-| 24 | Gemini Free browser chunking settings | Settings › Response handling | (U9) Every chunking setting applies: one hidden page per helper request (at most 4) |
+| 24 | Gemini Free browser chunking settings | Removed with the desktop section (search/gemini AI Mode overhaul) | No chunking settings on desktop or mobile: one request is one AI Mode question on one hidden page; old config keys are ignored |
 | 25 | Opera Aria (search/opera, search/opera-think) | ModelSheet search/opera rows + Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 26 | TOR proxy rotation (search/opera and ocz/) | Settings › Response handling & retries › "Tor rotation" (disabled row + ReasonChip) | **Excluded**; value preserved |
 | 27 | Antigravity Login (antigravity/, antigravityN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
@@ -571,7 +571,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 57 | NIM / AuthND Token Helpers (auto limits, token concurrency, subprocess limit, token timeout) | Settings › Response handling › NIM/AuthND helpers | Adapted: the subprocess-limit field is shown disabled with a ReasonChip (no subprocesses) |
 | 58 | Dispatch order timeout (s) | Response handling |  |
 | 59 | Enable TOR proxy rotation (search/opera, ocz/) | Settings › Response handling & retries › "Tor rotation" (disabled row + ReasonChip) | **Excluded**: Tor; value preserved |
-| 60 | Gemini Free Browser Chunking (search/gemini) | Response handling (shown when the search/gemini experimental route is enabled) | Adapted: experimental WebView route (U9); every chunking setting applies; not in the exclusion list |
+| 60 | Gemini Free Browser Chunking (search/gemini) | Removed with the desktop section (search/gemini AI Mode overhaul) | The desktop Other Settings section and its logic are gone; old config keys are ignored |
 | 61 | Parallel Extraction: Enable + Workers | Response handling › Parallel extraction | Threads; capped by CPU |
 | 62 | Enable GUI Responsiveness Yield | Settings › Response handling & retries › "GUI Responsiveness Yield" (disabled row + ReasonChip) | **Excluded**: Qt event-loop workaround; the mobile UI thread never blocks. Value preserved |
 | 63 | Translation Keys (Main Pool) status + Configure API Keys | Response handling › KeyPoolTile → Keys |  |

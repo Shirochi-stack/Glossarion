@@ -12257,6 +12257,12 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             if needs_authds:
                 self._update_authds_login_status()
 
+        if hasattr(self, 'search_gemini_login_btn'):
+            needs_search_gemini = str(model).lower().startswith('search/gemini')
+            self.search_gemini_login_btn.setVisible(needs_search_gemini)
+            if needs_search_gemini:
+                self._update_search_gemini_login_status()
+
         # Show/hide browser account login controls.
         if hasattr(self, 'authnan_login_btn'):
             needed = authnan_login_needed(model, self.config,
@@ -13326,6 +13332,91 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             )
             self.authds_login_btn.setStyleSheet(
                 "background-color: #4d6bfe; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            )
+
+    def _search_gemini_login_clicked(self):
+        """Google Login for search/gemini: sign in to Google in the route's own Chrome/Edge profile
+        (optional; signed in, google.com AI Mode offers its larger models), or log out of it."""
+        from gemini_free import has_session
+        if has_session():
+            self._update_search_gemini_login_status()
+            reply = QMessageBox.question(
+                self, "Google Account (search/gemini)",
+                "Currently signed in to Google for AI Mode.\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self.search_gemini_login_btn.setEnabled(False)
+            self.search_gemini_login_btn.setText("⏳ Logging out…")
+
+            def logout_worker():
+                try:
+                    from gemini_free import logout, reset_cancel
+                    reset_cancel()
+                    logout()
+                    self._search_gemini_login_result = "🔓 Gemini Free: Logged out of Google"
+                except Exception as exc:
+                    self._search_gemini_login_result = f"🔓 Gemini Free: Logged out locally ({exc})"
+                QMetaObject.invokeMethod(self, "_search_gemini_login_finished", Qt.QueuedConnection)
+
+            threading.Thread(target=logout_worker, daemon=True).start()
+            return
+
+        self.search_gemini_login_btn.setEnabled(False)
+        self.search_gemini_login_btn.setText("⏳ Signing in…")
+        self._search_gemini_login_result = None
+
+        def worker():
+            try:
+                from gemini_free import login, reset_cancel
+                reset_cancel()
+                login(log_fn=lambda message: None)
+                self._search_gemini_login_result = "✅ Gemini Free: Google session saved. search/gemini now runs signed in."
+            except Exception as exc:
+                self._search_gemini_login_result = f"❌ Gemini Free: {exc}"
+            QMetaObject.invokeMethod(self, "_search_gemini_login_finished", Qt.QueuedConnection)
+
+        self.append_log("🔐 Gemini Free: Opening Google's sign-in page in a Chrome/Edge window. Sign in there; "
+                        "Glossarion does not receive your Google password.")
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot()
+    def _search_gemini_login_finished(self):
+        self.search_gemini_login_btn.setEnabled(True)
+        self._update_search_gemini_login_status()
+        self.append_log(self._search_gemini_login_result or "Gemini Free: Google login finished.")
+        # the account decides which AI Mode models there are: read the model menu again
+        try:
+            self._start_provider_model_catalog_refresh(only_provider='search-gemini', automatic=True)
+        except Exception:
+            pass
+
+    def _update_search_gemini_login_status(self):
+        """Show the saved Google session of search/gemini on its login button, like DeepSeek's."""
+        from gemini_free import has_session
+        if has_session():
+            self.search_gemini_login_btn.setText("✅ Google")
+            self.search_gemini_login_btn.setToolTip(
+                "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                "Signed in to Google in Glossarion's own Chrome/Edge profile: search/gemini runs "
+                "google.com AI Mode with your account's models. Click to log out.</p></qt>"
+            )
+            self.search_gemini_login_btn.setStyleSheet(
+                "background-color: #28a745; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            )
+        else:
+            self.search_gemini_login_btn.setText("🔐 Google Login")
+            self.search_gemini_login_btn.setToolTip(
+                "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                "Optional. search/gemini works signed out with AI Mode's small model. Sign in on "
+                "Google's own page in a dedicated Chrome/Edge profile to use your account's AI Mode "
+                "models (search/gemini-4-carbon, ...). No API key needed. Desktop only.</p></qt>"
+            )
+            self.search_gemini_login_btn.setStyleSheet(
+                "background-color: #4385f4; color: white; font-weight: bold; "
                 "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
             )
 
@@ -16400,6 +16491,16 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.authds_login_btn.clicked.connect(self._authds_login_clicked)
         self.authds_login_btn.hide()
         model_btn_layout.addWidget(self.authds_login_btn)
+
+        # Google Login button (visible only for search/gemini models; optional sign-in)
+        self.search_gemini_login_btn = QPushButton("🔐 Google Login")
+        self.search_gemini_login_btn.setToolTip(
+            "Optional. Sign in on Google's own page in a dedicated Chrome/Edge profile so "
+            "search/gemini runs google.com AI Mode with your account's models. Desktop only."
+        )
+        self.search_gemini_login_btn.clicked.connect(self._search_gemini_login_clicked)
+        self.search_gemini_login_btn.hide()
+        model_btn_layout.addWidget(self.search_gemini_login_btn)
 
         # AuthGPT Login button (visible only for authgpt/ models)
         self.authgpt_login_btn = QPushButton("🔐 ChatGPT Login")
