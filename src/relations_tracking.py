@@ -1098,14 +1098,23 @@ def render_relations(relations: Sequence[Mapping[str, Any]],
     return "; ".join(parts)
 
 
-def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> List[Dict[str, Any]]:
-    """Full per-target timeline: runs of labels with their chapter span, plus blips."""
+def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any,
+                      up_to_chapter: Any = None) -> List[Dict[str, Any]]:
+    """Per-target timeline: runs of labels with their chapter span, plus blips.
+
+    With ``up_to_chapter`` it stops there, like the diagram it is shown beside: nothing
+    from a later chapter, and a relation first seen later is left out.
+    """
     entries = tracker.get("entries") if isinstance(tracker, Mapping) else None
     if not isinstance(entries, Mapping):
         return []
     item = entries.get(tracker_key(raw_name))
     if not isinstance(item, Mapping):
         return []
+    if up_to_chapter is None:
+        visible: Callable[[Mapping[str, Any]], bool] = lambda occurrence: True  # noqa: E731
+    else:
+        visible = _visible_predicate(tracker, chapter_cutoff({"chapter_num": up_to_chapter}))
     result = []
     for tkey, rel in (item.get("relations") or {}).items():
         if not isinstance(rel, Mapping):
@@ -1113,7 +1122,7 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
         timeline: List[Dict[str, Any]] = []
         blips = []
         for occurrence in rel.get("occurrences", []) or []:
-            if not isinstance(occurrence, Mapping) or not occurrence.get("label"):
+            if not isinstance(occurrence, Mapping) or not occurrence.get("label") or not visible(occurrence):
                 continue
             if _ignored(occurrence):  # blips and direction flips
                 blips.append({"label": occurrence["label"], "chapter_num": occurrence.get("chapter_num"),
@@ -1133,6 +1142,8 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
                 "to_file": occurrence.get("chapter_file", ""),
                 "count": 1,
             })
+        if not timeline and not blips and up_to_chapter is not None:
+            continue  # nothing of this relation had been seen by then
         target_item = entries.get(tkey)
         result.append({
             "target_key": tkey,
@@ -1141,7 +1152,7 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
                 str(target_item.get("translated_name") or "") if isinstance(target_item, Mapping) else ""),
             "current": timeline[-1]["label"] if timeline else "",
             "timeline": timeline,
-            "changes": [dict(c) for c in rel.get("changes", []) or [] if isinstance(c, Mapping)],
+            "changes": [dict(c) for c in rel.get("changes", []) or [] if isinstance(c, Mapping) and visible(c)],
             "blips": blips,
         })
     return result

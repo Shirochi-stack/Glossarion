@@ -586,10 +586,13 @@ class RelationsDiagramDialog(QDialog):
         raw = str(item.get('raw_name') or node_id) if isinstance(item, dict) else str(node_id)
         name = self._name(node_id)
         self.history_title.setText(f"{name} ({raw})" if raw != name else name)
-        history = relations_tracking.character_history(self.tracker, raw)
+        # Like the picture beside it, the history stops at the slider's chapter.
+        chapter = self.up_to_chapter()
+        history = relations_tracking.character_history(self.tracker, raw, chapter)
         parts = self._description_html(node_id, raw)
         if not history:
-            parts.append("<p style='color:#9ca3af'>No relations recorded from this character's side.</p>")
+            upto = f" up to chapter {chapter}" if chapter is not None else ""
+            parts.append(f"<p style='color:#9ca3af'>No relations recorded from this character's side{upto}.</p>")
             self.history_panel.setHtml("".join(parts))
             return history
         for rel in history:

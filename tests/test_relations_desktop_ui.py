@@ -448,6 +448,11 @@ def test_diagram_panel_shows_the_description_written_at_the_sliders_chapter(qapp
         assert "Description written at chapter 1" in text and "The heir of the Baek house" in text
         assert "betrayed" not in text and "Earlier descriptions" not in text
         assert "The heir of the Baek house" in dialog._node_items[seo].toolTip()
+        # The relation history stops at the slider's chapter too: the chapter-40 change is not there yet.
+        assert "Best Friend" in text and "Enemy" not in text and "Ch. 40" not in text
+        dialog.chapter_slider.setValue(40)
+        assert "Enemy" in dialog.history_panel.toPlainText()
+        dialog.chapter_slider.setValue(20)
         # No description recorded for him: the glossary's own, said to be undated.
         dialog._on_node_clicked(brother)
         text = dialog.history_panel.toPlainText()

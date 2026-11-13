@@ -903,6 +903,33 @@ def test_layout_disconnected_and_focus():
     assert random.getstate() == state
 
 
+def test_character_history_stops_at_a_chapter():
+    """The diagram's history panel shows what was known at the slider's chapter, no later."""
+    tracker = _story_tracker()
+
+    def harin(chapter):
+        rows = {r["target_raw"]: r for r in rt.character_history(tracker, "서윤", chapter)}
+        return rows.get("하린")
+
+    whole = harin(None)
+    assert whole["current"] == "Enemy" and [run["label"] for run in whole["timeline"]] == [
+        "Best Friend", "Rival", "Enemy"]
+    assert whole == {r["target_raw"]: r for r in rt.character_history(tracker, "서윤")}["하린"]
+    early = harin(15)
+    assert early["current"] == "Best Friend" and len(early["timeline"]) == 1
+    assert early["timeline"][0]["to_chapter"] == 10 and early["changes"] == []
+    middle = harin(25)
+    assert middle["current"] == "Rival" and [c["to"] for c in middle["changes"]] == ["Rival"]
+    assert harin(40)["current"] == "Enemy"
+    # A relation first seen later is left out, and before the first chapter there is nothing.
+    late = rt.empty_tracker()
+    _record(late, 3, [_entry("a", "A", "b: Friend")])
+    _record(late, 9, [_entry("a", "A", "c: Rival")])
+    assert [r["target_raw"] for r in rt.character_history(late, "a", 5)] == ["b"]
+    assert [r["target_raw"] for r in rt.character_history(late, "a")] == ["b", "c"]
+    assert rt.character_history(late, "a", 2) == []
+
+
 def test_edge_label_text_both_directions():
     edge = {"label_ab": "Enemy", "former_ab": ["Best Friend"], "label_ba": "Father", "former_ba": []}
     assert rt.edge_label_text(edge) == "Enemy / Father"

@@ -298,7 +298,8 @@ class RelationsDiagram:
     def history_rows(self, node_id: str) -> list:
         node = next((n for n in self.graph.get("nodes", []) if n["id"] == node_id), None)
         raw = (node or {}).get("raw_name") or node_id
-        return self.core.character_history(self.tracker, raw)
+        # Like the picture, the history stops at the slider's chapter.
+        return self.core.character_history(self.tracker, raw, self.chapter)
 
     def description_rows(self, node_id: str) -> tuple:
         """``(written, earlier, source)``: the description written at the slider's chapter
@@ -345,7 +346,8 @@ class RelationsDiagram:
                                      color=ft.Colors.ON_SURFACE_VARIANT))
             controls.append(ft.Column(lines, spacing=2, tight=True))
         if len(controls) == (1 if described else 0):
-            controls.append(ft.Text("No relations recorded for this character.",
+            upto = f" up to chapter {_chapter_text(self.chapter)}" if self.chapter is not None else ""
+            controls.append(ft.Text(f"No relations recorded for this character{upto}.",
                                     color=ft.Colors.ON_SURFACE_VARIANT))
         page = getattr(self.ctx, "page", None)
         if self.history_sheet is not None:  # one history sheet at a time (one key)
