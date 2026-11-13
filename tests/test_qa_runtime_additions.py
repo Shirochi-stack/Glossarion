@@ -135,6 +135,8 @@ def _mask_u7_run_qa_scan(method):
                     if src.startswith("from"):
                         kept.append(ast.Pass())
                     continue
+                if src in ("from qt_widget_helpers import saved_beep", "saved_beep()"):
+                    continue  # owner 2026-11-14: the custom settings Save plays the Windows sound of a save
                 kept.append(stmt)
             setattr(node, field, kept)
     return ast.dump(method)

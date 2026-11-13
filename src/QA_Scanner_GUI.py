@@ -1924,6 +1924,8 @@ class QAScannerMixin:
                     original_text = save_config_btn.text()
                     original_style = save_config_btn.styleSheet()
                     save_config_btn.setText("💾 Saved!")
+                    from qt_widget_helpers import saved_beep
+                    saved_beep()  # the Windows sound of a save, like the Multi API Key Manager
                     save_config_btn.setStyleSheet("""
                         QPushButton {
                             background-color: #28a745;
