@@ -11,6 +11,7 @@ Run (repository root)::
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -148,6 +149,37 @@ def test_build_prompt_keeps_a_relations_field_once_and_uses_its_name(eg, _env):
     header = re.search(r"Columns:\n(.+?)(?:\\n|\n)", system).group(1)
     assert header == "type, raw_name, translated_name, gender, description, bonds"
     assert "The `Bonds` column" in system
+
+
+def _instruction_example_rows(system):
+    line = next(l for l in system.split("\n") if l.startswith("Example rows that mirror each other"))
+    return [next(csv.reader([row])) for row in re.findall(r"`([^`]+)`", line)]
+
+
+def test_build_prompt_examples_put_relations_in_their_own_column(eg, _env):
+    """With description on, every other example row ends at the description; a relations
+    example of the same length made the model write the relations there."""
+    _on(_env)
+    _env.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps(["description", "relations"]))
+    system, _ = eg.build_prompt("text")
+    assert ("`relations` is its own column, column 6 of 6 (type, raw_name, translated_name, gender, "
+            "description, relations): never write relationships in another column.") in system
+    rows = _instruction_example_rows(system)
+    assert [len(row) for row in rows] == [6, 6]
+    assert rows[0][5] == "뢤사난: Older Sister" and ":" not in rows[0][4]
+
+    # Without a description field the relations are the fifth column, and the rows say so.
+    _env.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps([]))
+    system, _ = eg.build_prompt("text")
+    assert "column 5 of 5 (type, raw_name, translated_name, gender, relations)" in system
+    assert [len(row) for row in _instruction_example_rows(system)] == [5, 5]
+
+
+def test_instruction_example_names_are_the_prompt_example_names(eg):
+    """Made-up names only: a real-looking example name came back as a glossary entry."""
+    for example in rt._EXAMPLE_ROWS:
+        assert (f"character,{example['raw_name']},{example['translated_name']},{example['gender']},"
+                in eg._DESCRIPTION_EXAMPLE_TEXT)
 
 
 def test_minimal_prompt_declares_the_last_column(eg, _env):

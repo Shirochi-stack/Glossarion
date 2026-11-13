@@ -346,6 +346,80 @@ def test_diagram_builds_and_slider_changes_edges(qapp):
         dialog.deleteLater()
 
 
+def _team_tracker():
+    """A leader, a team whose members are all related to each other, and five subordinates."""
+    tracker = rt.empty_tracker()
+    team = ["민", "성규", "춘후", "준호", "민주"]
+    rows = []
+    for i, name in enumerate(team):
+        cell = "; ".join(f"{other}: {'Rival' if (i + j) % 2 else 'Teammate'}"
+                         for j, other in enumerate(team) if other != name)
+        rows.append({"raw_name": name, "translated_name": f"T{i}", "relations": cell})
+    for i in range(5):
+        rows.append({"raw_name": f"부하{i}", "translated_name": f"S{i}", "relations": "민: Subordinate"})
+    rows[0]["relations"] += "; " + "; ".join(f"부하{i}: Team Leader" for i in range(5))
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    return tracker
+
+
+def test_diagram_is_tidy_and_fitted(qapp):
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QLabel
+    from relations_diagram_dialog import DIMMED_OPACITY, HISTORY_HINT, RelationsDiagramDialog
+    dialog = RelationsDiagramDialog(None, tracker=_team_tracker())
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        for _ in range(4):
+            qapp.processEvents()
+        view = dialog._view
+        leader = rt.tracker_key("민")
+        assert dialog.node_count() == 10 and dialog.edge_count() == 15
+        # The same relation from both sides is one word, and every label sits on its own
+        # line clear of the names and of the other labels.
+        texts = [i.text() for i in dialog.scene.items() if hasattr(i, "text") and i.parentItem() is None]
+        assert "Teammate" in texts and "Teammate / Teammate" not in texts
+        boxes = dialog._label_boxes
+        assert len(boxes) == 15
+        names = [item.sceneBoundingRect() for item in dialog._node_items.values()]
+        # A label stays ON its line and slides along it past whatever already sits there.
+        start, end = QPointF(0, 5000), QPointF(4000, 5000)
+        edge = {"a": leader, "b": rt.tracker_key("성규"), "label_ab": "Rival", "label_ba": "Rival"}
+        taken = [QRectF(1700, 4900, 600, 200)]  # covers the middle of the line
+        dialog._add_edge_label(edge, start, end, QColor("#8b95a5"), False, taken)
+        box = taken[-1]
+        assert box is dialog._label_boxes[-1] and not box.intersects(taken[0])
+        assert abs(box.center().y() - 5000) < 0.01 and 0 < box.center().x() < 4000
+        dialog.rebuild()
+        # Opened fitted: every name is inside the window, with no scroll bars around it.
+        visible = view.mapToScene(view.viewport().rect()).boundingRect()
+        assert all(visible.contains(name) for name in names)
+        assert view.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        # The two switches are the app's checkboxes with the drawn tick.
+        for box in (dialog.show_former_checkbox, dialog.show_unlisted_checkbox):
+            assert [w.text() for w in box.findChildren(QLabel)] == ["✓"]
+            assert "QCheckBox::indicator:checked" in box.styleSheet()
+
+        # A click on a name keeps its lines and labels and fades the rest back.
+        dialog._on_node_clicked(leader)
+        lines = [i for i in dialog.scene.items() if hasattr(i, "line")]
+        assert sorted({round(i.opacity(), 2) for i in lines}) == [DIMMED_OPACITY, 1.0]
+        assert sum(1 for i in lines if i.opacity() == 1.0) == 9 and len(dialog._label_boxes) == 9
+        assert "T0" in dialog.history_title.text()
+        # Empty space (or the same name again) brings the whole picture back.
+        dialog.clear_selection()
+        assert dialog._selected is None and len(dialog._label_boxes) == 15
+        assert all(i.opacity() == 1.0 for i in dialog.scene.items())
+        assert dialog.history_title.text() == HISTORY_HINT
+        dialog._on_node_clicked(leader)
+        dialog._on_node_clicked(leader)
+        assert dialog._selected is None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
 def test_diagram_uses_the_configured_manual_glossary(gui, tmp_path):
     glossary = tmp_path / "Book_glossary.csv"
     glossary.write_text("type,raw_name,translated_name\n", encoding="utf-8")

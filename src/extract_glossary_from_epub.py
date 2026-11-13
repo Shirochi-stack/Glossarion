@@ -5423,11 +5423,13 @@ def _apply_subject_tracking_placeholder(prompt_text, include_gender_context=None
     )
 
 
-def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False):
+def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False, columns=None):
     """Expand ``{relations_instruction}`` when the Relations Tracker is on; drop its line when off.
 
     The instruction is written for the glossary target language. ``declare_column``
     adds "one extra LAST column" for prompts with a fixed column list (Minimal).
+    ``columns`` is the row layout the prompt asks for: the instruction's example rows
+    follow it, so the relations sit in their own column and not in the description's.
     """
     return relations_tracking.apply_relations_placeholder(
         prompt_text,
@@ -5435,6 +5437,7 @@ def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False
         field=relations_tracking.field_name(),
         language=os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English'),
         declare_column=declare_column,
+        columns=columns,
     )
 
 
@@ -5592,6 +5595,7 @@ def build_prompt(chapter_text: str) -> tuple:
     # Check if the prompt contains {fields} or {fields1} placeholders
     has_fields = '{fields}' in custom_prompt
     has_fields1 = '{fields1}' in custom_prompt
+    relations_columns = None
     if has_fields or has_fields1:
         # Get enabled types
         enabled_types = [(t, cfg) for t, cfg in custom_types.items() if cfg.get('enabled', True)]
@@ -5607,7 +5611,8 @@ def build_prompt(chapter_text: str) -> tuple:
         header_parts = ['type', 'raw_name', 'translated_name', 'gender']
         if custom_fields:
             header_parts.extend(custom_fields)
-        
+        relations_columns = list(header_parts)
+
         # List valid entry types
         type_names = [t[0] for t in enabled_types]
 
@@ -5687,7 +5692,7 @@ def build_prompt(chapter_text: str) -> tuple:
 
     # Expanded after {fields} so its wording cannot change the CSV/JSON choice above.
     # The relations column itself comes from {fields} (the relations custom field).
-    system_prompt = _apply_relations_placeholder(system_prompt)
+    system_prompt = _apply_relations_placeholder(system_prompt, columns=relations_columns)
 
     # Remove any {chapter_text} placeholders from system prompt
     system_prompt = system_prompt.replace('{chapter_text}', '')

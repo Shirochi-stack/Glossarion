@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import time
 
@@ -656,20 +657,57 @@ def test_prompts_missing_placeholder():
 def test_instruction_text_is_one_block():
     text = rt.instruction_text()
     assert text.startswith("The `relations` column: for character entries only")
-    assert text.count("\n") == 1
+    assert text.count("\n") == 2
     # The model writes what THIS row's character is to the other one, shown both ways.
     assert "role is what THIS row's character is to that other character" in text
     assert "a father's row has `<his daughter's raw_name>: Father`" in text
     assert "the daughter's row has `<her father's raw_name>: Daughter`" in text
     assert "never filler such as Acquaintance, Stranger or Unknown, and never a note such as Surname" in text
-    assert text.endswith("\nExample rows that mirror each other: `character,도현,Do-hyun,male,서윤: Older Brother` "
-                         "and `character,서윤,Seo-yun,female,도현: Younger Sister; 하린: Best Friend`")
-    # Recording the example rows gives the tracker's own meaning (도현 is 서윤's Older Brother).
+    # Without a known layout: the four fixed columns and the relations, no position claimed.
+    assert text.endswith(
+        "\n`relations` is its own column: never write relationships in another column."
+        "\nExample rows that mirror each other: `character,이히리ᐐ 나애,Dihirit Ade,female,뢤사난: Older Sister` "
+        "and `character,뢤사난,Kim Sang-hyu,male,이히리ᐐ 나애: Younger Brother`")
+    # Recording the example rows gives the tracker's own meaning (she is his Older Sister).
     tracker = rt.empty_tracker()
-    rt.record_relations(tracker, [_entry("도현", "Do-hyun", "서윤: Older Brother"),
-                                  _entry("서윤", "Seo-yun", "도현: Younger Sister; 하린: Best Friend")],
+    rt.record_relations(tracker, [_entry("이히리ᐐ 나애", "Dihirit Ade", "뢤사난: Older Sister"),
+                                  _entry("뢤사난", "Kim Sang-hyu", "이히리ᐐ 나애: Younger Brother")],
                         chapter_num=1)
-    assert rt.render_relations(rt.relations_at(tracker, "서윤", 1)) == "Do-hyun: Older Brother"
+    assert rt.render_relations(rt.relations_at(tracker, "뢤사난", 1)) == "Dihirit Ade: Older Sister"
+
+
+def _example_rows(text):
+    line = text.split("\n")[-1]
+    return [next(csv.reader([row])) for row in re.findall(r"`([^`]+)`", line)]
+
+
+def test_instruction_examples_follow_the_prompt_columns():
+    """A relation written in the description's place taught the model to merge the two."""
+    columns = ["type", "raw_name", "translated_name", "gender", "description", "relations"]
+    text = rt.instruction_text(columns=columns)
+    assert ("`relations` is its own column, column 6 of 6 (type, raw_name, translated_name, gender, "
+            "description, relations): never write relationships in another column.") in text
+    rows = _example_rows(text)
+    assert [len(row) for row in rows] == [6, 6]
+    assert rows[0][5] == "뢤사난: Older Sister" and rows[1][5] == "이히리ᐐ 나애: Younger Brother"
+    for row in rows:
+        assert row[0] == "character" and row[3] in ("female", "male")
+        assert len(row[4]) > 20 and ":" not in row[4]  # a description, not a relation
+
+    # The field keeps its place and its name wherever the user put it; other custom fields stay empty.
+    text = rt.instruction_text(field="bonds", columns=["type", "raw_name", "translated_name", "gender",
+                                                       "Bonds", "notes", "description"])
+    assert "`bonds` is its own column, column 5 of 7 (" in text
+    rows = _example_rows(text)
+    assert [len(row) for row in rows] == [7, 7]
+    assert rows[0][4] == "뢤사난: Older Sister" and rows[0][5] == "" and len(rows[0][6]) > 20
+
+    # A layout without the field (Minimal's fixed list): the relations are the extra last column.
+    text = rt.instruction_text(declare_column=True,
+                               columns=["type", "raw_name", "translated_name", "gender", "description"])
+    assert text.startswith("Add a `relations` column as one extra LAST column of every row. ")
+    assert "column 6 of 6" in text
+    assert [len(row) for row in _example_rows(text)] == [6, 6]
 
 
 # --------------------------------------------------------------------------- reciprocal flips
@@ -864,6 +902,66 @@ def test_edge_label_text_both_directions():
     assert rt.edge_label_text(edge) == "Enemy / Father"
     assert rt.edge_label_text(edge, True) == "Enemy [Best Friend] / Father"
     assert rt.edge_label_text({"label_ab": "", "label_ba": "Rival"}) == "? / Rival"
+    # The same word from both sides is said once.
+    assert rt.edge_label_text({"label_ab": "Teammate", "label_ba": "teammate"}) == "Teammate"
+    same = {"label_ab": "Enemy", "former_ab": ["Friend"], "label_ba": "Enemy", "former_ba": []}
+    assert rt.edge_label_text(same) == "Enemy"
+    assert rt.edge_label_text(same, True) == "Enemy [Friend] / Enemy"
+    assert rt.edge_label_text({"label_ab": "", "label_ba": ""}) == "? / ?"
+
+
+def _team_graph():
+    """The shape of a real book: a leader with five subordinates, four of the team all
+    related to each other, and one pair with no line to anyone else."""
+    hub, team, leaves = "min", ["park", "chunhu", "junho", "minju"], ["a", "b", "c", "d", "e"]
+    nodes = [{"id": n} for n in [hub] + team + leaves + ["x", "y"]]
+    edges = [{"a": hub, "b": n} for n in team + leaves]
+    edges += [{"a": a, "b": b} for i, a in enumerate(team) for b in team[i + 1:]]
+    edges.append({"a": "x", "b": "y"})
+    return {"nodes": nodes, "edges": edges}
+
+
+def test_small_layout_keeps_the_tidiest_try():
+    graph = _team_graph()
+    edge_list = [(e["a"], e["b"]) for e in graph["edges"]]
+    width, height = 1200.0, 800.0
+    positions = rt.layout_graph(graph, width, height)
+    assert positions == rt.layout_graph(graph, width, height)
+    # Kept: the best of several tries, never worse than the first one alone.
+    import random
+    first = rt._force_positions([n["id"] for n in graph["nodes"]], edge_list, width, height,
+                                random.Random(0), rt._REFINED_LAYOUT_ITERATIONS)
+    assert rt.layout_untidiness(positions, edge_list) <= rt.layout_untidiness(first, edge_list)
+    # Five names all related to each other cannot be drawn without one crossing; more than
+    # a couple, or a line through a name, is the mess this layout exists to avoid.
+    assert rt.layout_untidiness(positions, edge_list) <= 3.0
+
+    def gap(a, b):
+        return ((positions[a][0] - positions[b][0]) ** 2 + (positions[a][1] - positions[b][1]) ** 2) ** 0.5
+    lengths = [gap(a, b) for a, b in edge_list]
+    names = list(positions)
+    # No two names on top of each other, no line too short to carry its label.
+    assert min(gap(a, b) for i, a in enumerate(names) for b in names[i + 1:]) > 60
+    assert min(lengths) > 90
+    # The pair with no line to the others sits beside them, not in a far corner.
+    others = [n for n in names if n not in ("x", "y")]
+    assert min(gap("x", n) for n in others) < 2.5 * (sum(lengths) / len(lengths))
+
+
+def test_layout_untidiness_counts_crossings_and_lines_through_names():
+    square = {"a": (0.0, 0.0), "b": (100.0, 100.0), "c": (0.0, 100.0), "d": (100.0, 0.0)}
+    assert rt.layout_untidiness(square, [("a", "b"), ("c", "d")]) == 1.0  # the diagonals cross
+    assert rt.layout_untidiness(square, [("a", "c"), ("d", "b")]) == 0.0
+    line = {"a": (0.0, 0.0), "b": (200.0, 0.0), "c": (100.0, 5.0)}
+    assert rt.layout_untidiness(line, [("a", "b")]) == 2.0  # c sits on the a-b line
+
+
+def test_small_layout_is_quick_at_its_largest():
+    graph = _big_graph(rt._REFINED_LAYOUT_MAX_NODES)
+    started = time.perf_counter()
+    positions = rt.layout_graph(graph, 1600, 1100)
+    assert len(positions) == rt._REFINED_LAYOUT_MAX_NODES
+    assert time.perf_counter() - started < 5.0  # generous for slow CI; about half a second here
 
 
 def test_reset_question_is_one_question_for_one_or_both_prompts():

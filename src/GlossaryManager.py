@@ -5498,7 +5498,11 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     relations_sink = _minimal_relations_sink(
                         system_prompt, _rel_fields, _rel_uses_fields, existing_glossary
                     )
-                system_prompt = _apply_relations_placeholder(system_prompt, declare_column=_rel_declare)
+                # The example rows of the instruction follow the columns the rows are read with.
+                system_prompt = _apply_relations_placeholder(
+                    system_prompt, declare_column=_rel_declare,
+                    columns=relations_sink['columns'] if relations_sink else None,
+                )
 
             # --- {fields1}, {fields}, {entries} placeholder replacement ---
             _has_fields1 = '{fields1}' in system_prompt
