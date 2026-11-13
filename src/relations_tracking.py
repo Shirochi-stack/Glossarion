@@ -1394,17 +1394,71 @@ _INSTRUCTION_TEMPLATE = (
     'different word only when the relationship itself changed in this text. Do not guess, do not describe events '
     'or feelings, never use commas inside this column. Leave it empty for non-character entries, surname-only '
     'entries, and when no relationship is shown.\n'
-    'Example rows that mirror each other: `character,도현,Do-hyun,male,서윤: Older Brother` and '
-    '`character,서윤,Seo-yun,female,도현: Younger Sister; 하린: Best Friend`'
+    '{column_rule}\n'
+    'Example rows that mirror each other: `{row_a}` and `{row_b}`'
 )
 _DECLARE_TEMPLATE = 'Add a `{field}` column as one extra LAST column of every row. '
+_COLUMN_RULE = '`{field}` is its own column: never write relationships in another column.'
+_COLUMN_RULE_POSITION = (
+    '`{field}` is its own column, column {index} of {total} ({columns}): never write relationships in '
+    'another column.'
+)
+
+_BASE_COLUMNS = ("type", "raw_name", "translated_name", "gender")
+#: The two made-up characters of the glossary prompt's own example rows. They are not
+#: real names, so a model cannot take them for characters of the book it is reading.
+_EXAMPLE_ROWS = (
+    {"type": "character", "raw_name": "이히리ᐐ 나애", "translated_name": "Dihirit Ade", "gender": "female",
+     "description": '"The enigmatic guild leader of the Shadow Lotus who operates from the concealed '
+                    'backrooms of the capital"',
+     "relations": "뢤사난: Older Sister"},
+    {"type": "character", "raw_name": "뢤사난", "translated_name": "Kim Sang-hyu", "gender": "male",
+     "description": '"A master swordsman from the Northern Sect known for his icy demeanor and '
+                    'unparalleled skill with the Frost Blade technique"',
+     "relations": "이히리ᐐ 나애: Younger Brother"},
+)
+
+
+def instruction_columns(columns: Optional[Iterable[Any]], field: str) -> List[str]:
+    """The row's columns with the relations field in them (added last when missing)."""
+    names = [str(c).strip() for c in (columns or []) if str(c).strip()]
+    if not any(name.casefold() == field.casefold() for name in names):
+        names.append(field)
+    return names
+
+
+def _example_row(example: Mapping[str, str], columns: Sequence[str], field: str) -> str:
+    cells = []
+    for name in columns:
+        if name.casefold() == field.casefold():
+            cells.append(example["relations"])
+        else:
+            cells.append(example.get(name.casefold(), ""))
+    return ",".join(cells)
 
 
 def instruction_text(field: Optional[str] = None, language: Optional[str] = "English",
-                     declare_column: bool = False) -> str:
+                     declare_column: bool = False, columns: Optional[Iterable[Any]] = None) -> str:
+    """The ``{relations_instruction}`` expansion.
+
+    ``columns`` is the row layout the prompt asks for. With it the example rows have every
+    column in its place and the text says which column the relations go in; a prompt whose
+    other examples end at ``description`` otherwise teaches the model to write them there.
+    """
     field = (field or "").strip() or field_name()
     language = (language or "").strip() or "English"
-    text = _INSTRUCTION_TEMPLATE.replace("{field}", field).replace("{language}", language)
+    if columns:
+        layout = instruction_columns(columns, field)
+        index = next(i for i, name in enumerate(layout) if name.casefold() == field.casefold()) + 1
+        rule = (_COLUMN_RULE_POSITION.replace("{index}", str(index)).replace("{total}", str(len(layout)))
+                .replace("{columns}", ", ".join(layout)))
+    else:
+        layout = instruction_columns(_BASE_COLUMNS, field)
+        rule = _COLUMN_RULE
+    text = _INSTRUCTION_TEMPLATE.replace("{column_rule}", rule)
+    text = text.replace("{row_a}", _example_row(_EXAMPLE_ROWS[0], layout, field))
+    text = text.replace("{row_b}", _example_row(_EXAMPLE_ROWS[1], layout, field))
+    text = text.replace("{field}", field).replace("{language}", language)
     if declare_column:
         text = _DECLARE_TEMPLATE.replace("{field}", field) + text
     return text
@@ -1417,7 +1471,8 @@ _PLACEHOLDER_LINE_RE = re.compile(
 
 
 def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None, field: Optional[str] = None,
-                                language: Optional[str] = None, declare_column: bool = False) -> Any:
+                                language: Optional[str] = None, declare_column: bool = False,
+                                columns: Optional[Iterable[Any]] = None) -> Any:
     """Expand ``{relations_instruction}`` when tracking is on; remove its whole line when off."""
     if not isinstance(prompt_text, str) or RELATIONS_PLACEHOLDER not in prompt_text:
         return prompt_text
@@ -1427,7 +1482,8 @@ def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None
         if language is None:
             language = os.environ.get("GLOSSARY_TARGET_LANGUAGE", "English")
         return prompt_text.replace(
-            RELATIONS_PLACEHOLDER, instruction_text(field, language, declare_column=declare_column))
+            RELATIONS_PLACEHOLDER,
+            instruction_text(field, language, declare_column=declare_column, columns=columns))
     return _PLACEHOLDER_LINE_RE.sub("", prompt_text)
 
 
@@ -1526,8 +1582,9 @@ def persisted_custom_fields(fields: Optional[Iterable[Any]], settings: Optional[
 def edge_label_text(edge: Mapping[str, Any], show_former: bool = False) -> str:
     """``"Father / Daughter"``: what b is to a, then what a is to b (from each side's own row).
 
-    With ``show_former`` the earlier labels follow in brackets. Shared by the desktop and
-    mobile diagrams.
+    With ``show_former`` the earlier labels follow in brackets. A relation that reads the
+    same from both sides is written once (``"Teammate"``, not ``"Teammate / Teammate"``).
+    Shared by the desktop and mobile diagrams.
     """
     def _side(label: Any, former: Any) -> str:
         label = str(label or '').strip()
@@ -1536,7 +1593,11 @@ def edge_label_text(edge: Mapping[str, Any], show_former: bool = False) -> str:
         if show_former and former:
             return f"{label} [{', '.join(str(f) for f in former)}]"
         return label
-    return f"{_side(edge.get('label_ab'), edge.get('former_ab'))} / {_side(edge.get('label_ba'), edge.get('former_ba'))}"
+    first = _side(edge.get('label_ab'), edge.get('former_ab'))
+    second = _side(edge.get('label_ba'), edge.get('former_ba'))
+    if first != '?' and first.casefold() == second.casefold():
+        return first
+    return f"{first} / {second}"
 
 
 def build_graph(tracker: Optional[Mapping[str, Any]], glossary_entries: Optional[Iterable[Any]] = None,
@@ -1686,6 +1747,266 @@ def _radial_layout(ids: List[str], adjacency: Dict[str, List[str]], focus: str,
     return positions
 
 
+#: Up to this many characters the layout is tried several times and the tidiest one kept.
+_REFINED_LAYOUT_MAX_NODES = 40
+_REFINED_LAYOUT_ITERATIONS = 200
+#: Pair-repulsion evaluations spent on one small graph (keeps a phone under about a second).
+_REFINED_LAYOUT_BUDGET = 300_000
+_REFINED_LAYOUT_MAX_TRIES = 8  # measured: as tidy as 16 on a real book's shape, in half the time
+#: Past this many lines no move untangles much, and trying costs seconds.
+_UNTANGLE_MAX_EDGES = 60
+
+
+def _force_positions(ids: List[str], edge_list: List[Tuple[str, str]], width: float, height: float,
+                     rng: random.Random, iterations: int) -> Dict[str, List[float]]:
+    """Force layout where every pair of nodes repels (small graphs only: quadratic)."""
+    n = len(ids)
+    index = {node: i for i, node in enumerate(ids)}
+    links = [(index[a], index[b]) for a, b in edge_list]
+    # Which connected group each node is in: separate groups only push each other away
+    # at close range, so they end up side by side and not in opposite corners.
+    group = list(range(n))
+
+    def _root(i: int) -> int:
+        while group[i] != i:
+            group[i] = group[group[i]]
+            i = group[i]
+        return i
+    for i, j in links:
+        group[_root(i)] = _root(j)
+    group = [_root(i) for i in range(n)]
+    degree = [0] * n
+    for i, j in links:
+        degree[i] += 1
+        degree[j] += 1
+    k = math.sqrt(width * height / n)
+    k2 = k * k
+    apart2 = (1.3 * k) ** 2
+    cx, cy = width / 2.0, height / 2.0
+    radius = min(width, height) * 0.4
+    order = list(range(n))
+    rng.shuffle(order)  # each try starts from a different arrangement around the circle
+    xs = [0.0] * n
+    ys = [0.0] * n
+    for slot, i in enumerate(order):
+        theta = 2.0 * math.pi * slot / n
+        jitter = 0.85 + 0.3 * rng.random()
+        xs[i] = cx + radius * jitter * math.cos(theta)
+        ys[i] = cy + radius * jitter * math.sin(theta)
+    temperature = min(width, height) / 8.0
+    cooling = temperature / (iterations + 1)
+    # A pull to the centre as strong as the distance: groups with no line between them
+    # settle beside each other instead of drifting to opposite corners.
+    gravity = 1.0
+    for _iteration in range(iterations):
+        dxs = [0.0] * n
+        dys = [0.0] * n
+        for i in range(n):
+            xi, yi = xs[i], ys[i]
+            for j in range(i + 1, n):
+                ddx, ddy = xi - xs[j], yi - ys[j]
+                dist2 = ddx * ddx + ddy * ddy
+                if dist2 > apart2 and group[i] != group[j]:
+                    continue
+                if dist2 < 1e-6:
+                    ddx, ddy = rng.random() - 0.5, rng.random() - 0.5
+                    dist2 = ddx * ddx + ddy * ddy + 1e-6
+                factor = k2 / dist2
+                fx, fy = ddx * factor, ddy * factor
+                dxs[i] += fx
+                dys[i] += fy
+                dxs[j] -= fx
+                dys[j] -= fy
+        for i, j in links:
+            ddx, ddy = xs[i] - xs[j], ys[i] - ys[j]
+            # Weaker between two well-connected names: a tight group keeps lines long
+            # enough to carry their labels instead of collapsing into a knot.
+            force = (math.sqrt(ddx * ddx + ddy * ddy) or 1e-3) / (k * math.sqrt(min(degree[i], degree[j])))
+            fx, fy = ddx * force, ddy * force
+            dxs[i] -= fx
+            dys[i] -= fy
+            dxs[j] += fx
+            dys[j] += fy
+        for i in range(n):
+            dx = dxs[i] + (cx - xs[i]) * gravity
+            dy = dys[i] + (cy - ys[i]) * gravity
+            length = math.sqrt(dx * dx + dy * dy)
+            if length > 1e-9:
+                limited = min(length, temperature)
+                xs[i] += dx / length * limited
+                ys[i] += dy / length * limited
+        temperature = max(temperature - cooling, 1.0)
+    # Names are drawn as wide boxes: keep every pair a box apart (more so side by side).
+    near = 0.6 * k
+    for _pass in range(40):
+        moved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                ddx, ddy = (xs[i] - xs[j]) / 1.6, ys[i] - ys[j]
+                dist = math.sqrt(ddx * ddx + ddy * ddy)
+                if dist >= near:
+                    continue
+                if dist < 1e-6:
+                    ddx, ddy, dist = rng.random() - 0.5, rng.random() - 0.5, 1.0
+                push = (near - dist) / dist / 2.0
+                xs[i] += ddx * push * 1.6
+                ys[i] += ddy * push
+                xs[j] -= ddx * push * 1.6
+                ys[j] -= ddy * push
+                moved = True
+        if not moved:
+            break
+    return {node: [xs[i], ys[i]] for node, i in index.items()}
+
+
+def _segments_cross(p1: Sequence[float], p2: Sequence[float], p3: Sequence[float], p4: Sequence[float]) -> bool:
+    def _side(a: Sequence[float], b: Sequence[float], c: Sequence[float]) -> float:
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1, d2 = _side(p3, p4, p1), _side(p3, p4, p2)
+    d3, d4 = _side(p1, p2, p3), _side(p1, p2, p4)
+    return (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0)
+
+
+def _point_segment_distance(p: Sequence[float], a: Sequence[float], b: Sequence[float]) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    if length2 < 1e-12:
+        return math.hypot(p[0] - a[0], p[1] - a[1])
+    t = min(1.0, max(0.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2))
+    return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
+
+
+def layout_untidiness(positions: Mapping[str, Sequence[float]], edge_list: Sequence[Tuple[str, str]]) -> float:
+    """How hard a layout is to read: crossing lines, lines running through a name, names too close.
+
+    Distances are judged against the average line length, so the number does not depend on
+    the size the layout is drawn at.
+    """
+    lengths = [math.hypot(positions[a][0] - positions[b][0], positions[a][1] - positions[b][1])
+               for a, b in edge_list]
+    unit = (sum(lengths) / len(lengths)) if lengths else 0.0
+    if unit <= 1e-9:
+        xs = [p[0] for p in positions.values()]
+        ys = [p[1] for p in positions.values()]
+        unit = max(max(xs) - min(xs), max(ys) - min(ys), 1.0) / max(1.0, math.sqrt(len(positions)))
+    score = 0.0
+    for i, (a, b) in enumerate(edge_list):
+        pa, pb = positions[a], positions[b]
+        for c, d in edge_list[i + 1:]:
+            if a in (c, d) or b in (c, d):
+                continue
+            if _segments_cross(pa, pb, positions[c], positions[d]):
+                score += 1.0
+        for node, point in positions.items():
+            if node != a and node != b and _point_segment_distance(point, pa, pb) < 0.22 * unit:
+                score += 2.0
+    nodes = list(positions)
+    for i, a in enumerate(nodes):
+        for b in nodes[i + 1:]:
+            if math.hypot(positions[a][0] - positions[b][0], positions[a][1] - positions[b][1]) < 0.45 * unit:
+                score += 1.5
+    return score
+
+
+def _untangle(positions: Dict[str, List[float]], edge_list: List[Tuple[str, str]]) -> None:
+    """Move one name at a time to a nearby spot where its lines cross fewer others.
+
+    A force layout draws five people who are all related to each other as a star with five
+    crossings; putting one of them inside the other four leaves a single crossing. Only
+    what the moved name changes is counted, so a pass stays cheap.
+    """
+    if len(positions) < 4 or len(edge_list) < 2 or len(edge_list) > _UNTANGLE_MAX_EDGES:
+        return
+    lengths = [math.hypot(positions[a][0] - positions[b][0], positions[a][1] - positions[b][1])
+               for a, b in edge_list]
+    unit = sum(lengths) / len(lengths)
+    if unit <= 1e-9:
+        return
+    own: Dict[str, List[Tuple[str, str]]] = {node: [] for node in positions}
+    for edge in edge_list:
+        own[edge[0]].append(edge)
+        own[edge[1]].append(edge)
+    xs = [p[0] for p in positions.values()]
+    ys = [p[1] for p in positions.values()]
+    # Stay inside the area the layout already uses, so a move never stretches the picture.
+    low_x, high_x, low_y, high_y = min(xs), max(xs), min(ys), max(ys)
+
+    def _cost(node: str, point: Sequence[float]) -> float:
+        cost = 0.0
+        mine = own[node]
+        for a, b in mine:
+            other = b if a == node else a
+            end = positions[other]
+            length = math.hypot(point[0] - end[0], point[1] - end[1])
+            if length < 0.6 * unit:
+                cost += 3.0  # too short to carry its label
+            for c, d in edge_list:
+                if node in (c, d) or other in (c, d):
+                    continue
+                if _segments_cross(point, end, positions[c], positions[d]):
+                    cost += 1.0
+            for third, spot in positions.items():
+                if third != node and third != other and _point_segment_distance(spot, point, end) < 0.22 * unit:
+                    cost += 2.0
+        for a, b in edge_list:
+            if node not in (a, b) and _point_segment_distance(point, positions[a], positions[b]) < 0.22 * unit:
+                cost += 2.0
+        for third, spot in positions.items():
+            if third != node and math.hypot((point[0] - spot[0]) / 1.6, point[1] - spot[1]) < 0.45 * unit:
+                cost += 3.0
+        return cost
+
+    ring = [(math.cos(2.0 * math.pi * step / 12), math.sin(2.0 * math.pi * step / 12)) for step in range(12)]
+    for _round in range(3):
+        improved = False
+        for node in sorted(positions, key=lambda item: -len(own[item])):
+            if not own[node]:
+                continue
+            here = positions[node]
+            current = _cost(node, here)
+            if current <= 0.0:
+                continue
+            ends = [positions[b if a == node else a] for a, b in own[node]]
+            centre = (sum(p[0] for p in ends) / len(ends), sum(p[1] for p in ends) / len(ends))
+            spots = [centre]
+            for radius in (0.35, 0.7, 1.1):
+                spots += [(centre[0] + ux * radius * unit, centre[1] + uy * radius * unit) for ux, uy in ring]
+            spots += [(here[0] + ux * 0.5 * unit, here[1] + uy * 0.5 * unit) for ux, uy in ring]
+            best_spot, best_cost = None, current
+            for spot in spots:
+                if not (low_x <= spot[0] <= high_x and low_y <= spot[1] <= high_y):
+                    continue
+                cost = _cost(node, spot)
+                if cost < best_cost:
+                    best_spot, best_cost = spot, cost
+            if best_spot is not None:
+                positions[node] = [best_spot[0], best_spot[1]]
+                improved = True
+        if not improved:
+            break
+
+
+def _refined_layout(ids: List[str], edge_list: List[Tuple[str, str]], width: float, height: float,
+                    seed: int) -> Dict[str, List[float]]:
+    """The tidiest of several force layouts (see ``layout_untidiness``); same result for the same seed."""
+    n = len(ids)
+    pairs = max(1, n * (n - 1) // 2)
+    tries = max(1, min(_REFINED_LAYOUT_MAX_TRIES,
+                       _REFINED_LAYOUT_BUDGET // (_REFINED_LAYOUT_ITERATIONS * pairs)))
+    best: Optional[Dict[str, List[float]]] = None
+    best_score = 0.0
+    for attempt in range(tries):
+        rng = random.Random(int(seed) * 1_000_003 + attempt)
+        positions = _force_positions(ids, edge_list, width, height, rng, _REFINED_LAYOUT_ITERATIONS)
+        _untangle(positions, edge_list)
+        score = layout_untidiness(positions, edge_list)
+        if best is None or score < best_score:
+            best, best_score = positions, score
+            if score == 0.0:
+                break
+    return best or {}
+
+
 def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, height: float = 700.0,
                  focus: Optional[str] = None, seed: int = 0) -> Dict[str, Tuple[float, float]]:
     """Deterministic positions inside ``width`` x ``height``: seeded force layout, or radial around ``focus``."""
@@ -1713,8 +2034,11 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
     if focus is not None and str(focus) in id_set:
         return _radial_layout(ids, adjacency, str(focus), width, height)
 
-    rng = random.Random(seed)
     n = len(ids)
+    if n <= _REFINED_LAYOUT_MAX_NODES:
+        return _fit_positions(_refined_layout(ids, edge_list, width, height, seed), width, height)
+
+    rng = random.Random(seed)
     area = width * height
     k = math.sqrt(area / n)
     positions = {}

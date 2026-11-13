@@ -9,7 +9,7 @@ import html
 import math
 import os
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QGraphicsPathItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsView, QHBoxLayout, QLabel, QSlider, QSplitter,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QGraph
 import relations_tracking
 
 ALL_CHARACTERS = "All characters"
+HISTORY_HINT = "Click a character to see their relation history."
 EMPTY_TEXT = ("No relations tracked for this glossary yet.\n\n"
               "Turn on Enable Relations Tracker in Glossary Manager → General Settings, "
               "then run Balanced or Full glossary extraction.")
@@ -29,11 +30,36 @@ GENDER_TINTS = {
     'male': QColor("#5a9fd4"),
 }
 NEUTRAL_TINT = QColor("#6b7280")
+BACKGROUND = QColor("#1b1d21")
 EDGE_COLOR = QColor("#8b95a5")
+SELECTED_EDGE_COLOR = QColor("#e5e7eb")
 CHANGED_COLOR = QColor("#f59e0b")  # amber: the relation changed
-LABEL_BG = QColor(30, 30, 30, 215)
+LABEL_BG = QColor("#1b1d21")
 #: Above this many visible edges, labels are drawn only for the selected character's edges.
 MAX_LABELLED_EDGES = 120
+#: Lines and names that do not belong to the selected character fade to this.
+DIMMED_OPACITY = 0.22
+#: Where along its line a label may sit (middle first), so it never floats beside the line.
+LABEL_SPOTS = (0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72)
+
+
+def _over_background(tint, strength):
+    """``tint`` painted over the diagram background at ``strength``: an opaque fill, so the
+    lines running behind a name do not show through it."""
+    return QColor(
+        round(BACKGROUND.red() + (tint.red() - BACKGROUND.red()) * strength),
+        round(BACKGROUND.green() + (tint.green() - BACKGROUND.green()) * strength),
+        round(BACKGROUND.blue() + (tint.blue() - BACKGROUND.blue()) * strength),
+    )
+
+
+def _styled_checkbox(text):
+    """The app's checkbox with the drawn tick (the Library's shared factory)."""
+    try:
+        from epub_library import _create_styled_checkbox
+        return _create_styled_checkbox(text)
+    except Exception:
+        return QCheckBox(text)
 
 
 def _gender_key(value):
@@ -50,23 +76,29 @@ edge_label_text = relations_tracking.edge_label_text
 
 
 class _GraphView(QGraphicsView):
-    """Wheel zoom around the cursor, drag to pan."""
+    """Wheel zoom around the cursor, drag to pan.
+
+    The whole diagram is fitted to the window until the user zooms or pans; from then on
+    the view is theirs. A click on empty space calls ``on_background_click``.
+    """
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
+        self.on_background_click = None
+        self._auto_fit = True
+        self._press_pos = None
+        self._content_rect = QRectF()
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setRenderHint(QPainter.TextAntialiasing, True)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
-        self.setBackgroundBrush(QBrush(QColor("#1b1d21")))
-        self.setStyleSheet(
-            "QGraphicsView { border: 1px solid #4a5568; }"
-            " QScrollBar { background: #252525; width: 10px; height: 10px; }"
-            " QScrollBar::handle { background: #4a5568; border-radius: 4px; min-width: 20px; min-height: 20px; }"
-            " QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; }"
-        )
+        self.setBackgroundBrush(QBrush(BACKGROUND))
+        # Panning is by drag; scroll bars only added two grey bands around the picture.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setStyleSheet("QGraphicsView { border: 1px solid #4a5568; }")
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -76,17 +108,52 @@ class _GraphView(QGraphicsView):
         current = self.transform().m11()
         if (factor > 1 and current > 6.0) or (factor < 1 and current < 0.05):
             return
+        self._auto_fit = False
         self.scale(factor, factor)
         event.accept()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        pressed, self._press_pos = self._press_pos, None
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.LeftButton or pressed is None:
+            return
+        released = event.position().toPoint()
+        if (released - pressed).manhattanLength() > 4:
+            self._auto_fit = False  # a drag: the user moved the picture
+        elif self.itemAt(released) is None and self.on_background_click is not None:
+            self.on_background_click()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._auto_fit:
+            self.fit_all()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._auto_fit:
+            QTimer.singleShot(0, self.fit_all)  # after the first layout pass gave the real size
+
+    def set_content_rect(self, rect):
+        """The area that must stay in sight (every name of the layout, not only those drawn now)."""
+        self._content_rect = QRectF(rect)
+
     def fit_all(self):
-        rect = self.scene().itemsBoundingRect()
+        """Show the whole diagram and keep it fitted until the user zooms or pans."""
+        self._auto_fit = True
+        rect = QRectF(self._content_rect)
+        if rect.isEmpty():
+            rect = self.scene().itemsBoundingRect()
         if rect.isValid() and not rect.isEmpty():
-            self.fitInView(rect.adjusted(-30, -30, 30, 30), Qt.KeepAspectRatio)
+            self.fitInView(rect.adjusted(-24, -24, 24, 24), Qt.KeepAspectRatio)
             if self.transform().m11() > 1.4:  # do not blow a few nodes up to giant size
                 self.resetTransform()
                 self.scale(1.4, 1.4)
-                self.centerOn(rect.center())
+            self.centerOn(rect.center())
 
 
 class _NodeItem(QGraphicsPathItem):
@@ -107,10 +174,9 @@ class _NodeItem(QGraphicsPathItem):
         self.setPath(path)
         self.text_item.setPos(-text_rect.width() / 2, -text_rect.height() / 2)
         tint = GENDER_TINTS.get(_gender_key(node.get('gender')), NEUTRAL_TINT)
-        fill = QColor(tint)
-        fill.setAlpha(150 if node.get('listed', True) else 70)
-        self.setBrush(QBrush(fill))
-        self.setPen(QPen(tint.lighter(130), 1.4, Qt.SolidLine if node.get('listed', True) else Qt.DashLine))
+        self.setBrush(QBrush(_over_background(tint, 0.6 if node.get('listed', True) else 0.28)))
+        self._border = tint.lighter(130)
+        self.setPen(QPen(self._border, 1.4, Qt.SolidLine if node.get('listed', True) else Qt.DashLine))
         tip = str(node.get('raw_name') or '')
         if not node.get('listed', True):
             tip += " (not in the glossary)"
@@ -122,7 +188,7 @@ class _NodeItem(QGraphicsPathItem):
     def set_selected_look(self, selected):
         pen = self.pen()
         pen.setWidthF(3.0 if selected else 1.4)
-        pen.setColor(QColor("#ffffff") if selected else self.brush().color().lighter(150))
+        pen.setColor(QColor("#ffffff") if selected else self._border)
         self.setPen(pen)
 
     def mousePressEvent(self, event):
@@ -175,6 +241,8 @@ class RelationsDiagramDialog(QDialog):
         self._edge_count = 0
         self._positions = {}
         self._layout_key = None
+        self._refit = False
+        self._label_boxes = []
         self._selected = None
         self._node_font = QFont("Segoe UI", 10)
         self._node_font.setBold(True)
@@ -182,7 +250,6 @@ class RelationsDiagramDialog(QDialog):
 
         self._build_ui()
         self.rebuild()
-        self._view.fit_all()
 
     # ── data ────────────────────────────────────────────────────────────
     @staticmethod
@@ -251,11 +318,11 @@ class RelationsDiagramDialog(QDialog):
         self.focus_combo.currentIndexChanged.connect(self._on_controls_changed)
         controls.addWidget(self.focus_combo)
 
-        self.show_former_checkbox = QCheckBox("Show former relations")
+        self.show_former_checkbox = _styled_checkbox("Show former relations")
         self.show_former_checkbox.setToolTip("Add earlier labels in brackets, e.g. Enemy [Best Friend]")
         self.show_former_checkbox.toggled.connect(self._on_controls_changed)
         controls.addWidget(self.show_former_checkbox)
-        self.show_unlisted_checkbox = QCheckBox("Show unlisted names")
+        self.show_unlisted_checkbox = _styled_checkbox("Show unlisted names")
         self.show_unlisted_checkbox.setToolTip("Also show names that are not (or no longer) in the glossary")
         self.show_unlisted_checkbox.toggled.connect(self._on_controls_changed)
         controls.addWidget(self.show_unlisted_checkbox)
@@ -264,11 +331,12 @@ class RelationsDiagramDialog(QDialog):
         page_layout.addWidget(splitter, 1)
         self.scene = QGraphicsScene(self)
         self._view = _GraphView(self.scene)
+        self._view.on_background_click = self.clear_selection
         splitter.addWidget(self._view)
         side = QWidget()
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(6, 0, 0, 0)
-        self.history_title = QLabel("Click a character to see their relation history.")
+        self.history_title = QLabel(HISTORY_HINT)
         self.history_title.setWordWrap(True)
         self.history_title.setStyleSheet("font-weight: bold; color: #5a9fd4;")
         side_layout.addWidget(self.history_title)
@@ -333,6 +401,13 @@ class RelationsDiagramDialog(QDialog):
             height = width * 0.68
             self._positions = relations_tracking.layout_graph(full, width, height, focus=focus)
             self._layout_key = key
+            self._refit = True
+            if self._positions:
+                xs = [p[0] for p in self._positions.values()]
+                ys = [p[1] for p in self._positions.values()]
+                # Room for the name boxes around the outermost positions.
+                self._view.set_content_rect(QRectF(min(xs) - 90, min(ys) - 26,
+                                                   max(xs) - min(xs) + 180, max(ys) - min(ys) + 52))
         return self._positions
 
     def rebuild(self):
@@ -369,65 +444,82 @@ class RelationsDiagramDialog(QDialog):
         edges = [e for e in graph.get('edges') or [] if e['a'] in self._node_items and e['b'] in self._node_items]
         self._edge_count = len(edges)
         label_all = len(edges) <= MAX_LABELLED_EDGES
+        # A selected character keeps its own lines and labels; everything else fades back.
+        selected = self._selected if self._selected in self._node_items else None
+        related = {selected}
         # Labels steer clear of the name boxes and of each other.
         placed_labels = [item.sceneBoundingRect().adjusted(-3, -3, 3, 3) for item in self._node_items.values()]
         to_label = []
+        self._label_boxes = []
         for edge in edges:
             a, b = self._node_items[edge['a']], self._node_items[edge['b']]
             pa, pb = a.pos(), b.pos()
-            color = CHANGED_COLOR if edge.get('changed') else EDGE_COLOR
-            line = self.scene.addLine(pa.x(), pa.y(), pb.x(), pb.y(), QPen(color, 2.2 if edge.get('changed') else 1.4))
-            line.setZValue(1)
-            if label_all or self._selected in (edge['a'], edge['b']):
+            mine = selected is not None and selected in (edge['a'], edge['b'])
+            if mine:
+                related.update((edge['a'], edge['b']))
+            color = CHANGED_COLOR if edge.get('changed') else (SELECTED_EDGE_COLOR if mine else EDGE_COLOR)
+            width = 2.2 if edge.get('changed') else (2.0 if mine else 1.4)
+            line = self.scene.addLine(pa.x(), pa.y(), pb.x(), pb.y(), QPen(color, width))
+            line.setZValue(2 if mine else 1)
+            if selected is not None and not mine:
+                line.setOpacity(DIMMED_OPACITY)
+            if mine or (selected is None and label_all):
                 to_label.append((math.hypot(pb.x() - pa.x(), pb.y() - pa.y()), edge, pa, pb, color))
         # Short edges have the least room, so they choose their label spot first.
         for _length, edge, pa, pb, color in sorted(to_label, key=lambda item: item[0]):
             self._add_edge_label(edge, pa, pb, color, show_former, placed_labels)
 
-        if self._selected in self._node_items:
-            self._node_items[self._selected].set_selected_look(True)
+        if selected is not None:
+            for node_id, item in self._node_items.items():
+                if node_id not in related:
+                    item.setOpacity(0.4)
+            self._node_items[selected].set_selected_look(True)
         self.status_label.setText(
             f"{len(self._node_items)} characters, {len(edges)} relations"
             + ("" if label_all else f" (labels shown for the selected character only above {MAX_LABELLED_EDGES})")
-            + " · amber = changed · scroll to zoom, drag to pan")
+            + " · amber = changed · click a name to show only its relations · scroll to zoom, drag to pan")
         self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-200, -200, 200, 200))
+        if self._refit:
+            self._refit = False
+            self._view.fit_all()
+
+    @staticmethod
+    def _overlap(box, others):
+        total = 0.0
+        for other in others:
+            shared = box.intersected(other)
+            if not shared.isEmpty():
+                total += shared.width() * shared.height()
+        return total
 
     def _add_edge_label(self, edge, pa, pb, color, show_former, placed):
+        """One pill ON its line: the line runs into both ends of the pill, so it is plain
+        which relation the words belong to. It slides along the line to a free spot."""
         text = edge_label_text(edge, show_former)
         label = QGraphicsSimpleTextItem(text)
         label.setFont(self._label_font)
         label.setBrush(QBrush(color.lighter(125) if edge.get('changed') else QColor("#e5e7eb")))
         rect = label.boundingRect()
-        mid = QPointF((pa.x() + pb.x()) / 2, (pa.y() + pb.y()) / 2)
-        # Nudge along the edge until the label box stops overlapping one already placed.
-        dx, dy = pb.x() - pa.x(), pb.y() - pa.y()
-        length = math.hypot(dx, dy) or 1.0
-        ux, uy = dx / length, dy / length
-        box = None
-        reach = max(1, int((length / 2 - 20) / (rect.height() * 1.3)))
-        steps = [0]
-        for n in range(1, min(reach, 12) + 1):
-            steps += [n, -n]
-        nx, ny = -uy, ux  # normal: try just above / below the line when the line itself is crowded
-        gap = rect.height() + 10
-        for perp in (0, 1, -1, 2, -2):
-            for step in steps:
-                center = QPointF(mid.x() + ux * step * rect.height() * 1.3 + nx * perp * gap,
-                                 mid.y() + uy * step * rect.height() * 1.3 + ny * perp * gap)
-                candidate = QRectF(center.x() - rect.width() / 2 - 4, center.y() - rect.height() / 2 - 2,
-                                   rect.width() + 8, rect.height() + 4)
-                if not any(candidate.intersects(other) for other in placed):
-                    box = candidate
-                    break
-            if box is not None:
+        width, height = rect.width() + 12, rect.height() + 6
+        box, least = None, None
+        for spot in LABEL_SPOTS:
+            cx = pa.x() + (pb.x() - pa.x()) * spot
+            cy = pa.y() + (pb.y() - pa.y()) * spot
+            candidate = QRectF(cx - width / 2, cy - height / 2, width, height)
+            overlap = self._overlap(candidate, placed)
+            if least is None or overlap < least:
+                box, least = candidate, overlap
+            if overlap == 0.0:
                 break
-        if box is None:
-            box = QRectF(mid.x() - rect.width() / 2 - 4, mid.y() - rect.height() / 2 - 2,
-                         rect.width() + 8, rect.height() + 4)
         placed.append(box)
-        background = self.scene.addRect(box, QPen(Qt.NoPen), QBrush(LABEL_BG))
+        self._label_boxes.append(box)
+        pill = QPainterPath()
+        pill.addRoundedRect(box, height / 2, height / 2)
+        border = QColor(color)
+        border.setAlpha(150)
+        background = self.scene.addPath(pill, QPen(border, 1.0), QBrush(LABEL_BG))
         background.setZValue(5)
-        label.setPos(box.x() + 4, box.y() + 2)
+        label.setPos(box.x() + 6, box.y() + 3)
         label.setZValue(6)
         self.scene.addItem(label)
         tip = f"{self._name(edge['b'])} is {edge.get('label_ab') or '?'} to {self._name(edge['a'])}\n" \
@@ -443,15 +535,21 @@ class RelationsDiagramDialog(QDialog):
 
     # ── history panel ───────────────────────────────────────────────────
     def _on_node_clicked(self, node_id):
-        previous = self._selected
+        if node_id == self._selected:  # a second click on the same name lets go of it
+            self.clear_selection()
+            return
         self._selected = node_id
-        if previous in self._node_items:
-            self._node_items[previous].set_selected_look(False)
-        if node_id in self._node_items:
-            self._node_items[node_id].set_selected_look(True)
-        if self._edge_count > MAX_LABELLED_EDGES:
-            self.rebuild()
+        self.rebuild()
         self.show_history(node_id)
+
+    def clear_selection(self):
+        """Back to the whole picture (a click on empty space, or on the selected name again)."""
+        if self._selected is None:
+            return
+        self._selected = None
+        self.rebuild()
+        self.history_title.setText(HISTORY_HINT)
+        self.history_panel.clear()
 
     def show_history(self, node_id):
         entries = self.tracker.get('entries') or {}
