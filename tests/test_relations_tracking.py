@@ -870,3 +870,12 @@ def test_edge_label_text_both_directions():
     assert rt.edge_label_text(edge) == "Enemy / Father"
     assert rt.edge_label_text(edge, True) == "Enemy [Best Friend] / Father"
     assert rt.edge_label_text({"label_ab": "", "label_ba": "Rival"}) == "? / Rival"
+
+
+def test_reset_question_is_one_question_for_one_or_both_prompts():
+    one = rt.reset_question(["Minimal"])
+    assert one == ("The Minimal prompt has no {relations_instruction} line, so the AI will not return relations."
+                   "\n\nReset the Minimal prompt to default?")
+    both = rt.reset_question(["Balanced/Full", "Minimal"])
+    assert both == ("The Balanced/Full and Minimal prompts have no {relations_instruction} line, so the AI will "
+                    "not return relations.\n\nReset both prompts to default?")

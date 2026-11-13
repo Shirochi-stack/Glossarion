@@ -1447,6 +1447,22 @@ def prompts_missing_placeholder(prompts: Optional[Mapping[str, Any]]) -> List[st
             if not isinstance(text, str) or RELATIONS_PLACEHOLDER not in text]
 
 
+def reset_question(names: Iterable[Any]) -> str:
+    """The one question asked when the tracker is turned on and prompts lack the placeholder.
+
+    ``names`` are the display names of those prompts ("Balanced/Full", "Minimal").
+    """
+    names = [str(name) for name in names or [] if str(name or "").strip()]
+    if len(names) <= 1:
+        name = names[0] if names else "glossary"
+        return (f"The {name} prompt has no {RELATIONS_PLACEHOLDER} line, so the AI will not return relations.\n\n"
+                f"Reset the {name} prompt to default?")
+    listed = " and ".join([", ".join(names[:-1]), names[-1]])
+    every = "both" if len(names) == 2 else "these"
+    return (f"The {listed} prompts have no {RELATIONS_PLACEHOLDER} line, so the AI will not return relations.\n\n"
+            f"Reset {every} prompts to default?")
+
+
 # ---------------------------------------------------------------------------
 # Custom-field rules
 # ---------------------------------------------------------------------------

@@ -1499,23 +1499,24 @@ class GlossaryManagerMixin:
         return True
 
     def _check_relations_prompts(self, parent=None):
-        """Offer to reset each prompt that lacks {relations_instruction}; return the ones still missing."""
+        """Offer, in one question, to reset the prompts that lack {relations_instruction}; return the
+        ones still missing."""
         missing = relations_tracking.prompts_missing_placeholder(self._relations_prompt_texts())
-        for key in missing:
-            if self._relations_prompt_uses_on_device_profile(key):
-                continue  # the built-in On-device profile stays as it is: warn only
-            name = self._RELATIONS_PROMPT_NAMES.get(key, key)
+        # the built-in On-device profile stays as it is: warn only
+        resettable = [key for key in missing if not self._relations_prompt_uses_on_device_profile(key)]
+        if resettable:
             try:
                 from review_dialog import confirm_prompt_profile_action
             except Exception:
-                break
-            if confirm_prompt_profile_action(
+                confirm_prompt_profile_action = None
+            names = [self._RELATIONS_PROMPT_NAMES.get(key, key) for key in resettable]
+            if confirm_prompt_profile_action is not None and confirm_prompt_profile_action(
                 parent or getattr(self, 'dialog', None),
                 "Relations Tracker",
-                f"The {name} prompt has no {relations_tracking.RELATIONS_PLACEHOLDER} line, "
-                f"so the AI will not return relations.\n\nReset the {name} prompt to default?",
+                relations_tracking.reset_question(names),
             ):
-                self._reset_glossary_prompt_to_default(key)
+                for key in resettable:
+                    self._reset_glossary_prompt_to_default(key)
         return self._refresh_relations_warning_row()
 
     def _refresh_relations_warning_row(self, *_args):
@@ -2924,7 +2925,6 @@ class GlossaryManagerMixin:
         custom_frame_layout = QVBoxLayout(custom_frame)
         manual_layout.addWidget(custom_frame)
         
-        QLabel("Additional fields to extract (will be added as extra columns):").setParent(custom_frame)
         custom_frame_layout.addWidget(QLabel("Additional fields to extract (will be added as extra columns):"))
         
         self.custom_fields_listbox = QListWidget()

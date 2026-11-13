@@ -623,7 +623,7 @@ REWIRE_SPANS = (
     # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
     (735, 735, 4),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
-    (1800, 1799, 378),  # Relations Tracker
+    (1800, 1799, 379),  # Relations Tracker
     (1800, 1810, 3),
     # U9 gap closures: Entry Type Configuration / Custom Fields call the glossary_document rules
     (1934, 1933, 1),  # Relations Tracker
@@ -631,6 +631,7 @@ REWIRE_SPANS = (
     (2461, 2460, 1),  # Relations Tracker
     (2538, 2537, 3),  # Relations Tracker
     (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3093, 3093, 6),
+    (3106, 3106, 0),  # the stray second "Additional fields to extract" label (it floated over the box) is gone
     (3137, 3139, 4),  # Relations Tracker
     (3151, 3150, 5),  # Relations Tracker
     (3153, 3153, 1),  # Relations Tracker

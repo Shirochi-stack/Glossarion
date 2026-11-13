@@ -12848,6 +12848,7 @@ class BatchTranslationProcessor:
                         chapter_num=parent_actual_num,
                         source_text=merged_content,
                         chapter_file=chapter_ref.get("chapter_file"),
+                        merged_units=_single_pass_merged_units(chapters_data),
                     )
                 # Preserve the finish reason from the merged API call for later status decisions.
                 merged_finish_reason = finish_reason
@@ -12982,6 +12983,7 @@ class BatchTranslationProcessor:
                                         chapter_num=parent_actual_num,
                                         source_text=merged_content,
                                         chapter_file=chapter_ref.get("chapter_file"),
+                                        merged_units=_single_pass_merged_units(chapters_data),
                                     )
                             finally:
                                 if tls_retry_client is not None:
@@ -14389,7 +14391,59 @@ def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chap
     except Exception as e:
         print(f"⚠️ Single Pass Glossary: failed to restore in-progress: {e}")
 
-def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None):
+def _record_single_pass_relations(glossary_extractor, entries, json_path, output_dir, progress,
+                                  chapter_idx, actual_num, chapter_basename, merged_units=None):
+    """Relations Tracker for a Single Pass response: record the relations cells under their chapter
+    and take the field off ``entries`` (it is never saved in the glossary). Does nothing while the
+    tracker is off.
+
+    ``merged_units`` is ``[(chapter_num, chapter_file, text)]`` for the chapters of a merged request:
+    each relation is then filed under the first of them whose text shows both names.
+    """
+    source_path = os.getenv("EPUB_PATH", "")
+    units, positions, filenames = [], {}, {}
+    for unit_num, unit_file, unit_text in merged_units or []:
+        idx, actual, basename = _single_pass_chapter_refs(output_dir, unit_num, unit_file, progress)
+        if idx is None or idx in positions:
+            continue
+        units.append((idx, unit_text or ""))
+        positions[idx] = actual
+        filenames[idx] = basename or ""
+    if len(units) > 1:
+        return glossary_extractor.update_relations_tracker_for_group(
+            entries,
+            json_path,
+            units,
+            chapter_idx,
+            source_path=source_path,
+            chapter_positions=positions,
+            chapter_filenames=filenames,
+        )
+    return glossary_extractor.update_relations_tracker(
+        entries,
+        json_path,
+        source_path=source_path,
+        chapter_index=chapter_idx,
+        chapter_num=actual_num,
+        chapter_file=chapter_basename,
+    )
+
+
+def _single_pass_merged_units(chapters_data):
+    """``[(chapter_num, chapter_file, text)]`` for the chapters of a merged request."""
+    units = []
+    for item in chapters_data or []:
+        try:
+            unit_num, unit_text, unit_chapter = item[0], item[1], item[3]
+        except (IndexError, TypeError):
+            continue
+        fallback = FileUtilities.create_chapter_filename(unit_chapter, unit_num) if unit_num is not None else ""
+        units.append((unit_num, _single_pass_progress_chapter_file(unit_chapter, fallback), unit_text))
+    return units
+
+
+def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None,
+                                  merged_units=None):
     """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
     global _single_pass_glossary_active_indices
     if not _single_pass_glossary_mode():
@@ -14435,6 +14489,15 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             if not valid:
                 print("📑 Single Pass Glossary: no valid glossary entries found in response")
                 return 0
+
+            # Relations first: it takes the relations field off the entries before anything is saved.
+            try:
+                _record_single_pass_relations(
+                    glossary_extractor, valid, json_path, output_dir, progress,
+                    chapter_idx, actual_num, chapter_basename, merged_units=merged_units,
+                )
+            except Exception as e:
+                print(f"⚠️ Single Pass Glossary: failed to update relations tracker: {e}")
 
             try:
                 glossary_extractor.update_gender_tracker(
