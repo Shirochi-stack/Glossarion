@@ -59,10 +59,13 @@ TAB_SECTIONS = {
 
 
 #: tab -> ((anchor key, keys shown directly above it), ...): rows the desktop tab places next to a
-#: related row (the schema section lists its keys alphabetically).
+#: related row (the schema section lists its keys alphabetically). Keys listed after the anchor itself
+#: go directly below it.
 TAB_KEY_ANCHORS = {
     "general": (("glossary_skip_gender_tracking",
                  ("glossary_enable_relations_tracker", "glossary_relations_history_mode")),),
+    # desktop Minimal tab: "Include Relations Column" right under "Include Description Column"
+    "minimal": (("include_description", ("include_description", "glossary_minimal_include_relations")),),
 }
 
 
@@ -507,10 +510,13 @@ class GlossarySettingsTab:
         for anchor, moved in TAB_KEY_ANCHORS.get(self.tab, ()):
             if anchor not in keys:
                 continue
-            present = [key for key in moved if key in keys and key != anchor]
-            keys = [key for key in keys if key not in present]
+            split = moved.index(anchor) if anchor in moved else len(moved)
+            above = [key for key in moved[:split] if key in keys and key != anchor]
+            below = [key for key in moved[split + 1:] if key in keys and key != anchor]
+            keys = [key for key in keys if key not in above and key not in below]
             at = keys.index(anchor)
-            keys[at:at] = present
+            keys[at + 1:at + 1] = below
+            keys[at:at] = above
         return keys
 
     def build(self) -> ft.Control:

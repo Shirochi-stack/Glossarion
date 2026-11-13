@@ -48,6 +48,9 @@ ENV_FIELD = "GLOSSARY_RELATIONS_FIELD"
 CONFIG_ENABLE = "glossary_enable_relations_tracker"
 CONFIG_HISTORY_MODE = "glossary_relations_history_mode"
 CONFIG_FIELD = "glossary_relations_field_name"
+#: Minimal Glossary Generation asks for (and records) relations only with this on as well.
+ENV_MINIMAL = "GLOSSARY_MINIMAL_INCLUDE_RELATIONS"
+CONFIG_MINIMAL = "glossary_minimal_include_relations"
 
 TRACKER_SUFFIX = "_relations_tracker.json"
 TRACKER_BASENAME = "relations_tracker.json"
@@ -69,6 +72,7 @@ _CONFIG_FOR_ENV = {
     ENV_ENABLE: CONFIG_ENABLE,
     ENV_HISTORY_MODE: CONFIG_HISTORY_MODE,
     ENV_FIELD: CONFIG_FIELD,
+    ENV_MINIMAL: CONFIG_MINIMAL,
 }
 
 
@@ -93,6 +97,11 @@ def _truthy(value: Any) -> bool:
 
 def tracking_enabled(settings: Optional[Mapping[str, Any]] = None) -> bool:
     return _truthy(_setting(settings, ENV_ENABLE))
+
+
+def minimal_tracking_enabled(settings: Optional[Mapping[str, Any]] = None) -> bool:
+    """Minimal glossary relations: the tracker AND "Include Relations Column" (Minimal tab) are on."""
+    return tracking_enabled(settings) and _truthy(_setting(settings, ENV_MINIMAL))
 
 
 def field_name(settings: Optional[Mapping[str, Any]] = None) -> str:
@@ -1607,6 +1616,22 @@ def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None
             return _PLACEHOLDER_LINE_RE.sub("", prompt_text).replace(RELATIONS_PLACEHOLDER, "")
         return prompt_text.replace(RELATIONS_PLACEHOLDER, text)
     return _PLACEHOLDER_LINE_RE.sub("", prompt_text)
+
+
+def minimal_relations_requested(settings: Optional[Mapping[str, Any]] = None) -> bool:
+    """Minimal's own "Include Relations Column" toggle (``settings``: a config dict or an env snapshot)."""
+    if isinstance(settings, Mapping):
+        return _truthy(settings.get(ENV_MINIMAL, settings.get(CONFIG_MINIMAL)))
+    return _truthy(os.environ.get(ENV_MINIMAL))
+
+
+def prompts_to_check(prompts: Optional[Mapping[str, Any]],
+                     settings: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The prompts that must hold the placeholder: Balanced/Full always, Minimal only with its toggle on."""
+    if not isinstance(prompts, Mapping):
+        return {}
+    minimal_on = minimal_relations_requested(settings)
+    return {key: text for key, text in prompts.items() if key != "minimal" or minimal_on}
 
 
 def prompts_missing_placeholder(prompts: Optional[Mapping[str, Any]]) -> List[str]:

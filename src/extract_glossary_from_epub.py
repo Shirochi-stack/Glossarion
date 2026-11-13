@@ -5388,17 +5388,31 @@ def editable_placeholders():
         {'name': 'name_split_example', 'default': _NAME_SPLIT_EXAMPLE_TEXT,
          'note': _DESCRIPTION_OFF_NOTE + _LINE_NOTE},
         {'name': 'gender_instruction', 'default': _GENDER_INSTRUCTION_TEXT,
-         'note': "Balanced/Full prompt: active when at least one entry type has gender; empty otherwise. "
+         'note': "Active when at least one enabled entry type has gender; empty otherwise. "
                  "Token: {gender_types} (the entry types with gender, comma-separated)."},
         {'name': 'subject_tracking_instruction', 'default': _SUBJECT_TRACKING_INSTRUCTION_TEXT,
          'note': "Active when Include Gender Context is on" + _LINE_NOTE},
         {'name': 'relations_instruction', 'default': relations_tracking._INSTRUCTION_TEMPLATE,
-         'note': "Active when the Relations Tracker is on; its line is removed otherwise. Tokens (all optional): "
+         'note': "Active when the Relations Tracker is on (Minimal: and its Include Relations Column); its line "
+                 "is removed otherwise. Tokens (all optional): "
                  "{field} (the relations column name), {language} (target language), {example_row_1} and "
                  "{example_row_2} (two example rows in the prompt's column layout). Minimal: when the prompt's "
                  "own column list does not include the relations column, \"Add a `{field}` column as one extra "
                  "LAST column of every row. \" is put in front."},
     ]
+
+
+def gender_instruction_text(custom_types=None):
+    """The ``{gender_instruction}`` expansion (Balanced/Full and Minimal): the stored or built-in text with
+    ``{gender_types}`` = the enabled entry types with gender; empty when no entry type has gender."""
+    if custom_types is None:
+        custom_types = get_custom_entry_types()
+    gender_types = [t for t, cfg in (custom_types or {}).items()
+                    if (cfg or {}).get('enabled', True) and (cfg or {}).get('has_gender', False)]
+    if not gender_types:
+        return ""
+    return placeholder_text('gender_instruction', _GENDER_INSTRUCTION_TEXT).replace(
+        '{gender_types}', ', '.join(gender_types))
 
 
 def _strip_placeholder_line(prompt_text, placeholder):
@@ -5556,9 +5570,14 @@ def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False
     )
 
 
-def warn_missing_relations_placeholder(prompt_text) -> bool:
-    """Print one warning when the Relations Tracker is on but the prompt cannot ask for relations."""
-    if not relations_tracking.tracking_enabled():
+def warn_missing_relations_placeholder(prompt_text, enabled=None) -> bool:
+    """Print one warning when the Relations Tracker is on but the prompt cannot ask for relations.
+
+    ``enabled``: whether this prompt is asked for relations (default: the tracker toggle).
+    """
+    if enabled is None:
+        enabled = relations_tracking.tracking_enabled()
+    if not enabled:
         return False
     if isinstance(prompt_text, str) and relations_tracking.RELATIONS_PLACEHOLDER in prompt_text:
         return False
@@ -5647,11 +5666,7 @@ def _apply_description_rule_placeholders(prompt_text, custom_fields=None, descri
 def build_prompt(chapter_text: str) -> tuple:
     """Build the extraction prompt with custom types - returns (system_prompt, user_prompt)"""
     custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
-    
-    # Replace {language} placeholder with target language
     target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
-    if custom_prompt and '{language}' in custom_prompt:
-        custom_prompt = custom_prompt.replace('{language}', target_language)
 
     # Build entries phrase from enabled custom entry types (manual prompt only)
     custom_types = get_custom_entry_types()
@@ -5676,20 +5691,17 @@ def build_prompt(chapter_text: str) -> tuple:
     entries_str = _entries_phrase(custom_types)
 
     # Build dynamic gender instruction based on which types have has_gender
-    _gender_types = [t for t, cfg in custom_types.items()
-                     if cfg.get('enabled', True) and cfg.get('has_gender', False)]
-    if _gender_types:
-        _gender_labels = ', '.join(_gender_types)
-        _gender_instruction = placeholder_text('gender_instruction', _GENDER_INSTRUCTION_TEXT).replace(
-            '{gender_types}', _gender_labels)
-    else:
-        _gender_instruction = ""
+    _gender_instruction = gender_instruction_text(custom_types)
     
     if not custom_prompt:
         # If no custom prompt, use the canonical default defined at module level.
         # GlossaryManager_GUI.py imports this same constant so there is only
         # one authoritative copy of the default prompt.
         custom_prompt = DEFAULT_GLOSSARY_PROMPT
+
+    # Replace {language} placeholder with target language (after the default is chosen,
+    # so the built-in prompt gets it too)
+    custom_prompt = custom_prompt.replace('{language}', target_language)
 
     # Replace {entries} placeholder now that we have the enabled custom entry types
     custom_prompt = custom_prompt.replace('{entries}', entries_str)

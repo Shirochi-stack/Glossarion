@@ -416,6 +416,7 @@ class ConfigStateMixin:
         self.glossary_gender_tracking_bias_var = self.config.get('glossary_gender_tracking_bias', 'none')
         self.glossary_enable_relations_tracker_var = self.config.get('glossary_enable_relations_tracker', False)
         self.glossary_relations_history_mode_var = self.config.get('glossary_relations_history_mode', 'previous')
+        self.glossary_minimal_include_relations_var = self.config.get('glossary_minimal_include_relations', False)
         self.glossary_partial_ratio_gender_only_var = self.config.get('glossary_partial_ratio_gender_only', False)
         self.glossary_alias_aware_name_matching_var = self.config.get('glossary_alias_aware_name_matching', False)
         self.glossary_alias_aware_gender_only_var = self.config.get('glossary_alias_aware_gender_only', True)

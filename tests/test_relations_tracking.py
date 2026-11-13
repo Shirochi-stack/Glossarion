@@ -660,6 +660,22 @@ def test_prompts_missing_placeholder():
     assert rt.prompts_missing_placeholder({}) == []
 
 
+def test_minimal_prompt_is_checked_only_with_its_toggle(monkeypatch):
+    prompts = {"balanced_full": "b", "minimal": "m"}
+    assert rt.prompts_to_check(prompts, {rt.CONFIG_MINIMAL: False}) == {"balanced_full": "b"}
+    assert rt.prompts_to_check(prompts, {rt.CONFIG_MINIMAL: True}) == prompts
+    assert rt.prompts_to_check(prompts, {rt.ENV_MINIMAL: "1"}) == prompts
+    assert rt.prompts_to_check(None) == {}
+    monkeypatch.delenv(rt.ENV_MINIMAL, raising=False)
+    monkeypatch.setenv(rt.ENV_ENABLE, "1")
+    assert rt.prompts_to_check(prompts) == {"balanced_full": "b"}
+    assert not rt.minimal_tracking_enabled()
+    monkeypatch.setenv(rt.ENV_MINIMAL, "1")
+    assert rt.minimal_tracking_enabled() and rt.prompts_to_check(prompts) == prompts
+    monkeypatch.setenv(rt.ENV_ENABLE, "0")
+    assert not rt.minimal_tracking_enabled()
+
+
 def test_instruction_text_is_one_block():
     text = rt.instruction_text()
     assert text.startswith("The `relations` column: for character entries only")

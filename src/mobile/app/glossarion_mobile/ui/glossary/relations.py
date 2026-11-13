@@ -5,7 +5,8 @@ the toggle on / off adds / removes the relations column in Custom Fields in the 
 (``state.setting_writes.relations_tracker_writes``). Under the toggle this module adds:
 
 * the prompt check (desktop ``_check_relations_prompts``): when the toggle is turned on, each active
-  Balanced/Full and Minimal glossary prompt without ``{relations_instruction}``
+  Balanced/Full glossary prompt, and the Minimal one while "Include Relations Column" is on (turning
+  that on with the tracker on checks it too), without ``{relations_instruction}``
   (``relations_tracking.prompts_missing_placeholder``) is offered a reset to default (``ask``). A prompt
   whose active profile is the built-in On-device profile is not offered one, as on desktop;
 * the warning notice while the toggle is on and a prompt still lacks the line: which prompt, plus the
@@ -30,12 +31,14 @@ from glossarion_mobile.ui.components.copy_line import copy_line
 from glossarion_mobile.ui.glossary.common import ask, quiet
 from glossarion_mobile.ui.settings.banners import notice
 
-__all__ = ["PROMPT_KEYS", "PROMPT_NAMES", "RelationsPanel", "missing_prompts", "open_diagram", "relations_core",
+__all__ = ["MINIMAL_KEY", "PROMPT_KEYS", "PROMPT_NAMES", "RelationsPanel", "missing_prompts", "open_diagram", "relations_core",
            "reset_prompt_to_default", "tracker_glossaries"]
 
 log = logging.getLogger("glossarion.glossary.ui")
 
 TOGGLE_KEY = "glossary_enable_relations_tracker"
+#: Minimal Generation's "Include Relations Column": the Minimal prompt is checked only with it on
+MINIMAL_KEY = "glossary_minimal_include_relations"
 #: bucket -> the current prompt key runs read (``glossary_document.glossary_prompt_profile_meta``)
 PROMPT_KEYS = {"balanced_full": "manual_glossary_prompt3", "minimal": "unified_auto_glosary_prompt3"}
 PROMPT_NAMES = {"balanced_full": "Balanced/Full", "minimal": "Minimal"}
@@ -99,11 +102,13 @@ def prompt_texts(ctx: Any) -> dict:
 
 
 def missing_prompts(ctx: Any) -> list:
-    """The buckets whose prompt lacks ``{relations_instruction}`` (``prompts_missing_placeholder``)."""
+    """The buckets whose prompt lacks ``{relations_instruction}`` (``prompts_missing_placeholder``); Minimal
+    only while its "Include Relations Column" is on (``prompts_to_check``)."""
     core = relations_core(ctx)
     if core is None:
         return []
-    return list(core.prompts_missing_placeholder(prompt_texts(ctx)))
+    texts = core.prompts_to_check(prompt_texts(ctx), {MINIMAL_KEY: bool(_get(ctx, MINIMAL_KEY, False))})
+    return list(core.prompts_missing_placeholder(texts))
 
 
 def _on_device_active(ctx: Any, bucket: str) -> bool:
@@ -208,6 +213,7 @@ class RelationsPanel:
         self.checks = 0  # prompt checks run (the toggle turned on)
         self.check_task: Any = None  # the running prompt check
         self._was_on = bool(_get(ctx, TOGGLE_KEY))
+        self._minimal_was_on = bool(_get(ctx, MINIMAL_KEY))
         self._unsub: Any = None
         self._checking = False
         self.refresh(push=False)
@@ -265,6 +271,14 @@ class RelationsPanel:
                 self.refresh()
                 self.check_task = self.ctx.spawn(self.check_prompts())
                 return
+        if key == MINIMAL_KEY:
+            minimal_on = bool(value)
+            turned_on = minimal_on and not self._minimal_was_on
+            self._minimal_was_on = minimal_on
+            if turned_on and self.enabled:
+                self.refresh()
+                self.check_task = self.ctx.spawn(self.check_prompts())
+                return
         self.refresh()
 
     def attach(self) -> None:
@@ -273,8 +287,9 @@ class RelationsPanel:
         if store is None or self._unsub is not None:
             return
         self._was_on = self.enabled
+        self._minimal_was_on = bool(_get(self.ctx, MINIMAL_KEY))
         try:
-            self._unsub = store.observe_keys((TOGGLE_KEY, *PROMPT_KEYS.values()),
+            self._unsub = store.observe_keys((TOGGLE_KEY, MINIMAL_KEY, *PROMPT_KEYS.values()),
                                              lambda key, value: self.ctx.post_ui(self.on_change, key, value))
         except Exception:
             log.debug("observing the relations settings failed", exc_info=True)

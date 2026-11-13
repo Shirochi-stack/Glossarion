@@ -84,10 +84,12 @@ try:
     from extract_glossary_from_epub import (
         DEFAULT_AUTO_GLOSSARY_PROMPT as DEFAULT_AUTO_GLOSARY_PROMPT3,
         _apply_subject_tracking_placeholder,
+        gender_instruction_text,
     )
 except ImportError:
     DEFAULT_AUTO_GLOSARY_PROMPT3 = ""
     _apply_subject_tracking_placeholder = None
+    gender_instruction_text = None
 try:
     from extract_glossary_from_epub import _apply_relations_placeholder, warn_missing_relations_placeholder
 except ImportError:
@@ -943,7 +945,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     with _minimal_relations_lock:
         _minimal_relations_cells.pop(_minimal_relations_key(output_dir), None)
     if warn_missing_relations_placeholder is not None:
-        warn_missing_relations_placeholder(custom_prompt)
+        # Minimal asks for relations only with its own "Include Relations Column" toggle on too
+        warn_missing_relations_placeholder(custom_prompt, enabled=relations_tracking.minimal_tracking_enabled())
 
     def clean_html(html_text):
         """Remove HTML tags to get clean text"""
@@ -5313,7 +5316,7 @@ def _record_minimal_relations(output_dir, chapters):
     """
     with _minimal_relations_lock:
         cells = _minimal_relations_cells.pop(_minimal_relations_key(output_dir), [])
-    if not cells or not relations_tracking.tracking_enabled():
+    if not cells or not relations_tracking.minimal_tracking_enabled():
         return []
     try:
         from extract_glossary_from_epub import record_relations_for_chapters
@@ -5482,11 +5485,16 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 system_prompt = _apply_subject_tracking_placeholder(
                     system_prompt, include_gender_context=_inc_gender_ctx
                 )
+            # Same rule and text as Balanced/Full: the entry types with gender, empty when none.
+            if gender_instruction_text is not None:
+                system_prompt = system_prompt.replace('{gender_instruction}', gender_instruction_text())
 
             # Relations Tracker: expand (or strip) {relations_instruction}. Unless the
             # {fields} header already lists the relations field, the column is declared
             # as one extra LAST column; its cells are taken off the rows before parsing.
+            # Minimal asks only with its own "Include Relations Column" toggle on as well.
             relations_sink = None
+            _minimal_relations_on = relations_tracking.minimal_tracking_enabled()
             if _apply_relations_placeholder is not None:
                 _rel_uses_fields = '{fields}' in system_prompt or '{fields1}' in system_prompt
                 _rel_fields = _minimal_custom_fields()
@@ -5494,13 +5502,13 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     _rel_uses_fields
                     and any(relations_tracking.is_relations_field(f) for f in _rel_fields)
                 )
-                if relations_tracking.tracking_enabled() and relations_tracking.RELATIONS_PLACEHOLDER in system_prompt:
+                if _minimal_relations_on and relations_tracking.RELATIONS_PLACEHOLDER in system_prompt:
                     relations_sink = _minimal_relations_sink(
                         system_prompt, _rel_fields, _rel_uses_fields, existing_glossary
                     )
                 # The example rows of the instruction follow the columns the rows are read with.
                 system_prompt = _apply_relations_placeholder(
-                    system_prompt, declare_column=_rel_declare,
+                    system_prompt, enabled=_minimal_relations_on, declare_column=_rel_declare,
                     columns=relations_sink['columns'] if relations_sink else None,
                 )
 
@@ -5515,6 +5523,10 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     _custom_fields = json.loads(_custom_fields_json)
                 except Exception:
                     _custom_fields = []
+                if (relations_tracking.tracking_enabled() and not _minimal_relations_on
+                        and isinstance(_custom_fields, list)):
+                    # no relations column in Minimal's header unless its toggle asks for it
+                    _custom_fields = [f for f in _custom_fields if not relations_tracking.is_relations_field(f)]
                 _header_parts = ['type', 'raw_name', 'translated_name', 'gender']
                 if _custom_fields:
                     _header_parts.extend(_custom_fields)

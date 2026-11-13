@@ -8,6 +8,9 @@ and the other editable placeholders expand to can be replaced from Glossary Mana
 
 With nothing stored every prompt is byte-for-byte what it was before the feature: the digests in
 ``BASELINE_DIGESTS`` were recorded from origin/main aae300f4 (before the change) with ``capture_prompts``.
+Two later fixes change the default prompts on purpose, and only them (``as_before`` undoes exactly
+those two and must give the baseline back): Minimal now expands ``{gender_instruction}`` (it sent the
+literal placeholder), and the built-in Balanced/Full prompt gets ``{language}`` (it sent ``{language}``).
 
 Run (repository root)::
 
@@ -42,7 +45,7 @@ _PROMPT_ENV_KEYS = (
     "GLOSSARY_TARGET_LANGUAGE", "GLOSSARY_INCLUDE_GENDER_CONTEXT", "GLOSSARY_INCLUDE_DESCRIPTION",
     "GLOSSARY_ENABLE_RELATIONS_TRACKER", "GLOSSARY_RELATIONS_FIELD", "GLOSSARY_RELATIONS_HISTORY_MODE",
     "GLOSSARY_INCLUDE_BOOK_TITLE", "GLOSSARY_USE_SMART_FILTER", "GLOSSARY_FORCE_DISABLE_SMART_FILTER",
-    ENV,
+    "GLOSSARY_MINIMAL_INCLUDE_RELATIONS", ENV,
 )
 
 #: Entry types without any ``has_gender``: ``{gender_instruction}`` expands to nothing.
@@ -81,8 +84,10 @@ def balanced_prompt(env):
     return system
 
 
-def minimal_prompt(env, prompt=None):
-    """The system message the Minimal path sends (GlossaryManager._extract_with_custom_prompt)."""
+def minimal_prompt(env, prompt=None, response=None, output_dir=".", cells_out=None):
+    """The system message the Minimal path sends (GlossaryManager._extract_with_custom_prompt).
+
+    ``cells_out``: a list that receives the relations cells the run detached from the rows."""
     import GlossaryManager as GM
     import extract_glossary_from_epub as eg
     import unified_api_client as uac
@@ -95,7 +100,7 @@ def minimal_prompt(env, prompt=None):
 
     def send(messages, **kwargs):
         sent.append(messages[0]["content"])
-        return SimpleNamespace(content="type,raw_name,translated_name\ncharacter,서윤,Seoyun"), "stop", None
+        return SimpleNamespace(content=response or "type,raw_name,translated_name\ncharacter,서윤,Seoyun"), "stop", None
 
     extra = {"MODEL": "local/Qwen3.5-0.8B-UD-Q4_K_XL", "API_KEY": "test-key", "GLOSSARY_DEFER_SAVE": "1",
              "_CHUNK_ALREADY_FILTERED": "1", "THREAD_SUBMISSION_DELAY_SECONDS": "0",
@@ -106,10 +111,15 @@ def minimal_prompt(env, prompt=None):
     uac.UnifiedClient, GM.send_with_interrupt = FakeClient, send
     GM._stop_requested, GM._get_stop_file_path = False, (lambda: None)
     restore = _set_env(env)
+    key = GM._minimal_relations_key(output_dir)
+    GM._minimal_relations_cells.pop(key, None)
     try:
         GM._extract_with_custom_prompt(prompt or eg.DEFAULT_AUTO_GLOSSARY_PROMPT,
                                        "서윤은 도현을 보았다.\n=== CONTEXT 1 END ===", "korean",
-                                       1, 50, 50, None, ".", raise_on_failure=True)
+                                       1, 50, 50, None, output_dir, raise_on_failure=True)
+        cells = GM._minimal_relations_cells.pop(key, [])
+        if cells_out is not None:
+            cells_out.extend(cells)
     finally:
         restore()
         uac.UnifiedClient, GM.send_with_interrupt, GM._stop_requested, GM._get_stop_file_path = saved_attrs
@@ -144,6 +154,8 @@ def scenarios():
                     "GLOSSARY_INCLUDE_DESCRIPTION": str(desc),
                     "GLOSSARY_INCLUDE_GENDER_CONTEXT": str(gender),
                     "GLOSSARY_ENABLE_RELATIONS_TRACKER": str(relations),
+                    # Minimal asks for relations only with its own toggle on as well
+                    "GLOSSARY_MINIMAL_INCLUDE_RELATIONS": str(relations),
                 })
     return out
 
@@ -181,6 +193,43 @@ BASELINE_DIGESTS = {
     'minimal_desc1_gender1_rel1': '3b31011afe5cbea04f46f130386bf125719758834aeeec7c090160895ae3514b',
 }
 
+#: sha256 of the same prompts with the two fixes ({gender_instruction} in Minimal, {language} in the
+#: built-in Balanced/Full prompt); every scenario contained one of the two literals.
+CURRENT_DIGESTS = {
+    'balanced_desc0_gender0_rel0': 'f936e7c05efd38dce48746aa86f86306c5476e97d84749a9dfe59ac79051e597',
+    'minimal_desc0_gender0_rel0': '05a635f37a44a8256649bd3f1ef16d18cb186643173a3bef2ee3da5d064540bb',
+    'balanced_desc0_gender0_rel1': '17ab80067acde09eacdbf770208603d9199c1fd4c2afc7051b42c4507901f4a7',
+    'minimal_desc0_gender0_rel1': '8524b23153522c8b81a082fbec5e92e5f1114ed31238f80553c2252aedd17c34',
+    'balanced_desc0_gender1_rel0': 'cf81dd24ca606a71e62e623d526d14a0d5443397bb3a43c197873ba50aa1c139',
+    'minimal_desc0_gender1_rel0': 'cde38f84294d833efc7d7d6b64ced3a1397dcc182c2a469e728d4a61fbb4d0fc',
+    'balanced_desc0_gender1_rel1': '7acbd23645d1f12fc6ffccef88c75f5fac9359bfa50f2f7a440e51c3ea90bc23',
+    'minimal_desc0_gender1_rel1': '438e7b8a0ae96b5f0a98fa837b5bcbf3e6df19eeb9d192f50a42f3776e0a2941',
+    'balanced_desc1_gender0_rel0': 'd0d8bf230f9f5d4a432a090ad0ca012302ed9bc378a41a4dcb6a3ec054b3507a',
+    'minimal_desc1_gender0_rel0': '2c16930db10f5ddd35ef5b398fcda808ba0fd9d6144023b482a7c93fb574ddd9',
+    'balanced_desc1_gender0_rel1': '204cdaa61728d485502f6afedee4fec18b8ca8e65c49c8a98fc18ae23b490931',
+    'minimal_desc1_gender0_rel1': 'a1cb38443dfc0234ac1985a16a22b105c5961251d9b6bf03ae449f6efa0e003b',
+    'balanced_desc1_gender1_rel0': '1c05621d24c05a2115bb5aea03d65b671cc9d6ef177e3e721fe40ca39f7c66c1',
+    'minimal_desc1_gender1_rel0': '48b4ea7fdb3d1c7b2de65d158a854e05c74be28efcd11d904a12725ac58862aa',
+    'balanced_desc1_gender1_rel1': '1203b98f14a914848ced495288f7ccf8c1f67953fd30f462a7c2f8e5a1c49dd9',
+    'minimal_desc1_gender1_rel1': '86fff5871c6aab501ecc9b47b385bd34f92093fcaf67b5e5738912fc942865e3',
+}
+
+#: {gender_instruction} with the built-in text and the default entry types (character, titles, nicknames)
+GENDER_EXPANDED = ("The gender column applies only to character, titles, nicknames entries — determine gender "
+                   "from context clues, leave empty if insufficient.\nFor all other entry types, leave gender empty.")
+LANGUAGE_BEFORE = "must be in {language}, While the raw name"
+LANGUAGE_NOW = "must be in English, While the raw name"
+
+
+def as_before(name, text):
+    """The prompt with the two intended fixes undone (Minimal: {gender_instruction}; Balanced/Full: {language})."""
+    if name.startswith("minimal"):
+        assert "{gender_instruction}" not in text and text.count(GENDER_EXPANDED) == 1
+        return text.replace(GENDER_EXPANDED, "{gender_instruction}")
+    assert "{language}" not in text and text.count(LANGUAGE_NOW) == 1
+    return text.replace(LANGUAGE_NOW, LANGUAGE_BEFORE)
+
+
 EDITABLE = [
     "description_mandatory", "description_detailed", "description_in_language", "description_excluded_note",
     "description_example", "example", "description_name_split_example", "name_split_example",
@@ -213,16 +262,29 @@ def eg():
 @pytest.mark.parametrize("extra_env", [None, {ENV: "{}"}, {ENV: "not json"}],
                          ids=["no-env", "empty-dict", "bad-json"])
 def test_default_prompts_are_byte_identical_to_before(extra_env):
+    """Only the two intended fixes differ from the baseline; undone, every prompt is the old one."""
     prompts = capture_prompts(extra_env)
-    assert set(prompts) == set(BASELINE_DIGESTS)
-    changed = [name for name, text in prompts.items() if digest(text) != BASELINE_DIGESTS[name]]
+    assert set(prompts) == set(BASELINE_DIGESTS) == set(CURRENT_DIGESTS)
+    changed = [name for name, text in prompts.items() if digest(as_before(name, text)) != BASELINE_DIGESTS[name]]
     assert not changed
+    assert {name: digest(text) for name, text in prompts.items()} == CURRENT_DIGESTS
+
+
+def test_minimal_gets_the_gender_instruction_and_balanced_the_language():
+    prompts = capture_prompts()
+    for name, text in prompts.items():
+        if name.startswith("minimal"):
+            assert "{gender_instruction}" not in text
+            assert "Columns in this exact order: type,raw_name,translated_name,gender,description\n" + GENDER_EXPANDED in text
+        else:
+            assert "{language}" not in text
+            assert "Critical Requirement: The translated name" in text and LANGUAGE_NOW in text
 
 
 def test_texts_equal_to_the_defaults_change_nothing(eg):
     stored = {item["name"]: item["default"] for item in eg.editable_placeholders()}
     prompts = capture_prompts({ENV: json.dumps(stored, ensure_ascii=False)})
-    assert {name: digest(text) for name, text in prompts.items()} == BASELINE_DIGESTS
+    assert {name: digest(text) for name, text in prompts.items()} == CURRENT_DIGESTS
 
 
 def test_the_scenarios_cover_every_switch():
@@ -353,7 +415,7 @@ def test_gender_override_uses_gender_types_and_stays_empty_without_gender(eg):
     assert "Gender only for: character, titles, nicknames." in on
     off = _prompt("balanced_desc0_gender0_rel0", stored)
     assert "Gender only for" not in off
-    assert digest(off) == BASELINE_DIGESTS["balanced_desc0_gender0_rel0"]
+    assert digest(off) == CURRENT_DIGESTS["balanced_desc0_gender0_rel0"]
 
 
 def test_relations_override_with_and_without_tokens(eg, monkeypatch):
@@ -543,6 +605,71 @@ def test_switching_keeps_unsaved_drafts_and_close_asks(gui):
     again = gui._open_placeholder_text_dialog()
     assert again is dialog
     assert editor.toPlainText() != "draft text"  # drafts end at Close
+
+
+# =============================================================================================
+# Minimal: {gender_instruction}, and its own "Include Relations Column" toggle
+# =============================================================================================
+
+def _minimal_env(**extra):
+    env = {"GLOSSARY_TARGET_LANGUAGE": "English", "GLOSSARY_INCLUDE_BOOK_TITLE": "0",
+           "GLOSSARY_INCLUDE_DESCRIPTION": "1"}
+    env.update({key: str(value) for key, value in extra.items()})
+    return env
+
+
+def test_minimal_gender_instruction_follows_the_entry_types_and_the_stored_text():
+    assert GENDER_EXPANDED in minimal_prompt(_minimal_env())
+    none = minimal_prompt(_minimal_env(GLOSSARY_CUSTOM_ENTRY_TYPES=json.dumps(NO_GENDER_TYPES)))
+    assert "{gender_instruction}" not in none and "The gender column applies only to" not in none
+    stored = json.dumps({"gender_instruction": "Gender for {gender_types} only."})
+    own = minimal_prompt(_minimal_env(**{ENV: stored}))
+    assert "description\nGender for character, titles, nicknames only.\n" in own
+    assert "The gender column applies only to" not in own
+
+
+def test_balanced_language_is_filled_in_the_built_in_prompt_and_custom_prompts_keep_working():
+    built_in = balanced_prompt(dict(scenarios()["balanced_desc0_gender0_rel0"][1], GLOSSARY_TARGET_LANGUAGE="German"))
+    assert "{language}" not in built_in and "must be in German, While the raw name" in built_in
+    custom = balanced_prompt(dict(scenarios()["balanced_desc0_gender0_rel0"][1], GLOSSARY_TARGET_LANGUAGE="German",
+                                  GLOSSARY_SYSTEM_PROMPT="Translate into {language}. {fields}"))
+    assert custom.startswith("Translate into German.")
+
+
+RELATIONS_RESPONSE = ("type,raw_name,translated_name,gender,description\n"
+                      "character,서윤,Seo-yun,female,Heir,도현: Older Brother\n"
+                      "character,도현,Do-hyeon,male,Captain,서윤: Younger Sister\n")
+
+
+@pytest.mark.parametrize("tracker, toggle", [(0, 0), (0, 1), (1, 0), (1, 1)])
+def test_minimal_asks_and_detaches_relations_only_with_tracker_and_toggle(tracker, toggle, tmp_path):
+    cells = []
+    system = minimal_prompt(_minimal_env(GLOSSARY_ENABLE_RELATIONS_TRACKER=tracker,
+                                         GLOSSARY_MINIMAL_INCLUDE_RELATIONS=toggle),
+                            response=RELATIONS_RESPONSE, output_dir=str(tmp_path), cells_out=cells)
+    both = bool(tracker and toggle)
+    assert ("The `relations` column:" in system) is both
+    assert ("Add a `relations` column as one extra LAST column of every row." in system) is both
+    assert "{relations_instruction}" not in system
+    if not both:
+        # the line is removed exactly as with the tracker off
+        off = minimal_prompt(_minimal_env(GLOSSARY_ENABLE_RELATIONS_TRACKER=0))
+        assert system == off
+    assert bool(cells) is both
+
+
+def test_minimal_records_relations_only_with_the_toggle_on(tmp_path, monkeypatch):
+    import GlossaryManager as GM
+
+    chapters = [{"body": "<p>서윤은 도현을 보았다.</p>", "num": 1}]
+    for toggle, expected in (("0", False), ("1", True)):
+        out = tmp_path / f"out{toggle}"
+        out.mkdir()
+        monkeypatch.setenv("GLOSSARY_ENABLE_RELATIONS_TRACKER", "1")
+        monkeypatch.setenv("GLOSSARY_MINIMAL_INCLUDE_RELATIONS", toggle)
+        GM._minimal_relations_cells[GM._minimal_relations_key(str(out))] = [("서윤", "Seo-yun", "도현: Older Brother")]
+        recorded = GM._record_minimal_relations(str(out), chapters)
+        assert bool(recorded) is expected
 
 
 if __name__ == "__main__":  # print the digests (used to record BASELINE_DIGESTS before the change)

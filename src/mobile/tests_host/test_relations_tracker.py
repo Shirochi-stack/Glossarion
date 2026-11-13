@@ -50,6 +50,7 @@ FIELD = "glossary_relations_field_name"
 FIELDS = "custom_glossary_fields"
 BALANCED = "manual_glossary_prompt3"
 MINIMAL = "unified_auto_glosary_prompt3"
+MINIMAL_TOGGLE = "glossary_minimal_include_relations"
 
 
 @pytest.fixture
@@ -286,7 +287,8 @@ def test_declining_the_reset_shows_the_notice_with_the_copyable_line(iso, tmp_pa
 
 def test_accepting_the_reset_restores_the_default_prompt(iso, tmp_path):
     schema = _schema()
-    store = _store(tmp_path, schema, {BALANCED: "Custom balanced", MINIMAL: "Custom minimal"})
+    # the Minimal prompt is checked only while Minimal's "Include Relations Column" is on
+    store = _store(tmp_path, schema, {BALANCED: "Custom balanced", MINIMAL: "Custom minimal", MINIMAL_TOGGLE: True})
 
     async def scenario():
         conn, session = _TB._fake_session("android")
@@ -320,6 +322,68 @@ def test_accepting_the_reset_restores_the_default_prompt(iso, tmp_path):
         assert "{relations_instruction}" in store.get(BALANCED) and "{relations_instruction}" in store.get(MINIMAL)
         assert tab.relations.missing == [] and tab.relations.warning.visible is False
         tab.dispose()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_minimal_include_relations_row_sits_under_include_description_and_needs_the_tracker(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.settings_tabs import GlossarySettingsTab
+
+    schema = _schema()
+    spec = schema.spec(MINIMAL_TOGGLE)
+    assert spec.label == "Include Relations Column" and spec.type == "bool"
+    assert spec.section == "glossary.minimal"
+    assert schema.effective_default(MINIMAL_TOGGLE) is False
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        tab = GlossarySettingsTab(ctx, "minimal")
+        _mount(session.page, tab.build())
+        tab.did_show()
+        keys = tab.keys()
+        at = keys.index("include_description")
+        assert keys[at + 1] == MINIMAL_TOGGLE
+        tile = tab.page.tiles[MINIMAL_TOGGLE]
+        assert tile.lock_reason == "Turn on Enable Relations Tracker first"
+        store.set(TOGGLE, True)
+        await _settle()
+        tile.refresh(push=False)
+        assert not tile.lock_reason
+        tab.dispose()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_minimal_prompt_is_checked_only_with_its_toggle_on(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations import RelationsPanel, missing_prompts
+
+    schema = _schema()
+    store = _store(tmp_path, schema, {BALANCED: "Custom balanced\n- {relations_instruction}",
+                                      MINIMAL: "Custom minimal", TOGGLE: True})
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        ctx.extras["answers"] = [False]
+        panel = RelationsPanel(ctx)
+        panel.attach()
+        assert missing_prompts(ctx) == [] and panel.warning.visible is False
+        # turned on with the tracker on: the Minimal prompt is checked (one question) and named
+        store.set(MINIMAL_TOGGLE, True)
+        await _settle()
+        await panel.check_task
+        asked = ctx.extras["asked"]
+        assert len(asked) == 1 and "The Minimal prompt has no {relations_instruction} line" in asked[0][2]
+        assert panel.missing == ["minimal"] and panel.warning.visible is True
+        assert store.get(MINIMAL) == "Custom minimal"  # declined: kept
+        store.set(MINIMAL_TOGGLE, False)
+        await _settle()
+        assert panel.missing == [] and panel.warning.visible is False
+        panel.detach()
         store._saver.close()
 
     asyncio.run(scenario())
