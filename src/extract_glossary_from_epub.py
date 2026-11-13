@@ -63,13 +63,15 @@ from gender_tracking import (
     normalize_gender as _shared_normalize_gender,
     tracker_path_for_glossary as _shared_gender_tracker_path,
 )
+import gender_tracking as _gender_tracking
 import relations_tracking
 
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
 _glossary_last_thread_submit = 0.0
-_gender_tracker_lock = threading.RLock()
-_relations_tracker_lock = threading.RLock()
+# The trackers' in-process locks are the shared modules' own (the GUI and mobile edit through them).
+_gender_tracker_lock = _gender_tracking.TRACKER_LOCK
+_relations_tracker_lock = relations_tracking.TRACKER_LOCK
 _glossary_stop_summary_lock = threading.Lock()
 _glossary_stopped_request_labels = set()
 
@@ -1344,29 +1346,9 @@ _glossary_csv_lock = threading.Lock()
 _progress_lock = threading.Lock()
 _history_lock = threading.Lock()  # For thread-safe history access in batch mode
 
-def _atomic_replace_file(temp_path: str, target_path: str, max_retries: int = 3, delay: float = 0.5):
-    """Atomically replace target_path with temp_path, retrying on Windows lock errors.
-    
-    Uses os.replace() which is atomic on Windows (unlike os.remove+os.rename).
-    Retries with a short delay to handle transient file locks from antivirus,
-    editors, or other processes that briefly hold the file open.
-    """
-    last_err = None
-    for attempt in range(max_retries):
-        try:
-            os.replace(temp_path, target_path)
-            return  # Success
-        except (PermissionError, OSError) as e:
-            last_err = e
-            if attempt < max_retries - 1:
-                time.sleep(delay)
-    # All retries exhausted — clean up temp file and raise
-    if os.path.exists(temp_path):
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
-    raise last_err
+# The atomic replace (with retries for Windows file locks) lives in gender_tracking with the
+# other tracker sidecar writers; other modules still call it as extractor._atomic_replace_file.
+_atomic_replace_file = _gender_tracking.atomic_replace_file
 # Global book title cache (set in main)
 BOOK_TITLE_RAW = None
 BOOK_TITLE_TRANSLATED = None
@@ -2773,110 +2755,19 @@ def _alias_entry_allowed(entry: Dict) -> bool:
         return _entry_type_has_active_gender(entry)
     return _entry_type_is_active(entry)
 
-def _load_gender_tracker(path: str) -> Dict:
-    if not path or not os.path.exists(path):
-        return {"version": 2, "entries": {}}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            data.setdefault("version", 1)
-            data.setdefault("entries", {})
-            return data
-    except Exception:
-        pass
-    return {"version": 2, "entries": {}}
-
-def _tracker_int(value, fallback=10**9):
-    try:
-        if value is None or value == "":
-            return fallback
-        return int(value)
-    except Exception:
-        return fallback
-
-def _tracker_occurrence_sort_key(occurrence: Dict):
-    chapter_file = str(occurrence.get("chapter_file", "") or "")
-    file_num_match = re.search(r"(\d+)", chapter_file)
-    file_num = int(file_num_match.group(1)) if file_num_match else 10**9
-    return (
-        _tracker_int(occurrence.get("chapter_index")),
-        _tracker_int(occurrence.get("chapter_num")),
-        file_num,
-        chapter_file,
-        str(occurrence.get("gender", "") or ""),
-    )
-
-def _normalize_gender_tracker_order(tracker: Dict):
-    if not isinstance(tracker, dict):
-        return tracker
-    entries = tracker.get("entries", {})
-    if not isinstance(entries, dict):
-        return tracker
-
-    def first_occurrence_key(item):
-        occurrences = item.get("occurrences", []) if isinstance(item, dict) else []
-        occurrences = [o for o in occurrences if isinstance(o, dict)]
-        return _tracker_occurrence_sort_key(occurrences[0]) if occurrences else (10**9, 10**9, 10**9, "", "")
-
-    normalized_entries = []
-    for key, item in entries.items():
-        if not isinstance(item, dict):
-            normalized_entries.append((key, item))
-            continue
-        occurrences = [o for o in item.get("occurrences", []) if isinstance(o, dict)]
-        occurrences.sort(key=_tracker_occurrence_sort_key)
-        item["occurrences"] = occurrences
-
-        changes = []
-        previous = None
-        for occurrence in occurrences:
-            if previous and previous.get("gender") != occurrence.get("gender"):
-                changes.append({
-                    "from": previous.get("gender"),
-                    "to": occurrence.get("gender"),
-                    "chapter_index": occurrence.get("chapter_index"),
-                    "chapter_num": occurrence.get("chapter_num"),
-                    "chapter_file": occurrence.get("chapter_file", ""),
-                })
-            previous = occurrence
-        item["changes"] = changes
-
-        genders = item.setdefault("genders", {})
-        if isinstance(genders, dict):
-            for gender, meta in genders.items():
-                if not isinstance(meta, dict):
-                    continue
-                first = next((o for o in occurrences if o.get("gender") == gender), None)
-                if first:
-                    meta["first_seen_chapter"] = first.get("chapter_num")
-                    meta["first_seen_file"] = first.get("chapter_file", "")
-
-        normalized_entries.append((key, item))
-
-    normalized_entries.sort(key=lambda pair: (first_occurrence_key(pair[1]), str(pair[0])))
-    tracker["entries"] = {key: item for key, item in normalized_entries}
-    return tracker
-
-def _atomic_dump_tracker_json(path: str, data: Dict):
-    """Write a tracker sidecar: temp file in the same folder, fsync, atomic replace."""
-    output_dir = os.path.dirname(path) or "."
-    os.makedirs(output_dir, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_dir, delete=False, suffix=".tmp") as temp_f:
-        temp_path = temp_f.name
-        json.dump(data, temp_f, ensure_ascii=False, indent=2)
-        temp_f.flush()
-        os.fsync(temp_f.fileno())
-    _atomic_replace_file(temp_path, path)
+# The gender tracker's load / order / atomic write live in gender_tracking (one writer for the
+# extractor, the Glossary Editor and the Relations & Gender Tracker window).
+_load_gender_tracker = _gender_tracking.load_tracker
+_tracker_int = _gender_tracking.tracker_int
+_tracker_occurrence_sort_key = _gender_tracking.tracker_occurrence_sort_key
+_normalize_gender_tracker_order = _gender_tracking.normalize_tracker_order
+_atomic_dump_tracker_json = _gender_tracking.atomic_write_json
 
 def _write_gender_tracker(path: str, tracker: Dict):
     if not path or not isinstance(tracker, dict):
         return
     try:
-        tracker["version"] = max(2, _tracker_int(tracker.get("version"), fallback=2))
-        tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        tracker = _normalize_gender_tracker_order(tracker)
-        _atomic_dump_tracker_json(path, tracker)
+        _gender_tracking.write_tracker(path, tracker)
     except Exception as e:
         print(f"⚠️ Could not write gender tracker: {e}")
 
@@ -2887,7 +2778,7 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
         return
     tracker_path = _gender_tracker_path_for_output(output_path)
     source_path = source_path or os.getenv("EPUB_PATH", "")
-    with _gender_tracker_lock:
+    with _gender_tracking.tracker_file_guard(tracker_path):
         tracker = _load_gender_tracker(tracker_path)
         tracker["source_path"] = source_path
         tracker["glossary_path"] = output_path
@@ -2903,6 +2794,8 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
                 continue
 
             key = _raw_tracker_key(raw_name)
+            if _gender_tracking.chapter_has_manual_gender(tracker_entries.get(key), chapter_num, chapter_file):
+                continue  # the gender set by hand for this chapter (Relations & Gender Tracker) stays
             item = tracker_entries.setdefault(key, {
                 "raw_name": raw_name,
                 "translated_name": entry.get("translated_name", ""),
@@ -2961,24 +2854,23 @@ def set_gender_tracker_decisions(output_path: str, decisions: Dict[str, str]) ->
     tracker_path = _gender_tracker_path_for_output(output_path)
     if not os.path.exists(tracker_path):
         return False
-    changed = False
-    with _gender_tracker_lock:
-        tracker = _load_gender_tracker(tracker_path)
-        tracker_entries = tracker.get("entries", {})
+
+    def _apply(tracker):
+        changed = False
         for raw_name, requested in decisions.items():
-            key = _raw_tracker_key(raw_name)
-            item = tracker_entries.get(key)
-            if not isinstance(item, dict):
+            if not isinstance(_gender_tracking.tracker_entry_for_raw(tracker, raw_name), dict):
                 continue
             decision = _normalize_gender_value(requested)
             if decision not in {"auto", *BINARY_GENDERS}:
                 decision = "auto"
-            if item.get("decision", "auto") != decision:
-                item["decision"] = decision
-                changed = True
-        if changed:
-            _write_gender_tracker(tracker_path, tracker)
-    return changed
+            changed = _gender_tracking.set_tracker_gender(tracker, raw_name, decision) or changed
+        return changed
+
+    try:
+        return bool(_gender_tracking.update_tracker_file(tracker_path, _apply)["changed"])
+    except Exception as e:
+        print(f"⚠️ Could not write gender tracker: {e}")
+        return False
 
 
 def resolve_glossary_gender_variants(glossary: List[Dict], output_path: str = None,
@@ -3020,7 +2912,7 @@ def sync_gender_tracker_with_glossary(glossary: List[Dict], output_path: str):
     if not canonical_by_key:
         return
 
-    with _gender_tracker_lock:
+    with _gender_tracking.tracker_file_guard(tracker_path):
         tracker = _load_gender_tracker(tracker_path)
         tracker_entries = tracker.get("entries", {})
         changed = False
@@ -3048,52 +2940,21 @@ def sync_gender_tracker_with_glossary(glossary: List[Dict], output_path: str):
 
 
 # ── Relations tracker (write side) ──────────────────────────────────
-# The rules live in relations_tracking; this side loads the sidecar, records
-# and writes it back under _relations_tracker_lock, like the gender tracker.
+# The rules, the lock and the writer live in relations_tracking; this side loads the
+# sidecar, records and writes it back under the shared guard.
 
 def _relations_tracker_path_for_output(output_path: str) -> str:
     return relations_tracking.tracker_path_for_glossary(output_path)
 
-_relations_tracker_lock_depth = 0
-
-@contextlib.contextmanager
-def _relations_tracker_guard(tracker_path: str):
-    """Hold the sidecar for one load -> modify -> write.
-
-    _relations_tracker_lock serialises this process's threads; a lock file
-    (glossary_refinement.locked_progress_file, kept in the temp folder so the
-    glossary folder stays clean) serialises processes, so the editor's save in
-    the GUI and an extraction subprocess cannot overwrite each other's update.
-    """
-    global _relations_tracker_lock_depth
-    with _relations_tracker_lock:
-        guard = None
-        if _relations_tracker_lock_depth == 0 and tracker_path:
-            key = hashlib.sha1(
-                os.path.normcase(os.path.abspath(tracker_path)).encode("utf-8", "surrogatepass")
-            ).hexdigest()
-            lock_base = os.path.join(tempfile.gettempdir(), "glossarion_tracker_locks", key)
-            try:
-                guard = _locked_glossary_progress_file(lock_base)
-                guard.__enter__()
-            except Exception:
-                guard = None  # no lock file possible: the in-process lock still holds
-        _relations_tracker_lock_depth += 1
-        try:
-            yield
-        finally:
-            _relations_tracker_lock_depth -= 1
-            if guard is not None:
-                guard.__exit__(None, None, None)
+# One load -> modify -> write at a time: relations_tracking.tracker_guard (this process's lock
+# plus a lock file per tracker in the temp folder), shared with the diagram's editing.
+_relations_tracker_guard = relations_tracking.tracker_guard
 
 def _write_relations_tracker(path: str, tracker: Dict):
     if not path or not isinstance(tracker, dict):
         return
     try:
-        tracker["version"] = relations_tracking.TRACKER_VERSION
-        tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        relations_tracking.normalize_tracker(tracker)
-        _atomic_dump_tracker_json(path, tracker)
+        relations_tracking.write_tracker(path, tracker)
     except Exception as e:
         print(f"⚠️ Could not write relations tracker: {e}")
 

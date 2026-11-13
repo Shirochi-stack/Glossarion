@@ -1021,13 +1021,26 @@ def test_edge_label_text_both_directions():
     edge = {"label_ab": "Enemy", "former_ab": ["Best Friend"], "label_ba": "Father", "former_ba": []}
     assert rt.edge_label_text(edge) == "Enemy / Father"
     assert rt.edge_label_text(edge, True) == "Enemy [Best Friend] / Father"
-    assert rt.edge_label_text({"label_ab": "", "label_ba": "Rival"}) == "? / Rival"
+    # One side recorded: only that side, no "? /" (owner 2026-11-13); none: no label at all.
+    assert rt.edge_label_text({"label_ab": "", "label_ba": "Rival"}) == "Rival"
+    assert rt.edge_label_text({"label_ab": "Club Member", "label_ba": ""}) == "Club Member"
+    assert rt.edge_label_text({"label_ab": "", "former_ab": ["Friend"], "label_ba": "Rival"}, True) == "Rival"
     # The same word from both sides is said once.
     assert rt.edge_label_text({"label_ab": "Teammate", "label_ba": "teammate"}) == "Teammate"
     same = {"label_ab": "Enemy", "former_ab": ["Friend"], "label_ba": "Enemy", "former_ba": []}
     assert rt.edge_label_text(same) == "Enemy"
     assert rt.edge_label_text(same, True) == "Enemy [Friend] / Enemy"
-    assert rt.edge_label_text({"label_ab": "", "label_ba": ""}) == "? / ?"
+    assert rt.edge_label_text({"label_ab": "", "label_ba": ""}) == ""
+    assert "?" not in rt.edge_label_text({"label_ab": None, "label_ba": "Club Member"})
+
+
+def test_edge_description_lines_say_who_is_what_to_whom():
+    names = {"a": "Seo-yun", "b": "Do-hyeon"}.get
+    edge = {"a": "a", "b": "b", "label_ab": "Older Brother", "label_ba": ""}
+    assert rt.edge_description_lines(edge, names) == ["Do-hyeon is Older Brother to Seo-yun"]
+    edge["label_ba"] = "Younger Sister"
+    assert rt.edge_description_lines(edge, names) == [
+        "Do-hyeon is Older Brother to Seo-yun", "Seo-yun is Younger Sister to Do-hyeon"]
 
 
 def _team_graph():
@@ -1181,3 +1194,418 @@ def test_descriptions_shown_by_a_diagram():
     assert written["text"] == "third" and [d["text"] for d in earlier] == ["second", "first"]
     # Recorded, but nothing yet at that chapter: not the glossary's later text.
     assert rt.descriptions_shown(tracker, "min", 2, glossary) == (None, [], "chapter")
+
+
+# --------------------------------------------------------------------------- hand edits
+
+def _labels(tracker, a, b, chapter=None):
+    return rt.relation_labels(tracker, a, b, chapter)
+
+
+def _timeline(tracker, raw, target, chapter=None):
+    rows = {r["target_raw"]: r for r in rt.character_history(tracker, raw, chapter)}
+    return [(run["label"], run["from_chapter"], run["to_chapter"]) for run in rows[target]["timeline"]] if target in rows else []
+
+
+def test_set_relation_label_corrects_every_record_and_sticks():
+    tracker = _story_tracker()
+    assert _labels(tracker, "서윤", "도현") == ("Older Brother", "Younger Sister")
+    result = rt.set_relation_label(tracker, "서윤", "도현", "Big Brother")
+    assert result["changed"] and result["old"] == "Older Brother"
+    assert _labels(tracker, "서윤", "도현") == ("Big Brother", "Younger Sister")
+    assert tracker["edits"]["corrections"] == [
+        {"entry": "서윤", "target": "도현", "from": "Older Brother", "to": "Big Brother"}]
+    # The AI repeats the old wording (any case) in a later chapter: recorded as corrected.
+    _record(tracker, 30, [_entry("서윤", "Seo-yun", "도현: older brother")])
+    assert _timeline(tracker, "서윤", "도현") == [("Big Brother", 1, 30)]
+    assert rt.recorded_label(tracker, "서윤", "도현", "Older Brother") == "Big Brother"
+    assert rt.recorded_label(tracker, "도현", "서윤", "Older Brother") == "Older Brother"  # per direction
+    # Correcting again re-points the first correction; going back to the AI's word drops it.
+    rt.set_relation_label(tracker, "서윤", "도현", "Brother")
+    assert rt.recorded_label(tracker, "서윤", "도현", "Older Brother") == "Brother"
+    rt.set_relation_label(tracker, "서윤", "도현", "Older Brother")
+    assert rt.recorded_label(tracker, "서윤", "도현", "Older Brother") == "Older Brother"
+    assert rt.recorded_label(tracker, "서윤", "도현", "Brother") == "Older Brother"
+
+
+def test_set_relation_label_only_touches_the_chosen_label_and_can_clear_a_side():
+    tracker = _story_tracker()
+    # At chapter 25 서윤 sees 하린 as Rival: only that label changes, the others stay.
+    rt.set_relation_label(tracker, "서윤", "하린", "Nemesis", chapter=25)
+    assert [run[0] for run in _timeline(tracker, "서윤", "하린")] == ["Best Friend", "Nemesis", "Enemy"]
+    rt.set_relation_label(tracker, "서윤", "하린", "", old_label="Enemy")
+    assert [run[0] for run in _timeline(tracker, "서윤", "하린")] == ["Best Friend", "Nemesis"]
+    _record(tracker, 41, [_entry("서윤", "Seo-yun", "하린: Enemy")])
+    assert [run[0] for run in _timeline(tracker, "서윤", "하린")] == ["Best Friend", "Nemesis"]
+    # Writing the cleared label by hand lifts its ignore.
+    rt.set_relation_label(tracker, "서윤", "하린", "Enemy", chapter=42)
+    assert not any(r.get("label") == "Enemy" for r in tracker.get("edits", {}).get("ignored", []))
+    # A side with nothing recorded is added at the chapter given.
+    rt.set_relation_label(tracker, "하린", "도현", "Classmate", chapter=10)
+    assert _labels(tracker, "하린", "도현", 10) == ("Classmate", "") and _labels(tracker, "하린", "도현", 5) == ("", "")
+
+
+def test_clearing_the_only_side_removes_the_relation():
+    tracker = _story_tracker()
+    rt.edit_relation(tracker, "무진", "도현", label_ab="", label_ba="")
+    assert _labels(tracker, "무진", "도현") == ("", "")
+    assert "도현" not in tracker["entries"]["무진"]["relations"]
+    assert all(e["a"] != "도현" or e["b"] != "무진" for e in rt.build_graph(tracker)["edges"])
+    assert rt.edit_relation(tracker, "무진", "도현", label_ab="")["changed"] is False
+
+
+def test_delete_relation_and_remove_character_are_remembered():
+    tracker = _story_tracker()
+    assert rt.delete_relation(tracker, "서윤", "하린")["removed"] > 0
+    assert tracker["edits"]["ignored_pairs"] == [sorted(["서윤", "하린"])]
+    _record(tracker, 50, [_entry("서윤", "Seo-yun", "하린: Friend"), _entry("하린", "Ha-rin", "서윤: Friend")])
+    assert _labels(tracker, "서윤", "하린") == ("", "")
+    assert rt.delete_relation(tracker, "서윤", "하린")["changed"] is False
+    # A junk name: its entry and every relation pointing at it go; it is not recorded again,
+    # not even for a description.
+    _record(tracker, 5, [_entry("서윤", "Seo-yun", "Older Sibling: Brother"),
+                         _entry("Older Sibling", "", "서윤: Sister")])
+    assert "older sibling" in tracker["entries"]
+    result = rt.remove_character(tracker, "Older Sibling")
+    assert result["changed"] and result["relations"] == 2
+    _record(tracker, 6, [_entry("서윤", "Seo-yun", "Older Sibling: Brother"),
+                         _entry("Older Sibling", "", "서윤: Sister", description="A sibling")])
+    _describe(tracker, 7, "Older Sibling", "Still a sibling")
+    assert "older sibling" not in tracker["entries"]
+    assert not any("older sibling" in item["relations"] for item in tracker["entries"].values())
+    assert "older sibling" not in {n["id"] for n in rt.known_names(tracker, [{"raw_name": "Older Sibling"}])}
+    # Adding it by hand brings it back.
+    rt.add_relation(tracker, "Older Sibling", "서윤", "Brother", chapter=7)
+    assert "older sibling" in tracker["entries"] and "removed" not in tracker.get("edits", {})
+
+
+def test_removing_a_name_only_the_gender_tracker_knows_is_remembered():
+    tracker = rt.empty_tracker()
+    gender = {"entries": {"older sibling": {"raw_name": "Older Sibling",
+                                            "occurrences": [{"gender": "female", "chapter_num": 2}]}}}
+
+    def drawn():
+        graph = rt.build_graph(tracker, gender_tracker=gender, include_gender_only=True, show_unlisted=True)
+        return {n["id"] for n in graph["nodes"]}
+
+    assert "older sibling" in drawn()
+    result = rt.remove_character(tracker, "Older Sibling")
+    assert result["changed"] and tracker["edits"]["removed"] == ["older sibling"]
+    assert rt.remove_character(tracker, "Older Sibling")["changed"] is False  # already removed
+    assert "older sibling" not in drawn()
+
+
+def test_a_cleared_side_stays_cleared_for_a_slightly_different_wording():
+    tracker = rt.empty_tracker()
+    _record(tracker, 1, [_entry("서윤", "Seo-yun", "하린: Club Member"), _entry("하린", "Ha-rin", "")])
+    rt.set_relation_label(tracker, "서윤", "하린", "")
+    _record(tracker, 2, [_entry("서윤", "Seo-yun", "하린: Club Members"), _entry("하린", "Ha-rin", "")])
+    assert _labels(tracker, "서윤", "하린") == ("", "")
+    # a qualifier names another relation: not caught by the ignore
+    _record(tracker, 3, [_entry("서윤", "Seo-yun", "하린: Ex-Club Member"), _entry("하린", "Ha-rin", "")])
+    assert _labels(tracker, "서윤", "하린")[0] == "Ex-Club Member"
+
+
+def test_side_unknown_at_a_chapter_is_added_there_not_renamed_later():
+    tracker = rt.empty_tracker()
+    _record(tracker, 1, [_entry("갑", "", "을: Friend"), _entry("을", "", "")])
+    _record(tracker, 10, [_entry("을", "", "갑: Rival"), _entry("갑", "", "")])
+    assert rt.relation_labels(tracker, "을", "갑", 3) == ("", "Friend")
+    rt.edit_relation(tracker, "을", "갑", "Classmate", None, old_ab="", chapter=3)
+    assert rt.relation_labels(tracker, "을", "갑", 3) == ("Classmate", "Friend")
+    assert rt.relation_labels(tracker, "을", "갑", 10) == ("Rival", "Friend")
+    assert not (tracker.get("edits") or {}).get("corrections")
+
+
+def test_diagram_chapter_bounds_cover_both_trackers():
+    tracker = rt.empty_tracker()
+    _record(tracker, 3, [_entry("갑", "", "을: Friend"), _entry("을", "", "")])
+    _record(tracker, 5, [_entry("갑", "", "을: Friend"), _entry("을", "", "")])
+    gender = {"entries": {"병": {"occurrences": [{"gender": "female", "chapter_num": 1},
+                                                {"gender": "male", "chapter_num": 8}]}}}
+    assert rt.diagram_chapter_bounds(tracker) == (3, 5)
+    assert rt.diagram_chapter_bounds(tracker, gender) == (1, 8)
+    assert rt.diagram_chapter_bounds(rt.empty_tracker(), gender) == (1, 8)
+    assert rt.diagram_chapter_bounds(rt.empty_tracker(), None) == (None, None)
+
+
+def test_delete_history_entry_drops_one_run_for_its_chapters_only():
+    tracker = _story_tracker()
+    result = rt.delete_history_entry(tracker, "서윤", "하린", "Rival", 20, 21)
+    assert result == {"changed": True, "removed": 2}
+    assert [run[0] for run in _timeline(tracker, "서윤", "하린")] == ["Best Friend", "Enemy"]
+    _record(tracker, 20, [_entry("서윤", "Seo-yun", "하린: Rival")])  # chapter 20 re-extracted
+    assert [run[0] for run in _timeline(tracker, "서윤", "하린")] == ["Best Friend", "Enemy"]
+    _record(tracker, 45, [_entry("서윤", "Seo-yun", "하린: Rival")])  # a later chapter still counts
+    assert [run[0] for run in _timeline(tracker, "서윤", "하린")] == ["Best Friend", "Enemy", "Rival"]
+    assert rt.delete_history_entry(tracker, "서윤", "하린", "Nobody")["changed"] is False
+
+
+def test_add_relation_sorts_with_the_ai_records_and_lifts_ignores():
+    tracker = _story_tracker()
+    rt.delete_relation(tracker, "도현", "하린")
+    result = rt.add_relation(tracker, "도현", "하린", "Classmate", "Senior", chapter=15)
+    assert result == {"changed": True, "added": 2}
+    assert _labels(tracker, "도현", "하린", 15) == ("Classmate", "Senior")
+    assert _labels(tracker, "도현", "하린", 12) == ("", "")
+    assert "edits" not in tracker  # the pair ignore was the only edit
+    occurrence = tracker["entries"]["도현"]["relations"]["하린"]["occurrences"][0]
+    assert occurrence["manual"] is True and occurrence["chapter_num"] == 15
+    assert 9 < occurrence["chapter_index"] < 19  # between chapter 10 (index 9) and 20 (index 19)
+    # At a recorded chapter the AI's index and file are used; None means the last chapter.
+    rt.add_relation(tracker, "하린", "무진", "Teacher", chapter=10)
+    occurrence = tracker["entries"]["하린"]["relations"]["무진"]["occurrences"][0]
+    assert (occurrence["chapter_index"], occurrence["chapter_file"]) == (9, "ch010.xhtml")
+    rt.add_relation(tracker, "새이름", "서윤", "Stranger Friend")
+    occurrence = tracker["entries"]["새이름"]["relations"]["서윤"]["occurrences"][0]
+    assert occurrence["chapter_num"] == 40
+    assert rt.add_relation(tracker, "서윤", "서윤", "Self")["changed"] is False
+    assert rt.add_relation(tracker, "서윤", "하린")["changed"] is False
+
+
+def test_descriptions_can_be_edited_and_deleted_by_hand():
+    tracker = rt.empty_tracker()
+    for chapter, text in ((3, "first"), (8, "second")):
+        _describe(tracker, chapter, "min", text)
+    assert rt.set_description(tracker, "min", "corrected", 8)["changed"]
+    assert rt.description_at(tracker, "min", 9)["text"] == "corrected"
+    _describe(tracker, 8, "min", "the AI again")  # re-extracting chapter 8 keeps the hand-written one
+    assert rt.description_at(tracker, "min", 9)["text"] == "corrected"
+    assert rt.delete_description(tracker, "min", 3)["removed"] == 1
+    _describe(tracker, 3, "min", "first again")
+    assert [d["text"] for d in rt.description_history(tracker, "min")] == ["corrected"]
+    rt.set_description(tracker, "min", "written by hand", 3)
+    assert [d["text"] for d in rt.description_history(tracker, "min")] == ["written by hand", "corrected"]
+    assert "ignored_descriptions" not in tracker.get("edits", {})
+    rt.set_description(tracker, "min", "", 3)
+    assert [d["text"] for d in rt.description_history(tracker, "min")] == ["corrected"]
+
+
+def test_edits_follow_a_name_the_glossary_sync_merges():
+    tracker = rt.empty_tracker()
+    _record(tracker, 1, [_entry("바알", "Baal", "리리엣: Niece")])
+    rt.set_relation_label(tracker, "바알", "리리엣", "Daughter")
+    rt.hide_names(tracker, ["바알"])
+    rt.sync_tracker_with_glossary(tracker, [{"type": "character", "raw_name": "바알 아르젠트",
+                                             "translated_name": "Baal Argent"},
+                                            {"type": "character", "raw_name": "리리엣", "translated_name": "Liliet"}])
+    assert "바알 아르젠트" in tracker["entries"] and "바알" not in tracker["entries"]
+    assert tracker["edits"]["corrections"][0]["entry"] == "바알 아르젠트"
+    assert rt.view_settings(tracker)["hidden"] == ["바알 아르젠트"]
+    _record(tracker, 2, [_entry("바알 아르젠트", "Baal Argent", "리리엣: Niece")])
+    assert _labels(tracker, "바알 아르젠트", "리리엣") == ("Daughter", "")
+    # An alias entry merged by the sync brings the AI's old label: corrected on the way in.
+    _record(tracker, 3, [_entry("바알", "Baal", "리리엣: Niece")])
+    rt.sync_tracker_with_glossary(tracker, [{"type": "character", "raw_name": "바알 아르젠트",
+                                             "translated_name": "Baal Argent"}])
+    assert [run[0] for run in _timeline(tracker, "바알 아르젠트", "리리엣")] == ["Daughter"]
+
+
+def test_trackers_without_edits_are_unchanged():
+    """No new key appears unless the user edits; record/normalise give what they always gave."""
+    tracker = _story_tracker()
+    reference = json.dumps(tracker, ensure_ascii=False, sort_keys=True)
+    assert "edits" not in tracker and "view" not in tracker
+    rt.normalize_tracker(tracker)
+    rt._prune_optional_keys(tracker)
+    assert json.dumps(tracker, ensure_ascii=False, sort_keys=True) == reference
+    assert rt.recorded_label(tracker, "서윤", "하린", "Rival") == "Rival"
+    # Every edit leaves no trace once undone by hand.
+    rt.hide_names(tracker, ["서윤"])
+    rt.hide_names(tracker, ["서윤"], hide=False)
+    rt._prune_optional_keys(tracker)
+    assert json.dumps(tracker, ensure_ascii=False, sort_keys=True) == reference
+
+
+# --------------------------------------------------------------------------- tracker file
+
+def test_edit_tracker_writes_under_the_lock_and_undo_restores(tmp_path):
+    path = str(tmp_path / "Book_relations_tracker.json")
+    assert rt.file_stamp(path) is None and rt.read_tracker(path) == rt.empty_tracker()
+    first = rt.edit_tracker(path, lambda t: rt.add_relation(t, "a", "b", "Friend", chapter=1))
+    assert first["changed"] and first["result"]["added"] == 1 and first["stamp"] == rt.file_stamp(path)
+    assert first["before"] == rt.empty_tracker()
+    second = rt.edit_tracker(path, lambda t: rt.set_relation_label(t, "a", "b", "Best Friend"))
+    # Someone else (an extraction) adds another character meanwhile: undo keeps it.
+    rt.edit_tracker(path, lambda t: rt.add_relation(t, "c", "d", "Rival", chapter=2))
+    undone = rt.undo_edit(path, second)
+    assert undone["undone"] and undone["stamp"] == rt.file_stamp(path)
+    tracker = rt.load_tracker(path)
+    assert _labels(tracker, "a", "b") == ("Friend", "") and _labels(tracker, "c", "d") == ("Rival", "")
+    assert "edits" not in tracker
+    assert rt.undo_edit(path, second) == {"undone": False, "reason": "changed"}
+    # The same character changed by someone else since: nothing is undone.
+    third = rt.edit_tracker(path, lambda t: rt.set_relation_label(t, "a", "b", "Ally"))
+    rt.edit_tracker(path, lambda t: rt.add_relation(t, "a", "e", "Mentor", chapter=3))
+    assert rt.undo_edit(path, third)["reason"] == "changed"
+    assert rt.edit_tracker(path, lambda t: rt.add_relation(t, "a", "e", "Mentor", chapter=3))["changed"] is False
+
+
+def test_an_unreadable_tracker_is_skipped_and_never_overwritten(tmp_path):
+    path = tmp_path / "Book_relations_tracker.json"
+    path.write_text('{"entries": {"a": ', encoding="utf-8")
+    assert rt.read_tracker(str(path)) is None
+    with pytest.raises(ValueError):
+        rt.edit_tracker(str(path), lambda t: rt.add_relation(t, "a", "b", "Friend"))
+    assert path.read_text(encoding="utf-8") == '{"entries": {"a": '
+    assert rt.read_gender_tracker(str(path)) is None
+    assert rt.read_gender_tracker(str(tmp_path / "missing.json")) == {"version": 2, "entries": {}}
+
+
+def test_file_stamp_changes_with_a_write(tmp_path):
+    path = str(tmp_path / "Book_relations_tracker.json")
+    rt.edit_tracker(path, lambda t: rt.add_relation(t, "a", "b", "Friend", chapter=1))
+    stamp = rt.file_stamp(path)
+    assert isinstance(stamp, tuple) and stamp[1] == os.path.getsize(path)
+    rt.edit_tracker(path, lambda t: rt.add_relation(t, "a", "c", "Rival", chapter=1))
+    assert rt.file_stamp(path) != stamp
+
+
+# --------------------------------------------------------------------------- view choices
+
+def test_view_choices_are_kept_in_the_tracker(tmp_path):
+    tracker = _story_tracker()
+    assert rt.view_settings(tracker) == {"hidden": [], "show_relations": True, "show_gender": True}
+    assert rt.set_view(tracker, hidden=["서윤", "서윤 "], show_gender=False)["changed"]
+    assert tracker["view"] == {"hidden": ["서윤"], "show_relations": True, "show_gender": False}
+    assert rt.set_view(tracker, show_gender=False)["changed"] is False
+    rt.hide_names(tracker, ["하린"])
+    assert rt.view_settings(tracker)["hidden"] == ["서윤", "하린"]
+    path = str(tmp_path / "Book_relations_tracker.json")
+    rt.edit_tracker(path, lambda t: t.update(copy.deepcopy(_story_tracker())))
+    data_before = rt.load_tracker(path)
+    edit = rt.save_view(path, hidden=["무진"], show_relations=False)
+    data = rt.load_tracker(path)
+    assert edit["changed"] and data["view"]["hidden"] == ["무진"]
+    assert data["entries"] == data_before["entries"]  # relations data untouched
+    assert rt.undo_edit(path, edit)["undone"] and "view" not in rt.load_tracker(path)
+
+
+# --------------------------------------------------------------------------- graph filters and gender
+
+def _gender_tracker():
+    return {"version": 2, "entries": {
+        "서윤": {"raw_name": "서윤", "translated_name": "Seo-yun", "decision": "auto", "occurrences": [
+            {"gender": "male", "chapter_index": 0, "chapter_num": 1, "chapter_file": "ch001.xhtml"},
+            {"gender": "female", "chapter_index": 9, "chapter_num": 10, "chapter_file": "ch010.xhtml"},
+            {"gender": "female", "chapter_index": 19, "chapter_num": 20, "chapter_file": "ch020.xhtml"}]},
+        "무진": {"raw_name": "무진", "decision": "male", "occurrences": [
+            {"gender": "female", "chapter_index": 0, "chapter_num": 1, "chapter_file": "ch001.xhtml"}]},
+        "소희": {"raw_name": "소희", "translated_name": "So-hee", "decision": "auto", "occurrences": [
+            {"gender": "female", "chapter_index": 4, "chapter_num": 5, "chapter_file": "ch005.xhtml"}]},
+    }}
+
+
+def test_build_graph_defaults_are_unchanged_by_the_new_parameters():
+    tracker = _story_tracker()
+    glossary = [{"raw_name": "서윤", "translated_name": "Seo-yun", "gender": "Female"}]
+    for chapter in (None, 10, 40):
+        plain = rt.build_graph(tracker, glossary, chapter, True, "full")
+        assert plain == rt.build_graph(tracker, glossary, chapter, True, "full", hidden=(), show_relations=True,
+                                       show_gender=True, gender_tracker=None, include_gender_only=False)
+        assert all("gender_only" not in node for node in plain["nodes"])
+
+
+def test_hidden_names_keep_the_others_in_place():
+    tracker = _story_tracker()
+    full = rt.build_graph(tracker)
+    positions = rt.layout_graph(full, 900, 600)
+    shown = rt.build_graph(tracker, hidden=["하린"])
+    assert {n["id"] for n in shown["nodes"]} == {n["id"] for n in full["nodes"]} - {"하린"}
+    assert all("하린" not in (e["a"], e["b"]) for e in shown["edges"])
+    assert len(shown["edges"]) == len(full["edges"]) - 1
+    assert all(n["id"] in positions for n in shown["nodes"])  # drawn at the full layout's positions
+    assert rt.filter_graph(full, ["하린"]) == shown
+    no_lines = rt.build_graph(tracker, show_relations=False)
+    assert no_lines["edges"] == [] and len(no_lines["nodes"]) == len(full["nodes"])
+
+
+def test_gender_history_and_tints_follow_the_chapter():
+    gender = _gender_tracker()
+    history = rt.gender_history(gender, "서윤")
+    assert history["source"] == "tracker" and history["current"] == "female"
+    assert [(r["gender"], r["from_chapter"], r["to_chapter"]) for r in history["timeline"]] == [
+        ("male", 1, 1), ("female", 10, 20)]
+    assert rt.gender_history_text(history) == "Male (Ch. 1), Female (Ch. 10-20)"
+    assert rt.gender_at(gender, "서윤", 5) == "male" and rt.gender_at(gender, "서윤", 10) == "female"
+    assert rt.gender_history_text(rt.gender_history(gender, "서윤", 5)) == "Male (Ch. 1)"
+    assert rt.gender_history_text(rt.gender_history(gender, "무진")) == "Male (all chapters)"
+    # The glossary's gender when the tracker knows nothing (yet).
+    assert rt.gender_at(gender, "하린", None, "Female") == "female"
+    assert rt.gender_history_text(rt.gender_history(gender, "하린", None, "Female")) == "Female (glossary)"
+    assert rt.gender_at(gender, "서윤", 0, "Female") == "female"
+    assert rt.gender_history(None, "x") == {"raw_name": "x", "decision": "auto", "current": "", "source": "",
+                                            "timeline": []}
+    tracker = _story_tracker()
+    glossary = [{"raw_name": n, "translated_name": n.upper(), "gender": "Male"} for n in ("서윤", "도현", "하린", "무진")]
+    nodes = {n["id"]: n for n in rt.build_graph(tracker, glossary, 5, gender_tracker=gender)["nodes"]}
+    assert nodes["서윤"]["gender"] == "male" and nodes["무진"]["gender"] == "male"
+    assert nodes["도현"]["gender"] == "male" and nodes["서윤"]["gender_only"] is False
+    nodes = {n["id"]: n for n in rt.build_graph(tracker, glossary, 20, gender_tracker=gender)["nodes"]}
+    assert nodes["서윤"]["gender"] == "female"
+    assert all(n["gender"] == "" for n in rt.build_graph(tracker, glossary, 20, gender_tracker=gender,
+                                                        show_gender=False)["nodes"])
+
+
+def test_gender_only_names_appear_without_lines():
+    tracker = _story_tracker()
+    gender = _gender_tracker()
+    graph = rt.build_graph(tracker, None, None, gender_tracker=gender, include_gender_only=True)
+    extra = [n for n in graph["nodes"] if n.get("gender_only")]
+    assert [(n["id"], n["label"], n["gender"], n["degree"]) for n in extra] == [("소희", "So-hee", "female", 0)]
+    assert not any("소희" in (e["a"], e["b"]) for e in graph["edges"])
+    assert "소희" in rt.layout_graph(graph)
+    assert not [n for n in rt.build_graph(tracker, None, 3, gender_tracker=gender, include_gender_only=True)["nodes"]
+                if n.get("gender_only")]  # tracked from chapter 5 on
+    assert not [n for n in rt.build_graph(tracker, None, None, gender_tracker=gender, include_gender_only=True,
+                                          show_gender=False)["nodes"] if n.get("gender_only")]
+    # Unlisted names are left out (소희); 서윤 has no line to another listed name, so it is a name alone.
+    assert [n["id"] for n in rt.build_graph(tracker, [{"raw_name": "서윤"}], None, gender_tracker=gender,
+                                            include_gender_only=True)["nodes"] if n.get("gender_only")] == ["서윤"]
+    # A name removed from the tracker is not shown for its gender either.
+    rt.add_relation(tracker, "x", "y", "Friend", chapter=1)
+    rt.add_relation(tracker, "소희", "서윤", "Friend", chapter=5)
+    rt.remove_character(tracker, "소희")
+    assert not [n for n in rt.build_graph(tracker, None, None, gender_tracker=gender, include_gender_only=True)["nodes"]
+                if n["id"] == "소희"]
+    assert {n["id"] for n in rt.known_names(tracker, None, gender)} >= {"서윤", "x", "y"}
+    assert "소희" not in {n["id"] for n in rt.known_names(tracker, None, gender)}
+
+
+def test_the_word_empty_is_not_a_gender():
+    """A real book's gender tracker held "empty" (the model's wording for no gender) for 24 things such as
+    "Magic Stone"; each was drawn as a name known for its gender."""
+    gender = _gender_tracker()
+    gender["entries"]["마석"] = {"raw_name": "마석", "translated_name": "Magic Stone", "decision": "auto", "occurrences": [
+        {"gender": "empty", "chapter_index": 4, "chapter_num": 5, "chapter_file": "ch005.xhtml"}]}
+    gender["entries"]["서윤"]["occurrences"].append(
+        {"gender": "Empty", "chapter_index": 29, "chapter_num": 30, "chapter_file": "ch030.xhtml"})
+    graph = rt.build_graph(_story_tracker(), None, None, gender_tracker=gender, include_gender_only=True)
+    assert [n["id"] for n in graph["nodes"] if n.get("gender_only")] == ["소희"]
+    assert rt.gender_history(gender, "마석")["current"] == ""
+    assert rt.gender_at(gender, "서윤") == "female"  # the last real gender stays
+    assert rt.gender_at(gender, "x", None, "empty") == ""
+
+
+def test_set_gender_writes_the_gender_tracker_and_can_be_undone(tmp_path):
+    glossary = str(tmp_path / "Book_glossary.csv")
+    path = rt.gender_tracker_path_for_glossary(glossary)
+    assert path.endswith("Book_gender_tracker.json")
+    edit = rt.set_gender(glossary, "루나", "female")
+    assert edit["changed"] and edit["stamp"] == rt.file_stamp(path)
+    tracker = rt.read_gender_tracker(path)
+    assert tracker["entries"]["루나"]["decision"] == "female"
+    assert rt.set_gender(glossary, "루나", "female")["changed"] is False
+    # One chapter: the index comes from the relations tracker when the gender tracker has none.
+    rt.edit_tracker(rt.tracker_path_for_glossary(glossary),
+                    lambda t: [_record(t, c, [_entry("루나", "Luna", "카이: Friend")]) for c in (1, 4)])
+    chapter_edit = rt.set_gender(glossary, "루나", "male", 4)
+    item = rt.read_gender_tracker(path)["entries"]["루나"]
+    assert item["decision"] == "auto"
+    assert item["occurrences"] == [{"raw_name": "루나", "gender": "male", "chapter_index": 3, "chapter_num": 4,
+                                    "chapter_file": "ch004.xhtml", "source_path": "", "translated_name": "",
+                                    "manual": True}]
+    assert rt.undo_gender_edit(glossary, chapter_edit)["undone"]
+    assert rt.read_gender_tracker(path)["entries"]["루나"]["decision"] == "female"
+    assert rt.set_gender(glossary, "루나", "auto")["changed"]
+    assert rt.gender_at(rt.read_gender_tracker(path), "루나", None, "Male") == "male"

@@ -618,7 +618,8 @@ def test_tracker_writers_take_a_cross_process_lock(eg, _env, tmp_path, monkeypat
         held.append(path)
         yield
 
-    monkeypatch.setattr(eg, "_locked_glossary_progress_file", _fake_lock)
+    import gender_tracking
+    monkeypatch.setattr(gender_tracking, "_lock_file", _fake_lock)  # the one shared guard's lock file
     _on(_env)
     glossary = str(tmp_path / "Book_glossary.csv")
     eg.update_relations_tracker([{"raw_name": "서윤", "translated_name": "Seo-yun", "relations": "도현: Brother"}],
@@ -628,8 +629,143 @@ def test_tracker_writers_take_a_cross_process_lock(eg, _env, tmp_path, monkeypat
         with eg._relations_tracker_guard(rt.tracker_path_for_glossary(glossary)):  # nested: taken once
             pass
     assert len(held) == 3 and len(set(held)) == 1
+    # The diagram's edits and view choices take the very same lock (one implementation).
+    assert eg._relations_tracker_guard is rt.tracker_guard and eg._relations_tracker_lock is rt.TRACKER_LOCK
+    rt.edit_tracker(rt.tracker_path_for_glossary(glossary), lambda t: rt.add_relation(t, "서윤", "하린", "Friend"))
+    rt.save_view(rt.tracker_path_for_glossary(glossary), show_gender=False)
+    assert len(held) == 5 and len(set(held)) == 1
+    # The gender tracker's writers (extraction, the editor's decisions, the diagram) lock their own file.
+    eg.update_gender_tracker([{"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun", "gender": "female"}],
+                             glossary, chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    rt.set_gender(glossary, "서윤", "male", 1)
+    assert len(held) == 7 and len(set(held[5:])) == 1 and held[5] != held[0]
+    assert eg._gender_tracker_lock is gender_tracking.TRACKER_LOCK
     assert not held[0].startswith(str(tmp_path))
     assert os.listdir(tmp_path) and not [n for n in os.listdir(tmp_path) if n.endswith(".lock")]
+
+
+def _record_chapter(eg, glossary, chapter, rows):
+    eg.update_relations_tracker([dict(r) for r in rows], glossary, chapter_index=chapter - 1,
+                                chapter_num=chapter, chapter_file=f"c{chapter}.xhtml")
+
+
+def test_hand_edits_survive_a_later_extraction_and_the_glossary_sync(eg, _env, tmp_path):
+    """A corrected label, a deleted pair and a removed name stay fixed when the AI repeats itself."""
+    _on(_env)
+    glossary = str(tmp_path / "Book_glossary.csv")
+    path = rt.tracker_path_for_glossary(glossary)
+    # The model writes on X's row "Y: what X is to Y": 서윤 is Older Sibling to 도현 (a mistake).
+    rows = [{"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun",
+             "relations": "도현: Older Sibling; 하린: Rival; 언니: Sister"},
+            {"type": "character", "raw_name": "도현", "translated_name": "Do-hyeon"},
+            {"type": "character", "raw_name": "하린", "translated_name": "Ha-rin"}]
+    _record_chapter(eg, glossary, 1, rows)
+    tracker = rt.load_tracker(path)
+    assert rt.relation_labels(tracker, "도현", "서윤") == ("Older Sibling", "")
+    edit = rt.edit_tracker(path, lambda t: rt.set_relation_label(t, "도현", "서윤", "Younger Sister"))
+    assert edit["changed"] and edit["stamp"] == rt.file_stamp(path)
+    rt.edit_tracker(path, lambda t: rt.delete_relation(t, "서윤", "하린"))
+    rt.edit_tracker(path, lambda t: rt.remove_character(t, "언니"))
+    for chapter in (2, 3):
+        _record_chapter(eg, glossary, chapter, rows)
+    eg.sync_relations_tracker_with_glossary(
+        [{"type": "character", "raw_name": r["raw_name"], "translated_name": r["translated_name"]} for r in rows],
+        glossary)
+    tracker = rt.load_tracker(path)
+    assert rt.relation_labels(tracker, "도현", "서윤") == ("Younger Sister", "")
+    history = {r["target_raw"]: r for r in rt.character_history(tracker, "도현")}
+    assert [run["label"] for run in history["서윤"]["timeline"]] == ["Younger Sister"]
+    assert history["서윤"]["timeline"][0]["count"] == 3
+    assert rt.relation_labels(tracker, "서윤", "하린") == ("", "") and "언니" not in tracker["entries"]
+    assert not any("언니" in (item.get("relations") or {}) for item in tracker["entries"].values())
+    # Adding by hand lifts the pair's ignore; the next chapter records it again.
+    rt.edit_tracker(path, lambda t: rt.add_relation(t, "하린", "서윤", "Rival", chapter=3))
+    _record_chapter(eg, glossary, 4, rows)
+    rows_4 = {r["target_raw"]: r for r in rt.character_history(rt.load_tracker(path), "하린")}
+    assert rows_4["서윤"]["timeline"][-1]["to_chapter"] == 4
+
+
+def test_an_unedited_tracker_is_written_as_before(eg, _env, tmp_path):
+    """No new keys unless the user edits: the extractor's "write only when changed" still holds."""
+    _on(_env)
+    glossary = str(tmp_path / "Book_glossary.csv")
+    path = rt.tracker_path_for_glossary(glossary)
+    _record_chapter(eg, glossary, 1, [{"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun",
+                                       "description": "A swordswoman", "relations": "도현: Sister"}])
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert set(data) == {"version", "entries", "glossary_path", "updated_at"}
+    assert not any(k in json.dumps(data, ensure_ascii=False) for k in ('"manual"', '"edited"', '"edits"', '"view"'))
+    stamp = rt.file_stamp(path)
+    before = Path(path).read_bytes()
+    assert rt.edit_tracker(path, lambda t: None)["changed"] is False  # a no-op edit writes nothing
+    eg.sync_relations_tracker_with_glossary([{"raw_name": "서윤", "translated_name": "Seo-yun"},
+                                             {"raw_name": "도현", "translated_name": ""}], glossary)
+    assert rt.file_stamp(path) == stamp and Path(path).read_bytes() == before
+    # A view choice set and set back leaves the same data (only the time stamp moves).
+    rt.save_view(path, show_relations=False)
+    assert json.loads(Path(path).read_text(encoding="utf-8"))["view"]["show_relations"] is False
+    rt.save_view(path, show_relations=True)
+    after = json.loads(Path(path).read_text(encoding="utf-8"))
+    after.pop("updated_at")
+    data.pop("updated_at")
+    assert after == data
+
+
+_WRITER_SCRIPT = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+import relations_tracking as rt
+path, count = sys.argv[2], int(sys.argv[3])
+for i in range(count):
+    rt.edit_tracker(path, lambda t, i=i: rt.add_relation(t, "p%d" % i, "q%d" % i, "Friend", chapter=1))
+"""
+
+
+def test_concurrent_writers_lose_nothing(eg, _env, tmp_path):
+    """The extractor, a GUI edit in another thread and another process write the same tracker."""
+    import subprocess
+    import threading
+    _on(_env)
+    glossary = str(tmp_path / "Book_glossary.csv")
+    path = rt.tracker_path_for_glossary(glossary)
+    count = 12
+    script = tmp_path / "writer.py"
+    script.write_text(_WRITER_SCRIPT, encoding="utf-8")
+    other = subprocess.Popen([sys.executable, str(script), str(SRC), path, str(count)])
+
+    def _thread_edits():
+        for i in range(count):
+            rt.edit_tracker(path, lambda t, i=i: rt.set_description(t, f"d{i}", f"text {i}", 1))
+
+    thread = threading.Thread(target=_thread_edits)
+    thread.start()
+    for i in range(count):
+        _record_chapter(eg, glossary, 1, [{"type": "character", "raw_name": f"x{i}", "translated_name": "",
+                                           "relations": f"y{i}: Rival"}])
+    thread.join(60)
+    assert other.wait(120) == 0
+    tracker = rt.load_tracker(path)
+    assert all(rt.relation_labels(tracker, f"y{i}", f"x{i}") == ("Rival", "") for i in range(count))
+    assert all(rt.relation_labels(tracker, f"p{i}", f"q{i}") == ("Friend", "") for i in range(count))
+    assert all(rt.description_at(tracker, f"d{i}")["text"] == f"text {i}" for i in range(count))
+
+
+def test_a_gender_set_for_a_chapter_survives_extraction(eg, _env, tmp_path):
+    glossary = str(tmp_path / "Book_glossary.csv")
+    row = {"type": "character", "raw_name": "루나", "translated_name": "Luna", "gender": "male"}
+    for chapter in (1, 2):
+        eg.update_gender_tracker([dict(row)], glossary, chapter_index=chapter - 1, chapter_num=chapter,
+                                 chapter_file=f"c{chapter}.xhtml")
+    rt.set_gender(glossary, "루나", "female", 2)
+    eg.update_gender_tracker([dict(row)], glossary, chapter_index=1, chapter_num=2, chapter_file="c2.xhtml")
+    tracker = rt.read_gender_tracker(rt.gender_tracker_path_for_glossary(glossary))
+    history = rt.gender_history(tracker, "루나")
+    assert rt.gender_history_text(history) == "Male (Ch. 1), Female (Ch. 2)"
+    assert rt.gender_at(tracker, "루나", 1) == "male" and rt.gender_at(tracker, "루나", 2) == "female"
+    # The editor's decision path is the same writer.
+    assert eg.set_gender_tracker_decisions(glossary, {"루나": "female"})
+    assert rt.gender_history_text(rt.gender_history(rt.read_gender_tracker(
+        rt.gender_tracker_path_for_glossary(glossary)), "루나")) == "Female (all chapters)"
 
 
 def test_add_minimal_pass_environment_drops_the_relations_field(eg, _env):
