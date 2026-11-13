@@ -190,7 +190,12 @@ class RelationsDiagram:
         """Node positions from the all-chapters graph (stable while the slider moves)."""
         graph = self._all_graph()
         focus = self.focus if any(n["id"] == self.focus for n in graph.get("nodes", [])) else None
-        self.positions = self.core.layout_graph(graph, width=self.width, height=self.height, focus=focus)
+        # a node is drawn centred on its point, so the layout gets the canvas minus half a node on every
+        # side: a node at the layout's edge would otherwise be cut off by the Stack
+        pad_x, pad_y = NODE_WIDTH / 2 + 8, NODE_HEIGHT / 2 + 8
+        inner = self.core.layout_graph(graph, width=max(self.width - 2 * pad_x, 1), height=max(self.height - 2 * pad_y, 1),
+                                       focus=focus)
+        self.positions = {key: (point[0] + pad_x, point[1] + pad_y) for key, point in inner.items()}
 
     # ---- drawing -----------------------------------------------------------------------------------
 

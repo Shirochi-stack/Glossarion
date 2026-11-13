@@ -457,6 +457,26 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         texts = [s.value for s in diagram.canvas.shapes if type(s).__name__ == "Text"]
         assert any("Enemy [Best Friend]" in t for t in texts)
         positions = dict(diagram.positions)
+        # every pill lies inside the Stack, which clips: a node at the layout's edge was cut off
+        real = diagram.core
+
+        class _Corners:  # a layout that puts the nodes on the corners of the area it was given
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def layout_graph(self, graph, width=1000.0, height=700.0, focus=None):
+                corners = [(0.0, 0.0), (width, height), (width, 0.0), (0.0, height)]
+                return {n["id"]: corners[i % 4] for i, n in enumerate(graph.get("nodes", []))}
+
+        diagram.core = _Corners()
+        diagram.set_focus(None)
+        assert len(diagram.node_controls) == 3
+        for pill in diagram.node_controls:
+            assert pill.left >= 0 and pill.top >= 0
+            assert pill.left + pill.width <= diagram.width and pill.top + pill.height <= diagram.height
+        diagram.core = real
+        diagram.set_focus(None)
+        assert diagram.positions == positions
         diagram.set_chapter(1)
         assert diagram.edge_count() == 1 and diagram.chapter_label.value == "Up to chapter 1"
         assert diagram.positions == positions  # nodes stay put while the slider moves
