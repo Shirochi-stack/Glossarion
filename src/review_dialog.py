@@ -3127,6 +3127,8 @@ class ReviewDialog(QDialog):
                 "QPushButton:disabled { background-color: #555; color: #888; }"
             )
             self.save_btn.setText("✅ Saved!")
+            from qt_widget_helpers import saved_beep
+            saved_beep()  # the Windows sound of a save, like the Multi API Key Manager
             self.save_btn.setStyleSheet(
                 "QPushButton { background-color: #1a8f3a; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
