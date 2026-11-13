@@ -561,6 +561,8 @@ def test_both_placeholder_lines_have_the_new_action(gui, tab):
     assert any(t.startswith("Copy") for t in texts)
     assert any(t.startswith("Select All") for t in texts)
     assert texts[-1] == "Edit placeholder text…"
+    # The line's blue text colour is the menu highlight's colour: the menu sets its own text colour.
+    assert "#5a9fd4" in line.styleSheet() and "QMenu::item { color: white; }" in menu.styleSheet()
     menu.actions()[-1].trigger()
     dialog = gui._placeholder_text_dialog
     assert dialog.windowTitle() == "Placeholder Text"

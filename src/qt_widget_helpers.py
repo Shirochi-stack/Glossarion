@@ -409,8 +409,3 @@ def flash_saved(button, text="💾 Saved!", ms=1500, then=None, beep=True):
 
     timer.timeout.connect(restore)
     timer.start(int(ms))
-
-
-def saved_flash_active(button) -> bool:
-    """True while ``flash_saved`` shows on ``button``."""
-    return getattr(button, "_saved_flash_original", None) is not None
