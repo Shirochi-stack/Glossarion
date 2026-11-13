@@ -18445,7 +18445,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
 
-        save_btn = QPushButton("Save")
+        save_btn = QPushButton("💾 Save")
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
 
         def save_and_confirm():
