@@ -400,9 +400,8 @@ def test_diagram_builds_and_slider_changes_edges(qapp):
         dialog.deleteLater()
 
 
-def _team_tracker():
-    """A leader, a team whose members are all related to each other, and five subordinates."""
-    tracker = rt.empty_tracker()
+def _team_rows():
+    """The model's chapter-1 rows: a leader, a team all related to each other, five subordinates."""
     team = ["민", "성규", "춘후", "준호", "민주"]
     rows = []
     for i, name in enumerate(team):
@@ -412,7 +411,19 @@ def _team_tracker():
     for i in range(5):
         rows.append({"raw_name": f"부하{i}", "translated_name": f"S{i}", "relations": "민: Subordinate"})
     rows[0]["relations"] += "; " + "; ".join(f"부하{i}: Team Leader" for i in range(5))
-    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    return rows
+
+
+def _record_chapter_1(tracker):
+    """What a re-extraction of chapter 1 records (the AI's original wording)."""
+    return rt.record_relations(tracker, _team_rows(), field="relations", chapter_index=0, chapter_num=1,
+                               chapter_file="c1.xhtml")
+
+
+def _team_tracker():
+    """A leader, a team whose members are all related to each other, and five subordinates."""
+    tracker = rt.empty_tracker()
+    _record_chapter_1(tracker)
     return tracker
 
 
@@ -490,19 +501,25 @@ def test_a_name_in_the_side_panel_jumps_to_it_in_the_diagram(qapp):
         html_text = dialog.history_panel.toHtml()
         assert len(dialog._history_links) == 9 and html_text.count('href="node:') == 9
         target = dialog._history_links[3]
-        item = dialog._node_items[target]
 
         def in_sight(node):
             return view.mapToScene(view.viewport().rect()).boundingRect().contains(node.sceneBoundingRect())
 
-        # The whole diagram is in sight: the name is outlined and nothing moves.
+        # The owner's "clicking the name is not updating the right side column": the name is
+        # selected (panel, relations, outline); the whole diagram is in sight, so nothing moves.
         before = view.transform().m11(), view.horizontalScrollBar().value(), view.verticalScrollBar().value()
         dialog._on_history_link(QUrl("node:3"))
+        item = dialog._node_items[target]
+        assert dialog._selected == target
+        assert dialog._name(target) in dialog.history_title.text() and "T0" not in dialog.history_title.text()
         assert item.pen().color() == CHANGED_COLOR and item.pen().widthF() > 4
         assert (view.transform().m11(), view.horizontalScrollBar().value(), view.verticalScrollBar().value()) == before
-        assert dialog._selected == leader and "T0" in dialog.history_title.text()  # panel and selection stay
+        # Its own relations are the ones drawn bright now; the panel lists its relations.
+        assert dialog.history_title.text() and "T0" in dialog.history_panel.toPlainText()
         dialog._end_flash(target, item)
-        assert item.pen().color() != CHANGED_COLOR and item.pen().widthF() < 2
+        assert item.pen().color().name() == "#ffffff" and item.pen().widthF() < 4  # back to the selected look
+        dialog._on_node_clicked(leader)
+        item = dialog._node_items[target]
 
         # Zoomed in on another name: the jump brings the clicked one into view.
         far = max(dialog._history_links, key=lambda key: (dialog._node_items[key].pos() - item.pos()).manhattanLength())
@@ -584,11 +601,11 @@ def test_diagram_uses_the_configured_manual_glossary(gui, tmp_path):
     assert gui._relations_glossary_path() == str(glossary)
 
 
-def _write_book(folder, tracker):
+def _write_book(folder, tracker, extra_names=()):
     """A glossary file with a relations tracker beside it."""
     import json
     glossary = folder / "Book_glossary.csv"
-    names = sorted({str(item.get("raw_name") or key) for key, item in tracker["entries"].items()})
+    names = sorted({str(item.get("raw_name") or key) for key, item in tracker["entries"].items()} | set(extra_names))
     glossary.write_text("type,raw_name,translated_name\n" + "".join(f"character,{n},{n}\n" for n in names),
                         encoding="utf-8")
     (folder / "Book_relations_tracker.json").write_text(json.dumps(tracker, ensure_ascii=False), encoding="utf-8")
@@ -772,3 +789,483 @@ def test_save_settings_and_reopen_wiring_cover_the_toggle():
     assert "('🔗 Relations', lambda: self._open_relations_diagram(" in source.replace('"', "'")
     diagram = (SRC / "relations_diagram_dialog.py").read_text(encoding="utf-8")
     assert "manga_image_preview" not in diagram
+
+
+# ── Relations & Gender Tracker: selection, auto-update, edits, gender, filters ──────────────
+
+def _wait_idle(qapp, dialog, seconds=20.0):
+    """Until the loading thread has nothing left to do (a reload or a new layout)."""
+    import time
+    deadline = time.monotonic() + seconds
+    while dialog.is_busy() and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    qapp.processEvents()
+    assert not dialog.is_busy()
+
+
+def _open_book(qapp, glossary):
+    from relations_diagram_dialog import RelationsDiagramDialog
+    dialog = RelationsDiagramDialog(None, glossary_path=str(glossary), load_async=True)
+    dialog.resize(1300, 850)
+    dialog.show()
+    _wait_loaded(qapp, dialog)
+    _wait_idle(qapp, dialog)
+    return dialog
+
+
+def _close(qapp, dialog):
+    dialog.close()
+    dialog.deleteLater()
+    qapp.processEvents()
+
+
+def _answer_dialogs(monkeypatch, filler):
+    """Edit dialogs do not run: ``filler(dialog)`` fills the fields and returns True (Save) or False."""
+    from relations_diagram_dialog import RelationsDiagramDialog
+    seen = []
+
+    def _fake_exec(self, dialog):
+        seen.append(dialog)
+        return filler(dialog)
+
+    monkeypatch.setattr(RelationsDiagramDialog, "_exec", _fake_exec)
+    return seen
+
+
+def _labels(path, a, b):
+    return rt.relation_labels(rt.load_tracker(str(path)), a, b)
+
+
+def _scene_texts(dialog):
+    return [i.text() for i in dialog.scene.items() if hasattr(i, "text") and i.parentItem() is None]
+
+
+def _chapters_tracker():
+    """The team at chapter 1 and one more record at chapter 5 (slider 1 to 5)."""
+    tracker = _team_tracker()
+    rt.record_relations(tracker, [{"raw_name": "성규", "relations": "민: Teammate"}, {"raw_name": "민"}],
+                        field="relations", chapter_index=4, chapter_num=5, chapter_file="c5.xhtml")
+    return tracker
+
+
+def test_tracker_window_title_filter_row_and_menus(qapp):
+    from PySide6.QtWidgets import QLabel
+    from relations_diagram_dialog import WINDOW_TITLE, RelationsDiagramDialog, _item_key
+    dialog = RelationsDiagramDialog(None, tracker=_team_tracker())
+    try:
+        assert dialog.windowTitle() == WINDOW_TITLE == "Relations & Gender Tracker"
+        for box in (dialog.show_relations_checkbox, dialog.show_gender_checkbox):
+            assert box.isChecked() and [w.text() for w in box.findChildren(QLabel)] == ["✓"]
+        assert dialog.show_relations_checkbox.text() == "Relations" and dialog.show_gender_checkbox.text() == "Gender"
+        assert dialog.hide_button.text() == "Hide…" and not dialog.undo_button.isEnabled()
+        leader = rt.tracker_key("민")
+        menu = dialog.node_menu(leader)
+        texts = [a.text() for a in menu.actions() if a.text()]
+        assert texts == ["Add relation…", "Edit description…", "Set gender…", "Hide from view", "Remove from tracker…"]
+        # A tracker handed in without a file: nothing to write to, but hiding works for this window.
+        assert [a.text() for a in menu.actions() if a.text() and a.isEnabled()] == ["Hide from view"]
+        edge = dialog.edge_menu(leader, rt.tracker_key("성규"))
+        assert [a.text() for a in edge.actions()] == ["Edit relation…", "Delete relation"]
+        # Right-click / double-click find the name or relation under the mouse.
+        item = dialog._node_items[leader]
+        assert _item_key(item.text_item) == ("node", leader)
+        labels = [i for i in dialog.scene.items() if hasattr(i, "text") and i.parentItem() is None]
+        assert labels and all(_item_key(i)[0] == "edge" for i in labels)
+        # Hiding without a file still works (for this window only).
+        next(a for a in menu.actions() if a.text() == "Hide from view").trigger()
+        assert leader not in dialog._node_items and dialog.node_count() == 9
+    finally:
+        _close(qapp, dialog)
+
+
+def test_no_question_mark_for_a_one_sided_relation(qapp):
+    """The owner's 'why are there question marks': only the known side is written."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor
+    from relations_diagram_dialog import RelationsDiagramDialog
+    tracker = rt.empty_tracker()
+    rt.record_relations(tracker, [{"raw_name": "지수", "relations": "하나: Club Member"}, {"raw_name": "하나"}],
+                        field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker)
+    try:
+        texts = _scene_texts(dialog)
+        assert "Club Member" in texts and not any("?" in t for t in texts)
+        tips = [i.toolTip() for i in dialog.scene.items() if i.toolTip()]
+        assert any(" is Club Member to " in t for t in tips) and not any("?" in t for t in tips)
+        # Neither side known: no pill at all.
+        boxes = len(dialog._label_boxes)
+        edge = {"a": rt.tracker_key("지수"), "b": rt.tracker_key("하나"), "label_ab": "", "label_ba": ""}
+        assert dialog._add_edge_label(edge, QPointF(0, 0), QPointF(100, 0), QColor("#8b95a5"), False, []) is None
+        assert len(dialog._label_boxes) == boxes
+    finally:
+        _close(qapp, dialog)
+
+
+def test_auto_update_reloads_an_outside_write_and_keeps_the_view(qapp, tmp_path):
+    from relations_diagram_dialog import POLL_MS
+    glossary = _write_book(tmp_path, _chapters_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    try:
+        assert dialog._poll_timer.isActive() and dialog._poll_timer.interval() == POLL_MS == 1000
+        assert dialog._poll() is False  # nothing changed: no reload
+        leader, member = rt.tracker_key("민"), rt.tracker_key("성규")
+        dialog._on_node_clicked(leader)
+        dialog.chapter_slider.setValue(1)
+        view = dialog._view
+        view._auto_fit = False
+        view.scale(2.0, 2.0)
+        view.centerOn(dialog._node_items[member])
+        qapp.processEvents()
+        zoom, centre = view.transform().m11(), view.mapToScene(view.viewport().rect().center())
+        positions = dict(dialog._positions)
+        # Another writer (an extraction, the phone) renames a relation and adds chapter 9.
+        rt.edit_tracker(path, lambda t: rt.set_relation_label(t, "민", "성규", "Sworn Brother", chapter=1))
+        rt.edit_tracker(path, lambda t: rt.record_relations(
+            t, [{"raw_name": "민", "relations": "준호: Rival"}, {"raw_name": "준호"}], field="relations",
+            chapter_index=8, chapter_num=9, chapter_file="c9.xhtml"))
+        assert dialog._poll() is True
+        assert dialog._node_items  # the picture stays while the new data is read
+        _wait_idle(qapp, dialog)
+        assert dialog.chapter_slider.maximum() == 9 and dialog.chapter_slider.value() == 1  # kept its chapter
+        assert dialog._selected == leader and "Sworn Brother" in dialog.history_panel.toPlainText()
+        assert any("Sworn Brother" in t for t in _scene_texts(dialog))
+        assert dialog._positions == positions  # the same names: nobody moved
+        assert view.transform().m11() == zoom
+        assert (view.mapToScene(view.viewport().rect().center()) - centre).manhattanLength() < 2
+        assert dialog._poll() is False  # loaded: quiet again
+        # At the last chapter the slider follows the new last chapter.
+        dialog.chapter_slider.setValue(9)
+        rt.edit_tracker(path, lambda t: rt.record_relations(
+            t, [{"raw_name": "민", "relations": "민주: Rival"}, {"raw_name": "민주"}], field="relations",
+            chapter_index=11, chapter_num=12, chapter_file="c12.xhtml"))
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert dialog.chapter_slider.maximum() == 12 and dialog.chapter_slider.value() == 12
+        # Not while an edit dialog of this window is open.
+        rt.edit_tracker(path, lambda t: rt.set_relation_label(t, "민", "성규", "Brother", old_label="Sworn Brother"))
+        dialog._dialogs_open += 1
+        assert dialog._poll() is False
+        dialog._dialogs_open -= 1
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert "Brother" in dialog.history_panel.toPlainText()
+    finally:
+        _close(qapp, dialog)
+
+
+def test_auto_update_skips_a_half_written_file(qapp, tmp_path):
+    import json
+    glossary = _write_book(tmp_path, _team_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    try:
+        shown = dialog.tracker
+        good = pathlib.Path(path).read_text(encoding="utf-8")
+        pathlib.Path(path).write_text(good[: len(good) // 2], encoding="utf-8")  # mid-write
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert dialog.tracker is shown and dialog.node_count() == 10 and dialog.edge_count() == 15  # never empty
+        assert dialog._poll() is True  # tried again at the next check
+        _wait_idle(qapp, dialog)
+        tracker = json.loads(good)
+        rt.set_relation_label(tracker, "민", "성규", "Sworn Brother")
+        rt.write_tracker(path, tracker)
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert dialog.tracker is not shown and any("Sworn Brother" in t for t in _scene_texts(dialog))
+        assert dialog._poll() is False
+    finally:
+        _close(qapp, dialog)
+
+
+def test_edits_write_the_file_stick_after_a_re_extraction_and_undo(qapp, tmp_path, isolated, monkeypatch):
+    from PySide6.QtCore import QUrl
+    calls, answer = isolated
+    answer["value"] = True
+    glossary = _write_book(tmp_path, _team_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    leader, member, third = rt.tracker_key("민"), rt.tracker_key("성규"), rt.tracker_key("춘후")
+    try:
+        old_ab, old_ba = _labels(path, "민", "성규")
+        assert old_ab and old_ba
+
+        def edit_ab(d):
+            d.fields[0].setText("Sworn Brother")  # what 성규 is to 민; the other side untouched
+            return True
+
+        seen = _answer_dialogs(monkeypatch, edit_ab)
+        dialog._on_item_double(("edge", leader, member))  # double-click a relation label
+        assert seen and seen[-1].windowTitle() == "Edit relation"
+        assert _labels(path, "민", "성규") == ("Sworn Brother", old_ba)
+        assert dialog._poll() is False  # our own save: no second reload
+        assert any("Sworn Brother" in t for t in _scene_texts(dialog)) and dialog.undo_button.isEnabled()
+        rt.edit_tracker(path, _record_chapter_1)  # the AI says the old label again
+        assert _labels(path, "민", "성규") == ("Sworn Brother", old_ba)
+
+        # Undo takes the last edit back (the re-extraction did not touch the corrected records).
+        assert dialog.undo() is True
+        assert _labels(path, "민", "성규") == (old_ab, old_ba) and not dialog.undo_button.isEnabled()
+        assert dialog._poll() is False
+
+        # Delete a relation from the side panel (asks first); the AI cannot bring it back.
+        dialog._on_node_clicked(leader)
+        assert len(rt.character_history(rt.load_tracker(path), "민")) == 9
+        entry = dialog.history_action("delete relation ")
+        assert entry is not None
+        dialog._on_history_link(QUrl(f"act:{dialog._history_actions.index(entry)}"))
+        qapp.processEvents()
+        assert calls and "Delete the relation between" in calls[-1]
+        assert len(rt.character_history(rt.load_tracker(path), "민")) == 8
+        rt.edit_tracker(path, _record_chapter_1)
+        assert len(rt.character_history(rt.load_tracker(path), "민")) == 8
+
+        # A refused confirmation writes nothing.
+        answer["value"] = False
+        before = pathlib.Path(path).read_bytes()
+        assert dialog.delete_relation_between(leader, third) is None
+        assert pathlib.Path(path).read_bytes() == before
+        answer["value"] = True
+
+        # Remove a junk name: its entry and every line to it go, for good.
+        junk = rt.tracker_key("부하1")
+        dialog.remove_character_for(junk)
+        assert junk not in rt.load_tracker(path)["entries"]
+        rt.edit_tracker(path, _record_chapter_1)
+        tracker = rt.load_tracker(path)
+        assert junk not in tracker["entries"]
+        assert all(junk not in (item.get("relations") or {}) for item in tracker["entries"].values())
+        _wait_idle(qapp, dialog)
+        assert junk not in dialog._node_items
+
+        # Add a relation to a new name (typed in) at the slider's chapter.
+        def add_new(d):
+            d.fields[0].setEditText("새인물")
+            d.fields[1].setText("Older Sister")
+            return True
+
+        _answer_dialogs(monkeypatch, add_new)
+        dialog.add_relation_for(rt.tracker_key("부하2"))
+        assert _labels(path, "부하2", "새인물") == ("Older Sister", "")
+        _wait_idle(qapp, dialog)
+        # Not in the glossary: shown with "Show unlisted names" (the window says so).
+        assert rt.tracker_key("새인물") not in dialog._node_items and "Show unlisted names" in dialog.notice_label.text()
+        dialog.show_unlisted_checkbox.setChecked(True)
+        assert rt.tracker_key("새인물") in dialog._node_items
+        dialog.show_unlisted_checkbox.setChecked(False)
+
+        # Add a relation to a known name picked from the list.
+        def add_known(d):
+            combo = d.fields[0]
+            d.fields[0].setCurrentIndex(combo.findData("부하3"))
+            d.fields[2].setText("Mentor")
+            return True
+
+        _answer_dialogs(monkeypatch, add_known)
+        dialog.add_relation_for(rt.tracker_key("부하2"))
+        assert _labels(path, "부하2", "부하3") == ("", "Mentor")
+
+        # Rename one history label, then delete a history row; both stick.
+        history = rt.character_history(rt.load_tracker(path), "민")
+        row = next(rel for rel in history if rel["target_key"] == third)
+        label = row["timeline"][0]["label"]
+
+        def rename(d):
+            d.fields[0].setText("Old Rival")
+            return True
+
+        _answer_dialogs(monkeypatch, rename)
+        dialog.edit_history_label(leader, third, label)
+        assert _labels(path, "민", "춘후")[0] == "Old Rival"
+        rt.edit_tracker(path, _record_chapter_1)
+        assert _labels(path, "민", "춘후")[0] == "Old Rival"
+        dialog.delete_history_row(leader, third, "Old Rival", 1, 1)
+        assert _labels(path, "민", "춘후")[0] == ""
+        rt.edit_tracker(path, _record_chapter_1)
+        assert _labels(path, "민", "춘후")[0] == ""
+
+        # Descriptions: write one, then delete it (asked first).
+        def describe(d):
+            d.fields[1].setPlainText("The team leader")
+            return True
+
+        _answer_dialogs(monkeypatch, describe)
+        dialog.edit_description_for(leader)
+        assert rt.description_at(rt.load_tracker(path), "민")["text"] == "The team leader"
+        if dialog._selected != leader:
+            dialog._on_node_clicked(leader)
+        assert "The team leader" in dialog.history_panel.toPlainText()
+        assert dialog.history_action("edit description ch 1") is not None
+        dialog.delete_description_for(leader, 1)
+        assert rt.description_at(rt.load_tracker(path), "민") is None
+        assert dialog._poll() is False
+    finally:
+        _close(qapp, dialog)
+
+
+def test_undo_is_refused_when_someone_else_changed_the_same_character(qapp, tmp_path, monkeypatch):
+    glossary = _write_book(tmp_path, _team_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    try:
+        leader, member = rt.tracker_key("민"), rt.tracker_key("성규")
+
+        def edit_ab(d):
+            d.fields[0].setText("Sworn Brother")
+            return True
+
+        _answer_dialogs(monkeypatch, edit_ab)
+        dialog.edit_relation_between(leader, member)
+        rt.edit_tracker(path, lambda t: rt.set_relation_label(t, "민", "성규", "Blood Brother"))
+        assert dialog.undo() is False
+        assert "Cannot undo" in dialog.notice_label.text()
+        assert _labels(path, "민", "성규")[0] == "Blood Brother"
+        # Cancel writes nothing and offers no undo.
+        _answer_dialogs(monkeypatch, lambda d: False)
+        before = pathlib.Path(path).read_bytes()
+        assert dialog.edit_relation_between(leader, member) is None
+        assert pathlib.Path(path).read_bytes() == before and not dialog.undo_button.isEnabled()
+    finally:
+        _close(qapp, dialog)
+
+
+def test_gender_tints_history_gender_only_names_and_set_gender(qapp, tmp_path, monkeypatch):
+    from relations_diagram_dialog import GENDER_TINTS, NEUTRAL_TINT
+    glossary = _write_book(tmp_path, _chapters_tracker(), extra_names=("외톨이",))
+    rt.set_gender(str(glossary), "민", "male", 1)
+    rt.set_gender(str(glossary), "민", "female", 5)
+    rt.set_gender(str(glossary), "외톨이", "female", 2)
+    gender_path = rt.gender_tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    leader, loner = rt.tracker_key("민"), rt.tracker_key("외톨이")
+    try:
+        assert dialog.chapter_slider.value() == 5
+        assert dialog._node_items[leader].tint == GENDER_TINTS["female"]
+        # Tracked for gender, no relations: a name without lines.
+        assert loner in dialog._node_items and dialog.node_count() == 11 and dialog.edge_count() == 15
+        dialog._on_node_clicked(leader)
+        assert "Gender: Male (Ch. 1), Female (Ch. 5)" in dialog.history_panel.toPlainText()
+        dialog.chapter_slider.setValue(1)  # the tint and the history follow the slider
+        assert dialog._node_items[leader].tint == GENDER_TINTS["male"]
+        assert "Gender: Male (Ch. 1)" in dialog.history_panel.toPlainText()
+        assert "Female" not in dialog.history_panel.toPlainText()
+        assert loner not in dialog._node_items  # first tracked at chapter 2
+        dialog.chapter_slider.setValue(5)
+
+        # Set a gender for all chapters (the gender tracker's own writer); no reload of our own write.
+        def all_male(d):
+            d.fields[0].setCurrentIndex(d.fields[0].findData("male"))
+            d.fields[1].setCurrentIndex(d.fields[1].findData("all"))
+            return True
+
+        _answer_dialogs(monkeypatch, all_male)
+        dialog.set_gender_for(loner)
+        stored = rt.read_gender_tracker(gender_path)
+        assert rt.gender_history(stored, "외톨이")["decision"] == "male"
+        assert dialog._node_items[loner].tint == GENDER_TINTS["male"] and dialog._poll() is False
+        assert dialog.undo() is True
+        assert rt.gender_history(rt.read_gender_tracker(gender_path), "외톨이")["decision"] == "auto"
+
+        # One chapter only (the slider's).
+        def chapter_male(d):
+            d.fields[0].setCurrentIndex(d.fields[0].findData("male"))
+            d.fields[1].setCurrentIndex(d.fields[1].findData("chapter"))
+            return True
+
+        _answer_dialogs(monkeypatch, chapter_male)
+        dialog.set_gender_for(leader)
+        assert rt.gender_history_text(rt.gender_history(rt.read_gender_tracker(gender_path), "민")) == "Male (Ch. 1-5)"
+        # An outside gender write is picked up too.
+        rt.set_gender(str(glossary), "외톨이", "male", None)
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        assert dialog._node_items[loner].tint == GENDER_TINTS["male"]
+
+        # Gender off: neutral names, no gender-only names, no gender history.
+        dialog.show_gender_checkbox.setChecked(False)
+        assert loner not in dialog._node_items
+        assert all(item.tint == NEUTRAL_TINT for item in dialog._node_items.values())
+        dialog._on_node_clicked(rt.tracker_key("성규"))
+        assert "Gender:" not in dialog.history_panel.toPlainText()
+    finally:
+        _close(qapp, dialog)
+
+
+def test_filters_hide_names_and_persist_in_the_trackers_view(qapp, tmp_path):
+    import json
+    glossary = _write_book(tmp_path, _team_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    member, leader = rt.tracker_key("성규"), rt.tracker_key("민")
+
+    def stored():
+        return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+
+    try:
+        entries = stored()["entries"]
+        dialog._on_node_clicked(leader)
+        dialog.show_relations_checkbox.setChecked(False)
+        assert dialog.edge_count() == 0 and dialog._label_boxes == [] and dialog.node_count() == 10
+        assert "Relations are switched off" in dialog.history_panel.toPlainText()
+        assert stored()["view"] == {"hidden": [], "show_relations": False, "show_gender": True}
+        assert stored()["entries"] == entries  # the relations data is not touched
+        assert dialog._poll() is False  # the view write does not reload
+        dialog.show_relations_checkbox.setChecked(True)
+        assert "view" not in stored()  # back to the defaults
+
+        # The Hide checklist: search, check a name, Show all.
+        positions = {k: (i.pos().x(), i.pos().y()) for k, i in dialog._node_items.items()}
+        popup = dialog.hide_popup()
+        assert popup.tree.topLevelItemCount() == 10
+        popup.search.setText("부하")
+        assert sum(1 for i in range(10) if not popup.tree.topLevelItem(i).isHidden()) == 5
+        popup.search.clear()
+        assert popup.set_checked(member, True)
+        assert member not in dialog._node_items and dialog.node_count() == 9 and dialog.edge_count() < 15
+        assert all((i.pos().x(), i.pos().y()) == positions[k] for k, i in dialog._node_items.items())  # others stay
+        assert dialog.hide_button.text() == "Hide (1)…"
+        assert stored()["view"]["hidden"] == [member]
+        # "Hide from view" on a name's menu.
+        next(a for a in dialog.node_menu(leader).actions() if a.text() == "Hide from view").trigger()
+        assert leader not in dialog._node_items and dialog._selected is None
+        assert dialog.view_settings()["hidden"] == [member, leader]
+        # Remembered for the book: a new window opens with the same choices.
+        dialog.show_gender_checkbox.setChecked(False)
+        again = _open_book(qapp, glossary)
+        try:
+            assert again.node_count() == 8 and not again.show_gender_checkbox.isChecked()
+            assert again.hide_button.text() == "Hide (2)…"
+        finally:
+            _close(qapp, again)
+        dialog.show_gender_checkbox.setChecked(True)
+        dialog.hide_popup().show_all()
+        assert dialog.node_count() == 10 and "view" not in stored()
+        # Undo works for view choices too.
+        assert dialog.undo() is True and dialog.view_settings()["hidden"] == [member, leader]
+    finally:
+        _close(qapp, dialog)
+
+
+def test_tracker_window_still_appears_at_once(qapp, tmp_path):
+    """Nothing new runs before the window is shown: constructor + show stay around 0.1 s."""
+    import time
+    from relations_diagram_dialog import RelationsDiagramDialog
+    tracker = rt.empty_tracker()
+    names = [f"인물{i:02d}" for i in range(15)]
+    rows = [{"raw_name": n, "translated_name": f"P{i}", "relations": f"{names[(i + 1) % 15]}: Friend"}
+            for i, n in enumerate(names)]
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    glossary = _write_book(tmp_path, tracker)
+    RelationsDiagramDialog(None, tracker=rt.empty_tracker()).deleteLater()  # warm the imports
+    started = time.perf_counter()
+    dialog = RelationsDiagramDialog(None, glossary_path=str(glossary), load_async=True)
+    dialog.show()
+    elapsed = time.perf_counter() - started
+    try:
+        assert dialog.is_loading() and elapsed < 0.5, elapsed
+        _wait_loaded(qapp, dialog)
+        assert dialog.node_count() == 15
+    finally:
+        _close(qapp, dialog)
