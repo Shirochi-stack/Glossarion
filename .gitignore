@@ -133,6 +133,10 @@ tests/**
 !tests/test_review_volume_mode.py
 !tests/test_glossary_dedup_logging.py
 !tests/test_gender_tracking.py
+!tests/test_relations_tracking.py
+!tests/test_relations_extraction.py
+!tests/test_relations_translation.py
+!tests/test_relations_desktop_ui.py
 !tests/test_extract_glossary_parser.py
 !tests/test_parallel_epub_visibility.py
 !tests/test_glossary_source_preparation.py

@@ -63,11 +63,13 @@ from gender_tracking import (
     normalize_gender as _shared_normalize_gender,
     tracker_path_for_glossary as _shared_gender_tracker_path,
 )
+import relations_tracking
 
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
 _glossary_last_thread_submit = 0.0
 _gender_tracker_lock = threading.RLock()
+_relations_tracker_lock = threading.RLock()
 _glossary_stop_summary_lock = threading.Lock()
 _glossary_stopped_request_labels = set()
 
@@ -2742,6 +2744,9 @@ def _strip_private_glossary_keys(entry: Dict) -> Dict:
     if not isinstance(entry, dict):
         return entry
     cleaned = {k: v for k, v in entry.items() if not str(k).startswith("_gender_tracker_")}
+    if relations_tracking.tracking_enabled():
+        # The relations column lives in the relations tracker, never in the glossary file.
+        cleaned = {k: v for k, v in cleaned.items() if not relations_tracking.is_relations_field(k)}
     if cleaned.get("gender"):
         # One spelling per column: the tracker resolves to `male`, the AI
         # returns `Male`; both are written as `Male`.
@@ -2853,21 +2858,25 @@ def _normalize_gender_tracker_order(tracker: Dict):
     tracker["entries"] = {key: item for key, item in normalized_entries}
     return tracker
 
+def _atomic_dump_tracker_json(path: str, data: Dict):
+    """Write a tracker sidecar: temp file in the same folder, fsync, atomic replace."""
+    output_dir = os.path.dirname(path) or "."
+    os.makedirs(output_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_dir, delete=False, suffix=".tmp") as temp_f:
+        temp_path = temp_f.name
+        json.dump(data, temp_f, ensure_ascii=False, indent=2)
+        temp_f.flush()
+        os.fsync(temp_f.fileno())
+    _atomic_replace_file(temp_path, path)
+
 def _write_gender_tracker(path: str, tracker: Dict):
     if not path or not isinstance(tracker, dict):
         return
     try:
-        output_dir = os.path.dirname(path) or "."
-        os.makedirs(output_dir, exist_ok=True)
         tracker["version"] = max(2, _tracker_int(tracker.get("version"), fallback=2))
         tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         tracker = _normalize_gender_tracker_order(tracker)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_dir, delete=False, suffix=".tmp") as temp_f:
-            temp_path = temp_f.name
-            json.dump(tracker, temp_f, ensure_ascii=False, indent=2)
-            temp_f.flush()
-            os.fsync(temp_f.fileno())
-        _atomic_replace_file(temp_path, path)
+        _atomic_dump_tracker_json(path, tracker)
     except Exception as e:
         print(f"⚠️ Could not write gender tracker: {e}")
 
@@ -3036,6 +3045,287 @@ def sync_gender_tracker_with_glossary(glossary: List[Dict], output_path: str):
                     changed = True
         if changed:
             _write_gender_tracker(tracker_path, tracker)
+
+
+# ── Relations tracker (write side) ──────────────────────────────────
+# The rules live in relations_tracking; this side loads the sidecar, records
+# and writes it back under _relations_tracker_lock, like the gender tracker.
+
+def _relations_tracker_path_for_output(output_path: str) -> str:
+    return relations_tracking.tracker_path_for_glossary(output_path)
+
+_relations_tracker_lock_depth = 0
+
+@contextlib.contextmanager
+def _relations_tracker_guard(tracker_path: str):
+    """Hold the sidecar for one load -> modify -> write.
+
+    _relations_tracker_lock serialises this process's threads; a lock file
+    (glossary_refinement.locked_progress_file, kept in the temp folder so the
+    glossary folder stays clean) serialises processes, so the editor's save in
+    the GUI and an extraction subprocess cannot overwrite each other's update.
+    """
+    global _relations_tracker_lock_depth
+    with _relations_tracker_lock:
+        guard = None
+        if _relations_tracker_lock_depth == 0 and tracker_path:
+            key = hashlib.sha1(
+                os.path.normcase(os.path.abspath(tracker_path)).encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            lock_base = os.path.join(tempfile.gettempdir(), "glossarion_tracker_locks", key)
+            try:
+                guard = _locked_glossary_progress_file(lock_base)
+                guard.__enter__()
+            except Exception:
+                guard = None  # no lock file possible: the in-process lock still holds
+        _relations_tracker_lock_depth += 1
+        try:
+            yield
+        finally:
+            _relations_tracker_lock_depth -= 1
+            if guard is not None:
+                guard.__exit__(None, None, None)
+
+def _write_relations_tracker(path: str, tracker: Dict):
+    if not path or not isinstance(tracker, dict):
+        return
+    try:
+        tracker["version"] = relations_tracking.TRACKER_VERSION
+        tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        relations_tracking.normalize_tracker(tracker)
+        _atomic_dump_tracker_json(path, tracker)
+    except Exception as e:
+        print(f"⚠️ Could not write relations tracker: {e}")
+
+def _relations_name_key(raw_name: str) -> str:
+    """The raw-name key the dedup pass compares (honorifics removed, NFC)."""
+    return unicodedata.normalize('NFC', remove_honorifics(str(raw_name or "")))
+
+def _relations_chapter_label(chapter_num) -> str:
+    try:
+        number = float(chapter_num)
+        return str(int(number)) if number == int(number) else str(number)
+    except (TypeError, ValueError):
+        return str(chapter_num)
+
+def _relations_tracker_log_line(stats: Dict, chapter_num) -> str:
+    """'🔗 Relations tracker: Ch. 40 +3 new, 1 changed (서윤 → 하린: Best Friend → Enemy)', or ''."""
+    if not isinstance(stats, dict):
+        return ""
+    new = int(stats.get("new") or 0)
+    changes = [c for c in stats.get("changes") or [] if isinstance(c, dict)]
+    if not new and not changes:
+        return ""
+    parts = []
+    if new:
+        parts.append(f"+{new} new")
+    if changes:
+        parts.append(f"{len(changes)} changed")
+    line = f"🔗 Relations tracker: Ch. {_relations_chapter_label(chapter_num)} {', '.join(parts)}"
+    if changes:
+        shown = [
+            f"{c.get('raw_name')} → {c.get('target_raw')}: {c.get('from')} → {c.get('to')}"
+            for c in changes[:3]
+        ]
+        more = f"; +{len(changes) - 3} more" if len(changes) > 3 else ""
+        line += f" ({'; '.join(shown)}{more})"
+    return line
+
+def _record_relations_batches(batches, output_path: str, source_path: str = None) -> List[Dict]:
+    """Record several chapters' relations cells with one load -> record -> write.
+
+    ``batches`` is a list of ``(entries, chapter_index, chapter_num, chapter_file)``.
+    The relations field is removed from every entry. Returns one stats dict per batch.
+    """
+    if not relations_tracking.tracking_enabled() or not output_path:
+        return []
+    batches = [b for b in batches or [] if b and b[0]]
+    if not batches:
+        return []
+    if not any(cell for b in batches for _raw, _translated, cell in _peek_relations_cells(b[0])):
+        # Nothing to record: drop the (empty) fields without touching the sidecar.
+        for b in batches:
+            _pop_relations_cells(b[0])
+        return [{"new": 0, "changed": 0, "changes": [], "pairs": 0} for _b in batches]
+    field = relations_tracking.field_name()
+    tracker_path = _relations_tracker_path_for_output(output_path)
+    source_path = source_path or os.getenv("EPUB_PATH", "")
+    results = []
+    with _relations_tracker_guard(tracker_path):
+        tracker = relations_tracking.load_tracker(tracker_path)
+        recorded = 0
+        for entries, chapter_index, chapter_num, chapter_file in batches:
+            stats = relations_tracking.record_relations(
+                tracker,
+                entries,
+                field=field,
+                chapter_index=chapter_index,
+                chapter_num=chapter_num,
+                chapter_file=chapter_file or "",
+                source_path=source_path or None,
+                glossary_path=output_path,
+            )
+            recorded += int(stats.get("pairs") or 0)
+            results.append((chapter_num, stats))
+        if recorded:
+            _write_relations_tracker(tracker_path, tracker)
+    for chapter_num, stats in results:
+        line = _relations_tracker_log_line(stats, chapter_num)
+        if line:
+            print(line)
+    return [stats for _num, stats in results]
+
+def update_relations_tracker(entries: List[Dict], output_path: str, source_path: str = None,
+                             chapter_index=None, chapter_num=None, chapter_file: str = None) -> Dict:
+    """Record one chapter's relations cells and remove the field from ``entries``.
+
+    With the Relations Tracker off the entries are left untouched.
+    """
+    if not relations_tracking.tracking_enabled() or not entries or not output_path:
+        return {}
+    results = _record_relations_batches(
+        [(entries, chapter_index, chapter_num, chapter_file)], output_path, source_path=source_path
+    )
+    return results[0] if results else {}
+
+def _bucket_relations_by_chapter(cells, units, fallback_index, field: str = None) -> Dict:
+    """File each relation under the chapter that shows it.
+
+    ``cells`` is ``[(raw_name, translated_name, cell_text)]`` and ``units`` is
+    ``[(chapter_index, chapter_text)]`` in chapter order. A relation goes to the first
+    chapter whose text contains both raw names, else the first one containing the
+    entry's own raw name, else ``fallback_index``. Returns ``{chapter_index: [entries]}``
+    where each entry carries only raw_name, translated_name and the relations field.
+    """
+    field = field or relations_tracking.field_name()
+    units = [(idx, str(text or "")) for idx, text in units or []]
+    buckets: Dict = {}
+    for raw_name, translated_name, cell in cells or []:
+        raw = str(raw_name or "").strip()
+        if not raw or not cell:
+            continue
+        own_index = next((idx for idx, text in units if raw in text), fallback_index)
+        per_chapter: Dict = {}
+        for target, label in relations_tracking.parse_relations_cell(cell):
+            index = next((idx for idx, text in units if raw in text and target in text), own_index)
+            per_chapter.setdefault(index, []).append(f"{target}: {label}")
+        for index, items in per_chapter.items():
+            buckets.setdefault(index, []).append({
+                "raw_name": raw,
+                "translated_name": translated_name or "",
+                field: "; ".join(items),
+            })
+    return buckets
+
+def _peek_relations_cells(entries: List[Dict], pop: bool = False) -> List[Tuple[str, str, str]]:
+    """The relations cell of each entry: ``[(raw_name, translated_name, cell)]`` (``pop`` removes the field)."""
+    cells = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        keys = [k for k in list(entry.keys()) if isinstance(k, str) and relations_tracking.is_relations_field(k)]
+        cell = next((entry[k] for k in keys if isinstance(entry.get(k), str) and entry[k].strip()), "")
+        if pop:
+            for k in keys:
+                entry.pop(k, None)
+        if cell:
+            cells.append((str(entry.get("raw_name") or "").strip(), str(entry.get("translated_name") or ""), cell))
+    return cells
+
+def _pop_relations_cells(entries: List[Dict]) -> List[Tuple[str, str, str]]:
+    """Take the relations cell off each entry: ``[(raw_name, translated_name, cell)]``."""
+    return _peek_relations_cells(entries, pop=True)
+
+def record_relations_for_chapters(cells, units, fallback_index, output_path: str, source_path: str = None,
+                                  chapter_positions=None, chapter_filenames=None, names=None) -> List[Dict]:
+    """Bucket relations cells by chapter (see _bucket_relations_by_chapter) and record them.
+
+    ``names`` are extra ``{raw_name, translated_name}`` dicts used only to fill in the
+    targets' translated names. Chapter numbers come from ``chapter_positions`` (else
+    index + 1) and files from ``chapter_filenames``.
+    """
+    if not relations_tracking.tracking_enabled() or not cells or not output_path:
+        return []
+    chapter_positions = chapter_positions or {}
+    chapter_filenames = chapter_filenames or {}
+    field = relations_tracking.field_name()
+    buckets = _bucket_relations_by_chapter(cells, units, fallback_index, field=field)
+    name_entries = [
+        {"raw_name": n.get("raw_name", ""), "translated_name": n.get("translated_name", "")}
+        for n in names or [] if isinstance(n, dict) and n.get("raw_name")
+    ]
+    batches = []
+    for index in sorted(buckets, key=lambda i: (i is None, i if isinstance(i, (int, float)) else 0)):
+        position = chapter_positions.get(index, (index + 1) if isinstance(index, int) else index)
+        batches.append((
+            buckets[index] + [dict(n) for n in name_entries],
+            index,
+            position,
+            chapter_filenames.get(index, ""),
+        ))
+    return _record_relations_batches(batches, output_path, source_path=source_path)
+
+def update_relations_tracker_for_group(entries: List[Dict], output_path: str, units, parent_index,
+                                       source_path: str = None, chapter_positions=None,
+                                       chapter_filenames=None) -> List[Dict]:
+    """Merged request: record each relation under the child chapter that shows it.
+
+    The relations field is removed from every entry. With the Relations Tracker off
+    the entries are left untouched.
+    """
+    if not relations_tracking.tracking_enabled() or not entries or not output_path:
+        return []
+    cells = _pop_relations_cells(entries)
+    if not cells:
+        return []
+    return record_relations_for_chapters(
+        cells,
+        units,
+        parent_index,
+        output_path,
+        source_path=source_path,
+        chapter_positions=chapter_positions,
+        chapter_filenames=chapter_filenames,
+        names=[e for e in entries if isinstance(e, dict)],
+    )
+
+def sync_relations_tracker_with_glossary(glossary: List[Dict], output_path: str, enabled=None):
+    """Re-key relations tracker names that the dedup pass merged into another entry.
+
+    ``enabled`` overrides the environment toggle (the editor passes its config's value).
+    """
+    if enabled is None:
+        enabled = relations_tracking.tracking_enabled()
+    if not enabled or not glossary or not output_path:
+        return None
+    tracker_path = _relations_tracker_path_for_output(output_path)
+    if not os.path.exists(tracker_path):
+        return None
+    with _relations_tracker_guard(tracker_path):
+        tracker = relations_tracking.load_tracker(tracker_path)
+        before = json.dumps(tracker, ensure_ascii=False, sort_keys=True)
+        stats = relations_tracking.sync_tracker_with_glossary(
+            tracker, glossary, strip_honorifics=_relations_name_key
+        )
+        if json.dumps(tracker, ensure_ascii=False, sort_keys=True) != before:
+            _write_relations_tracker(tracker_path, tracker)
+    return stats
+
+def _persisted_custom_fields(fields):
+    """Custom fields written to glossary files: the relations field never is."""
+    if not relations_tracking.tracking_enabled():
+        return fields
+    return relations_tracking.persisted_custom_fields(fields)
+
+def _extraction_custom_fields(fields):
+    """Custom fields the model is asked for; with the Relations Tracker on this always
+    includes the relations field (added last when the user's list lacks it)."""
+    if not relations_tracking.tracking_enabled():
+        return fields
+    current = list(fields) if isinstance(fields, (list, tuple)) else []
+    if any(relations_tracking.is_relations_field(f) for f in current):
+        return current
+    return relations_tracking.apply_relations_field(current, True, relations_tracking.field_name())
 
 def _align_gender_variant_translation(existing_entry: Dict, new_entry: Dict):
     canonical = existing_entry.get("translated_name") or new_entry.get("translated_name")
@@ -3256,7 +3546,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             x.get('raw_name', '').lower()
         ))
         sync_gender_tracker_with_glossary(sorted_glossary, output_path)
-        
+        sync_relations_tracker_with_glossary(sorted_glossary, output_path)
+
         use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
         csv_dir = os.path.dirname(csv_path) or '.'
         
@@ -3268,7 +3559,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     header = ['type', 'raw_name', 'translated_name', 'gender']
                     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                     try:
-                        custom_fields = json.loads(custom_fields_json)
+                        custom_fields = _persisted_custom_fields(json.loads(custom_fields_json))
                         header.extend(custom_fields)
                     except:
                         custom_fields = []
@@ -3327,10 +3618,10 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 
                 custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                 try:
-                    custom_fields = json.loads(custom_fields_json)
+                    custom_fields = _persisted_custom_fields(json.loads(custom_fields_json))
                 except:
                     custom_fields = []
-                
+
                 # Custom Fields is the authoritative source for whether description
                 # should appear in the output at all. Removing "description" from
                 # Custom Fields in the GUI must fully suppress the column even if
@@ -3429,7 +3720,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         writer = csv.writer(f)
                         header = ['type', 'raw_name', 'translated_name', 'gender']
                         try:
-                            custom_fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+                            custom_fields = _persisted_custom_fields(json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')))
                             header.extend(custom_fields)
                         except:
                             custom_fields = []
@@ -3474,7 +3765,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         # Write column header
                         custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                         try:
-                            custom_fields_list = json.loads(custom_fields_json)
+                            custom_fields_list = _persisted_custom_fields(json.loads(custom_fields_json))
                         except:
                             custom_fields_list = []
                         column_headers = ['raw_name', 'translated_name']
@@ -4640,7 +4931,7 @@ def parse_api_response(response_text: str, *, _recover_rows: bool = True) -> Lis
                 has_gender_field = bool(type_config.get('has_gender', False))
                 custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                 try:
-                    custom_fields = json.loads(custom_fields_json)
+                    custom_fields = _extraction_custom_fields(json.loads(custom_fields_json))
                 except Exception:
                     custom_fields = []
                 description_active = _find_description_field_casing(custom_fields) is not None
@@ -5034,6 +5325,7 @@ The translated_name column must be a direct translation or transliteration of th
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
 - Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".
+- {relations_instruction}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"{description_excluded_note}
@@ -5070,6 +5362,7 @@ The translated_name column must be a direct translation or transliteration of th
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks
 - {subject_tracking_instruction}
+- {relations_instruction}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
@@ -5128,6 +5421,34 @@ def _apply_subject_tracking_placeholder(prompt_text, include_gender_context=None
         prompt_text,
         flags=_re_st.MULTILINE,
     )
+
+
+def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False):
+    """Expand ``{relations_instruction}`` when the Relations Tracker is on; drop its line when off.
+
+    The instruction is written for the glossary target language. ``declare_column``
+    adds "one extra LAST column" for prompts with a fixed column list (Minimal).
+    """
+    return relations_tracking.apply_relations_placeholder(
+        prompt_text,
+        enabled=enabled,
+        field=relations_tracking.field_name(),
+        language=os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English'),
+        declare_column=declare_column,
+    )
+
+
+def warn_missing_relations_placeholder(prompt_text) -> bool:
+    """Print one warning when the Relations Tracker is on but the prompt cannot ask for relations."""
+    if not relations_tracking.tracking_enabled():
+        return False
+    if isinstance(prompt_text, str) and relations_tracking.RELATIONS_PLACEHOLDER in prompt_text:
+        return False
+    print(
+        f"⚠️ Relations Tracker is on, but the glossary prompt has no {relations_tracking.RELATIONS_PLACEHOLDER}. "
+        f"Add the line \"{relations_tracking.RELATIONS_PLACEHOLDER_LINE}\" or reset the prompt to record relations."
+    )
+    return True
 
 
 def _apply_description_rule_placeholders(prompt_text, custom_fields=None, description_active=None):
@@ -5278,10 +5599,10 @@ def build_prompt(chapter_text: str) -> tuple:
         # Get custom fields
         custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
         try:
-            custom_fields = json.loads(custom_fields_json)
+            custom_fields = _extraction_custom_fields(json.loads(custom_fields_json))
         except:
             custom_fields = []
-        
+
         # Build header parts (shared between {fields} and {fields1})
         header_parts = ['type', 'raw_name', 'translated_name', 'gender']
         if custom_fields:
@@ -5363,7 +5684,11 @@ def build_prompt(chapter_text: str) -> tuple:
     else:
         # No {fields} or {fields1} placeholder - use the prompt as-is
         system_prompt = custom_prompt
-    
+
+    # Expanded after {fields} so its wording cannot change the CSV/JSON choice above.
+    # The relations column itself comes from {fields} (the relations custom field).
+    system_prompt = _apply_relations_placeholder(system_prompt)
+
     # Remove any {chapter_text} placeholders from system prompt
     system_prompt = system_prompt.replace('{chapter_text}', '')
     system_prompt = system_prompt.replace('{{chapter_text}}', '')
@@ -7687,11 +8012,25 @@ def _minimal_pass_environment():
     Neither is a real reason to skip: the user asked for this pass explicitly.
     Both are overridden for the duration and restored afterwards.
     """
-    return _environment_overrides({
+    overrides = {
         "ENABLE_AUTO_GLOSSARY": "1",
         # Removed, not blanked: save_glossary checks os.path.exists on it.
         "MANUAL_GLOSSARY": None,
-    })
+    }
+    if relations_tracking.tracking_enabled():
+        # Relations come from the Balanced/Full requests; the extra pass only finds names.
+        # The relations field leaves the custom fields too, or the pass (tracker off)
+        # would ask for it and save it as an ordinary column.
+        overrides[relations_tracking.ENV_ENABLE] = "0"
+        try:
+            fields = json.loads(os.environ.get("GLOSSARY_CUSTOM_FIELDS") or "[]")
+        except Exception:
+            fields = None
+        if isinstance(fields, list):
+            kept = relations_tracking.persisted_custom_fields(fields)
+            if kept != fields:
+                overrides["GLOSSARY_CUSTOM_FIELDS"] = json.dumps(kept)
+    return _environment_overrides(overrides)
 
 
 def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=None):
@@ -8385,6 +8724,7 @@ def main(log_callback=None, stop_callback=None):
         print("📑 Using custom extraction prompt")
     else:
         print("📑 Using default extraction prompt")
+    warn_missing_relations_placeholder(os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip() or DEFAULT_GLOSSARY_PROMPT)
 
     # Keep one source snapshot for progress mapping and glossary processing.
     if check_stop():
@@ -9183,6 +9523,15 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Process entries
                                 if data and len(data) > 0:
+                                    update_relations_tracker_for_group(
+                                        data,
+                                        args.output,
+                                        unit,
+                                        idx,
+                                        source_path=epub_path,
+                                        chapter_positions=_chapter_positions,
+                                        chapter_filenames=_chapter_filenames,
+                                    )
                                     tracker_buckets = {}
                                     for entry in data:
                                         raw_for_tracker = str(entry.get("raw_name", "")).strip()
@@ -9286,6 +9635,14 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Process entries as each chapter completes
                             if data and len(data) > 0:
+                                update_relations_tracker(
+                                    data,
+                                    args.output,
+                                    source_path=epub_path,
+                                    chapter_index=idx,
+                                    chapter_num=_chapter_positions.get(idx, idx + 1),
+                                    chapter_file=_chapter_filenames.get(idx, ""),
+                                )
                                 update_gender_tracker(
                                     data,
                                     args.output,
@@ -10485,6 +10842,15 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     # Apply skip logic and save
                     tracker_units = merge_groups.get(idx, [(idx, chap)]) if isinstance(merge_groups, dict) else [(idx, chap)]
+                    update_relations_tracker_for_group(
+                        data,
+                        args.output,
+                        tracker_units,
+                        idx,
+                        source_path=epub_path,
+                        chapter_positions=_chapter_positions,
+                        chapter_filenames=_chapter_filenames,
+                    )
                     tracker_buckets = {}
                     for entry in data:
                         raw_for_tracker = str(entry.get("raw_name", "")).strip()

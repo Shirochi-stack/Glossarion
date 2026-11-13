@@ -28,7 +28,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, number_keyboard, toggle
+from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, number_keyboard, semantic, toggle
 
 log = logging.getLogger("glossarion.ui")
 
@@ -331,11 +331,25 @@ class PathEditor(FullScreenEditor):
 
 
 class ListEditor(FullScreenEditor):
-    """Rows of strings with add / remove / reorder (up / down buttons)."""
+    """Rows of strings with add / remove / reorder (up / down buttons).
+
+    ``locked``: the name of one row that cannot be removed (the Relations Tracker's column in Custom
+    Fields): it is tinted amber, has no Remove button, can still be renamed and moved, and a blank or
+    duplicate (case ignored) name for it is refused on Save. ``locked_check(name, other_rows)`` may refuse
+    more names: it returns the reason, or '' to accept. ``locked_value`` holds its name after
+    :meth:`collect` (None when the list has no such row)."""
 
     def __init__(self, ctx: Any, *, title: str, value: Sequence[Any], on_save: Optional[SaveHandler] = None,
-                 subtitle: Optional[str] = None) -> None:
+                 subtitle: Optional[str] = None, locked: Optional[str] = None,
+                 locked_tooltip: Optional[str] = None,
+                 locked_check: Optional[Callable[[str, list], str]] = None) -> None:
         self.items: list[str] = [str(v) for v in (value or [])]
+        folded = str(locked or "").strip().casefold()
+        self.locked_index: Optional[int] = next(
+            (i for i, item in enumerate(self.items) if folded and item.strip().casefold() == folded), None)
+        self.locked_tooltip = locked_tooltip
+        self.locked_check = locked_check
+        self.locked_value: Optional[str] = None
         super().__init__(ctx, title=title, subtitle=subtitle, on_save=on_save)
 
     def build_body(self) -> ft.Control:
@@ -353,26 +367,30 @@ class ListEditor(FullScreenEditor):
         self._fields: list[ft.TextField] = []
         controls: list[ft.Control] = []
         for index, item in enumerate(self.items):
+            locked = index == self.locked_index
             field = ft.TextField(color=ft.Colors.ON_SURFACE, value=item, dense=True, expand=True,
-                                 border_radius=tokens.RADII["field"])
+                                 border_radius=tokens.RADII["field"], tooltip=self.locked_tooltip if locked else None)
             self._fields.append(field)
-            controls.append(
-                ft.Row(
-                    [
-                        field,
-                        ft.IconButton(icon=ft.Icons.ARROW_UPWARD, tooltip="Move up", disabled=index == 0,
-                                      on_click=lambda e, i=index: self.move(i, -1), size_constraints=HIT_TARGET),
-                        ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, tooltip="Move down",
-                                      disabled=index == len(self.items) - 1,
-                                      on_click=lambda e, i=index: self.move(i, 1), size_constraints=HIT_TARGET),
-                        ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Remove",
-                                      on_click=lambda e, i=index: self.remove(i), size_constraints=HIT_TARGET),
-                    ],
-                    spacing=0,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    key=f"row-{index}",
-                )
-            )
+            buttons: list[ft.Control] = [
+                ft.IconButton(icon=ft.Icons.ARROW_UPWARD, tooltip="Move up", disabled=index == 0,
+                              on_click=lambda e, i=index: self.move(i, -1), size_constraints=HIT_TARGET),
+                ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, tooltip="Move down",
+                              disabled=index == len(self.items) - 1,
+                              on_click=lambda e, i=index: self.move(i, 1), size_constraints=HIT_TARGET),
+            ]
+            if locked:  # the Remove button's room, so the rows stay aligned
+                buttons.append(ft.Container(width=tokens.SIZES["hit_target"], key="row-locked-spacer"))
+            else:
+                buttons.append(ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Remove",
+                                             on_click=lambda e, i=index: self.remove(i), size_constraints=HIT_TARGET))
+            row: ft.Control = ft.Row([field, *buttons], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                     key=f"row-{index}")
+            if locked:
+                amber = semantic("warning", bool(getattr(self.ctx, "dark", False)))
+                row = ft.Container(content=row, bgcolor=ft.Colors.with_opacity(0.18, amber),
+                                   border=ft.Border.all(1, amber), border_radius=tokens.RADII["field"],
+                                   padding=ft.Padding.only(left=4), key="row-locked")
+            controls.append(row)
         if not controls:
             controls.append(ft.Text("No items", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
         self.rows.controls = controls
@@ -388,8 +406,12 @@ class ListEditor(FullScreenEditor):
 
     def remove(self, index: int) -> None:
         self._sync_from_fields()
+        if index == self.locked_index:
+            return
         if 0 <= index < len(self.items):
             del self.items[index]
+            if self.locked_index is not None and index < self.locked_index:
+                self.locked_index -= 1
             self._rerender()
 
     def move(self, index: int, delta: int) -> None:
@@ -397,6 +419,10 @@ class ListEditor(FullScreenEditor):
         target = index + delta
         if 0 <= index < len(self.items) and 0 <= target < len(self.items):
             self.items[index], self.items[target] = self.items[target], self.items[index]
+            if self.locked_index == index:
+                self.locked_index = target
+            elif self.locked_index == target:
+                self.locked_index = index
             self._rerender()
 
     def _on_add(self, e: Any = None) -> None:
@@ -404,6 +430,19 @@ class ListEditor(FullScreenEditor):
 
     def collect(self) -> Any:
         self._sync_from_fields()
+        self.locked_value = None
+        if self.locked_index is not None and 0 <= self.locked_index < len(self.items):
+            name = self.items[self.locked_index].strip()
+            if not name:
+                raise ValueError("The relations field needs a name.")
+            others = [s.strip().casefold() for i, s in enumerate(self.items) if i != self.locked_index]
+            if name.casefold() in others:
+                raise ValueError(f"There is already a field named \"{name}\".")
+            if self.locked_check is not None:
+                problem = self.locked_check(name, [s for i, s in enumerate(self.items) if i != self.locked_index])
+                if problem:
+                    raise ValueError(problem)
+            self.locked_value = name
         return [item for item in (s.strip() for s in self.items) if item]
 
 

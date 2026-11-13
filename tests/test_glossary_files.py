@@ -124,6 +124,8 @@ MOVED_BODIES = {
         ("_auto_gp = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)",
          "_auto_gp = auto_loaded_glossary_path or manual_glossary_path"),
         ("not getattr(self, 'manual_glossary_manually_loaded', False)", "not manually_loaded"),
+        # Relations Tracker: the relations sidecar is deleted with its glossary
+        ("re", r'( *)f"\{base\}_gender_tracker\.json",\n', r'\g<0>\1f"{base}_relations_tracker.json",\n'),
         (_APPEND, "return all_files"),
     ]),
     ("glossary_files", "glossary_delete_display"): ([(TG, 19580, 19589)], [

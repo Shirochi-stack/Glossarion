@@ -22,7 +22,8 @@ import flet as ft
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
 
-__all__ = ["EntrySheet", "GENDER_DECISIONS", "GENDER_OPTIONS", "GenderSheet", "RESOLVE_GENDER_LABEL", "field_label"]
+__all__ = ["EntrySheet", "GENDER_DECISIONS", "GENDER_OPTIONS", "GenderSheet", "RESOLVE_GENDER_LABEL", "field_label",
+           "offered_fields"]
 
 GENDER_OPTIONS = ("", "Male", "Female", "Unknown")
 #: The desktop "Resolve Tracked Gender" decisions (GlossaryManager_GUI ``_open_gender_resolution``: the
@@ -36,6 +37,24 @@ RESOLVE_GENDER_LABEL = "Resolve Gender…"
 def field_label(name: str) -> str:
     """The desktop column header text (``field.replace('_', ' ').title()``)."""
     return str(name or "").replace("_", " ").title()
+
+
+def offered_fields(ctx: Any, fields: Sequence[str]) -> list:
+    """The columns an entry can be edited in: while the Relations Tracker is on its column is never saved
+    in the glossary (``relations_tracking.persisted_custom_fields``), so it is not offered."""
+    fields = list(fields or ())
+    from glossarion_mobile.ui.glossary.relations import relations_core
+
+    core = relations_core(ctx)
+    cfg = getattr(ctx, "cfg", None)
+    if core is None or not callable(cfg):
+        return fields
+    try:
+        settings = {core.CONFIG_ENABLE: bool(cfg(core.CONFIG_ENABLE, False)),
+                    core.CONFIG_FIELD: str(cfg(core.CONFIG_FIELD, "") or core.DEFAULT_FIELD_NAME)}
+        return list(core.persisted_custom_fields(fields, settings))
+    except Exception:
+        return fields
 
 
 class EntrySheet:
@@ -56,7 +75,7 @@ class EntrySheet:
     ) -> None:
         self.ctx = ctx
         self.host = SheetHost(ctx)
-        self.fields = [f for f in fields if not str(f).startswith("_")]
+        self.fields = [f for f in offered_fields(ctx, fields) if not str(f).startswith("_")]
         self.initial = {f: _text(values.get(f)) for f in self.fields}
         self.new = new
         self.on_save = on_save

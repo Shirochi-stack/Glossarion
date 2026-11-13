@@ -362,6 +362,8 @@ class FrozenDesktopTables:
             ('glossary_skip_gender_tracking', ['skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'], False, bool),
             ('glossary_gender_noise_threshold', ['glossary_gender_noise_threshold_var'], 10, lambda v: safe_int(v, 10)),
             ('glossary_gender_tracking_bias', ['glossary_gender_tracking_bias_var'], 'none', str),
+            ('glossary_enable_relations_tracker', ['enable_relations_tracker_checkbox', 'glossary_enable_relations_tracker_var'], False, bool),
+            ('glossary_relations_history_mode', ['glossary_relations_history_mode_var'], 'previous', str),
             ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
             ('scan_phase_mode', ['scan_phase_mode_var'], 'quick-scan', str),
 

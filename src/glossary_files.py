@@ -200,6 +200,7 @@ def collect_glossary_files_for_inputs(epubs, *, config, guess_glossary=None,
                 for fname in [
                     f"{base}_glossary_progress.json",
                     f"{base}_gender_tracker.json",
+                    f"{base}_relations_tracker.json",
                     f"{base}_glossary_history.json",
                 ]:
                     f = os.path.join(nested_gdir, fname)
@@ -212,6 +213,7 @@ def collect_glossary_files_for_inputs(epubs, *, config, guess_glossary=None,
             for fname in [
                 f"{base}_glossary_progress.json",
                 f"{base}_gender_tracker.json",
+                f"{base}_relations_tracker.json",
                 f"{base}_glossary_history.json",
             ]:
                 pf = os.path.join(gdir, fname)

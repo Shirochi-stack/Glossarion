@@ -259,6 +259,15 @@ class PipelineHooksMixin(JobHooksMixin):
         return None
 
 
+def _is_relations_tracker_file(name):
+    """A relations tracker sidecar is never a glossary candidate."""
+    try:
+        from glossary_paths import is_relations_tracker_file
+    except Exception:
+        return False
+    return is_relations_tracker_file(name)
+
+
 class GlossaryPipelineMixin(PipelineHooksMixin):
     """Glossary extraction and glossary auto-loading/auto-mapping, plus the input-selection
     helpers both pipelines use (moved verbatim; see the module docstring)."""
@@ -2419,6 +2428,7 @@ Important rules:
                         if (
                             '_progress' in stem_lower
                             or stem_lower.endswith('_gender_tracker')
+                            or _is_relations_tracker_file(fn)
                             or stem_lower.endswith('_glossary_history')
                         ):
                             continue
@@ -2746,6 +2756,7 @@ Important rules:
                         or stem_cf.endswith('glossary_progress')
                         or '_progress' in stem_cf
                         or stem_cf.endswith('_gender_tracker')
+                        or _is_relations_tracker_file(fn)
                         or stem_cf.endswith('_glossary_history')
                     ):
                         continue

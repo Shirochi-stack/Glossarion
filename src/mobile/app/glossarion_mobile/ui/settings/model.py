@@ -141,6 +141,11 @@ ANTI_DUPLICATE_SLIDERS = {
     "logit_bias_strength": (0, 2, 20),
 }
 ANTI_DUPLICATE_OFF = "Enable Anti-Duplicate Parameters first"
+#: Sub-settings that only apply while a toggle is on: key -> (toggle key, lock reason). The desktop
+#: enables them with their toggle (GlossaryManager_GUI ``_relations_option_widgets``).
+TOGGLE_DEPENDENCIES = {
+    "glossary_relations_history_mode": ("glossary_enable_relations_tracker", "Turn on Enable Relations Tracker first"),
+}
 
 #: UI_SPEC §4.15 curated sections (U9): ``(id, title, home group, ((sub-heading, keys), ...))``.
 #: Each listed key moves out of its desktop schema section into the curated one (the schema stays the

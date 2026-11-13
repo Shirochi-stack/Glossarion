@@ -614,28 +614,53 @@ MOVED_BLOCKS = {
 REWIRE_SPANS = (
     # multi-instance: the user's selection (instance_runs.user_selection) - its import ...
     (8, 7, 2),
-    (47, 47, 10), (91, 178, 4), (276, 277, 27), (457, 475, 3), (477, 478, 2), (480, 507, 3),
-    (509, 511, 2), (513, 515, 2), (517, 523, 2), (525, 528, 2), (530, 534, 2), (563, 568, 1),
+    (47, 47, 11),
+    (64, 63, 11),  # Relations Tracker
+    (91, 178, 4), (276, 277, 27), (457, 475, 3), (477, 478, 2), (480, 507, 3),
+    (509, 511, 2), (513, 515, 2), (517, 523, 2), (525, 528, 2), (530, 534, 2),
+    (558, 557, 2),  # Relations Tracker
+    (563, 568, 1),
     # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
     (735, 735, 4),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
+    (1800, 1799, 378),  # Relations Tracker
     (1800, 1810, 3),
     # U9 gap closures: Entry Type Configuration / Custom Fields call the glossary_document rules
-    (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3093, 3093, 6), (3155, 3158, 4),
+    (1934, 1933, 1),  # Relations Tracker
+    (1941, 1940, 6),  # Relations Tracker
+    (2461, 2460, 1),  # Relations Tracker
+    (2538, 2537, 3),  # Relations Tracker
+    (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3093, 3093, 6),
+    (3137, 3139, 4),  # Relations Tracker
+    (3151, 3150, 5),  # Relations Tracker
+    (3153, 3153, 1),  # Relations Tracker
+    (3155, 3154, 1),  # Relations Tracker
+    (3155, 3158, 4),
+    (3166, 3165, 11),  # Relations Tracker
     (3168, 3171, 4),
     # U9 gap closures (round 3): the Balanced/Full Compression Factor + Auto closure calls the
     # settings_rules glossary compression rule (tests/parity/test_u9_gap_round3.py)
+    (3186, 3185, 8),  # Relations Tracker
+    (3648, 3648, 1),  # Relations Tracker
+    (3711, 3710, 1),  # Relations Tracker
+    (3770, 3770, 1),  # Relations Tracker
     (3979, 3992, 7), (3998, 3998, 1), (4000, 4008, 2),
     (4144, 4149, 2), (4151, 4156, 2),
+    (5113, 5113, 1),  # Relations Tracker
+    (5171, 5170, 1),  # Relations Tracker
+    (5189, 5189, 3),  # Relations Tracker
+    (5208, 5208, 1),  # Relations Tracker
     (5802, 5809, 1), (5854, 5859, 1),
     # the Anti-Duplicate sliders can be set to OFF (not sent: the server's own setting applies)
     (6036, 6036, 1), (6090, 6090, 1), (6107, 6107, 1), (6146, 6146, 1), (6150, 6150, 1), (6162, 6162, 1),
     # the editor's "Glossary File:" ◀ combo ▶ row is qt_widget_helpers.NavComboRow (shared with the QA
     # scanner's glossary name review); its ◀/▶ and arrow-visibility helpers are the row's
+    (7072, 7071, 117),  # Relations Tracker
     (7601, 7632, 9),
     (7818, 7849, 12), (7867, 7879, 7),
     (7889, 7919, 8),
     (7944, 7952, 6), (8024, 8030, 4), (8312, 8317, 3), (8420, 8428, 4), (8462, 8480, 1), (8566, 8966, 9),
+    (9015, 9028, 1),  # Relations Tracker
     (9035, 9167, 9), (9175, 9185, 4), (9196, 9203, 2), (9208, 9212, 2), (9234, 9256, 3), (9270, 9280, 8),
     (9296, 9306, 3), (9321, 9326, 2), (9422, 9422, 1),
     # the backup settings save goes through config_store.save_config_file (atomic, encrypted keys)
@@ -643,7 +668,9 @@ REWIRE_SPANS = (
     (9457, 9463, 3), (9537, 9537, 3), (9582, 9585, 1),
     (9616, 9625, 1), (9701, 9701, 3), (9712, 9714, 3), (9732, 9746, 1), (9885, 9937, 12), (9948, 9958, 3),
     (9984, 9988, 1), (10044, 10089, 7), (10096, 10111, 5), (10289, 10494, 17), (10499, 10503, 5), (10523, 10528, 5),
-    (10570, 10595, 3), (10607, 10619, 1), (10631, 10637, 1), (10683, 10828, 13), (10887, 10892, 0), (10895, 10906, 2), (10916, 10925, 3), (10927, 10933, 2),
+    (10570, 10595, 3), (10607, 10619, 1), (10631, 10637, 1), (10683, 10828, 13),
+    (10879, 10878, 2),  # Relations Tracker
+    (10887, 10892, 0), (10895, 10906, 2), (10916, 10925, 3), (10927, 10933, 2),
     (10941, 10963, 2), (10968, 10973, 2), (10981, 11001, 2), (11018, 11018, 1), (11096, 11128, 1), (11165, 11173, 3),
     (11177, 11190, 2), (11208, 11210, 1), (11235, 11238, 1), (11251, 11258, 3), (11264, 11266, 1), (11301, 11306, 1),
     (11371, 11415, 13), (11417, 11442, 3), (11444, 11483, 7), (11485, 11527, 10), (11537, 11588, 0), (11691, 11769, 1),

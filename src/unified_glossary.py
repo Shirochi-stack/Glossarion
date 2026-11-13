@@ -42,7 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import instance_plan
 import mobile_runtime
-from glossary_paths import resolve_shared_glossary_dir, sanitize_glossary_folder_name
+from glossary_paths import RELATIONS_TRACKER_SUFFIX, resolve_shared_glossary_dir, sanitize_glossary_folder_name
 
 UNIFIED_FOLDER_NAME = "Unified Glossary"
 UNIFIED_BASENAME = "glossary_unified"
@@ -56,6 +56,7 @@ _SKIP_FILE_PREFIXES = ("glossary_extension", "glossary_unified")
 _SKIP_FILE_SUFFIXES = (
     "_glossary_progress.json",
     "_gender_tracker.json",
+    RELATIONS_TRACKER_SUFFIX,
     "_glossary_history.json",
 )
 # Output of extract_glossary_from_epub._detect_dominant_script_glossary -> language.

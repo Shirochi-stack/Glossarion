@@ -4209,6 +4209,140 @@ _DEL_KEY_IMPORT_EXPORT_PREVIEW = [
 ]
 
 
+# 2026-11-13 Relations Tracker (glossary_enable_relations_tracker / GLOSSARY_ENABLE_RELATIONS_TRACKER,
+# glossary_relations_history_mode / GLOSSARY_RELATIONS_HISTORY_MODE, glossary_relations_field_name /
+# GLOSSARY_RELATIONS_FIELD): each pair is (row before + row after) -> (before + new rows + after), so it
+# applies once at every pin and is a no-op where the rows already exist.
+_RELATIONS_TRACKER_ROWS = {'src/owner_state.py': [('        self.glossary_gender_tracking_bias_var = '
+                         "self.config.get('glossary_gender_tracking_bias', 'none')\n"
+                         '        self.glossary_partial_ratio_gender_only_var = '
+                         "self.config.get('glossary_partial_ratio_gender_only', False)\n",
+                         '        self.glossary_gender_tracking_bias_var = '
+                         "self.config.get('glossary_gender_tracking_bias', 'none')\n"
+                         '        self.glossary_enable_relations_tracker_var = '
+                         "self.config.get('glossary_enable_relations_tracker', False)\n"
+                         '        self.glossary_relations_history_mode_var = '
+                         "self.config.get('glossary_relations_history_mode', 'previous')\n"
+                         '        self.glossary_partial_ratio_gender_only_var = '
+                         "self.config.get('glossary_partial_ratio_gender_only', False)\n")],
+ 'src/run_env.py': [("            'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, "
+                     "'glossary_gender_tracking_bias_var', self.config.get('glossary_gender_tracking_bias', "
+                     "'none'))),\n"
+                     "            'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, "
+                     "'glossary_partial_ratio_gender_only_var', False) else '0',\n",
+                     "            'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, "
+                     "'glossary_gender_tracking_bias_var', self.config.get('glossary_gender_tracking_bias', "
+                     "'none'))),\n"
+                     "            'GLOSSARY_ENABLE_RELATIONS_TRACKER': '1' if getattr(self, "
+                     "'glossary_enable_relations_tracker_var', False) else '0',\n"
+                     "            'GLOSSARY_RELATIONS_HISTORY_MODE': str(getattr(self, "
+                     "'glossary_relations_history_mode_var', "
+                     "self.config.get('glossary_relations_history_mode', 'previous'))),\n"
+                     "            'GLOSSARY_RELATIONS_FIELD': "
+                     "str(self.config.get('glossary_relations_field_name', 'relations')),\n"
+                     "            'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, "
+                     "'glossary_partial_ratio_gender_only_var', False) else '0',\n"),
+                    ("            ('GLOSSARY_GENDER_TRACKING_BIAS', "
+                     "str(self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                     "            ('GLOSSARY_USE_SMART_FILTER', '1' if "
+                     "self.config.get('glossary_use_smart_filter', True) else '0'),\n",
+                     "            ('GLOSSARY_GENDER_TRACKING_BIAS', "
+                     "str(self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                     "            ('GLOSSARY_ENABLE_RELATIONS_TRACKER', '1' if "
+                     "self.config.get('glossary_enable_relations_tracker', False) else '0'),\n"
+                     "            ('GLOSSARY_RELATIONS_HISTORY_MODE', "
+                     "str(self.config.get('glossary_relations_history_mode', 'previous'))),\n"
+                     "            ('GLOSSARY_RELATIONS_FIELD', "
+                     "str(self.config.get('glossary_relations_field_name', 'relations'))),\n"
+                     "            ('GLOSSARY_USE_SMART_FILTER', '1' if "
+                     "self.config.get('glossary_use_smart_filter', True) else '0'),\n")],
+ 'src/settings_persistence.py': [("            ('glossary_gender_tracking_bias', "
+                                  "['glossary_gender_tracking_bias_var'], 'none', str),\n"
+                                  "            ('glossary_filter_mode', ['glossary_filter_mode_var'], "
+                                  "'strict', str),\n",
+                                  "            ('glossary_gender_tracking_bias', "
+                                  "['glossary_gender_tracking_bias_var'], 'none', str),\n"
+                                  "            ('glossary_enable_relations_tracker', "
+                                  "['enable_relations_tracker_checkbox', "
+                                  "'glossary_enable_relations_tracker_var'], False, bool),\n"
+                                  "            ('glossary_relations_history_mode', "
+                                  "['glossary_relations_history_mode_var'], 'previous', str),\n"
+                                  "            ('glossary_filter_mode', ['glossary_filter_mode_var'], "
+                                  "'strict', str),\n")],
+ 'src/translator_gui.py': [('        self.glossary_gender_tracking_bias_var = '
+                            "self.config.get('glossary_gender_tracking_bias', 'none')\n"
+                            '        self.glossary_partial_ratio_gender_only_var = '
+                            "self.config.get('glossary_partial_ratio_gender_only', False)\n",
+                            '        self.glossary_gender_tracking_bias_var = '
+                            "self.config.get('glossary_gender_tracking_bias', 'none')\n"
+                            '        self.glossary_enable_relations_tracker_var = '
+                            "self.config.get('glossary_enable_relations_tracker', False)\n"
+                            '        self.glossary_relations_history_mode_var = '
+                            "self.config.get('glossary_relations_history_mode', 'previous')\n"
+                            '        self.glossary_partial_ratio_gender_only_var = '
+                            "self.config.get('glossary_partial_ratio_gender_only', False)\n"),
+                           ("            'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, "
+                            "'glossary_gender_tracking_bias_var', "
+                            "self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                            "            'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, "
+                            "'glossary_partial_ratio_gender_only_var', False) else '0',\n",
+                            "            'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, "
+                            "'glossary_gender_tracking_bias_var', "
+                            "self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                            "            'GLOSSARY_ENABLE_RELATIONS_TRACKER': '1' if getattr(self, "
+                            "'glossary_enable_relations_tracker_var', False) else '0',\n"
+                            "            'GLOSSARY_RELATIONS_HISTORY_MODE': str(getattr(self, "
+                            "'glossary_relations_history_mode_var', "
+                            "self.config.get('glossary_relations_history_mode', 'previous'))),\n"
+                            "            'GLOSSARY_RELATIONS_FIELD': "
+                            "str(self.config.get('glossary_relations_field_name', 'relations')),\n"
+                            "            'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, "
+                            "'glossary_partial_ratio_gender_only_var', False) else '0',\n"),
+                           ("                    'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, "
+                            "'glossary_gender_tracking_bias_var', "
+                            "self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                            "                    'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, "
+                            "'glossary_partial_ratio_gender_only_var', False) else '0',\n",
+                            "                    'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, "
+                            "'glossary_gender_tracking_bias_var', "
+                            "self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                            "                    'GLOSSARY_ENABLE_RELATIONS_TRACKER': '1' if getattr(self, "
+                            "'glossary_enable_relations_tracker_var', False) else '0',\n"
+                            "                    'GLOSSARY_RELATIONS_HISTORY_MODE': str(getattr(self, "
+                            "'glossary_relations_history_mode_var', "
+                            "self.config.get('glossary_relations_history_mode', 'previous'))),\n"
+                            "                    'GLOSSARY_RELATIONS_FIELD': "
+                            "str(self.config.get('glossary_relations_field_name', 'relations')),\n"
+                            "                    'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, "
+                            "'glossary_partial_ratio_gender_only_var', False) else '0',\n"),
+                           ("            ('GLOSSARY_GENDER_TRACKING_BIAS', "
+                            "str(self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                            "            ('GLOSSARY_USE_SMART_FILTER', '1' if "
+                            "self.config.get('glossary_use_smart_filter', True) else '0'),\n",
+                            "            ('GLOSSARY_GENDER_TRACKING_BIAS', "
+                            "str(self.config.get('glossary_gender_tracking_bias', 'none'))),\n"
+                            "            ('GLOSSARY_ENABLE_RELATIONS_TRACKER', '1' if "
+                            "self.config.get('glossary_enable_relations_tracker', False) else '0'),\n"
+                            "            ('GLOSSARY_RELATIONS_HISTORY_MODE', "
+                            "str(self.config.get('glossary_relations_history_mode', 'previous'))),\n"
+                            "            ('GLOSSARY_RELATIONS_FIELD', "
+                            "str(self.config.get('glossary_relations_field_name', 'relations'))),\n"
+                            "            ('GLOSSARY_USE_SMART_FILTER', '1' if "
+                            "self.config.get('glossary_use_smart_filter', True) else '0'),\n"),
+                           ("                ('glossary_gender_tracking_bias', "
+                            "['glossary_gender_tracking_bias_var'], 'none', str),\n"
+                            "                ('glossary_filter_mode', ['glossary_filter_mode_var'], "
+                            "'strict', str),\n",
+                            "                ('glossary_gender_tracking_bias', "
+                            "['glossary_gender_tracking_bias_var'], 'none', str),\n"
+                            "                ('glossary_enable_relations_tracker', "
+                            "['enable_relations_tracker_checkbox', 'glossary_enable_relations_tracker_var'], "
+                            'False, bool),\n'
+                            "                ('glossary_relations_history_mode', "
+                            "['glossary_relations_history_mode_var'], 'previous', str),\n"
+                            "                ('glossary_filter_mode', ['glossary_filter_mode_var'], "
+                            "'strict', str),\n")]}
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5759,6 +5893,14 @@ APPROVED = (
         "source": {
             "src/manga_image_preview.py": _DEL_KEY_IMPORT_EXPORT_PREVIEW,
         },
+        "values": {},
+    },
+    {
+        "date": "2026-11-13",
+        "what": "New glossary setting 'Enable Relations Tracker' (glossary_enable_relations_tracker, off) with 'Earlier relations shown' (glossary_relations_history_mode, previous) and the relations field name "
+                "(glossary_relations_field_name, relations): the glossary AI returns a relations column that is "
+                "kept in a *_relations_tracker.json sidecar, never in the glossary file",
+        "source": _RELATIONS_TRACKER_ROWS,
         "values": {},
     },
 )

@@ -96,6 +96,7 @@ CORE_MODULES = (
     "glossary_refinement",
     "glossary_progress_core",
     "glossary_usage",
+    "relations_tracking",
     "settings_rules",
 )
 
@@ -405,11 +406,12 @@ PROMPT_PLACEHOLDERS = {
     "balanced_full": ("{fields}", "{fields1}", "{language}", "{entries}", "{description_mandatory}",
                       "{description_detailed}", "{description_in_language}", "{description_excluded_note}",
                       "{description_example}", "{example}", "{description_name_split_example}",
-                      "{name_split_example}", "{gender_instruction}", "{subject_tracking_instruction}"),
+                      "{name_split_example}", "{gender_instruction}", "{subject_tracking_instruction}",
+                      "{relations_instruction}"),
     "minimal": ("{fields}", "{fields1}", "{language}", "{entries}", "{min_frequency}", "{max_names}",
                 "{max_titles}", "{marker}", "{description_example}", "{example}",
                 "{description_name_split_example}", "{name_split_example}", "{gender_instruction}",
-                "{subject_tracking_instruction}"),
+                "{subject_tracking_instruction}", "{relations_instruction}"),
 }
 
 #: config.json dicts the Balanced/Full and Minimal rows share (each row writes only its own entry).

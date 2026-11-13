@@ -40,6 +40,7 @@ from glossarion_mobile.ui.settings.model import (
     FOLDED_KEYS,
     SECTION_ORDER,
     SECTION_TITLES,
+    TOGGLE_DEPENDENCIES,
     VIRTUAL_SPECS,
     config_path,
     env_names,
@@ -565,6 +566,10 @@ class SchemaAccess:
             if key in ("forced_truncation_seconds", "mark_glossary_forced_truncation_complete"):
                 if not config.get("forced_truncation_enabled"):
                     return "Turn on Forced Truncation first"
+        if include_dependencies and key in TOGGLE_DEPENDENCIES:
+            toggle, reason = TOGGLE_DEPENDENCIES[key]
+            if not config.get(toggle):
+                return reason
         return self._evaluate(spec_attr(spec, "locked_if", None), config, _LOCK_REASON)
 
     def hidden_reason(self, spec: Any, config: Mapping[str, Any]) -> Optional[str]:

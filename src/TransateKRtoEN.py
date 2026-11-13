@@ -12633,6 +12633,10 @@ class BatchTranslationProcessor:
                 "chapter_num": parent_actual_num,
                 "chapter_file": _single_pass_progress_chapter_file(parent_chapter, parent_fname),
             }
+            # Relations Tracker cut-off: the last chapter of the merged group.
+            merged_num_end = _merged_chapter_num_end(cn for cn, _, _, _, _ in chapters_data)
+            if merged_num_end is not None:
+                chapter_ref["chapter_num_end"] = merged_num_end
             os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_ref["chapter_file"] or "")
             os.environ["CURRENT_CHAPTER_NUM"] = str(parent_actual_num or "")
             chapter_system_prompt = build_system_prompt(
@@ -13627,6 +13631,93 @@ def _request_glossary_setting(settings, name, default=None):
     return os.getenv(name, default)
 
 
+# Relations Tracker settings read per request (snapshot first, then the env),
+# with the defaults run_env writes.
+_RELATIONS_SETTING_DEFAULTS = (
+    ("GLOSSARY_ENABLE_RELATIONS_TRACKER", "0"),
+    ("GLOSSARY_RELATIONS_HISTORY_MODE", "previous"),
+    ("GLOSSARY_RELATIONS_FIELD", "relations"),
+)
+
+
+def _inject_glossary_relations(glossary_text, glossary_path, chapter_ref=None, settings=None):
+    """Add the Relations column (known up to this request's chapter) to the book glossary text.
+
+    Returns ``(text, log_line, field)``. ``field`` is the column name when
+    something was added, else None. With the toggle off nothing is imported
+    and the text comes back untouched.
+    """
+    relations_settings = {
+        name: _request_glossary_setting(settings, name, default)
+        for name, default in _RELATIONS_SETTING_DEFAULTS
+    }
+    enabled = str(relations_settings["GLOSSARY_ENABLE_RELATIONS_TRACKER"]).strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return glossary_text, None, None
+    try:
+        import relations_tracking
+        injected, stats = relations_tracking.inject_relations_column(
+            glossary_text,
+            glossary_path,
+            chapter_ref=chapter_ref,
+            settings=relations_settings,
+        )
+        field = None
+        if injected != glossary_text:
+            field = relations_tracking.field_name(relations_settings)
+        return injected, relations_tracking.relations_log_line(stats), field
+    except Exception as e:
+        print(f"⚠️ Relations tracker skipped: {e}")
+        return glossary_text, None, None
+
+
+def _is_relations_tracker_file(name):
+    """True for a Relations Tracker sidecar (never a glossary)."""
+    try:
+        import relations_tracking
+    except Exception:
+        return False
+    return relations_tracking.is_tracker_file(name)
+
+
+def _copy_relations_tracker_with_glossary(source_glossary, target_glossary):
+    """Copy the Relations Tracker sidecar of ``source_glossary`` next to its copy.
+
+    Does nothing when the source has no tracker or the copy already has one.
+    """
+    try:
+        import relations_tracking
+        source_tracker = relations_tracking.tracker_path_for_glossary(source_glossary)
+        target_tracker = relations_tracking.tracker_path_for_glossary(target_glossary)
+        if (
+            not source_tracker
+            or not target_tracker
+            or not os.path.isfile(source_tracker)
+            or os.path.exists(target_tracker)
+            or os.path.abspath(source_tracker) == os.path.abspath(target_tracker)
+        ):
+            return None
+        shutil.copy(source_tracker, target_tracker)
+        print(f"📑 Copied relations tracker to output: {os.path.basename(target_tracker)}")
+        return target_tracker
+    except Exception as e:
+        print(f"⚠️ Failed to copy relations tracker: {e}")
+        return None
+
+
+def _merged_chapter_num_end(chapter_nums):
+    """The highest actual chapter number of a merged request, or None."""
+    best = None
+    for value in chapter_nums:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if best is None or number > best[0]:
+            best = (number, value)
+    return best[1] if best else None
+
+
 def _multipass_exclude_applied_glossary_entries():
     """Multipass sends only glossary entries not yet applied in the translated output."""
     return str(os.getenv("COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING", "1")).strip().lower() in (
@@ -13686,6 +13777,7 @@ def find_glossary_file(
                 and "progress" not in stem_cf
                 and not stem_cf.endswith("_gender_tracker")
                 and not stem_cf.endswith("_glossary_history")
+                and not _is_relations_tracker_file(path)
             )
         except Exception:
             return False
@@ -13728,6 +13820,7 @@ def find_glossary_file(
                         "progress" in stem_cf
                         or stem_cf.endswith("_gender_tracker")
                         or stem_cf.endswith("_glossary_history")
+                        or _is_relations_tracker_file(name)
                     ):
                         continue
                     if preferred and stem_cf in preferred:
@@ -23581,8 +23674,13 @@ def build_system_prompt(
             # The book glossary, the extension and the unified glossary are merged into one
             # block (one header, each section once) and appended after the append prompt below.
             glossary_pieces = []
+            relations_log = relations_field = None
             # Skip appending if compression returned empty (0 matching entries)
             if glossary_text and glossary_text.strip():
+                # Relations Tracker: only the book's own glossary gets the column.
+                glossary_text, relations_log, relations_field = _inject_glossary_relations(
+                    glossary_text, actual_glossary_path, chapter_ref=chapter_ref, settings=settings,
+                )
                 glossary_pieces.append(glossary_text)
                 if not glossary_compression_logged:
                     glossary_log_parts.append(f"✅ Glossary appended ({len(glossary_text):,} characters)")
@@ -23720,16 +23818,31 @@ def build_system_prompt(
                 ))
 
             from glossary_compressor import merge_glossary_texts
-            merged_glossary = merge_glossary_texts(glossary_pieces)
+            if relations_field:
+                # The book glossary's header gained the relations column; the
+                # extension / unified glossary still share it.
+                merged_glossary = merge_glossary_texts(
+                    glossary_pieces, extra_header_columns=(relations_field,)
+                )
+            else:
+                merged_glossary = merge_glossary_texts(glossary_pieces)
             if merged_glossary:
                 if system:
                     system += "\n\n"
-                system += f"{custom_prompt}\n{merged_glossary}"
+                if relations_field:
+                    # How to read the relations column: a line of its own above the
+                    # glossary block, so the block's header and rows stay untouched.
+                    from relations_tracking import legend_line as _relations_legend_line
+                    system += f"{custom_prompt}\n{_relations_legend_line(relations_field)}\n{merged_glossary}"
+                else:
+                    system += f"{custom_prompt}\n{merged_glossary}"
 
             # One line for everything glossary-related in this request, e.g.
             # 🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens
             if glossary_log_parts:
                 defer_batch_log(" | ".join(glossary_log_parts))
+            if relations_log:
+                defer_batch_log(relations_log)
 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
@@ -27109,6 +27222,7 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_CUSTOM_ENTRY_TYPES', 'GLOSSARY_CUSTOM_FIELDS', 'GLOSSARY_ENTRY_TYPE_FILTER_MODE',
                         'GLOSSARY_SKIP_GENDER_TRACKING',
                         'GLOSSARY_GENDER_NOISE_THRESHOLD', 'GLOSSARY_GENDER_TRACKING_BIAS',
+                        'GLOSSARY_ENABLE_RELATIONS_TRACKER', 'GLOSSARY_RELATIONS_HISTORY_MODE', 'GLOSSARY_RELATIONS_FIELD',
                         'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', 'GLOSSARY_ALIAS_AWARE_NAME_MATCHING',
                         'GLOSSARY_ALIAS_AWARE_GENDER_ONLY',
                         # Match GUI batching settings
@@ -27708,6 +27822,7 @@ def main(log_callback=None, stop_callback=None):
                                     '_progress' in stem_lower
                                     or stem_lower.endswith('_gender_tracker')
                                     or stem_lower.endswith('_glossary_history')
+                                    or _is_relations_tracker_file(fn)
                                 ):
                                     continue
                                 if _preextracted_glossary_matches_input(fp, input_path):
@@ -27730,6 +27845,8 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"📑 Copied glossary to output: {target_name}")
                             except Exception as e:
                                 print(f"⚠️ Failed to copy glossary: {e}")
+                            else:
+                                _copy_relations_tracker_with_glossary(best_match, target_path)
                         else:
                             print(f"📑 Glossary already exists in output: {target_name}")
                     else:
@@ -31949,6 +32066,11 @@ def main(log_callback=None, stop_callback=None):
                         "chapter_num": actual_num,
                         "chapter_file": _single_pass_progress_chapter_file(c, FileUtilities.create_chapter_filename(c, actual_num)),
                     }
+                    if merge_info:
+                        # Relations Tracker cut-off: the last chapter of the merged group.
+                        merged_num_end = _merged_chapter_num_end(merge_info.get('expected_chapters') or [])
+                        if merged_num_end is not None:
+                            current_chapter_ref["chapter_num_end"] = merged_num_end
                     os.environ["CURRENT_CHAPTER_FILE"] = str(current_chapter_ref["chapter_file"] or "")
                     os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
                     if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and current_glossary_path and os.path.exists(current_glossary_path):

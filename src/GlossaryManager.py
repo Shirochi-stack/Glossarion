@@ -88,6 +88,22 @@ try:
 except ImportError:
     DEFAULT_AUTO_GLOSARY_PROMPT3 = ""
     _apply_subject_tracking_placeholder = None
+try:
+    from extract_glossary_from_epub import _apply_relations_placeholder, warn_missing_relations_placeholder
+except ImportError:
+    _apply_relations_placeholder = None
+    warn_missing_relations_placeholder = None
+import relations_tracking
+
+# Relations cells taken off Minimal responses during one save_glossary run
+# (chunks run on threads), recorded once the chapters are known. One list per
+# output folder, so two runs in the same process do not mix their cells.
+_minimal_relations_lock = threading.Lock()
+_minimal_relations_cells = {}
+
+
+def _minimal_relations_key(output_dir):
+    return os.path.normcase(os.path.abspath(str(output_dir or '')))
 
 
 # Class-level shared lock for API submission timing
@@ -924,7 +940,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         custom_prompt = DEFAULT_AUTO_GLOSARY_PROMPT3.strip()
         os.environ["AUTO_GLOSSARY_PROMPT"] = custom_prompt
         print("📑 AUTO_GLOSSARY_PROMPT not set - initialized to default unified prompt")
-    
+    with _minimal_relations_lock:
+        _minimal_relations_cells.pop(_minimal_relations_key(output_dir), None)
+    if warn_missing_relations_placeholder is not None:
+        warn_missing_relations_placeholder(custom_prompt)
+
     def clean_html(html_text):
         """Remove HTML tags to get clean text"""
         soup = _html_soup(html_text)
@@ -1257,6 +1277,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 getattr(_process_chunks_batch_api, 'last_run_complete', False)
                 and not is_stop_requested()
             )
+            _record_minimal_relations(output_dir, chapters)
             return _parse_csv_to_dict(csv_content)
         else:
             # Strict sequential processing (one API call at a time)
@@ -1561,6 +1582,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         save_glossary.last_run_complete = bool(
             _minimal_scheduled_requests_complete and not is_stop_requested()
         )
+        _record_minimal_relations(output_dir, chapters)
         return _parse_csv_to_dict(csv_content)
     
     # Original single-text processing
@@ -1574,10 +1596,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             os.environ["_TEXT_ALREADY_FILTERED"] = "1"
         
         try:
-            return _extract_with_custom_prompt(custom_prompt, text_to_process, language, 
-                                                   min_frequency, max_names, max_titles, 
-                                                   existing_glossary, output_dir, 
+            result = _extract_with_custom_prompt(custom_prompt, text_to_process, language,
+                                                   min_frequency, max_names, max_titles,
+                                                   existing_glossary, output_dir,
                                                    strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback)
+            if result:
+                _record_minimal_relations(output_dir, chapters)
+            return result
         finally:
             if already_filtered:
                 os.environ.pop("_TEXT_ALREADY_FILTERED", None)
@@ -5119,6 +5144,212 @@ def _send_splitting_on_context_error(send_text, text, max_output_tokens, *, _dep
     return responses
 
 
+_MINIMAL_DEFAULT_COLUMNS = ('type', 'raw_name', 'translated_name', 'gender', 'description')
+
+
+def _minimal_custom_fields():
+    try:
+        fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+    except Exception:
+        return []
+    return [str(f) for f in fields] if isinstance(fields, list) else []
+
+
+def _glossary_raw_name_keys(glossary_text):
+    """Tracker keys of the raw names in a CSV or token-efficient glossary text."""
+    keys = set()
+    if not isinstance(glossary_text, str):
+        return keys
+    for line in glossary_text.splitlines():
+        line = line.strip()
+        if not line or _is_glossary_header(line) or line.startswith(('===', 'Glossary Columns:')):
+            continue
+        if line.startswith('* '):
+            raw = line[2:].split(' = ', 1)[0].strip()
+        else:
+            cells = line.split(_gsep(line))
+            raw = cells[1].strip().strip('"') if len(cells) > 1 else ''
+        if raw:
+            keys.add(relations_tracking.tracker_key(raw))
+    return keys
+
+
+def _minimal_relations_sink(prompt_text, custom_fields, uses_fields, existing_glossary=None):
+    """What _detach_relations_cells needs: the field, the prompt's columns and known names."""
+    if uses_fields:
+        columns = ['type', 'raw_name', 'translated_name', 'gender'] + list(custom_fields or [])
+    else:
+        match = re.search(r'Columns in this exact order:\s*([^\n]+)', prompt_text or '', flags=re.IGNORECASE)
+        columns = [c.strip() for c in match.group(1).split(',') if c.strip()] if match else []
+        if not columns:
+            columns = list(_MINIMAL_DEFAULT_COLUMNS)
+    return {
+        'field': relations_tracking.field_name(),
+        'columns': columns,
+        'known': _glossary_raw_name_keys(existing_glossary),
+        'cells': [],
+    }
+
+
+def _split_row_cells(line, sep):
+    """Split one response row on ``sep``, leaving separators inside "double quotes" alone.
+
+    Each cell keeps its own text (quotes included), so ``sep.join(cells)`` gives the row
+    back unchanged. A row with unbalanced quotes is split plainly.
+    """
+    if sep != ',' or '"' not in line or line.count('"') % 2:
+        return line.split(sep)
+    cells, start, quoted = [], 0, False
+    for i, ch in enumerate(line):
+        if ch == '"':
+            quoted = not quoted
+        elif ch == sep and not quoted:
+            cells.append(line[start:i])
+            start = i + 1
+    cells.append(line[start:])
+    return cells
+
+
+def _detach_relations_cells(lines, sep, sink):
+    """Take the relations cell off each response row; collect ``(raw, translated, cell)`` in the sink.
+
+    A header the model returned decides the column; otherwise the prompt's columns do
+    (relations is one extra LAST column unless they list it). The cell is taken when the
+    row has exactly one cell more than the other columns (and that cell is empty or reads
+    as ``name: relation``), or when the last cell reads as relations whose names are all
+    raw names in this response or the existing glossary. Anything else is left alone.
+    """
+    field_key = str(sink.get('field') or '').strip().casefold()
+    folded = [str(c).strip().casefold() for c in sink.get('columns') or []]
+    rel_idx = folded.index(field_key) if field_key in folded else None
+    expected = len(folded) - (1 if rel_idx is not None else 0)
+    if rel_idx is None:
+        rel_idx = expected
+
+    header_idx = None
+    header_cells = None
+    header_names_field = False
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if 'type' in low and 'raw_name' in low:
+            header_idx = i
+            header_cells = [c.strip() for c in ln.split(sep)]
+            break
+    if header_cells is not None:
+        named = [c for c in header_cells if c]
+        named_folded = [c.casefold() for c in named]
+        if field_key in named_folded:
+            header_names_field = True
+            rel_idx = named_folded.index(field_key)
+            expected = len(named) - 1
+        else:
+            expected = len(named)
+            rel_idx = expected
+
+    known = set(sink.get('known') or ())
+    for i, ln in enumerate(lines):
+        if i == header_idx:
+            continue
+        cells = _split_row_cells(ln, sep)
+        if len(cells) > 1:
+            known.add(relations_tracking.tracker_key(cells[1].strip().strip('"')))
+
+    out = []
+    for i, ln in enumerate(lines):
+        if i == header_idx:
+            if header_names_field:
+                ln = sep.join(c for c in ln.split(sep) if c.strip().casefold() != field_key)
+            out.append(ln)
+            continue
+        cells = _split_row_cells(ln, sep)
+        take = None
+        if len(cells) >= 3:
+            if header_names_field:
+                if rel_idx == expected and len(cells) >= expected + 1:
+                    # Last column: overflow from an unquoted comma stays left of it. A last
+                    # cell that does not read as relations is description overflow: keep it.
+                    candidate = cells[-1]
+                    if not candidate.strip().strip('"') or relations_tracking.parse_relations_cell(candidate):
+                        take = len(cells) - 1
+                elif len(cells) > rel_idx:
+                    take = rel_idx
+            elif len(cells) == expected + 1 and rel_idx < len(cells):
+                candidate = cells[rel_idx]
+                if not candidate.strip().strip('"') or relations_tracking.parse_relations_cell(candidate):
+                    take = rel_idx
+            elif len(cells) > 3:
+                pairs = relations_tracking.parse_relations_cell(cells[-1])
+                if pairs and all(relations_tracking.tracker_key(t) in known for t, _label in pairs):
+                    take = len(cells) - 1
+        if take is not None:
+            cell = cells.pop(take).strip().strip('"').strip()
+            if cell:
+                sink['cells'].append((
+                    cells[1].strip().strip('"'),
+                    cells[2].strip().strip('"') if len(cells) > 2 else '',
+                    cell,
+                ))
+            ln = sep.join(cells)
+        out.append(ln)
+    return out
+
+
+def _chapter_plain_text(chapter):
+    body = chapter.get('body', '') if isinstance(chapter, dict) else chapter
+    body = str(body or '')
+    if '<' not in body:
+        return body
+    try:
+        return _html_soup(body).get_text()
+    except Exception:
+        return body
+
+
+def _record_minimal_relations(output_dir, chapters):
+    """Record the relations cells collected during this run in ``<output_dir>/relations_tracker.json``.
+
+    Minimal requests carry no chapter, so each relation is filed under the first chapter
+    whose text contains both raw names (else the entry's raw name, else chapter 1).
+    """
+    with _minimal_relations_lock:
+        cells = _minimal_relations_cells.pop(_minimal_relations_key(output_dir), [])
+    if not cells or not relations_tracking.tracking_enabled():
+        return []
+    try:
+        from extract_glossary_from_epub import record_relations_for_chapters
+    except Exception as exc:
+        print(f"⚠️ Relations tracker unavailable: {exc}")
+        return []
+    units = []
+    positions = {}
+    filenames = {}
+    for index, chapter in enumerate(chapters or []):
+        units.append((index, _chapter_plain_text(chapter)))
+        if isinstance(chapter, dict):
+            number = chapter.get('actual_chapter_num', chapter.get('num'))
+            positions[index] = number if number not in (None, '') else index + 1
+            filenames[index] = os.path.basename(str(
+                chapter.get('original_basename') or chapter.get('filename') or ''
+            ))
+        else:
+            positions[index] = index + 1
+    names = [{'raw_name': raw, 'translated_name': translated} for raw, translated, _cell in cells]
+    try:
+        return record_relations_for_chapters(
+            cells,
+            units,
+            0,
+            os.path.join(output_dir, "glossary.csv"),
+            source_path=os.getenv("EPUB_PATH", ""),
+            chapter_positions=positions,
+            chapter_filenames=filenames,
+            names=names,
+        )
+    except Exception as exc:
+        print(f"⚠️ Could not record relations: {exc}")
+        return []
+
+
 def _extract_with_custom_prompt(custom_prompt, all_text, language,
                               min_frequency, max_names, max_titles, 
                               existing_glossary, output_dir, 
@@ -5251,6 +5482,23 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 system_prompt = _apply_subject_tracking_placeholder(
                     system_prompt, include_gender_context=_inc_gender_ctx
                 )
+
+            # Relations Tracker: expand (or strip) {relations_instruction}. Unless the
+            # {fields} header already lists the relations field, the column is declared
+            # as one extra LAST column; its cells are taken off the rows before parsing.
+            relations_sink = None
+            if _apply_relations_placeholder is not None:
+                _rel_uses_fields = '{fields}' in system_prompt or '{fields1}' in system_prompt
+                _rel_fields = _minimal_custom_fields()
+                _rel_declare = not (
+                    _rel_uses_fields
+                    and any(relations_tracking.is_relations_field(f) for f in _rel_fields)
+                )
+                if relations_tracking.tracking_enabled() and relations_tracking.RELATIONS_PLACEHOLDER in system_prompt:
+                    relations_sink = _minimal_relations_sink(
+                        system_prompt, _rel_fields, _rel_uses_fields, existing_glossary
+                    )
+                system_prompt = _apply_relations_placeholder(system_prompt, declare_column=_rel_declare)
 
             # --- {fields1}, {fields}, {entries} placeholder replacement ---
             _has_fields1 = '{fields1}' in system_prompt
@@ -5432,14 +5680,19 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 process_start = time.time()
                 csv_lines = None
                 for response_text in response_texts:
-                    part_lines = _process_ai_response(response_text, all_text, min_frequency, 
-                                                      strip_honorifics, fuzzy_threshold, 
-                                                      language, filter_mode)
+                    part_lines = _process_ai_response(response_text, all_text, min_frequency,
+                                                      strip_honorifics, fuzzy_threshold,
+                                                      language, filter_mode,
+                                                      relations_sink=relations_sink)
                     if csv_lines is None:
                         csv_lines = list(part_lines)
                     else:
                         csv_lines.extend(line for line in part_lines if not _is_glossary_header(line))
-                
+                if relations_sink is not None and relations_sink['cells']:
+                    with _minimal_relations_lock:
+                        _minimal_relations_cells.setdefault(
+                            _minimal_relations_key(output_dir), []).extend(relations_sink['cells'])
+
                 print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
 
                 process_time = time.time() - process_start
@@ -5600,8 +5853,13 @@ def _type_name_only_lines(lines):
     return typed
 
 def _process_ai_response(response_text, all_text, min_frequency,
-                       strip_honorifics, fuzzy_threshold, language, filter_mode, *, _recover_rows=True):
-    """Process AI response and return CSV lines"""
+                       strip_honorifics, fuzzy_threshold, language, filter_mode, *, _recover_rows=True,
+                       relations_sink=None):
+    """Process AI response and return CSV lines
+
+    ``relations_sink`` (Relations Tracker, see _minimal_relations_sink): the relations
+    cells are taken off the rows first and collected in ``relations_sink['cells']``.
+    """
 
     original_response = response_text
 
@@ -5615,7 +5873,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 repaired = recover_glossary_row_breaks(response_text, known_types)
             if repaired is not None:
                 recovered = _process_ai_response(repaired, all_text, min_frequency, strip_honorifics,
-                                                 fuzzy_threshold, language, filter_mode, _recover_rows=False)
+                                                 fuzzy_threshold, language, filter_mode, _recover_rows=False,
+                                                 relations_sink=relations_sink)
                 if len(recovered) - 1 > max(1, count):
                     print(f"[Glossary] Recovered missing row breaks: {len(recovered) - 1} entries")
                     return recovered
@@ -5703,6 +5962,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
     dynamic_header = None
     dynamic_rows = []
     ai_sep = _gsep('\n'.join(lines))  # Auto-detect if AI used \x1F or comma
+    if relations_sink is not None:
+        lines = _detach_relations_cells(lines, ai_sep, relations_sink)
     for ln in lines:
         low = ln.lower()
         if 'type' in low and 'raw_name' in low:

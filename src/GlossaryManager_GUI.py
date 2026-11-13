@@ -48,6 +48,7 @@ from gender_tracking import (
     tracker_path_for_glossary,
 )
 import glossary_document  # editor parse/save/edit logic shared with the mobile app (U6)
+import relations_tracking  # relations tracker rules shared with the extractor, translator and mobile app
 # Moved verbatim to glossary_document (U6); imported under their old names.
 from glossary_document import (
     collect_glossary_filter_values as _collect_glossary_filter_values,
@@ -70,6 +71,17 @@ def _wrapped_tooltip_html(text, width=430):
         "<qt><p style='white-space: normal; margin: 0; "
         f"width: {int(width)}px;'>{safe_text}</p></qt>"
     )
+
+
+#: {relations_instruction} row of the Balanced/Full and Minimal placeholder tooltip tables.
+_RELATIONS_PLACEHOLDER_TOOLTIP_ROW = (
+    "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{relations_instruction}</b></td>"
+    "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The relations column: for character entries only, "
+    "list this character's relationships to other named characters shown in this text, as raw_name: relation...'</i>"
+    "<br/>Asks the AI for each character's relationships (Father, Rival, Best Friend...); the Relations Tracker "
+    "stores them per chapter instead of in the glossary file."
+    "<br/>Active when Enable Relations Tracker is ON; stripped otherwise</td></tr>"
+)
 
 
 def _apply_editor_gender_presentation(item, status, gender_column=None):
@@ -454,6 +466,8 @@ class GlossaryManagerMixin:
                 editor.blockSignals(False)
             except Exception:
                 pass
+        # Signals are blocked above, so a profile switch re-checks the relations line here.
+        self._refresh_relations_warning_row()
 
     def _sync_glossary_prompt_profile_current_prompt(self, profile_key):
         widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
@@ -1233,6 +1247,384 @@ class GlossaryManagerMixin:
         except Exception:
             pass
 
+    # ── Relations Tracker ────────────────────────────────────────────────
+    # "Earlier relations shown" dropdown: stored values / labels.
+    _RELATIONS_HISTORY_MODES = relations_tracking.HISTORY_MODES  # ('previous', 'full', 'current')
+    _RELATIONS_HISTORY_LABELS = ("Previous one only", "Full history", "Current only")
+    _RELATIONS_PROMPT_NAMES = {'balanced_full': 'Balanced/Full', 'minimal': 'Minimal'}
+    _RELATIONS_FIELD_ROLE = int(Qt.UserRole) + 31  # list item data: the relations field's name
+
+    def _relations_tracker_enabled(self):
+        checkbox = getattr(self, 'enable_relations_tracker_checkbox', None)
+        if checkbox is not None:
+            try:
+                return bool(checkbox.isChecked())
+            except RuntimeError:
+                pass
+        return bool(self.config.get(relations_tracking.CONFIG_ENABLE, False))
+
+    def _relations_field_name(self):
+        name = str(self.config.get(relations_tracking.CONFIG_FIELD) or '').strip()
+        if name.casefold() in relations_tracking.RESERVED_FIELD_NAMES:
+            name = ''
+        return name or relations_tracking.DEFAULT_FIELD_NAME
+
+    def _relations_history_mode(self):
+        combo = getattr(self, 'relations_history_mode_combo', None)
+        if combo is not None:
+            try:
+                index = int(combo.currentIndex())
+                if 0 <= index < len(self._RELATIONS_HISTORY_MODES):
+                    return self._RELATIONS_HISTORY_MODES[index]
+            except RuntimeError:
+                pass
+        return relations_tracking.history_mode(self.config)
+
+    def _apply_relations_tracker_settings(self, enabled=None):
+        """Write the toggle, the history mode and the field name to config, owner vars and environment."""
+        enabled = self._relations_tracker_enabled() if enabled is None else bool(enabled)
+        mode = self._relations_history_mode()
+        try:
+            self.config[relations_tracking.CONFIG_ENABLE] = enabled
+            self.glossary_enable_relations_tracker_var = enabled
+            self.config[relations_tracking.CONFIG_HISTORY_MODE] = mode
+            self.glossary_relations_history_mode_var = mode
+            os.environ[relations_tracking.ENV_ENABLE] = '1' if enabled else '0'
+            os.environ[relations_tracking.ENV_HISTORY_MODE] = mode
+            os.environ[relations_tracking.ENV_FIELD] = self._relations_field_name()
+        except Exception:
+            pass
+
+    def _is_relations_custom_field(self, field):
+        """True for the locked relations item (only while the tracker is on)."""
+        if not self._relations_tracker_enabled():
+            return False
+        return str(field or '').strip().casefold() == self._relations_field_name().casefold()
+
+    def _set_custom_fields_status(self, text=''):
+        label = getattr(self, 'custom_fields_status_label', None)
+        if label is None:
+            return
+        try:
+            label.setText(text)
+            label.setVisible(bool(text))
+        except RuntimeError:
+            pass
+
+    def _relations_field_colors(self, widget=None):
+        """Amber (background, foreground) readable on the dark dialog and on a light palette."""
+        dark = True
+        try:
+            from PySide6.QtGui import QPalette
+            base = (widget.palette() if widget is not None else QApplication.palette()).color(QPalette.Base)
+            # The dialog style sheet paints lists dark; only a plainly light palette switches.
+            dark = base.lightness() < 160 or bool(getattr(self, '_glossary_dialog', None))
+        except Exception:
+            pass
+        if dark:
+            return QColor("#7a5200"), QColor("#ffe7a3")
+        return QColor("#ffe08a"), QColor("#5c3d00")
+
+    def _make_custom_field_item(self, field):
+        item = QListWidgetItem(str(field))
+        if self._is_relations_custom_field(field):
+            listbox = getattr(self, 'custom_fields_listbox', None)
+            background, foreground = self._relations_field_colors(listbox)
+            item.setBackground(QBrush(background))
+            item.setForeground(QBrush(foreground))
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setData(self._RELATIONS_FIELD_ROLE, str(field))
+            item.setToolTip(_wrapped_tooltip_html(
+                "Relations Tracker column. The AI fills it during extraction; it is never saved "
+                "in the glossary file. Double-click to rename. Turn off Enable Relations Tracker to remove it."
+            ))
+        return item
+
+    def _reload_custom_fields_listbox(self):
+        listbox = getattr(self, 'custom_fields_listbox', None)
+        if listbox is None:
+            return
+        try:
+            blocked = listbox.blockSignals(True)
+            try:
+                listbox.clear()
+                for field in getattr(self, 'custom_glossary_fields', None) or []:
+                    listbox.addItem(self._make_custom_field_item(field))
+            finally:
+                listbox.blockSignals(blocked)
+        except RuntimeError:
+            pass
+
+    def _relations_current_fields(self):
+        """Custom Fields as they stand (also before that tab exists)."""
+        if hasattr(self, 'custom_glossary_fields'):
+            return list(self.custom_glossary_fields or [])
+        return list(self.config.get('custom_glossary_fields', []) or [])
+
+    def _sync_relations_custom_field(self, enabled, previous_name=None):
+        """Add or remove the relations field in Custom Fields right away (also before that tab exists)."""
+        fields = self._relations_current_fields()
+        updated = relations_tracking.apply_relations_field(
+            fields, enabled, self._relations_field_name(), previous_name=previous_name)
+        changed = updated != fields
+        self.custom_glossary_fields = updated
+        self.config['custom_glossary_fields'] = list(updated)
+        self._reload_custom_fields_listbox()
+        self._set_custom_fields_status('')
+        return changed
+
+    def _on_custom_field_item_changed(self, item):
+        """Double-click rename of the relations field: update config, env and the list."""
+        if item is None:
+            return
+        previous = item.data(self._RELATIONS_FIELD_ROLE)
+        if not previous:
+            return
+        new_name = item.text().strip()
+        listbox = self.custom_fields_listbox
+        others = [listbox.item(i).text() for i in range(listbox.count())
+                  if listbox.item(i) is not item]
+        problem = relations_tracking.field_name_problem(new_name, others)
+        if problem:
+            blocked = listbox.blockSignals(True)
+            try:
+                item.setText(str(previous))
+            finally:
+                listbox.blockSignals(blocked)
+            self._set_custom_fields_status(problem)
+            return
+        if new_name == previous:
+            return
+        self.config[relations_tracking.CONFIG_FIELD] = new_name
+        os.environ[relations_tracking.ENV_FIELD] = new_name
+        self.custom_glossary_fields = [listbox.item(i).text() for i in range(listbox.count())]
+        self._sync_relations_custom_field(True, previous_name=str(previous))
+        self._set_custom_fields_status(f"Relations field renamed to '{new_name}'.")
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+
+    def _refresh_relations_tracker_row(self):
+        """Sub-controls are usable only while the tracker is on; then re-check the prompts."""
+        enabled = self._relations_tracker_enabled()
+        for widget in getattr(self, '_relations_option_widgets', ()):
+            try:
+                widget.setEnabled(enabled)
+            except RuntimeError:
+                pass
+        self._refresh_relations_warning_row()
+
+    def _saved_glossary_prompt_text(self, profile_key):
+        """The prompt the editor would load for this bucket (active profile, else Default)."""
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        if active and not self._is_default_glossary_prompt_profile(active) and active in profiles:
+            return str(profiles.get(active) or '')
+        meta = self._glossary_prompt_profile_meta(profile_key)
+        text = (self._default_glossary_prompt_profile_text(profile_key)
+                or self.config.get(meta['config_key']) or getattr(self, meta['attr'], '') or '')
+        if not str(text).strip():
+            text = self._default_glossary_prompt_for(profile_key)
+        return str(text or '')
+
+    def _default_glossary_prompt_for(self, profile_key):
+        if profile_key == 'minimal':
+            default = getattr(self, 'default_auto_glossary_prompt', None)
+            name = 'DEFAULT_AUTO_GLOSSARY_PROMPT'
+        else:
+            default = getattr(self, 'default_manual_glossary_prompt', None)
+            name = 'DEFAULT_GLOSSARY_PROMPT'
+        if default is None:
+            try:
+                import extract_glossary_from_epub
+                default = getattr(extract_glossary_from_epub, name, '')
+            except Exception:
+                default = ''
+        return default or ''
+
+    def _relations_prompt_texts(self):
+        """Both glossary prompts: the live editor text when the editor exists, else the saved text."""
+        editors = {
+            'balanced_full': getattr(self, 'manual_prompt_text', None),
+            'minimal': getattr(self, 'auto_prompt_text', None),
+        }
+        texts = {}
+        for key, editor in editors.items():
+            text = None
+            if editor is not None:
+                try:
+                    editor.toPlainText()
+                    text = self._glossary_prompt_text(editor)
+                except RuntimeError:
+                    text = None
+            if text is None:
+                text = self._saved_glossary_prompt_text(key)
+            texts[key] = text
+        return texts
+
+    def _relations_prompt_uses_on_device_profile(self, profile_key):
+        return glossary_document.is_builtin_glossary_prompt_profile(
+            self._active_glossary_prompt_profile_for(profile_key))
+
+    def _reset_glossary_prompt_to_default(self, profile_key):
+        """The Reset to Default body (no question): Balanced/Full or Minimal prompt."""
+        if profile_key == 'minimal':
+            editor = getattr(self, 'auto_prompt_text', None)
+            default = self._default_glossary_prompt_for('minimal')
+        else:
+            editor = getattr(self, 'manual_prompt_text', None)
+            default = None
+            if editor is not None and not hasattr(self, 'default_manual_glossary_prompt'):
+                default = self._sep_from_display(editor.toPlainText())
+            if default is None:
+                default = self._default_glossary_prompt_for('balanced_full')
+        if editor is not None:
+            try:
+                editor.setPlainText(self._sep_for_display(default))
+                return True
+            except RuntimeError:
+                pass
+        # No editor yet: store it where the editor would load it from.
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        if active and not self._is_default_glossary_prompt_profile(active) and active in profiles:
+            profiles[active] = default
+        else:
+            self._set_default_glossary_prompt_profile_text(profile_key, default)
+        glossary_document.store_glossary_prompt_current(self, profile_key, default)
+        return True
+
+    def _check_relations_prompts(self, parent=None):
+        """Offer to reset each prompt that lacks {relations_instruction}; return the ones still missing."""
+        missing = relations_tracking.prompts_missing_placeholder(self._relations_prompt_texts())
+        for key in missing:
+            if self._relations_prompt_uses_on_device_profile(key):
+                continue  # the built-in On-device profile stays as it is: warn only
+            name = self._RELATIONS_PROMPT_NAMES.get(key, key)
+            try:
+                from review_dialog import confirm_prompt_profile_action
+            except Exception:
+                break
+            if confirm_prompt_profile_action(
+                parent or getattr(self, 'dialog', None),
+                "Relations Tracker",
+                f"The {name} prompt has no {relations_tracking.RELATIONS_PLACEHOLDER} line, "
+                f"so the AI will not return relations.\n\nReset the {name} prompt to default?",
+            ):
+                self._reset_glossary_prompt_to_default(key)
+        return self._refresh_relations_warning_row()
+
+    def _refresh_relations_warning_row(self, *_args):
+        """Show the ⚠️ copy row while the tracker is on and a prompt lacks the placeholder."""
+        row = getattr(self, 'relations_warning_widget', None)
+        if row is None:
+            return []
+        try:
+            if not self._relations_tracker_enabled():
+                row.setVisible(False)
+                return []
+            missing = relations_tracking.prompts_missing_placeholder(self._relations_prompt_texts())
+            if missing:
+                names = [self._RELATIONS_PROMPT_NAMES.get(key, key) for key in missing]
+                which = (f"The {names[0]} prompt is" if len(names) == 1
+                         else f"The {' and '.join(names)} prompts are")
+                them = "it" if len(names) == 1 else "them"
+                self.relations_warning_label.setText(f"{which} missing the relations line. Add this line to {them}:")
+            row.setVisible(bool(missing))
+            return missing
+        except RuntimeError:
+            return []
+
+    def _copy_relations_placeholder_line(self):
+        try:
+            QApplication.clipboard().setText(relations_tracking.RELATIONS_PLACEHOLDER_LINE)
+        except Exception:
+            pass
+
+    def _on_glossary_manager_relations_tracker_toggle(self, state=None):
+        """Sync the Relations Tracker toggle at once: config, env, Custom Fields, prompt check."""
+        try:
+            enabled = bool(self.enable_relations_tracker_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        if enabled and not bool(self.config.get(relations_tracking.CONFIG_ENABLE, False)):
+            # Turned on: a custom field that already has the name is the user's own column.
+            free_name = relations_tracking.enable_field_name(
+                self._relations_current_fields(), self._relations_field_name())
+            if free_name != self._relations_field_name():
+                self.config[relations_tracking.CONFIG_FIELD] = free_name
+        self._apply_relations_tracker_settings(enabled=enabled)
+        self._sync_relations_custom_field(enabled)
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        self._refresh_relations_tracker_row()
+        if enabled:
+            parent = None
+            try:
+                parent = self.enable_relations_tracker_checkbox.window()
+            except Exception:
+                pass
+            self._check_relations_prompts(parent)
+
+    def _on_glossary_manager_relations_history_mode_change(self, index=None):
+        self._apply_relations_tracker_settings()
+
+    def _relations_glossary_path(self):
+        """The glossary loaded in the editor, else the mapped manual glossary."""
+        candidates = []
+        entry = getattr(self, 'editor_file_entry', None)
+        if entry is not None:
+            try:
+                candidates.append(entry.text())
+            except Exception:
+                pass
+        candidates.append(getattr(self, 'manual_glossary_path', None))
+        try:
+            candidates.append(self.config.get('manual_glossary_path'))
+        except Exception:
+            pass
+        for path in candidates:
+            if path and os.path.isfile(str(path)):
+                return str(path)
+        return ''
+
+    def _pick_glossary_file(self, parent=None, title="Select glossary file"):
+        """The editor's glossary file picker (starts in the output folder when one is set)."""
+        start_dir = ""
+        try:
+            override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
+            if override_dir:
+                start_dir = os.path.abspath(override_dir)
+        except Exception:
+            start_dir = ""
+
+        path, _ = QFileDialog.getOpenFileName(
+            parent,
+            title,
+            start_dir,
+            "Glossary files (*.json *.csv);;JSON files (*.json);;CSV files (*.csv)"
+        )
+        return path
+
+    def _open_relations_diagram(self, parent=None, glossary_path=None):
+        """Open the Relations Diagram for the current glossary (ask for one when none is known)."""
+        path = glossary_path if glossary_path and os.path.isfile(str(glossary_path)) else self._relations_glossary_path()
+        if not path:
+            path = self._pick_glossary_file(parent or getattr(self, 'dialog', None))
+            if not path:
+                return None
+        from relations_diagram_dialog import RelationsDiagramDialog
+        dialog = RelationsDiagramDialog(parent or getattr(self, 'dialog', None), glossary_path=path)
+        self._relations_diagram_dialog = dialog
+        dialog.show()
+        return dialog
+
     def _unified_glossary_folder_key(self):
         """The Unified Glossary subfolder the current settings resolve to."""
         return glossary_document.unified_glossary_folder_key(getattr(self, 'config', None))
@@ -1359,6 +1751,7 @@ class GlossaryManagerMixin:
                     ('generate_unified_glossary_checkbox', 'generate_unified_glossary', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                     ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
+                    ('enable_relations_tracker_checkbox', 'glossary_enable_relations_tracker', False),
                 ]
                 for attr, cfg_key, default in _sync_pairs:
                     if hasattr(self, attr):
@@ -1366,6 +1759,12 @@ class GlossaryManagerMixin:
                         cb.blockSignals(True)
                         cb.setChecked(bool(self.config.get(cfg_key, default)))
                         cb.blockSignals(False)
+                if hasattr(self, 'relations_history_mode_combo'):
+                    self.relations_history_mode_combo.blockSignals(True)
+                    self.relations_history_mode_combo.setCurrentIndex(self._RELATIONS_HISTORY_MODES.index(
+                        relations_tracking.history_mode(self.config)))
+                    self.relations_history_mode_combo.blockSignals(False)
+                    self._refresh_relations_tracker_row()
                 if hasattr(self, 'strict_matching_mode_combo'):
                     self.strict_matching_mode_combo.blockSignals(True)
                     self.strict_matching_mode_combo.setCurrentIndex(
@@ -1886,6 +2285,7 @@ class GlossaryManagerMixin:
                     ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
                     ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
                     ('skip_identical_entries_checkbox', 'glossary_skip_identical_entries_var'),
+                    ('enable_relations_tracker_checkbox', 'glossary_enable_relations_tracker_var'),
                     ('skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'),
                     ('disable_glossary_history_checkbox', 'disable_glossary_history_var'),
                     ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only_var'),
@@ -1963,6 +2363,9 @@ class GlossaryManagerMixin:
                             self.config['glossary_include_all_characters'] = bool(checked)
                         elif checkbox_name == 'skip_identical_entries_checkbox':
                             self.config['glossary_skip_identical_entries'] = bool(checked)
+                        elif checkbox_name == 'enable_relations_tracker_checkbox':
+                            # Toggle, history mode and field name: config + the three env vars
+                            self._apply_relations_tracker_settings(enabled=bool(checked))
                         elif checkbox_name == 'skip_gender_tracking_checkbox':
                             self.config['glossary_skip_gender_tracking'] = bool(checked)
                             os.environ['GLOSSARY_SKIP_GENDER_TRACKING'] = '1' if checked else '0'
@@ -2552,9 +2955,10 @@ class GlossaryManagerMixin:
             self.config['custom_glossary_fields'] = self.custom_glossary_fields
             self.save_config(show_message=False)
         
-        for field in self.custom_glossary_fields:
-            self.custom_fields_listbox.addItem(field)
-        
+        # The relations item (Enable Relations Tracker) is amber, locked and renamable by double-click.
+        self._reload_custom_fields_listbox()
+        self.custom_fields_listbox.itemChanged.connect(self._on_custom_field_item_changed)
+
         custom_controls_widget = QWidget()
         custom_controls_layout = QHBoxLayout(custom_controls_widget)
         custom_controls_layout.setContentsMargins(0, 5, 0, 0)
@@ -2566,10 +2970,16 @@ class GlossaryManagerMixin:
         
         def add_custom_field():
             field = self.custom_field_entry.text().strip()
+            if field and self._is_relations_custom_field(field):
+                # Already in the list while the tracker is on: never add it twice.
+                self.custom_field_entry.clear()
+                self._set_custom_fields_status(f"'{field}' is the Relations Tracker field and is already in the list.")
+                return
             if field and field not in self.custom_glossary_fields:
                 self.custom_glossary_fields.append(field)
-                self.custom_fields_listbox.addItem(field)
+                self.custom_fields_listbox.addItem(self._make_custom_field_item(field))
                 self.custom_field_entry.clear()
+                self._set_custom_fields_status('')
 
                 flag = glossary_document.description_removed_flag('add', field)
                 if flag is not None:
@@ -2581,6 +2991,17 @@ class GlossaryManagerMixin:
             if current_row >= 0:
                 item = self.custom_fields_listbox.item(current_row)
                 field = item.text()
+                if item.data(self._RELATIONS_FIELD_ROLE) and self._is_relations_custom_field(field):
+                    message = "The relations field stays while Enable Relations Tracker is on (General Settings)."
+                    self._set_custom_fields_status(message)
+                    try:
+                        from PySide6.QtWidgets import QToolTip
+                        QToolTip.showText(remove_field_btn.mapToGlobal(QPoint(0, remove_field_btn.height())),
+                                          message, remove_field_btn)
+                    except Exception:
+                        pass
+                    return
+                self._set_custom_fields_status('')
                 self.custom_glossary_fields.remove(field)
                 self.custom_fields_listbox.takeItem(current_row)
 
@@ -2601,6 +3022,14 @@ class GlossaryManagerMixin:
         remove_field_btn.setFixedWidth(button_width)
         remove_field_btn.clicked.connect(remove_custom_field)
         custom_controls_layout.addWidget(remove_field_btn)
+        self.custom_fields_remove_btn = remove_field_btn
+        self.custom_fields_add_btn = add_field_btn
+
+        self.custom_fields_status_label = QLabel("")
+        self.custom_fields_status_label.setStyleSheet("color: #ff9800; font-style: italic;")
+        self.custom_fields_status_label.setWordWrap(True)
+        self.custom_fields_status_label.setVisible(False)
+        custom_frame_layout.addWidget(self.custom_fields_status_label)
         
         # Duplicate Detection Settings
         duplicate_frame = QGroupBox("Duplicate Detection")
@@ -3063,7 +3492,7 @@ class GlossaryManagerMixin:
             "{description_mandatory}, {description_detailed}, {description_in_language}, "
             "{description_excluded_note}, {description_example}, {example}, "
             "{description_name_split_example}, {name_split_example}, {gender_instruction}, "
-            "{subject_tracking_instruction},  Separator: \\x1F"
+            "{subject_tracking_instruction}, {relations_instruction},  Separator: \\x1F"
         )
         placeholders_line.setReadOnly(True)
         placeholders_line.setFrame(False)
@@ -3126,6 +3555,7 @@ class GlossaryManagerMixin:
             "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{subject_tracking_instruction}</b></td>"
             "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data...'</i>"
             "<br/>Active when Include Gender Context is ON; stripped otherwise</td></tr>"
+            + _RELATIONS_PLACEHOLDER_TOOLTIP_ROW +
             "</table></qt>"
         )
         prompt_frame_layout.addWidget(placeholders_line)
@@ -3185,7 +3615,7 @@ class GlossaryManagerMixin:
             reply = QMessageBox.question(parent, "Reset Prompt", "Reset manual glossary prompt to default?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.manual_prompt_text.setPlainText(self._sep_for_display(getattr(self, 'default_manual_glossary_prompt', self._sep_from_display(self.manual_prompt_text.toPlainText()))))
+                self._reset_glossary_prompt_to_default('balanced_full')
         
         reset_btn = QPushButton("Reset to Default")
         reset_btn.clicked.connect(reset_manual_prompt)
@@ -4506,7 +4936,7 @@ Do not stop after the glossary."""
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {description_example}, {example}, {description_name_split_example}, {name_split_example}, {gender_instruction}, {subject_tracking_instruction},  Separator: \\x1F")
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {description_example}, {example}, {description_name_split_example}, {name_split_example}, {gender_instruction}, {subject_tracking_instruction}, {relations_instruction},  Separator: \\x1F")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
@@ -4564,6 +4994,7 @@ Do not stop after the glossary."""
             "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{subject_tracking_instruction}</b></td>"
             "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data...'</i>"
             "<br/>Active when Include Gender Context is ON; stripped otherwise</td></tr>"
+            + _RELATIONS_PLACEHOLDER_TOOLTIP_ROW +
             "</table></qt>"
         )
         glossary_prompt_frame_layout.addWidget(placeholder_line)
@@ -4582,7 +5013,9 @@ Do not stop after the glossary."""
             default_unified_prompt = DEFAULT_AUTO_GLOSSARY_PROMPT
         except ImportError:
             default_unified_prompt = ""
-        
+        # Kept for Reset to Default (also used by the Relations Tracker prompt check)
+        self.default_auto_glossary_prompt = default_unified_prompt
+
         # Load from config or use default
         # Note: Ignoring old '...prompt2' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
@@ -4601,7 +5034,7 @@ Do not stop after the glossary."""
             reply = QMessageBox.question(parent, "Reset Prompt", "Reset glossary prompt to default?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.auto_prompt_text.setPlainText(self._sep_for_display(default_unified_prompt))
+                self._reset_glossary_prompt_to_default('minimal')
         
         reset_glossary_btn = QPushButton("Reset to Default")
         reset_glossary_btn.clicked.connect(reset_glossary_prompt)
@@ -6453,6 +6886,123 @@ Do not stop after the glossary."""
         output_save_layout.addWidget(output_save_hint)
         output_save_layout.addStretch()
 
+        # Relations tracker toggle (directly above the gender tracker rows)
+        relations_tracker_widget = QWidget()
+        relations_tracker_layout = QHBoxLayout(relations_tracker_widget)
+        relations_tracker_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(relations_tracker_widget)
+
+        if not hasattr(self, 'enable_relations_tracker_checkbox'):
+            self.enable_relations_tracker_checkbox = self._create_styled_checkbox("Enable Relations Tracker")
+            self.enable_relations_tracker_checkbox.setChecked(
+                bool(self.config.get('glossary_enable_relations_tracker', False)))
+        if not getattr(self.enable_relations_tracker_checkbox, '_glossary_manager_sync_connected', False):
+            self.enable_relations_tracker_checkbox.stateChanged.connect(
+                self._on_glossary_manager_relations_tracker_toggle)
+            self.enable_relations_tracker_checkbox._glossary_manager_sync_connected = True
+        self.enable_relations_tracker_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Balanced/Full extraction asks the AI who is what to whom (Father, Rival, Best Friend...) and records it "
+            "per chapter in a *_relations_tracker.json file beside the glossary. The column is never saved in the "
+            "glossary itself.\n"
+            "When translating, each character's glossary line gets the relations known up to that chapter.\n"
+            "Needs the {relations_instruction} line in the glossary prompt. Default OFF."
+        ))
+        relations_tracker_layout.addWidget(self.enable_relations_tracker_checkbox)
+
+        relations_tracker_hint = QLabel("(Tracks character relationships by chapter and adds them to translation prompts)")
+        relations_tracker_layout.addWidget(relations_tracker_hint)
+        relations_tracker_layout.addStretch()
+
+        relations_options_widget = QWidget()
+        relations_options_layout = QHBoxLayout(relations_options_widget)
+        relations_options_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(relations_options_widget)
+
+        relations_history_label = QLabel("Earlier relations shown:")
+        relations_options_layout.addWidget(relations_history_label)
+
+        if not hasattr(self, 'relations_history_mode_combo'):
+            self.relations_history_mode_combo = QComboBox()
+            self.relations_history_mode_combo.addItems(list(self._RELATIONS_HISTORY_LABELS))
+            self.relations_history_mode_combo.setCurrentIndex(
+                self._RELATIONS_HISTORY_MODES.index(relations_tracking.history_mode(self.config)))
+            self._disable_combobox_mousewheel(self.relations_history_mode_combo)
+            self.relations_history_mode_combo.currentIndexChanged.connect(
+                self._on_glossary_manager_relations_history_mode_change)
+        try:
+            from review_dialog import _halgakos_arrow_style
+            self.relations_history_mode_combo.setStyleSheet(_halgakos_arrow_style(16) + """
+                QComboBox { padding-right: 24px; }
+                QComboBox::drop-down {
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 22px;
+                    border-left: 1px solid #4a5568;
+                }
+            """)
+        except Exception:
+            pass
+        self.relations_history_mode_combo.setMinimumWidth(170)
+        self.relations_history_mode_combo.setToolTip(_wrapped_tooltip_html(
+            "What the translation prompt shows when a relation changed:\n"
+            "Previous one only (default): Ha-rin: Enemy [formerly Best Friend]\n"
+            "Full history: Ha-rin: Enemy [formerly Rival, Best Friend]\n"
+            "Current only: Ha-rin: Enemy"
+        ))
+        relations_options_layout.addWidget(self.relations_history_mode_combo)
+
+        relations_diagram_btn = QPushButton("View Diagram")
+        relations_diagram_btn.setStyleSheet(
+            "background-color: #3a5f8a; color: white; padding: 4px 10px; border-radius: 3px;"
+        )
+        relations_diagram_btn.setToolTip(_wrapped_tooltip_html(
+            "Show the relationship diagram for the glossary loaded in the Glossary Editor, with a chapter slider."
+        ))
+        relations_diagram_btn.clicked.connect(
+            lambda: self._open_relations_diagram(relations_diagram_btn.window()))
+        relations_options_layout.addWidget(relations_diagram_btn)
+        self.relations_diagram_btn = relations_diagram_btn
+
+        relations_options_hint = QLabel("(Brackets show the earlier relation when it changed)")
+        relations_options_layout.addWidget(relations_options_hint)
+        relations_options_layout.addStretch()
+        self._relations_option_widgets = (relations_history_label, self.relations_history_mode_combo,
+                                          relations_diagram_btn, relations_options_hint)
+
+        # Shown while the tracker is on and a glossary prompt lacks {relations_instruction}
+        self.relations_warning_widget = QWidget()
+        relations_warning_layout = QHBoxLayout(self.relations_warning_widget)
+        relations_warning_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(self.relations_warning_widget)
+        relations_warning_icon = QLabel("⚠️")
+        relations_warning_layout.addWidget(relations_warning_icon)
+        self.relations_warning_label = QLabel("")
+        self.relations_warning_label.setStyleSheet("color: #ff9800; font-style: italic;")
+        relations_warning_layout.addWidget(self.relations_warning_label)
+        self.relations_placeholder_line = QLineEdit(relations_tracking.RELATIONS_PLACEHOLDER_LINE)
+        self.relations_placeholder_line.setReadOnly(True)
+        self.relations_placeholder_line.setFixedWidth(220)
+        self.relations_placeholder_line.setToolTip(_wrapped_tooltip_html(
+            "Paste this line into the glossary prompt (for example under the subject tracking line)."
+        ))
+        relations_warning_layout.addWidget(self.relations_placeholder_line)
+        relations_copy_btn = QPushButton("Copy")
+        relations_copy_btn.setFixedWidth(70)
+        relations_copy_btn.setStyleSheet(
+            "background-color: #3a5f8a; color: white; padding: 4px 10px; border-radius: 3px;"
+        )
+        relations_copy_btn.clicked.connect(self._copy_relations_placeholder_line)
+        relations_warning_layout.addWidget(relations_copy_btn)
+        self.relations_copy_btn = relations_copy_btn
+        relations_warning_layout.addStretch()
+        self.relations_warning_widget.setVisible(False)
+
+        for _editor in (getattr(self, 'manual_prompt_text', None), getattr(self, 'auto_prompt_text', None)):
+            if _editor is not None and not getattr(_editor, '_relations_warning_connected', False):
+                _editor.textChanged.connect(self._refresh_relations_warning_row)
+                _editor._relations_warning_connected = True
+        self._refresh_relations_tracker_row()
+
         # Optional tracker file toggle
         skip_gender_tracking_widget = QWidget()
         skip_gender_tracking_layout = QHBoxLayout(skip_gender_tracking_widget)
@@ -7900,20 +8450,7 @@ Do not stop after the glossary."""
                self.append_log(f"❌ Failed to load glossary: {e}")
        
         def browse_glossary():
-           start_dir = ""
-           try:
-               override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
-               if override_dir:
-                   start_dir = os.path.abspath(override_dir)
-           except Exception:
-               start_dir = ""
-
-           path, _ = QFileDialog.getOpenFileName(
-               parent,
-               "Select glossary file",
-               start_dir,
-               "Glossary files (*.json *.csv);;JSON files (*.json);;CSV files (*.csv)"
-           )
+           path = self._pick_glossary_file(parent)
            if path:
                self._glossary_editor_manual_source = True
                self.editor_file_entry.setText(path)
@@ -9096,6 +9633,8 @@ Do not stop after the glossary."""
             ("Save As...", save_as_glossary, "#0f766e"),
             ("Delete Selected", delete_selected_entries, "#991b1b"),
             ("✏️ Edit in Notepad", lambda: _open_glossary_in_editor(), "#1e40af"),
+            ("🔗 Relations", lambda: self._open_relations_diagram(
+                parent.window(), glossary_path=self.editor_file_entry.text()), "#7c3aed"),
         ]:
             btn = QPushButton(text)
             btn.setFixedWidth(135)

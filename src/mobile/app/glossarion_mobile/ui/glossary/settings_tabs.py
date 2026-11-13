@@ -58,6 +58,14 @@ TAB_SECTIONS = {
 }
 
 
+#: tab -> ((anchor key, keys shown directly above it), ...): rows the desktop tab places next to a
+#: related row (the schema section lists its keys alphabetically).
+TAB_KEY_ANCHORS = {
+    "general": (("glossary_skip_gender_tracking",
+                 ("glossary_enable_relations_tracker", "glossary_relations_history_mode")),),
+}
+
+
 #: Settings › Glossary section ids -> the tab that hosts them (UI_SPEC §4.1 / §4.15: "also at
 #: Settings › Glossary, the same pages as the Glossaries tabs").
 SECTION_TABS = {
@@ -472,10 +480,13 @@ class GlossaryPromptCard:
 class GlossarySettingsTab:
     """One settings tab: a SectionPage over a synthetic section (extra keys + the schema sections)."""
 
-    def __init__(self, ctx: Any, tab: str, match: Any = None) -> None:
+    def __init__(self, ctx: Any, tab: str, match: Any = None,
+                 glossary_path: Optional[Callable[[], Optional[str]]] = None) -> None:
         self.ctx = ctx
         self.tab = tab
         self.match = match  # a Settings search hit / All prompts tap: #<key> is focused (U9)
+        self.glossary_path = glossary_path  # the open glossary (Glossary view), for the relationship diagram
+        self.relations: Any = None  # General: the Relations Tracker rows under its toggle
         self.title, self.section_ids, self.bucket_id, self.prompt_keys, self.leading_keys = TAB_SECTIONS[tab]
         self.page: Any = None
         self.profile_bar: Optional[ProfileBar] = None
@@ -493,6 +504,13 @@ class GlossarySettingsTab:
             for key in (section.keys if section is not None else ()):
                 if key not in keys:
                     keys.append(key)
+        for anchor, moved in TAB_KEY_ANCHORS.get(self.tab, ()):
+            if anchor not in keys:
+                continue
+            present = [key for key in moved if key in keys and key != anchor]
+            keys = [key for key in keys if key not in present]
+            at = keys.index(anchor)
+            keys[at:at] = present
         return keys
 
     def build(self) -> ft.Control:
@@ -510,6 +528,11 @@ class GlossarySettingsTab:
                                    group="Glossary")
         page.title = self.title
         self.page = page
+        if self.tab == "general":
+            from glossarion_mobile.ui.glossary.relations import TOGGLE_KEY, RelationsPanel
+
+            self.relations = RelationsPanel(self.ctx, glossary_path=self.glossary_path)
+            page.after_tiles[TOGGLE_KEY] = self.relations.control
         body = page.get_body()
         extras: list = []
         if self.bucket_id is not None:
@@ -552,12 +575,16 @@ class GlossarySettingsTab:
             self.page.did_show()
         if self.profile_bar is not None:
             self.profile_bar.attach()
+        if self.relations is not None:
+            self.relations.attach()
 
     def dispose(self) -> None:
         if self.page is not None:
             self.page.dispose()
         if self.profile_bar is not None:
             self.profile_bar.detach()
+        if self.relations is not None:
+            self.relations.detach()
         self.shown = False
 
 
