@@ -134,6 +134,7 @@ jobs:
           tests/test_google_vision_rest.py \
           tests/test_update_core.py \
           tests/test_browser_driver.py \
+          tests/test_gemini_free_ai_mode.py \
           tests/test_schema_p5b.py \
           tests/test_other_settings_streaming_texts.py \
           tests/test_respect_retry_after.py \

@@ -8,7 +8,7 @@ registers no driver, so none of that changes.
 Glossarion Mobile has neither Qt nor helper processes. Its WebViewBridge feature
 (``src/mobile/app/glossarion_mobile/services/webview_bridge.py``) registers a driver whose
 pages are hidden in-app WebViews, and the routes run their own flows on those pages
-(``authnd_auth._mint_captcha_token_flow``, ``gemini_free._submit_ai_mode_prompt``): the same
+(``authnd_auth._mint_captcha_token_flow``, ``gemini_free._submit_ai_mode_request``): the same
 scripts, timing and retries as the desktop helper. Only the page operations differ. Two
 mobile drivers exist: the native in-app browser (``services/native_webview.py``, pages the
 app's Flet extension owns outside the Flutter widget tree, so screen changes never rebuild

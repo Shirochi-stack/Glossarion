@@ -5,7 +5,7 @@ The desktop runs these routes in QtWebEngine helper processes. Mobile has neithe
 helper processes, so this bridge registers a ``browser_driver`` driver (``src/browser_driver.py``)
 whose pages are hidden ``flet_webview.WebView`` controls (``ui/components/hidden_webview.py``).
 The routes keep their own flow, the desktop helper's scripts and timing
-(``authnd_auth._mint_captcha_token_flow``, ``gemini_free._submit_ai_mode_prompt``); only the
+(``authnd_auth._mint_captcha_token_flow``, ``gemini_free._submit_ai_mode_request``); only the
 page operations come from here.
 
 Threads. Route code runs on worker threads (the job thread, the API worker pool) and calls a
@@ -25,8 +25,8 @@ Threads. Route code runs on worker threads (the job thread, the API worker pool)
   unmounts their WebViews; a page also ends its calls when the request's ``cancel_check`` says
   so. Calling a page from the loop thread is refused (it would deadlock).
 
-At most :data:`MAX_PAGES` pages are open at once (the routes' own token / sub-chunk
-concurrency settings usually keep it at one); further ``open_page`` calls wait for a slot.
+At most :data:`MAX_PAGES` pages are open at once (the routes' own token concurrency
+setting usually keeps it at one); further ``open_page`` calls wait for a slot.
 
 Background (hotfix 1, issue 3: authchatgpt/ stopped while the app was hidden). Flutter builds
 widgets only in frames and produces no frames while the app is hidden or paused
@@ -149,8 +149,8 @@ _LIMITATIONS_HEAD = (
     "with that message.\n"
 )
 _LIMITATIONS_TAIL = (
-    f"• Every request opens its own hidden page; Token concurrency and the Gemini Free sub-chunk "
-    f"concurrency limit how many run at once (never more than {MAX_PAGES})."
+    f"• Every request opens its own hidden page; Token concurrency limits how many AuthND pages "
+    f"run at once (never more than {MAX_PAGES} pages in all)."
 )
 LIMITATIONS = (
     _LIMITATIONS_HEAD

@@ -4055,8 +4055,10 @@ class ChatView:
         jobs = self.env.jobs if self.env is not None else None
         # the job the strip shows (another instance's job of a multi-instance run while instance 1 is idle)
         job_id = getattr(self.job_strip.model, "job_id", None)
-        if jobs is not None and job_id and jobs.snapshot(job_id) is not None:
-            jobs.request_stop(job_id, force=False)
+        # ``env.jobs`` is the chat's JobsAdapter: one job is looked up with ``snapshot_of`` and
+        # stopped by keyword (its ``snapshot()`` takes no id, its first positional is ``force``)
+        if jobs is not None and job_id and jobs.snapshot_of(job_id) is not None:
+            jobs.request_stop(force=False, job_id=job_id)
         elif jobs is not None and jobs.snapshot() is not None:
             jobs.request_stop(force=False)
         else:

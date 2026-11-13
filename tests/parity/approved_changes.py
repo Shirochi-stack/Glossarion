@@ -4343,6 +4343,147 @@ _RELATIONS_TRACKER_ROWS = {'src/owner_state.py': [('        self.glossary_gender
                             "                ('glossary_filter_mode', ['glossary_filter_mode_var'], "
                             "'strict', str),\n")]}
 
+
+# 2026-11-13 search/gemini overhaul (google.com AI Mode with attachments): the "Gemini Free Browser
+# Chunking" settings and their env vars are removed. Each row is deleted where a pinned source has it
+# (whole lines: the leading newline keeps a 12-space row from matching inside a 16-space one).
+_GEMINI_CHUNKING_KEYS = (
+    'gemini_free_adaptive_split',
+    'gemini_free_html_text_node_transport',
+    'gemini_free_subchunk_prompt_chars',
+    'gemini_free_subchunk_url_chars',
+    'gemini_free_subchunk_safety_chars',
+    'gemini_free_min_subchunk_body_chars',
+    'gemini_free_subchunk_concurrency',
+    'gemini_free_subchunk_start_delay',
+    'gemini_free_subchunk_timeout',
+    'gemini_free_subchunk_payload_format',
+    'gemini_free_html_splitter',
+    'gemini_free_subchunk_balancer',
+)
+_GEMINI_CHUNKING_REMOVED_ROWS = {
+    'src/translator_gui.py': (
+        "            'GEMINI_FREE_ADAPTIVE_SPLIT': '1' if _bool_config_value('gemini_free_adaptive_split_var', 'gemini_free_adaptive_split', True) else '0',",
+        "            'GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT': '1' if _bool_config_value('gemini_free_html_text_node_transport_var', 'gemini_free_html_text_node_transport', True) else '0',",
+        "            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 7000, 300, 7000),",
+        "            'GEMINI_FREE_SUBCHUNK_URL_CHARS': _bounded_config_int('gemini_free_subchunk_url_chars_var', 'gemini_free_subchunk_url_chars', 14500, 1000, 200000),",
+        "            'GEMINI_FREE_SUBCHUNK_SAFETY_CHARS': _bounded_config_int('gemini_free_subchunk_safety_chars_var', 'gemini_free_subchunk_safety_chars', 600, 0, 20000),",
+        "            'GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS': _bounded_config_int('gemini_free_min_subchunk_body_chars_var', 'gemini_free_min_subchunk_body_chars', 80, 1, 50000),",
+        "            'GEMINI_FREE_SUBCHUNK_CONCURRENCY': _bounded_config_int('gemini_free_subchunk_concurrency_var', 'gemini_free_subchunk_concurrency', 0, 0, 64),",
+        "            'GEMINI_FREE_SUBCHUNK_START_DELAY': _bounded_config_float('gemini_free_subchunk_start_delay_var', 'gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0),",
+        "            'GEMINI_FREE_SUBCHUNK_TIMEOUT': _bounded_config_int('gemini_free_subchunk_timeout_var', 'gemini_free_subchunk_timeout', 0, 0, 7200),",
+        "            'GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT': _choice_config_value('gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'}),",
+        "            'GEMINI_FREE_HTML_SPLITTER': _choice_config_value('gemini_free_html_splitter_var', 'gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'}),",
+        "            'GEMINI_FREE_SUBCHUNK_BALANCER': _choice_config_value('gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'}),",
+        "                ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),",
+        "                ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),",
+        "                ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 7000, lambda v: min(7000, max(300, safe_int(v, 7000)))),",
+        "                ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),",
+        "                ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),",
+        "                ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),",
+        "                ('gemini_free_subchunk_concurrency', ['gemini_free_subchunk_concurrency_var'], 0, lambda v: min(64, max(0, safe_int(v, 0)))),",
+        "                ('gemini_free_subchunk_start_delay', ['gemini_free_subchunk_start_delay_var'], 5.0, lambda v: min(60.0, max(0.0, safe_float(v, 5.0)))),",
+        "                ('gemini_free_subchunk_timeout', ['gemini_free_subchunk_timeout_var'], 0, lambda v: min(7200, max(0, safe_int(v, 0)))),",
+        "                ('gemini_free_subchunk_payload_format', ['gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format_combo'], 'auto', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('auto', 'html', 'text') else 'auto'),",
+        "                ('gemini_free_html_splitter', ['gemini_free_html_splitter_var', 'gemini_free_html_splitter_combo'], 'beautifulsoup4', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('beautifulsoup4', 'regex') else 'beautifulsoup4'),",
+        "                ('gemini_free_subchunk_balancer', ['gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer_combo'], 'balanced', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('balanced', 'greedy') else 'balanced'),",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_ADAPTIVE_SPLIT', _config_bool('gemini_free_adaptive_split', True), is_bool=True))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', _config_bool('gemini_free_html_text_node_transport', True), is_bool=True))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 7000, 300, 7000)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_URL_CHARS', _config_int('gemini_free_subchunk_url_chars', 14500, 1000, 200000)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _config_int('gemini_free_subchunk_safety_chars', 600, 0, 20000)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _config_int('gemini_free_min_subchunk_body_chars', 80, 1, 50000)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_CONCURRENCY', _config_int('gemini_free_subchunk_concurrency', 0, 0, 64)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_START_DELAY', _config_float('gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_TIMEOUT', _config_int('gemini_free_subchunk_timeout', 0, 0, 7200)))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT', _config_choice('gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'})))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_HTML_SPLITTER', _config_choice('gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'})))",
+        "            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_BALANCER', _config_choice('gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'})))",
+        "                ('GEMINI_FREE_ADAPTIVE_SPLIT', '1' if _bool_config('gemini_free_adaptive_split', True) else '0'),",
+        "                ('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', '1' if _bool_config('gemini_free_html_text_node_transport', True) else '0'),",
+        "                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 7000, 300, 7000)),",
+        "                ('GEMINI_FREE_SUBCHUNK_URL_CHARS', _int_config('gemini_free_subchunk_url_chars', 14500, 1000, 200000)),",
+        "                ('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _int_config('gemini_free_subchunk_safety_chars', 600, 0, 20000)),",
+        "                ('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _int_config('gemini_free_min_subchunk_body_chars', 80, 1, 50000)),",
+        "                ('GEMINI_FREE_SUBCHUNK_CONCURRENCY', _int_config('gemini_free_subchunk_concurrency', 0, 0, 64)),",
+        "                ('GEMINI_FREE_SUBCHUNK_START_DELAY', _float_config('gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0)),",
+        "                ('GEMINI_FREE_SUBCHUNK_TIMEOUT', _int_config('gemini_free_subchunk_timeout', 0, 0, 7200)),",
+        "                ('GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT', _choice_config('gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'})),",
+        "                ('GEMINI_FREE_HTML_SPLITTER', _choice_config('gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'})),",
+        "                ('GEMINI_FREE_SUBCHUNK_BALANCER', _choice_config('gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'})),",
+    ),
+    'src/settings_persistence.py': (
+        "            ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),",
+        "            ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),",
+        "            ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 7000, lambda v: min(7000, max(300, safe_int(v, 7000)))),",
+        "            ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),",
+        "            ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),",
+        "            ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),",
+        "            ('gemini_free_subchunk_concurrency', ['gemini_free_subchunk_concurrency_var'], 0, lambda v: min(64, max(0, safe_int(v, 0)))),",
+        "            ('gemini_free_subchunk_start_delay', ['gemini_free_subchunk_start_delay_var'], 5.0, lambda v: min(60.0, max(0.0, safe_float(v, 5.0)))),",
+        "            ('gemini_free_subchunk_timeout', ['gemini_free_subchunk_timeout_var'], 0, lambda v: min(7200, max(0, safe_int(v, 0)))),",
+        "            ('gemini_free_subchunk_payload_format', ['gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format_combo'], 'auto', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('auto', 'html', 'text') else 'auto'),",
+        "            ('gemini_free_html_splitter', ['gemini_free_html_splitter_var', 'gemini_free_html_splitter_combo'], 'beautifulsoup4', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('beautifulsoup4', 'regex') else 'beautifulsoup4'),",
+        "            ('gemini_free_subchunk_balancer', ['gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer_combo'], 'balanced', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('balanced', 'greedy') else 'balanced'),",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_ADAPTIVE_SPLIT', _config_bool('gemini_free_adaptive_split', True), is_bool=True))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', _config_bool('gemini_free_html_text_node_transport', True), is_bool=True))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 7000, 300, 7000)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_URL_CHARS', _config_int('gemini_free_subchunk_url_chars', 14500, 1000, 200000)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _config_int('gemini_free_subchunk_safety_chars', 600, 0, 20000)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _config_int('gemini_free_min_subchunk_body_chars', 80, 1, 50000)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_CONCURRENCY', _config_int('gemini_free_subchunk_concurrency', 0, 0, 64)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_START_DELAY', _config_float('gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_TIMEOUT', _config_int('gemini_free_subchunk_timeout', 0, 0, 7200)))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT', _config_choice('gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'})))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_HTML_SPLITTER', _config_choice('gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'})))",
+        "        env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_BALANCER', _config_choice('gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'})))",
+    ),
+    'src/run_env.py': (
+        "            'GEMINI_FREE_ADAPTIVE_SPLIT': '1' if _bool_config_value('gemini_free_adaptive_split_var', 'gemini_free_adaptive_split', True) else '0',",
+        "            'GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT': '1' if _bool_config_value('gemini_free_html_text_node_transport_var', 'gemini_free_html_text_node_transport', True) else '0',",
+        "            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 7000, 300, 7000),",
+        "            'GEMINI_FREE_SUBCHUNK_URL_CHARS': _bounded_config_int('gemini_free_subchunk_url_chars_var', 'gemini_free_subchunk_url_chars', 14500, 1000, 200000),",
+        "            'GEMINI_FREE_SUBCHUNK_SAFETY_CHARS': _bounded_config_int('gemini_free_subchunk_safety_chars_var', 'gemini_free_subchunk_safety_chars', 600, 0, 20000),",
+        "            'GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS': _bounded_config_int('gemini_free_min_subchunk_body_chars_var', 'gemini_free_min_subchunk_body_chars', 80, 1, 50000),",
+        "            'GEMINI_FREE_SUBCHUNK_CONCURRENCY': _bounded_config_int('gemini_free_subchunk_concurrency_var', 'gemini_free_subchunk_concurrency', 0, 0, 64),",
+        "            'GEMINI_FREE_SUBCHUNK_START_DELAY': _bounded_config_float('gemini_free_subchunk_start_delay_var', 'gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0),",
+        "            'GEMINI_FREE_SUBCHUNK_TIMEOUT': _bounded_config_int('gemini_free_subchunk_timeout_var', 'gemini_free_subchunk_timeout', 0, 0, 7200),",
+        "            'GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT': _choice_config_value('gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'}),",
+        "            'GEMINI_FREE_HTML_SPLITTER': _choice_config_value('gemini_free_html_splitter_var', 'gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'}),",
+        "            'GEMINI_FREE_SUBCHUNK_BALANCER': _choice_config_value('gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'}),",
+        "                ('GEMINI_FREE_ADAPTIVE_SPLIT', '1' if _bool_config('gemini_free_adaptive_split', True) else '0'),",
+        "                ('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', '1' if _bool_config('gemini_free_html_text_node_transport', True) else '0'),",
+        "                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 7000, 300, 7000)),",
+        "                ('GEMINI_FREE_SUBCHUNK_URL_CHARS', _int_config('gemini_free_subchunk_url_chars', 14500, 1000, 200000)),",
+        "                ('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _int_config('gemini_free_subchunk_safety_chars', 600, 0, 20000)),",
+        "                ('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _int_config('gemini_free_min_subchunk_body_chars', 80, 1, 50000)),",
+        "                ('GEMINI_FREE_SUBCHUNK_CONCURRENCY', _int_config('gemini_free_subchunk_concurrency', 0, 0, 64)),",
+        "                ('GEMINI_FREE_SUBCHUNK_START_DELAY', _float_config('gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0)),",
+        "                ('GEMINI_FREE_SUBCHUNK_TIMEOUT', _int_config('gemini_free_subchunk_timeout', 0, 0, 7200)),",
+        "                ('GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT', _choice_config('gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'})),",
+        "                ('GEMINI_FREE_HTML_SPLITTER', _choice_config('gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'})),",
+        "                ('GEMINI_FREE_SUBCHUNK_BALANCER', _choice_config('gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'})),",
+    ),
+    'src/mobile/tools/frozen_desktop_tables.py': (
+        "            ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),",
+        "            ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),",
+        "            ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 7000, lambda v: min(7000, max(300, safe_int(v, 7000)))),",
+        "            ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),",
+        "            ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),",
+        "            ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),",
+        "            ('gemini_free_subchunk_concurrency', ['gemini_free_subchunk_concurrency_var'], 0, lambda v: min(64, max(0, safe_int(v, 0)))),",
+        "            ('gemini_free_subchunk_start_delay', ['gemini_free_subchunk_start_delay_var'], 5.0, lambda v: min(60.0, max(0.0, safe_float(v, 5.0)))),",
+        "            ('gemini_free_subchunk_timeout', ['gemini_free_subchunk_timeout_var'], 0, lambda v: min(7200, max(0, safe_int(v, 0)))),",
+        "            ('gemini_free_subchunk_payload_format', ['gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format_combo'], 'auto', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('auto', 'html', 'text') else 'auto'),",
+        "            ('gemini_free_html_splitter', ['gemini_free_html_splitter_var', 'gemini_free_html_splitter_combo'], 'beautifulsoup4', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('beautifulsoup4', 'regex') else 'beautifulsoup4'),",
+        "            ('gemini_free_subchunk_balancer', ['gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer_combo'], 'balanced', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('balanced', 'greedy') else 'balanced'),",
+    ),
+}
+
+
+def _removed_rows(rows):
+    return [("\n" + row + "\n", "\n") for row in rows]
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -5897,6 +6038,17 @@ APPROVED = (
     },
     {
         "date": "2026-11-13",
+        "what": "search/gemini overhaul: the route opens google.com in AI Mode and attaches the text and images "
+                "as files, so the Other Settings section 'Gemini Free Browser Chunking' (adaptive sub-chunks, HTML "
+                "text-node transport and the ten chunk tuning fields) is removed with its 12 config keys, owner "
+                "vars and GEMINI_FREE_* env vars. A config that still holds the keys keeps them untouched",
+        "source": {relpath: _removed_rows(rows) for relpath, rows in _GEMINI_CHUNKING_REMOVED_ROWS.items()},
+        "values": {},
+        "removes": tuple(_GEMINI_CHUNKING_KEYS) + tuple(key + "_var" for key in _GEMINI_CHUNKING_KEYS)
+                   + tuple(key.upper() for key in _GEMINI_CHUNKING_KEYS),
+    },
+    {
+        "date": "2026-11-13",
         "what": "New glossary setting 'Enable Relations Tracker' (glossary_enable_relations_tracker, off) with 'Earlier relations shown' (glossary_relations_history_mode, previous) and the relations field name "
                 "(glossary_relations_field_name, relations): the glossary AI returns a relations column that is "
                 "kept in a *_relations_tracker.json sidecar, never in the glossary file",
@@ -5944,13 +6096,15 @@ def _changed(value, old, new):
 
 
 def apply_to_golden(data):
-    """A loaded golden (nested dicts / lists) with the approved recorded values changed and the
-    approved new keys inserted."""
+    """A loaded golden (nested dicts / lists) with the approved recorded values changed, the
+    approved new keys inserted and the keys of approved removed settings dropped."""
     values = {}
     inserts = []
+    removes = set()
     for change in APPROVED:
         values.update(change["values"])
         inserts.extend(change.get("inserts", ()))
+        removes.update(change.get("removes", ()))
 
     def _inserted(parent, node):
         for rule in inserts:
@@ -5966,8 +6120,9 @@ def apply_to_golden(data):
     def walk(node, parent=None):
         if isinstance(node, dict):
             node = _inserted(parent, node)
+            # "removes": a removed setting's recorded key (config key, owner var, env var) is dropped
             return {key: (_changed(walk(value, key), *values[key]) if key in values else walk(value, key))
-                    for key, value in node.items()}
+                    for key, value in node.items() if key not in removes}
         if isinstance(node, list):
             return [walk(item) for item in node]
         if isinstance(node, tuple):

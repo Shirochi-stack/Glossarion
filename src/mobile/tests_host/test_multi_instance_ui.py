@@ -547,11 +547,13 @@ def test_strip_shows_one_job_plus_n_running_and_acts_on_the_job_it_shows(tmp_pat
 
 def test_chat_strip_stop_stops_the_job_the_strip_shows():
     from glossarion_mobile.ui.chat.chat_view import ChatView
+    from glossarion_mobile.ui.chat.job_binding import JobsAdapter
 
     view, one, two = _two_running()
     service = FakeJobService(JobsView(active=two, running=(two,)))
     notes = []
-    stub = types.SimpleNamespace(env=types.SimpleNamespace(jobs=service),
+    # the chat reaches the job service through its JobsAdapter, never the service itself
+    stub = types.SimpleNamespace(env=types.SimpleNamespace(jobs=JobsAdapter(service)),
                                  job_strip=types.SimpleNamespace(model=types.SimpleNamespace(job_id=two.id)),
                                  notify=notes.append)
     ChatView._on_strip_stop(stub)

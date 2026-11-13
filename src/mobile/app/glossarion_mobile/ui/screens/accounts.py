@@ -100,9 +100,9 @@ EXPERIMENTAL_ACCOUNTS = (
      "get its hCaptcha token; the app then sends the request itself. Pick an "
      "authnd/<publisher>/<model> model (Models › Poll providers lists NVIDIA Build's free models)."),
     ("Gemini Free (search/gemini)", "search/gemini",
-     "No sign-in. A hidden in-app browser asks Google Search AI Mode and reads its answer; long "
-     "prompts are split into browser sub-chunks (Settings › Response handling › Gemini Free "
-     "browser chunking). Pick the search/gemini model."),
+     "No sign-in. A hidden in-app browser opens google.com in AI Mode with the prompt and reads "
+     "its answer. One request is one AI Mode question, so keep chunks short (AI Mode answers "
+     "prompts up to about 8,000 characters). Pick the search/gemini model."),
     ("AuthChatGPT (ChatGPT web chat)", "authchatgpt/",
      "No sign-in needed. A hidden in-app browser opens chatgpt.com and sends each request through ChatGPT's own "
      "web chat; logged out it offers authchatgpt/auto and gpt-6-instant with guest limits. Models are named like "

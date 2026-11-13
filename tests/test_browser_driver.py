@@ -9,7 +9,7 @@
 * Without helper processes (Glossarion Mobile) a route never reaches ``subprocess.Popen``: it
   uses the driver, or fails with a clear ``BrowserUnavailable`` message.
 * ``cancel_stream`` cancels the route's pages (pending calls end with "stream cancelled").
-* The NIM / AuthND token helper and Gemini Free browser chunking settings are available on
+* The NIM / AuthND token helper settings are available on
   mobile, except the helper-subprocess limit.
 
 Python 3.10 compatible; no Qt or Flet needed (PySide6 is faked where the Qt helper runs).
@@ -18,6 +18,7 @@ Run:
 """
 
 import ast
+import base64
 import json
 import os
 import re
@@ -55,6 +56,7 @@ def desktop(monkeypatch, tmp_path):
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("GEMINI_FREE_WAIT_AFTER_LOAD_MS", "0")
     monkeypatch.setenv("GEMINI_FREE_STABLE_MS", "0")
+    monkeypatch.setenv("GEMINI_FREE_SETTLE_MS", "0")
     monkeypatch.setattr(authnd, "CAPTCHA_DOCUMENT_STABLE_SECONDS", 0.0)
     browser_driver.unregister_driver()
     authnd._cancel_event.clear()
@@ -113,29 +115,65 @@ class NvidiaBuild:
 
 
 class AiMode:
-    """Google Search AI Mode: a textarea, a Send button that is ready on the second try and
-    an answer on the first snapshot after the click."""
+    """google.com AI Mode: a prompt box, the attach / model menu, a Send button that is ready on
+    the second try, and a finished answer on the first snapshot after the click."""
 
-    def __init__(self, answer_text="Bonjour"):
+    def __init__(self, answer_text="Bonjour", models=("4 Hydrogen \u2022 Everyday help",), code_blocks=()):
         self.answer_text = answer_text
+        self.models = list(models)
+        self.code_blocks = list(code_blocks)
         self.clicks = 0
+        self.sent = False
+        self.selected = None
+        self.staged = {}
+        self.attached = []
+        self.prompt = None
 
     def answer(self, script, renavigate):
+        if script == gemini_free.AI_MODE_SNAPSHOT_SCRIPT:
+            answer = self.answer_text if self.sent else ""
+            return json.dumps({"url": "https://www.google.com/search?udm=50&hl=en", "title": "AI Mode",
+                               "ready": "complete", "text": "Ask anything", "aiMode": self.sent,
+                               "promptBox": True, "answerFound": self.sent, "answerText": answer,
+                               "answerMarkdown": answer, "codeBlocks": self.code_blocks if self.sent else [],
+                               "complete": self.sent, "pending": 0, "htmlLength": 999})
+        if script == gemini_free.AI_MODE_MENU_SCRIPT:
+            return json.dumps({"ok": True, "opener": True, "clicked": False, "inputs": ["image/png,image/jpeg", ""],
+                               "models": [{"label": label, "checked": index == 0, "disabled": False}
+                                          for index, label in enumerate(self.models)]})
+        if "const want = " in script:
+            want = json.loads(re.search(r"const want = (\".*?\");", script).group(1))
+            label = next((item for item in self.models if want in item.lower()), None)
+            if label is None:
+                return json.dumps({"ok": False, "error": "not listed", "models": self.models})
+            self.selected = label
+            return json.dumps({"ok": True, "label": label, "already": False, "models": self.models})
+        if "__glossarionAiFiles" in script and "b64 +=" in script:
+            index = int(re.search(r"const index = (\d+);", script).group(1))
+            name, mime, kind, chunk = (json.loads(value) for value in re.search(
+                r"\{name: (\".*?\"), mime: (\".*?\"), kind: (\".*?\"), b64: \"\"\};"
+                r" staged\[index\]\.b64 \+= (\".*?\");", script).groups())
+            entry = self.staged.setdefault(index, {"name": name, "mime": mime, "kind": kind, "b64": ""})
+            entry["b64"] += chunk
+            return len(entry["b64"])
+        if "new DataTransfer()" in script:
+            kind = json.loads(re.search(r"const kind = (\".*?\");", script).group(1))
+            names = [entry["name"] for _index, entry in sorted(self.staged.items()) if entry["kind"] == kind]
+            self.attached += names
+            return json.dumps({"ok": True, "names": names})
+        if "crupload" in script:
+            return json.dumps({"chips": list(self.attached), "uploads": len(self.attached)})
         if "AI Mode textarea not found" in script:
-            return json.dumps({"ok": True, "textareaCount": 1, "valueLength": 5, "placeholder": "Ask anything"})
+            self.prompt = json.loads(re.search(r"const promptText = (\".*?\");", script).group(1))
+            return json.dumps({"ok": True, "textareaCount": 1, "valueLength": len(self.prompt),
+                               "placeholder": "Ask anything"})
         if "AI Mode send button not ready" in script:
             self.clicks += 1
             if self.clicks < 2:
                 return json.dumps({"ok": False, "error": "AI Mode send button not ready", "buttonCount": 1,
                                    "labels": ["Send"]})
+            self.sent = True
             return json.dumps({"ok": True, "label": "Send", "buttonCount": 1})
-        if "answerMarkdown" in script:
-            prompt = json.loads(re.search(r"const promptText = (\".*?\");", script).group(1))
-            text = f"You said:\n{prompt}\n{self.answer_text}\nAI can make mistakes"
-            return json.dumps({"url": "https://www.google.com/search?udm=50", "title": "AI Mode",
-                               "ready": "complete", "text": text, "busy": False,
-                               "answerText": self.answer_text,
-                               "answerHtml": f"<p>{self.answer_text}</p>", "htmlLength": 999})
         return None
 
 
@@ -478,19 +516,26 @@ def test_authnd_request_cancel_check_reaches_the_page(mobile):
 
 # ============================================================================ Gemini Free
 def test_gemini_driver_page_runs_the_qt_helper_flow(desktop):
-    prompt = "User:\nTranslate: bonjour"
+    request = gemini_free._build_ai_mode_request([{"role": "user", "content": "Translate: bonjour"}])
+    assert request["prompt"] == "Translate: bonjour" and request["files"] == [] and request["model"] == ""
     qt_pages = install_fake_qt(desktop, AiMode())
-    qt_result = gemini_free.load_ai_mode_prompt_text(prompt, timeout=30)
+    qt_result = gemini_free.load_ai_mode_answer(request, timeout=30)
     driver = FakeDriver(AiMode)
     browser_driver.register_driver(driver)
-    result = gemini_free.load_ai_mode_prompt_text(prompt, timeout=30)
+    result = gemini_free.load_ai_mode_answer(request, timeout=30)
     assert result == qt_result
-    assert result["submit_mode"] == "ui" and result["submit_state"]["click"]["ok"] is True
+    assert result["answerText"] == "Bonjour" and result["submit_state"]["click"]["ok"] is True
     (page,) = driver.pages
     assert page.scripts == qt_pages[0].scripts
-    assert page.scripts[0] == gemini_free._ai_mode_set_prompt_script(prompt)
-    assert page.scripts[1] == page.scripts[2] == gemini_free.AI_MODE_CLICK_SEND_SCRIPT
+    # the page as it loaded, the menu (plain search/gemini asks for "Auto"), the prompt, Send, the answer
+    assert page.scripts[0] == gemini_free.AI_MODE_SNAPSHOT_SCRIPT
+    assert page.scripts[1] == gemini_free.AI_MODE_MENU_SCRIPT
+    assert page.scripts[2] == gemini_free._ai_mode_select_model_script(gemini_free.AUTO_MODEL)
+    assert page.scripts[3] == gemini_free._ai_mode_set_prompt_script("Translate: bonjour")
+    assert page.scripts[4] == page.scripts[5] == gemini_free.AI_MODE_CLICK_SEND_SCRIPT
+    assert page.scripts[6:] == [gemini_free.AI_MODE_SNAPSHOT_SCRIPT]
     assert page.loads == [gemini_free._build_search_base_url()] and page.closed
+    assert page.loads == ["https://www.google.com/search?udm=50&hl=en"]          # google.com, AI Mode on
     assert page.owner == gemini_free.BROWSER_OWNER
     assert page.viewport == gemini_free._default_viewport_size() == (1280, 900)
 
@@ -511,18 +556,35 @@ def test_gemini_on_mobile_uses_driver_pages_and_never_spawns(mobile, no_spawn):
     assert not any("Qt WebEngine helper subprocess" in line for line in logs)
 
 
-def test_gemini_subchunks_run_on_driver_pages(mobile, no_spawn):
-    """The helper orchestration (adaptive sub-chunks) on mobile: one page per sub-chunk."""
-    mobile.setenv("GEMINI_FREE_SUBCHUNK_START_DELAY", "0")
-    driver = FakeDriver(lambda: AiMode("part"))
+def test_gemini_attachments_and_model_run_on_driver_pages(mobile, no_spawn):
+    """One request is one page: the chapter goes in as an attached file, the image as an image,
+    the named model is ticked in AI Mode's menu and the answer is the HTML of its code block."""
+    chapter = "<h1>제1장</h1>\n<p>안녕하세요.</p>"
+    picture = b"\x89PNG fake picture bytes"
+    site = AiMode("html\n\n```\n<h1>Chapter 1</h1>\n<p>Hello.</p>\n```\n\nUse code with caution.",
+                  models=("Auto", "3.8 Flash", "4 Carbon"), code_blocks=["<h1>Chapter 1</h1>\n<p>Hello.</p>\n"])
+    driver = FakeDriver(lambda: site)
     browser_driver.register_driver(driver)
-    chunks = [[{"role": "user", "content": f"chunk {index}"}] for index in range(3)]
-    result = gemini_free._run_search_subprocess_sequential(
-        source_messages=[{"role": "user", "content": "source"}], chunks=chunks,
-        split_metadata={"target_prompt_chars": 1000}, model="search/gemini", timeout=30, max_tokens=None)
-    assert result["content"] == "part\npart\npart"
-    assert len(driver.pages) == 3 and all(page.closed for page in driver.pages)
-    assert no_spawn == []
+    result = gemini_free.send_chat_completion(
+        messages=[{"role": "system", "content": "Translate to English."},
+                  {"role": "user", "content": [
+                      {"type": "text", "text": chapter},
+                      {"type": "image_url", "image_url": {
+                          "url": "data:image/png;base64," + base64.b64encode(picture).decode("ascii")}}]}],
+        model="search/gemini-4-carbon")
+    assert result["content"] == "<h1>Chapter 1</h1>\n<p>Hello.</p>"
+    assert len(driver.pages) == 1 and driver.pages[0].closed and no_spawn == []
+    assert site.selected == "4 Carbon" and result["raw_response"]["ai_mode_model"] == "4 Carbon"
+    staged = [site.staged[index] for index in sorted(site.staged)]
+    assert [(entry["name"], entry["mime"], entry["kind"]) for entry in staged] == [
+        ("chapter.html", "text/plain", "file"), ("image001.png", "image/png", "image")]
+    assert base64.b64decode(staged[0]["b64"]).decode("utf-8") == chapter
+    assert base64.b64decode(staged[1]["b64"]) == picture
+    assert site.attached == ["chapter.html", "image001.png"]
+    # the chapter is not in the prompt box: only the instructions and what to do with the file
+    assert site.prompt.startswith("Translate to English.\n\n") and "chapter.html" in site.prompt
+    assert "안녕" not in site.prompt and "System instructions" not in site.prompt
+    assert [item["name"] for item in result["raw_response"]["attachments"]] == ["chapter.html", "image001.png"]
 
 
 def test_gemini_cancel_stream_cancels_the_pages(mobile):
@@ -566,6 +628,7 @@ def test_gemini_desktop_default_still_spawns_the_helper(desktop):
 
     desktop.setattr(gemini_free.subprocess, "Popen", FakeProc)
     desktop.setattr(gemini_free, "_run_search_driver_once", lambda **k: pytest.fail("driver used on desktop"))
+    assert not gemini_free.has_session()                                      # signed out: the Qt helper
     result = gemini_free.send_chat_completion(messages=[{"role": "user", "content": "hi"}], model="search/gemini")
     assert result["content"] == "from helper"
     assert len(spawned) == 1
@@ -577,8 +640,10 @@ def test_gemini_desktop_default_still_spawns_the_helper(desktop):
 def test_browser_route_settings_are_available_on_mobile():
     import settings_schema as ss
 
-    keys = [key for key in ss.keys() if key.startswith(("authnd_", "gemini_free_"))]
-    assert "authnd_token_concurrency" in keys and "gemini_free_adaptive_split" in keys
+    # search/gemini has no settings of its own any more (its browser chunking section is gone)
+    assert not [key for key in ss.keys() if key.startswith("gemini_free_")]
+    keys = [key for key in ss.keys() if key.startswith("authnd_")]
+    assert "authnd_token_concurrency" in keys
     for key in keys:
         available, reason = ss.is_available(key, "mobile")
         if key == "authnd_token_subprocess_concurrency":
