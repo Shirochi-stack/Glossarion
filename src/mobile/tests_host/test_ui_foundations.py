@@ -1341,6 +1341,47 @@ def test_app_builds_chat_shell_offline(app_env, capsys):
 
 
 @needs_flet
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_back_from_a_screen_opened_in_the_chat_returns_to_the_chat(app_env, platform):
+    """Owner, 2026-11-14: Progress opened from the chat went back to Tools and a Library page to the Library,
+    with the app bar's back arrow and with the system back alike (both pop the top View)."""
+
+    async def scenario():
+        _m, _conn, session, page, app = await _start(platform)
+        try:
+            # opened from the chat: alone on the stack, so one Back is the chat again
+            for route in ("/tools/progress", "/tools/qa", "/settings/logs"):
+                await app.navigate(route)
+                assert _routes(page) == ["/", route], route
+                await session.dispatch_event(page._i, "view_pop", {"route": route})
+                assert _routes(page) == ["/"], route
+                assert not app.shell.stack
+
+            # opened from another screen: on top of that screen, as before
+            await app.navigate("/tools")
+            await app.navigate("/tools/progress")
+            assert _routes(page) == ["/", "/tools", "/tools/progress"]
+            await session.dispatch_event(page._i, "view_pop", {"route": "/tools/progress"})
+            assert _routes(page) == ["/", "/tools"]
+            await session.dispatch_event(page._i, "view_pop", {"route": "/tools"})
+            assert _routes(page) == ["/"]
+
+            # a link from outside the app (deep link, notification) keeps the route's own parents
+            await _route(session, "/tools/progress")
+            assert _routes(page) == ["/", "/tools", "/tools/progress"]
+            await _route(session, "/")
+            assert _routes(page) == ["/"]
+
+            # and so does a drawer destination
+            await app.navigate("/settings/logs", reset=True)
+            assert _routes(page) == ["/", "/settings", "/settings/logs"]
+        finally:
+            await _stop(app)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 def test_app_routes_selftest_and_view_stack(app_env):
     from glossarion_mobile.ui.screens.base import HubScreen, PlaceholderScreen
     from glossarion_mobile.ui.screens.diagnostics import DiagnosticsScreen
@@ -1495,7 +1536,8 @@ def test_drawer_chat_view_actions_and_worker_updates(app_env):
             plus = app.chat_view.open_plus_sheet()
             assert plus.dialog.open and app.chat_view.composer.plus_button.rotate.angle > 0
             plus._select(plus.on_tool, "qa")
-            assert await _wait(lambda: _routes(page) == ["/", "/tools", "/tools/qa"])
+            # opened from the chat: on the stack alone, so Back returns to the chat (not to Tools)
+            assert await _wait(lambda: _routes(page) == ["/", "/tools/qa"])
             assert app.chat_view.composer.plus_button.rotate.angle == 0
             await _route(session, "/")
             sheet = app.chat_view.open_mode_options("text")
