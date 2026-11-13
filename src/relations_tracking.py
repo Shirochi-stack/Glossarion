@@ -449,6 +449,22 @@ def _first_key_of(item: Mapping[str, Any]) -> Tuple[Any, ...]:
     return best if best is not None else (_BIG, _BIG, _BIG, "")
 
 
+def _normalize_descriptions(item: Dict[str, Any]) -> None:
+    """One description per chapter, in chapter order (the key is dropped when there are none)."""
+    descriptions = item.get("descriptions")
+    if not isinstance(descriptions, list):
+        item.pop("descriptions", None)
+        return
+    kept: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for description in descriptions:
+        if isinstance(description, Mapping) and str(description.get("text") or "").strip():
+            kept[_chapter_signature(description)] = dict(description)  # a later record of a chapter wins
+    if kept:
+        item["descriptions"] = sorted(kept.values(), key=_chapter_sort_key)
+    else:
+        item.pop("descriptions", None)
+
+
 def normalize_tracker(tracker: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(tracker, dict):
         return tracker
@@ -460,6 +476,7 @@ def normalize_tracker(tracker: Dict[str, Any]) -> Dict[str, Any]:
     for key, item in entries.items():
         if isinstance(item, dict):
             item.setdefault("aliases", [])
+            _normalize_descriptions(item)
             relations = item.get("relations")
             if not isinstance(relations, dict):
                 relations = {}
@@ -506,6 +523,20 @@ def _change_signatures(tracker: Mapping[str, Any]) -> set:
     return result
 
 
+#: A description kept per chapter is cut here; the glossary file keeps the full text.
+MAX_DESCRIPTION_CHARS = 600
+
+
+def _entry_description(entry: Mapping[str, Any]) -> str:
+    """The row's description cell, as one line."""
+    for key in _entry_field_keys(entry, "description"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            return text if len(text) <= MAX_DESCRIPTION_CHARS else text[:MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    return ""
+
+
 def _new_entry(raw_name: str, translated_name: str = "") -> Dict[str, Any]:
     return {"raw_name": raw_name, "translated_name": translated_name, "aliases": [], "relations": {}}
 
@@ -531,7 +562,7 @@ def record_relations(
     A cell item ``Y: label`` on X's row says what X is to Y; it is stored on the
     reverse edge, ``entries[Y].relations[X] = label``. Filler labels are dropped.
     """
-    stats: Dict[str, Any] = {"new": 0, "changed": 0, "changes": [], "pairs": 0}
+    stats: Dict[str, Any] = {"new": 0, "changed": 0, "changes": [], "pairs": 0, "descriptions": 0}
     if not isinstance(tracker, dict):
         return stats
     field = (field or "").strip() or field_name()
@@ -606,6 +637,36 @@ def record_relations(
                 "chapter_file": chapter_file,
             })
             stats["pairs"] += 1
+
+    # The description each character was given in this chapter (the diagram shows the one
+    # written at the chapter it is looking at). Kept for character rows and for any name
+    # that has a relation; the glossary file still holds its own single description.
+    involved = set(tracker_entries)
+    for item in tracker_entries.values():
+        if isinstance(item, Mapping):
+            involved.update((item.get("relations") or {}).keys())
+    for entry in entry_list:
+        raw = str(entry.get("raw_name") or "").strip()
+        text = _entry_description(entry)
+        if not raw or not text:
+            continue
+        key = tracker_key(raw)
+        if key not in involved and str(entry.get("type") or "").strip().casefold() != "character":
+            continue
+        item = tracker_entries.get(key)
+        if not isinstance(item, dict):
+            item = _new_entry(raw, batch_translated.get(key, ""))
+            tracker_entries[key] = item
+        elif batch_translated.get(key) and not item.get("translated_name"):
+            item["translated_name"] = batch_translated[key]
+        signature = (str(chapter_num), chapter_file)
+        descriptions = item.setdefault("descriptions", [])
+        if any(isinstance(d, Mapping) and _chapter_signature(d) == signature and d.get("text") == text
+               for d in descriptions):
+            continue
+        descriptions.append({"text": text, "chapter_index": chapter_index, "chapter_num": chapter_num,
+                             "chapter_file": chapter_file})
+        stats["descriptions"] += 1
 
     normalize_tracker(tracker)
     for key, item in tracker_entries.items():
@@ -746,7 +807,8 @@ def sync_tracker_with_glossary(
             continue
         new_key = _resolve(key, str(item.get("raw_name") or key), str(item.get("translated_name") or ""))
         if new_key is None:
-            unlisted_names.add(key)
+            if item.get("relations"):  # a name kept only for its descriptions is not an unlisted relation
+                unlisted_names.add(key)
             continue
         entries.pop(key, None)
         survivor = entries.get(new_key)
@@ -757,6 +819,10 @@ def sync_tracker_with_glossary(
         else:
             stats["merged"] += 1
         _add_aliases(survivor, [item.get("raw_name") or key] + list(item.get("aliases") or []), canonical[new_key][0])
+        if item.get("descriptions"):
+            # The survivor's own description of a chapter wins (it is appended last).
+            survivor["descriptions"] = [dict(d) for d in item["descriptions"] if isinstance(d, Mapping)] + [
+                d for d in survivor.get("descriptions") or [] if isinstance(d, Mapping)]
         relations = survivor.setdefault("relations", {})
         for tkey, rel in (item.get("relations") or {}).items():
             if not isinstance(rel, Mapping) or tkey == new_key:
@@ -1079,6 +1145,56 @@ def character_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> Li
             "blips": blips,
         })
     return result
+
+
+def description_history(tracker: Optional[Mapping[str, Any]], raw_name: Any) -> List[Dict[str, Any]]:
+    """Every description recorded for ``raw_name``, in chapter order: ``{text, chapter_num, chapter_file}``."""
+    entries = tracker.get("entries") if isinstance(tracker, Mapping) else None
+    item = entries.get(tracker_key(raw_name)) if isinstance(entries, Mapping) else None
+    if not isinstance(item, Mapping):
+        return []
+    found = [d for d in item.get("descriptions") or [] if isinstance(d, Mapping) and str(d.get("text") or "").strip()]
+    return [{"text": str(d["text"]), "chapter_num": d.get("chapter_num"), "chapter_file": d.get("chapter_file", "")}
+            for d in sorted(found, key=_chapter_sort_key)]
+
+
+def description_at(tracker: Optional[Mapping[str, Any]], raw_name: Any,
+                   up_to_chapter: Any = None) -> Optional[Dict[str, Any]]:
+    """The description written for ``raw_name`` at ``up_to_chapter`` or, failing that, the last
+    one before it (never a later chapter's). ``None`` chapter: the latest one recorded."""
+    history = description_history(tracker, raw_name)
+    if up_to_chapter is not None:
+        limit = _num(up_to_chapter)
+        if limit is None:
+            return None
+        history = [d for d in history if _num(d.get("chapter_num")) is not None and _num(d["chapter_num"]) <= limit]
+    return history[-1] if history else None
+
+
+def descriptions_shown(tracker: Optional[Mapping[str, Any]], raw_name: Any, up_to_chapter: Any = None,
+                       glossary_entries: Optional[Iterable[Any]] = None) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], str]:
+    """What a diagram shows for a character: ``(written, earlier, source)``.
+
+    ``written`` is the description written at ``up_to_chapter`` (or the last one before it),
+    ``earlier`` the ones before that, newest first. ``source`` is ``"chapter"`` for those. A
+    tracker made before descriptions were recorded has none: then ``written`` is the
+    glossary's present description (no chapter) and ``source`` is ``"glossary"``. Nothing
+    at all gives ``(None, [], "")``; nothing yet at that chapter ``(None, [], "chapter")``.
+    """
+    recorded = description_history(tracker, raw_name)
+    if not recorded:
+        key = tracker_key(raw_name)
+        for entry in glossary_entries or []:
+            if isinstance(entry, Mapping) and tracker_key(entry.get("raw_name")) == key:
+                text = " ".join(str(entry.get("description") or "").split())
+                if text:
+                    return {"text": text, "chapter_num": None, "chapter_file": ""}, [], "glossary"
+        return None, [], ""
+    written = description_at(tracker, raw_name, up_to_chapter)
+    if written is None:
+        return None, [], "chapter"
+    cut = recorded.index(written)
+    return written, list(reversed(recorded[:cut])), "chapter"
 
 
 def chapter_bounds(tracker: Optional[Mapping[str, Any]]) -> Tuple[Any, Any]:

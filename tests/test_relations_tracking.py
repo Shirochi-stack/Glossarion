@@ -32,6 +32,11 @@ def _entry(raw, translated, cell, **extra):
     return entry
 
 
+def _related(tracker):
+    """The names that have a relation (an entry may also hold only its descriptions)."""
+    return {key for key, item in tracker["entries"].items() if item["relations"]}
+
+
 def _model_rows(rows):
     """The fixtures state the stored meaning: on X's row, ``Y: what Y is to X``. The model
     writes the other way round (on Y's row, ``X: what Y is to X``), so every item moves to
@@ -176,7 +181,8 @@ def test_record_pops_field_and_skips_self_reference():
     assert all("relations" not in r and "Relations" not in r for r in rows)
     assert stats["pairs"] == 1 and stats["new"] == 1
     # 서윤's row says what 서윤 is to 도현; it is stored on 도현's entry.
-    assert set(tracker["entries"]) == {"도현"}
+    assert _related(tracker) == {"도현"}
+    assert tracker["entries"]["서윤"]["relations"] == {}  # kept for its description only
     rels = tracker["entries"]["도현"]["relations"]
     assert list(rels) == ["서윤"]
     assert rels["서윤"]["target_translated"] == "Seo-yun"
@@ -200,7 +206,7 @@ def test_model_direction_is_stored_on_the_reverse_edge():
     liliet = tracker["entries"]["리리엣"]
     assert liliet["raw_name"] == "리리엣" and liliet["translated_name"] == ""
     assert liliet["relations"]["바알"]["target_translated"] == "Baal"
-    assert "바알" not in tracker["entries"]
+    assert tracker["entries"]["바알"]["relations"] == {}
     # A later sync fills the translated name in.
     rt.sync_tracker_with_glossary(tracker, [{"type": "character", "raw_name": "리리엣", "translated_name": "Liliet"},
                                             {"type": "character", "raw_name": "바알", "translated_name": "Baal"}])
@@ -212,13 +218,13 @@ def test_filler_labels_never_enter_the_tracker():
     cell = ("B: Acquaintance; C: stranger; D: UNKNOWN; E: None; F: n/a; G: Surname; H: Same person; "
             "I: self; J: Friend")
     stats = rt.record_relations(tracker, [_entry("A", "Aa", cell)], chapter_num=1)
-    assert stats["pairs"] == 1 and set(tracker["entries"]) == {"j"}
+    assert stats["pairs"] == 1 and _related(tracker) == {"j"}
     assert all(rt.is_filler_label(label) for label in rt.FILLER_LABELS)
     assert not rt.is_filler_label("Friend") and not rt.is_filler_label("Acquaintance's Son")
     # Only filler: nothing is recorded at all.
     tracker = rt.empty_tracker()
     assert rt.record_relations(tracker, [_entry("A", "Aa", "B: Acquaintance")], chapter_num=1)["pairs"] == 0
-    assert tracker["entries"] == {}
+    assert _related(tracker) == set()
 
 
 def test_record_keeps_field_when_asked():
@@ -971,3 +977,93 @@ def test_reset_question_is_one_question_for_one_or_both_prompts():
     both = rt.reset_question(["Balanced/Full", "Minimal"])
     assert both == ("The Balanced/Full and Minimal prompts have no {relations_instruction} line, so the AI will "
                     "not return relations.\n\nReset both prompts to default?")
+
+
+# --------------------------------------------------------------------------- descriptions per chapter
+
+def _describe(tracker, chapter, raw, text, cell="", **extra):
+    row = {"type": "character", "raw_name": raw, "translated_name": raw.title(), "description": text,
+           "relations": cell}
+    row.update(extra)
+    return rt.record_relations(tracker, [row], chapter_index=chapter - 1, chapter_num=chapter,
+                               chapter_file=f"ch{chapter:03d}.xhtml")
+
+
+def test_description_written_at_each_chapter_is_kept_and_read_by_chapter():
+    tracker = rt.empty_tracker()
+    # Out of order, as parallel requests arrive.
+    assert _describe(tracker, 12, "min", "Leader of Team 1, now  feared\nby the Red Tiger clan")["descriptions"] == 1
+    _describe(tracker, 3, "min", "A playful hunter", cell="jin: Team Leader")
+    _describe(tracker, 8, "min", "Team leader of the Night Wind clan")
+    history = rt.description_history(tracker, "Min")
+    assert [(d["chapter_num"], d["text"]) for d in history] == [
+        (3, "A playful hunter"), (8, "Team leader of the Night Wind clan"),
+        (12, "Leader of Team 1, now feared by the Red Tiger clan")]
+    # The one written at that chapter, else the last before it; never a later one.
+    assert rt.description_at(tracker, "min", 8)["text"] == "Team leader of the Night Wind clan"
+    assert rt.description_at(tracker, "min", 11)["chapter_num"] == 8
+    assert rt.description_at(tracker, "min", 2) is None
+    assert rt.description_at(tracker, "min")["chapter_num"] == 12
+    assert rt.description_at(tracker, "nobody", 5) is None
+    # The same chapter recorded again: unchanged text adds nothing, new text replaces it.
+    assert _describe(tracker, 8, "min", "Team leader of the Night Wind clan")["descriptions"] == 0
+    assert _describe(tracker, 8, "min", "Team leader, sniper's partner")["descriptions"] == 1
+    assert [d["text"] for d in rt.description_history(tracker, "min") if d["chapter_num"] == 8] == [
+        "Team leader, sniper's partner"]
+    # The description stays on the row: it is a glossary column, only relations are taken off.
+    row = {"type": "character", "raw_name": "jin", "description": "A sniper", "relations": "min: Subordinate"}
+    rt.record_relations(tracker, [row], chapter_num=9)
+    assert row == {"type": "character", "raw_name": "jin", "description": "A sniper"}
+
+
+def test_descriptions_are_kept_for_characters_and_related_names_only():
+    tracker = rt.empty_tracker()
+    rows = [{"type": "term", "raw_name": "검", "description": "A sword"},
+            {"type": "titles", "raw_name": "대장", "description": "A rank", "relations": "min: Superior"},
+            {"type": "character", "raw_name": "min", "description": ""},
+            {"type": "character", "raw_name": "jin", "description": "A sniper"},
+            {"type": "character", "raw_name": "long", "description": "word " * 400}]
+    stats = rt.record_relations(tracker, rows, chapter_num=4, chapter_file="ch004.xhtml")
+    assert stats["descriptions"] == 3
+    assert "검" not in tracker["entries"]                      # not a character, no relation
+    assert rt.description_at(tracker, "대장")["text"] == "A rank"  # has a relation
+    assert rt.description_at(tracker, "jin")["text"] == "A sniper"
+    assert rt.description_at(tracker, "min") is None
+    long_text = rt.description_at(tracker, "long")["text"]
+    assert len(long_text) == rt.MAX_DESCRIPTION_CHARS and long_text.endswith("…")
+    # Names without relations do not become diagram nodes.
+    assert {n["id"] for n in rt.build_graph(tracker)["nodes"]} == {"min", "대장"}
+
+
+def test_descriptions_follow_a_name_merged_by_the_glossary_sync():
+    tracker = rt.empty_tracker()
+    _describe(tracker, 1, "서윤님", "The heir, as first seen", cell="도현: Younger Sister")
+    _describe(tracker, 2, "서윤", "The heir of the Baek house")
+    _describe(tracker, 2, "서윤님", "Overwritten by the surviving name's own")
+    stats = rt.sync_tracker_with_glossary(
+        tracker, [{"type": "character", "raw_name": "서윤", "translated_name": "Seo-yun"},
+                  {"type": "character", "raw_name": "도현", "translated_name": "Do-hyeon"}],
+        strip_honorifics=lambda raw: raw.replace("님", ""))
+    assert "서윤님" not in tracker["entries"] and stats["unlisted"] == 0
+    assert [(d["chapter_num"], d["text"]) for d in rt.description_history(tracker, "서윤")] == [
+        (1, "The heir, as first seen"), (2, "The heir of the Baek house")]
+
+
+def test_descriptions_shown_by_a_diagram():
+    tracker = rt.empty_tracker()
+    glossary = [{"raw_name": "min", "description": "The glossary's  present\ndescription"},
+                {"raw_name": "jin", "description": ""}]
+    # A tracker from before descriptions were recorded: the glossary's own, undated.
+    assert rt.descriptions_shown(tracker, "min", 5, glossary) == (
+        {"text": "The glossary's present description", "chapter_num": None, "chapter_file": ""}, [], "glossary")
+    assert rt.descriptions_shown(tracker, "jin", 5, glossary) == (None, [], "")
+    assert rt.descriptions_shown(tracker, "min", 5) == (None, [], "")
+    for chapter, text in ((3, "first"), (8, "second"), (12, "third")):
+        _describe(tracker, chapter, "min", text)
+    written, earlier, source = rt.descriptions_shown(tracker, "min", 9, glossary)
+    assert (written["text"], written["chapter_num"], source) == ("second", 8, "chapter")
+    assert [d["text"] for d in earlier] == ["first"]
+    written, earlier, _source = rt.descriptions_shown(tracker, "min", None, glossary)
+    assert written["text"] == "third" and [d["text"] for d in earlier] == ["second", "first"]
+    # Recorded, but nothing yet at that chapter: not the glossary's later text.
+    assert rt.descriptions_shown(tracker, "min", 2, glossary) == (None, [], "chapter")

@@ -436,6 +436,9 @@ class RelationsDiagramDialog(QDialog):
             if node_id not in positions:
                 continue
             item = _NodeItem(node, self._on_node_clicked, self._node_font)
+            written, _earlier, _source = self.descriptions_shown(node_id, str(node.get('raw_name') or node_id))
+            if written is not None:
+                item.setToolTip(f"<qt><b>{html.escape(item.toolTip())}</b><br>{html.escape(written['text'])}</qt>")
             x, y = positions[node_id]
             item.setPos(x, y)
             self.scene.addItem(item)
@@ -482,6 +485,8 @@ class RelationsDiagramDialog(QDialog):
         if self._refit:
             self._refit = False
             self._view.fit_all()
+        if selected is not None:
+            self.show_history(selected)  # the slider moved: the description written at that chapter
 
     @staticmethod
     def _overlap(box, others):
@@ -551,6 +556,30 @@ class RelationsDiagramDialog(QDialog):
         self.history_title.setText(HISTORY_HINT)
         self.history_panel.clear()
 
+    def descriptions_shown(self, node_id, raw):
+        """The description written at the slider's chapter, the earlier ones, and its source
+        (``relations_tracking.descriptions_shown``, shared with the mobile diagram)."""
+        return relations_tracking.descriptions_shown(self.tracker, raw, self.up_to_chapter(), self.glossary_entries)
+
+    def _description_html(self, node_id, raw):
+        written, earlier, source = self.descriptions_shown(node_id, raw)
+        if written is None:
+            if source != 'chapter':
+                return []
+            shown = self.up_to_chapter()
+            return [f"<p style='color:#9ca3af;margin:0 0 10px 0'>No description written up to chapter {shown}.</p>"]
+        heading = (f"Description written at chapter {written.get('chapter_num')}" if source == 'chapter'
+                   else "Description (from the glossary; not recorded per chapter for this book yet)")
+        parts = [f"<p style='color:#9ca3af;margin:0 0 2px 0'>{html.escape(heading)}</p>",
+                 f"<p style='margin:0 0 10px 0'>{html.escape(written['text'])}</p>"]
+        if earlier:
+            parts.append("<p style='color:#9ca3af;margin:0 0 2px 0'>Earlier descriptions</p><ul style='margin:0 0 10px 0'>")
+            for old in earlier:
+                parts.append(f"<li style='color:#9ca3af'>Ch. {html.escape(str(old.get('chapter_num')))}: "
+                             f"{html.escape(old['text'])}</li>")
+            parts.append("</ul>")
+        return parts
+
     def show_history(self, node_id):
         entries = self.tracker.get('entries') or {}
         item = entries.get(node_id) if isinstance(entries, dict) else None
@@ -558,10 +587,11 @@ class RelationsDiagramDialog(QDialog):
         name = self._name(node_id)
         self.history_title.setText(f"{name} ({raw})" if raw != name else name)
         history = relations_tracking.character_history(self.tracker, raw)
+        parts = self._description_html(node_id, raw)
         if not history:
-            self.history_panel.setHtml("<p style='color:#9ca3af'>No relations recorded from this character's side.</p>")
+            parts.append("<p style='color:#9ca3af'>No relations recorded from this character's side.</p>")
+            self.history_panel.setHtml("".join(parts))
             return history
-        parts = []
         for rel in history:
             target = html.escape(str(rel.get('target_translated') or rel.get('target_raw') or ''))
             parts.append(f"<p style='margin:8px 0 2px 0'><b>{target}</b>: "
