@@ -420,6 +420,63 @@ def test_diagram_is_tidy_and_fitted(qapp):
         dialog.deleteLater()
 
 
+def test_a_name_in_the_side_panel_jumps_to_it_in_the_diagram(qapp):
+    from PySide6.QtCore import QUrl
+    from relations_diagram_dialog import CHANGED_COLOR, RelationsDiagramDialog
+    dialog = RelationsDiagramDialog(None, tracker=_team_tracker())
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        for _ in range(4):
+            qapp.processEvents()
+        view = dialog._view
+        leader = rt.tracker_key("민")
+        dialog._on_node_clicked(leader)
+        # Every name listed is drawn, so every one is a link, in the order shown.
+        html_text = dialog.history_panel.toHtml()
+        assert len(dialog._history_links) == 9 and html_text.count('href="node:') == 9
+        target = dialog._history_links[3]
+        item = dialog._node_items[target]
+
+        def in_sight(node):
+            return view.mapToScene(view.viewport().rect()).boundingRect().contains(node.sceneBoundingRect())
+
+        # The whole diagram is in sight: the name is outlined and nothing moves.
+        before = view.transform().m11(), view.horizontalScrollBar().value(), view.verticalScrollBar().value()
+        dialog._on_history_link(QUrl("node:3"))
+        assert item.pen().color() == CHANGED_COLOR and item.pen().widthF() > 4
+        assert (view.transform().m11(), view.horizontalScrollBar().value(), view.verticalScrollBar().value()) == before
+        assert dialog._selected == leader and "T0" in dialog.history_title.text()  # panel and selection stay
+        dialog._end_flash(target, item)
+        assert item.pen().color() != CHANGED_COLOR and item.pen().widthF() < 2
+
+        # Zoomed in on another name: the jump brings the clicked one into view.
+        far = max(dialog._history_links, key=lambda key: (dialog._node_items[key].pos() - item.pos()).manhattanLength())
+        view._auto_fit = False
+        view.scale(4.0, 4.0)
+        view.centerOn(dialog._node_items[far])
+        qapp.processEvents()
+        assert not in_sight(item)
+        assert dialog.jump_to(target) is True
+        qapp.processEvents()
+        assert in_sight(item) and view.transform().m11() > 3  # moved to it, zoom kept
+        # The selected name's own outline comes back after the flash.
+        dialog.jump_to(leader)
+        dialog._end_flash(leader, dialog._node_items[leader])
+        assert dialog._node_items[leader].pen().color().name() == "#ffffff"
+        # A link that no longer points anywhere does nothing.
+        dialog._on_history_link(QUrl("node:99"))
+        dialog._on_history_link(QUrl("https://example.invalid/"))
+        assert dialog.jump_to("nobody") is False
+        # A flash that outlives its item (the scene was rebuilt) is dropped.
+        dialog.jump_to(target)
+        dialog.rebuild()
+        dialog._end_flash(target, item)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
 def test_diagram_panel_shows_the_description_written_at_the_sliders_chapter(qapp):
     from relations_diagram_dialog import RelationsDiagramDialog
     tracker = _synthetic_tracker()  # chapters 1 to 40
