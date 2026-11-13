@@ -7,18 +7,23 @@ platform installers; the model and chat paths use its native HTTP API.
 from __future__ import annotations
 
 import atexit
+import base64
+import contextlib
+import http.client
 import json
 import os
 import queue
 import re
 import shutil
 import socket
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import zipfile
 from collections import deque
 from pathlib import Path
@@ -43,6 +48,9 @@ def base_url() -> str:
 _LATEST_RELEASE_URL = "https://api.github.com/repos/ollama/ollama/releases/latest"
 _UPDATE_CHECK_SECONDS = 6 * 60 * 60
 _lifecycle_lock = threading.RLock()
+#: Loading a model into memory: one request does it, the others of a batch wait here and find it loaded.
+_load_lock = threading.Lock()
+_chat_count_lock = threading.Lock()
 _release_lock = threading.Lock()
 _release_checked_at = 0.0
 _release_version: Optional[str] = None
@@ -148,6 +156,8 @@ def model_settings(model_name: str) -> dict[str, Any]:
 
 
 def _progress(callback: Optional[Callable[[str], None]], message: str) -> None:
+    """Report a setup step (install, update, server start, pull). It is printed, which is the run log's line;
+    ``callback`` is for a caller with a surface of its own (the settings dialog's label) and must not log it again."""
     print(f"[Ollama] {message}", flush=True)
     if callback is not None:
         try:
@@ -199,6 +209,246 @@ def _stream_log_fragment(pending: str, fragment: str, *, prefix: str = "",
 def _check_stop(should_stop: Optional[Callable[[], bool]]) -> None:
     if should_stop is not None and should_stop():
         raise OllamaPullCancelled("Ollama operation cancelled")
+
+
+@contextlib.contextmanager
+def _held(lock: Any, should_stop: Optional[Callable[[], bool]]):
+    """Hold ``lock``. A request that waits for the one preparing Ollama ends on Stop instead of waiting it out."""
+    while not lock.acquire(timeout=0.2):
+        _check_stop(should_stop)
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+# ---- stop ----------------------------------------------------------------------------------------------------
+# The stop flags are cleared when the next run starts, so a request of the stopped run that is still blocked then
+# (on the model load, on the answer's first byte) would wake up in the new run and carry on. Stop therefore closes
+# every open connection and advances a generation; a request that began under an older generation stays cancelled.
+_cancel_lock = threading.Lock()
+_cancel_generation = 0
+_open_exchanges: set[Any] = set()
+
+
+def cancel_stream() -> None:
+    """Stop every request in flight for good: Stop, and the start of a new run. Never blocks."""
+    global _cancel_generation
+    with _cancel_lock:
+        _cancel_generation += 1
+        exchanges = list(_open_exchanges)
+    for exchange in exchanges:
+        exchange.abort()
+    _wait_wake.set()
+
+
+def capture_cancel_generation() -> int:
+    """The generation a new request belongs to."""
+    with _cancel_lock:
+        return _cancel_generation
+
+
+def is_cancel_generation_cancelled(cancel_generation: Optional[int]) -> bool:
+    """Whether Stop has ended the request that began under ``cancel_generation``."""
+    with _cancel_lock:
+        return cancel_generation is not None and int(cancel_generation) != _cancel_generation
+
+
+def _tls_context() -> ssl.SSLContext:
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+class _Exchange:
+    """One POST whose connection Stop can close in every phase, also before the server has answered: Ollama sends
+    the response headers with the first token (after the model has loaded and the prompt is processed), and
+    ``requests`` hands out nothing to close until then. Offers what this module reads of ``requests.Response``."""
+
+    def __init__(self, url: str, payload: dict[str, Any], timeout: tuple[float, float]) -> None:
+        parts = urllib.parse.urlsplit(url)
+        self._headers = {"Content-Type": "application/json"}
+        if parts.username:
+            login = f"{urllib.parse.unquote(parts.username)}:{urllib.parse.unquote(parts.password or '')}"
+            self._headers["Authorization"] = "Basic " + base64.b64encode(login.encode("utf-8")).decode("ascii")
+        if parts.scheme == "https":
+            self._connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+                parts.hostname or "", parts.port, timeout=timeout[0], context=_tls_context())
+        else:
+            self._connection = http.client.HTTPConnection(parts.hostname or "", parts.port, timeout=timeout[0])
+        self._target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        self._body = json.dumps(payload).encode("utf-8")
+        self._read_timeout = timeout[1]
+        self._response: Optional[http.client.HTTPResponse] = None
+        # Our own reference: http.client lets go of the socket once a "Connection: close" response has begun.
+        self._socket: Optional[socket.socket] = None
+        self._content: Optional[bytes] = None
+        self._aborted = False
+        self._owner = threading.get_ident()
+        self.finished = threading.Event()
+        self.status_code = 0
+        self.reason = ""
+
+    def _failure(self, exc: BaseException) -> Exception:
+        if self._aborted:
+            return OllamaPullCancelled("Ollama operation cancelled")
+        kind = requests.Timeout if isinstance(exc, TimeoutError) else requests.ConnectionError
+        return kind(str(exc) or type(exc).__name__)
+
+    def send(self) -> "_Exchange":
+        """Send the request and wait for the response headers."""
+        try:
+            self._connection.connect()
+            self._socket = self._connection.sock
+            if self._aborted:
+                raise ConnectionAbortedError("closed")
+            self._socket.settimeout(self._read_timeout)
+            self._connection.request("POST", self._target, body=self._body, headers=self._headers)
+            self._response = self._connection.getresponse()
+        except (OSError, http.client.HTTPException, AttributeError) as exc:
+            raise self._failure(exc) from exc
+        self.status_code = self._response.status
+        self.reason = self._response.reason
+        return self
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status_code < 400
+
+    def iter_lines(self):
+        try:
+            for line in self._response:
+                yield line.rstrip(b"\r\n")
+        except (OSError, http.client.HTTPException, AttributeError, ValueError) as exc:
+            raise self._failure(exc) from exc
+        if self._aborted:
+            raise OllamaPullCancelled("Ollama operation cancelled")
+
+    def _read(self) -> bytes:
+        if self._content is None:
+            try:
+                self._content = self._response.read()
+            except (OSError, http.client.HTTPException, AttributeError, ValueError) as exc:
+                raise self._failure(exc) from exc
+        return self._content
+
+    @property
+    def text(self) -> str:
+        return self._read().decode("utf-8", "replace")
+
+    def json(self) -> Any:
+        return json.loads(self._read())
+
+    def abort(self) -> None:
+        """End the exchange from another thread: the blocked read wakes at once and the server sees the
+        connection close, which is how Ollama and llama-server stop working on a request."""
+        self._aborted = True
+        sock = self._socket
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        if threading.get_ident() != self._owner and not self.finished.is_set():
+            self.abort()
+        self.finished.set()
+        with _cancel_lock:
+            _open_exchanges.discard(self)
+        for closing in (self._response, self._connection, self._socket):
+            try:
+                if closing is not None:
+                    closing.close()
+            except Exception:
+                pass
+
+
+def _post(url: str, *, json: dict[str, Any], should_stop: Optional[Callable[[], bool]] = None,
+          timeout: tuple[float, float] = (5.0, 600.0)) -> _Exchange:
+    """POST ``json`` and wait for the response headers. Stop (``should_stop``, ``cancel_stream``) closes the
+    connection in every phase, so nothing of a stopped request stays with the server."""
+    exchange = _Exchange(url, json, timeout)
+    with _cancel_lock:
+        _open_exchanges.add(exchange)
+    _watch_stop(exchange.abort, should_stop, exchange.finished)
+    try:
+        return exchange.send()
+    except BaseException:
+        exchange.close()
+        raise
+
+
+# ---- waiting lines -------------------------------------------------------------------------------------------
+# What a batch waits for (the model load, the model's answer) is one state shared by its requests: it is reported
+# once per interval for all of them, not once per request.
+_WAIT_REPORT_SECONDS = 15
+_wait_lock = threading.Lock()
+_wait_wake = threading.Event()
+_waits: dict[int, dict[str, Any]] = {}
+_wait_reported: dict[Any, float] = {}
+_wait_thread: Optional[threading.Thread] = None
+_wait_ids = iter(range(1, sys.maxsize))
+
+
+def _wait_begin(key: Any, text: Callable[[int, int], str], progress: Optional[Callable[[str], None]],
+                should_stop: Optional[Callable[[], bool]]) -> tuple[int, bool]:
+    """Register a request that waits on ``key``; ``text(seconds, requests)`` is its periodic line.
+    Returns (token for ``_wait_end``, whether no other request was already waiting on ``key``)."""
+    global _wait_thread
+    with _wait_lock:
+        first = not any(entry["key"] == key for entry in _waits.values())
+        token = next(_wait_ids)
+        _waits[token] = {"key": key, "text": text, "progress": progress, "should_stop": should_stop,
+                         "started": time.monotonic()}
+        if progress is not None and _wait_thread is None:
+            _wait_thread = threading.Thread(target=_report_waits, name="OllamaWaitReport", daemon=True)
+            _wait_thread.start()
+    return token, first
+
+
+def _wait_end(token: Optional[int]) -> None:
+    if token is None:
+        return
+    with _wait_lock:
+        entry = _waits.pop(token, None)
+        if entry is not None and not any(other["key"] == entry["key"] for other in _waits.values()):
+            _wait_reported.pop(entry["key"], None)
+
+
+def _report_waits() -> None:
+    global _wait_thread
+    while True:
+        _wait_wake.wait(1.0)
+        _wait_wake.clear()
+        lines: list[tuple[Callable[[str], None], str]] = []
+        with _wait_lock:
+            for token, entry in list(_waits.items()):
+                try:
+                    stopped = entry["should_stop"] is not None and entry["should_stop"]()
+                except Exception:
+                    stopped = True
+                if stopped:  # a stopped request reports nothing more, also when its thread is still unwinding
+                    _waits.pop(token, None)
+            if not _waits:
+                _wait_reported.clear()
+                _wait_thread = None
+                return
+            now = time.monotonic()
+            groups: dict[Any, list[dict[str, Any]]] = {}
+            for entry in _waits.values():
+                groups.setdefault(entry["key"], []).append(entry)
+            for key, entries in groups.items():
+                oldest = min(entries, key=lambda entry: entry["started"])
+                since = _wait_reported.get(key, oldest["started"])
+                if oldest["progress"] is None or now - since < _WAIT_REPORT_SECONDS:
+                    continue
+                _wait_reported[key] = now
+                lines.append((oldest["progress"], oldest["text"](int(now - oldest["started"]), len(entries))))
+        for progress, line in lines:
+            _chat_status(progress, line)
 
 
 def _http_error(response: requests.Response, action: str) -> OllamaPullError:
@@ -528,7 +778,7 @@ def _run_installer(progress: Optional[Callable[[str], None]], should_stop: Optio
 def update_ollama(*, progress: Optional[Callable[[str], None]] = None,
                   should_stop: Optional[Callable[[], bool]] = None) -> None:
     """Run the official installer, which installs or upgrades the current app."""
-    with _lifecycle_lock:
+    with _held(_lifecycle_lock, should_stop):
         _run_installer(progress, should_stop)
         _after_update(progress, should_stop)
         _progress(progress, "Ollama installation finished.")
@@ -732,16 +982,16 @@ def _iter_json_lines(response: requests.Response,
     _check_stop(should_stop)
 
 
-def _watch_stop(response: requests.Response,
-                should_stop: Optional[Callable[[], bool]]) -> threading.Event:
-    """Close a blocked stream promptly when the user presses Stop."""
-    finished = threading.Event()
+def _watch_stop(close: Callable[[], None], should_stop: Optional[Callable[[], bool]],
+                finished: Optional[threading.Event] = None) -> threading.Event:
+    """Call ``close`` promptly when the user presses Stop, until ``finished`` is set."""
+    finished = finished or threading.Event()
     if should_stop is not None:
         def monitor() -> None:
             while not finished.wait(0.2):
                 try:
                     if should_stop():
-                        response.close()
+                        close()
                         return
                 except Exception:
                     return
@@ -766,7 +1016,7 @@ def pull_model(model_name: str, *, progress: Optional[Callable[[str], None]] = N
     try:
         with requests.post(f"{base_url()}/api/pull", json={"model": name, "stream": True},
                            stream=True, timeout=(5, 30)) as response:
-            finished = _watch_stop(response, should_stop)
+            finished = _watch_stop(response.close, should_stop)
             try:
                 if not response.ok:
                     raise _http_error(response, "model pull")
@@ -817,8 +1067,9 @@ def pull_model(model_name: str, *, progress: Optional[Callable[[str], None]] = N
 def ensure_ready(model_name: Optional[str] = None, *, auto_update: Optional[bool] = None,
                  progress: Optional[Callable[[str], None]] = None,
                  should_stop: Optional[Callable[[], bool]] = None) -> None:
-    """Install/update Ollama, start its server, and pull a missing model."""
-    with _lifecycle_lock:
+    """Install/update Ollama, start its server, and pull a missing model. One request of a batch does the work;
+    the others wait for it here, then find everything in place."""
+    with _held(_lifecycle_lock, should_stop):
         _check_stop(should_stop)
         installed = bool(_ollama_executable()) if mobile_runtime.subprocesses_available() else False
         if not installed:
@@ -854,6 +1105,48 @@ def ensure_ready(model_name: Optional[str] = None, *, auto_update: Optional[bool
         _start_server(progress, should_stop)
         if model_name and not _model_is_installed(model_name, _models()):
             pull_model(model_name, progress=progress, should_stop=should_stop)
+
+
+def _loaded_entry(name: str) -> Optional[dict[str, Any]]:
+    """Ollama's ``/api/ps`` record of ``name`` while the model is in memory."""
+    running = _api_get("/api/ps").get("models") or []
+    for item in running if isinstance(running, list) else []:
+        if _model_is_installed(name, [item]):
+            return item
+    return None
+
+
+def _load_model(name: str, options: dict[str, Any], progress: Optional[Callable[[str], None]],
+                should_stop: Optional[Callable[[], bool]]) -> None:
+    """Have Ollama load ``name`` with the request's ``options`` and wait until it is in memory. One request of a
+    batch does it; the others wait here and find it loaded, so nothing is sent to a model that is still loading."""
+    with _held(_load_lock, should_stop):
+        _check_stop(should_stop)
+        try:
+            if _loaded_entry(name) is not None:
+                return
+        except (requests.RequestException, OllamaPullError, ValueError):
+            return  # Ollama did not say; the chat request itself reports what is wrong
+        _chat_status(progress, f"Loading {name}; requests are sent once Ollama has it in memory.")
+        body: dict[str, Any] = {"model": name, "stream": False}
+        if options:
+            body["options"] = options
+        waiting, _first = _wait_begin(("load", name), lambda seconds, _count: f"Still loading {name} ({seconds}s).",
+                                      progress, should_stop)
+        started = time.monotonic()
+        response: Optional[_Exchange] = None
+        try:
+            response = _post(f"{base_url()}/api/generate", json=body, should_stop=should_stop)
+            if not response.ok:
+                raise _http_error(response, "model load")
+        except requests.RequestException as exc:
+            _check_stop(should_stop)
+            raise OllamaPullError(f"Could not load Ollama model {name}: {exc}") from exc
+        finally:
+            _wait_end(waiting)
+            if response is not None:
+                response.close()
+        _chat_status(progress, f"{name} is loaded ({int(time.monotonic() - started)}s).")
 
 
 def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -904,7 +1197,9 @@ _LLAMA_FALLBACK_CONTEXT = 32768
 _LLAMA_IDLE_SECONDS = 300
 _LLAMA_START_SECONDS = 300
 _ban_server_lock = threading.RLock()
-_ban_server: Optional[dict[str, Any]] = None  # {"process", "url", "key"}
+_ban_bias_lock = threading.Lock()
+#: {"process", "url", "key", "name", "started", "ready"}: ``ready`` once /health said the model is in memory
+_ban_server: Optional[dict[str, Any]] = None
 _ban_backends: dict[str, dict[str, str]] = {}  # llama-server path -> environment of its GPU backend
 _ban_contexts: dict[str, int] = {}  # model -> the context size Ollama chose for it
 _ban_bias_cache: dict[tuple, list] = {}  # (model file, scripts, kaomoji) -> llama-server's logit_bias
@@ -992,7 +1287,7 @@ def _token_ban_bias(model_file: str, scripts: tuple, allow_kaomoji: bool, exempt
     import script_ban_core
 
     key = (model_file, scripts, allow_kaomoji)
-    with _ban_server_lock:
+    with _ban_bias_lock:
         if key not in _ban_bias_cache:
             tokens = _gguf_tokens(model_file)
             byte_level = script_ban_core.is_byte_level(tokens)
@@ -1019,15 +1314,19 @@ def _model_files(name: str) -> tuple[str, str]:
     return files[0], (files[1] if len(files) > 1 else "")
 
 
-def _ollama_context(name: str) -> int:
-    """The context size Ollama loads ``name`` with (it picks by the GPU's memory): loaded once to ask it."""
+def _ollama_context(name: str, progress: Optional[Callable[[str], None]] = None,
+                    should_stop: Optional[Callable[[], bool]] = None) -> int:
+    """The context size Ollama loads ``name`` with (it picks by the GPU's memory): loaded once to ask it. The
+    caller holds ``_ban_server_lock``: every request must read the same answer, before the model is unloaded."""
     if name not in _ban_contexts:
         context = 0
         try:
-            _api_post("/api/generate", {"model": name}, timeout=300.0)
+            _load_model(name, {}, progress, should_stop)
             for loaded in _api_get("/api/ps").get("models") or []:
                 if isinstance(loaded, dict) and loaded.get("name") == name:
                     context = int(loaded.get("context_length") or 0)
+        except OllamaPullCancelled:
+            raise
         except (OllamaPullError, requests.RequestException, TypeError, ValueError):
             pass
         _ban_contexts[name] = context or _LLAMA_FALLBACK_CONTEXT
@@ -1065,48 +1364,83 @@ def _start_ban_server(name: str, options: dict[str, Any], vision: bool,
         raise OllamaPullError("Block other scripts needs the llama-server of a current Ollama, and this install "
                               "has none. Update Ollama, or turn the toggle off in Ollama Settings.")
     model_file, projector = _model_files(name)
-    context = int(options.get("num_ctx") or 0) or _ollama_context(name)
-    args = ["-c", str(context)]
-    for option, flag in _LLAMA_LOAD_OPTIONS.items():
-        if options.get(option) is not None:
-            args += [flag, str(options[option])]
-    if vision and projector:
-        args += ["--mmproj", projector]
-    key = (model_file, tuple(args))
-    with _ban_server_lock:
-        if _ban_server is not None and _ban_server["key"] == key and _ban_server["process"].poll() is None:
-            return _ban_server["url"], model_file
-        _stop_ban_server()
-        try:
-            _api_post("/api/generate", {"model": name, "keep_alive": 0}, timeout=60.0)
-        except (OllamaPullError, requests.RequestException):
-            pass
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        _chat_status(progress, f"Starting llama-server for {name} (Block other scripts)...")
-        process = subprocess.Popen(
-            [executable, "--model", model_file, "--port", str(port), "--host", "127.0.0.1", "--no-webui", "--offline",
-             "-np", "1", "--sleep-idle-seconds", str(_LLAMA_IDLE_SECONDS), *args],
-            env={**os.environ, **_llama_backend_env(executable)},
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **_hidden_subprocess_kwargs())
-        url = f"http://127.0.0.1:{port}"
-        _ban_server = {"process": process, "url": url, "key": key}
-        deadline = time.monotonic() + _LLAMA_START_SECONDS
+    # One request starts the server and waits for its model; the others of a batch wait here for the same server.
+    with _held(_ban_server_lock, should_stop):
+        _check_stop(should_stop)
+        context = int(options.get("num_ctx") or 0) or _ollama_context(name, progress, should_stop)
+        args = ["-c", str(context)]
+        for option, flag in _LLAMA_LOAD_OPTIONS.items():
+            if options.get(option) is not None:
+                args += [flag, str(options[option])]
+        if vision and projector:
+            args += ["--mmproj", projector]
+        key = (model_file, tuple(args))
+        server = _ban_server
+        if server is None or server["key"] != key or server["process"].poll() is not None:
+            _stop_ban_server()
+            try:
+                _api_post("/api/generate", {"model": name, "keep_alive": 0}, timeout=60.0)
+            except (OllamaPullError, requests.RequestException):
+                pass
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            _chat_status(progress, f"Starting llama-server for {name} (Block other scripts)...")
+            process = subprocess.Popen(
+                [executable, "--model", model_file, "--port", str(port), "--host", "127.0.0.1", "--no-webui",
+                 "--offline", "-np", "1", "--sleep-idle-seconds", str(_LLAMA_IDLE_SECONDS), *args],
+                env={**os.environ, **_llama_backend_env(executable)},
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **_hidden_subprocess_kwargs())
+            server = _ban_server = {"process": process, "url": f"http://127.0.0.1:{port}", "key": key,
+                                    "name": name, "started": time.monotonic(), "ready": False}
+        _await_ban_server(server, progress, should_stop)
+        return server["url"], model_file
+
+
+def _await_ban_server(server: dict[str, Any], progress: Optional[Callable[[str], None]],
+                      should_stop: Optional[Callable[[], bool]]) -> None:
+    """Wait until ``server`` says on /health that its model is in memory (the caller holds ``_ban_server_lock``).
+    A wait that Stop ends leaves the server loading and not ``ready``: the next request waits for it again."""
+    global _ban_server
+    if server["ready"]:
+        return
+    name, process = server["name"], server["process"]
+    waiting, _first = _wait_begin(("load", name), lambda seconds, _count: f"Still loading {name} ({seconds}s).",
+                                  progress, should_stop)
+    try:
+        deadline = server["started"] + _LLAMA_START_SECONDS
         while time.monotonic() < deadline:
             _check_stop(should_stop)
             if process.poll() is not None:
-                _ban_server = None
+                if _ban_server is server:
+                    _ban_server = None
                 raise OllamaPullError(f"llama-server stopped while loading {name} (exit code {process.returncode}).")
             try:
-                if requests.get(f"{url}/health", timeout=2).ok:
-                    return url, model_file
+                if requests.get(f"{server['url']}/health", timeout=2).ok:
+                    server["ready"] = True
+                    return
             except requests.RequestException:
                 pass
             time.sleep(0.25)
+    finally:
+        _wait_end(waiting)
+    if _ban_server is server:
         _stop_ban_server()
-        raise OllamaPullError(f"llama-server did not load {name} in {_LLAMA_START_SECONDS} seconds.")
+    raise OllamaPullError(f"llama-server did not load {name} in {_LLAMA_START_SECONDS} seconds.")
+
+
+def _ban_server_loading(url: str, progress: Optional[Callable[[str], None]],
+                        should_stop: Optional[Callable[[], bool]]) -> None:
+    """llama-server answered a chat request with 503 "Loading model": wait until the model is in memory."""
+    with _held(_ban_server_lock, should_stop):
+        server = _ban_server
+        if server is None or not url.startswith(server["url"]):
+            raise OllamaPullError("llama-server stopped before the request could be sent.")
+        if server["ready"]:  # the first request to be told; the others find the wait already under way or over
+            server["ready"], server["started"] = False, time.monotonic()
+            time.sleep(0.25)
+        _await_ban_server(server, progress, should_stop)
 
 
 def _token_ban_request(name: str, messages: list[dict[str, Any]], payload: dict[str, Any], scripts: tuple,
@@ -1189,6 +1523,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
          log_stream: bool = False, log_thinking: bool = False,
          progress: Optional[Callable[[str], None]] = None,
          should_stop: Optional[Callable[[], bool]] = None,
+         stop_before_send: Optional[Callable[[], bool]] = None,
          on_response_open: Optional[Callable[[requests.Response], None]] = None,
          on_response_close: Optional[Callable[[requests.Response], None]] = None) -> dict[str, Any]:
     """Send one native chat request and return text, finish reason, and usage.
@@ -1196,9 +1531,12 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
     ``ban_scripts``: the ``script_ban_core.SCRIPTS`` the answer may not use: the request goes to llama-server with a
     token ban (``_token_ban_request``), except tokens that only need ``ban_exempt_chars``. Only on this PC: a
     remote Ollama's model file is out of reach. ``repeat_watch`` (``forced_truncation.RepetitionWatch``): the answer
-    stops with finish reason ``length`` when it says so; the request streams even when the logs do not."""
+    stops with finish reason ``length`` when it says so; the request streams even when the logs do not.
+    ``should_stop`` ends the request in every phase; ``stop_before_send`` (default: the same) ends only the wait
+    for the model before it, for a stop that lets a request already sent finish."""
     name = native_model_name(model_name)
-    _check_stop(should_stop)
+    stop_before_send = stop_before_send or should_stop
+    _check_stop(stop_before_send)
     stream = bool(stream) or repeat_watch is not None
     settings = model_settings(name)
     options: dict[str, Any] = {}
@@ -1230,42 +1568,56 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
             raise OllamaPullError(f"Additional options for {name} must be a JSON object.")
         payload["options"].update(extra_options)
     payload.update({key: value for key, value in request_options.items() if key != "options"})
-    response: Optional[requests.Response] = None
-    finished: Optional[threading.Event] = None
+    response: Any = None
+    waiting: Optional[int] = None
+
+    def answered() -> None:
+        nonlocal waiting
+        if waiting is not None:
+            _wait_end(waiting)
+            waiting = None
+
     global _active_chats
-    with _lifecycle_lock:
+    with _chat_count_lock:
         _active_chats += 1
-    first_event = threading.Event()
-    request_started = time.monotonic()
-    _chat_status(progress, f"Sending request for {name}; waiting for Ollama to respond.")
-    if progress is not None:
-        def report_wait() -> None:
-            while not first_event.wait(15):
-                try:
-                    if should_stop is not None and should_stop():
-                        return
-                except Exception:
-                    return
-                elapsed = int(time.monotonic() - request_started)
-                _chat_status(progress, f"Still waiting for an Ollama response ({elapsed}s); model loading or prompt processing may be underway.")
-        threading.Thread(target=report_wait, daemon=True).start()
     try:
         token_ban = bool(ban_scripts)
         if token_ban and (base_url() != BASE_URL or not mobile_runtime.subprocesses_available()):
             token_ban = False
             _chat_status(progress, "Block other scripts is not applied: the token ban needs Ollama on this device.")
         chat_url = f"{base_url()}/api/chat"
+        # The model is in memory before anything is sent to it: one request loads it, the others wait for that.
         if token_ban:
             chat_url, payload = _token_ban_request(name, messages, payload, tuple(ban_scripts), allow_kaomoji,
-                                                   progress, should_stop, ban_exempt_chars)
+                                                   progress, stop_before_send, ban_exempt_chars)
         else:
             _stop_ban_server()  # its GPU memory is Ollama's again
-        response = requests.post(chat_url, json=payload, stream=stream, timeout=(5, 600))
-        finished = _watch_stop(response, should_stop)
+            _load_model(name, payload["options"], progress, stop_before_send)
+        _check_stop(stop_before_send)
+        waiting, first = _wait_begin(
+            ("response", name),
+            lambda seconds, count: (f"Still waiting for an Ollama response ({seconds}s"
+                                    + (f", {count} requests" if count > 1 else "")
+                                    + "); model loading or prompt processing may be underway."),
+            progress, should_stop)
+        if first:  # the requests of a batch that join it wait for the same thing: said once
+            _chat_status(progress, f"Sending request for {name}; waiting for Ollama to respond.")
+        reload_deadline = time.monotonic() + _LLAMA_START_SECONDS
+        while True:
+            response = _post(chat_url, json=payload, should_stop=should_stop)
+            if response.ok:
+                break
+            error = _http_error(response, "chat")
+            # llama-server answers 503 "Loading model" while its model is not in memory: the request was not
+            # refused, it came too early, and goes out again once /health says the model is there.
+            if not (token_ban and getattr(response, "status_code", None) == 503
+                    and "loading model" in str(error).lower() and time.monotonic() < reload_deadline):
+                raise error
+            response.close()
+            response = None
+            _ban_server_loading(chat_url, progress, stop_before_send)
         if on_response_open:
             on_response_open(response)
-        if not response.ok:
-            raise _http_error(response, "chat")
         chunks: list[str] = []
         final: dict[str, Any] = {}
         if stream:
@@ -1279,7 +1631,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                 content = message.get("content") if isinstance(message, dict) else None
                 thinking = message.get("thinking") if isinstance(message, dict) else None
                 if thinking or content or item.get("done"):
-                    first_event.set()
+                    answered()
                 if thinking:
                     if not saw_thinking:
                         saw_thinking = True
@@ -1318,7 +1670,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                 raise OllamaPullError("Ollama chat stream ended without a completion event.")
         else:
             final = response.json()
-            first_event.set()
+            answered()
             if not isinstance(final, dict):
                 raise OllamaPullError("Unexpected Ollama chat response.")
             if token_ban:
@@ -1345,9 +1697,7 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
         _check_stop(should_stop)
         raise OllamaPullError(f"Ollama chat failed: {exc}") from exc
     finally:
-        first_event.set()
-        if finished is not None:
-            finished.set()
+        answered()
         try:
             if response is not None:
                 try:
@@ -1356,5 +1706,5 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
                 finally:
                     response.close()
         finally:
-            with _lifecycle_lock:
+            with _chat_count_lock:
                 _active_chats -= 1
