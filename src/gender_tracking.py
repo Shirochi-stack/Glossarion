@@ -24,7 +24,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 BINARY_GENDERS = ("male", "female")
-UNKNOWN_GENDERS = {"", "unknown", "n/a", "na", "none", "-"}
+# "empty": what a model writes when it is told to leave the gender empty
+UNKNOWN_GENDERS = {"", "unknown", "n/a", "na", "none", "-", "empty"}
 VALID_DECISIONS = {"auto", *BINARY_GENDERS}
 
 

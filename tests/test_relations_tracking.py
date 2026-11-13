@@ -1572,6 +1572,21 @@ def test_gender_only_names_appear_without_lines():
     assert "소희" not in {n["id"] for n in rt.known_names(tracker, None, gender)}
 
 
+def test_the_word_empty_is_not_a_gender():
+    """A real book's gender tracker held "empty" (the model's wording for no gender) for 24 things such as
+    "Magic Stone"; each was drawn as a name known for its gender."""
+    gender = _gender_tracker()
+    gender["entries"]["마석"] = {"raw_name": "마석", "translated_name": "Magic Stone", "decision": "auto", "occurrences": [
+        {"gender": "empty", "chapter_index": 4, "chapter_num": 5, "chapter_file": "ch005.xhtml"}]}
+    gender["entries"]["서윤"]["occurrences"].append(
+        {"gender": "Empty", "chapter_index": 29, "chapter_num": 30, "chapter_file": "ch030.xhtml"})
+    graph = rt.build_graph(_story_tracker(), None, None, gender_tracker=gender, include_gender_only=True)
+    assert [n["id"] for n in graph["nodes"] if n.get("gender_only")] == ["소희"]
+    assert rt.gender_history(gender, "마석")["current"] == ""
+    assert rt.gender_at(gender, "서윤") == "female"  # the last real gender stays
+    assert rt.gender_at(gender, "x", None, "empty") == ""
+
+
 def test_set_gender_writes_the_gender_tracker_and_can_be_undone(tmp_path):
     glossary = str(tmp_path / "Book_glossary.csv")
     path = rt.gender_tracker_path_for_glossary(glossary)
