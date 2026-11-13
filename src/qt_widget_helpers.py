@@ -11,6 +11,8 @@
   the QA scanner's glossary name check).
 * ``HalgakosLoadingWidget`` - the spinning Halgakos over one line of text (the EPUB Library's
   loading screen as a widget; the Relations Diagram shows it while its data is read).
+* ``flash_saved`` - the Multi API Key Manager's saved confirmation for any Save button: green,
+  "💾 Saved!", the Windows notification sound (the Placeholder Text editor, Manage Models).
 """
 
 import os
@@ -350,3 +352,65 @@ class HalgakosLoadingWidget(QWidget):
     def hideEvent(self, event):
         self._timer.stop()
         super().hideEvent(event)
+
+
+SAVED_FLASH_COLOR = "#2e7d32"  # the Multi API Key Manager's "Saved!" green
+
+
+def saved_beep():
+    """The Windows notification sound of a save (nothing elsewhere)."""
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
+    except Exception:
+        pass
+
+
+def flash_saved(button, text="💾 Saved!", ms=1500, then=None, beep=True):
+    """The saved confirmation of a Save button: it turns green and reads ``text`` for ``ms`` milliseconds,
+    with the Windows notification sound, then gets its own text and style back and ``then()`` runs (e.g.
+    closing the dialog). A second call while it shows restarts the wait. The timer belongs to the button, so
+    nothing runs after the button is gone."""
+    original = getattr(button, "_saved_flash_original", None)
+    if original is None:
+        original = (button.text(), button.styleSheet())
+        button._saved_flash_original = original
+    style = original[1]
+    if "{" in style:  # a sheet with selectors: a later rule wins
+        style += (f" QPushButton, QPushButton:hover {{ background-color: {SAVED_FLASH_COLOR}; "
+                  f"border-color: {SAVED_FLASH_COLOR}; color: white; }}")
+    else:  # bare declarations (or none)
+        style = f"{style.rstrip().rstrip(';')}; background-color: {SAVED_FLASH_COLOR}; color: white;".lstrip("; ")
+    button.setText(text)
+    button.setStyleSheet(style)
+    if beep:
+        saved_beep()
+    timer = getattr(button, "_saved_flash_timer", None)
+    if timer is None:
+        timer = QTimer(button)
+        timer.setSingleShot(True)
+        button._saved_flash_timer = timer
+    else:
+        timer.stop()
+        try:
+            timer.timeout.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+
+    def restore():
+        try:
+            button.setText(original[0])
+            button.setStyleSheet(original[1])
+            button._saved_flash_original = None
+        except RuntimeError:  # the button was deleted
+            return
+        if then is not None:
+            then()
+
+    timer.timeout.connect(restore)
+    timer.start(int(ms))
+
+
+def saved_flash_active(button) -> bool:
+    """True while ``flash_saved`` shows on ``button``."""
+    return getattr(button, "_saved_flash_original", None) is not None

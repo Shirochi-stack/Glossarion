@@ -579,7 +579,11 @@ def test_dialog_lists_exactly_the_editable_placeholders(gui, eg):
     assert dialog.placeholder_note.text()
 
 
-def test_save_and_reset_write_config_and_env(gui, eg):
+def test_save_and_reset_write_config_and_env(gui, eg, monkeypatch):
+    import qt_widget_helpers
+
+    beeps = []
+    monkeypatch.setattr(qt_widget_helpers, "saved_beep", lambda: beeps.append(1))
     dialog = gui._open_placeholder_text_dialog()
     combo, editor = dialog.placeholder_combo, dialog.placeholder_editor
     buttons = dialog.placeholder_buttons
@@ -595,6 +599,9 @@ def test_save_and_reset_write_config_and_env(gui, eg):
     assert json.loads(os.environ[ENV]) == {"relations_instruction": "Relations in {language}."}
     assert gui.saves == saves + 1
     assert dialog.placeholder_status.text() == "Edited"
+    # the Multi API Key Manager's saved confirmation: green "Saved!" and the Windows sound
+    assert buttons["save"].text() == "💾 Saved!" and beeps == [1]
+    assert qt_widget_helpers.SAVED_FLASH_COLOR in buttons["save"].styleSheet()
     assert eg.placeholder_text("relations_instruction", "x") == "Relations in {language}."
 
     # empty text is stored (the placeholder expands to nothing)

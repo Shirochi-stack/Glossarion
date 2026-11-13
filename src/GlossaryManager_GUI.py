@@ -877,6 +877,8 @@ class GlossaryManagerMixin:
             self._store_placeholder_texts(texts)
             state['drafts'].pop(name, None)
             refresh_status()
+            from qt_widget_helpers import flash_saved
+            flash_saved(buttons['save'])  # green "Saved!" and the Windows sound, like the Multi API Key Manager
 
         def reset():
             name = state['name']
