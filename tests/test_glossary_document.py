@@ -623,14 +623,16 @@ REWIRE_SPANS = (
     # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
     (735, 735, 4),
     # Placeholder Text editor (right-click an "Available placeholders" line); the profile combo style is shared
-    (758, 757, 266), (782, 794, 1),
+    (758, 757, 296), (782, 794, 1),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1799, 379),  # Relations Tracker
     (1800, 1810, 3),
     # U9 gap closures: Entry Type Configuration / Custom Fields call the glossary_document rules
-    (1934, 1933, 1),  # Relations Tracker
+    (1934, 1933, 2),  # Relations Tracker + Minimal Include Relations Column
     (1941, 1940, 6),  # Relations Tracker
+    (2454, 2453, 1),  # Minimal Include Relations Column
     (2461, 2460, 1),  # Relations Tracker
+    (2524, 2523, 3),  # Minimal Include Relations Column
     (2538, 2537, 3),  # Relations Tracker
     (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3093, 3093, 6),
     (3106, 3106, 0),  # the stray second "Additional fields to extract" label (it floated over the box) is gone
@@ -650,6 +652,7 @@ REWIRE_SPANS = (
     (3770, 3770, 1),  # Relations Tracker
     (3979, 3992, 7), (3998, 3998, 1), (4000, 4008, 2),
     (4144, 4149, 2), (4151, 4156, 2),
+    (4598, 4598, 25),  # Minimal Include Relations Column
     (5113, 5113, 1),  # Relations Tracker
     (5117, 5116, 1),  # Placeholder Text editor
     (5171, 5170, 1),  # Relations Tracker

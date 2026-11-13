@@ -27282,6 +27282,7 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_SKIP_GENDER_TRACKING',
                         'GLOSSARY_GENDER_NOISE_THRESHOLD', 'GLOSSARY_GENDER_TRACKING_BIAS',
                         'GLOSSARY_ENABLE_RELATIONS_TRACKER', 'GLOSSARY_RELATIONS_HISTORY_MODE', 'GLOSSARY_RELATIONS_FIELD', 'GLOSSARY_PLACEHOLDER_TEXTS',
+                        'GLOSSARY_MINIMAL_INCLUDE_RELATIONS',
                         'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', 'GLOSSARY_ALIAS_AWARE_NAME_MATCHING',
                         'GLOSSARY_ALIAS_AWARE_GENDER_ONLY',
                         # Match GUI batching settings

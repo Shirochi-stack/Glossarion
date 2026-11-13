@@ -145,6 +145,7 @@ ANTI_DUPLICATE_OFF = "Enable Anti-Duplicate Parameters first"
 #: enables them with their toggle (GlossaryManager_GUI ``_relations_option_widgets``).
 TOGGLE_DEPENDENCIES = {
     "glossary_relations_history_mode": ("glossary_enable_relations_tracker", "Turn on Enable Relations Tracker first"),
+    "glossary_minimal_include_relations": ("glossary_enable_relations_tracker", "Turn on Enable Relations Tracker first"),
 }
 
 #: UI_SPEC §4.15 curated sections (U9): ``(id, title, home group, ((sub-heading, keys), ...))``.

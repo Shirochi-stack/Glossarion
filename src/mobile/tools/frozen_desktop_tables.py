@@ -325,6 +325,7 @@ class FrozenDesktopTables:
             ('include_gender_context', ['include_gender_context_checkbox', 'include_gender_context_var'], False, bool),
             ('enable_gender_nuance', ['enable_gender_nuance_checkbox', 'enable_gender_nuance_var'], True, bool),
             ('include_description', ['include_description_checkbox', 'include_description_var'], False, bool),
+            ('glossary_minimal_include_relations', ['minimal_include_relations_checkbox', 'glossary_minimal_include_relations_var'], False, bool),
             ('glossary_use_smart_filter', ['glossary_use_smart_filter_var'], True, bool),
             ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
             ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),

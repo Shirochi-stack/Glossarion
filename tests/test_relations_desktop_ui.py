@@ -34,7 +34,7 @@ def isolated(tmp_path, monkeypatch):
         path = tmp_path / sub
         path.mkdir()
         monkeypatch.setenv(key, str(path))
-    for key in (rt.ENV_ENABLE, rt.ENV_HISTORY_MODE, rt.ENV_FIELD):
+    for key in (rt.ENV_ENABLE, rt.ENV_HISTORY_MODE, rt.ENV_FIELD, rt.ENV_MINIMAL):
         monkeypatch.delenv(key, raising=False)
     import review_dialog
     calls = []
@@ -274,13 +274,48 @@ def test_on_device_profile_is_not_offered_a_reset(qapp, isolated):
         glossary_prompt_profiles={"balanced_full": {}, "minimal": {}},
         active_glossary_prompt_profiles={"balanced_full": "On-device", "minimal": "On-device"},
         manual_glossary_prompt3=on_device["balanced_full"],
-        unified_auto_glosary_prompt3=on_device["minimal"]))
+        unified_auto_glosary_prompt3=on_device["minimal"],
+        glossary_minimal_include_relations=True))
     try:
         window.enable_relations_tracker_checkbox.setChecked(True)
         assert calls == []
         assert not window.relations_warning_widget.isHidden()
         assert "Balanced/Full and Minimal" in window.relations_warning_label.text()
         assert window.relations_warning_label.text().endswith("Add this line to them:")
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_minimal_include_relations_checkbox(qapp, isolated):
+    """Minimal tab: "Include Relations Column" right under "Include Description Column", off by default;
+    it writes config + env at once and, turned on with the tracker on, checks the Minimal prompt."""
+    calls, answer = isolated
+    answer["value"] = False
+    window = _make_gui(_old_prompt_config())
+    try:
+        box = window.minimal_include_relations_checkbox
+        assert box.text() == "Include Relations Column" and not box.isChecked()
+        assert "Enable Relations Tracker" in box.toolTip()
+        description_row = window.include_description_checkbox.parentWidget()
+        relations_row = box.parentWidget()
+        layout = description_row.parentWidget().layout()
+        assert relations_row.parentWidget() is description_row.parentWidget()
+        assert layout.indexOf(relations_row) == layout.indexOf(description_row) + 1
+
+        window.auto_prompt_text.setPlainText("Minimal prompt without the relations line")
+        saves = window.saves
+        box.setChecked(True)  # tracker off: stored, no prompt question
+        assert window.config[rt.CONFIG_MINIMAL] is True and os.environ[rt.ENV_MINIMAL] == "1"
+        assert window.saves == saves + 1 and calls == []
+        box.setChecked(False)
+        assert window.config[rt.CONFIG_MINIMAL] is False and os.environ[rt.ENV_MINIMAL] == "0"
+
+        window.enable_relations_tracker_checkbox.setChecked(True)  # Minimal off: only Balanced/Full is asked about
+        assert len(calls) == 1 and "Balanced/Full prompt" in calls[0] and "Minimal" not in calls[0]
+        box.setChecked(True)  # on with the tracker on: the Minimal prompt is checked too
+        assert len(calls) == 2 and "Minimal" in calls[1]
+        assert "Minimal" in window.relations_warning_label.text()
     finally:
         window.close()
         window.deleteLater()

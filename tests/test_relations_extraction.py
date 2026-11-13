@@ -29,7 +29,7 @@ if str(SRC) not in sys.path:
 import relations_tracking as rt  # noqa: E402
 
 _ENV_KEYS = (
-    rt.ENV_ENABLE, rt.ENV_FIELD, rt.ENV_HISTORY_MODE,
+    rt.ENV_ENABLE, rt.ENV_FIELD, rt.ENV_HISTORY_MODE, rt.ENV_MINIMAL,
     "GLOSSARY_SYSTEM_PROMPT", "GLOSSARY_CUSTOM_FIELDS", "GLOSSARY_CUSTOM_ENTRY_TYPES",
     "GLOSSARY_TARGET_LANGUAGE", "GLOSSARY_INCLUDE_GENDER_CONTEXT", "GLOSSARY_INCLUDE_DESCRIPTION",
     "GLOSSARY_USE_LEGACY_CSV", "GLOSSARY_OUTPUT_LEGACY_JSON", "GLOSSARY_INCLUDE_BOOK_TITLE",
@@ -561,6 +561,7 @@ def test_minimal_detach_by_returned_header(gm, _env):
 
 def test_minimal_response_path_and_recording(gm, _env, tmp_path):
     _on(_env)
+    _env.setenv(rt.ENV_MINIMAL, "1")  # Minimal records relations only with its own toggle on too
     _env.setenv("GLOSSARY_INCLUDE_DESCRIPTION", "1")
     sink = _sink(gm)
     response = (

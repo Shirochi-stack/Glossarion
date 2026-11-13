@@ -4366,6 +4366,40 @@ def _placeholder_texts_rows():
 _PLACEHOLDER_TEXTS_ROWS = _placeholder_texts_rows()
 
 
+# 2026-11-13 Minimal "Include Relations Column" (glossary_minimal_include_relations /
+# GLOSSARY_MINIMAL_INCLUDE_RELATIONS): same (row before + row after) -> (before + new row + after) pairs.
+def _minimal_relations_rows():
+    placeholder_value = "json.dumps(self.config.get('glossary_placeholder_texts') or {}, ensure_ascii=False)"
+    dict_before = f"'GLOSSARY_PLACEHOLDER_TEXTS': {placeholder_value},\n"
+    dict_new = ("'GLOSSARY_MINIMAL_INCLUDE_RELATIONS': '1' if getattr(self, "
+                "'glossary_minimal_include_relations_var', False) else '0',\n")
+    dict_next = "'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, 'glossary_partial_ratio_gender_only_var', False) else '0',\n"
+    tuple_before = f"('GLOSSARY_PLACEHOLDER_TEXTS', {placeholder_value}),\n"
+    tuple_new = ("('GLOSSARY_MINIMAL_INCLUDE_RELATIONS', '1' if "
+                 "self.config.get('glossary_minimal_include_relations', False) else '0'),\n")
+    tuple_next = "('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),\n"
+    var_before = "self.glossary_relations_history_mode_var = self.config.get('glossary_relations_history_mode', 'previous')\n"
+    var_new = "self.glossary_minimal_include_relations_var = self.config.get('glossary_minimal_include_relations', False)\n"
+    var_next = "self.glossary_partial_ratio_gender_only_var = self.config.get('glossary_partial_ratio_gender_only', False)\n"
+    map_before = "('include_description', ['include_description_checkbox', 'include_description_var'], False, bool),\n"
+    map_new = ("('glossary_minimal_include_relations', ['minimal_include_relations_checkbox', "
+               "'glossary_minimal_include_relations_var'], False, bool),\n")
+    map_next = "('glossary_use_smart_filter', ['glossary_use_smart_filter_var'], True, bool),\n"
+
+    def pair(indent, before, new, after):
+        return (indent + before + indent + after, indent + before + indent + new + indent + after)
+
+    env_rows = [pair(" " * 12, dict_before, dict_new, dict_next), pair(" " * 20, dict_before, dict_new, dict_next),
+                pair(" " * 12, tuple_before, tuple_new, tuple_next)]
+    var_rows = [pair(" " * 8, var_before, var_new, var_next)]
+    map_rows = [pair(" " * 12, map_before, map_new, map_next), pair(" " * 16, map_before, map_new, map_next)]
+    return {'src/run_env.py': env_rows, 'src/owner_state.py': var_rows, 'src/settings_persistence.py': map_rows,
+            'src/translator_gui.py': env_rows + var_rows + map_rows}
+
+
+_MINIMAL_RELATIONS_ROWS = _minimal_relations_rows()
+
+
 # 2026-11-13 search/gemini overhaul (google.com AI Mode with attachments): the "Gemini Free Browser
 # Chunking" settings and their env vars are removed. Each row is deleted where a pinned source has it
 # (whole lines: the leading newline keeps a 12-space row from matching inside a 16-space one).
@@ -6085,6 +6119,14 @@ APPROVED = (
                 "Manager > right-click 'Available placeholders' > 'Edit placeholder text…'. With nothing stored "
                 "every prompt is unchanged",
         "source": _PLACEHOLDER_TEXTS_ROWS,
+        "values": {},
+    },
+    {
+        "date": "2026-11-13",
+        "what": "New Minimal glossary setting 'Include Relations Column' (glossary_minimal_include_relations, off), "
+                "sent as GLOSSARY_MINIMAL_INCLUDE_RELATIONS: Minimal Glossary Generation asks for and records "
+                "relations only with it and Enable Relations Tracker on (it used to follow the tracker alone)",
+        "source": _MINIMAL_RELATIONS_ROWS,
         "values": {},
     },
 )

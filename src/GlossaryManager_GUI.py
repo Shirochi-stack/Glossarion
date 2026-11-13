@@ -932,6 +932,36 @@ class GlossaryManagerMixin:
         dialog.show()
         return dialog
 
+    # ── Minimal "Include Relations Column" (Minimal asks for relations only with it and the tracker on) ──
+    def _minimal_relations_enabled(self):
+        checkbox = getattr(self, 'minimal_include_relations_checkbox', None)
+        if checkbox is not None:
+            try:
+                return bool(checkbox.isChecked())
+            except RuntimeError:
+                pass
+        return bool(self.config.get(relations_tracking.CONFIG_MINIMAL, False))
+
+    def _on_glossary_manager_minimal_relations_toggle(self, state=None):
+        """Sync at once (config, owner var, env, save); turned on with the tracker on: check the Minimal prompt."""
+        enabled = self._minimal_relations_enabled()
+        self.config[relations_tracking.CONFIG_MINIMAL] = enabled
+        self.glossary_minimal_include_relations_var = enabled
+        os.environ[relations_tracking.ENV_MINIMAL] = '1' if enabled else '0'
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        if enabled and self._relations_tracker_enabled():
+            parent = None
+            try:
+                parent = self.minimal_include_relations_checkbox.window()
+            except Exception:
+                pass
+            self._check_relations_prompts(parent)
+        else:
+            self._refresh_relations_warning_row()
+
     def _create_glossary_prompt_profile_controls(self, profile_key, editor):
         """Create New/Save/Delete controls for one glossary prompt editor."""
         self._ensure_glossary_prompt_profiles()
@@ -1718,7 +1748,7 @@ class GlossaryManagerMixin:
             if text is None:
                 text = self._saved_glossary_prompt_text(key)
             texts[key] = text
-        return texts
+        return relations_tracking.prompts_to_check(texts, {relations_tracking.CONFIG_MINIMAL: self._minimal_relations_enabled()})
 
     def _relations_prompt_uses_on_device_profile(self, profile_key):
         return glossary_document.is_builtin_glossary_prompt_profile(
@@ -2007,6 +2037,7 @@ class GlossaryManagerMixin:
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                     ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
                     ('enable_relations_tracker_checkbox', 'glossary_enable_relations_tracker', False),
+                    ('minimal_include_relations_checkbox', 'glossary_minimal_include_relations', False),
                 ]
                 for attr, cfg_key, default in _sync_pairs:
                     if hasattr(self, attr):
@@ -2533,6 +2564,7 @@ class GlossaryManagerMixin:
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
+                    ('minimal_include_relations_checkbox', 'glossary_minimal_include_relations_var'),
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
                     ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
@@ -2604,6 +2636,9 @@ class GlossaryManagerMixin:
                             self.config['include_gender_context'] = bool(checked)
                         elif checkbox_name == 'include_description_checkbox':
                             self.config['include_description'] = bool(checked)
+                        elif checkbox_name == 'minimal_include_relations_checkbox':
+                            self.config['glossary_minimal_include_relations'] = bool(checked)
+                            os.environ['GLOSSARY_MINIMAL_INCLUDE_RELATIONS'] = '1' if checked else '0'
                         elif checkbox_name == 'strip_honorifics_checkbox':
                             self.config['strip_honorifics'] = bool(checked)
                         elif checkbox_name == 'disable_honorifics_checkbox':
@@ -4676,7 +4711,31 @@ Do not stop after the glossary."""
         label5 = QLabel("(Adds a description/context field for each glossary entry)")
         description_layout.addWidget(label5)
         description_layout.addStretch()
-        
+
+        # Include relations column toggle (below description): Minimal's own relations switch
+        self.minimal_relations_widget = QWidget()
+        minimal_relations_layout = QHBoxLayout(self.minimal_relations_widget)
+        minimal_relations_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(self.minimal_relations_widget)
+        if not hasattr(self, 'minimal_include_relations_checkbox'):
+            self.minimal_include_relations_checkbox = self._create_styled_checkbox("Include Relations Column")
+            self.minimal_include_relations_checkbox.setChecked(
+                bool(self.config.get('glossary_minimal_include_relations', False)))
+        if not getattr(self.minimal_include_relations_checkbox, '_glossary_manager_sync_connected', False):
+            self.minimal_include_relations_checkbox.stateChanged.connect(
+                self._on_glossary_manager_minimal_relations_toggle)
+            self.minimal_include_relations_checkbox._glossary_manager_sync_connected = True
+        self.minimal_include_relations_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Minimal asks for the relations column only with this on and Enable Relations Tracker "
+            "(General Settings) on.\n"
+            "Relations from Minimal are dated by the first chapter that contains both names.\n"
+            "Default OFF."
+        ))
+        minimal_relations_layout.addWidget(self.minimal_include_relations_checkbox)
+        minimal_relations_hint = QLabel("(Asks for each character's relationships; needs Enable Relations Tracker)")
+        minimal_relations_layout.addWidget(minimal_relations_hint)
+        minimal_relations_layout.addStretch()
+
         # Function to update description checkbox state based on gender context
         def update_description_state():
             gender_enabled = self.include_gender_context_checkbox.isChecked()
