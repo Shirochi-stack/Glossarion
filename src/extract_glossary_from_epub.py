@@ -2679,6 +2679,17 @@ def _prompt_env(name, default=''):
     return os.getenv(name, default)
 
 
+#: The entry types a run uses when none are configured (get_custom_entry_types' default).
+DEFAULT_CUSTOM_ENTRY_TYPES = {
+    'character': {'enabled': True, 'has_gender': True},
+    'term': {'enabled': True, 'has_gender': False},
+    'surnames': {'enabled': True, 'has_gender': False},
+    'titles': {'enabled': True, 'has_gender': True},
+    'locations': {'enabled': True, 'has_gender': False},
+    'nicknames': {'enabled': True, 'has_gender': True}
+}
+
+
 def get_custom_entry_types():
     """Get custom entry types configuration from environment"""
     try:
@@ -2686,25 +2697,11 @@ def get_custom_entry_types():
         result = json.loads(types_json)
         # If empty, return defaults
         if not result:
-            return {
-                'character': {'enabled': True, 'has_gender': True},
-                'term': {'enabled': True, 'has_gender': False},
-                'surnames': {'enabled': True, 'has_gender': False},
-                'titles': {'enabled': True, 'has_gender': True},
-                'locations': {'enabled': True, 'has_gender': False},
-                'nicknames': {'enabled': True, 'has_gender': True}
-            }
+            return {name: dict(cfg) for name, cfg in DEFAULT_CUSTOM_ENTRY_TYPES.items()}
         return result
     except:
         # Default configuration
-        return {
-            'character': {'enabled': True, 'has_gender': True},
-            'term': {'enabled': True, 'has_gender': False},
-            'surnames': {'enabled': True, 'has_gender': False},
-            'titles': {'enabled': True, 'has_gender': True},
-            'locations': {'enabled': True, 'has_gender': False},
-            'nicknames': {'enabled': True, 'has_gender': True}
-        }
+        return {name: dict(cfg) for name, cfg in DEFAULT_CUSTOM_ENTRY_TYPES.items()}
 
 def _normalize_gender_value(value) -> str:
     return _shared_normalize_gender(value)
@@ -5548,6 +5545,46 @@ def placeholder_is_active(name, *, mode='balanced', prompt=None, settings=None, 
     """False when the prompt builder removes ``{name}`` now (see placeholder_preview)."""
     return placeholder_preview(name, mode=mode, prompt=prompt, settings=settings, custom_types=custom_types,
                                language=language, fields=fields)['active']
+
+
+#: Placeholders an inactive prompt build replaces with nothing (the others lose their whole line).
+PLACEHOLDERS_EMPTIED_WHEN_INACTIVE = ('description_in_language', 'description_excluded_note', 'gender_instruction')
+
+
+def placeholder_value(name, *, mode='balanced', prompt=None, settings=None):
+    """placeholder_preview of ``{name}`` with an ``inactive`` text that says what inactive means for it (its
+    line removed, replaced with nothing, or the placeholder text holding a token not in the prompt): the
+    value the desktop hover tooltip and the mobile value sheet show."""
+    value = dict(placeholder_preview(name, mode=mode, prompt=prompt, settings=settings))
+    if not value['active'] and not value.get('inactive'):
+        if value['name'] in PLACEHOLDERS_EMPTIED_WHEN_INACTIVE:
+            value['inactive'] = "Inactive right now: replaced with nothing."
+        elif value['name'] in PREVIEW_TOKEN_NAMES + ('language',):
+            value['inactive'] = "Inactive right now: the placeholder text that holds it is not in the prompt."
+        else:
+            value['inactive'] = "Inactive right now: its line is removed from the prompt."
+    return value
+
+
+#: Single Pass Header Prompt placeholders (build_single_pass_prompt) and what they are.
+SINGLE_PASS_HEADER_PLACEHOLDERS = {
+    'glossary_prompt': "the Balanced/Full glossary extraction prompt with its placeholders filled in.",
+    'translation_prompt': "the translation system prompt of the request.",
+}
+
+
+def single_pass_header_placeholder_value(name, *, glossary_prompt=None, settings=None, translation_prompt='',
+                                         target_lang=''):
+    """What a Single Pass Header placeholder says now: ``{glossary_prompt}`` is the Balanced/Full system prompt
+    build_prompt makes from ``glossary_prompt`` with ``settings``; ``{translation_prompt}`` the translation system
+    prompt with ``{target_lang}`` filled in."""
+    if name == 'glossary_prompt':
+        return balanced_system_prompt_preview(glossary_prompt, settings)
+    text = str(translation_prompt or '')
+    if target_lang:
+        text = text.replace('{target_lang}', target_lang)
+    return {'text': text, 'extra': "As the request sends it: anything the request adds to the system prompt "
+                                   "(such as the appended glossary) is included."}
 
 
 def _strip_placeholder_line(prompt_text, placeholder):

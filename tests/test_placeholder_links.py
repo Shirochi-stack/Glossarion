@@ -446,3 +446,35 @@ def test_the_other_prompt_editors_are_wired():
     assert "self._link_wrapper_placeholders(wrapper_help)" in parallel
     assert 'link_glossary(self.system_prompt_edit, "balanced", prompt=self.system_prompt_edit.toPlainText)' in parallel
     assert "self._assistant_prompt_placeholder_value)" in source("translator_gui.py")
+
+
+def test_translation_placeholder_sets_match_the_shared_core():
+    """translator_gui keeps its sets literal (other tests evaluate them from its source); the mobile app marks
+    the prompt_defaults ones: they must stay the same."""
+    import ast
+    import prompt_defaults
+    tree = ast.parse((SRC / "translator_gui.py").read_text(encoding="utf-8-sig"))
+    tg = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TranslatorGUI")
+    namespace = {}
+    for node in tg.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in (
+                "_SYSTEM_PROMPT_PLACEHOLDERS", "_REFINEMENT_SYSTEM_PLACEHOLDERS", "_REFINEMENT_USER_PLACEHOLDERS"):
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "translator_gui.py", "exec"), namespace)
+    assert namespace["_SYSTEM_PROMPT_PLACEHOLDERS"] == prompt_defaults.SYSTEM_PROMPT_PLACEHOLDERS
+    assert namespace["_REFINEMENT_SYSTEM_PLACEHOLDERS"] == prompt_defaults.REFINEMENT_SYSTEM_PLACEHOLDERS
+    assert namespace["_REFINEMENT_USER_PLACEHOLDERS"] == prompt_defaults.REFINEMENT_USER_PLACEHOLDERS
+
+
+def test_shared_value_rules():
+    """The GUI-free rules both the desktop tooltip and the mobile value sheet show."""
+    from prompt_defaults import placeholder_value_parts, translation_placeholder_value
+    assert placeholder_value_parts("German") == ("German", [])
+    assert placeholder_value_parts("") == ("", ["(empty)"])
+    assert placeholder_value_parts({"per_request": True, "text": "x"}) == ("", ["Filled in for each request: x"])
+    assert placeholder_value_parts({"active": False}) == ("", ["Inactive right now: removed from the prompt."])
+    assert placeholder_value_parts({"text": "t", "extra": "e"}) == ("t", ["e"])
+    assert translation_placeholder_value("target_lang", target_lang="French") == "French"
+    off = translation_placeholder_value("split_marker_instruction", request_merging=False)
+    assert off["active"] is False and "Request Merging is off" in off["inactive"]
+    assert translation_placeholder_value("split_marker_instruction", request_merging=True)["text"].startswith(
+        "- CRITICAL Requirement")

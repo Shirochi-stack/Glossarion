@@ -1048,6 +1048,42 @@ def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type
     return rendered
 
 
+#: The refinement prompt placeholders (_render_prompt_placeholders) and what each is (display only: the
+#: desktop hover tooltips and the mobile value sheet).
+REFINEMENT_PROMPT_PLACEHOLDERS = {
+    'fields': "comma-separated glossary column schema, including active custom columns.",
+    'columns': "alias for {fields}.",
+    'fields1': "\\x1F-separated glossary column schema, only for prompts that explicitly want Unit Separator.",
+    'entries': "comma-separated active refinement entry types.",
+    'entry_type': "the entry type of the refinement chunk.",
+    'chunk_index': "current refinement chunk number.",
+    'total_chunks': "total chunks for this entry type.",
+}
+
+
+def refinement_placeholder_value(name, *, custom_fields=None, entry_types=None, chunking_mode=None,
+                                 type_mode=None, selected=None):
+    """What a refinement prompt placeholder says now (_render_prompt_placeholders with the live settings).
+
+    ``custom_fields``: the configured custom columns; ``entry_types``: {type: {'enabled': ...}};
+    ``chunking_mode``: the request mode ('all' sends every entry type in one request); ``type_mode`` /
+    ``selected``: "Selected Entry Types". Returns a str or a value dict (prompt_defaults.placeholder_value_parts).
+    """
+    if name in ('entry_type', 'chunk_index', 'total_chunks'):
+        return {'per_request': True, 'text': REFINEMENT_PROMPT_PLACEHOLDERS[name]}
+    if name in ('fields', 'columns', 'fields1'):
+        columns = _entry_columns([], custom_fields=list(custom_fields or []))
+        text = _render_prompt_placeholders('{' + name + '}', columns, '')
+        return {'text': text.replace('\x1f', '\\x1F'),
+                'extra': "Columns the glossary being refined has beyond these (such as gender) are added in "
+                         "their place."}
+    if _canonical_refinement_mode(chunking_mode) != 'all':
+        return {'per_request': True, 'text': "the entry type of the request (each entry type is sent in a "
+                                             "separate request)."}
+    active = [t for t, cfg in (entry_types or {}).items() if not isinstance(cfg, dict) or cfg.get('enabled', True)]
+    return ", ".join(selected_refinement_types(active, type_mode or 'all', list(selected or [])))
+
+
 def _build_messages(system_prompt: str, user_prompt: str, entry_type: str, chunk_text: str, columns: List[str], chunk_idx=None, total_chunks=None, active_entry_types: Optional[List[str]] = None) -> List[Dict]:
     messages = []
     system_prompt = _render_prompt_placeholders(system_prompt, columns, entry_type, chunk_idx, total_chunks, active_entry_types)

@@ -20779,42 +20779,32 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     #: AI prompt placeholders TransateKRtoEN replaces: in the system prompt (build_system_prompt, request
     #: merging) and in the refinement prompts (_format_refinement_prompt; {html}/{content} in user prompts).
+    #: Literal here (tests evaluate them from this source); tests/test_placeholder_links.py keeps them equal to
+    #: the prompt_defaults sets the mobile app marks.
     _SYSTEM_PROMPT_PLACEHOLDERS = frozenset({'target_lang', 'split_marker_instruction'})
     _REFINEMENT_SYSTEM_PLACEHOLDERS = frozenset({'target_lang', 'QA_Issues', 'QA_ISSUES', 'qa_issues'})
     _REFINEMENT_USER_PLACEHOLDERS = _REFINEMENT_SYSTEM_PLACEHOLDERS | {'html', 'content'}
 
     def _prompt_placeholder_value(self, name):
-        """What a translation / refinement prompt placeholder says now (live widgets), for its hover tooltip."""
+        """What a translation / refinement prompt placeholder says now (live widgets), for its hover tooltip
+        (prompt_defaults.translation_placeholder_value, shared with mobile)."""
+        from prompt_defaults import translation_placeholder_value
+        language = ''
         if name == 'target_lang':
             try:
                 language = self.target_lang_combo.currentText().strip()
             except (AttributeError, RuntimeError):
                 language = ''
-            return language or str(self.config.get('output_language') or 'English')
-        if name == 'split_marker_instruction':
-            from prompt_defaults import SPLIT_MARKER_INSTRUCTION
-            if not getattr(self, 'request_merging_enabled_var', False):
-                return {'active': False,
-                        'inactive': "Inactive right now: Request Merging is off, so its line is removed from the prompt."}
-            return {'text': SPLIT_MARKER_INSTRUCTION,
-                    'extra': "Sent in requests that merge more than one chapter; removed from the others."}
-        if name.lower() == 'qa_issues':
-            return {'per_request': True,
-                    'text': "\"QA issue(s) to address: \" followed by the chapter's current character-found QA "
-                            "issues; without QA issues its line is removed."}
-        if name in ('html', 'content'):
-            return {'per_request': True, 'text': "the translated HTML of the chapter being refined."}
-        return ''
+            language = language or str(self.config.get('output_language') or 'English')
+        return translation_placeholder_value(
+            name, target_lang=language, request_merging=bool(getattr(self, 'request_merging_enabled_var', False)))
 
     def _assistant_prompt_placeholder_value(self, name):
-        """The Assistant Prompt's placeholders: only refinement requests replace them (_format_refinement_prompt
-        without QA issues); translation requests send the prefill as written."""
-        if name == 'target_lang':
-            return {'text': self._prompt_placeholder_value('target_lang'),
-                    'extra': "Replaced in refinement requests only; translation requests send {target_lang} as written."}
-        return {'active': False,
-                'inactive': "Inactive in refinement requests (no QA issues are given to the assistant prompt): its "
-                            "line is removed. Translation requests send it as written."}
+        """The Assistant Prompt's placeholders (prompt_defaults.assistant_placeholder_value): only refinement
+        requests replace them; translation requests send the prefill as written."""
+        from prompt_defaults import assistant_placeholder_value
+        language = self._prompt_placeholder_value('target_lang') if name == 'target_lang' else ''
+        return assistant_placeholder_value(name, target_lang=language)
 
     def _create_log_section(self):
         """Create log text area"""

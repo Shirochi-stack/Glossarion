@@ -181,26 +181,47 @@ class FullScreenEditor:
 
 
 class PromptEditor(FullScreenEditor):
+    """Mono prompt text, char / token count, Reset to default. With ``links`` (a
+    ``services.prompt_placeholders.PlaceholderLinks``: the placeholders this prompt's request replaces) the
+    header has the marked-view toggle (``ui.components.placeholder_links``): the prompt read-only with those
+    placeholders blue and underlined, each opening what it says right now. Display only."""
+
     def __init__(self, ctx: Any, *, title: str, value: str, default: Optional[str] = None,
-                 on_save: Optional[SaveHandler] = None, subtitle: Optional[str] = None) -> None:
+                 on_save: Optional[SaveHandler] = None, subtitle: Optional[str] = None, links: Any = None) -> None:
         self.initial = "" if value is None else str(value)
         self.default = default
+        self.links = links
+        self.linker: Any = None
+        self.marked: Any = None
         super().__init__(ctx, title=title, subtitle=subtitle, on_save=on_save)
+        if self.marked is not None:  # in the header, before Save: the title gives way (the footer is full at 360 dp)
+            self.header.controls.insert(len(self.header.controls) - 1, self.marked.toggle)
 
     def build_body(self) -> ft.Control:
+        mono = mono_family(self.ctx.page)
         self.field = ft.TextField(
             color=ft.Colors.ON_SURFACE,
             value=self.initial,
             multiline=True,
             min_lines=12,
             expand=True,
-            text_style=ft.TextStyle(font_family=mono_family(self.ctx.page), size=13),
+            text_style=ft.TextStyle(font_family=mono, size=13),
             border_radius=tokens.RADII["field"],
             on_change=self._on_change,
         )
         self.counter = ft.Text(count_label(self.initial), theme_style=ft.TextThemeStyle.LABEL_SMALL,
                                color=ft.Colors.ON_SURFACE_VARIANT)
-        return ft.Container(content=self.field, expand=True)
+        holder = ft.Container(content=self.field, expand=True)
+        if self.links is None:
+            return holder
+        from glossarion_mobile.ui.components.placeholder_links import PlaceholderLinker
+
+        self.linker = PlaceholderLinker(
+            self.links, text=lambda: self.field.value or "", page=lambda: getattr(self.ctx, "page", None),
+            run_io=getattr(self.ctx, "run_io", None), copy=getattr(self.ctx, "copy_text", None), mono=mono,
+            dark=getattr(self.ctx, "dark", None), key="prompt-ph")
+        self.marked = self.linker.marked_view(self.field, holder, size=13, key="prompt-marked")
+        return self.marked.body
 
     def build_footer(self) -> Optional[ft.Control]:
         self.reset_button = ft.TextButton(
@@ -224,6 +245,9 @@ class PromptEditor(FullScreenEditor):
         self.field.value = str(self.default)
         self._on_change()
         self.ctx.push(self.field)
+        if self.marked is not None and self.marked.marked:  # the marked view shows the reset text too
+            self.marked.shown_text = self.field.value
+            self.marked.render_spans()
 
     def collect(self) -> Any:
         return self.field.value or ""

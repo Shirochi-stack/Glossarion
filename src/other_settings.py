@@ -1157,7 +1157,8 @@ def configure_rolling_summary_prompts(self):
     # {target_lang} in the system prompt, the summary request fills {translations})
     from qt_widget_helpers import link_placeholders, link_described_placeholders, link_described_placeholders_in_label
     link_placeholders(self.summary_system_text, {'target_lang'}, self._prompt_placeholder_value)
-    summary_inputs = {'translations': "the translated text of the chapters being summarized, joined by \"---\" lines."}
+    from prompt_defaults import PROMPT_INPUT_PLACEHOLDERS  # the shared descriptions (mobile shows them too)
+    summary_inputs = PROMPT_INPUT_PLACEHOLDERS['rolling_summary_user_prompt']
     link_described_placeholders(self.summary_user_text, summary_inputs)
     link_described_placeholders_in_label(user_help, summary_inputs)
 
@@ -6443,11 +6444,9 @@ def configure_translation_chunk_prompt(self):
     instructions_box = QGroupBox("Available Placeholders")
     instructions_v = QVBoxLayout(instructions_box)
     
-    placeholders = [
-        ("{chunk_idx}", "Current chunk number (1-based)"),
-        ("{total_chunks}", "Total number of chunks"),
-    ]
-    
+    from prompt_defaults import TRANSLATION_CHUNK_PLACEHOLDER_NOTES  # shared with mobile
+    placeholders = [("{" + name + "}", note) for name, note in TRANSLATION_CHUNK_PLACEHOLDER_NOTES.items()]
+
     from qt_widget_helpers import link_described_placeholders_in_label
     for placeholder, description in placeholders:
         placeholder_lbl = QLabel(f"• <b>{placeholder}:</b> {description}")
@@ -6755,15 +6754,9 @@ def configure_image_chunk_prompt(self):
     instructions_box = QGroupBox("Available Placeholders")
     instructions_v = QVBoxLayout(instructions_box)
     
-    placeholders = [
-        ("{chunk_idx}", "Current chunk number (1-based)"),
-        ("{total_chunks}", "Total number of chunks"),
-        ("{context}", "Additional context (e.g., chapter info)"),
-        ("{chunk_count}", "Number of OCR chunks with text"),
-        ("{ocr_overlap_instruction}", "Remove OCR-only duplicated text caused by the overlapping pixels between adjacent image chunks."),
-        ("{ocr_text}", "Combined OCR text (translation prompt only)")
-    ]
-    
+    from prompt_defaults import IMAGE_CHUNK_PLACEHOLDER_NOTES  # shared with mobile
+    placeholders = [("{" + name + "}", note) for name, note in IMAGE_CHUNK_PLACEHOLDER_NOTES.items()]
+
     from qt_widget_helpers import link_described_placeholders_in_label
     for placeholder, description in placeholders:
         placeholder_lbl = QLabel(f"• <b>{placeholder}:</b> {description}")
@@ -6809,13 +6802,12 @@ def configure_image_chunk_prompt(self):
     translation_v.addWidget(vision_ocr_translation_user_prompt_text)
     main_layout.addWidget(translation_box)
     # placeholders like links, described on hover (the ones image_translator replaces in each prompt)
+    from prompt_defaults import PROMPT_INPUT_PLACEHOLDERS  # the prompt -> placeholders table mobile uses too
     from qt_widget_helpers import link_described_placeholders
-    descriptions = dict(placeholders)
-    for editor, names in ((image_chunk_prompt_text, ("{chunk_idx}", "{total_chunks}", "{context}")),
-                          (vision_ocr_combined_context_prompt_text,
-                           ("{chunk_count}", "{total_chunks}", "{context}", "{ocr_overlap_instruction}")),
-                          (vision_ocr_translation_user_prompt_text, ("{context}", "{ocr_text}"))):
-        link_described_placeholders(editor, {name: descriptions[name] for name in names})
+    for editor, key in ((image_chunk_prompt_text, 'image_chunk_prompt'),
+                        (vision_ocr_combined_context_prompt_text, 'vision_ocr_combined_context_prompt'),
+                        (vision_ocr_translation_user_prompt_text, 'vision_ocr_translation_user_prompt')):
+        link_described_placeholders(editor, PROMPT_INPUT_PLACEHOLDERS[key])
     
     # Example
     example_box = QGroupBox("Example Output")
@@ -6971,7 +6963,8 @@ def configure_vision_ocr_prompt(self):
     main_layout.addWidget(user_box, 1)
     # {context} like a link, described on hover (image_translator fills it for each OCR request)
     from qt_widget_helpers import link_described_placeholders, link_described_placeholders_in_label
-    ocr_inputs = {'context': "the chapter/image context or alt text of the image being read (empty when none)."}
+    from prompt_defaults import PROMPT_INPUT_PLACEHOLDERS  # the shared descriptions (mobile shows them too)
+    ocr_inputs = PROMPT_INPUT_PLACEHOLDERS['vision_ocr_user_prompt']
     link_described_placeholders(user_text, ocr_inputs)
     link_described_placeholders_in_label(user_hint, ocr_inputs)
 

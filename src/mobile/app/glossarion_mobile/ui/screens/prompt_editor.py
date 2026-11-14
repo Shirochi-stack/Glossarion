@@ -15,6 +15,10 @@ writing a second editor:
   in place).
 
 ``insert_placeholder`` is the pure insertion rule (host-tested).
+
+Both take ``links`` (``services.prompt_placeholders``): the placeholders the prompt's request replaces. The
+chips are then link-styled (a long press shows what the placeholder says now) and the editor gets the marked
+view toggle (``ui.components.placeholder_links``). Display only.
 """
 
 from __future__ import annotations
@@ -191,7 +195,10 @@ class TokenCounter:
 
 
 class PromptEditorPane(ft.Column):
-    """In-page prompt editor: mono field + placeholder chips + token count."""
+    """In-page prompt editor: mono field + placeholder chips + token count.
+
+    ``links`` (``services.prompt_placeholders``): link-styled chips (tap inserts, hold shows what the
+    placeholder says now) and the marked-view toggle next to the count (``ui.components.placeholder_links``)."""
 
     def __init__(
         self,
@@ -207,6 +214,8 @@ class PromptEditorPane(ft.Column):
         min_lines: int = 14,
         key: Optional[str] = None,
         fill: bool = True,
+        links: Any = None,
+        copy: Optional[Callable[[str], Any]] = None,
     ) -> None:
         super().__init__(spacing=tokens.SPACING["sm"], expand=fill, key=key)
         self.initial = str(value or "")
@@ -227,17 +236,40 @@ class PromptEditorPane(ft.Column):
         self.counter_text = ft.Text(count_label(self.initial), theme_style=ft.TextThemeStyle.LABEL_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT)
         self.tokens = TokenCounter(run_io=run_io, model=model, on_count=self._on_count, counter=counter)
-        self.chips = [
-            ft.Chip(label=ft.Text(p, font_family=mono, size=12), on_click=lambda e, p=p: self.insert(p),
-                    key=f"placeholder-{p.strip('{}')}")
-            for p in placeholders
-        ]
+        holder = ft.Container(content=self.field, expand=fill)
         rows: list[ft.Control] = []
-        if self.chips:
-            rows.append(ft.Row(self.chips, wrap=True, spacing=6, run_spacing=4))
-        rows.append(ft.Container(content=self.field, expand=fill))
-        rows.append(self.counter_text)
+        self.linker: Any = None
+        self.marked: Any = None
+        if links is not None:
+            from glossarion_mobile.ui.components.placeholder_links import PlaceholderLinker
+
+            self.linker = PlaceholderLinker(links, text=lambda: self.field.value or "", page=self._page_or_none,
+                                            run_io=run_io, copy=copy, mono=mono, key=f"{key or 'pane'}-ph")
+            self.chips, chip_rows = self.linker.chips_row(placeholders, self.insert, font_family=mono,
+                                                          key_of=lambda p: f"placeholder-{p.strip('{}')}")
+            rows.extend(chip_rows)
+            self.marked = self.linker.marked_view(self.field, holder, size=13, key=f"{key or 'pane'}-marked",
+                                                  height=None if fill else min_lines * 18 + 24)
+            rows.append(self.marked.body)
+            rows.append(ft.Row([self.counter_text, ft.Container(expand=True), self.marked.toggle],
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER))
+        else:
+            self.chips = [
+                ft.Chip(label=ft.Text(p, font_family=mono, size=12), on_click=lambda e, p=p: self.insert(p),
+                        key=f"placeholder-{p.strip('{}')}")
+                for p in placeholders
+            ]
+            if self.chips:
+                rows.append(ft.Row(self.chips, wrap=True, spacing=6, run_spacing=4))
+            rows.append(holder)
+            rows.append(self.counter_text)
         self.controls = rows
+
+    def _page_or_none(self) -> Any:
+        try:
+            return self.page
+        except Exception:  # Flet raises before the pane is mounted
+            return None
 
     # ---- value ------------------------------------------------------------------------------
 
@@ -248,6 +280,9 @@ class PromptEditorPane(ft.Column):
     def set_value(self, text: str, *, initial: bool = True) -> None:
         self.field.value = str(text or "")
         self.cursor.forget()
+        if self.marked is not None and self.marked.marked:  # another profile loaded: the view shows it
+            self.marked.shown_text = self.field.value
+            self.marked.render_spans()
         if initial:
             self.initial = self.field.value
         self.counter_text.value = count_label(self.field.value)
@@ -266,6 +301,8 @@ class PromptEditorPane(ft.Column):
     def did_mount(self) -> None:
         super().did_mount()
         self.tokens.schedule(self.value)
+        if self.linker is not None:  # the page's theme is known now: its link blue
+            self.linker.refresh_colors()
 
     def will_unmount(self) -> None:
         self.tokens.cancel()
@@ -292,6 +329,8 @@ class PromptEditorPane(ft.Column):
         self._push(self.counter_text)
 
     def insert(self, placeholder: str) -> str:
+        if self.marked is not None and self.marked.marked:  # chips insert into the field: show it again
+            self.marked.set_marked_sync(False)
         text = self.cursor.insert(placeholder)
         self._on_change()
         self._push(self.field)
@@ -299,26 +338,37 @@ class PromptEditorPane(ft.Column):
 
 
 class PromptEditorSheet(PromptEditor):
-    """The U2 full-screen ``PromptEditor`` with placeholder chips and a real token count."""
+    """The U2 full-screen ``PromptEditor`` with placeholder chips and a real token count.
+
+    ``links`` (``services.prompt_placeholders``): the chips are link-styled (tap inserts, hold shows what the
+    placeholder says now) and the header has the marked-view toggle (``PromptEditor``)."""
 
     def __init__(self, ctx: Any, *, title: str, value: str, default: Optional[str] = None,
                  on_save: Optional[Callable[[Any], Optional[str]]] = None, subtitle: Optional[str] = None,
                  placeholders: Sequence[str] = PLACEHOLDERS, model: Callable[[], str] = lambda: "",
-                 counter: Optional[Callable[[str, str], int]] = None) -> None:
+                 counter: Optional[Callable[[str, str], int]] = None, links: Any = None) -> None:
         self.placeholders = tuple(placeholders)
         self._model = model
         self._counter_fn = counter
-        super().__init__(ctx, title=title, value=value, default=default, on_save=on_save, subtitle=subtitle)
+        self.chips: list = []
+        super().__init__(ctx, title=title, value=value, default=default, on_save=on_save, subtitle=subtitle,
+                         links=links)
 
     def build_body(self) -> ft.Control:
         body = super().build_body()
         self.cursor = CursorCache(self.field)
         self.tokens = TokenCounter(run_io=getattr(self.ctx, "run_io", None), model=self._model,
                                    on_count=self._on_count, counter=self._counter_fn)
-        chips = [ft.Chip(label=ft.Text(p, size=12), on_click=lambda e, p=p: self.insert(p)) for p in self.placeholders]
-        if not chips:
+        if self.linker is not None:
+            self.chips, rows = self.linker.chips_row(self.placeholders, self.insert,
+                                                     key_of=lambda p: f"placeholder-{p.strip('{}')}")
+        else:
+            self.chips = [ft.Chip(label=ft.Text(p, size=12), on_click=lambda e, p=p: self.insert(p))
+                          for p in self.placeholders]
+            rows = [ft.Row(self.chips, wrap=True, spacing=6, run_spacing=4)] if self.chips else []
+        if not rows:
             return body
-        return ft.Column([ft.Row(chips, wrap=True, spacing=6, run_spacing=4), body], spacing=6, expand=True)
+        return ft.Column([*rows, body], spacing=6, expand=True)
 
     def _on_change(self, e: Any = None) -> None:
         super()._on_change(e)
@@ -333,6 +383,8 @@ class PromptEditorSheet(PromptEditor):
         super()._on_reset(e)
 
     def insert(self, placeholder: str) -> str:
+        if self.marked is not None and self.marked.marked:  # chips insert into the field: show it again
+            self.marked.set_marked_sync(False)
         text = self.cursor.insert(placeholder)
         self._on_change()
         self.ctx.push(self.field)

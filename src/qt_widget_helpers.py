@@ -1,4 +1,4 @@
-"""Small Qt widgets / helpers shared by several dialogs (light: PySide6 only, no app imports).
+"""Small Qt widgets / helpers shared by several dialogs (light: PySide6 and the GUI-free prompt_defaults only).
 
 * ``NavComboRow`` - a labelled ◀ combo box ▶ row (the Glossary Manager's "Glossary File:" switcher,
   the QA scanner's glossary name review "Output folder:").
@@ -22,7 +22,6 @@
 
 import html
 import os
-import re
 import time
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt, QTimer
@@ -453,30 +452,12 @@ def dialog_button(text, kind):
 PLACEHOLDER_LINK_COLOR = "#5a9fd4"
 #: The same link on a light input background, where #5a9fd4 reads poorly.
 PLACEHOLDER_LINK_COLOR_ON_LIGHT = "#1f5fa8"
-#: One ``{name}`` token.
-PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The GUI-free rules (shared with mobile): the {name} token, which ones are marked, what a value shows.
+from prompt_defaults import (PLACEHOLDER_RE, described_placeholder_value, placeholder_names as _placeholder_names,
+                             placeholder_spans, placeholder_value_parts)
 _PLACEHOLDER_HREF = "placeholder:"
 _TOOLTIP_WIDTH = 520
 _TOOLTIP_MUTED = "#9aa0a6"
-
-
-def _placeholder_names(names):
-    """The names valid now: ``names`` is a callable (called now) or a collection."""
-    try:
-        value = names() if callable(names) else names
-    except Exception:
-        return frozenset()
-    return value if isinstance(value, frozenset) else frozenset(value or ())
-
-
-def placeholder_spans(text, names):
-    """``[(start, end, name)]`` of each ``{name}`` in ``text`` whose name is valid (``names``)."""
-    if not text or "{" not in text:
-        return []
-    valid = _placeholder_names(names)
-    if not valid:
-        return []
-    return [(m.start(), m.end(), m.group(1)) for m in PLACEHOLDER_RE.finditer(text) if m.group(1) in valid]
 
 
 def placeholder_at(text, index, names):
@@ -505,28 +486,16 @@ def _tooltip_lines(lines, muted=False):
 
 
 def _placeholder_tooltip_body(value):
-    """``(html, long)`` for one value (see placeholder_tooltip)."""
-    if isinstance(value, dict):
-        text = str(value.get("text") or "")
-        note = str(value.get("note") or "")
-        if value.get("error"):
-            body = _tooltip_lines([f"The current value could not be read: {value['error']}"], muted=True)
-            return body, False
-        if value.get("per_request"):
-            lines = ["Filled in for each request: " + (text or note)]
-            return _tooltip_lines(lines, muted=True), len(lines[0]) > 70
-        if value.get("active") is False:
-            lines = [str(value.get("inactive") or "Inactive right now: removed from the prompt.")]
-            if note:
-                lines.append(note)
-            return _tooltip_lines(lines, muted=True), any(len(line) > 70 for line in lines)
-        extra = [str(value["extra"])] if value.get("extra") else []
-    else:
-        text, extra = str(value if value is not None else ""), []
-    body = _tooltip_lines([text]) if text else _tooltip_lines(["(empty)"], muted=True)
-    if extra:
-        body += "<br>" + _tooltip_lines(extra, muted=True)
-    return body, len(text) > 300 or any(len(line) > 70 for line in [*text.split("\n"), *extra])
+    """``(html, long)`` for one value (see placeholder_tooltip; the lines are prompt_defaults.placeholder_value_parts)."""
+    text, notes = placeholder_value_parts(value)
+    if isinstance(value, dict) and value.get("error"):
+        return _tooltip_lines(notes, muted=True), False
+    if not text:
+        return _tooltip_lines(notes, muted=True), any(len(line) > 70 for line in notes)
+    body = _tooltip_lines([text])
+    if notes:
+        body += "<br>" + _tooltip_lines(notes, muted=True)
+    return body, len(text) > 300 or any(len(line) > 70 for line in [*text.split("\n"), *notes])
 
 
 def placeholder_tooltip(name, value):
@@ -845,7 +814,7 @@ def described_placeholder_resolver(descriptions):
     """The resolver of placeholders that hold data of each request: ``descriptions`` maps each name (braces
     optional) to what it is filled with. Returns ``(names, resolver)``."""
     descriptions = {str(name).strip("{}"): text for name, text in dict(descriptions).items()}
-    return frozenset(descriptions), lambda name: {"per_request": True, "text": descriptions[name]}
+    return frozenset(descriptions), lambda name: described_placeholder_value(descriptions, name)
 
 
 def link_described_placeholders_in_label(label, descriptions, text=None):

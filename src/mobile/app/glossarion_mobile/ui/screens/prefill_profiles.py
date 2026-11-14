@@ -243,10 +243,14 @@ class PrefillScreen(Screen):
             on_select=lambda e: self.select(e.control.value or DEFAULT_LABEL), disabled=not editable,
         )
         self.name_field = ft.TextField(label="Profile name", value=self.selected, dense=True, read_only=not editable)
+        from glossarion_mobile.services.prompt_placeholders import assistant_links
+
+        # no chips (the desktop Assistant Prompt has none); its placeholders are marked in the marked view
         self.editor = PromptEditorPane(value=self.listing.text_for(self.listing.active), placeholders=(), mono=self.mono,
                                        hint="Enter assistant prefill prompt here... (leave empty to disable)",
                                        run_io=getattr(self.ctx, "run_io", None), model=self.model, min_lines=6,
-                                       fill=False)
+                                       fill=False, links=assistant_links(getattr(self.service, "store", None)),
+                                       copy=getattr(self.ctx, "copy_text", None))
         self.editor.field.read_only = not editable
         self._status()
         rows: list[ft.Control] = [

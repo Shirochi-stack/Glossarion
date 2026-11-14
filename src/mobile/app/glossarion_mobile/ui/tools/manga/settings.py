@@ -608,8 +608,12 @@ class SettingsTab(MangaTab):
             self.set(key, str(value or ""))
             return None
 
+        from glossarion_mobile.services.prompt_placeholders import links_for_setting
+
+        # the manga glossary prompt goes through build_prompt: its placeholders are marked (the OCR / context
+        # prompts have none)
         self.editor = PromptEditor(self._editor_ctx(), title=title, value=current, default=default, on_save=save,
-                                   subtitle=key)
+                                   subtitle=key, links=links_for_setting(key, self.config))
         return self.editor.show()
 
     def _image_edit_profile_bar(self) -> Any:
@@ -639,6 +643,7 @@ class SettingsTab(MangaTab):
 
         With the image edit prompt profiles (the row above Edit Prompt), this edits the selected profile's
         system prompt; its user prompt is kept."""
+        from glossarion_mobile.services.prompt_placeholders import links_for_setting
         from glossarion_mobile.ui.settings.editors import PromptEditor
 
         cfg = self.config()
@@ -660,7 +665,8 @@ class SettingsTab(MangaTab):
 
             self.editor = PromptEditor(self._editor_ctx(), title=f"Custom image edit prompt · {name}", value=current,
                                        default=shipped or None, on_save=save_profile,
-                                       subtitle="custom_image_edit_system_prompt · {target_lang} = the output language")
+                                       subtitle="custom_image_edit_system_prompt · {target_lang} = the output language",
+                                       links=links_for_setting("custom_image_edit_system_prompt", self.config))
             return self.editor.show()
         current = (str(cfg.get("custom_image_edit_system_prompt") or "") or str(cfg.get("custom_image_edit_prompt") or "")
                    or (default or ""))
@@ -671,7 +677,8 @@ class SettingsTab(MangaTab):
             return None
 
         self.editor = PromptEditor(self._editor_ctx(), title="Custom image edit prompt", value=current,
-                                   default=default, on_save=save, subtitle="custom_image_edit_system_prompt")
+                                   default=default, on_save=save, subtitle="custom_image_edit_system_prompt",
+                                   links=links_for_setting("custom_image_edit_system_prompt", self.config))
         return self.editor.show()
 
     # ---- detection ---------------------------------------------------------------------------------

@@ -625,8 +625,9 @@ REWIRE_SPANS = (
     # Placeholder Text editor (right-click an "Available placeholders" line); the profile combo style is shared
     # its Save flashes "Saved!"; its context menu has readable text; Reset asks and confirms; Reset All;
     # its buttons come from qt_widget_helpers.dialog_button (shared with the Refinement Prompt dialog);
-    # AI prompt placeholders shown like links with their current value on hover (qt_widget_helpers)
-    (758, 757, 547), (782, 794, 1),
+    # AI prompt placeholders shown like links with their current value on hover (qt_widget_helpers; the values
+    # from the GUI-free cores shared with mobile)
+    (758, 757, 520), (782, 794, 1),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1799, 379),  # Relations Tracker
     (1800, 1810, 3),
