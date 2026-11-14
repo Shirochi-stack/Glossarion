@@ -8,8 +8,9 @@ text height). A ``GestureDetector`` maps taps (centre: chrome, edges: scroll a
 screen, and at the end / start of the chapter :meth:`FallbackPage.page_by`
 reports :data:`PAGE_EDGE` so the Reader opens the next / previous chapter, like
 the page's ``edge`` event), pinch (font size steps, like the page's two-finger
-events) and long-press on a paragraph (the selection actions for that
-paragraph). The text is never OS-selectable: a ``SelectableText`` wins the
+events), long-press on a paragraph (the selection actions for that
+paragraph) and a double tap on an image (the Reader's full-screen image viewer,
+like the page's ``img`` event; a pinch here always changes the font size). The text is never OS-selectable: a ``SelectableText`` wins the
 gesture arena over the tap zones and the paragraph long-press, and native
 selection reports no text anyway.
 """
@@ -65,8 +66,10 @@ class FallbackPage:
         on_pinch_end: Callable[[], Any],
         on_paragraph: Callable[[str], Any],
         on_scroll: Callable[[float], Any],
+        on_image: Optional[Callable[[bytes], Any]] = None,  # a double-tapped image: the full-screen viewer
     ) -> None:
         self.on_tap_zone = on_tap_zone
+        self.on_image = on_image
         self.on_pinch = on_pinch
         self.on_pinch_end = on_pinch_end
         self.on_paragraph = on_paragraph
@@ -136,8 +139,14 @@ class FallbackPage:
             elif block.kind == "image":
                 data = (images or {}).get(block.src)
                 if data:
-                    controls.append(ft.Container(padding=ft.Padding.symmetric(vertical=8),
-                                                 content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN)))
+                    # a double tap opens the full-screen viewer; a single tap waits out the double tap
+                    # (Flutter's gesture arena) and then reaches the tap zones like a tap on text
+                    controls.append(ft.GestureDetector(
+                        content=ft.Container(padding=ft.Padding.symmetric(vertical=8),
+                                             content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN)),
+                        on_double_tap=lambda e, d=data: call_handler(self.on_image, d),
+                        key=f"reader-fallback-image-{len(controls)}",
+                    ))
                 elif block.alt:
                     controls.append(ft.Text(f"🖼 {block.alt}", color=fg, italic=True, size=px - 2))
             else:

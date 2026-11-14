@@ -961,7 +961,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 29 | Scan for Raw (pair missing raws) | Chip "Scan for raw (N)" → `/library/scan-raw` |  |
 | 30 | Library loading spinner / toast / F11 fullscreen | Skeletons, snackbars | F11 n/a |
 | 31 | Book Details hero page | Book › Overview hero; Reader top bar ⓘ Book Details and ⋯ › Open Book Details (the Book page of the book or file the Reader shows; hotfix 3) | New: from the Reader |
-| 32 | Start reading / Read raw source | Overview primary / tonal buttons |  |
+| 32 | Start reading / Read raw source | Overview "📖  Open Reader" (raw source only while nothing is translated); the Reader switches Original / Translated / Bilingual | Adapted: one button |
 | 33 | Edit metadata.json | Overview › Edit → metadata form; ⋯ Edit raw JSON (CodeEditor) (the resolved workspace; an organized book edits its workspace's metadata.json) |  |
 | 34 | Chapter list (Book Details) | Book › Chapters (PM parity; filters persisted via `epub_details_*` incl. rows per page); a book without a workspace lists its EPUB's own chapters (`BookDetailsModel.row_specs`) |  |
 | 35 | Translate / Retranslate this chapter (Book Details) | Chapters row ⋯ (SINGLE_CHAPTER job) |  |
@@ -976,7 +976,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 44 | Reader: search across book | Reader search sheet |  |
 | 45 | Reader: selection context menu (Google Translate / Define on web) | Selection chip row (+ Add to glossary, Ask in chat) |  |
 | 46 | Reader: live 'Translate' current chapter (inline streaming translation) | Reader 🌐 → LivePanel (native) |  |
-| 47 | Reader: images | Reader (served from localhost; tap image → viewer) |  |
+| 47 | Reader: images | Reader (served from localhost); double-tap an image (or spread two fingers on it) → the full-screen MediaViewer (pinch zoom, pan, double tap to zoom, ✕ / Back close); a single tap acts like a tap on text | Adapted |
 | 48 | Reader: special files filtering | Chapters drawer "Show special files" |  |
 | 49 | Reader: fullscreen & settings persistence | Reader full screen + `epub_reader_*` keys + per-book overrides, `reader_positions` and `reader_bookmarks` in `mobile_state.json` (Prefs) | New: reading positions |
 | 50 | Reader: QtWebEngine prewarm & QTextBrowser fallback | Reader (flet-webview on Android/iOS; native fallback renderer elsewhere) | **Excluded** (Qt-specific); replaced |

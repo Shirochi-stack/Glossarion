@@ -1283,15 +1283,13 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 **Hero.**
 - Cover 120 × 180 (phone) / 240 × 340 (tablet); title (titleLarge, raw toggle); author.
 - Chips: 🌐 language · 📅 year · type.
+- The book's tags as wrapping chips under those chips, beside the cover (hidden when the book has none). There is no separate TAGS section.
 
 **Progress strip** (in-progress books only): "⏳  Translation in progress — {done}/{total} chapters ({pct}%)" in the #ffd166 / #6c63ff style. It is hidden when completed.
 
 **Actions.**
-- Primary `FilledButton`:
-  - "📖  Start reading" when completed;
-  - "📖  Read translated" when in progress;
-  - "📖  Read raw source" when there is no translation.
-- Tonal "📜  Read raw source" (shown when translated chapters exist).
+- Primary `FilledButton` "📖  Open Reader" in every state. An in-progress or PDF workspace with no translated chapter opens the raw source only; otherwise it opens the book as before (a TXT / PDF / HTML / image workspace on Translated). The Reader switches Original / Translated / Bilingual itself, so there is no separate raw button.
+- "🖥 Migrate Job to PC" is not on the Overview; it stays in the Book page ⋯ menu (enabled when the book has a workspace) and the Library card ⋯.
 - **"Continue · Ch 12 · 43%"** when a reading position exists.
 - Icon row: 🌐 **Translate…** (TranslateSheet) · 📘 **Compile** (menu) · 🏷 **Translate Metadata** (shown only when a raw EPUB resolves) · ↗ **Share** · 📁 **Files**.
   - Each icon is dimmed to 35% with an explanatory tooltip when its target can't be resolved.
@@ -1304,8 +1302,6 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
   - a full-screen form: Title, Author, Publisher, Language, Date, Tags (comma/newline), Synopsis;
   - note: "Changes are saved to the output workspace's metadata.json. The original EPUB is not modified.";
   - saved via `merge_manual_metadata_edits` + `save_metadata_json_atomic`.
-
-**TAGS.** Wrapping chips.
 
 **At a glance.**
 - The stats chip row (same as Chapters; tap jumps to the filtered Chapters tab).
@@ -1504,10 +1500,11 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 - Mobile additions: a viewport meta tag, `-webkit-column-break-*`, 16–20 dp padding, safe-area insets, `100dvh`. Paged layouts add the top / bottom safe-area insets once, on `body`, and give `#columns` the height that is left (`100dvh - 36px - env(safe-area-inset-top) - env(safe-area-inset-bottom)`, `!important` over the desktop `_setupColumns` inline `innerHeight - 36`). With no inset this is the desktop geometry: columns from 20 px to innerHeight − 16 px, same page counts. The image limits keep the desktop offsets from that column height.
 - The page layer (WebView, native page, empty state) sits in a `SafeArea` inside the Reader's full-screen Stack (`reader-page-safe`). The APK targets SDK 36, so Android 15+ runs the app edge to edge; the page never lies under the status bar, the navigation bar or a cutout, and its viewport is the area the reader sees. The chrome bars stay edge to edge with their own SafeAreas, the theme background fills the strips behind the system bars, and the selection chips map the page's selection rect into the Stack. Device fix 2026-10-08 (#10): before it, the last lines of pages were cut at the screen edge or hidden under the navigation bar.
 - Pagination uses CSS columns. Tap zones (left / right thirds) and swipes are handled in page JS.
+- **Images.** A double tap on a picture (an `<img>`, an SVG `<image>`, or the margin of a full-page illustration box), or two fingers that start on it and spread, opens it full screen in the app's `MediaViewer` (`ReaderScreen.view_image` → `screens.files.open_media_viewer`: a black `ft.View` pushed on the shell's overlay stack with ✕ Close, pinch zoom 1-6x and pan, a double tap zooms in and fits again, Save to… / Share; the bytes go to `<cache>/reader/images/` first). ✕, Android back and the iOS back gesture close it; the Reader underneath keeps its page, scroll position and chrome state. A pinch that starts on text still changes the font size. A single tap on a picture is held for the double tap's 300 ms, then does once what a tap at that point does on text (tap zones or the chrome). Owner report 2026-11-14: before, a double tap on a picture toggled the chrome twice (it came back up) and opened a small BottomSheet with the "Close Menu" strip.
 - Chapter changes navigate the existing WebView with `load_request` (`reader_view.navigate_webview`; flet-webview reads `url` only when the control is built). The first page builds the WebView with its URL, and a WebView whose navigation fails is rebuilt with the page URL (each build gets its own key, `reader-webview-N`). Device fix 2026-10-08: before it, no chapter after the first one loaded on Android/iOS.
 - Events reach Python as console messages `GLRDR:{json}` (`reader_doc.MOBILE_EVENT_PREFIX`, read through `on_console_message`) and, as a twin, `fetch` POSTs to `/<token>/__ev` (`MOBILE_EVENT_PATH`). Every event carries `{type, seq, chapter, …}`; `seq` de-duplicates the two transports and `GLRDR.setTransport('console'|'fetch'|'both')` narrows them. The Reader's own extras (`ui/reader/bridge.py`) add find / anchor / live restyle, a cleared-selection event and the selection rectangle.
 
-**Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls. It scrolls; edge taps scroll 90 % of what the list shows (its scroll viewport, else the page area) and at the end/start of the list open the next/previous chapter (previous: at its end; `fallback_view.page_by`: a list known to be able to move never turns on late scroll events; a chapter shorter than the screen turns on the first tap); text is not OS-selectable (long-press a paragraph for its actions); another chapter opens at its top, the same chapter drawn again (Aa) keeps its offset. It is used:
+**Native fallback.** `reader_doc.html_to_blocks()` feeds a `ListView` of `Text` / `Image` controls. It scrolls; edge taps scroll 90 % of what the list shows (its scroll viewport, else the page area) and at the end/start of the list open the next/previous chapter (previous: at its end; `fallback_view.page_by`: a list known to be able to move never turns on late scroll events; a chapter shorter than the screen turns on the first tap); text is not OS-selectable (long-press a paragraph for its actions); a double tap on an image opens the same full-screen viewer (a single tap on it waits out the double tap, then reaches the tap zones); another chapter opens at its top, the same chapter drawn again (Aa) keeps its offset. It is used:
 - automatically on Windows/Linux dev, because flet-webview raises outside Android, iOS and macOS;
 - for the "Lightweight reader" setting;
 - on WebView failures.
@@ -1540,7 +1537,7 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 - `TabBar` **Text · Theme · Layout**.
 - **Text:** font family (Embedded CSS / Serif / Sans / Mono / imported fonts) · size `Slider` with A− / A+ and a value pill (pt) · line spacing 1.0–3.0 · margins.
 - **Pinch** on the page changes the Aa font size.
-  - Page JS posts two-finger scale events; the native fallback uses `GestureDetector(on_scale_update)`.
+  - Page JS posts two-finger scale events (not for a pinch that starts on a picture: that opens the image viewer); the native fallback uses `GestureDetector(on_scale_update)`.
   - Each step gives a `selection_click` haptic tick, and the value pill flashes.
 - **Theme:** 6 swatch cards — Dark, Light, Sepia, Midnight, Forest, Rose (exact `READER_THEMES` colours) — and "Follow app theme".
 - **Layout:** Single page / Scroll / Scroll all; Double page appears only on tablets in landscape. Also tap-zone paging on/off, keep screen on, show progress %.
@@ -2180,7 +2177,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `VideoCard` (`chat/media_cards.py`) | 16:9 player + ⋯ Save as… / Share / Open externally | loading · playing · error (Open externally) | `flet_video.Video(playlist=[VideoMedia(path)], aspect_ratio=16/9)` with its default controls |
 | `AudioCard` + `AudioHub` (`chat/media_cards.py`) | "🔊 Generated audio" · play/pause · seek · "m:ss / m:ss" · volume (default 75%) · ⋯ Save / Share / Open externally | stopped · playing · paused · error ("Native audio playback is unavailable") | one `flet_audio.Audio` service per chat (`AudioHub`, created on the first Play). Playback belongs to the playing file: every AudioCard built for it (a transcript re-render, the MediaViewer) adopts the state / position / duration and gets `on_position_change` / `on_duration_change` / `on_state_change`; `IconButton`, `Slider` |
 | `CompareSheet` (`chat/media_cards.py`) | Refine "Compare with original": original paragraph above the refined one (`chat/media_model.compare_blocks`) | — | `BottomSheet`, tinted `Container`s |
-| `MediaViewer` (`components/media_viewer.py`) | Full-screen image viewer (pinch / pan, swipe between a response's images) or video/audio player · Save / Share / Open externally | — | `View`, `InteractiveViewer`, `Image`, `PageView`, `flet_video.Video`; actions are the chat's callbacks (`ChatFeature.export_file` / `share_files` / `open_external`) |
+| `MediaViewer` (`components/media_viewer.py`) | Full-screen image viewer (pinch / pan, double tap zooms 2.5x and fits again, swipe between a response's images) or video/audio player · Save / Share / Open externally; also the Reader's page images | — | `View`, `InteractiveViewer` in a `GestureDetector(on_double_tap)` (`zoom` / `reset`), `Image`, `PageView`, `flet_video.Video`; actions are the chat's callbacks (`ChatFeature.export_file` / `share_files` / `open_external`) |
 | `HtmlView` (not built yet) | Sanitized HTML ("View as HTML", QA report) | WebView (Android/iOS) · fallback (Windows/Linux dev: html2text → `Markdown` + "Open in browser") | `flet_webview.WebView`, or `Markdown` + `UrlLauncher` |
 | Output editor (`screens/output_editor.py`, `OutputEditorScreen`; the `FullScreenEditor` role) | App bar (title, dirty dot, Save, Cancel) + editor + footer (token count / position) | clean · dirty · saving · read-only · file missing | `View`; `flet_code_editor.CodeEditor` (`MARKDOWN` / `XML` / `JSON` / `CSS` / `PLAINTEXT`), with a plain `TextField(multiline=True)` fallback |
 | `TextEditor` (`tools/text_editor.py`, `TextEditorScreen`) | FullScreenEditor + find bar (hit i/n) | read-only · editing | as FullScreenEditor |

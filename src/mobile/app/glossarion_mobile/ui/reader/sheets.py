@@ -1,17 +1,19 @@
-"""Small Reader sheets: Bookmarks (⋯ › Bookmarks), the glossary entry sheet stub, the image viewer.
+"""Small Reader sheets: Bookmarks (⋯ › Bookmarks) and the glossary entry sheet stub.
 
 * ``BookmarksSheet`` lists Prefs ``reader_bookmarks`` for the book with
   "Add bookmark here"; tap jumps, the trailing icon removes.
 * ``GlossaryEntryStub`` is what the selection's "Add to glossary" opens until
   the glossary editor ships (U6): the selected raw term prefilled, a
   translation field, Copy, and a disabled Save with its reason (nothing hidden).
-* ``ImageViewer``: a double-tapped page image, zoomable (``InteractiveViewer``).
+
+A page image is not a sheet: it opens full screen in the app's ``MediaViewer``
+(``ReaderScreen.view_image``).
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Sequence
 
 import flet as ft
 
@@ -21,7 +23,7 @@ from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["BookmarksSheet", "GlossaryEntryStub", "ImageViewer"]
+__all__ = ["BookmarksSheet", "GlossaryEntryStub"]
 
 
 class _Sheet:
@@ -132,11 +134,3 @@ class GlossaryEntryStub(_Sheet):
         )
         self.sheet = ft.BottomSheet(content=body, show_drag_handle=True, scrollable=True,
                                     bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH)
-
-
-class ImageViewer(_Sheet):
-    def __init__(self, data: bytes, *, height: Optional[float] = None) -> None:
-        viewer = ft.InteractiveViewer(content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN), min_scale=0.5, max_scale=6,
-                                      expand=True)
-        self.sheet = ft.BottomSheet(content=ft.Container(content=viewer, height=min(720.0, (height or 800) * 0.85)),
-                                    show_drag_handle=True, bgcolor=ft.Colors.BLACK)

@@ -1,13 +1,13 @@
 """Book page › Overview (UI_SPEC §3.6; epub_library ``BookDetailsDialog`` hero).
 
 Hero (cover 120 x 180 phone / 240 x 340 tablet, title, author, chips 🌐 language ·
-📅 year · type), the in-progress strip "⏳  Translation in progress — d/t chapters
-(p%)", the reading actions ("📖  Start reading" / "📖  Read translated" /
-"📖  Read raw source" + tonal "📜  Read raw source", "Continue · Ch 12 · 43%"),
+📅 year · type, and the book's tags under them), the in-progress strip "⏳  Translation in progress — d/t chapters
+(p%)", the reading actions ("📖  Open Reader", "Continue · Ch 12 · 43%"; the Reader itself
+switches Original / Translated / Bilingual),
 the icon row (Translate… · Compile · Translate Metadata · Share · Files; each
 dimmed with a reason when its target can't be resolved), SYNOPSIS (4 lines,
 expandable; "No synopsis available."), METADATA (📘 Title · ✍️ Author · 🏛️
-Publisher · 🌐 Language · 📅 Year, "—" when missing; ✏️ Edit), TAGS and "At a
+Publisher · 🌐 Language · 📅 Year, "—" when missing; ✏️ Edit) and "At a
 glance" (the Chapters stats chips, the glossary summary, the last job; a book with no output
 workspace shows its EPUB's "📖 N chapters"). The workspace (Compile, Files, ✏️ Edit) is the
 book's resolved one (``progress_model.book_workspace``).
@@ -17,7 +17,7 @@ the OPF, then the card) and its display helpers when the core offers them.
 
 Until the preview-phase details arrive the hero is a ``Skeleton("hero")`` (UI_SPEC §7.4). On a large
 phone in landscape (UI_SPEC §1.1) the same controls are arranged in two columns: hero, strip, read
-buttons and icon row | synopsis, metadata, tags and at a glance (``apply_layout``, called from
+buttons and icon row | synopsis, metadata and at a glance (``apply_layout``, called from
 ``BookPageScreen.apply_size_class``; each arrangement gets fresh keys, Flet 1.0.3 freezes a subtree
 re-rendered under the same key).
 """
@@ -41,8 +41,10 @@ from glossarion_mobile.ui.library.common import (
     stat_chip,
 )
 
-__all__ = ["OverviewTab", "hero_values", "primary_read_label", "progress_strip_text", "split_tags", "two_columns"]
+__all__ = ["OPEN_READER", "OverviewTab", "hero_values", "opens_raw_only", "progress_strip_text", "split_tags",
+           "two_columns"]
 
+OPEN_READER = "\U0001f4d6  Open Reader"
 NO_SYNOPSIS = "No synopsis available."
 DASH = "—"
 _METADATA_ROWS = (("title", "\U0001f4d8 Title"), ("author", "✍️ Author"), ("publisher", "\U0001f3db️ Publisher"),
@@ -115,17 +117,14 @@ def hero_values(book: Mapping[str, Any], details: Optional[Mapping[str, Any]], m
     }
 
 
-def primary_read_label(book: Mapping[str, Any], chapters_info: Any) -> tuple:
-    """``(primary label, show the tonal "📜 Read raw source")`` (BookDetailsDialog 15770-15805)."""
+def opens_raw_only(book: Mapping[str, Any], chapters_info: Any) -> bool:
+    """True when "📖  Open Reader" opens the raw source only: an in-progress or PDF workspace with no
+    translated chapter yet (the desktop's "Read raw source" state, BookDetailsDialog 15770-15805)."""
     has_translated = any((c or {}).get("translated_path") for c in (chapters_info or ()))
     raw = str(book.get("raw_source_path") or "")
     is_pdf_workspace = (raw.lower().endswith(".pdf") or str(book.get("workspace_kind") or "").lower() == "pdf"
                         or str(book.get("compiled_output_kind") or "").lower() == "pdf")
-    if book.get("is_in_progress") or is_pdf_workspace:
-        if has_translated:
-            return "\U0001f4d6  Read translated", True
-        return "\U0001f4d6  Read raw source", False
-    return "\U0001f4d6  Start reading", False
+    return bool(book.get("is_in_progress") or is_pdf_workspace) and not has_translated
 
 
 def progress_strip_text(book: Mapping[str, Any], model: Any = None) -> Optional[str]:
@@ -164,6 +163,7 @@ class OverviewTab:
         self.ctx = page.ctx
         self.synopsis_expanded = False
         self.values: dict = {}
+        self.raw_only = False  # "📖  Open Reader" opens the raw source only (``opens_raw_only``)
         self.columns = False  # two-column landscape arrangement (``apply_layout``)
         self.layout_builds = 0
 
@@ -184,36 +184,33 @@ class OverviewTab:
             bgcolor=ft.Colors.with_opacity(0.14, "#6c63ff"), border=ft.Border.all(1, "#6c63ff"),
             border_radius=tokens.RADII["chip"], padding=ft.Padding.symmetric(horizontal=10, vertical=6),
             visible=False, key="ov-strip")
-        self.read_button = ft.FilledButton(content="\U0001f4d6  Start reading", on_click=self._on_read, key="ov-read")
-        self.raw_button = ft.FilledTonalButton(content="\U0001f4dc  Read raw source", on_click=self._on_read_raw,
-                                               visible=False, key="ov-read-raw")
+        self.read_button = ft.FilledButton(content=OPEN_READER, on_click=self._on_read, key="ov-read")
         self.continue_button = ft.OutlinedButton(content="", icon=ft.Icons.PLAY_ARROW, on_click=self._on_continue,
                                                  visible=False, key="ov-continue")
         self.icon_row = ft.Row(wrap=True, spacing=0, key="ov-icons")
-        self.migrate_button = ft.TextButton(content="🖥 Migrate Job to PC", visible=False,
-                                            on_click=lambda e: self.ctx.spawn(self.page.output.migrate_job()),
-                                            key="ov-migrate-job")
         self.synopsis_text = ft.Text(NO_SYNOPSIS, max_lines=4, overflow=ft.TextOverflow.ELLIPSIS, selectable=True,
                                      key="ov-synopsis")
         self.synopsis_toggle = ft.TextButton(content="More", on_click=self._toggle_synopsis, visible=False,
                                              key="ov-synopsis-more")
         self.metadata_rows = ft.Column(spacing=2, key="ov-metadata")
         self.edit_button = ft.TextButton(content="✏️  Edit", on_click=self._on_edit, key="ov-edit")
-        self.tags_row = ft.Row(wrap=True, spacing=6, run_spacing=6, key="ov-tags")
+        # The tags sit beside the cover, under the language / type chips: the cover is taller than the
+        # title, author and chips, which left that space empty (owner); no separate TAGS section.
+        self.tags_row = ft.Row(wrap=True, spacing=6, run_spacing=4, visible=False, key="ov-tags")
         self.glance = ft.Column(spacing=6, key="ov-glance")
         self.error_text = ft.Text("", color=ft.Colors.ERROR, visible=False, key="ov-error")
         self.hero = ft.Row([
             self.cover,
-            ft.Column([self.title_text, self.author_text, self.hero_chips], spacing=4, expand=True, tight=True),
+            ft.Column([self.title_text, self.author_text, self.hero_chips, self.tags_row], spacing=4, expand=True,
+                      tight=True),
         ], vertical_alignment=ft.CrossAxisAlignment.START, spacing=12, key="ov-hero")
         self.skeleton = Skeleton("hero", count=2, label="Loading book…", key="ov-skeleton").control
         self.left_items = [
             self.skeleton,
             self.hero,
             self.strip,
-            ft.Row([self.read_button, self.raw_button, self.continue_button], wrap=True, spacing=8, run_spacing=6),
+            ft.Row([self.read_button, self.continue_button], wrap=True, spacing=8, run_spacing=6),
             self.icon_row,
-            self.migrate_button,
             self.error_text,
         ]
         self.right_items = [
@@ -222,8 +219,6 @@ class OverviewTab:
             self.synopsis_toggle,
             ft.Row([section_title("METADATA"), self.edit_button], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             self.metadata_rows,
-            section_title("TAGS"),
-            self.tags_row,
             section_title("At a glance"),
             self.glance,
         ]
@@ -293,12 +288,11 @@ class OverviewTab:
         strip = progress_strip_text(book, model if details.get("chapters_info") is not None else None)
         self.strip.visible = bool(strip)
         self.strip.content.value = strip or ""
-        label, show_raw = primary_read_label(book, details.get("chapters_info"))
-        self.read_button.content = label
+        self.raw_only = opens_raw_only(book, details.get("chapters_info"))
+        self.read_button.content = OPEN_READER
         elsewhere = opens_in_another_app(book)  # the card menus' rule: no Reader for it, ↗ Share instead
         self.read_button.disabled = elsewhere
         self.read_button.tooltip = OPENS_ELSEWHERE_REASON if elsewhere else None
-        self.raw_button.visible = show_raw
         self._render_continue()
         self._render_icons()
         synopsis = values["synopsis"]
@@ -312,12 +306,10 @@ class OverviewTab:
             for key, label_text in _METADATA_ROWS
         ]
         has_workspace = bool(pm.book_workspace(service, book))
-        self.migrate_button.visible = has_workspace
         self.edit_button.disabled = not has_workspace
         self.edit_button.tooltip = None if has_workspace else "No output workspace yet"
         self.tags_row.controls = [ft.Chip(label=ft.Text(tag), key=f"tag-{i}") for i, tag in enumerate(values["tags"])]
-        if not values["tags"]:
-            self.tags_row.controls = [ft.Text(DASH, color=ft.Colors.ON_SURFACE_VARIANT)]
+        self.tags_row.visible = bool(values["tags"])  # no tags: nothing (the "—" row went with the TAGS section)
         self._render_glance()
         error = details.get("error")
         self.error_text.visible = bool(error)
@@ -450,16 +442,12 @@ class OverviewTab:
     # ---- events ------------------------------------------------------------------------------------
 
     def _on_read(self, e: Any = None) -> None:
-        label = str(self.read_button.content or "")
-        if "raw" in label.lower():
+        if self.raw_only:
             self.page.open_reader(mode="original", raw_only=True)
         elif self.page.service.format_of(self.page.book) in ("txt", "pdf", "html", "image"):
             self.page.open_reader(mode="translated")
         else:
             self.page.open_reader()
-
-    def _on_read_raw(self, e: Any = None) -> None:
-        self.page.open_reader(mode="original", raw_only=True)
 
     def _on_continue(self, e: Any = None) -> None:
         self.page.open_reader(resume=True)  # "Continue · Ch N · P%" opens at that position

@@ -562,11 +562,11 @@ def test_real_library_scan_card_and_details(real_env):
     assert len(full["chapters_info"]) == 4
     model = service.details_model(book, full)
     assert model.title() == "Raw Book" and model.tags() == ["Fantasy"]
-    from glossarion_mobile.ui.library.overview_tab import hero_values, primary_read_label, progress_strip_text
+    from glossarion_mobile.ui.library.overview_tab import hero_values, opens_raw_only, progress_strip_text
 
     hero = hero_values(book, full, model)
     assert hero["author"] == "Author" and hero["language"] == "ko"
-    assert primary_read_label(book, full["chapters_info"])[0] == "\U0001f4d6  Read translated"
+    assert opens_raw_only(book, full["chapters_info"]) is False  # translated chapters: not the raw-only Reader
     strip = progress_strip_text(book, model)
     assert strip is None or strip.startswith("⏳  Translation in progress")
     # the service resolved the raw file through the shared resolver too
@@ -908,7 +908,9 @@ def test_book_page_tabs_render_progress_glossary_and_overview(real_env):
         assert glossary.view is not None and glossary.visible_rows()[0].kind == "minimal"
         assert glossary.file_chip.visible
         overview = screen.overview
-        assert overview.title_text.value == "Raw Book" and overview.read_button.content == "\U0001f4d6  Read translated"
+        assert overview.title_text.value == "Raw Book" and overview.read_button.content == "\U0001f4d6  Open Reader"
+        assert not overview.raw_only and not hasattr(overview, "raw_button")
+        assert not hasattr(overview, "migrate_button")
         assert overview.strip.visible and overview.strip.content.value.startswith("⏳  Translation in progress")
         screen.set_tab("output")
         await screen.output.reload()
@@ -1918,6 +1920,123 @@ def test_pdf_without_a_workspace_is_not_offered_to_the_reader(tmp_path):
         screen.dispose()
 
     asyncio.run(scenario())
+
+
+def _keys(control, out=None):
+    """Every control ``key`` under a control (the ``_texts`` walk)."""
+    import flet as ft
+
+    out = out if out is not None else []
+    if control is None:
+        return out
+    if getattr(control, "key", None):
+        out.append(str(control.key))
+    for name in ("content", "controls", "leading", "title", "subtitle", "trailing"):
+        value = getattr(control, name, None)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, ft.BaseControl):
+                    _keys(item, out)
+        elif isinstance(value, ft.BaseControl):
+            _keys(value, out)
+    return out
+
+
+# (row, chapters_info, format_of, the open_reader call the old label made: "Start reading" /
+# "Read translated" / "Read raw source")
+_OPEN_READER_STATES = [
+    ({"name": "Done", "type": "epub", "translation_state": "completed", "output_folder": "W"},
+     [{"translated_path": "t1"}], "epub", {}),
+    ({"name": "Half", "type": "epub", "is_in_progress": True, "output_folder": "W"},
+     [{"translated_path": "t1"}, {}], "epub", {}),
+    ({"name": "Half txt", "type": "txt", "is_in_progress": True, "output_folder": "W"},
+     [{"translated_path": "t1"}], "txt", {"mode": "translated"}),
+    ({"name": "Fresh", "type": "epub", "is_in_progress": True, "output_folder": "W"},
+     [{}, {}], "epub", {"mode": "original", "raw_only": True}),
+    ({"name": "Scan", "type": "pdf", "raw_source_path": "Scan.pdf", "output_folder": "W"},
+     [], "pdf", {"mode": "original", "raw_only": True}),
+    ({"name": "Scan done", "type": "pdf", "raw_source_path": "Scan.pdf", "output_folder": "W"},
+     [{"translated_path": "t1"}], "pdf", {"mode": "translated"}),
+]
+
+
+@needs_flet
+@pytest.mark.parametrize("platform", ["android", "ios"])
+@pytest.mark.parametrize("row,chapters,fmt,expected", _OPEN_READER_STATES)
+def test_overview_has_one_open_reader_button_and_no_raw_or_migrate_buttons(platform, row, chapters, fmt, expected):
+    """Owner request: the Overview's "📖  Read translated" / "📖  Read raw source" / "📖  Start reading"
+    is one "📖  Open Reader" that opens what each state opened before (the Reader switches Original /
+    Translated / Bilingual itself); the tonal "📜  Read raw source" and the "🖥 Migrate Job to PC" text
+    button are gone (Migrate stays in the Book page ⋯ menu, enabled under the same workspace rule)."""
+    from glossarion_mobile.ui.library.book_page import BookPageScreen
+    from glossarion_mobile.ui.library.common import LibraryContext
+    from glossarion_mobile.ui.library.overview_tab import OPEN_READER, OverviewTab, opens_raw_only
+
+    service = types.SimpleNamespace(covers={}, format_of=lambda book: fmt,
+                                    workspace_for=lambda book: book.get("output_folder") or "")
+    ctx = LibraryContext(service=service, platform=platform)
+    opened = []
+    page = types.SimpleNamespace(
+        ctx=ctx, service=service, book=dict(row), bid="b1", details={"chapters_info": chapters},
+        details_model=lambda: None, metadata_reason=lambda: None, progress=None, glossary=None, job_view=None,
+        open_reader=lambda **kw: opened.append(kw))
+    overview = OverviewTab(page)
+    body = overview.build()
+    keys = _keys(body)
+    texts = " ".join(_texts(body))
+    assert "ov-read" in keys and "ov-read-raw" not in keys and "ov-migrate-job" not in keys
+    assert "Read raw source" not in texts and "Migrate" not in texts
+    assert "Read translated" not in texts and "Start reading" not in texts
+    assert overview.read_button.content == OPEN_READER == "\U0001f4d6  Open Reader"
+    assert not hasattr(overview, "raw_button") and not hasattr(overview, "migrate_button")
+    assert overview.raw_only is opens_raw_only(row, chapters) is bool(expected.get("raw_only"))
+    overview._on_read()
+    assert opened == [expected]
+
+    # the Book page ⋯ menu keeps "🖥 Migrate Job to PC", enabled when the book has a workspace
+    screen = BookPageScreen.__new__(BookPageScreen)
+    screen.service, screen.ctx, screen.book, screen.bid = service, ctx, dict(row), "b1"
+    screen.metadata_reason = lambda: None
+    for folder in ("W", ""):
+        screen.book = dict(row, output_folder=folder)
+        migrate = [i for i in screen._menu_items() if i.content == "🖥 Migrate Job to PC"]
+        assert len(migrate) == 1 and migrate[0].disabled is (not folder)
+
+
+@needs_flet
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_overview_tags_sit_beside_the_cover(platform):
+    """Owner: the space beside the cover, under the language / type chips, was empty while the tags had
+    their own section at the bottom. The tags are in the hero column now; a book without tags shows none."""
+    from glossarion_mobile.ui.library.common import LibraryContext
+    from glossarion_mobile.ui.library.overview_tab import OverviewTab
+
+    service = types.SimpleNamespace(covers={}, format_of=lambda book: "epub",
+                                    workspace_for=lambda book: book.get("output_folder") or "")
+    ctx = LibraryContext(service=service, platform=platform)
+
+    def overview_for(metadata):
+        page = types.SimpleNamespace(
+            ctx=ctx, service=service, book={"name": "Novel", "output_folder": "W"}, bid="b1",
+            details={"chapters_info": [], "metadata_json": metadata}, details_model=lambda: None,
+            metadata_reason=lambda: None, progress=None, glossary=None, job_view=None,
+            open_reader=lambda **kw: None)
+        overview = OverviewTab(page)
+        return overview, overview.build()
+
+    overview, body = overview_for({"language": "ko", "tags": "Fantasy, TS, Academy, Growth"})
+    hero_column = overview.hero.controls[1]
+    assert overview.hero.controls[0] is overview.cover
+    assert hero_column.controls[-2:] == [overview.hero_chips, overview.tags_row]  # right under the chips
+    assert overview.tags_row.visible and overview.tags_row.wrap
+    assert [chip.label.value for chip in overview.tags_row.controls] == ["Fantasy", "TS", "Academy", "Growth"]
+    assert "TAGS" not in _texts(body)  # no section of its own
+    assert all(item is not overview.tags_row for item in [*overview.left_items, *overview.right_items])
+    assert all(control is not overview.tags_row for control in body.controls)  # only inside the hero
+
+    overview, body = overview_for({"language": "ko"})
+    assert overview.tags_row.visible is False and overview.tags_row.controls == []
+    assert "TAGS" not in _texts(body)
 
 
 def test_compile_spec_uses_the_workspace_compile_kind():

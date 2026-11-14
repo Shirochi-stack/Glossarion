@@ -25,7 +25,12 @@ the shell's own ``GLRDR.post`` (so sequence numbers and transport stay shared):
   the shell's handler);
 * Scroll all: ``scroll`` events with the chapter on screen (``ch``/``chf``, from the
   ``data-glrdr-ch`` headings) and the restore of a chapter position on load;
-* ``img`` on a double-tapped image.
+* images (capture phase, before the shell's handlers): ``img`` on a double tap, or on
+  two fingers that start on the picture and spread (the shell never sees that pinch, so
+  it does not change the font size); a single tap on a picture is held for the double
+  tap's 300 ms and then does once what a tap at that point does on text (tap zones or the
+  chrome). The shell alone made both clicks of a double tap a ``tap``: the chrome
+  toggled twice and was back up behind the viewer.
 
 ``normalize_event`` accepts the shell's schema (``type``, ``edge: end|start``,
 ``zone``, ``scale``, ``reason``) and the extras'; ``EventDeduper`` drops the second
@@ -175,16 +180,98 @@ READER_EXTRAS_JS = r"""
     }
     return null;
   }
-  if (C.zones === false) {  // every layout: a side tap scrolls a screen in Scroll / Scroll all too
-    window.addEventListener('click', function (e) {
-      if (linkOf(e.target) || selText()) { return; }
+  // Images: a double tap (or a pinch that starts on the picture) opens the full-screen viewer. A double
+  // tap reaches the page as click, click, dblclick, and the shell's click handler made each click a tap
+  // (the chrome toggled twice, so it was back up behind the viewer). A click on an image is held here for
+  // DOUBLE_MS: a second click on it within that time is the double tap ('img' only), else the held click
+  // does what a tap at that point does on text (tap zones, or the chrome), once.
+  var DOUBLE_MS = 300, PINCH_OPEN = 1.08, imgTap = null, imgPinch = null;
+  function classOf(el) {
+    var c = el.className;
+    return ' ' + String((c && c.baseVal !== undefined) ? c.baseVal : (c || '')) + ' ';
+  }
+  function imageAt(el) {
+    // the picture under a touch: an <img> / SVG <image>, or the margin of a full-page illustration box
+    while (el && el !== document.body && el.nodeType === 1) {
+      var tag = String(el.tagName || '').toLowerCase();
+      if (tag === 'img' || tag === 'image') { return el; }
+      if (classOf(el).indexOf(' full-page-img ') >= 0) {
+        return el.querySelector ? el.querySelector('img, image') : null;
+      }
+      el = el.parentNode;
+    }
+    return null;
+  }
+  function srcOf(el) {
+    return el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('xlink:href') || '';
+  }
+  function tapAt(clientX) {
+    // what the shell does with a tap at clientX (and side taps as centre taps with tap zones off)
+    var w = window.innerWidth || document.documentElement.clientWidth || 1, x = clientX / w;
+    if (C.zones !== false && x < 1 / 3) { G.prev(); }
+    else if (C.zones !== false && x > 2 / 3) { G.next(); }
+    else { post({type: 'tap', zone: 'center'}); }
+  }
+  window.addEventListener('click', function (e) {  // capture phase: before the shell's handler
+    if (linkOf(e.target) || selText()) { return; }
+    var img = imageAt(e.target);
+    if (img) {
+      e.stopPropagation();
+      var held = imgTap;
+      imgTap = null;
+      if (held && held.img === img) {
+        clearTimeout(held.timer);
+        post({type: 'img', src: srcOf(img)});
+        return;
+      }
+      if (held) { clearTimeout(held.timer); tapAt(held.x); }  // another picture: the first tap counts now
+      var tap = {img: img, x: e.clientX};
+      tap.timer = setTimeout(function () {
+        if (imgTap !== tap) { return; }
+        imgTap = null;
+        tapAt(tap.x);
+      }, DOUBLE_MS);
+      imgTap = tap;
+      return;
+    }
+    if (C.zones === false) {  // every layout: a side tap scrolls a screen in Scroll / Scroll all too
       var w = window.innerWidth || document.documentElement.clientWidth || 1, x = e.clientX / w;
       if (x < 1 / 3 || x > 2 / 3) {
         e.stopPropagation();
         post({type: 'tap', zone: 'center'});
       }
-    }, true);
+    }
+  }, true);
+  function spread(t) {
+    var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
   }
+  // A two-finger touch that starts on a picture is the viewer, not the font size: the shell never sees it
+  // (its pinch posts 'scale'); fingers spreading open the viewer once. A pinch on text keeps the font size.
+  window.addEventListener('touchstart', function (e) {
+    var ts = e.touches || [];
+    if (!imgPinch && ts.length === 2) {
+      var img = imageAt(ts[0].target) || imageAt(ts[1].target);
+      if (img) { imgPinch = {img: img, start: spread(ts), sent: false}; }
+    }
+    if (imgPinch) { e.stopPropagation(); }
+  }, {capture: true, passive: true});
+  window.addEventListener('touchmove', function (e) {
+    if (!imgPinch) { return; }
+    e.stopPropagation();
+    var ts = e.touches || [];
+    if (!imgPinch.sent && ts.length === 2 && imgPinch.start > 0 && spread(ts) / imgPinch.start > PINCH_OPEN) {
+      imgPinch.sent = true;
+      post({type: 'img', src: srcOf(imgPinch.img)});
+    }
+  }, {capture: true, passive: true});
+  function pinchOver(e) {
+    if (!imgPinch) { return; }
+    e.stopPropagation();
+    if (!e.touches || !e.touches.length) { imgPinch = null; }
+  }
+  window.addEventListener('touchend', pinchOver, {capture: true, passive: true});
+  window.addEventListener('touchcancel', pinchOver, {capture: true, passive: true});
   var selTimer = 0, hadSel = false;
   document.addEventListener('selectionchange', function () {
     clearTimeout(selTimer);
@@ -251,12 +338,6 @@ READER_EXTRAS_JS = r"""
     if (document.readyState === 'complete') { setTimeout(restore, 0); }
     else { window.addEventListener('load', function () { setTimeout(restore, 0); }); }
   }
-  document.addEventListener('dblclick', function (e) {
-    var el = e.target;
-    if (el && (el.tagName === 'IMG' || el.tagName === 'img' || el.tagName === 'image')) {
-      post({type: 'img', src: el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('xlink:href') || ''});
-    }
-  }, true);
   var pending = function () {
     if (C.anchor) { G.anchor(C.anchor); }
     if (C.find && C.find.text) { G.find(C.find.text, C.find.occurrence || 0); }
