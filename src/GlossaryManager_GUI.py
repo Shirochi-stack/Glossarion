@@ -808,6 +808,7 @@ class GlossaryManagerMixin:
         for key, text, background, border, hover in (
                 ('save', "💾 Save", '#2f5f8f', '#4a78a8', '#3f78ad'),
                 ('reset', "Reset to Default", '#6f2f2f', '#944545', '#8a3a3a'),
+                ('reset_all', "Reset All to Defaults", '#6f2f2f', '#944545', '#8a3a3a'),
                 ('close', "Close", '#3a3a3a', '#555555', '#4a4a4a')):
             button = QPushButton(text)
             button.setObjectName(f"placeholder_text_{key}_button")
@@ -821,6 +822,10 @@ class GlossaryManagerMixin:
             buttons[key] = button
         buttons_row.addWidget(buttons['save'])
         buttons_row.addWidget(buttons['reset'])
+        buttons_row.addWidget(buttons['reset_all'])
+        for key in ('reset', 'reset_all'):  # the shorter "Reset!" confirmation must not move the row
+            buttons[key].ensurePolished()
+            buttons[key].setMinimumWidth(buttons[key].sizeHint().width())
         buttons_row.addStretch()
         buttons_row.addWidget(buttons['close'])
         layout.addLayout(buttons_row)
@@ -852,7 +857,6 @@ class GlossaryManagerMixin:
             if text != effective(name):
                 label += " (unsaved changes)"
             status.setText(label)
-            buttons['reset'].setEnabled(stored or text != defaults[name])
 
         def load(name):
             state['name'] = name
@@ -885,15 +889,35 @@ class GlossaryManagerMixin:
             flash_saved(buttons['save'])  # green "Saved!" and the Windows sound, like the Multi API Key Manager
 
         def reset():
+            """Always asks first, and always confirms on the button (it was silent, and looked enabled
+            while it was disabled)."""
             name = state['name']
-            texts = self._stored_placeholder_texts()
-            if name in texts and not confirm_prompt_profile_action(
-                    dialog, "Placeholder Text", f"Reset {{{name}}} to the built-in default text?"):
+            if not confirm_prompt_profile_action(
+                    dialog, "Placeholder Text",
+                    f"Reset {{{name}}} to the built-in default text?\n\n"
+                    "Your saved text and any unsaved changes for this placeholder will be removed."):
                 return
-            texts.pop(name, None)
-            self._store_placeholder_texts(texts)
+            texts = self._stored_placeholder_texts()
+            if name in texts:
+                texts.pop(name)
+                self._store_placeholder_texts(texts)
             state['drafts'].pop(name, None)
             load(name)
+            from qt_widget_helpers import flash_saved
+            flash_saved(buttons['reset'], text="✅ Reset!")
+
+        def reset_all():
+            if not confirm_prompt_profile_action(
+                    dialog, "Placeholder Text",
+                    f"Reset all {len(names)} placeholder texts to their built-in defaults?\n\n"
+                    "Every saved text and every unsaved change in this window will be removed."):
+                return
+            if self._stored_placeholder_texts():
+                self._store_placeholder_texts({})
+            state['drafts'].clear()
+            load(state['name'])
+            from qt_widget_helpers import flash_saved
+            flash_saved(buttons['reset_all'], text="✅ All Reset!")
 
         def may_close():
             remember()
@@ -924,6 +948,7 @@ class GlossaryManagerMixin:
         editor.textChanged.connect(refresh_status)
         buttons['save'].clicked.connect(lambda _checked=False: save())
         buttons['reset'].clicked.connect(lambda _checked=False: reset())
+        buttons['reset_all'].clicked.connect(lambda _checked=False: reset_all())
         buttons['close'].clicked.connect(lambda _checked=False: close_dialog())
         dialog.reject = close_dialog  # Esc
         dialog.closeEvent = close_event  # the title bar's X

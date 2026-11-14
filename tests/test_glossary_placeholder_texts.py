@@ -625,6 +625,91 @@ def test_save_and_reset_write_config_and_env(gui, eg, monkeypatch):
     assert json.loads(os.environ[ENV]) == {}
     assert editor.toPlainText() == default
     assert dialog.placeholder_status.text() == "Default text"
+    assert buttons["reset"].text() == "✅ Reset!"  # the reset is confirmed on the button, with the sound
+
+
+def test_reset_always_asks_and_confirms_on_the_button(gui, monkeypatch):
+    """Owner: Reset to Default gave no feedback (it looked enabled while it was disabled) and never asked."""
+    import qt_widget_helpers
+
+    beeps = []
+    monkeypatch.setattr(qt_widget_helpers, "saved_beep", lambda: beeps.append(1))
+    dialog = gui._open_placeholder_text_dialog()
+    editor, buttons = dialog.placeholder_editor, dialog.placeholder_buttons
+    reset = buttons["reset"]
+    default = editor.toPlainText()
+    assert dialog.placeholder_status.text() == "Default text"
+    assert reset.isEnabled() and buttons["reset_all"].isEnabled()  # never a dead button
+
+    # nothing edited: it still asks, and still answers
+    saves = gui.saves
+    reset.click()
+    assert len(gui.answers["asked"]) == 1 and "{" + EDITABLE[0] + "}" in gui.answers["asked"][0]
+    assert reset.text() == "✅ Reset!" and beeps == [1]
+    assert qt_widget_helpers.SAVED_FLASH_COLOR in reset.styleSheet()
+    assert gui.saves == saves and CONFIG_KEY not in gui.config  # nothing was stored: nothing is written
+
+    # an unsaved change: No keeps it, Yes drops it
+    editor.setPlainText("draft text")
+    gui.answers["value"] = False
+    reset.click()
+    assert editor.toPlainText() == "draft text" and beeps == [1] and len(gui.answers["asked"]) == 2
+    gui.answers["value"] = True
+    reset.click()
+    assert editor.toPlainText() == default and beeps == [1, 1]
+    assert dialog.placeholder_status.text() == "Default text"
+    assert gui.saves == saves
+
+
+def test_reset_all_clears_every_stored_text_and_unsaved_change(gui, eg, monkeypatch):
+    import qt_widget_helpers
+
+    beeps = []
+    monkeypatch.setattr(qt_widget_helpers, "saved_beep", lambda: beeps.append(1))
+    dialog = gui._open_placeholder_text_dialog()
+    combo, editor, buttons = dialog.placeholder_combo, dialog.placeholder_editor, dialog.placeholder_buttons
+    row = dialog.layout().itemAt(dialog.layout().count() - 1).layout()
+    assert [row.itemAt(i).widget() for i in range(row.count()) if row.itemAt(i).widget() is not None] == [
+        buttons["save"], buttons["reset"], buttons["reset_all"], buttons["close"]]
+    assert buttons["reset_all"].text() == "Reset All to Defaults"
+    defaults = {item["name"]: item["default"] for item in eg.editable_placeholders()}
+
+    for name in ("relations_instruction", "example"):
+        combo.setCurrentIndex(EDITABLE.index(name))
+        editor.setPlainText(f"my {name}")
+        buttons["save"].click()
+    combo.setCurrentIndex(EDITABLE.index("gender_instruction"))
+    editor.setPlainText("an unsaved change")
+    combo.setCurrentIndex(EDITABLE.index("example"))
+    assert gui.config[CONFIG_KEY] == {"relations_instruction": "my relations_instruction", "example": "my example"}
+    beeps.clear()
+
+    gui.answers["value"] = False  # No: nothing changes
+    buttons["reset_all"].click()
+    assert f"all {len(EDITABLE)} placeholder texts" in gui.answers["asked"][-1]
+    assert len(gui.config[CONFIG_KEY]) == 2 and editor.toPlainText() == "my example" and beeps == []
+    assert buttons["reset_all"].text() == "Reset All to Defaults"
+
+    gui.answers["value"] = True
+    saves = gui.saves
+    buttons["reset_all"].click()
+    assert gui.config[CONFIG_KEY] == {} and json.loads(os.environ[ENV]) == {}
+    assert gui.saves == saves + 1
+    assert buttons["reset_all"].text() == "✅ All Reset!" and beeps == [1]
+    assert editor.toPlainText() == defaults["example"] and dialog.placeholder_status.text() == "Default text"
+    for name in EDITABLE:  # every placeholder shows its default again, the unsaved one too
+        combo.setCurrentIndex(EDITABLE.index(name))
+        assert editor.toPlainText() == defaults[name], name
+        assert dialog.placeholder_status.text() == "Default text"
+    assert eg.placeholder_text("relations_instruction", "x") == "x"
+
+    # nothing left to reset: it still asks and answers, and writes nothing
+    saves = gui.saves
+    buttons["reset_all"].click()
+    assert gui.saves == saves and beeps == [1, 1]
+    gui.answers["value"] = True
+    dialog.placeholder_buttons["close"].click()  # no unsaved change is left: Close does not ask
+    assert not dialog.isVisible()
 
 
 def test_switching_keeps_unsaved_drafts_and_close_asks(gui):
