@@ -2438,7 +2438,7 @@ def relations_log_line(stats: Optional[Mapping[str, Any]]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 _INSTRUCTION_TEMPLATE = (
-    'The `{field}` column: for character entries only, list this character\'s relationships to OTHER named '
+    'The `{field}` column: for {gender_types} entries only, list this character\'s relationships to OTHER named '
     'characters that are shown or stated in THIS text. Write each as `raw_name: role`, separated by "; ", '
     'where raw_name is the other character\'s raw_name exactly as in their own entry and role is what THIS '
     'row\'s character is to that other character, in {language}, 1–3 words (Father, Mother, Daughter, Older '
@@ -2447,7 +2447,7 @@ _INSTRUCTION_TEMPLATE = (
     'raw_name>: Daughter`. List only real, specific relationships; never filler such as Acquaintance, Stranger '
     'or Unknown, and never a note such as Surname. Keep the same wording for the same relationship; use a '
     'different word only when the relationship itself changed in this text. Do not guess, do not describe events '
-    'or feelings, never use commas inside this column. Leave it empty for non-character entries, surname-only '
+    'or feelings, never use commas inside this column. Leave it empty for all other entry types, surname-only '
     'entries, and when no relationship is shown.\n'
     '{column_rule}\n'
     'Example rows that mirror each other: `{example_row_1}` and `{example_row_2}`'
@@ -2495,9 +2495,19 @@ def _example_row(example: Mapping[str, str], columns: Sequence[str], field: str)
     return ",".join(cells)
 
 
+def relations_gender_types(gender_types: Any = None) -> str:
+    """What ``{gender_types}`` reads in the relations text: the comma list of the enabled entry types
+    with gender (a list or an already joined string), or "character" when there is none."""
+    if isinstance(gender_types, str):
+        text = gender_types.strip()
+    else:
+        text = ", ".join(str(t).strip() for t in (gender_types or ()) if str(t).strip())
+    return text or "character"
+
+
 def instruction_text(field: Optional[str] = None, language: Optional[str] = "English",
                      declare_column: bool = False, columns: Optional[Iterable[Any]] = None,
-                     template: Optional[str] = None) -> str:
+                     template: Optional[str] = None, gender_types: Any = None) -> str:
     """The ``{relations_instruction}`` expansion.
 
     ``columns`` is the row layout the prompt asks for. With it the two example rows have
@@ -2505,8 +2515,9 @@ def instruction_text(field: Optional[str] = None, language: Optional[str] = "Eng
     whose other examples end at ``description`` otherwise teaches the model to write them
     there.
     ``template`` replaces the built-in text (a user-edited one); it may use the tokens
-    ``{field}``, ``{language}``, ``{column_rule}``, ``{example_row_1}`` and
+    ``{field}``, ``{language}``, ``{gender_types}``, ``{column_rule}``, ``{example_row_1}`` and
     ``{example_row_2}``, or none.
+    ``gender_types``: the enabled entry types with gender (``relations_gender_types``).
     """
     field = (field or "").strip() or field_name()
     language = (language or "").strip() or "English"
@@ -2523,6 +2534,7 @@ def instruction_text(field: Optional[str] = None, language: Optional[str] = "Eng
     text = text.replace("{example_row_1}", _example_row(_EXAMPLE_ROWS[0], layout, field))
     text = text.replace("{example_row_2}", _example_row(_EXAMPLE_ROWS[1], layout, field))
     text = text.replace("{field}", field).replace("{language}", language)
+    text = text.replace("{gender_types}", relations_gender_types(gender_types))
     if declare_column:
         text = _DECLARE_TEMPLATE.replace("{field}", field) + text
     return text
@@ -2536,11 +2548,12 @@ _PLACEHOLDER_LINE_RE = re.compile(
 
 def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None, field: Optional[str] = None,
                                 language: Optional[str] = None, declare_column: bool = False,
-                                columns: Optional[Iterable[Any]] = None, template: Optional[str] = None) -> Any:
+                                columns: Optional[Iterable[Any]] = None, template: Optional[str] = None,
+                                gender_types: Any = None) -> Any:
     """Expand ``{relations_instruction}`` when tracking is on; remove its whole line when off.
 
     ``template``: a user-edited instruction text (``instruction_text``); one that expands to
-    nothing removes the line as when tracking is off.
+    nothing removes the line as when tracking is off. ``gender_types``: see ``instruction_text``.
     """
     if not isinstance(prompt_text, str) or RELATIONS_PLACEHOLDER not in prompt_text:
         return prompt_text
@@ -2550,7 +2563,7 @@ def apply_relations_placeholder(prompt_text: Any, enabled: Optional[bool] = None
         if language is None:
             language = os.environ.get("GLOSSARY_TARGET_LANGUAGE", "English")
         text = instruction_text(field, language, declare_column=declare_column, columns=columns,
-                                template=template)
+                                template=template, gender_types=gender_types)
         if not text:
             return _PLACEHOLDER_LINE_RE.sub("", prompt_text).replace(RELATIONS_PLACEHOLDER, "")
         return prompt_text.replace(RELATIONS_PLACEHOLDER, text)

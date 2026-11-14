@@ -253,6 +253,7 @@ files = []
 "glm_proxy->PySide6" = { count = 4, reason = "_captcha_window_main: the desktop QtWebEngine window for the AuthZA free-plan captcha (--authza-captcha child process); never reached on mobile, see glm_proxy:_solve_captcha_in_window" }
 "gemini_free->PySide6" = { count = 7, reason = "desktop QtWebEngine helpers for search/gemini; mobile searches through the registered browser_driver (WebViewBridge, U9)" }
 "metadata_batch_translator->PySide6" = { count = 5, reason = "MetadataBatchTranslatorUI dialogs; mobile uses metadata_defaults (U1)" }
+"metadata_batch_translator->qt_widget_helpers" = { count = 2, reason = "MetadataBatchTranslatorUI prompt editors: placeholder links with their live value on hover (desktop dialog)" }
 "multi_api_key_manager->PySide6" = { count = 10, reason = "MultiAPIKeyDialog / RefusalPatternsDialog; mobile uses key_pool_service (U4)" }
 "multi_api_key_manager->ollama_settings_dialog" = { count = 1, reason = "MultiAPIKeyDialog._wrap_model_with_ollama_settings (desktop dialog)" }
 "scan_html_folder->PySide6" = { count = 1, reason = "__main__ custom-detection dialog (never runs on import)" }

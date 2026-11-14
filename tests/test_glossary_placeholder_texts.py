@@ -195,24 +195,25 @@ BASELINE_DIGESTS = {
 }
 
 #: sha256 of the same prompts with the two fixes ({gender_instruction} in Minimal, {language} in the
-#: built-in Balanced/Full prompt); every scenario contained one of the two literals.
+#: built-in Balanced/Full prompt); every scenario contained one of the two literals. The *_rel1 ones also
+#: have the long relations text with {gender_types} (2026-11-14; see relations_as_before).
 CURRENT_DIGESTS = {
     'balanced_desc0_gender0_rel0': 'f936e7c05efd38dce48746aa86f86306c5476e97d84749a9dfe59ac79051e597',
     'minimal_desc0_gender0_rel0': '05a635f37a44a8256649bd3f1ef16d18cb186643173a3bef2ee3da5d064540bb',
-    'balanced_desc0_gender0_rel1': 'ef9907e996e4071703c64ffcdf1d7027158c3a5ac648cbbffdedf8d52416e6b7',
-    'minimal_desc0_gender0_rel1': 'cdea66fc237863813125b10c285a459bc5e5a4ba8a71a9d492f46ec5f29d6dd6',
+    'balanced_desc0_gender0_rel1': 'ed4e3cac8a49548b20360faee62092f4e1e1e1ca7166b57df4d2225a34d24c00',
+    'minimal_desc0_gender0_rel1': '36891d51a43e98e55311e81a496c1e4f0ca0889162b60f535b2f3e5e99ed9a86',
     'balanced_desc0_gender1_rel0': 'cf81dd24ca606a71e62e623d526d14a0d5443397bb3a43c197873ba50aa1c139',
     'minimal_desc0_gender1_rel0': 'cde38f84294d833efc7d7d6b64ced3a1397dcc182c2a469e728d4a61fbb4d0fc',
-    'balanced_desc0_gender1_rel1': '4aa402b0991c3dd8240ed4c7bda82fafbd2fae989f0af5a493195765de918e85',
-    'minimal_desc0_gender1_rel1': 'b430a95cdaf577260b9a1ae74af474900f776a6b15a0be9901b1654372bed9b8',
+    'balanced_desc0_gender1_rel1': 'c88f3264ce85f0b2a67795f3deceae5bc1e5564df3572a686969e2628baf218e',
+    'minimal_desc0_gender1_rel1': 'aae5abdd45d425f08c0e0737b3626dfa987ca60c4f5f7e5f59514b9614028fd1',
     'balanced_desc1_gender0_rel0': 'd0d8bf230f9f5d4a432a090ad0ca012302ed9bc378a41a4dcb6a3ec054b3507a',
     'minimal_desc1_gender0_rel0': '2c16930db10f5ddd35ef5b398fcda808ba0fd9d6144023b482a7c93fb574ddd9',
-    'balanced_desc1_gender0_rel1': '6baa36719158698c6965a4932b64ddab8d1863395ec06f2e9ee03d0b558a23f5',
-    'minimal_desc1_gender0_rel1': 'a150ac3b2bfd9d96a0c5d97833fcc328772f83fea0f2b534134c23b25f172a9b',
+    'balanced_desc1_gender0_rel1': 'aa34b330c2a427382ea7aa4e2ab946d7fa22931c15abc2c50963394fed410fe5',
+    'minimal_desc1_gender0_rel1': '1ea04df6e6fe8f062e15691ea7d78dbf686f3706fcf33cebc14bd57c7447fe19',
     'balanced_desc1_gender1_rel0': '1c05621d24c05a2115bb5aea03d65b671cc9d6ef177e3e721fe40ca39f7c66c1',
     'minimal_desc1_gender1_rel0': '48b4ea7fdb3d1c7b2de65d158a854e05c74be28efcd11d904a12725ac58862aa',
-    'balanced_desc1_gender1_rel1': 'bcddc9adf115239440378e4f1371a7f9a325fedba6c9e092c4bc2cb5f0b65602',
-    'minimal_desc1_gender1_rel1': '45cd2c338e8ca91c8fb7ab6b2c97b9a5e5361f8164bde48cc775acbd3f96076a',
+    'balanced_desc1_gender1_rel1': 'c291d8b0a061472cff7ccd0e9064aec31ca0fb0416f2a53bafb92880af50361a',
+    'minimal_desc1_gender1_rel1': 'd30914c011f96f3e3d1f632ee45b4eacb3f7d97f2d4164fa1fb95fc5726f49c4',
 }
 
 #: {gender_instruction} with the built-in text and the default entry types (character, titles, nicknames)
@@ -237,11 +238,21 @@ RELATIONS_DESCRIPTIONS = (
 )
 
 
+#: {gender_types} in the relations text (owner, 2026-11-14): "for <the entry types with gender> entries only"
+#: and "Leave it empty for all other entry types," instead of "character" / "non-character entries,".
+RELATIONS_TYPES_NOW = re.compile(r"The `relations` column: for [^\n]*? entries only, list")
+RELATIONS_TYPES_BEFORE = "The `relations` column: for character entries only, list"
+RELATIONS_OTHERS_NOW = "Leave it empty for all other entry types, surname-only"
+RELATIONS_OTHERS_BEFORE = "Leave it empty for non-character entries, surname-only"
+
+
 def relations_as_before(text):
     """The prompt with the short {relations_instruction} of aae300f4 (no change without the instruction)."""
     if "The `relations` column:" not in text:
         assert "is its own column" not in text
         return text
+    assert len(RELATIONS_TYPES_NOW.findall(text)) == 1 and text.count(RELATIONS_OTHERS_NOW) == 1
+    text = RELATIONS_TYPES_NOW.sub(RELATIONS_TYPES_BEFORE, text).replace(RELATIONS_OTHERS_NOW, RELATIONS_OTHERS_BEFORE)
     assert text.count(RELATIONS_LABELS_NOW) == 1 and len(RELATIONS_COLUMN_RULE.findall(text)) == 1
     assert len(RELATIONS_EXAMPLE_LINE.findall(text)) == 1
     text = RELATIONS_COLUMN_RULE.sub("", text.replace(RELATIONS_LABELS_NOW, RELATIONS_LABELS_BEFORE))
@@ -482,6 +493,159 @@ def test_relations_template_uses_the_new_token_names():
 def test_relations_tracking_does_not_import_the_extractor():
     source = (SRC / "relations_tracking.py").read_text(encoding="utf-8")
     assert "extract_glossary_from_epub" not in source
+
+
+# =============================================================================================
+# {gender_types} in the relations text (owner, 2026-11-14)
+# =============================================================================================
+
+SECT_TYPES = {"character": {"enabled": True, "has_gender": False}, "sect": {"enabled": True, "has_gender": True},
+              "titles": {"enabled": False, "has_gender": True}, "term": {"enabled": True, "has_gender": False}}
+
+
+def test_relations_text_lists_the_entry_types_with_gender(eg):
+    on = {"GLOSSARY_ENABLE_RELATIONS_TRACKER": "1", "GLOSSARY_MINIMAL_INCLUDE_RELATIONS": "1"}
+    cases = (({}, "character, titles, nicknames"),                  # the default entry types
+             ({"GLOSSARY_CUSTOM_ENTRY_TYPES": json.dumps(SECT_TYPES)}, "sect"),  # a custom type; disabled ones left out
+             ({"GLOSSARY_CUSTOM_ENTRY_TYPES": json.dumps(NO_GENDER_TYPES)}, "character"))  # none: "character"
+    for extra, listed in cases:
+        env = dict(_minimal_env(**on), **extra)
+        for system in (balanced_prompt(env), minimal_prompt(env)):
+            assert f"The `relations` column: for {listed} entries only, list this character's" in system
+            assert "Leave it empty for all other entry types, surname-only entries" in system
+            assert "{gender_types}" not in system
+            assert ("The gender column applies only to" in system) is (listed != "character")
+    assert eg.gender_entry_type_names(SECT_TYPES) == ["sect"]
+    assert eg.gender_instruction_text(SECT_TYPES).startswith("The gender column applies only to sect entries")
+    assert eg.gender_instruction_text(NO_GENDER_TYPES) == ""
+
+
+def test_a_stored_relations_text_without_the_token_is_kept(eg):
+    stored = {"relations_instruction": "My relations rule for characters."}
+    system = _prompt("balanced_desc0_gender1_rel1", stored)
+    assert "\n- My relations rule for characters.\n" in system and "{gender_types}" not in system
+    stored = {"relations_instruction": "Relations for {gender_types} rows."}
+    assert "\n- Relations for character, titles, nicknames rows.\n" in _prompt("balanced_desc0_gender1_rel1", stored)
+
+
+# =============================================================================================
+# placeholder_preview: what a placeholder says right now (the hover text)
+# =============================================================================================
+
+PROBE_TEMPLATE = "Return CSV rows.\n{fields}\n- {relations_instruction}\nAAAA\n%s\nZZZZ"
+PREVIEW_SCENARIOS = ("desc1_gender1_rel1", "desc0_gender0_rel0", "desc0_gender1_rel1", "desc1_gender0_rel1")
+#: Minimal's {min_frequency}/{max_names}/{max_titles}: minimal_prompt passes 1/50/50 (the run reads them from env)
+MINIMAL_LIMITS = {"GLOSSARY_MIN_FREQUENCY": "1", "GLOSSARY_MAX_NAMES": "50", "GLOSSARY_MAX_TITLES": "50"}
+
+
+def _between(system):
+    start = system.index("AAAA\n") + len("AAAA\n")
+    inner = system[start:system.index("ZZZZ", start)]
+    return inner[:-1] if inner.endswith("\n") else inner
+
+
+def _real_insert(mode, env, name, stored=None):
+    """What the real Balanced/Full build_prompt or Minimal request path writes for {name}."""
+    if name in PREVIEW_TOKENS:
+        parent = "relations_instruction" if (env.get("GLOSSARY_ENABLE_RELATIONS_TRACKER") == "1"
+                                             or name != "gender_types") else "gender_instruction"
+        if parent == "gender_instruction":
+            stored = {parent: "{" + name + "}"}
+            template = PROBE_TEMPLATE % "{gender_instruction}"
+        else:  # the relations line comes before the (empty) AAAA/ZZZZ block of the template
+            stored = {parent: "AAAA\n{" + name + "}\nZZZZ"}
+            template = PROBE_TEMPLATE % ""
+    else:
+        template = PROBE_TEMPLATE % ("{" + name + "}")
+    if stored is not None:
+        env = dict(env, **{ENV: json.dumps(stored, ensure_ascii=False)})
+    if mode == "balanced":
+        return _between(balanced_prompt(dict(env, GLOSSARY_SYSTEM_PROMPT=template))), template
+    return _between(minimal_prompt(env, prompt=template)), template
+
+
+PREVIEW_TOKENS = ("gender_types", "field", "column_rule", "example_row_1", "example_row_2")
+
+
+@pytest.mark.parametrize("scenario", PREVIEW_SCENARIOS)
+@pytest.mark.parametrize("mode", ["balanced", "minimal"])
+def test_preview_is_what_the_real_prompt_build_inserts(eg, mode, scenario):
+    env = dict(scenarios()[f"{mode}_{scenario}"][1], **MINIMAL_LIMITS)
+    relations_on = env["GLOSSARY_ENABLE_RELATIONS_TRACKER"] == "1"
+    checked = 0
+    for name in eg.known_placeholder_names(mode):
+        if name == "marker":
+            preview = eg.placeholder_preview(name, mode=mode, settings=env)
+            assert preview["per_request"] and preview["text"] and preview["active"]
+            continue
+        if name in ("chapter_text", "text"):
+            # always replaced with nothing in the system prompt (the chapter is the user message)
+            assert _real_insert(mode, env, name)[0] == ""
+            preview = eg.placeholder_preview(name, mode=mode, settings=env)
+            assert not preview["per_request"] and preview["active"] is False and preview["text"] == ""
+            assert preview["inactive"].startswith("Replaced with nothing in the system prompt")
+            continue
+        if name in PREVIEW_TOKENS and not relations_on and name != "gender_types":
+            preview = eg.placeholder_preview(name, mode=mode, prompt=PROBE_TEMPLATE % "", settings=env)
+            assert preview["active"] is False and preview["text"] == ""
+            continue
+        real, template = _real_insert(mode, env, name)
+        # the settings come from the argument: nothing of the scenario is in os.environ here
+        assert "GLOSSARY_ENABLE_RELATIONS_TRACKER" not in os.environ
+        preview = eg.placeholder_preview(name, mode=mode, prompt=template, settings=env)
+        assert not preview["per_request"] and preview["known"]
+        assert preview["text"] == real, name
+        assert eg.placeholder_expansion(name, mode=mode, prompt=template, settings=env) == real, name
+        assert eg.placeholder_is_active(name, mode=mode, prompt=template, settings=env) is preview["active"]
+        if not preview["active"]:
+            assert real == "", name
+        checked += 1
+    assert checked >= 15
+
+
+def test_preview_flags_names_and_live_settings(eg):
+    assert eg.known_placeholder_names("balanced", tokens=False) == (
+        "fields", "fields1", "language", "entries", "description_mandatory", "description_detailed",
+        "description_in_language", "description_excluded_note", "description_example", "example",
+        "description_name_split_example", "name_split_example", "gender_instruction",
+        "subject_tracking_instruction", "relations_instruction", "chapter_text", "text")
+    assert eg.known_placeholder_names("minimal", tokens=False) == (
+        "fields", "fields1", "language", "entries", "min_frequency", "max_names", "max_titles", "marker",
+        "description_mandatory", "description_detailed", "description_in_language", "description_excluded_note",
+        "description_example", "example", "description_name_split_example", "name_split_example",
+        "gender_instruction", "subject_tracking_instruction", "relations_instruction")
+    assert eg.known_placeholder_names("minimal")[-5:] == PREVIEW_TOKENS
+
+    off = eg.placeholder_preview("{relations_instruction}", settings={"GLOSSARY_ENABLE_RELATIONS_TRACKER": False})
+    assert off["active"] is False and off["text"] == "" and off["note"].startswith("Active when the Relations Tracker")
+    on = eg.placeholder_preview("relations_instruction", settings={"GLOSSARY_ENABLE_RELATIONS_TRACKER": True},
+                                custom_types=SECT_TYPES, language="German")
+    assert on["active"] and on["text"].startswith("The `relations` column: for sect entries only")
+    assert "in German, 1–3 words" in on["text"]
+    # every change shows at once: the same call with other live values says something else
+    assert eg.placeholder_expansion("gender_types", custom_types=NO_GENDER_TYPES,
+                                    settings={"GLOSSARY_ENABLE_RELATIONS_TRACKER": "1"}) == "character"
+    assert eg.placeholder_preview("gender_types", custom_types=NO_GENDER_TYPES)["active"] is False
+    assert eg.placeholder_expansion("gender_types", custom_types=SECT_TYPES) == "sect"
+    assert eg.placeholder_expansion("language", language="French") == "French"
+    assert eg.placeholder_expansion("entries", custom_types=SECT_TYPES) == "Character, Sect, & Term entries"
+    assert eg.placeholder_expansion("fields", fields=["description", "notes"], custom_types=SECT_TYPES) == (
+        "Columns:\ntype, raw_name, translated_name, gender, description, notes\nEntry Types:\ncharacter, sect, term")
+    assert eg.placeholder_expansion("description_mandatory", fields=[]) == ""
+    assert eg.placeholder_is_active("description_mandatory", fields=[]) is False
+    assert eg.placeholder_expansion("description_mandatory", fields=["description"]) == (
+        "The description column is mandatory and must be detailed")
+    assert eg.placeholder_expansion("max_names", mode="minimal", settings={"GLOSSARY_MAX_NAMES": 7}) == "7"
+    marker = eg.placeholder_preview("marker", mode="minimal")
+    assert marker["per_request"] and "context window marker count" in marker["text"]
+    unknown = eg.placeholder_preview("max_names", mode="balanced")
+    assert unknown["known"] is False and unknown["active"] is False and unknown["text"] == ""
+    # a stored text shows, with its own tokens filled in
+    stored = json.dumps({"subject_tracking_instruction": "Track pronouns."})
+    assert eg.placeholder_expansion("subject_tracking_instruction", mode="minimal", settings={
+        "GLOSSARY_INCLUDE_GENDER_CONTEXT": "1", ENV: stored}) == "Track pronouns."
+    # the preview leaves nothing behind for the extraction
+    assert eg._prompt_settings() is None and ENV not in os.environ
 
 
 # =============================================================================================

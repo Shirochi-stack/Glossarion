@@ -359,9 +359,13 @@ UI_SITE_ROOTS = (
     ("translate_headers_standalone.py", "run_translate_headers_now", "other.meta_data"),
 )
 UI_REACH_DEPTH = 3
+#: Read the live values for the placeholder hover tooltips (qt_widget_helpers.link_placeholders): they show
+#: settings, edit none, so they are no UI site of them.
+HOVER_READERS = {"_live_glossary_prompt_settings", "_prompt_placeholder_value", "_glossary_refinement_placeholder_value",
+                 "_single_pass_header_placeholder_value", "_assistant_prompt_placeholder_value"}
 # Never walk into these from a UI root: they touch every setting and are not UI.
 UI_REACH_EXCLUDE = (INIT_FUNCS | SAVE_FUNCS | {n for names in ENV_SITES.values() for n in names}
-                    | {"_glossary_env_mappings", "initialize_environment_variables"})
+                    | {"_glossary_env_mappings", "initialize_environment_variables"} | HOVER_READERS)
 
 ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 CONFIG_NAMES = {"config", "cfg", "_cfg", "conf", "_config", "live_config", "config_dict"}
@@ -2044,7 +2048,8 @@ def _reachability(mod: Module, funcs, roots):
     for qual, site in roots:
         if qual == "*":
             for fn in funcs:
-                result.setdefault(fn.qualname, (site, 9))
+                if fn.name not in HOVER_READERS:
+                    result.setdefault(fn.qualname, (site, 9))
     return result
 
 

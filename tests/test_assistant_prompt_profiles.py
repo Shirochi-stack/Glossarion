@@ -83,9 +83,16 @@ def qapp():
 def _bind_production_methods():
     for name, method in _production_methods(
         "translator_gui.py", "TranslatorGUI",
-        ["show_assistant_prompt_dialog", "_add_combobox_arrow", "_count_assistant_prompt_tokens"],
+        ["show_assistant_prompt_dialog", "_add_combobox_arrow", "_count_assistant_prompt_tokens",
+         # the placeholder links of the prompt editor (display only)
+         "_assistant_prompt_placeholder_value", "_prompt_placeholder_value"],
     ).items():
         setattr(_PromptHarness, name, method)
+    tree = ast.parse((SRC / "translator_gui.py").read_text(encoding="utf-8-sig"))
+    tg_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TranslatorGUI")
+    constant = next(n for n in tg_class.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                    and n.targets[0].id == "_REFINEMENT_SYSTEM_PLACEHOLDERS")
+    _PromptHarness._REFINEMENT_SYSTEM_PLACEHOLDERS = eval(compile(ast.Expression(constant.value), "<constant>", "eval"))
     for name, method in _production_methods(
         "GlossaryManager_GUI.py",
         "GlossaryManagerMixin",

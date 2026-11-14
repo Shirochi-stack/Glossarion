@@ -11408,6 +11408,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             "The existing Assistant Prompt button is used for optional assistant prefill."
         )
         instructions.setWordWrap(True)
+        from qt_widget_helpers import link_placeholders, link_placeholders_in_label
+        link_placeholders_in_label(instructions, self._REFINEMENT_USER_PLACEHOLDERS, self._prompt_placeholder_value)
         layout.addWidget(instructions)
 
         tabs = QTabWidget()
@@ -11486,6 +11488,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             else:
                 user_editor.setPlaceholderText("Optional extra instruction for this refinement mode")
             user_editor.setPlainText(_prompt_value(user_attr, user_config_key, default_user_attr, allow_default=False))
+            link_placeholders(system_editor, self._REFINEMENT_SYSTEM_PLACEHOLDERS, self._prompt_placeholder_value)
+            link_placeholders(user_editor, self._REFINEMENT_USER_PLACEHOLDERS, self._prompt_placeholder_value)
             tab_layout.addWidget(user_editor)
             editors[mode_key] = (system_editor, user_editor)
             tab_index = tabs.addTab(tab, label)
@@ -11742,7 +11746,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self._update_refinement_prompt_button_style()
             self.save_config(show_message=False)
             self.append_log("✅ Refinement prompts updated")
-            dialog.accept()
+            # Confirmed on the button with the Windows sound, like the Multi API Key Manager and the Placeholder
+            # Text editor; the window stays open (no delayed close, owner 2026-11-14), Close closes it.
+            flash_saved(save_btn)
 
         def _reset_prompt_tab(mode_key):
             system_editor, user_editor = editors[mode_key]
@@ -11770,22 +11776,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 self.partial_b2_entries_per_request_spinbox.setValue(-1)
 
         def _confirm_reset(message):
-            msg = QMessageBox(dialog)
-            msg.setWindowTitle("Reset Refinement Prompts")
-            msg.setIcon(QMessageBox.Question)
-            msg.setText(message)
-            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            msg.setDefaultButton(QMessageBox.No)
-            msg.setStyleSheet("""
-                QMessageBox QPushButton {
-                    min-width: 64px;
-                    padding: 5px 12px;
-                }
-                QMessageBox QDialogButtonBox {
-                    qproperty-centerButtons: true;
-                }
-            """)
-            return msg.exec() == QMessageBox.Yes
+            from review_dialog import confirm_prompt_profile_action
+            return confirm_prompt_profile_action(dialog, "Reset Refinement Prompts", message)
 
         def reset_prompt():
             mode_key = tab_mode_by_index.get(tabs.currentIndex())
@@ -11795,29 +11787,33 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             if not _confirm_reset(f"Reset the {tab_label} refinement prompt tab to its defaults?"):
                 return
             _reset_prompt_tab(mode_key)
+            flash_saved(reset_btn, text="✅ Reset!")
 
         def reset_all_prompts():
             if not _confirm_reset("Reset all refinement prompt tabs to their defaults?"):
                 return
             for mode_key in editors:
                 _reset_prompt_tab(mode_key)
+            flash_saved(reset_all_btn, text="✅ All Reset!")
 
-        save_btn = QPushButton("Save")
+        # The Placeholder Text editor's bottom-row style: blue Save, red Resets, grey Close
+        from qt_widget_helpers import dialog_button, flash_saved
+        save_btn = dialog_button("💾 Save", 'save')
         save_btn.clicked.connect(save_prompt)
         save_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(save_btn)
 
-        reset_btn = QPushButton("Reset to Default")
+        reset_btn = dialog_button("🔄 Reset to Default", 'reset')
         reset_btn.clicked.connect(reset_prompt)
         reset_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(reset_btn)
 
-        reset_all_btn = QPushButton("Reset All to Default")
+        reset_all_btn = dialog_button("🔄 Reset All to Default", 'reset')
         reset_all_btn.clicked.connect(reset_all_prompts)
         reset_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(reset_all_btn)
 
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = dialog_button("❌ Close", 'close')
         cancel_btn.clicked.connect(dialog.reject)
         cancel_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(cancel_btn)
@@ -11918,7 +11914,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         prompt_edit.setAcceptRichText(False)
         prompt_edit.setPlainText(current_prompt)
         layout.addWidget(prompt_edit)
-        
+        from qt_widget_helpers import link_placeholders
+        link_placeholders(prompt_edit, self._REFINEMENT_SYSTEM_PLACEHOLDERS, self._assistant_prompt_placeholder_value)
+
         token_count_label = QLabel()
         token_count_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
         token_count_label.setToolTip("Prompt text tokens counted with tiktoken (cl100k_base).")
@@ -20408,6 +20406,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.prompt_text.textChanged.connect(self._adjust_prompt_and_log_sizes)
         
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
+        from qt_widget_helpers import link_placeholders
+        link_placeholders(self.prompt_text, self._SYSTEM_PROMPT_PLACEHOLDERS, self._prompt_placeholder_value)
 
         # Output Token Limit button (row 9, column 0 - below label)
         self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens:,}")
@@ -20543,6 +20543,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.target_lang_warning.setStyleSheet("color: #5a9fd4; font-size: 7pt; margin-top: 6px;")
         self.target_lang_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)  # Allow copy-paste
         self.target_lang_warning.setWordWrap(True)
+        self._update_target_lang_state()  # {target_lang} like a link, with the current language on hover
         self.target_lang_warning.show()
         output_layout.addWidget(self.target_lang_warning)
         
@@ -20763,10 +20764,51 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         """Keep the target-language placeholder hint label present."""
         try:
             if hasattr(self, 'target_lang_warning') and self.target_lang_warning:
-                self.target_lang_warning.setText("Target Language Placeholder {target_lang}")
+                from qt_widget_helpers import link_placeholders_in_label
+                link_placeholders_in_label(self.target_lang_warning, {'target_lang'}, self._prompt_placeholder_value,
+                                           text="Target Language Placeholder {target_lang}")
                 self.target_lang_warning.show()
         except Exception:
             pass
+
+    #: AI prompt placeholders TransateKRtoEN replaces: in the system prompt (build_system_prompt, request
+    #: merging) and in the refinement prompts (_format_refinement_prompt; {html}/{content} in user prompts).
+    _SYSTEM_PROMPT_PLACEHOLDERS = frozenset({'target_lang', 'split_marker_instruction'})
+    _REFINEMENT_SYSTEM_PLACEHOLDERS = frozenset({'target_lang', 'QA_Issues', 'QA_ISSUES', 'qa_issues'})
+    _REFINEMENT_USER_PLACEHOLDERS = _REFINEMENT_SYSTEM_PLACEHOLDERS | {'html', 'content'}
+
+    def _prompt_placeholder_value(self, name):
+        """What a translation / refinement prompt placeholder says now (live widgets), for its hover tooltip."""
+        if name == 'target_lang':
+            try:
+                language = self.target_lang_combo.currentText().strip()
+            except (AttributeError, RuntimeError):
+                language = ''
+            return language or str(self.config.get('output_language') or 'English')
+        if name == 'split_marker_instruction':
+            from prompt_defaults import SPLIT_MARKER_INSTRUCTION
+            if not getattr(self, 'request_merging_enabled_var', False):
+                return {'active': False,
+                        'inactive': "Inactive right now: Request Merging is off, so its line is removed from the prompt."}
+            return {'text': SPLIT_MARKER_INSTRUCTION,
+                    'extra': "Sent in requests that merge more than one chapter; removed from the others."}
+        if name.lower() == 'qa_issues':
+            return {'per_request': True,
+                    'text': "\"QA issue(s) to address: \" followed by the chapter's current character-found QA "
+                            "issues; without QA issues its line is removed."}
+        if name in ('html', 'content'):
+            return {'per_request': True, 'text': "the translated HTML of the chapter being refined."}
+        return ''
+
+    def _assistant_prompt_placeholder_value(self, name):
+        """The Assistant Prompt's placeholders: only refinement requests replace them (_format_refinement_prompt
+        without QA issues); translation requests send the prefill as written."""
+        if name == 'target_lang':
+            return {'text': self._prompt_placeholder_value('target_lang'),
+                    'extra': "Replaced in refinement requests only; translation requests send {target_lang} as written."}
+        return {'active': False,
+                'inactive': "Inactive in refinement requests (no QA issues are given to the assistant prompt): its "
+                            "line is removed. Translation requests send it as written."}
 
     def _create_log_section(self):
         """Create log text area"""

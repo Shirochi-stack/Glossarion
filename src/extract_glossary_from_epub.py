@@ -5,6 +5,7 @@ from instance_plan import instance_payloads_dir, has_enabled_key
 from urllib.parse import unquote
 import json
 import contextlib
+import contextvars
 import hashlib
 import re
 import argparse
@@ -2655,10 +2656,33 @@ def load_config(path: str) -> Dict:
 
     return cfg
 
+# Settings the glossary prompt builders read. A placeholder preview (placeholder_preview) sets them
+# for its own call only; the extraction itself never sets them, so it reads the environment as before.
+_PROMPT_SETTINGS = contextvars.ContextVar('glossary_prompt_settings', default=None)
+
+
+def _prompt_settings():
+    """The preview's settings mapping (ENV names), or None outside a preview."""
+    return _PROMPT_SETTINGS.get()
+
+
+def _prompt_env(name, default=''):
+    """A prompt setting by ENV name: the preview's value when it has one, else os.environ."""
+    settings = _PROMPT_SETTINGS.get()
+    if settings is not None and settings.get(name) is not None:
+        value = settings[name]
+        if isinstance(value, bool):
+            return '1' if value else '0'
+        if isinstance(value, (list, tuple, dict)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+    return os.getenv(name, default)
+
+
 def get_custom_entry_types():
     """Get custom entry types configuration from environment"""
     try:
-        types_json = os.getenv('GLOSSARY_CUSTOM_ENTRY_TYPES', '{}')
+        types_json = _prompt_env('GLOSSARY_CUSTOM_ENTRY_TYPES', '{}')
         result = json.loads(types_json)
         # If empty, return defaults
         if not result:
@@ -3203,12 +3227,13 @@ def _persisted_custom_fields(fields):
 def _extraction_custom_fields(fields):
     """Custom fields the model is asked for; with the Relations Tracker on this always
     includes the relations field (added last when the user's list lacks it)."""
-    if not relations_tracking.tracking_enabled():
+    settings = _prompt_settings()
+    if not relations_tracking.tracking_enabled(settings):
         return fields
     current = list(fields) if isinstance(fields, (list, tuple)) else []
-    if any(relations_tracking.is_relations_field(f) for f in current):
+    if any(relations_tracking.is_relations_field(f, settings) for f in current):
         return current
-    return relations_tracking.apply_relations_field(current, True, relations_tracking.field_name())
+    return relations_tracking.apply_relations_field(current, True, relations_tracking.field_name(settings))
 
 def _align_gender_variant_translation(existing_entry: Dict, new_entry: Dict):
     canonical = existing_entry.get("translated_name") or new_entry.get("translated_name")
@@ -5117,7 +5142,7 @@ def _glossary_description_active(custom_fields=None):
     """
     if custom_fields is None:
         try:
-            custom_fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+            custom_fields = json.loads(_prompt_env('GLOSSARY_CUSTOM_FIELDS', '[]'))
         except Exception:
             custom_fields = []
     return any(
@@ -5209,7 +5234,7 @@ def placeholder_text_overrides(raw=None):
     """The stored placeholder texts ({name: text}) from GLOSSARY_PLACEHOLDER_TEXTS; bad JSON is ignored."""
     global _placeholder_overrides_cache
     if raw is None:
-        raw = os.environ.get(PLACEHOLDER_TEXTS_ENV, '') or ''
+        raw = _prompt_env(PLACEHOLDER_TEXTS_ENV, '') or ''
     if _placeholder_overrides_cache[0] == raw:
         return dict(_placeholder_overrides_cache[1])
     try:
@@ -5256,7 +5281,8 @@ def editable_placeholders():
         {'name': 'relations_instruction', 'default': relations_tracking._INSTRUCTION_TEMPLATE,
          'note': "Active when the Relations Tracker is on (Minimal: and its Include Relations Column); its line "
                  "is removed otherwise. Tokens (all optional): "
-                 "{field} (the relations column name), {language} (target language), {column_rule} (the sentence "
+                 "{field} (the relations column name), {language} (target language), {gender_types} (the entry "
+                 "types with gender, comma-separated; \"character\" when none has gender), {column_rule} (the sentence "
                  "that says which column the relations go in), {example_row_1} and "
                  "{example_row_2} (two example rows in the prompt's column layout). Minimal: when the prompt's "
                  "own column list does not include the relations column, \"Add a `{field}` column as one extra "
@@ -5264,17 +5290,264 @@ def editable_placeholders():
     ]
 
 
+def gender_entry_type_names(custom_types=None):
+    """The enabled entry types with gender, in their configured order: what ``{gender_types}`` lists in
+    the ``{gender_instruction}`` and ``{relations_instruction}`` texts."""
+    if custom_types is None:
+        custom_types = get_custom_entry_types()
+    return [t for t, cfg in (custom_types or {}).items()
+            if (cfg or {}).get('enabled', True) and (cfg or {}).get('has_gender', False)]
+
+
 def gender_instruction_text(custom_types=None):
     """The ``{gender_instruction}`` expansion (Balanced/Full and Minimal): the stored or built-in text with
     ``{gender_types}`` = the enabled entry types with gender; empty when no entry type has gender."""
-    if custom_types is None:
-        custom_types = get_custom_entry_types()
-    gender_types = [t for t, cfg in (custom_types or {}).items()
-                    if (cfg or {}).get('enabled', True) and (cfg or {}).get('has_gender', False)]
+    gender_types = gender_entry_type_names(custom_types)
     if not gender_types:
         return ""
     return placeholder_text('gender_instruction', _GENDER_INSTRUCTION_TEXT).replace(
         '{gender_types}', ', '.join(gender_types))
+
+
+# ── Placeholder preview: what a placeholder says right now ─────────
+# The desktop shows it on hover. Each preview runs the real prompt builder (build_prompt for
+# Balanced/Full, GlossaryManager.build_minimal_system_prompt for Minimal) on the prompt with the
+# placeholder fenced by two marker characters, and returns what the builder put between them.
+
+#: The placeholders each prompt builder replaces ('balanced' = Balanced/Full, 'minimal' = Minimal).
+PREVIEW_PLACEHOLDER_NAMES = {
+    'balanced': ('fields', 'fields1', 'language', 'entries', 'description_mandatory', 'description_detailed',
+                 'description_in_language', 'description_excluded_note', 'description_example', 'example',
+                 'description_name_split_example', 'name_split_example', 'gender_instruction',
+                 'subject_tracking_instruction', 'relations_instruction', 'chapter_text', 'text'),
+    'minimal': ('fields', 'fields1', 'language', 'entries', 'min_frequency', 'max_names', 'max_titles', 'marker',
+                'description_mandatory', 'description_detailed', 'description_in_language',
+                'description_excluded_note', 'description_example', 'example', 'description_name_split_example',
+                'name_split_example', 'gender_instruction', 'subject_tracking_instruction', 'relations_instruction'),
+}
+#: Tokens inside placeholder texts: {gender_types} ({gender_instruction} and {relations_instruction}) and
+#: the {relations_instruction} ones. {language} is a token there too, with the same value as the placeholder.
+PREVIEW_TOKEN_NAMES = ('gender_types', 'field', 'column_rule', 'example_row_1', 'example_row_2')
+#: Placeholders filled with data of each request (nothing to show before a request is sent).
+_PER_REQUEST_NOTES = {
+    ('minimal', 'marker'): "context window marker count (the \"=== CONTEXT N END ===\" windows in the text "
+                           "of each request)",
+}
+#: Placeholders the builder always replaces with nothing (``inactive``: why, shown on hover).
+_ALWAYS_EMPTIED_NOTES = {
+    ('balanced', 'chapter_text'): "Replaced with nothing in the system prompt: the chapter text is sent as the "
+                                  "user message",
+    ('balanced', 'text'): "Replaced with nothing in the system prompt: the chapter text is sent as the user message",
+}
+#: The Glossary Manager tooltip descriptions of the placeholders that have no editable text.
+_DYNAMIC_PLACEHOLDER_NOTES = {
+    'fields': "comma-separated columns/entry types list",
+    'fields1': "\\x1F-separated columns/entry types list (recommended)",
+    'language': "target language",
+    'entries': "enabled custom entry types (comma list with ampersand)",
+    'min_frequency': "minimum term frequency",
+    'max_names': "max character names",
+    'max_titles': "max titles",
+}
+_PROBE_BEGIN = '\x02'
+_PROBE_END = '\x03'
+_DESCRIPTION_ON_PLACEHOLDERS = ('description_mandatory', 'description_detailed', 'description_in_language',
+                                'description_excluded_note', 'description_example',
+                                'description_name_split_example')
+
+
+def _preview_mode(mode):
+    return 'minimal' if str(mode or '').strip().lower() in ('minimal', 'auto') else 'balanced'
+
+
+def known_placeholder_names(mode='balanced', tokens=True):
+    """The names (no braces) placeholder_preview knows for ``mode``; ``tokens`` adds PREVIEW_TOKEN_NAMES."""
+    names = PREVIEW_PLACEHOLDER_NAMES[_preview_mode(mode)]
+    return names + PREVIEW_TOKEN_NAMES if tokens else names
+
+
+def _preview_description_on(mode):
+    if mode == 'minimal':
+        return _prompt_env('GLOSSARY_INCLUDE_DESCRIPTION', '0') == '1'
+    return _glossary_description_active()
+
+
+def _preview_relations_on(mode):
+    if mode == 'minimal':
+        return relations_tracking.minimal_tracking_enabled(_prompt_settings())
+    return relations_tracking.tracking_enabled(_prompt_settings())
+
+
+def _preview_active(name, mode):
+    """Whether the builder puts ``{name}`` in the prompt now (False: its line is removed / it is emptied)."""
+    if name in _DESCRIPTION_ON_PLACEHOLDERS:
+        return _preview_description_on(mode)
+    if name in ('example', 'name_split_example'):
+        return not _preview_description_on(mode)
+    if name == 'gender_instruction':
+        return bool(gender_entry_type_names())
+    if name == 'subject_tracking_instruction':
+        return _prompt_env('GLOSSARY_INCLUDE_GENDER_CONTEXT', '0') == '1'
+    if name == 'relations_instruction':
+        return _preview_relations_on(mode)
+    return True
+
+
+def _preview_build(mode, prompt_text):
+    """The system prompt the real builder makes from ``prompt_text`` with the current settings."""
+    if mode == 'minimal':
+        import GlossaryManager
+        system, _sink = GlossaryManager.build_minimal_system_prompt(
+            prompt_text, '', *GlossaryManager.minimal_prompt_limits())
+        return system
+    values = dict(_prompt_settings() or {})
+    values['GLOSSARY_SYSTEM_PROMPT'] = prompt_text
+    token = _PROMPT_SETTINGS.set(values)
+    try:
+        system, _user = build_prompt('')
+    finally:
+        _PROMPT_SETTINGS.reset(token)
+    return system
+
+
+def _preview_probe(mode, prompt, name, overrides=None, fence=True):
+    """What the builder writes for ``{name}`` in ``prompt`` (the current prompt of ``mode`` when None).
+
+    ``overrides``: placeholder texts used instead of the stored ones; ``fence`` False leaves the
+    placeholder itself alone (a token preview fences the token inside the placeholder text instead).
+    """
+    placeholder = '{' + name + '}'
+    if not isinstance(prompt, str):
+        if mode == 'minimal':
+            prompt = DEFAULT_AUTO_GLOSSARY_PROMPT
+        else:
+            prompt = _prompt_env('GLOSSARY_SYSTEM_PROMPT', '').strip() or DEFAULT_GLOSSARY_PROMPT
+    if placeholder not in prompt:
+        prompt = prompt.rstrip('\n') + '\n' + placeholder
+    if fence:
+        prompt = prompt.replace(placeholder, f'{_PROBE_BEGIN}\n{placeholder}\n{_PROBE_END}', 1)
+    if overrides is not None:
+        values = dict(_prompt_settings() or {})
+        values[PLACEHOLDER_TEXTS_ENV] = json.dumps(overrides, ensure_ascii=False)
+        token = _PROMPT_SETTINGS.set(values)
+        try:
+            built = _preview_build(mode, prompt)
+        finally:
+            _PROMPT_SETTINGS.reset(token)
+    else:
+        built = _preview_build(mode, prompt)
+    start = built.find(_PROBE_BEGIN)
+    end = built.find(_PROBE_END, start + 1)
+    if start < 0 or end < 0:
+        return ''
+    inner = built[start + 1:end]
+    if inner.startswith('\n'):
+        inner = inner[1:]
+    if inner.endswith('\n'):
+        inner = inner[:-1]
+    return inner
+
+
+def _preview_token(name, mode, prompt):
+    """``(active, text)`` for a token inside a placeholder text."""
+    if name == 'gender_types' and not _preview_relations_on(mode):
+        if not gender_entry_type_names():
+            return False, ''
+        parent = 'gender_instruction'
+    elif _preview_relations_on(mode):
+        parent = 'relations_instruction'
+    else:
+        return False, ''
+    overrides = placeholder_text_overrides()
+    overrides[parent] = f'{_PROBE_BEGIN}\n{{{name}}}\n{_PROBE_END}'
+    return True, _preview_probe(mode, prompt, parent, overrides=overrides, fence=False)
+
+
+def placeholder_preview(name, *, mode='balanced', prompt=None, settings=None, custom_types=None,
+                        language=None, fields=None):
+    """What ``{name}`` (braces optional) says in the ``mode`` prompt right now.
+
+    Returns ``{'name', 'mode', 'known', 'active', 'per_request', 'text', 'note'}``:
+    ``text`` is exactly what the prompt builder puts in place of the placeholder (or token);
+    ``active`` False means the builder removes it (its line, or the inline text), ``text`` is then '';
+    ``per_request`` True means it is filled from each request's own text, ``text`` then describes it.
+    An always-emptied placeholder ({chapter_text}/{text} in Balanced/Full) has ``active`` False and an extra
+    ``inactive`` key that says why. ``note`` says when the placeholder is active (editable placeholders) or what it is.
+
+    ``mode``: 'balanced' (Balanced/Full) or 'minimal'. ``prompt``: the prompt being edited (default: the
+    current prompt of the mode); its own wording matters for some placeholders ({fields} is a CSV or a
+    JSON spec, the relations example rows follow its columns). ``settings``: live values by ENV name
+    (GLOSSARY_TARGET_LANGUAGE, GLOSSARY_CUSTOM_FIELDS, GLOSSARY_CUSTOM_ENTRY_TYPES,
+    GLOSSARY_INCLUDE_DESCRIPTION, GLOSSARY_INCLUDE_GENDER_CONTEXT, GLOSSARY_ENABLE_RELATIONS_TRACKER,
+    GLOSSARY_MINIMAL_INCLUDE_RELATIONS, GLOSSARY_RELATIONS_FIELD, GLOSSARY_PLACEHOLDER_TEXTS,
+    GLOSSARY_MIN_FREQUENCY, GLOSSARY_MAX_NAMES, GLOSSARY_MAX_TITLES, GLOSSARY_SYSTEM_PROMPT; lists and dicts
+    may be given as such); a missing one is read from the environment, as the extraction reads it.
+    ``custom_types``, ``language`` and ``fields`` are shortcuts for the first three.
+    """
+    name = str(name or '').strip()
+    if name.startswith('{') and name.endswith('}'):
+        name = name[1:-1].strip()
+    mode = _preview_mode(mode)
+    values = dict(settings or {})
+    if custom_types is not None:
+        values['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types
+    if language is not None:
+        values['GLOSSARY_TARGET_LANGUAGE'] = language
+    if fields is not None:
+        values['GLOSSARY_CUSTOM_FIELDS'] = fields
+    notes = {item['name']: item['note'] for item in editable_placeholders()}
+    result = {'name': name, 'mode': mode, 'known': name in known_placeholder_names(mode), 'active': True,
+              'per_request': False, 'text': '', 'note': notes.get(name) or _DYNAMIC_PLACEHOLDER_NOTES.get(name, '')}
+    if name in PREVIEW_TOKEN_NAMES:
+        result['note'] = notes['gender_instruction' if name == 'gender_types' else 'relations_instruction']
+    if not result['known']:
+        result['active'] = False
+        return result
+    per_request = _PER_REQUEST_NOTES.get((mode, name))
+    if per_request:
+        result.update(per_request=True, text=per_request, note=per_request)
+        return result
+    emptied = _ALWAYS_EMPTIED_NOTES.get((mode, name))
+    if emptied:
+        result.update(active=False, inactive=emptied, note='')
+        return result
+    token = _PROMPT_SETTINGS.set(values)
+    try:
+        if name in PREVIEW_TOKEN_NAMES:
+            active, text = _preview_token(name, mode, prompt)
+        else:
+            active = _preview_active(name, mode)
+            text = _preview_probe(mode, prompt, name) if active else ''
+    finally:
+        _PROMPT_SETTINGS.reset(token)
+    result.update(active=active, text=text)
+    return result
+
+
+def balanced_system_prompt_preview(prompt=None, settings=None):
+    """The Balanced/Full system prompt build_prompt makes now from ``prompt`` (default: the current one)
+    with ``settings`` (as in placeholder_preview): what {glossary_prompt} of the Single Pass Header becomes."""
+    token = _PROMPT_SETTINGS.set(dict(settings or {}))
+    try:
+        if not isinstance(prompt, str) or not prompt.strip():
+            prompt = _prompt_env('GLOSSARY_SYSTEM_PROMPT', '').strip() or DEFAULT_GLOSSARY_PROMPT
+        return _preview_build('balanced', prompt)
+    finally:
+        _PROMPT_SETTINGS.reset(token)
+
+
+def placeholder_expansion(name, *, mode='balanced', prompt=None, settings=None, custom_types=None,
+                          language=None, fields=None):
+    """The text ``{name}`` expands to right now ('' when inactive); see placeholder_preview."""
+    return placeholder_preview(name, mode=mode, prompt=prompt, settings=settings, custom_types=custom_types,
+                               language=language, fields=fields)['text']
+
+
+def placeholder_is_active(name, *, mode='balanced', prompt=None, settings=None, custom_types=None,
+                          language=None, fields=None):
+    """False when the prompt builder removes ``{name}`` now (see placeholder_preview)."""
+    return placeholder_preview(name, mode=mode, prompt=prompt, settings=settings, custom_types=custom_types,
+                               language=language, fields=fields)['active']
 
 
 def _strip_placeholder_line(prompt_text, placeholder):
@@ -5404,7 +5677,7 @@ def _apply_subject_tracking_placeholder(prompt_text, include_gender_context=None
     if not isinstance(prompt_text, str) or '{subject_tracking_instruction}' not in prompt_text:
         return prompt_text
     if include_gender_context is None:
-        include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+        include_gender_context = _prompt_env("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
     if include_gender_context:
         return _expand_line_placeholder(
             prompt_text, '{subject_tracking_instruction}',
@@ -5420,15 +5693,20 @@ def _apply_relations_placeholder(prompt_text, enabled=None, declare_column=False
     ``columns`` is the row layout the prompt asks for: the instruction's example rows
     follow it, so the relations sit in their own column and not in the description's.
     A stored ``relations_instruction`` text (see ``placeholder_text``) replaces the built-in one.
+    Its ``{gender_types}`` lists the enabled entry types with gender (``gender_entry_type_names``).
     """
+    settings = _prompt_settings()
+    if enabled is None:
+        enabled = relations_tracking.tracking_enabled(settings)
     return relations_tracking.apply_relations_placeholder(
         prompt_text,
         enabled=enabled,
-        field=relations_tracking.field_name(),
-        language=os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English'),
+        field=relations_tracking.field_name(settings),
+        language=_prompt_env('GLOSSARY_TARGET_LANGUAGE', 'English'),
         declare_column=declare_column,
         columns=columns,
         template=placeholder_text_overrides().get('relations_instruction'),
+        gender_types=gender_entry_type_names(),
     )
 
 
@@ -5527,8 +5805,8 @@ def _apply_description_rule_placeholders(prompt_text, custom_fields=None, descri
 
 def build_prompt(chapter_text: str) -> tuple:
     """Build the extraction prompt with custom types - returns (system_prompt, user_prompt)"""
-    custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
-    target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
+    custom_prompt = _prompt_env('GLOSSARY_SYSTEM_PROMPT', '').strip()
+    target_language = _prompt_env('GLOSSARY_TARGET_LANGUAGE', 'English')
 
     # Build entries phrase from enabled custom entry types (manual prompt only)
     custom_types = get_custom_entry_types()
@@ -5587,7 +5865,7 @@ def build_prompt(chapter_text: str) -> tuple:
         enabled_types = [(t, cfg) for t, cfg in custom_types.items() if cfg.get('enabled', True)]
         
         # Get custom fields
-        custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+        custom_fields_json = _prompt_env('GLOSSARY_CUSTOM_FIELDS', '[]')
         try:
             custom_fields = _extraction_custom_fields(json.loads(custom_fields_json))
         except:

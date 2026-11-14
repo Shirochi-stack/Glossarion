@@ -76,7 +76,7 @@ def _wrapped_tooltip_html(text, width=430):
 #: {relations_instruction} row of the Balanced/Full and Minimal placeholder tooltip tables.
 _RELATIONS_PLACEHOLDER_TOOLTIP_ROW = (
     "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{relations_instruction}</b></td>"
-    "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The relations column: for character entries only, "
+    "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The relations column: for {gender_types} entries only, "
     "list this character's relationships to other named characters shown in this text, as raw_name: relation...'</i>"
     "<br/>Asks the AI for each character's relationships (Father, Rival, Best Friend...); the Relations Tracker "
     "stores them per chapter instead of in the glossary file."
@@ -805,27 +805,17 @@ class GlossaryManagerMixin:
 
         buttons_row = QHBoxLayout()
         buttons = {}
-        for key, text, background, border, hover in (
-                ('save', "💾 Save", '#2f5f8f', '#4a78a8', '#3f78ad'),
-                ('reset', "Reset to Default", '#6f2f2f', '#944545', '#8a3a3a'),
-                ('reset_all', "Reset All to Defaults", '#6f2f2f', '#944545', '#8a3a3a'),
-                ('close', "Close", '#3a3a3a', '#555555', '#4a4a4a')):
-            button = QPushButton(text)
-            button.setObjectName(f"placeholder_text_{key}_button")
-            button.setAutoDefault(False)
-            button.setFixedHeight(28)
-            button.setStyleSheet(f"""
-                QPushButton {{ background-color: {background}; color: #ffffff; font-size: 11px;
-                    font-weight: bold; border: 1px solid {border}; border-radius: 4px; padding: 0px 12px; }}
-                QPushButton:hover {{ background-color: {hover}; }}
-            """)
-            buttons[key] = button
+        from qt_widget_helpers import dialog_button  # keeps its width: the shorter "Reset!" must not move the row
+        for key, text, kind in (
+                ('save', "💾 Save", 'save'),
+                ('reset', "Reset to Default", 'reset'),
+                ('reset_all', "Reset All to Defaults", 'reset'),
+                ('close', "Close", 'close')):
+            buttons[key] = dialog_button(text, kind)
+            buttons[key].setObjectName(f"placeholder_text_{key}_button")
         buttons_row.addWidget(buttons['save'])
         buttons_row.addWidget(buttons['reset'])
         buttons_row.addWidget(buttons['reset_all'])
-        for key in ('reset', 'reset_all'):  # the shorter "Reset!" confirmation must not move the row
-            buttons[key].ensurePolished()
-            buttons[key].setMinimumWidth(buttons[key].sizeHint().width())
         buttons_row.addStretch()
         buttons_row.addWidget(buttons['close'])
         layout.addLayout(buttons_row)
@@ -865,7 +855,7 @@ class GlossaryManagerMixin:
                 editor.setPlainText(state['drafts'].get(name, effective(name)))
             finally:
                 editor.blockSignals(False)
-            note.setText(notes[name])
+            state.get('set_note', note.setText)(notes[name])
             refresh_status()
 
         def on_select(index):
@@ -959,9 +949,239 @@ class GlossaryManagerMixin:
         dialog.placeholder_status = status
         dialog.placeholder_buttons = buttons
         load(names[0])
+        self._link_placeholder_text_dialog(dialog, combo, note, editor, state)
         self._placeholder_text_dialog = dialog
         dialog.show()
         return dialog
+
+    # ── AI prompt placeholders shown like links; the tooltip says what each says at hover time ──────────
+    #: Tokens replaced inside an editable placeholder text (relations_tracking / gender_instruction_text).
+    _PLACEHOLDER_TEXT_TOKENS = {
+        'gender_instruction': ('gender_types',),
+        'relations_instruction': ('field', 'language', 'gender_types', 'column_rule', 'example_row_1',
+                                  'example_row_2'),
+    }
+    #: Placeholders an inactive prompt build replaces with nothing (the others lose their whole line).
+    _PLACEHOLDERS_EMPTIED_WHEN_INACTIVE = ('description_in_language', 'description_excluded_note',
+                                           'gender_instruction')
+    #: Glossary refinement prompts (glossary_refinement._render_prompt_placeholders); the texts describe them.
+    _GLOSSARY_REFINEMENT_PLACEHOLDERS = {
+        'fields': "comma-separated glossary column schema, including active custom columns.",
+        'columns': "alias for {fields}.",
+        'fields1': "\\x1F-separated glossary column schema, only for prompts that explicitly want Unit Separator.",
+        'entries': "comma-separated active refinement entry types.",
+        'entry_type': "the entry type of the refinement chunk.",
+        'chunk_index': "current refinement chunk number.",
+        'total_chunks': "total chunks for this entry type.",
+    }
+    #: Single Pass Header Prompt (extract_glossary_from_epub.build_single_pass_prompt).
+    _SINGLE_PASS_HEADER_PLACEHOLDERS = {
+        'glossary_prompt': "the Balanced/Full glossary extraction prompt with its placeholders filled in.",
+        'translation_prompt': "the translation system prompt of the request.",
+    }
+
+    def _live_glossary_prompt_settings(self):
+        """The glossary prompt settings as this dialog shows them now (unsaved toggles included), by ENV
+        name, for extract_glossary_from_epub.placeholder_preview."""
+        import copy
+
+        def checked(attr, config_key):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    return bool(widget.isChecked())
+                except RuntimeError:
+                    pass
+            return bool(self.config.get(config_key, False))
+
+        def text_of(attrs, config_key, default):
+            for attr in attrs:
+                widget = getattr(self, attr, None)
+                try:
+                    value = widget.currentText() if isinstance(widget, QComboBox) else widget.text()
+                except (AttributeError, RuntimeError):
+                    continue
+                if str(value).strip():
+                    return str(value).strip()
+            return str(self.config.get(config_key) or default)
+
+        entry_types = copy.deepcopy(getattr(self, 'custom_entry_types', None)
+                                    or self.config.get('custom_entry_types') or {})
+        for type_name, checkbox in (getattr(self, 'type_enabled_checkboxes', None) or {}).items():
+            if isinstance(entry_types.get(type_name), dict):
+                try:
+                    entry_types[type_name]['enabled'] = bool(checkbox.isChecked())
+                except RuntimeError:
+                    pass
+        return {
+            'GLOSSARY_CUSTOM_ENTRY_TYPES': entry_types,
+            'GLOSSARY_CUSTOM_FIELDS': self._relations_current_fields(),
+            'GLOSSARY_TARGET_LANGUAGE': text_of(('glossary_target_language_combo', 'manual_target_language_combo'),
+                                                'glossary_target_language',
+                                                self.config.get('output_language') or 'English'),
+            'GLOSSARY_INCLUDE_DESCRIPTION': checked('include_description_checkbox', 'include_description'),
+            'GLOSSARY_INCLUDE_GENDER_CONTEXT': checked('include_gender_context_checkbox', 'include_gender_context'),
+            'GLOSSARY_ENABLE_RELATIONS_TRACKER': self._relations_tracker_enabled(),
+            'GLOSSARY_MINIMAL_INCLUDE_RELATIONS': self._minimal_relations_enabled(),
+            'GLOSSARY_RELATIONS_FIELD': self._relations_field_name(),
+            'GLOSSARY_PLACEHOLDER_TEXTS': self._stored_placeholder_texts(),
+            'GLOSSARY_MIN_FREQUENCY': text_of(('glossary_min_frequency_entry',), 'glossary_min_frequency', '2'),
+            'GLOSSARY_MAX_NAMES': text_of(('glossary_max_names_entry',), 'glossary_max_names', '50'),
+            'GLOSSARY_MAX_TITLES': text_of(('glossary_max_titles_entry',), 'glossary_max_titles', '30'),
+        }
+
+    def _glossary_prompt_editor_text(self, mode):
+        """The Balanced/Full or Minimal prompt as its editor shows it now (None before the editor exists)."""
+        editor = getattr(self, 'auto_prompt_text' if mode == 'minimal' else 'manual_prompt_text', None)
+        try:
+            return self._sep_from_display(editor.toPlainText()) if editor is not None else None
+        except RuntimeError:
+            return None
+
+    def _glossary_placeholder_value(self, name, mode, settings=None, prompt=None):
+        """What ``{name}`` says in the ``mode`` prompt now (live widgets, the editor's own text), for its tooltip.
+        ``prompt``: the prompt text when it is not the mode's own editor (the Parallel EPUB / manga glossary
+        prompts, which go through the same Balanced/Full build)."""
+        from extract_glossary_from_epub import placeholder_preview
+        value = dict(placeholder_preview(name, mode=mode,
+                                         prompt=prompt if prompt is not None else self._glossary_prompt_editor_text(mode),
+                                         settings=settings or self._live_glossary_prompt_settings()))
+        if not value['active'] and not value.get('inactive'):
+            if name in self._PLACEHOLDERS_EMPTIED_WHEN_INACTIVE:
+                value['inactive'] = "Inactive right now: replaced with nothing."
+            elif name in sum(self._PLACEHOLDER_TEXT_TOKENS.values(), ()):
+                value['inactive'] = "Inactive right now: the placeholder text that holds it is not in the prompt."
+            else:
+                value['inactive'] = "Inactive right now: its line is removed from the prompt."
+        return value
+
+    def _link_glossary_prompt_placeholders(self, widget, mode, prompt=None):
+        """Balanced/Full ('balanced') or Minimal ('minimal') prompt editor or "Available placeholders" line.
+        ``prompt``: a callable giving the prompt text, for an editor outside this dialog."""
+        from extract_glossary_from_epub import known_placeholder_names
+        from qt_widget_helpers import link_placeholders
+        names = frozenset(known_placeholder_names(mode, tokens=False))
+        return link_placeholders(widget, names, lambda name: self._glossary_placeholder_value(
+            name, mode, prompt=prompt() if prompt is not None else None))
+
+    def _checked_glossary_refinement_types(self):
+        """The entry types checked in the refinement "Selected Entry Types" list."""
+        checked = []
+        for i in range(self.glossary_refinement_type_list.count()):
+            item = self.glossary_refinement_type_list.item(i)
+            widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+            if isinstance(widget, QCheckBox):
+                if widget.isChecked():
+                    checked.append(widget.property('entry_type') or widget.text())
+            elif item and item.checkState() == Qt.Checked:
+                checked.append(item.data(Qt.UserRole) or item.text())
+        return checked
+
+    def _glossary_refinement_placeholder_value(self, name):
+        """What a glossary refinement prompt placeholder says now: glossary_refinement._render_prompt_placeholders
+        with the live Custom Fields, entry types, type selection and request mode (unsaved ones included)."""
+        import glossary_refinement
+        if name in ('entry_type', 'chunk_index', 'total_chunks'):
+            return {'per_request': True, 'text': self._GLOSSARY_REFINEMENT_PLACEHOLDERS[name]}
+        settings = self._live_glossary_prompt_settings()
+        if name in ('fields', 'columns', 'fields1'):
+            columns = glossary_refinement._entry_columns([], custom_fields=settings['GLOSSARY_CUSTOM_FIELDS'])
+            text = glossary_refinement._render_prompt_placeholders('{' + name + '}', columns, '')
+            return {'text': text.replace('\x1f', '\\x1F'),
+                    'extra': "Columns the glossary being refined has beyond these (such as gender) are added in "
+                             "their place."}
+
+        def widget_value(attr, read, fallback):
+            widget = getattr(self, attr, None)
+            try:
+                return read(widget) if widget is not None else fallback()
+            except RuntimeError:
+                return fallback()
+
+        sends_all = widget_value('glossary_refinement_chunking_combo', lambda combo: combo.currentIndex() == 1,
+                                 lambda: self._glossary_refinement_chunking_combo_index(self.config) == 1)
+        if not sends_all:
+            return {'per_request': True, 'text': "the entry type of the request (each entry type is sent in a "
+                                                 "separate request)."}
+        type_mode = widget_value('glossary_refinement_type_mode_combo',
+                                 lambda combo: 'selected' if combo.currentIndex() == 1 else 'all',
+                                 lambda: str(self.config.get('glossary_refinement_type_mode', 'all')))
+        selected = widget_value('glossary_refinement_type_list', lambda _list: self._checked_glossary_refinement_types(),
+                                lambda: list(self.config.get('glossary_refinement_selected_types', []) or []))
+        active = [t for t, cfg in settings['GLOSSARY_CUSTOM_ENTRY_TYPES'].items()
+                  if not isinstance(cfg, dict) or cfg.get('enabled', True)]
+        return ", ".join(glossary_refinement.selected_refinement_types(active, type_mode, selected))
+
+    def _single_pass_header_placeholder_value(self, name):
+        """What a Single Pass Header placeholder says now (build_single_pass_translation_system_prompt)."""
+        if name == 'glossary_prompt':
+            from extract_glossary_from_epub import balanced_system_prompt_preview
+            return balanced_system_prompt_preview(self._glossary_prompt_editor_text('balanced'),
+                                                  self._live_glossary_prompt_settings())
+        editor = getattr(self, 'prompt_text', None)
+        text = editor.toPlainText() if editor is not None else str(getattr(self, 'system_prompt', '') or '')
+        language = getattr(self, '_prompt_placeholder_value', lambda _name: '')('target_lang')
+        if language:
+            text = text.replace('{target_lang}', language)
+        return {'text': text, 'extra': "As the request sends it: anything the request adds to the system prompt "
+                                       "(such as the appended glossary) is included."}
+
+    def _link_glossary_refinement_placeholders(self, widget):
+        from qt_widget_helpers import link_placeholders
+        return link_placeholders(widget, frozenset(self._GLOSSARY_REFINEMENT_PLACEHOLDERS),
+                                 self._glossary_refinement_placeholder_value)
+
+    def _link_single_pass_header_placeholders(self, widget):
+        """The Single Pass Header Prompt editor or its hint label."""
+        from qt_widget_helpers import link_placeholders, link_placeholders_in_label
+        link = link_placeholders_in_label if isinstance(widget, QLabel) else link_placeholders
+        return link(widget, frozenset(self._SINGLE_PASS_HEADER_PLACEHOLDERS), self._single_pass_header_placeholder_value)
+
+    def _link_placeholder_text_dialog(self, dialog, combo, note, editor, state):
+        """Placeholder Text editor: the tokens of the selected text (box and note) and the selected
+        placeholder itself (the combo's tooltip) show what they say now, with the text in the box."""
+        from qt_widget_helpers import link_placeholders, link_placeholders_in_label, placeholder_tooltip_for
+
+        def token_names():
+            return frozenset(self._PLACEHOLDER_TEXT_TOKENS.get(state['name'], ()))
+
+        def live(mode_settings=None):
+            settings = self._live_glossary_prompt_settings()
+            texts = dict(settings['GLOSSARY_PLACEHOLDER_TEXTS'])
+            texts[state['name']] = editor.toPlainText()  # unsaved edits included
+            settings['GLOSSARY_PLACEHOLDER_TEXTS'] = texts
+            settings.update(mode_settings or {})
+            return settings
+
+        def per_mode(value_of):
+            sections = [("Balanced/Full", value_of('balanced')), ("Minimal", value_of('minimal'))]
+            return sections[0][1] if sections[0][1] == sections[1][1] else sections
+
+        def token_value(token):
+            parent = state['name']
+            # the token's value inside this text (as when its placeholder is active), then whether it is sent
+            forced = ({'GLOSSARY_ENABLE_RELATIONS_TRACKER': True, 'GLOSSARY_MINIMAL_INCLUDE_RELATIONS': True}
+                      if parent == 'relations_instruction' else {'GLOSSARY_ENABLE_RELATIONS_TRACKER': False})
+
+            def value_of(mode):
+                value = self._glossary_placeholder_value(token, mode, live(forced))
+                if value['active'] and not self._glossary_placeholder_value(parent, mode, live())['active']:
+                    value['extra'] = f"Not sent right now: {{{parent}}} is inactive."
+                elif not value['active'] and parent == 'gender_instruction':
+                    value['inactive'] = "Inactive right now: no enabled entry type has gender."
+                return value
+            return per_mode(value_of)
+
+        def selected_value(name):
+            return per_mode(lambda mode: self._glossary_placeholder_value(name, mode, live()))
+
+        link_placeholders(editor, token_names, token_value)
+        dialog.placeholder_note_links = link_placeholders_in_label(note, token_names, token_value)
+        placeholder_tooltip_for(combo, lambda: state['name'], selected_value)
+        dialog.placeholder_token_value = token_value
+        dialog.placeholder_selected_value = selected_value
+        # load() sets each placeholder's note through this from now on
+        state['set_note'] = lambda text: link_placeholders_in_label(note, token_names, token_value, text=text)
 
     # ── Minimal "Include Relations Column" (Minimal asks for relations only with it and the tracker on) ──
     def _minimal_relations_enabled(self):
@@ -2748,15 +2968,7 @@ class GlossaryManagerMixin:
                     self.config['glossary_refinement_type_mode'] = type_mode
                     self.glossary_refinement_type_mode_var = type_mode
                 if hasattr(self, 'glossary_refinement_type_list'):
-                    selected_refinement_types = []
-                    for i in range(self.glossary_refinement_type_list.count()):
-                        item = self.glossary_refinement_type_list.item(i)
-                        widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
-                        if isinstance(widget, QCheckBox):
-                            if widget.isChecked():
-                                selected_refinement_types.append(widget.property('entry_type') or widget.text())
-                        elif item and item.checkState() == Qt.Checked:
-                            selected_refinement_types.append(item.data(Qt.UserRole) or item.text())
+                    selected_refinement_types = self._checked_glossary_refinement_types()
                     self.config['glossary_refinement_selected_types'] = selected_refinement_types
                     self.glossary_refinement_selected_types_var = selected_refinement_types
                 if hasattr(self, 'glossary_refinement_chunking_combo'):
@@ -3819,6 +4031,7 @@ class GlossaryManagerMixin:
         placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         placeholders_line.setCursorPosition(0)
         self._attach_placeholder_text_menu(placeholders_line)
+        self._link_glossary_prompt_placeholders(placeholders_line, 'balanced')
         placeholders_line.setToolTip(
             "<qt><table width='600' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
             "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{fields}</b></td>"
@@ -3891,6 +4104,7 @@ class GlossaryManagerMixin:
             self._create_glossary_prompt_profile_controls('balanced_full', self.manual_prompt_text)
         )
         prompt_frame_layout.addWidget(self.manual_prompt_text)
+        self._link_glossary_prompt_placeholders(self.manual_prompt_text, 'balanced')
 
         # If the user clears the prompt and leaves the field, restore the default.
         # (Avoids persisting an empty template and doesn't interfere with copy/paste while typing.)
@@ -5286,6 +5500,7 @@ Do not stop after the glossary."""
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
         self._attach_placeholder_text_menu(placeholder_line)
+        self._link_glossary_prompt_placeholders(placeholder_line, 'minimal')
         placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         placeholder_line.setToolTip(
             "<qt><table width='600' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
@@ -5352,6 +5567,7 @@ Do not stop after the glossary."""
             self._create_glossary_prompt_profile_controls('minimal', self.auto_prompt_text)
         )
         glossary_prompt_frame_layout.addWidget(self.auto_prompt_text)
+        self._link_glossary_prompt_placeholders(self.auto_prompt_text, 'minimal')
         
         # Default unified prompt — imported from canonical source of truth
         try:
@@ -7477,6 +7693,7 @@ Do not stop after the glossary."""
         self.single_pass_header_prompt_text = QTextEdit()
         self.single_pass_header_prompt_text.setFixedHeight(130)
         self.single_pass_header_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        self._link_single_pass_header_placeholders(self.single_pass_header_prompt_text)
         single_pass_header_layout.addWidget(self.single_pass_header_prompt_text)
 
         default_single_pass_header = self._default_single_pass_header_prompt()
@@ -7526,6 +7743,7 @@ Do not stop after the glossary."""
         single_pass_header_controls_layout.addWidget(reset_single_pass_header_btn)
         single_pass_header_hint = QLabel("Use {glossary_prompt} and {translation_prompt} placeholders.")
         single_pass_header_hint.setStyleSheet("color: gray; font-size: 9pt;")
+        self._link_single_pass_header_placeholders(single_pass_header_hint)
         single_pass_header_controls_layout.addWidget(single_pass_header_hint)
         single_pass_header_controls_layout.addStretch()
 
@@ -7762,6 +7980,7 @@ Do not stop after the glossary."""
             "<tr><td><b>{total_chunks}</b></td><td>total chunks for this entry type.</td></tr>"
             "</table></qt>"
         )
+        self._link_glossary_refinement_placeholders(placeholder_line)
         prompt_layout.addWidget(placeholder_line)
 
         prompt_layout.addWidget(QLabel("System Prompt:"))
@@ -7772,6 +7991,7 @@ Do not stop after the glossary."""
         if not system_prompt or not str(system_prompt).strip():
             system_prompt = default_system
         self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(system_prompt))
+        self._link_glossary_refinement_placeholders(self.glossary_refinement_system_prompt_text)
         prompt_layout.addWidget(self.glossary_refinement_system_prompt_text)
 
         prompt_layout.addWidget(QLabel("User Prompt (optional):"))
@@ -7780,6 +8000,7 @@ Do not stop after the glossary."""
         default_user = self._default_glossary_refinement_user_prompt()
         self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(self.config.get('glossary_refinement_user_prompt', default_user)))
         self.glossary_refinement_user_prompt_text.setPlaceholderText("Leave empty to send only the glossary content.")
+        self._link_glossary_refinement_placeholders(self.glossary_refinement_user_prompt_text)
         prompt_layout.addWidget(self.glossary_refinement_user_prompt_text)
 
         prompt_layout.insertWidget(1, self._create_refinement_prompt_profile_controls(

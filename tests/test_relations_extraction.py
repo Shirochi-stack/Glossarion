@@ -131,7 +131,9 @@ def test_build_prompt_with_toggle_on_has_instruction_and_column(eg, _env):
     _env.setenv("GLOSSARY_TARGET_LANGUAGE", "Spanish")
     system, _ = eg.build_prompt("text")
     assert rt.RELATIONS_PLACEHOLDER not in system
-    assert "The `relations` column: for character entries only" in system
+    # {gender_types}: the enabled entry types with gender (the defaults: character, titles, nicknames)
+    assert "The `relations` column: for character, titles, nicknames entries only" in system
+    assert "Leave it empty for all other entry types, surname-only entries" in system
     assert "in Spanish, 1–3 words" in system
     assert "extra LAST column" not in system  # Balanced/Full: the column comes from {fields}
     assert "Columns:\ntype, raw_name, translated_name, gender, description, relations" in system

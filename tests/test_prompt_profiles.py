@@ -375,8 +375,14 @@ def _dialog_harness_class():
     for module in (QtCore, QtGui, QtWidgets):
         ns.update({k: getattr(module, k) for k in dir(module) if not k.startswith("_")})
     ns.update({"os": os, "__file__": str(path)})
+    # the TranslatorGUI members the dialog's placeholder links use (display only)
+    link_members = ("_assistant_prompt_placeholder_value", "_prompt_placeholder_value")
+    tg_class = next(n for n in ast.parse((SRC / "translator_gui.py").read_text(encoding="utf-8-sig")).body
+                    if isinstance(n, ast.ClassDef) and n.name == "TranslatorGUI")
+    constants = [n for n in tg_class.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                 and n.targets[0].id == "_REFINEMENT_SYSTEM_PLACEHOLDERS"]
     body = [find_method(n) for n in ("show_assistant_prompt_dialog", "_add_combobox_arrow",
-                                     "_count_assistant_prompt_tokens")] + gm_methods
+                                     "_count_assistant_prompt_tokens") + link_members] + gm_methods + constants
     exec(compile(ast.Module(body=body, type_ignores=[]), "<dialog>", "exec"), ns)
 
     class Harness(QMainWindow):
@@ -400,7 +406,8 @@ def _dialog_harness_class():
             pass
 
     for name in ("show_assistant_prompt_dialog", "_add_combobox_arrow", "_count_assistant_prompt_tokens",
-                 "_disable_combobox_mousewheel", "_apply_halgakos_combo_icons"):
+                 "_disable_combobox_mousewheel", "_apply_halgakos_combo_icons",
+                 "_REFINEMENT_SYSTEM_PLACEHOLDERS") + link_members:
         setattr(Harness, name, ns[name])
     return Harness
 

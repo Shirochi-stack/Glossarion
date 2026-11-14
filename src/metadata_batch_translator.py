@@ -1208,11 +1208,12 @@ class MetadataBatchTranslatorUI:
         self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
             ""))
         tab_layout.addWidget(self.title_user_text)
-        
+
         var_label = QLabel("Variables available: {target_lang} - detected source language")
         var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
+        self._link_prompt_placeholders(self.title_system_text, self.title_user_text, var_label)
         
         tab_layout.addStretch()
     
@@ -1330,11 +1331,12 @@ class MetadataBatchTranslatorUI:
             "Return ONLY a JSON object with chapter numbers as keys.\n"
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
         tab_layout.addWidget(self.header_batch_text)
-        
+
         var_label = QLabel("Variables available: {target_lang} - detected source language")
         var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
+        self._link_prompt_placeholders(self.header_batch_system_text, self.header_batch_text, var_label)
         
         tab_layout.addStretch()
     
@@ -1462,7 +1464,9 @@ class MetadataBatchTranslatorUI:
         var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
-        
+        self._link_prompt_placeholders(self.metadata_batch_text)
+        self._link_prompt_placeholders(*self.field_prompt_widgets.values(), var_label, field_value=True)
+
         tab_layout.addStretch()
         scroll_area.setWidget(scroll_widget)
         
@@ -1708,7 +1712,30 @@ class MetadataBatchTranslatorUI:
         tab_layout.addWidget(output_group)
         
         tab_layout.addStretch()
-    
+
+    def _prompt_placeholder_value(self, name):
+        """What a metadata prompt placeholder says now, for its hover tooltip: {target_lang} is the Output
+        Language of this dialog (the main window's target language until it exists)."""
+        if name == 'field_value':
+            return {'per_request': True, 'text': "the text of the metadata field being translated."}
+        combo = getattr(self, 'output_lang_combo', None)
+        try:
+            language = combo.currentText().strip() if combo is not None else ''
+        except RuntimeError:
+            language = ''
+        from qt_widget_helpers import target_language_now
+        return language or target_language_now(self.gui)
+
+    def _link_prompt_placeholders(self, *widgets, field_value=False):
+        """{target_lang} (and {field_value} in the field prompts) like links, with the live value on hover."""
+        from qt_widget_helpers import link_placeholders, link_placeholders_in_label
+        names = frozenset({'target_lang', 'field_value'} if field_value else {'target_lang'})
+        for widget in widgets:
+            if isinstance(widget, QLabel):
+                link_placeholders_in_label(widget, names, self._prompt_placeholder_value)
+            else:
+                link_placeholders(widget, names, self._prompt_placeholder_value)
+
     def _save_all_prompt_configs(self):
         """Save all prompt configurations"""
         # Book title prompts

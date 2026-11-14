@@ -623,8 +623,10 @@ REWIRE_SPANS = (
     # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
     (735, 735, 4),
     # Placeholder Text editor (right-click an "Available placeholders" line); the profile combo style is shared
-    # its Save flashes "Saved!"; its context menu has readable text; Reset asks and confirms; Reset All
-    (758, 757, 327), (782, 794, 1),
+    # its Save flashes "Saved!"; its context menu has readable text; Reset asks and confirms; Reset All;
+    # its buttons come from qt_widget_helpers.dialog_button (shared with the Refinement Prompt dialog);
+    # AI prompt placeholders shown like links with their current value on hover (qt_widget_helpers)
+    (758, 757, 547), (782, 794, 1),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1799, 379),  # Relations Tracker
     (1800, 1810, 3),
@@ -635,6 +637,7 @@ REWIRE_SPANS = (
     (2461, 2460, 1),  # Relations Tracker
     (2524, 2523, 3),  # Minimal Include Relations Column
     (2538, 2537, 3),  # Relations Tracker
+    (2599, 2607, 1),  # the refinement type-list read is _checked_glossary_refinement_types (placeholder links)
     (2845, 2850, 1), (2891, 2893, 1), (2963, 2965, 4), (2967, 2977, 1), (2993, 2994, 3), (3093, 3093, 6),
     (3106, 3106, 0),  # the stray second "Additional fields to extract" label (it floated over the box) is gone
     (3137, 3139, 4),  # Relations Tracker
@@ -648,15 +651,17 @@ REWIRE_SPANS = (
     # settings_rules glossary compression rule (tests/parity/test_u9_gap_round3.py)
     (3186, 3185, 8),  # Relations Tracker
     (3648, 3648, 1),  # Relations Tracker
-    (3654, 3653, 1),  # Placeholder Text editor
+    (3654, 3653, 2),  # Placeholder Text editor; placeholder links
     (3711, 3710, 1),  # Relations Tracker
+    (3725, 3724, 1),  # placeholder links (Balanced/Full prompt)
     (3770, 3770, 1),  # Relations Tracker
     (3979, 3992, 7), (3998, 3998, 1), (4000, 4008, 2),
     (4144, 4149, 2), (4151, 4156, 2),
     (4598, 4598, 25),  # Minimal Include Relations Column
     (5113, 5113, 1),  # Relations Tracker
-    (5117, 5116, 1),  # Placeholder Text editor
+    (5117, 5116, 2),  # Placeholder Text editor; placeholder links
     (5171, 5170, 1),  # Relations Tracker
+    (5182, 5181, 1),  # placeholder links (Minimal prompt)
     (5189, 5189, 3),  # Relations Tracker
     (5208, 5208, 1),  # Relations Tracker
     (5802, 5809, 1), (5854, 5859, 1),
@@ -665,6 +670,8 @@ REWIRE_SPANS = (
     # the editor's "Glossary File:" ◀ combo ▶ row is qt_widget_helpers.NavComboRow (shared with the QA
     # scanner's glossary name review); its ◀/▶ and arrow-visibility helpers are the row's
     (7072, 7071, 117),  # Relations Tracker
+    # placeholder links: Single Pass Header Prompt and its hint, glossary refinement line and prompts
+    (7200, 7199, 1), (7249, 7248, 1), (7485, 7484, 1), (7495, 7494, 1), (7503, 7502, 1),
     (7601, 7632, 9),
     (7818, 7849, 12), (7867, 7879, 7),
     (7889, 7919, 8),

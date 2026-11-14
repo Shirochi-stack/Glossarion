@@ -413,7 +413,10 @@ PEG_REWIRE_SPANS = (
     # lines 52-512 -> the parallel_epub_core re-export block
     (52, 512, 37),
     # __init__ profiles, _default_chapter_loader, _start_epub_load's loader
-    (795, 799, 1), (802, 807, 1), (814, 818, 1), (1145, 1165, 3),
+    (795, 799, 1), (802, 807, 1), (814, 818, 1),
+    # AI prompt placeholders like links with what they say on hover (wrapper, its help line, system prompt)
+    (912, 911, 1), (1029, 1028, 4), (1052, 1051, 14),
+    (1145, 1165, 3),
     # restore_persisted_selection, _apply_pending_persisted_mapping
     (1280, 1280, 2), (1282, 1292, 2), (1294, 1303, 1), (1450, 1460, 3), (1468, 1467, 1), (1472, 1484, 1),
     (1493, 1493, 1),
