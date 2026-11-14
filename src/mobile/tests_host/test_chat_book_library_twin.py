@@ -19,9 +19,11 @@ Real app objects as in ``test_devfix_issue4`` (fake LLM server, temp storage).
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -130,6 +132,22 @@ async def _start_on(platform: str):
     return tf, app, tester, UiDriver(tester, picker=picker, back=None, poll_ms=100, log=lambda *_a: None)
 
 
+async def _submit_extract(app, driver, raw, cid):
+    """＋ › Extract glossary from the chat. The first long job on Android asks "Keep translations running"
+    first (BackgroundExecution): "Not now", as ``D._send`` answers it."""
+    task = asyncio.ensure_future(app.glossary_feature.submit_extract(
+        [raw], origin={"type": "chat", "cid": str(cid), "label": "Chat"}))
+    deadline = time.monotonic() + 60
+    while not task.done():
+        if await driver.count(text="Keep translations running"):
+            await driver.tap(text="Not now")
+        if time.monotonic() > deadline:
+            task.cancel()
+            raise AssertionError(f"submit_extract did not return for {raw}")
+        await asyncio.sleep(0.05)
+    return task.result()
+
+
 async def _job_done(app, job_id) -> None:
     service = app.job_service
 
@@ -161,8 +179,7 @@ def test_chat_glossary_extraction_alone_gets_the_library_card(iso, migrate_calls
             raw = D._import(app, source)  # ＋ › Files: the Inbox copy
             chats = app.chat_feature.chats
             cid = chats.new_chat()
-            job_id = await app.glossary_feature.submit_extract(
-                [raw], origin={"type": "chat", "cid": str(cid), "label": "Chat"})
+            job_id = await _submit_extract(app, driver, raw, cid)
             await _job_done(app, job_id)
             stem = Path(raw).stem
             out_root = Path(app.paths.output)
