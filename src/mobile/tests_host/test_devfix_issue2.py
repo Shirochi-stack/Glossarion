@@ -19,10 +19,10 @@ app sends to the client recorded), with every folder in ``tmp_path``:
   "Open in Reader" is enabled and opens it;
 * after a translation run (the real ``txt_processor.TextFileProcessor`` split +
   ``TransateKRtoEN.ProgressManager`` progress, one section left untranslated), the in-progress
-  card's Book page "Read translated" opens the TXT workspace: Translated / Original / Bilingual,
+  card's Book page "Open Reader" opens the TXT workspace: Translated / Original / Bilingual,
   the untranslated section shows the placeholder over its raw text, the text-mode position maps
   to the same place in the workspace layout; once compiled (``create_output_structure``) the
-  Completed card opens the Book page and "Start reading" reads the workspace;
+  Completed card opens the Book page and "Open Reader" reads the workspace;
 * Japanese Shift-JIS / CP932 and traditional-Chinese Big5 ``.txt`` files decode as their own
   text (the decode order lists those code pages).
 
@@ -387,7 +387,7 @@ def test_library_txt_books_open_in_the_reader(app_env, tmp_path):
             # ---- the UTF-8 card -> Book page -> read button -> Reader -----------------------------
             book_page, bid = await open_book_page(run, utf8_book)
             label = str(book_page.overview.read_button.content or "")
-            assert "Read" in label or "reading" in label, label
+            assert label == "\U0001f4d6  Open Reader" and book_page.overview.raw_only, label
             await run.driver.tap(key="ov-read")
             screen = await run.reader()
             assert run.route().startswith(f"/reader/{bid}")
@@ -633,7 +633,7 @@ def test_txt_translation_workspace_reads_translated_original_and_bilingual(app_e
             assert book.get("is_in_progress") and run.app.library.bid_for(book) == bid, book
             book_page, _bid = await open_book_page(run, book)
             label = str(book_page.overview.read_button.content or "")
-            assert "Read translated" in label, label
+            assert label == "\U0001f4d6  Open Reader" and not book_page.overview.raw_only, label
             await run.driver.tap(key="ov-read")
             screen = await run.reader()
             session = screen.session
@@ -688,7 +688,8 @@ def test_txt_translation_workspace_reads_translated_original_and_bilingual(app_e
             completed = done[0]
             assert completed.get("type") == "txt", completed
             book_page, cbid = await open_book_page(run, completed, shelf="completed")
-            assert str(book_page.overview.read_button.content or "").strip().endswith("Start reading")
+            assert str(book_page.overview.read_button.content or "") == "\U0001f4d6  Open Reader"
+            assert not book_page.overview.raw_only
             await run.driver.tap(key="ov-read")
             screen = await run.reader()
             session = screen.session

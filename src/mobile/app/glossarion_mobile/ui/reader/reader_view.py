@@ -77,7 +77,7 @@ from glossarion_mobile.ui.reader.session import (
     unsupported_file_message,
     workspace_for_chapter_file,
 )
-from glossarion_mobile.ui.reader.sheets import BookmarksSheet, GlossaryEntryStub, ImageViewer
+from glossarion_mobile.ui.reader.sheets import BookmarksSheet, GlossaryEntryStub
 from glossarion_mobile.ui.reader.toc_drawer import ChaptersDrawer, TocRow, toc_rows
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
@@ -107,6 +107,37 @@ ALREADY_RUNNING = ("A translation is already running.\n"
 #: ⋯ › the Book page (the Library card ⋯ "📑 Open Book Details", the desktop context menu's label)
 DETAILS_LABEL = "Open Book Details"
 NOT_A_LIBRARY_BOOK = "Not a Library book"
+IMAGE_UNAVAILABLE = "This image cannot be shown full screen"
+#: Page images the full-screen viewer shows (``screens.files.IMAGE_VIEW_EXTENSIONS``), by content type.
+_IMAGE_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+                     "image/bmp": ".bmp"}
+
+
+def image_cache_file(data: bytes, cache_dir: Optional[str] = None) -> Optional[str]:
+    """Write a page image to ``<cache>/images/<hash><ext>`` for the full-screen viewer (once per image)
+    and return the path; None when the bytes are no image the viewer can show (SVG, AVIF) or the
+    file cannot be written. Without the app's cache folder it goes to the system temp folder."""
+    import hashlib
+    import tempfile
+
+    from glossarion_mobile.services.reader_server import sniff_image_mime
+
+    ext = _IMAGE_EXTENSIONS.get(sniff_image_mime(data) or "")
+    if not data or ext is None:
+        return None
+    folder = os.path.join(cache_dir or os.path.join(tempfile.gettempdir(), "glossarion-reader"), "images")
+    path = os.path.join(folder, hashlib.sha1(bytes(data)).hexdigest()[:20] + ext)
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) != len(data):
+            os.makedirs(folder, exist_ok=True)
+            partial = path + ".part"
+            with open(partial, "wb") as handle:
+                handle.write(bytes(data))
+            os.replace(partial, path)
+    except OSError as exc:
+        log.warning("reader image could not be cached: %s", exc)
+        return None
+    return path
 
 
 def webview_supported(page: Any) -> bool:
@@ -171,6 +202,11 @@ class ReaderDeps:
     open_book_details: Optional[Callable[[str], Any]] = None
     webview_ok: Optional[Callable[[], bool]] = None
     wakelock: Any = None  # the Reader's holder of the shared wakelock (services.wakelock)
+    # the shell's overlay stack: a page image opens in the full-screen MediaViewer (a pushed ft.View);
+    # pop_overlay() closes the top overlay (the app's back)
+    push_overlay: Optional[Callable[[Any], Any]] = None
+    pop_overlay: Optional[Callable[[], Any]] = None
+    files: Any = None  # FileBridge: the image viewer's Save to… / Share
     extras: dict = field(default_factory=dict)
 
 
@@ -256,6 +292,7 @@ class ReaderScreen(Screen):
         self._painted_bg: Any = None  # the theme background last given to the body / View (``_paint_background``)
         self._mode_busy = False  # a flavour switch is loading (one at a time, ``set_mode``)
         self.panel_open = False  # tablet: the chapters side panel is shown
+        self.image_viewer: Any = None  # the full-screen MediaViewer of a page image (``view_image``)
         self.custom_families: list = []  # Aa › Text: fonts imported with Converter › Load Font…
         self.font_faces: dict = {}  # imported family -> URL served by ReaderServer (@font-face)
         self.scale_hint_shown = False  # UI_SPEC §7.5 "Text size in Aa" (once per Reader)
@@ -430,6 +467,7 @@ class ReaderScreen(Screen):
         self.fallback = FallbackPage(
             on_tap_zone=self._on_fallback_tap, on_pinch=self._on_pinch_step, on_pinch_end=self._on_pinch_end,
             on_paragraph=self._on_paragraph, on_scroll=self._on_fallback_scroll,
+            on_image=lambda data: self._spawn(self.view_image(data)),
         )
         self.fallback.set_size(*self._page_size())
         self.page_slot = ft.Container(expand=True, content=None, bgcolor=self.theme.get("bg"))
@@ -1496,7 +1534,46 @@ class ReaderScreen(Screen):
         elif self.session is not None:
             data = await self._io(self.session.image_bytes, src)
         if data:
-            ImageViewer(data, height=self._size()[1]).show(self.page)
+            await self.view_image(data)
+
+    def _image_viewer_open(self) -> bool:
+        viewer = self.image_viewer
+        views = getattr(self.page, "views", None) or []
+        return viewer is not None and any(v is viewer.view for v in views)
+
+    async def view_image(self, data: bytes) -> Any:
+        """A page image full screen: the app's MediaViewer (black, pinch zoom and pan, double tap to zoom,
+        ✕ Close, Save to… / Share) pushed over the Reader with the shell's overlay stack, so Android back
+        and the iOS back gesture close it first and the Reader underneath keeps its page, scroll position
+        and chrome. The bytes go to a cache file first (the viewer, Save and Share work on files). A
+        second request while it is open (a double tap right after a pinch) is ignored."""
+        if self.disposed or self._image_viewer_open():
+            return None
+        push = self.deps.push_overlay
+        if push is None:
+            log.info("reader: no overlay stack for the image viewer")
+            return None
+        path = await self._io(image_cache_file, data, self.deps.cache_dir)
+        if not path:
+            self.notify(IMAGE_UNAVAILABLE)
+            return None
+        if self.disposed or self._image_viewer_open():
+            return None
+        from glossarion_mobile.ui.screens.files import open_media_viewer
+
+        viewer = open_media_viewer(path, push_overlay=push, pop_overlay=self._close_image_viewer,
+                                   files=self.deps.files, page=self.page, notify=self.deps.notify,
+                                   tablet=self.tablet_layout(), spawn=self._spawn)
+        self.image_viewer = viewer
+        return viewer
+
+    def _close_image_viewer(self, view: Any) -> None:
+        """✕ Close: pop the viewer unless Android back already did (popping again would leave the Reader)."""
+        views = getattr(self.page, "views", None) or []
+        if not any(v is view for v in views):
+            return
+        if self.deps.pop_overlay is not None:
+            self.deps.pop_overlay()
 
     def _turn_chapter(self, direction: int) -> None:
         """Past the last page: the next chapter; before the first: the previous chapter's last page

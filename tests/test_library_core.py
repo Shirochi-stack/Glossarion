@@ -74,7 +74,8 @@ REAL_DEFAULT_OUTPUT_ROOT = library_core._default_output_root
 
 #: Moved functions whose bodies carry a documented U5 edit (seam / Qt replacement).
 ADAPTED_FUNCTIONS = {
-    "library_core": {"_default_output_root", "_count_epub_spine_items", "_parse_epub_details"},
+    "library_core": {"_default_output_root", "_count_epub_spine_items", "_parse_epub_details",
+                     "scan_output_folders"},
     "library_covers": {"_cover_cache_dir", "_download_remote_cover_image", "_extract_cover"},
     "reader_doc": {"_epub_cache_dir", "_reader_image_is_sizeable"},
 }
@@ -560,6 +561,21 @@ def test_adapted_functions_carry_only_the_documented_edits(legacy_tree):
         "os.path.basename(unquote(href))", "os.path.basename(href)") == ast.unparse(legacy_defs["_parse_epub_details"])
     assert ast.unparse(covers["_extract_cover"]).replace(
         "unquote(item_el.get('href', ''))", "item_el.get('href', '')") == ast.unparse(legacy_defs["_extract_cover"])
+    # 2026-11-14: a book with only glossary progress gets a Not started card; nothing else changed
+    def _body(node):
+        return ast.unparse(ast.Module(body=node.body[1:], type_ignores=[]))  # without the docstring
+    scan = _body(core["scan_output_folders"])
+    for before, after in (
+        ("\nfolder_items.extend(_glossary_only_workspaces(roots, seen_folders))", ""),
+        ("\n    glossary_progress = _workspace_glossary_progress(folder)", ""),
+        (" and (not raw_in_library) and (not glossary_progress):", " and (not raw_in_library):"),
+        ("missing_raw_file and (not glossary_progress):", "missing_raw_file:"),
+        ("os.stat(folder if os.path.isdir(folder) or not glossary_progress else glossary_progress)",
+         "os.stat(folder)"),
+    ):
+        assert before in scan, before
+        scan = scan.replace(before, after, 1)
+    assert scan == _body(legacy_defs["scan_output_folders"])
     # cache folders: the override seam only
     assert ast.unparse(covers["_cover_cache_dir"]).replace(
         "_COVER_CACHE_DIR_OVERRIDE or ", "") == ast.unparse(legacy_defs["_cover_cache_dir"])
@@ -1754,6 +1770,106 @@ def test_mobile_import_copies_registers_and_scaffolds(tmp_path, monkeypatch):
     assert Path(translated["imported"][0]).parent == Path(library_core.get_library_translated_dir())
     ip, comp = library_core.scan_library({})
     assert any(b.get("in_library") for b in comp + ip)
+
+
+def _write_glossary_progress(glossary_dir: Path, book: str) -> Path:
+    """What Extract Glossary leaves behind: ``<book>_glossary_progress.json`` + ``<book>_glossary.csv``."""
+    glossary_dir.mkdir(parents=True, exist_ok=True)
+    progress = glossary_dir / f"{book}_glossary_progress.json"
+    progress.write_text(json.dumps({
+        "chapters": {"0": {"status": "completed"}}, "completed": [0], "skipped": [], "failed": [],
+        "merged_indices": [], "chapter_count": 3, "progress_schema_version": "2.2",
+        "indexing": "chapter_index_zero_based"}), encoding="utf-8")
+    (glossary_dir / f"{book}_glossary.csv").write_text(
+        "type,raw_name,translated_name\ncharacter,김철수,Kim Cheolsu\n", encoding="utf-8")
+    return progress
+
+
+def test_glossary_progress_alone_makes_a_not_started_card(tmp_path):
+    output = Path(os.environ["OUTPUT_DIRECTORY"])
+    # Extract Glossary writes <root>/Glossary/<book>/ and creates no workspace <root>/<book>/
+    _write_glossary_progress(output / "Glossary" / "My Book", "My Book")
+    (output / "Empty Folder").mkdir()  # unrelated folders stay off the shelf
+    (output / "Glossary" / "No Progress").mkdir()
+    ((output / "Glossary" / "No Progress") / "No Progress_glossary.csv").write_text("type\n", encoding="utf-8")
+    ip, comp = library_core.scan_library({})
+    assert comp == []
+    assert [b["folder_name"] for b in ip] == ["My Book"]
+    card = ip[0]
+    workspace = str(output / "My Book")
+    assert not os.path.exists(workspace)
+    assert (card["path"], card["output_folder"], card["type"]) == (workspace, workspace, "in_progress")
+    assert (card["translation_state"], card["is_in_progress"]) == ("not_started", True)
+    assert (card["completed_chapters"], card["total_chapters"], card["pending_chapters"]) == (0, 0, 0)
+    assert card["progress_file"] == "" and card["missing_raw_file"] is False
+    # the card's consumers take it: card view, Book page loader, counters
+    library_core.card_progress_view(card)
+    details = library_core.load_book_details(card, {})
+    assert details["details"]["chapters"] == []
+    shelf = library_core.LibraryShelf(ip, comp, {})
+    assert shelf.counts()["missing_raw"] == 0
+
+    # the raw in Library/Raw names the book: the card counts its chapters, still 0 translated
+    raw = write_epub(Path(library_core.get_library_raw_dir()) / "My Book.epub",
+                     [(f"chapter{i}.xhtml", f"Chapter {i}", f"<p>{i}</p>") for i in (1, 2, 3)], title="My Book")
+    ip, _comp = library_core.scan_library({})
+    assert [(b["folder_name"], b["raw_source_path"], b["completed_chapters"], b["total_chapters"])
+            for b in ip] == [("My Book", raw, 0, 3)]
+
+    # translation starts: the same folder, still one card
+    os.makedirs(workspace)
+    (Path(workspace) / "translation_progress.json").write_text(json.dumps({"chapters": {
+        "0_chapter1": {"status": "completed", "original_basename": "chapter1.xhtml",
+                       "output_file": "response_chapter1.html"}}, "chapter_chunks": {}, "version": "2.1"}),
+        encoding="utf-8")
+    (Path(workspace) / "response_chapter1.html").write_text("<p>1</p>", encoding="utf-8")
+    ip, _comp = library_core.scan_library({})
+    assert [(b["path"], b["translation_state"], b["completed_chapters"]) for b in ip] == [
+        (workspace, "in_progress", 1)]
+
+
+def test_deleting_a_glossary_only_card_removes_its_glossary_folder(tmp_path):
+    output = Path(os.environ["OUTPUT_DIRECTORY"])
+    glossary_root = output / "Glossary"
+    _write_glossary_progress(glossary_root / "My Book", "My Book")
+    _write_glossary_progress(glossary_root / "Other Book", "Other Book")  # another glossary-only book
+    # a book with a workspace: its Delete stays the workspace (+ its Library/Raw raw); its glossary is kept
+    _write_glossary_progress(glossary_root / "Started", "Started")
+    started = output / "Started"
+    started.mkdir()
+    (started / "translation_progress.json").write_text(json.dumps({"chapters": {}, "version": "2.1"}),
+                                                       encoding="utf-8")
+    raw = write_epub(Path(library_core.get_library_raw_dir()) / "Started.epub",
+                     [("chapter1.xhtml", "One", "<p>1</p>")], title="Started")
+    ip, comp = library_core.scan_library({})
+    by_name = {b["folder_name"]: b for b in ip}
+    assert set(by_name) == {"My Book", "Other Book", "Started"}
+    shelf = library_core.LibraryShelf(ip, comp, {})
+    plan = shelf.plan_delete([by_name["My Book"]])
+    assert [(label, path, is_folder) for label, path, is_folder, _b in plan["targets"]] == [
+        ("My Book glossary", str(glossary_root / "My Book"), True)]
+    assert not plan["needs_keyword"]  # a Not started card: the simple confirmation, which names the folder
+    assert str(glossary_root / "My Book") in plan["simple_prompt"] and "glossary files" in plan["simple_prompt"]
+    result = shelf.execute_delete(plan)
+    assert result["deleted"] == 1 and not (glossary_root / "My Book").exists()
+    assert (glossary_root / "Other Book").is_dir() and (glossary_root / "Started").is_dir()
+    ip, _comp = library_core.scan_library({})
+    assert sorted(b["folder_name"] for b in ip) == ["Other Book", "Started"]  # the card does not come back
+    plan = shelf.plan_delete([next(b for b in ip if b["folder_name"] == "Started")])
+    assert sorted(path for _l, path, _f, _b in plan["targets"]) == sorted([str(started), raw])
+
+
+def test_glossary_progress_inside_a_workspace_keeps_its_card(tmp_path):
+    output = Path(os.environ["OUTPUT_DIRECTORY"])
+    # a chat run's stash (<workspace>/Glossary/), no raw anywhere: was dropped as an empty workspace
+    _write_glossary_progress(output / "Chat Book" / "Glossary", "Chat Book")
+    # a folder Organize filed away keeps no glossary-only card (its Library/Translated EPUB is the card)
+    _write_glossary_progress(output / "Glossary" / "Filed Book", "Filed Book")
+    library_core._save_origins({"version": 3, "raw": {}, "pairs": {},
+                                "translated": {"Filed Book.epub": str(output / "Filed Book" / "Filed Book.epub")}})
+    ip, comp = library_core.scan_library({})
+    assert [(b["folder_name"], b["translation_state"]) for b in ip] == [("Chat Book", "not_started")]
+    assert comp == []
 
 
 def test_unique_destination_is_the_organize_rule(tmp_path):

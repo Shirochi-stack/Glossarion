@@ -1318,7 +1318,10 @@ def test_fallback_page_live_panel_aa_sheet_and_drawer():
     controls = page.list_view.controls
     assert len(controls) == 4 and page.container.bgcolor == "#f4ecd8"
     assert controls[0].content.size == round(16 * 1.6) and controls[0].content.color == "#3e2c1c"
-    assert isinstance(controls[2].content, ft.Image) and isinstance(controls[3], ft.Divider)
+    # the image sits in a double-tap detector (the full-screen viewer); without on_image it does nothing
+    assert isinstance(controls[2], ft.GestureDetector) and isinstance(controls[2].content.content, ft.Image)
+    assert isinstance(controls[3], ft.Divider)
+    controls[2].on_double_tap(None)
     para = controls[1].content.content
     assert para.size == 16 and [s.text for s in para.spans] == ["a ", "b"]
     controls[1].on_long_press(None)

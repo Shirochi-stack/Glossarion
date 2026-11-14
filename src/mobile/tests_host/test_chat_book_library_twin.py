@@ -19,9 +19,11 @@ Real app objects as in ``test_devfix_issue4`` (fake LLM server, temp storage).
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -110,6 +112,101 @@ def test_chat_book_merges_into_the_not_started_library_book(iso, migrate_calls, 
             assert not any("Attachments" in Path(f).parts for f in folders), folders
             # silent (owner 2026-10-20): no "Added to the Library · Open book" snackbar
             assert not [n for n in notes if n[0] == "Added to the Library"], [n[:2] for n in notes]
+        finally:
+            await D._stop_app(tf, app)
+
+    D._run_scenario(scenario)
+
+
+async def _start_on(platform: str):
+    """``D._start_app`` on ``platform`` (the host driver over the real app, a fake session)."""
+    from host_tester import HostPicker, PyTester
+    from ui_driver import UiDriver
+
+    tf = D._UF._foundations()
+    _m, _conn, session, page, app = await tf._start(platform, width=412)
+    picker = HostPicker({})
+    if getattr(app, "files", None) is not None:
+        app.files._get_picker = lambda: picker
+    tester = PyTester(session, page)
+    return tf, app, tester, UiDriver(tester, picker=picker, back=None, poll_ms=100, log=lambda *_a: None)
+
+
+async def _submit_extract(app, driver, raw, cid):
+    """＋ › Extract glossary from the chat. The first long job on Android asks "Keep translations running"
+    first (BackgroundExecution): "Not now", as ``D._send`` answers it."""
+    task = asyncio.ensure_future(app.glossary_feature.submit_extract(
+        [raw], origin={"type": "chat", "cid": str(cid), "label": "Chat"}))
+    deadline = time.monotonic() + 60
+    while not task.done():
+        if await driver.count(text="Keep translations running"):
+            await driver.tap(text="Not now")
+        if time.monotonic() > deadline:
+            task.cancel()
+            raise AssertionError(f"submit_extract did not return for {raw}")
+        await asyncio.sleep(0.05)
+    return task.result()
+
+
+async def _job_done(app, job_id) -> None:
+    service = app.job_service
+
+    def ended():
+        snap = service.snapshot(job_id)
+        return snap is not None and snap.is_terminal and not service.busy
+
+    assert await D._until(ended, D.RUN_TIMEOUT), service.snapshot(job_id)
+    snap = service.snapshot(job_id)
+    assert snap.state.value == "DONE", (snap.state, snap.error)
+
+
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_chat_glossary_extraction_alone_gets_the_library_card(iso, migrate_calls, platform):
+    """Owner report (2026-11-14): "library flash cards are not being created when there is only glossary
+    progress". A book attached in a chat whose only run is ＋ › Extract glossary (``GlossaryFeature.
+    open_extract_from_chat`` -> ``submit_extract``): the Library shows its Not started card at once, on the
+    folder a later chat translation of the book moves into (one card), its raw file found, and the Book page's
+    Glossary tab and that translation use the glossary the extraction wrote."""
+    source = iso.picks / NAME
+    shutil.copyfile(D.SELFTEST_EPUB, source)
+
+    async def scenario(server):
+        tf, app, tester, driver = await _start_on(platform)
+        try:
+            await D._until(lambda: getattr(app, "chat_feature", None) is not None and app.library is not None
+                           and getattr(app, "glossary_feature", None) is not None, 30)
+            D._configure(app, server)
+            raw = D._import(app, source)  # ＋ › Files: the Inbox copy
+            chats = app.chat_feature.chats
+            cid = chats.new_chat()
+            job_id = await _submit_extract(app, driver, raw, cid)
+            await _job_done(app, job_id)
+            stem = Path(raw).stem
+            out_root = Path(app.paths.output)
+            glossary_dir = out_root / "Glossary" / stem
+            progress = glossary_dir / f"{stem}_glossary_progress.json"
+            assert progress.is_file(), sorted(str(p.relative_to(out_root)) for p in out_root.rglob("*"))
+            assert not (out_root / stem).exists()  # the extraction made no workspace
+
+            books = await _books(app)
+            assert [(b.get("translation_state"), Path(b["output_folder"]).name) for b in books] == [
+                ("not_started", stem)], books
+            book = books[0]
+            assert D._same(app.library.raw_source(book), raw)  # cover, chapters and Translate find the file
+            assert book.get("total_chapters") == D.CHAPTERS and book.get("completed_chapters") == 0
+            assert not book.get("missing_raw_file")
+            from glossarion_mobile.ui.library import progress_model as pm
+
+            assert D._same(pm.find_glossary_progress_path(app.library, book), progress)
+
+            # a later chat translation of the book: the same card, now translated; the glossary stays the book's
+            await D._finish(app, await D._send(app, driver, cid, raw))
+            assert await D._until(lambda: chats.attachment_folders(cid) == [], 30), chats.attachment_folders(cid)
+            books = await _books(app)
+            assert len(books) == 1, [(b.get("translation_state"), b.get("output_folder")) for b in books]
+            assert D._same(books[0]["output_folder"], out_root / stem)
+            assert books[0].get("translation_state") == "completed"
+            assert progress.is_file() and D._same(pm.find_glossary_progress_path(app.library, books[0]), progress)
         finally:
             await D._stop_app(tf, app)
 

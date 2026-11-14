@@ -597,6 +597,9 @@ def test_library_core_is_moved_verbatim_and_reexported():
     # objects, mixins); every name that epub_library defined at BASE_SHA is a move and
     # must stay verbatim, except the documented U5 seams (tests/parity/DISCREPANCIES.md).
     adapted = {"_default_output_root"}  # LibraryEnv output-root seam (desktop never installs one)
+    # 2026-11-14: a book with only glossary progress gets a Not started card; the exact edits are
+    # pinned by tests/test_library_core.py (test_adapted_functions_carry_only_the_documented_edits)
+    adapted.add("scan_output_folders")
     # owner edits made after the move (in library_core, which desktop now uses): (old, new) fragments
     later_edits = {
         # 3646b1a3 "image reference": the image-reference sidecar is a progress sidecar too

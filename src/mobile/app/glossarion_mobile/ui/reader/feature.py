@@ -394,6 +394,9 @@ class ReaderFeature:
             open_book_details=self.open_book_details,
             webview_ok=lambda: webview_supported(page) and self.server is not None,
             wakelock=wakelock,
+            push_overlay=self._push_overlay,
+            pop_overlay=self._go_back,
+            files=files,
             extras=extras,
         )
 
@@ -401,6 +404,17 @@ class ReaderFeature:
         back = getattr(self.app, "back", None)
         if callable(back):
             back()
+
+    def _push_overlay(self, view: Any) -> None:
+        """A full-screen View over the Reader (the page image viewer), on the shell's overlay stack."""
+        shell = getattr(self.app, "shell", None)
+        if shell is None:
+            return
+        shell.push_overlay(view)
+        try:
+            self.page.update()
+        except Exception:
+            pass
 
     def _add_to_glossary(self, term: str, book: Optional[dict] = None) -> Any:
         """Selection › Add to glossary: the GlossaryFeature (installed after the Reader) opens the book's
