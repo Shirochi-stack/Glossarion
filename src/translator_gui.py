@@ -18443,21 +18443,25 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton("❌ Close")
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
 
-        save_btn = QPushButton("💾 Save")
+        save_btn = QPushButton("💾 Saved!")
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        save_btn.ensurePolished()
+        save_btn.setMinimumWidth(save_btn.sizeHint().width())  # the confirmation must not move the row
+        save_btn.setText("💾 Save")
 
         def save_and_confirm():
-            """Save. A successful save closes the window at once (owner, 2026-11-14: no wait) and plays the
-            Windows sound of a save, like the Multi API Key Manager; a failed save leaves the window open."""
+            """Save. The window stays open (owner, 2026-11-14) and a successful save confirms on the button
+            with the Windows sound of a save, like the Refinement Prompt and Placeholder Text Save; a failed
+            save shows its own message and no confirmation."""
             dialog._model_manager_saved = False
             self._save_model_manager_state(list_widget, prefix_table, dialog)
             if dialog._model_manager_saved:
-                from qt_widget_helpers import saved_beep
-                saved_beep()
+                from qt_widget_helpers import flash_saved
+                flash_saved(save_btn)
 
         save_btn.clicked.connect(save_and_confirm)
         button_layout.addWidget(save_btn)
@@ -18488,6 +18492,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         ]
         if dialog is not None:
             dialog._model_manager_draft_active = True
+            dialog._model_manager_saved = False  # an edit after a Save is a draft again
         self._refresh_model_combo_catalog(draft_models, force=True)
         refresh_search_state = getattr(self, '_refresh_model_search_poll_state', None)
         if callable(refresh_search_state):
@@ -18577,9 +18582,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         if wheel_lock_toggle is not None:
             self._apply_combobox_mousewheel_lock(self.model_combo, 'model_mousewheel_locked', True)
         self.append_log(MODEL_LIST_SAVED_LOG)
+        # Save keeps the window open (owner, 2026-11-14): the saved list is what a later Cancel/Close
+        # goes back to, and the window stays a live draft (_preview_model_manager_order).
         dialog._model_manager_saved = True
-        dialog._model_manager_draft_active = False
-        dialog.accept()
+        dialog._model_manager_original_models = list(new_order)
 
     def _collect_custom_prefix_routes_from_table(self, table, dialog):
         """Validate and collect custom prefix routes from the model manager table."""

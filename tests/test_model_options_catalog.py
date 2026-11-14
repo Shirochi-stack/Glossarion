@@ -2609,6 +2609,61 @@ def test_model_manager_failed_config_write_keeps_dialog_open_and_does_not_claim_
     assert logs == ["❌ Model list was not saved; config.json write failed"]
 
 
+def test_model_manager_save_keeps_the_window_open_and_later_edits_are_a_draft_again():
+    """Owner (2026-11-14): Save does not close Manage Models. The saved list is what closing goes back
+    to, and an edit made after the Save is dropped by Close like any unsaved draft."""
+    import translator_gui
+
+    class FakeList:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def item(self, index):
+            return SimpleNamespace(text=lambda: self.values[index])
+
+    old_models = ["provider/a", "provider/b", "provider/c"]
+    refreshes = []
+    accepted = []
+    gui = SimpleNamespace(
+        config={},
+        _model_all_values=list(old_models),
+        model_combo=SimpleNamespace(count=lambda: len(old_models), itemText=lambda index: old_models[index]),
+        _refresh_model_combo_catalog=lambda models, force=False: refreshes.append((list(models), force)),
+        _refresh_model_search_poll_state=lambda: None,
+        save_config=lambda show_message=False: None,
+        append_log=lambda _message: None,
+    )
+    dialog = SimpleNamespace(
+        accept=lambda: accepted.append(True),
+        _model_manager_original_models=list(old_models),
+        _model_manager_saved=False,
+        _model_manager_draft_active=True,
+    )
+    gui._model_manager_dialog = dialog
+
+    translator_gui.TranslatorGUI._save_model_order(gui, FakeList(["provider/a", "provider/b"]), dialog)
+    assert accepted == []  # the window stays open
+    assert dialog._model_manager_saved is True and dialog._model_manager_draft_active is True
+    assert dialog._model_manager_original_models == ["provider/a", "provider/b"]
+
+    # an edit after the Save is a draft again; Close restores what was saved, not the first list
+    translator_gui.TranslatorGUI._preview_model_manager_order(gui, FakeList(["provider/a"]), dialog)
+    assert dialog._model_manager_saved is False
+    del refreshes[:]
+    translator_gui.TranslatorGUI._finish_model_manager_dialog(gui, dialog)
+    assert refreshes == [(["provider/a", "provider/b"], True)]
+    assert gui._model_manager_dialog is None
+
+    # closing right after a Save restores nothing
+    dialog._model_manager_saved = True
+    del refreshes[:]
+    translator_gui.TranslatorGUI._finish_model_manager_dialog(gui, dialog)
+    assert refreshes == []
+
+
 def test_model_manager_draft_updates_search_immediately_and_cancel_restores_it():
     import translator_gui
 
