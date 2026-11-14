@@ -2298,12 +2298,108 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
     return results
 
 
+#: The book glossary's progress file (``extract_glossary_from_epub``: ``<book>_glossary_progress.json``).
+_GLOSSARY_PROGRESS_SUFFIX = "_glossary_progress.json"
+
+
+def _book_glossary_folder_name(book: str) -> str:
+    """``Glossary/<folder>`` of a book (``glossary_paths.sanitize_glossary_folder_name``)."""
+    try:
+        from glossary_paths import sanitize_glossary_folder_name
+    except Exception:
+        return book
+    return sanitize_glossary_folder_name(book)
+
+
+def _workspace_glossary_progress(folder: str) -> str:
+    """The glossary progress file of the book whose workspace is *folder*, '' when there is none.
+
+    The folder need not exist: Extract Glossary writes ``<root>/Glossary/<book>/<book>_glossary_progress.json``
+    and creates no workspace; a finished chat run keeps it in ``<workspace>/Glossary/``.
+    """
+    folder = os.path.normpath(folder)
+    book = os.path.basename(folder)
+    if not book:
+        return ""
+    name = book + _GLOSSARY_PROGRESS_SUFFIX
+    for candidate in (
+        os.path.join(os.path.dirname(folder), "Glossary", _book_glossary_folder_name(book), name),
+        os.path.join(folder, "Glossary", name),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _glossary_only_folder(workspace: str) -> str:
+    """``<root>/Glossary/<book>/`` of a glossary-only card (its workspace *workspace* does not exist),
+    '' otherwise: what Delete removes so the card does not come back on the next scan."""
+    if not workspace or os.path.isdir(workspace):
+        return ""
+    progress = _workspace_glossary_progress(workspace)
+    folder = os.path.dirname(progress) if progress else ""
+    expected = os.path.join(os.path.dirname(os.path.normpath(workspace)), "Glossary")
+    if not folder or os.path.normcase(os.path.dirname(folder)) != os.path.normcase(expected):
+        return ""
+    return folder
+
+
+def _glossary_only_workspaces(roots: list[str], seen_folders: set[str]) -> list[tuple[str, str]]:
+    """``(book, <root>/<book>)`` for each book glossary under ``<root>/Glossary/`` that has a progress
+    file while its workspace folder does not exist yet (only the glossary was extracted).
+
+    Adds each workspace to *seen_folders*. A workspace an Organize filed away (``library_origins``
+    "translated") is left out: its Library/Translated card represents the book.
+    """
+    found: list[tuple[str, str]] = []
+    organized: set[str] | None = None
+    for root in roots:
+        try:
+            it = os.scandir(os.path.join(root, "Glossary"))
+        except OSError:
+            continue
+        with it:
+            entries = [e for e in it if e.is_dir(follow_symlinks=False)]
+        for entry in entries:
+            try:
+                names = os.listdir(entry.path)
+            except OSError:
+                continue
+            for name in names:
+                if not name.lower().endswith(_GLOSSARY_PROGRESS_SUFFIX) or len(name) <= len(_GLOSSARY_PROGRESS_SUFFIX):
+                    continue
+                book = name[: -len(_GLOSSARY_PROGRESS_SUFFIX)]
+                if _book_glossary_folder_name(book).casefold() != entry.name.casefold():
+                    continue  # a stray copy of another book's file
+                workspace = os.path.join(root, book)
+                key = os.path.normcase(os.path.normpath(workspace))
+                if key in seen_folders or os.path.isdir(workspace):
+                    continue
+                if organized is None:
+                    try:
+                        trans_map = _load_origins().get("translated", {}) or {}
+                    except Exception:
+                        trans_map = {}
+                    organized = {
+                        os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(str(p)))))
+                        for p in (trans_map.values() if isinstance(trans_map, dict) else ()) if p
+                    }
+                if os.path.normcase(os.path.normpath(os.path.abspath(workspace))) in organized:
+                    continue
+                seen_folders.add(key)
+                found.append((book, workspace))
+    return found
+
+
 def scan_output_folders(config: dict | None = None) -> list[dict]:
     """Scan the output root(s) for translation folders.
 
     Honors the OUTPUT_DIRECTORY override strictly via :func:`_resolve_output_roots`.
     A folder qualifies when it has either a compiled ``.epub`` *or* a
-    translation_progress.json with at least one recorded chapter.
+    translation_progress.json with at least one recorded chapter. A book
+    whose glossary has progress (:func:`_workspace_glossary_progress`) is
+    listed too, as a Not started card of its workspace ``<root>/<book>``
+    even before that folder exists.
 
     Each result carries ``metadata_json`` (already loaded) so the card/details
     dialog can render without a second filesystem hit.
@@ -2342,6 +2438,7 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     continue
                 seen_folders.add(key)
                 folder_items.append((entry.name, folder))
+    folder_items.extend(_glossary_only_workspaces(roots, seen_folders))
 
     if not folder_items:
         return []
@@ -2386,10 +2483,12 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 raw_source_path, exclude_special=exclude_special, config=config)
         total = max(progress_total, spine_total)
         done = progress_done if progress_total > 0 else fs_done
+        glossary_progress = _workspace_glossary_progress(folder)
 
         if (not compiled and not has_progress
                 and not raw_source_path
-                and fs_done == 0 and not raw_in_library):
+                and fs_done == 0 and not raw_in_library
+                and not glossary_progress):
             return None
 
         missing_raw_file = bool(not raw_source_path and (
@@ -2405,7 +2504,7 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
         else:
             translation_state = "in_progress"
 
-        if translation_state == "not_started" and missing_raw_file:
+        if translation_state == "not_started" and missing_raw_file and not glossary_progress:
             return None
 
         workspace_kind = _detect_workspace_kind(folder, raw_source_path or "")
@@ -2442,7 +2541,8 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 or translation_state == "outdated_progress"
             )
             try:
-                stat = os.stat(folder)
+                # a glossary-only book: no workspace folder yet, its glossary progress dates the card
+                stat = os.stat(folder if os.path.isdir(folder) or not glossary_progress else glossary_progress)
             except OSError:
                 return None
 
@@ -6487,6 +6587,14 @@ class LibraryShelfMixin:
                 if folder and os.path.isdir(folder):
                     _queue(b.get("name") or os.path.basename(folder),
                            folder, True, b)
+                elif folder:
+                    # A glossary-only card (no workspace yet): its book's
+                    # ``<root>/Glossary/<book>/`` folder is what lists it, so
+                    # Delete removes that folder or the card comes back.
+                    glossary_dir = _glossary_only_folder(folder)
+                    if glossary_dir:
+                        _queue(f"{b.get('name') or os.path.basename(folder)} glossary",
+                               glossary_dir, True, b)
                 _queue_library_raw_copy(b)
                 continue
             # Completed but NOT library-filed: the card represents the

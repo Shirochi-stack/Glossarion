@@ -922,6 +922,93 @@ def test_book_page_tabs_render_progress_glossary_and_overview(real_env):
 
 
 @needs_flet
+def test_a_book_with_only_glossary_progress_gets_a_library_card(real_env):
+    """The owner's report: Library cards were not created while a book had only glossary progress. Extract
+    Glossary writes ``Output/Glossary/<book>/`` and no workspace; the Library home now shows a Not started
+    card for ``Output/<book>`` and its Book page opens on the book's Glossary progress."""
+    if _core("glossary_progress_core", "open_glossary_progress") is None:
+        pytest.skip("glossary_progress_core not importable")
+    from glossarion_mobile.ui.library import progress_model as pm
+    from glossarion_mobile.ui.library.book_page import BookPageScreen
+    from glossarion_mobile.ui.library.home import LibraryScreen
+    from glossarion_mobile.ui.router import parse_route
+
+    service = real_env["service"]
+    output = real_env["output"]
+
+    def glossary_only(name):
+        folder = output / "Glossary" / name
+        folder.mkdir(parents=True)
+        progress = folder / f"{name}_glossary_progress.json"
+        progress.write_text(json.dumps({
+            "progress_schema_version": "2.2", "indexing": "chapter_index_zero_based", "chapter_count": 2,
+            "chapters": {"0": {"chapter_index": 0, "status": "completed"}}, "completed": [0],
+            "chapter_filenames": {"0": "ch001.xhtml", "1": "ch002.xhtml"}, "book_title": name}), encoding="utf-8")
+        (folder / f"{name}_glossary.csv").write_text("type,raw_name,translated_name\ncharacter,김,Kim\n",
+                                                     encoding="utf-8")
+        return folder, progress
+
+    gdir, gp = glossary_only("Gloss Book")
+    doomed_dir, _doomed_gp = glossary_only("Delete Me")
+    (output / "Unrelated").mkdir()
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        page = session.page
+        ctx = _ctx(page, service)
+        screen = LibraryScreen(parse_route("/library"), ctx)
+        screen.actions()
+        _mount(page, screen.get_body())
+        await _scanned_screen(screen)
+        page.update()
+        names = sorted(b["name"] for b in service.snapshot.in_progress)
+        assert names == ["Book", "Delete Me", "Gloss Book"] and not service.snapshot.completed
+        # Delete on a glossary-only card: the simple Not started confirmation names the book's glossary folder,
+        # which goes, so the card does not come back; the other books keep their folders
+        doomed = next(b for b in service.snapshot.in_progress if b["name"] == "Delete Me")
+        plan = await asyncio.to_thread(service.plan_delete_blocking, [doomed])
+        assert [(t.label, t.path, t.is_folder) for t in plan.targets] == [("Delete Me glossary", str(doomed_dir), True)]
+        assert not plan.needs_keyword and str(doomed_dir) in plan.simple_prompt
+        assert any("glossary files" in line for line in plan.targets[0].contents), plan.targets[0].contents
+        report = await asyncio.to_thread(service.execute_delete_blocking, plan)
+        assert report.deleted == 1 and not doomed_dir.exists()
+        assert gdir.is_dir() and real_env["ws"].is_dir() and real_env["gp"].is_file()
+        await service.refresh()
+        assert sorted(b["name"] for b in service.snapshot.in_progress) == ["Book", "Gloss Book"]
+        book = next(b for b in service.snapshot.in_progress if b["name"] == "Gloss Book")
+        assert book["output_folder"] == str(output / "Gloss Book") and book["translation_state"] == "not_started"
+        card = screen.cards[book_key(book)]
+        texts = _texts(card.control)
+        assert "Gloss Book" in texts and "NOT STARTED" in texts, texts
+        screen._on_card_tap(card.model)
+        assert ctx.navigated[-1] == ("library.book", {"bid": card.model.bid}, None)
+        screen.dispose()
+        # the Book page of that card: its Glossary progress, the Chapters tab empty but working
+        assert pm.find_glossary_progress_path(service, book) == str(gp)
+        bid = service.bid_for(book)
+        page_screen = BookPageScreen(parse_route(f"/library/book/{bid}?tab=glossary"), _ctx(page, service))
+        page_screen.actions()
+        _mount(page, page_screen.get_body())
+        await page_screen.load()
+        await page_screen.reload_glossary()
+        page.update()
+        glossary = page_screen.glossary_tab
+        assert glossary.view is not None and glossary.view.path == str(gp) and not glossary.view.empty
+        assert [r.status for r in glossary.visible_rows() if r.kind == "chapter"] == ["completed", "not_completed"]
+        page_screen.set_tab("chapters")
+        page.update()
+        page_screen.dispose()
+        # the Book page's Progress manager made the book's workspace (the desktop's empty v2.1 progress file,
+        # progress_core._ensure_progress_view_workspace): still the same one card
+        assert (output / "Gloss Book" / "translation_progress.json").is_file()
+        await service.refresh()
+        assert [b["output_folder"] for b in service.snapshot.in_progress if b["name"] == "Gloss Book"] == [
+            str(output / "Gloss Book")]
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 def test_metadata_editor_and_scan_raw_screens(real_env):
     from glossarion_mobile.ui.library.metadata_editor import MetadataEditorScreen
     from glossarion_mobile.ui.library.scan_raw import ScanRawScreen, normalize_matches, status_line

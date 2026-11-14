@@ -171,12 +171,34 @@ def glossary_outputs(owner: Any, files: list) -> list:
     return out
 
 
+def record_book_inputs(owner: Any, files: list) -> list:
+    """The books among ``files`` go into the Library's raw-inputs registry through the run set-up hook a
+    translation calls (``owner._record_library_raw_inputs``, translation_pipeline's run start). A book whose
+    only work is this glossary then has its Library card with its raw file: the card is the workspace
+    ``<output root>/<stem>``, named after the file like the glossary folder. Image pages are not books."""
+    hook = getattr(owner, "_record_library_raw_inputs", None)
+    try:
+        import library_core
+
+        extensions = tuple(getattr(library_core, "RAW_IMPORT_EXTENSIONS", ()) or ())
+    except Exception:
+        return []
+    books = [p for p in files if extensions and os.path.splitext(str(p))[1].lower() in extensions]
+    if books and callable(hook):
+        try:
+            hook(books)
+        except Exception:  # the registry is a convenience: the extraction runs without it
+            return []
+    return books
+
+
 def run(ctx: Any) -> dict:
     files = resolve_workspace_collisions(ctx, check_inputs(ctx.inputs))  # the desktop selection's rename
     owner = ctx.owner
     extract = owner_method(owner, "run_glossary_extraction_direct")
     owner.selected_files = list(files)
     record_output_dirs(ctx, files)
+    record_book_inputs(owner, files)
     ctx.phase("Generating glossary…")
     with filter_in_child():
         result = extract(force_balanced_request_merging=bool(ctx.params.get("force_balanced_request_merging", False)))
