@@ -12,7 +12,9 @@ each) and reloads on the loading thread when one of them changed.
 import html
 import math
 import os
+import re
 import threading
+import time
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
@@ -71,9 +73,11 @@ SMALL_BUTTON_STYLE = ("QPushButton { background-color: #2d2d2d; color: white; bo
 EDIT_DIALOG_STYLE = (
     "QDialog { background-color: #1e1e1e; color: white; }"
     " QLabel { color: white; }"
-    " QLineEdit, QPlainTextEdit, QSpinBox { background-color: #2d2d2d; color: white;"
+    # No QSpinBox rule on purpose: a border / padding from a stylesheet replaces the spinbox's own buttons with
+    # ones that neither look nor click like the app's other spinboxes (Other Settings' GUI Font Scale).
+    " QLineEdit, QPlainTextEdit { background-color: #2d2d2d; color: white;"
     "  border: 1px solid #4a5568; border-radius: 3px; padding: 4px; }"
-    " QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus { border-color: #5a9fd4; }"
+    " QLineEdit:focus, QPlainTextEdit:focus { border-color: #5a9fd4; }"
     " QComboBox { background-color: #2d2d2d; color: white; border: 1px solid #4a5568;"
     "  border-radius: 3px; padding: 4px 6px; }"
     " QComboBox QAbstractItemView { background-color: #2d2d2d; color: white;"
@@ -106,12 +110,76 @@ def _styled_checkbox(text):
         return QCheckBox(text)
 
 
-def _style_combo(combo):
-    """The Glossary Manager's profile dropdown look (drop-down area and the ▼ overlay)."""
+_SHEET_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_SHEET_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+
+
+def _inherited_sheet(owner):
+    """The stylesheets a child window of ``owner`` would take from it and the windows above it (outermost
+    first), without their spinbox selectors. A window made without a Qt parent sets this as the start of its
+    own sheet: it looks as before, and its spinboxes keep their own buttons."""
+    sheets = []
+    widget = owner
+    while widget is not None:
+        try:
+            text = widget.styleSheet()
+            widget = widget.parentWidget()
+        except RuntimeError:
+            break
+        if text and "{" in text:
+            sheets.append(text)
+
+    def rule(match):
+        selectors = [s for s in match.group(1).split(",") if "SpinBox" not in s]
+        if not any(s.strip() for s in selectors):
+            return ""
+        return ",".join(selectors) + "{" + match.group(2) + "}"
+
+    return "".join(_SHEET_RULE.sub(rule, _SHEET_COMMENT.sub("", text)) + "\n" for text in reversed(sheets))
+
+
+def _stay_above(window, owner, centre=True):
+    """Tie a window made without a Qt parent to ``owner``: it stays above it and, with ``centre``, opens
+    centred on it. Call from the window's showEvent, before the base class's."""
     try:
-        from GlossaryManager_GUI import GlossaryManagerMixin
-        # Both helpers it calls are static, so the class itself can stand in for ``self``.
-        GlossaryManagerMixin._style_glossary_profile_combo(GlossaryManagerMixin, combo)
+        if owner is None or owner.windowHandle() is None:
+            return
+        window.winId()  # the native window exists from here on
+        window.windowHandle().setTransientParent(owner.windowHandle())
+        if centre:
+            middle = owner.frameGeometry().center()
+            window.move(middle.x() - window.width() // 2, max(0, middle.y() - window.height() // 2))
+    except RuntimeError:
+        pass
+
+
+def _plain_spinbox(low, high, value, width=96):
+    """A number box like Other Settings' GUI Font Scale: the plain spinbox (no stylesheet reaches it in these
+    windows), a fixed width, and the mouse wheel does not change it."""
+    spin = QSpinBox()
+    spin.setRange(low, high)
+    spin.setValue(int(value) if value is not None else low)
+    spin.setFixedWidth(width)
+    spin.setFocusPolicy(Qt.StrongFocus)
+    spin.wheelEvent = lambda event: event.ignore()
+    return spin
+
+
+def _style_combo(combo):
+    """The app's dropdown look: the Halgakos icon as the arrow (``review_dialog._halgakos_arrow_style``, as on the
+    Glossary Manager's "Earlier relations shown"), and the mouse wheel does not change the choice."""
+    combo.wheelEvent = lambda event: event.ignore()
+    try:
+        from review_dialog import _halgakos_arrow_style
+        combo.setStyleSheet(_halgakos_arrow_style(16) + """
+            QComboBox { padding-right: 24px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 22px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
     except Exception:
         pass
 
@@ -330,9 +398,15 @@ class _EditDialog(QDialog):
     """A small dark form (Save / Cancel) for one edit."""
 
     def __init__(self, parent, title, intro=None):
-        super().__init__(parent)
+        # No Qt parent: the stylesheets of the windows above reach every child widget, and the Glossary
+        # Manager's has a QSpinBox rule that would replace the spinbox's own buttons. The window still
+        # belongs to ``parent``: it is application modal, stays above it and opens centred on it.
+        super().__init__(None)
+        self._owner = parent
         self.setWindowTitle(title)
-        self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
+        if parent is not None:
+            self.setWindowIcon(parent.windowIcon())
         self.setStyleSheet(EDIT_DIALOG_STYLE)
         self.setMinimumWidth(440)
         layout = QVBoxLayout(self)
@@ -379,10 +453,12 @@ class _EditDialog(QDialog):
         self.fields.append(widget)
         return widget
 
+    def showEvent(self, event):
+        _stay_above(self, self._owner)
+        super().showEvent(event)
+
     def spin(self, label, value, low=0, high=100000):
-        widget = QSpinBox()
-        widget.setRange(low, high)
-        widget.setValue(int(value) if value is not None else low)
+        widget = _plain_spinbox(low, high, value)
         self.form.addRow(label, widget)
         self.fields.append(widget)
         return widget
@@ -461,6 +537,13 @@ class _HidePopup(QFrame):
         layout.addLayout(bottom)
         self.resize(280, 360)
         self._ids = []
+        #: When the list last closed (time.monotonic): a click on the Hide button closes it first, and
+        #: the same click must not open it again.
+        self.closed_at = 0.0
+
+    def hideEvent(self, event):
+        self.closed_at = time.monotonic()
+        super().hideEvent(event)
 
     def set_names(self, names, hidden):
         """``names``: ``[{"id", "label", "raw_name"}]`` in the order listed; ``hidden``: ids."""
@@ -546,12 +629,22 @@ class RelationsDiagramDialog(QDialog):
     _loaded = Signal(object)
 
     def __init__(self, parent=None, glossary_path=None, tracker=None, glossary_entries=None, load_async=False):
-        super().__init__(parent)
+        # No Qt parent, like the edit dialogs: the Glossary Manager's stylesheet would replace the chapter
+        # spinbox's own buttons. The window keeps the look it took from the windows above (their sheets
+        # without the spinbox rules), stays above ``parent`` and closes with it.
+        super().__init__(None)
+        self._owner = parent
+        self._placed = False
         self.setWindowTitle(WINDOW_TITLE)
         self.setModal(False)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self.resize(1200, 780)
+        if parent is not None:
+            for signal in (getattr(parent, 'finished', None), parent.destroyed):
+                if signal is not None:
+                    signal.connect(self._on_owner_gone)
         self.setStyleSheet(
+            _inherited_sheet(parent) +
             "QDialog { background-color: #1e1e1e; color: white; }"
             " QLabel, QCheckBox { color: white; }"
             " QTextBrowser { background-color: #252525; color: #e5e7eb; border: 1px solid #4a5568; }"
@@ -741,8 +834,16 @@ class RelationsDiagramDialog(QDialog):
         entries = self.gender_tracker.get('entries') if isinstance(self.gender_tracker, dict) else None
         return bool(entries) and bool(self._node_info)
 
+    def _on_owner_gone(self, *_args):
+        try:
+            self.close()
+        except RuntimeError:
+            pass
+
     # ── auto-update ─────────────────────────────────────────────────────
     def showEvent(self, event):
+        _stay_above(self, self._owner, centre=not self._placed)
+        self._placed = True
         super().showEvent(event)
         if self.glossary_path and not self._loading:
             self._poll_timer.start()
@@ -886,13 +987,18 @@ class RelationsDiagramDialog(QDialog):
         page_layout.addLayout(controls)
         self._chapter_low = self._chapter_high = None
         self.chapter_label = QLabel("")
-        self.chapter_label.setMinimumWidth(130)
         controls.addWidget(self.chapter_label)
+        # The exact chapter: the slider is too coarse for a book of 2,000 chapters.
+        self.chapter_spin = _plain_spinbox(0, 0, 0)
+        self.chapter_spin.setKeyboardTracking(False)  # a typed number applies when it is complete
+        self.chapter_spin.setToolTip("Show only what was known up to this chapter (type a number or use the slider)")
+        controls.addWidget(self.chapter_spin)
         self.chapter_slider = QSlider(Qt.Horizontal)
         self.chapter_slider.setMinimumWidth(220)
         self.chapter_slider.setToolTip("Show only what was known up to this chapter")
         self._update_chapter_range(initial=True)
         self.chapter_slider.valueChanged.connect(self._on_controls_changed)
+        self.chapter_spin.valueChanged.connect(self.chapter_slider.setValue)
         controls.addWidget(self.chapter_slider, 1)
 
         controls.addWidget(QLabel("Focus:"))
@@ -900,6 +1006,7 @@ class RelationsDiagramDialog(QDialog):
         self.focus_combo.setEditable(True)
         self.focus_combo.setInsertPolicy(QComboBox.NoInsert)
         self.focus_combo.setMinimumWidth(200)
+        _style_combo(self.focus_combo)
         self.focus_combo.setToolTip("Type to search; pick a character to place them in the centre")
         completer = QCompleter(self.focus_combo.model(), self.focus_combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
@@ -1002,6 +1109,21 @@ class RelationsDiagramDialog(QDialog):
                 slider.setEnabled(False)
         finally:
             slider.blockSignals(blocked)
+        self._sync_chapter_spin()
+
+    def _sync_chapter_spin(self):
+        """The chapter number box shows the slider's chapter and has its range."""
+        spin, slider = self.chapter_spin, self.chapter_slider
+        known = slider.isEnabled()
+        blocked = spin.blockSignals(True)
+        try:
+            if known:
+                spin.setRange(slider.minimum(), slider.maximum())
+                spin.setValue(slider.value())
+        finally:
+            spin.blockSignals(blocked)
+        spin.setVisible(known)
+        self.chapter_label.setText("Up to chapter" if known else "All chapters")
 
     def _fill_focus_combo(self):
         """The Focus list (every name of every chapter, unlisted ones too); keeps the current pick."""
@@ -1100,8 +1222,7 @@ class RelationsDiagramDialog(QDialog):
             return
         self._stack.setCurrentWidget(self._page)
         chapter = self.up_to_chapter()
-        shown = chapter if chapter is not None else self._chapter_high
-        self.chapter_label.setText(f"Up to chapter {shown}" if shown is not None else "All chapters")
+        self._sync_chapter_spin()
         show_former = self.show_former_checkbox.isChecked()
         show_unlisted = self.show_unlisted_checkbox.isChecked()
         focus = self.focus_id()
@@ -1508,8 +1629,19 @@ class RelationsDiagramDialog(QDialog):
             self.edit_relation_between(key[1], key[2])
 
     # ── hiding ──────────────────────────────────────────────────────────
+    #: A click on the Hide button within this many seconds of the list closing is the click that closed it.
+    HIDE_TOGGLE_SECONDS = 0.3
+
     def open_hide_popup(self):
-        """The Hide control: a searchable checklist of the names (checked = hidden)."""
+        """The Hide control: a searchable checklist of the names (checked = hidden). The button toggles it:
+        a click while the list is open closes it (the click outside the list has just done so)."""
+        current = self._hide_popup
+        if current is not None:
+            if current.isVisible():
+                current.hide()
+                return current
+            if time.monotonic() - current.closed_at < self.HIDE_TOGGLE_SECONDS:
+                return current
         popup = self.hide_popup()
         popup.popup_below(self.hide_button)
         return popup

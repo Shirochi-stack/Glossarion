@@ -379,14 +379,21 @@ def test_diagram_builds_and_slider_changes_edges(qapp):
     dialog = RelationsDiagramDialog(None, tracker=_synthetic_tracker(), glossary_entries=entries)
     try:
         assert dialog.chapter_slider.minimum() == 1 and dialog.chapter_slider.maximum() == 40
-        assert dialog.chapter_label.text() == "Up to chapter 40"
+        # The chapter is a number box beside the slider (the slider is too coarse for a long book).
+        spin = dialog.chapter_spin
+        assert dialog.chapter_label.text() == "Up to chapter" and not spin.isHidden()
+        assert (spin.minimum(), spin.maximum(), spin.value()) == (1, 40, 40)
         full = dialog.edge_count()
         assert full == 4 and dialog.node_count() == 5
         dialog.chapter_slider.setValue(1)
         assert dialog.edge_count() == 2
-        assert dialog.chapter_label.text() == "Up to chapter 1"
+        assert spin.value() == 1
         dialog.chapter_slider.setValue(40)
         assert dialog.edge_count() == full
+        spin.setValue(1)  # a typed chapter moves the slider and redraws
+        assert dialog.chapter_slider.value() == 1 and dialog.edge_count() == 2 and dialog.up_to_chapter() == 1
+        spin.setValue(40)
+        assert dialog.chapter_slider.value() == 40 and dialog.edge_count() == full and dialog.up_to_chapter() is None
         # focus places a character in the centre (radial layout) without changing the edges
         dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(rt.tracker_key("서윤")))
         assert dialog.edge_count() == full
@@ -1244,6 +1251,68 @@ def test_filters_hide_names_and_persist_in_the_trackers_view(qapp, tmp_path):
         assert dialog.node_count() == 10 and "view" not in stored()
         # Undo works for view choices too.
         assert dialog.undo() is True and dialog.view_settings()["hidden"] == [member, leader]
+    finally:
+        _close(qapp, dialog)
+
+
+def test_widgets_are_the_apps_own(qapp, tmp_path):
+    """Owner, 2026-11-14: the Hide button did not close its list on a second click, the dropdowns had a
+    text arrow instead of the Halgakos icon, and the spinboxes had stylesheet-drawn buttons."""
+    import relations_diagram_dialog as rdd
+    from PySide6.QtWidgets import QComboBox, QDialog, QSpinBox
+
+    glossary = _write_book(tmp_path, _team_tracker())
+    # A parent with the Glossary Manager's kind of stylesheet: nothing of its spinbox rule may arrive.
+    owner = QDialog()
+    owner.setStyleSheet("/* SpinBox styling */ QSpinBox, QDoubleSpinBox { border: 1px solid #4a5568; padding: 4px; }"
+                        " QLineEdit, QSpinBox { color: red; } QSlider::handle:horizontal { background: #5a9fd4; }")
+    owner.show()
+    dialog = rdd.RelationsDiagramDialog(owner, glossary_path=str(glossary))
+    dialog.show()
+    qapp.processEvents()
+    try:
+        assert dialog.parent() is None  # no Qt parent: the owner's sheet does not cascade
+        sheet = dialog.styleSheet()
+        assert "SpinBox" not in sheet and "QLineEdit{ color: red; }" in sheet.replace(" {", "{")
+        assert "QSlider::handle:horizontal" in sheet  # the rest of the inherited look stays
+        assert isinstance(dialog.chapter_spin, QSpinBox) and dialog.chapter_spin.styleSheet() == ""
+        assert "Halgakos.ico" in dialog.focus_combo.styleSheet()
+
+        seen = []
+
+        def look(form):
+            assert form.parent() is None
+            assert "SpinBox" not in form.styleSheet()
+            for field in form.fields:
+                if isinstance(field, QSpinBox):
+                    seen.append("spin")
+                    assert field.styleSheet() == "" and field.maximumWidth() == field.minimumWidth() == 96
+                elif isinstance(field, QComboBox):
+                    seen.append("combo")
+                    assert "Halgakos.ico" in field.styleSheet() and "QComboBox::down-arrow" in field.styleSheet()
+            return False
+
+        dialog._exec = look
+        leader = next(iter(dialog._node_info))
+        dialog.set_gender_for(leader)
+        other = next(k for k in dialog._node_info if k != leader)
+        dialog.edit_relation_between(leader, other)
+        assert "combo" in seen and "spin" in seen
+
+        # The Hide button toggles its list.
+        popup = dialog.open_hide_popup()
+        assert popup.isVisible()
+        dialog.open_hide_popup()
+        assert not popup.isVisible()
+        popup.closed_at = 0.0
+        dialog.open_hide_popup()
+        assert popup.isVisible()
+        popup.hide()  # a click outside closes it; the button's own click right after must not reopen it
+        dialog.open_hide_popup()
+        assert not popup.isVisible()
+
+        owner.close()  # the window goes with the one it was opened from
+        assert not dialog.isVisible()
     finally:
         _close(qapp, dialog)
 

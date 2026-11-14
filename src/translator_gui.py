@@ -496,7 +496,8 @@ def _style_model_popup_view(view):
         palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
         view.setPalette(palette)
         view.setAutoFillBackground(True)
-        view.setStyleSheet(_MODEL_POPUP_STYLE)
+        if view.styleSheet() != _MODEL_POPUP_STYLE:  # the same sheet again re-polishes a full list for nothing
+            view.setStyleSheet(_MODEL_POPUP_STYLE)
         viewport = view.viewport()
         if viewport is not None:
             viewport.setPalette(palette)
@@ -16287,15 +16288,18 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         )
 
         completer = QCompleter(self.model_combo)
-        completer.setModel(completion_model)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
         completer_popup = completer.popup()
         completer_popup.setObjectName("modelCompleterPopup")
+        # Style the popup while it is still empty: a stylesheet set on a view that already shows the catalog
+        # makes Qt ask the model for every row again (about 0.3 s for 4,000 models, on every Manage Models
+        # save: the delay before that window closed).
         _style_model_popup_view(completer_popup)
         completer_popup.setItemDelegate(
             _ModelPollMarkerDelegate(checked_icon, completer_popup)
         )
+        completer.setModel(completion_model)
         self.model_combo.setCompleter(completer)
         old_popup_filter = getattr(
             self.model_combo, '_model_completion_popup_filter', None,
