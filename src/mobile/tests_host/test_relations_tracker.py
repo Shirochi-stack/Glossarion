@@ -516,6 +516,101 @@ def _tracker():
     return tracker
 
 
+@pytest.mark.parametrize("platform", ["android", "ios"])
+def test_the_chapter_number_box_sets_the_exact_chapter(iso, tmp_path, platform):
+    """Owner: the slider is too coarse for a long book, so the chapter can be typed or stepped."""
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session(platform)
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
+        field, slider = diagram.chapter_field, diagram.slider
+        row = diagram.diagram_body.controls[0]
+        assert row.controls == [diagram.chapter_label, diagram.chapter_minus, field, diagram.chapter_plus]
+        assert diagram.diagram_body.controls[1].controls == [slider]
+        assert (slider.min, slider.max, field.value, field.disabled) == (1, 5, "5", False)
+        # typing a chapter and pressing Done moves the slider and redraws
+        field.on_focus(None)
+        field.value = "1"
+        field.on_submit(None)
+        assert diagram.chapter == 1 and slider.value == 1 and diagram.edge_count() == 1
+        field.on_blur(None)  # the blur after Done commits nothing more
+        assert diagram.chapter == 1
+        # a tap outside commits too
+        field.on_focus(None)
+        field.value = "3"
+        field.on_tap_outside(None)
+        assert diagram.chapter == 3 and slider.value == 3
+        # a number outside the tracked chapters is held to them; the box shows what was applied
+        for typed, applied in (("2000", 5), ("0", 1), ("-4", 1), ("2.6", 3)):
+            field.on_focus(None)
+            field.value = typed
+            field.on_blur(None)
+            assert (diagram.chapter, slider.value, field.value) == (applied, applied, str(applied)), typed
+        # not a number: the chapter stays and the box shows it again
+        for typed in ("abc", "", "nan", "inf"):
+            field.on_focus(None)
+            field.value = typed
+            field.on_blur(None)
+            assert (diagram.chapter, field.value) == (3, "3"), typed
+        # − and + step one chapter and stop at the ends
+        diagram.chapter_minus.on_click(None)
+        assert (diagram.chapter, field.value, slider.value) == (2, "2", 2)
+        diagram.chapter_minus.on_click(None)
+        diagram.chapter_minus.on_click(None)
+        assert diagram.chapter == 1 and diagram.edge_count() == 1
+        for _ in range(6):
+            diagram.chapter_plus.on_click(None)
+        assert (diagram.chapter, field.value) == (5, "5") and diagram.edge_count() == 2
+        # dragging the slider updates the box
+        slider.value = 2.0
+        slider.on_change(types.SimpleNamespace(control=slider))
+        assert field.value == "2"
+        slider.on_change_end(types.SimpleNamespace(control=slider))
+        assert diagram.chapter == 2 and field.value == "2"
+        # a number being typed survives a redraw from new file contents
+        field.on_focus(None)
+        field.value = "4"
+        diagram._apply_state(tracker=_tracker())
+        assert field.value == "4" and diagram.chapter == 2
+        field.on_blur(None)
+        assert diagram.chapter == 4 and slider.value == 4
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_chapter_number_box_is_off_for_a_single_chapter(iso, tmp_path):
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
+        rt = diagram.core
+        one = rt.empty_tracker()
+        rt.record_relations(one, [{"raw_name": "서윤", "translated_name": "Seo-yun", "relations": "하린: Friend"},
+                                  {"raw_name": "하린", "translated_name": "Ha-rin", "relations": "서윤: Friend"}],
+                            field="relations", chapter_index=2, chapter_num=3, chapter_file="ch3.html")
+        diagram._apply_state(tracker=one)
+        assert diagram.chapter == 3 and diagram.chapter_field.value == "3"
+        assert diagram.chapter_field.disabled and diagram.chapter_minus.disabled and diagram.chapter_plus.disabled
+        diagram.step_chapter(1)
+        assert diagram.chapter == 3
+        diagram._apply_state(tracker=_tracker())  # more chapters again: the box works again
+        assert not diagram.chapter_field.disabled and not diagram.chapter_plus.disabled
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram, edge_label_text
 
@@ -529,7 +624,8 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         conn, session = _TB._fake_session("android")
         ctx = _ctx(session.page, store, schema)
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=entries)
-        assert not diagram.empty and diagram.chapter == 5 and diagram.chapter_label.value == "Up to chapter 5"
+        assert not diagram.empty and diagram.chapter == 5 and diagram.chapter_label.value == "Up to chapter"
+        assert diagram.chapter_field.value == "5"
         assert diagram.edge_count() == 2 and diagram.node_count() == 3
         lines = [s for s in diagram.canvas.shapes if type(s).__name__ == "Line"]
         assert len(lines) == 2
@@ -557,7 +653,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         diagram.set_focus(None)
         assert diagram.positions == positions
         diagram.set_chapter(1)
-        assert diagram.edge_count() == 1 and diagram.chapter_label.value == "Up to chapter 1"
+        assert diagram.edge_count() == 1 and diagram.chapter_field.value == "1"
         assert diagram.positions == positions  # nodes stay put while the slider moves
         diagram.set_chapter(5)
         diagram.set_former(False)
@@ -1255,7 +1351,7 @@ def test_auto_update_reloads_external_changes_and_keeps_the_view(iso, tmp_path, 
         # at the last chapter: follows the new last chapter
         extraction(7, [{"raw_name": "민준", "translated_name": "Min-jun", "relations": "하린: Friend"}])
         assert await diagram.check_for_update() is True
-        assert diagram.chapter == 7 and diagram.slider.max == 7 and diagram.chapter_label.value == "Up to chapter 7"
+        assert diagram.chapter == 7 and diagram.slider.max == 7 and diagram.chapter_field.value == "7"
         assert diagram.focus == seo and diagram.selected == harin and diagram.viewer is viewer
         assert "Min-jun: Friend" in _texts(diagram.history_sheet)  # the open sheet shows the update
         # not at the last chapter: keeps its chapter
