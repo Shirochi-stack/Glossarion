@@ -9,8 +9,9 @@ label when none is), amber when the relation changed; nodes are rounded name lab
 known at the slider's chapter (female pink, male blue, others grey; unlisted names paler). Names tracked
 for gender but without relations are drawn without lines while Gender is shown.
 
-Controls: the chapter slider ("Up to chapter N", the last chapter by default), the focus character
-(radial layout around it), "Former relations" (earlier labels in brackets), "Unlisted names", and the
+Controls: "Up to chapter" with a number box (− / + and a typed number, for a book whose slider is too
+coarse) and the chapter slider under it (the last chapter by default), the focus character (radial
+layout around it), "Former relations" (earlier labels in brackets), "Unlisted names", and the
 view filters "Relations" / "Gender" / "Hide" (a searchable checklist of names with "Show all"). The
 filters are stored per book in the tracker's ``view`` key (``relations_tracking.save_view``, shared with
 the desktop). Node positions come from the all-chapters graph, so nodes stay put while the slider or a
@@ -42,9 +43,11 @@ import flet as ft
 import flet.canvas as cv
 
 from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import EmptyState
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.glossary.common import ask, quiet, sheet
-from glossarion_mobile.ui.theme import HIT_TARGET, semantic, toggle
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic, toggle
 
 __all__ = ["ALL_CHARACTERS", "EMPTY_BODY", "GENDER_TINTS", "POLL_SECONDS", "RelationsDiagram", "TITLE",
            "edge_label_text"]
@@ -378,6 +381,21 @@ class RelationsDiagram:
         single, low, high = self._slider_range()
         self.chapter_label = ft.Text(self._chapter_label(), theme_style=ft.TextThemeStyle.LABEL_LARGE,
                                      key="rel-chapter-label")
+        # The exact chapter: the slider of a 2,000-chapter book moves many chapters per pixel. The app's
+        # number control (Settings' NumberTile: − field +); Done, a tap outside and the loss of focus commit.
+        self.chapter_field = commit_on_blur(
+            ft.TextField(value=self._chapter_field_text(), dense=True, width=84, text_align=ft.TextAlign.CENTER,
+                         keyboard_type=number_keyboard(), disabled=single,
+                         content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                         border_radius=tokens.RADII["field"], on_focus=lambda e: self._chapter_typing(True),
+                         on_blur=lambda e: self._chapter_typing(False), key="rel-chapter-field"),
+            self.type_chapter, current=self._chapter_field_text)
+        self.chapter_minus = ft.IconButton(icon=ft.Icons.REMOVE, tooltip="Previous chapter", disabled=single,
+                                           size_constraints=HIT_TARGET, on_click=lambda e: self.step_chapter(-1),
+                                           key="rel-chapter-minus")
+        self.chapter_plus = ft.IconButton(icon=ft.Icons.ADD, tooltip="Next chapter", disabled=single,
+                                          size_constraints=HIT_TARGET, on_click=lambda e: self.step_chapter(1),
+                                          key="rel-chapter-plus")
         self.slider = ft.Slider(min=low, max=high, value=self.chapter if self.chapter is not None else low,
                                 divisions=max(1, int(round(high - low))), round=0, disabled=single,
                                 expand=True, on_change=self._on_slider, on_change_end=self._on_slider_end,
@@ -407,7 +425,10 @@ class RelationsDiagram:
         self.viewer = ft.InteractiveViewer(content=self.stack, constrained=False, min_scale=0.25, max_scale=4,
                                            boundary_margin=ft.Margin.all(200), key="rel-viewer")
         return ft.Column([
-            ft.Row([self.chapter_label, self.slider], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([self.chapter_label, self.chapter_minus, self.chapter_field, self.chapter_plus], spacing=4,
+                   run_spacing=0, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                   key="rel-chapter-row"),
+            ft.Row([self.slider]),
             ft.Row([self.focus_picker]),
             ft.Row([self.former_switch, self.unlisted_switch], wrap=True, spacing=12),
             ft.Row([self.relations_chip, self.gender_chip, self.hide_chip], wrap=True, spacing=8, key="rel-filters"),
@@ -426,6 +447,8 @@ class RelationsDiagram:
         self.slider.disabled = single
         self.slider.value = self.chapter if self.chapter is not None else low
         self.chapter_label.value = self._chapter_label()
+        self.chapter_field.disabled = self.chapter_minus.disabled = self.chapter_plus.disabled = single
+        self._sync_chapter_field()
         self.focus_picker.options = self._focus_options()
         if self.focus is not None and not any(n["id"] == self.focus for n in self.all_graph.get("nodes", [])):
             self.focus = None
@@ -444,7 +467,19 @@ class RelationsDiagram:
         return f"Hidden ({count})" if count else "Hide"
 
     def _chapter_label(self) -> str:
-        return f"Up to chapter {_chapter_text(self.chapter)}" if self.chapter is not None else "All chapters"
+        return "Up to chapter" if self.chapter is not None else "All chapters"
+
+    def _chapter_field_text(self) -> str:
+        return _chapter_text(self.chapter) if self.chapter is not None else ""
+
+    def _chapter_typing(self, on: bool) -> None:
+        self.typing_chapter = bool(on)
+
+    def _sync_chapter_field(self, force: bool = False) -> None:
+        """The number box shows the slider's chapter; a number being typed is left alone (the files are
+        re-read once a second while the screen is open)."""
+        if hasattr(self, "chapter_field") and (force or not getattr(self, "typing_chapter", False)):
+            self.chapter_field.value = self._chapter_field_text()
 
     def _all_graph(self) -> dict:
         return self.core.build_graph(self.tracker, self.entries, None, self.show_unlisted, "full",
@@ -540,7 +575,7 @@ class RelationsDiagram:
         self.summary.value = (f"{count_nodes} character{'s' if count_nodes != 1 else ''} · "
                               f"{count_edges} relation{'s' if count_edges != 1 else ''}")
         if push:
-            self.ctx.push(self.stack, self.summary, self.chapter_label)
+            self.ctx.push(self.stack, self.summary, self.chapter_label, self.chapter_field, self.slider)
 
     def edge_count(self) -> int:
         return len(self.drawn_edges)
@@ -553,7 +588,8 @@ class RelationsDiagram:
     def _on_slider(self, e: Any) -> None:
         self.chapter = e.control.value
         self.chapter_label.value = self._chapter_label()
-        self.ctx.push(self.chapter_label)
+        self._sync_chapter_field(force=True)
+        self.ctx.push(self.chapter_label, self.chapter_field)
 
     def _on_slider_end(self, e: Any) -> None:
         self.set_chapter(e.control.value)
@@ -564,7 +600,32 @@ class RelationsDiagram:
             self.slider.value = value
         if hasattr(self, "chapter_label"):
             self.chapter_label.value = self._chapter_label()
+        self._sync_chapter_field(force=True)
         self.rebuild()
+
+    def _chapter_in_range(self, value: float) -> Any:
+        """``value`` as a whole chapter inside the slider's range."""
+        _single, low, high = self._slider_range()
+        number = min(max(float(round(value)), float(low)), float(high))
+        return int(number) if number.is_integer() else number
+
+    def type_chapter(self, text: Any) -> None:
+        """The number box's commit: a number moves the slider there (held to the tracked chapters);
+        anything else puts the current chapter back."""
+        try:
+            number = float(str(text or "").strip())
+        except ValueError:
+            number = float("nan")
+        if self.chapter is None or self._slider_range()[0] or not math.isfinite(number):
+            self._sync_chapter_field(force=True)
+            self.ctx.push(self.chapter_field)
+            return
+        self.set_chapter(self._chapter_in_range(number))
+
+    def step_chapter(self, direction: int) -> None:
+        if self.chapter is None or self._slider_range()[0]:
+            return
+        self.set_chapter(self._chapter_in_range(self._num(self.chapter) + direction))
 
     def set_focus(self, node_id: Any) -> None:
         self.focus = None if node_id in (None, "", ALL_CHARACTERS) else str(node_id)
