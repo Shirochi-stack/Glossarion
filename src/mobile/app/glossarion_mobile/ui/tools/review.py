@@ -268,6 +268,7 @@ class ReviewPrompts:
 
     def edit_prompt(self, field_name: str) -> Any:
         """Edit prompt: the selected profile's review or final prompt in ``PromptEditorSheet``."""
+        from glossarion_mobile.services.prompt_placeholders import target_lang_links
         from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
 
         profiles = self.profiles
@@ -281,7 +282,8 @@ class ReviewPrompts:
         editor = PromptEditorSheet(
             settings, title=name, subtitle=f"{heading} · review prompt profile · shared with the desktop",
             value=str(profiles.texts.get(field_name, "") or ""), default=builtin.get(field_name),
-            placeholders=("{target_lang}",), on_save=lambda text, f=field_name: self.save_prompt(f, text))
+            placeholders=("{target_lang}",), on_save=lambda text, f=field_name: self.save_prompt(f, text),
+            links=target_lang_links(settings))  # review_generator fills {target_lang} with the output language
         self.editor = editor
         editor.show()
         return editor

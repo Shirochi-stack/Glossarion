@@ -73,6 +73,9 @@ SEMANTIC_COLORS: dict[str, ColorPair] = {
     "warning": ("#B26A00", "#FFB74D"),
     "info": ("#0E7C8C", "#5FD0DF"),
     "locked": ("#7C3AED", "#B388FF"),  # desktop purple lock
+    # AI prompt placeholders marked like links (UI_SPEC §5.5): the desktop's link blues
+    # (qt_widget_helpers PLACEHOLDER_LINK_COLOR_ON_LIGHT / PLACEHOLDER_LINK_COLOR)
+    "link": ("#1F5FA8", "#5A9FD4"),
 }
 
 # A palette entry is a (light, dark) pair, "semantic:<name>" or "role:<flet color role>".

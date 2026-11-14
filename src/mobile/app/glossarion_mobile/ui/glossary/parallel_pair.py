@@ -208,8 +208,7 @@ class ParallelPairScreen(Screen):
         wrapper = str(self.service.cfg("parallel_epub_glossary_wrapper_prompt", "") or self.service.default_wrapper_prompt())
         self.wrapper = ft.TextField(label="Pair wrapper prompt", value=wrapper, multiline=True, min_lines=4,
                                     max_lines=10, key="pp-wrapper")
-        self.placeholder_chips = ft.Row([ft.Chip(label=ft.Text(p), on_click=lambda e, p=p: self._insert(p))
-                                         for p in PLACEHOLDERS], wrap=True, spacing=4)
+        self._build_placeholder_links()
         reason = None if self.service.has_job_kind("parallel_pair") else "The job service is not running"
         self.accept_button = ft.FilledButton(content="Use mapped pair · Extract glossary", icon=ft.Icons.CHECK,
                                              disabled=reason is not None, tooltip=reason,
@@ -238,11 +237,13 @@ class ParallelPairScreen(Screen):
                     ft.IconButton(icon=ft.Icons.SAVE_OUTLINED, tooltip="Save Profile", size_constraints=HIT_TARGET,
                                   on_click=lambda e: self.save_profile(), key="pp-save"),
                     self.delete_button], spacing=0),
-            self.system_prompt,
-            ft.Text("Available placeholders: {raw_text}, {translated_text}, {raw_filename}, {translated_filename}",
-                    theme_style=ft.TextThemeStyle.BODY_SMALL),
-            self.placeholder_chips,
-            self.wrapper,
+            self.system_marked.body,
+            ft.Row([self.system_marked.toggle], alignment=ft.MainAxisAlignment.END),
+            ft.Text("Available placeholders: {raw_text}, {translated_text}, {raw_filename}, "
+                    "{translated_filename}", theme_style=ft.TextThemeStyle.BODY_SMALL),
+            *self.placeholder_rows,
+            self.wrapper_marked.body,
+            ft.Row([self.wrapper_marked.toggle], alignment=ft.MainAxisAlignment.END),
             ft.Text("4. Accept", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY),
             ft.Row([self.accept_button,
                     ft.TextButton(content="Glossary progress", icon=ft.Icons.PLAYLIST_ADD_CHECK, key="pp-progress",
@@ -597,6 +598,10 @@ class ParallelPairScreen(Screen):
         is_default = self.profile == DEFAULT_PROFILE
         self.delete_button.icon = ft.Icons.RESTART_ALT if is_default else ft.Icons.DELETE_OUTLINE
         self.delete_button.tooltip = "Reset Profile" if is_default else "Delete Profile"
+        marked = getattr(self, "system_marked", None)
+        if marked is not None and marked.marked:  # another profile's prompt: the marked view shows it
+            marked.shown_text = self.system_prompt.value or ""
+            marked.render_spans()
 
     def load_profile(self, name: Optional[str]) -> None:
         profiles = self._profiles()
@@ -661,7 +666,34 @@ class ParallelPairScreen(Screen):
         self.ctx.push(self.root)
         return name
 
+    def _build_placeholder_links(self) -> None:
+        """The placeholders like links (``ui.components.placeholder_links``): link-styled wrapper chips (tap
+        appends, hold shows what it is filled with) and a marked view of the system prompt (its request is the
+        Balanced/Full ``build_prompt``: what each placeholder says now) and of the wrapper."""
+        from glossarion_mobile.services.prompt_placeholders import glossary_links, links_for_setting
+        from glossarion_mobile.ui.components.placeholder_links import PlaceholderLinker
+
+        # off the loop: the Library/Glossary context runs blocking work through ``io`` (it has no ``run_io``)
+        common = dict(page=lambda: getattr(self.ctx, "page", None),
+                      run_io=getattr(self.ctx, "run_io", None) or getattr(self.ctx, "io", None),
+                      copy=getattr(self.ctx, "copy_text", None))
+        # the two fields use the default font, so the marked text does too (mono=False)
+        self.system_linker = PlaceholderLinker(glossary_links("balanced", self.service),
+                                               text=lambda: self.system_prompt.value or "", key="pp-system-ph", **common)
+        self.system_marked = self.system_linker.marked_view(
+            self.system_prompt, ft.Container(content=self.system_prompt), height=10 * 18 + 24, key="pp-system-marked",
+            mono=False, label="System prompt", subject="system prompt")
+        self.wrapper_linker = PlaceholderLinker(links_for_setting("parallel_epub_glossary_wrapper_prompt", self.service),
+                                                text=lambda: self.wrapper.value or "", key="pp-wrapper-ph", **common)
+        self.wrapper_marked = self.wrapper_linker.marked_view(
+            self.wrapper, ft.Container(content=self.wrapper), height=10 * 18 + 24, key="pp-wrapper-marked",
+            mono=False, label="Pair wrapper prompt", subject="pair wrapper prompt")
+        self.placeholder_chip_list, self.placeholder_rows = self.wrapper_linker.chips_row(
+            PLACEHOLDERS, self._insert, spacing=4, key_of=lambda p: f"pp-chip-{p.strip('{}')}")
+
     def _insert(self, placeholder: str) -> None:
+        if self.wrapper_marked.marked:  # the chip appends to the field: show it again
+            self.wrapper_marked.set_marked_sync(False)
         self.wrapper.value = (self.wrapper.value or "") + placeholder
         self.ctx.push(self.wrapper)
 

@@ -35,6 +35,7 @@ class SettingsContext:
     tablet: bool = False
     file_picker_factory: Optional[Callable[[], Any]] = None
     extras: dict = field(default_factory=dict)
+    copy_text: Optional[Callable[[str], Any]] = None  # clipboard (app._copy_text): the placeholder value sheet's Copy
 
     # ---- threading ------------------------------------------------------------------------
 

@@ -1212,10 +1212,13 @@ class PromptTile(SettingTile):
         return super().readonly() or _foreign_value_reason(self)
 
     def activate(self) -> PromptEditor:
+        from glossarion_mobile.services.prompt_placeholders import links_for_setting
+
         default = self.default()
         self.editor = PromptEditor(
             self.ctx, title=self.label, subtitle=self.key, value=self.value() or "",
             default=None if default is None else str(default), on_save=self.save_from_editor,
+            links=links_for_setting(self.key, self.store),  # the placeholders its request replaces, marked
         ).show()
         return self.editor
 

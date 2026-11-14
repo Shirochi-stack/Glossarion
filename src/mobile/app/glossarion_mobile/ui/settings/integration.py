@@ -81,6 +81,7 @@ class SettingsFeature:
             prefs=prefs,
             file_picker_factory=self._picker,
             extras={"import_dir": os.path.join(data_dir, "imports") if data_dir else None},
+            copy_text=copy_handler,
         )
         self.app: Any = None
         self._fallback_factory: Optional[Callable[[RouteMatch], Any]] = None

@@ -570,6 +570,7 @@ class ChatSettingsSheet:
     def edit_prompt(self, name: Optional[str] = None) -> Any:
         """Edit prompt: the shared profile's text in ``PromptEditorSheet`` (placeholder chips, token count;
         Reset to default for a built-in). Saving changes the profile itself."""
+        from glossarion_mobile.services.prompt_placeholders import translation_links
         from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
 
         name = str(name or self.value_of("profile") or "")
@@ -583,6 +584,8 @@ class ChatSettingsSheet:
             value=str(listing.texts.get(name, "") or ""), default=listing.defaults.get(name),
             model=lambda: str(self.value_of("model") or ""),
             on_save=lambda text, n=name: self.save_prompt(n, text),
+            # {target_lang} is this chat's target language (its own when the chat overrides it)
+            links=translation_links(self.config, target_lang=lambda: self.value_of("target_language")),
         )
         editor.on_saved = lambda _value: self._profiles_changed()  # once the editor has closed
         self.prompt_editor = editor

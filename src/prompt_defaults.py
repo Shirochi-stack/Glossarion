@@ -203,3 +203,138 @@ def migrate_legacy_default_profiles(profiles):
             changed.append(name)
             print(f"[Sanitizer] Updated the built-in '{name}' profile to its current default rules")
     return changed
+
+
+# ---- AI prompt placeholders shown like links (display only) ----
+# The desktop marks them in its prompt editors and shows what each says on hover
+# (qt_widget_helpers.link_placeholders); mobile marks them and shows it in a sheet
+# (glossarion_mobile.ui.components.placeholder_links). Nothing here changes a prompt or a request.
+
+#: One ``{name}`` token.
+PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+#: The placeholders TransateKRtoEN replaces: in the translation system prompt (build_system_prompt, request
+#: merging) and in the refinement prompts (_format_refinement_prompt; {html}/{content} in user prompts).
+SYSTEM_PROMPT_PLACEHOLDERS = frozenset({'target_lang', 'split_marker_instruction'})
+REFINEMENT_SYSTEM_PLACEHOLDERS = frozenset({'target_lang', 'QA_Issues', 'QA_ISSUES', 'qa_issues'})
+REFINEMENT_USER_PLACEHOLDERS = REFINEMENT_SYSTEM_PLACEHOLDERS | {'html', 'content'}
+
+#: The Chunk Prompt Template placeholders (TransateKRtoEN fills them for each chunk) and what they are.
+TRANSLATION_CHUNK_PLACEHOLDER_NOTES = {
+    'chunk_idx': "Current chunk number (1-based)",
+    'total_chunks': "Total number of chunks",
+}
+#: The Image Chunk Prompt / Vision OCR prompt placeholders (image_translator fills them for each request).
+IMAGE_CHUNK_PLACEHOLDER_NOTES = {
+    'chunk_idx': "Current chunk number (1-based)",
+    'total_chunks': "Total number of chunks",
+    'context': "Additional context (e.g., chapter info)",
+    'chunk_count': "Number of OCR chunks with text",
+    'ocr_overlap_instruction': "Remove OCR-only duplicated text caused by the overlapping pixels between adjacent "
+                               "image chunks.",
+    'ocr_text': "Combined OCR text (translation prompt only)",
+}
+#: Placeholders filled with data of each request, by the prompt (config key) whose request replaces them:
+#: what each is filled with.
+PROMPT_INPUT_PLACEHOLDERS = {
+    'rolling_summary_user_prompt': {
+        'translations': "the translated text of the chapters being summarized, joined by \"---\" lines.",
+    },
+    'translation_chunk_prompt': dict(TRANSLATION_CHUNK_PLACEHOLDER_NOTES),
+    'image_chunk_prompt': {name: IMAGE_CHUNK_PLACEHOLDER_NOTES[name]
+                           for name in ('chunk_idx', 'total_chunks', 'context')},
+    'vision_ocr_combined_context_prompt': {name: IMAGE_CHUNK_PLACEHOLDER_NOTES[name]
+                                           for name in ('chunk_count', 'total_chunks', 'context',
+                                                        'ocr_overlap_instruction')},
+    'vision_ocr_translation_user_prompt': {name: IMAGE_CHUNK_PLACEHOLDER_NOTES[name]
+                                           for name in ('context', 'ocr_text')},
+    'vision_ocr_user_prompt': {
+        'context': "the chapter/image context or alt text of the image being read (empty when none).",
+    },
+    'parallel_epub_glossary_wrapper_prompt': {
+        'raw_text': "the raw chapter text of each mapped pair.",
+        'translated_text': "the translated chapter text of each mapped pair.",
+        'raw_filename': "the raw HTML file name of each mapped pair.",
+        'translated_filename': "the translated HTML file name of each mapped pair.",
+    },
+}
+
+
+def placeholder_names(names):
+    """The names valid now: ``names`` is a callable (called now) or a collection."""
+    try:
+        value = names() if callable(names) else names
+    except Exception:
+        return frozenset()
+    return value if isinstance(value, frozenset) else frozenset(value or ())
+
+
+def placeholder_spans(text, names):
+    """``[(start, end, name)]`` of each ``{name}`` in ``text`` whose name is valid (``names``)."""
+    if not text or "{" not in text:
+        return []
+    valid = placeholder_names(names)
+    if not valid:
+        return []
+    return [(m.start(), m.end(), m.group(1)) for m in PLACEHOLDER_RE.finditer(text) if m.group(1) in valid]
+
+
+def described_placeholder_value(descriptions, name):
+    """The value of a placeholder that holds data of each request (``descriptions``: name -> what it holds)."""
+    return {'per_request': True, 'text': descriptions[name]}
+
+
+def translation_placeholder_value(name, *, target_lang='', request_merging=False):
+    """What a translation / refinement prompt placeholder says now (TransateKRtoEN replaces it), from the
+    live ``target_lang`` and Request Merging state: a str or a value dict (see placeholder_value_parts)."""
+    if name == 'target_lang':
+        return str(target_lang or '')
+    if name == 'split_marker_instruction':
+        if not request_merging:
+            return {'active': False,
+                    'inactive': "Inactive right now: Request Merging is off, so its line is removed from the prompt."}
+        return {'text': SPLIT_MARKER_INSTRUCTION,
+                'extra': "Sent in requests that merge more than one chapter; removed from the others."}
+    if name.lower() == 'qa_issues':
+        return {'per_request': True,
+                'text': "\"QA issue(s) to address: \" followed by the chapter's current character-found QA "
+                        "issues; without QA issues its line is removed."}
+    if name in ('html', 'content'):
+        return {'per_request': True, 'text': "the translated HTML of the chapter being refined."}
+    return ''
+
+
+def assistant_placeholder_value(name, *, target_lang=''):
+    """The Assistant Prompt's placeholders: only refinement requests replace them (_format_refinement_prompt
+    without QA issues); translation requests send the prefill as written."""
+    if name == 'target_lang':
+        return {'text': str(target_lang or ''),
+                'extra': "Replaced in refinement requests only; translation requests send {target_lang} as written."}
+    return {'active': False,
+            'inactive': "Inactive in refinement requests (no QA issues are given to the assistant prompt): its "
+                        "line is removed. Translation requests send it as written."}
+
+
+def placeholder_value_parts(value):
+    """What one placeholder value shows (desktop hover tooltip, mobile value sheet): ``(text, notes)``.
+
+    ``value`` is a str (its expansion) or a dict with ``text`` and the optional keys ``active`` (False: removed
+    from the prompt now), ``inactive`` (what removed means there), ``per_request`` (``text`` describes data of
+    each request), ``note`` (shown under an inactive value), ``extra`` (a short line under the value),
+    ``error``. ``text`` is the expansion, verbatim ('' when the placeholder has none now); ``notes`` are the
+    short lines shown muted.
+    """
+    if not isinstance(value, dict):
+        text = str(value if value is not None else "")
+        return text, ([] if text else ["(empty)"])
+    text = str(value.get("text") or "")
+    note = str(value.get("note") or "")
+    if value.get("error"):
+        return "", [f"The current value could not be read: {value['error']}"]
+    if value.get("per_request"):
+        return "", ["Filled in for each request: " + (text or note)]
+    if value.get("active") is False:
+        return "", [str(value.get("inactive") or "Inactive right now: removed from the prompt.")] + (
+            [note] if note else [])
+    extra = [str(value["extra"])] if value.get("extra") else []
+    return text, (extra if text else ["(empty)"] + extra)

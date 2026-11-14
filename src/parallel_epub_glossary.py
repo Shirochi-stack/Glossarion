@@ -620,14 +620,10 @@ class ParallelEpubPairDialog(QDialog):
     def _link_wrapper_placeholders(self, wrapper_help):
         """The pair wrapper's placeholders like links, described on hover (parallel_epub_core fills them for
         each mapped pair)."""
+        from prompt_defaults import PROMPT_INPUT_PLACEHOLDERS  # the descriptions, shared with mobile
         from qt_widget_helpers import link_described_placeholders, link_described_placeholders_in_label
 
-        pair_inputs = {
-            "raw_text": "the raw chapter text of each mapped pair.",
-            "translated_text": "the translated chapter text of each mapped pair.",
-            "raw_filename": "the raw HTML file name of each mapped pair.",
-            "translated_filename": "the translated HTML file name of each mapped pair.",
-        }
+        pair_inputs = PROMPT_INPUT_PLACEHOLDERS["parallel_epub_glossary_wrapper_prompt"]
         link_described_placeholders(self.wrapper_edit, pair_inputs)
         link_described_placeholders_in_label(wrapper_help, pair_inputs)
 

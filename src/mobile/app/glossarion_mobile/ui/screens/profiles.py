@@ -1090,8 +1090,12 @@ class ProfileDetailScreen(_ProfilesBase):
         builtin = listing.is_builtin(self.name)
         editable = self.service.available
         self.name_field = ft.TextField(label="Profile name", value=self.name, dense=True, read_only=not editable)
+        from glossarion_mobile.services.prompt_placeholders import translation_links
+
         self.editor = PromptEditorPane(value=listing.texts.get(self.name, ""), placeholders=PLACEHOLDERS, mono=self.mono,
-                                       run_io=getattr(self.ctx, "run_io", None), model=self.model)
+                                       run_io=getattr(self.ctx, "run_io", None), model=self.model,
+                                       links=translation_links(self.service.store),
+                                       copy=getattr(self.ctx, "copy_text", None))
         self.editor.field.read_only = not editable
         self.role_switch = toggle(
             label="Send as user message (🔀)", value=self.service.role_is_user(),

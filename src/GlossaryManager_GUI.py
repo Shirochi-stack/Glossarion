@@ -961,24 +961,9 @@ class GlossaryManagerMixin:
         'relations_instruction': ('field', 'language', 'gender_types', 'column_rule', 'example_row_1',
                                   'example_row_2'),
     }
-    #: Placeholders an inactive prompt build replaces with nothing (the others lose their whole line).
-    _PLACEHOLDERS_EMPTIED_WHEN_INACTIVE = ('description_in_language', 'description_excluded_note',
-                                           'gender_instruction')
-    #: Glossary refinement prompts (glossary_refinement._render_prompt_placeholders); the texts describe them.
-    _GLOSSARY_REFINEMENT_PLACEHOLDERS = {
-        'fields': "comma-separated glossary column schema, including active custom columns.",
-        'columns': "alias for {fields}.",
-        'fields1': "\\x1F-separated glossary column schema, only for prompts that explicitly want Unit Separator.",
-        'entries': "comma-separated active refinement entry types.",
-        'entry_type': "the entry type of the refinement chunk.",
-        'chunk_index': "current refinement chunk number.",
-        'total_chunks': "total chunks for this entry type.",
-    }
-    #: Single Pass Header Prompt (extract_glossary_from_epub.build_single_pass_prompt).
-    _SINGLE_PASS_HEADER_PLACEHOLDERS = {
-        'glossary_prompt': "the Balanced/Full glossary extraction prompt with its placeholders filled in.",
-        'translation_prompt': "the translation system prompt of the request.",
-    }
+    # The values themselves come from the GUI-free cores, shared with mobile: extract_glossary_from_epub
+    # (placeholder_value, SINGLE_PASS_HEADER_PLACEHOLDERS) and glossary_refinement
+    # (REFINEMENT_PROMPT_PLACEHOLDERS, refinement_placeholder_value); this dialog gives them its live widgets.
 
     def _live_glossary_prompt_settings(self):
         """The glossary prompt settings as this dialog shows them now (unsaved toggles included), by ENV
@@ -1042,18 +1027,10 @@ class GlossaryManagerMixin:
         """What ``{name}`` says in the ``mode`` prompt now (live widgets, the editor's own text), for its tooltip.
         ``prompt``: the prompt text when it is not the mode's own editor (the Parallel EPUB / manga glossary
         prompts, which go through the same Balanced/Full build)."""
-        from extract_glossary_from_epub import placeholder_preview
-        value = dict(placeholder_preview(name, mode=mode,
-                                         prompt=prompt if prompt is not None else self._glossary_prompt_editor_text(mode),
-                                         settings=settings or self._live_glossary_prompt_settings()))
-        if not value['active'] and not value.get('inactive'):
-            if name in self._PLACEHOLDERS_EMPTIED_WHEN_INACTIVE:
-                value['inactive'] = "Inactive right now: replaced with nothing."
-            elif name in sum(self._PLACEHOLDER_TEXT_TOKENS.values(), ()):
-                value['inactive'] = "Inactive right now: the placeholder text that holds it is not in the prompt."
-            else:
-                value['inactive'] = "Inactive right now: its line is removed from the prompt."
-        return value
+        from extract_glossary_from_epub import placeholder_value
+        return placeholder_value(name, mode=mode,
+                                 prompt=prompt if prompt is not None else self._glossary_prompt_editor_text(mode),
+                                 settings=settings or self._live_glossary_prompt_settings())
 
     def _link_glossary_prompt_placeholders(self, widget, mode, prompt=None):
         """Balanced/Full ('balanced') or Minimal ('minimal') prompt editor or "Available placeholders" line.
@@ -1079,17 +1056,15 @@ class GlossaryManagerMixin:
 
     def _glossary_refinement_placeholder_value(self, name):
         """What a glossary refinement prompt placeholder says now: glossary_refinement._render_prompt_placeholders
-        with the live Custom Fields, entry types, type selection and request mode (unsaved ones included)."""
+        with the live Custom Fields, entry types, type selection and request mode (unsaved ones included);
+        glossary_refinement.refinement_placeholder_value, shared with mobile."""
         import glossary_refinement
         if name in ('entry_type', 'chunk_index', 'total_chunks'):
-            return {'per_request': True, 'text': self._GLOSSARY_REFINEMENT_PLACEHOLDERS[name]}
+            return glossary_refinement.refinement_placeholder_value(name)
         settings = self._live_glossary_prompt_settings()
         if name in ('fields', 'columns', 'fields1'):
-            columns = glossary_refinement._entry_columns([], custom_fields=settings['GLOSSARY_CUSTOM_FIELDS'])
-            text = glossary_refinement._render_prompt_placeholders('{' + name + '}', columns, '')
-            return {'text': text.replace('\x1f', '\\x1F'),
-                    'extra': "Columns the glossary being refined has beyond these (such as gender) are added in "
-                             "their place."}
+            return glossary_refinement.refinement_placeholder_value(
+                name, custom_fields=settings['GLOSSARY_CUSTOM_FIELDS'])
 
         def widget_value(attr, read, fallback):
             widget = getattr(self, attr, None)
@@ -1100,42 +1075,40 @@ class GlossaryManagerMixin:
 
         sends_all = widget_value('glossary_refinement_chunking_combo', lambda combo: combo.currentIndex() == 1,
                                  lambda: self._glossary_refinement_chunking_combo_index(self.config) == 1)
-        if not sends_all:
-            return {'per_request': True, 'text': "the entry type of the request (each entry type is sent in a "
-                                                 "separate request)."}
         type_mode = widget_value('glossary_refinement_type_mode_combo',
                                  lambda combo: 'selected' if combo.currentIndex() == 1 else 'all',
                                  lambda: str(self.config.get('glossary_refinement_type_mode', 'all')))
         selected = widget_value('glossary_refinement_type_list', lambda _list: self._checked_glossary_refinement_types(),
                                 lambda: list(self.config.get('glossary_refinement_selected_types', []) or []))
-        active = [t for t, cfg in settings['GLOSSARY_CUSTOM_ENTRY_TYPES'].items()
-                  if not isinstance(cfg, dict) or cfg.get('enabled', True)]
-        return ", ".join(glossary_refinement.selected_refinement_types(active, type_mode, selected))
+        return glossary_refinement.refinement_placeholder_value(
+            name, entry_types=settings['GLOSSARY_CUSTOM_ENTRY_TYPES'], chunking_mode='all' if sends_all else 'separate',
+            type_mode=type_mode, selected=selected)
 
     def _single_pass_header_placeholder_value(self, name):
-        """What a Single Pass Header placeholder says now (build_single_pass_translation_system_prompt)."""
+        """What a Single Pass Header placeholder says now (build_single_pass_translation_system_prompt;
+        extract_glossary_from_epub.single_pass_header_placeholder_value, shared with mobile)."""
+        from extract_glossary_from_epub import single_pass_header_placeholder_value
         if name == 'glossary_prompt':
-            from extract_glossary_from_epub import balanced_system_prompt_preview
-            return balanced_system_prompt_preview(self._glossary_prompt_editor_text('balanced'),
-                                                  self._live_glossary_prompt_settings())
+            return single_pass_header_placeholder_value(
+                name, glossary_prompt=self._glossary_prompt_editor_text('balanced'),
+                settings=self._live_glossary_prompt_settings())
         editor = getattr(self, 'prompt_text', None)
         text = editor.toPlainText() if editor is not None else str(getattr(self, 'system_prompt', '') or '')
         language = getattr(self, '_prompt_placeholder_value', lambda _name: '')('target_lang')
-        if language:
-            text = text.replace('{target_lang}', language)
-        return {'text': text, 'extra': "As the request sends it: anything the request adds to the system prompt "
-                                       "(such as the appended glossary) is included."}
+        return single_pass_header_placeholder_value(name, translation_prompt=text, target_lang=language)
 
     def _link_glossary_refinement_placeholders(self, widget):
+        from glossary_refinement import REFINEMENT_PROMPT_PLACEHOLDERS
         from qt_widget_helpers import link_placeholders
-        return link_placeholders(widget, frozenset(self._GLOSSARY_REFINEMENT_PLACEHOLDERS),
+        return link_placeholders(widget, frozenset(REFINEMENT_PROMPT_PLACEHOLDERS),
                                  self._glossary_refinement_placeholder_value)
 
     def _link_single_pass_header_placeholders(self, widget):
         """The Single Pass Header Prompt editor or its hint label."""
+        from extract_glossary_from_epub import SINGLE_PASS_HEADER_PLACEHOLDERS
         from qt_widget_helpers import link_placeholders, link_placeholders_in_label
         link = link_placeholders_in_label if isinstance(widget, QLabel) else link_placeholders
-        return link(widget, frozenset(self._SINGLE_PASS_HEADER_PLACEHOLDERS), self._single_pass_header_placeholder_value)
+        return link(widget, frozenset(SINGLE_PASS_HEADER_PLACEHOLDERS), self._single_pass_header_placeholder_value)
 
     def _link_placeholder_text_dialog(self, dialog, combo, note, editor, state):
         """Placeholder Text editor: the tokens of the selected text (box and note) and the selected

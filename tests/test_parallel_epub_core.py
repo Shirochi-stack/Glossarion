@@ -415,7 +415,7 @@ PEG_REWIRE_SPANS = (
     # __init__ profiles, _default_chapter_loader, _start_epub_load's loader
     (795, 799, 1), (802, 807, 1), (814, 818, 1),
     # AI prompt placeholders like links with what they say on hover (wrapper, its help line, system prompt)
-    (912, 911, 1), (1029, 1028, 4), (1052, 1051, 14),
+    (912, 911, 1), (1029, 1028, 4), (1052, 1051, 10),  # wrapper descriptions: prompt_defaults (shared with mobile)
     (1145, 1165, 3),
     # restore_persisted_selection, _apply_pending_persisted_mapping
     (1280, 1280, 2), (1282, 1292, 2), (1294, 1303, 1), (1450, 1460, 3), (1468, 1467, 1), (1472, 1484, 1),

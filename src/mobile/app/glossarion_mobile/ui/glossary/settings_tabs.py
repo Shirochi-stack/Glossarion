@@ -400,18 +400,22 @@ class GlossaryPromptCard:
     def edit_prompt(self, name: Optional[str] = None) -> Any:
         """Edit prompt: the profile's text in ``PromptEditorSheet`` (the bucket's placeholder chips, token
         count; Reset to default for Default and On-device). Saving changes the profile itself."""
+        from glossarion_mobile.services.prompt_placeholders import glossary_links
         from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
 
         name = str(name or self.name)
         if self.error or name not in self.texts:
             self._say(self.error or f"The glossary prompt profile '{name}' no longer exists")
             return None
+        store = getattr(self.ctx, "store", None)
         editor = PromptEditorSheet(
             self.ctx, title=name,
             subtitle=f"{PROFILE_BUCKETS[self.bucket_id]} · glossary prompt · shared with every chat and the desktop",
             value=str(self.texts.get(name, "") or ""), default=self.builtins.get(name),
             placeholders=PROMPT_PLACEHOLDERS.get(self.bucket_id, ()), model=self.model,
             on_save=lambda text, n=name: self.save_prompt(n, text),
+            links=glossary_links("minimal" if self.bucket_id == "minimal" else "balanced",
+                                 store if store is not None else self.service),
         )
         editor.on_saved = lambda _value: self._saved()  # once the editor has closed
         self.editor = editor
