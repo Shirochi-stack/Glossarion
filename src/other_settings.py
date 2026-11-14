@@ -1153,6 +1153,13 @@ def configure_rolling_summary_prompts(self):
     self.summary_user_text.setAcceptRichText(False)
     self.summary_user_text.setPlainText(getattr(self, 'rolling_summary_user_prompt', ''))
     user_v.addWidget(self.summary_user_text)
+    # placeholders like links with what they say on hover (TransateKRtoEN: build_system_prompt fills
+    # {target_lang} in the system prompt, the summary request fills {translations})
+    from qt_widget_helpers import link_placeholders, link_described_placeholders, link_described_placeholders_in_label
+    link_placeholders(self.summary_system_text, {'target_lang'}, self._prompt_placeholder_value)
+    summary_inputs = {'translations': "the translated text of the chapters being summarized, joined by \"---\" lines."}
+    link_described_placeholders(self.summary_user_text, summary_inputs)
+    link_described_placeholders_in_label(user_help, summary_inputs)
 
     layout.addWidget(user_group)
 
@@ -6146,6 +6153,10 @@ def configure_image_only_title_tag_prompt(self):
             DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
         ),
     ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT))
+    # {target_lang} like a link with the current target language on hover (title_tag_translation replaces it)
+    from qt_widget_helpers import link_placeholders, link_placeholders_in_label
+    link_placeholders(prompt_text, {'target_lang'}, self._prompt_placeholder_value)
+    link_placeholders_in_label(placeholder_hint, {'target_lang'}, self._prompt_placeholder_value)
     prompt_layout.addWidget(prompt_text)
     main_layout.addWidget(prompt_box, 1)
 
@@ -6437,13 +6448,16 @@ def configure_translation_chunk_prompt(self):
         ("{total_chunks}", "Total number of chunks"),
     ]
     
+    from qt_widget_helpers import link_described_placeholders_in_label
     for placeholder, description in placeholders:
         placeholder_lbl = QLabel(f"• <b>{placeholder}:</b> {description}")
         placeholder_lbl.setStyleSheet("font-family: Courier; font-size: 10pt;")
+        link_described_placeholders_in_label(placeholder_lbl, {placeholder: description},
+                                             text=f"• {placeholder}: {description}")
         instructions_v.addWidget(placeholder_lbl)
-    
+
     main_layout.addWidget(instructions_box)
-    
+
     # Prompt input
     prompt_box = QGroupBox("Chunk Prompt Template")
     prompt_v = QVBoxLayout(prompt_box)
@@ -6451,6 +6465,8 @@ def configure_translation_chunk_prompt(self):
     chunk_prompt_text = QTextEdit()
     chunk_prompt_text.setAcceptRichText(False)
     chunk_prompt_text.setPlainText(self.translation_chunk_prompt)
+    from qt_widget_helpers import link_described_placeholders
+    link_described_placeholders(chunk_prompt_text, dict(placeholders))  # like links, described on hover
     prompt_v.addWidget(chunk_prompt_text)
     
     main_layout.addWidget(prompt_box)
@@ -6748,13 +6764,16 @@ def configure_image_chunk_prompt(self):
         ("{ocr_text}", "Combined OCR text (translation prompt only)")
     ]
     
+    from qt_widget_helpers import link_described_placeholders_in_label
     for placeholder, description in placeholders:
         placeholder_lbl = QLabel(f"• <b>{placeholder}:</b> {description}")
         placeholder_lbl.setStyleSheet("font-family: Courier; font-size: 10pt;")
+        link_described_placeholders_in_label(placeholder_lbl, {placeholder: description},
+                                             text=f"• {placeholder}: {description}")
         instructions_v.addWidget(placeholder_lbl)
-    
+
     main_layout.addWidget(instructions_box)
-    
+
     # Prompt input
     prompt_box = QGroupBox("Image Chunk Prompt Template")
     prompt_v = QVBoxLayout(prompt_box)
@@ -6789,6 +6808,14 @@ def configure_image_chunk_prompt(self):
     )
     translation_v.addWidget(vision_ocr_translation_user_prompt_text)
     main_layout.addWidget(translation_box)
+    # placeholders like links, described on hover (the ones image_translator replaces in each prompt)
+    from qt_widget_helpers import link_described_placeholders
+    descriptions = dict(placeholders)
+    for editor, names in ((image_chunk_prompt_text, ("{chunk_idx}", "{total_chunks}", "{context}")),
+                          (vision_ocr_combined_context_prompt_text,
+                           ("{chunk_count}", "{total_chunks}", "{context}", "{ocr_overlap_instruction}")),
+                          (vision_ocr_translation_user_prompt_text, ("{context}", "{ocr_text}"))):
+        link_described_placeholders(editor, {name: descriptions[name] for name in names})
     
     # Example
     example_box = QGroupBox("Example Output")
@@ -6942,6 +6969,11 @@ def configure_vision_ocr_prompt(self):
     ))
     user_v.addWidget(user_text)
     main_layout.addWidget(user_box, 1)
+    # {context} like a link, described on hover (image_translator fills it for each OCR request)
+    from qt_widget_helpers import link_described_placeholders, link_described_placeholders_in_label
+    ocr_inputs = {'context': "the chapter/image context or alt text of the image being read (empty when none)."}
+    link_described_placeholders(user_text, ocr_inputs)
+    link_described_placeholders_in_label(user_hint, ocr_inputs)
 
     button_layout = QHBoxLayout()
 

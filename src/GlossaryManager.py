@@ -95,6 +95,15 @@ try:
 except ImportError:
     _apply_relations_placeholder = None
     warn_missing_relations_placeholder = None
+try:
+    # the settings the prompt builders read (a placeholder preview sets them for its own call)
+    from extract_glossary_from_epub import _prompt_env, _prompt_settings
+except ImportError:
+    def _prompt_env(name, default=''):
+        return os.getenv(name, default)
+
+    def _prompt_settings():
+        return None
 import relations_tracking
 
 # Relations cells taken off Minimal responses during one save_glossary run
@@ -906,9 +915,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     print(f"⚠️ Could not load existing glossary: {e}")
     
     # Get configuration from environment variables (FRESH READ)
-    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
-    max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
-    max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
+    min_frequency, max_names, max_titles = minimal_prompt_limits()
 
     # Batch sizing:
     # - GUI uses BATCH_SIZE for concurrency/batching.
@@ -5152,7 +5159,7 @@ _MINIMAL_DEFAULT_COLUMNS = ('type', 'raw_name', 'translated_name', 'gender', 'de
 
 def _minimal_custom_fields():
     try:
-        fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+        fields = json.loads(_prompt_env('GLOSSARY_CUSTOM_FIELDS', '[]'))
     except Exception:
         return []
     return [str(f) for f in fields] if isinstance(fields, list) else []
@@ -5187,11 +5194,121 @@ def _minimal_relations_sink(prompt_text, custom_fields, uses_fields, existing_gl
         if not columns:
             columns = list(_MINIMAL_DEFAULT_COLUMNS)
     return {
-        'field': relations_tracking.field_name(),
+        'field': relations_tracking.field_name(_prompt_settings()),
         'columns': columns,
         'known': _glossary_raw_name_keys(existing_glossary),
         'cells': [],
     }
+
+
+def minimal_prompt_limits():
+    """``(min_frequency, max_names, max_titles)``: the {min_frequency}, {max_names} and {max_titles} values."""
+    return (int(_prompt_env("GLOSSARY_MIN_FREQUENCY", "2")),
+            int(_prompt_env("GLOSSARY_MAX_NAMES", "50")),
+            int(_prompt_env("GLOSSARY_MAX_TITLES", "30")))
+
+
+#: What the Minimal prompt's {entries} expands to (a fixed list, not the entry types).
+_MINIMAL_ENTRY_TYPES = ('Character names', 'Terms', 'Location names', 'Ability/Skill names',
+                        'Item names', 'Organization names', 'Titles/Ranks')
+
+
+def build_minimal_system_prompt(custom_prompt, all_text, min_frequency, max_names, max_titles,
+                                existing_glossary=None):
+    """The Minimal request's system prompt with every placeholder replaced: ``(system_prompt, relations_sink)``.
+
+    ``relations_sink`` is what _detach_relations_cells needs (None when the prompt asks for no relations).
+    """
+    settings = _prompt_settings()
+    # Get target language from environment (used in the prompt for translation output)
+    target_language = _prompt_env('GLOSSARY_TARGET_LANGUAGE', 'English')
+    # Count context marker windows for {marker} placeholder
+    marker_matches = re.findall(r"===\s*CONTEXT\s+\d+\s+END\s*===", all_text or "")
+    marker_count = len(marker_matches)
+    system_prompt = custom_prompt.replace('{language}', target_language)
+    system_prompt = system_prompt.replace('{min_frequency}', str(min_frequency))
+    system_prompt = system_prompt.replace('{max_names}', str(max_names))
+    system_prompt = system_prompt.replace('{max_titles}', str(max_titles))
+    system_prompt = system_prompt.replace('{marker}', str(marker_count))
+    if _apply_subject_tracking_placeholder is not None:
+        _inc_gender_ctx = _prompt_env("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+        system_prompt = _apply_subject_tracking_placeholder(
+            system_prompt, include_gender_context=_inc_gender_ctx
+        )
+    # Same rule and text as Balanced/Full: the entry types with gender, empty when none.
+    if gender_instruction_text is not None:
+        system_prompt = system_prompt.replace('{gender_instruction}', gender_instruction_text())
+
+    # Relations Tracker: expand (or strip) {relations_instruction}. Unless the
+    # {fields} header already lists the relations field, the column is declared
+    # as one extra LAST column; its cells are taken off the rows before parsing.
+    # Minimal asks only with its own "Include Relations Column" toggle on as well.
+    relations_sink = None
+    _minimal_relations_on = relations_tracking.minimal_tracking_enabled(settings)
+    if _apply_relations_placeholder is not None:
+        _rel_uses_fields = '{fields}' in system_prompt or '{fields1}' in system_prompt
+        _rel_fields = _minimal_custom_fields()
+        _rel_declare = not (
+            _rel_uses_fields
+            and any(relations_tracking.is_relations_field(f, settings) for f in _rel_fields)
+        )
+        if _minimal_relations_on and relations_tracking.RELATIONS_PLACEHOLDER in system_prompt:
+            relations_sink = _minimal_relations_sink(
+                system_prompt, _rel_fields, _rel_uses_fields, existing_glossary
+            )
+        # The example rows of the instruction follow the columns the rows are read with.
+        system_prompt = _apply_relations_placeholder(
+            system_prompt, enabled=_minimal_relations_on, declare_column=_rel_declare,
+            columns=relations_sink['columns'] if relations_sink else None,
+        )
+
+    # --- {fields1}, {fields}, {entries} placeholder replacement ---
+    _has_fields1 = '{fields1}' in system_prompt
+    _has_fields = '{fields}' in system_prompt
+    _has_entries = '{entries}' in system_prompt
+    if _has_fields1 or _has_fields or _has_entries:
+        # Build header parts
+        _custom_fields_json = _prompt_env('GLOSSARY_CUSTOM_FIELDS', '[]')
+        try:
+            _custom_fields = json.loads(_custom_fields_json)
+        except Exception:
+            _custom_fields = []
+        if (relations_tracking.tracking_enabled(settings) and not _minimal_relations_on
+                and isinstance(_custom_fields, list)):
+            # no relations column in Minimal's header unless its toggle asks for it
+            _custom_fields = [f for f in _custom_fields if not relations_tracking.is_relations_field(f, settings)]
+        _header_parts = ['type', 'raw_name', 'translated_name', 'gender']
+        if _custom_fields:
+            _header_parts.extend(_custom_fields)
+
+        if _has_fields1:
+            _sep_joined = '\\x1F'.join(_header_parts)
+            _f1_str = f"Columns (separated by Unit Separator character \\x1F):\n{_sep_joined}"
+            system_prompt = system_prompt.replace('{fields1}', _f1_str)
+
+        if _has_fields:
+            _f_str = f"Columns:\n{', '.join(_header_parts)}"
+            system_prompt = system_prompt.replace('{fields}', _f_str)
+
+        if _has_entries:
+            # Build entries phrase from entry types used in the prompt context
+            _entry_types = list(_MINIMAL_ENTRY_TYPES)
+            _entries_str = ', '.join(_entry_types[:-1]) + f', & {_entry_types[-1]}'
+            system_prompt = system_prompt.replace('{entries}', _entries_str)
+
+    # Expand (or strip) description-rule placeholders.
+    # The auto/minimal prompt uses the "Include Description Column"
+    # toggle (GLOSSARY_INCLUDE_DESCRIPTION env var) instead of the
+    # Custom Fields list used by the Balanced/Full prompt.
+    try:
+        from extract_glossary_from_epub import _apply_description_rule_placeholders
+        _inc_desc = _prompt_env("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
+        system_prompt = _apply_description_rule_placeholders(
+            system_prompt, description_active=_inc_desc
+        )
+    except Exception as _desc_err:
+        print(f"⚠️ Description placeholder expansion failed: {_desc_err}")
+    return system_prompt, relations_sink
 
 
 def _split_row_cells(line, sep):
@@ -5470,96 +5587,10 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 return {}
 
             # Replace placeholders in prompt
-            # Get target language from environment (used in the prompt for translation output)
-            target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
-            # Count context marker windows for {marker} placeholder
-            marker_matches = re.findall(r"===\s*CONTEXT\s+\d+\s+END\s*===", all_text or "")
-            marker_count = len(marker_matches)
-            system_prompt = custom_prompt.replace('{language}', target_language)
-            system_prompt = system_prompt.replace('{min_frequency}', str(min_frequency))
-            system_prompt = system_prompt.replace('{max_names}', str(max_names))
-            system_prompt = system_prompt.replace('{max_titles}', str(max_titles))
-            system_prompt = system_prompt.replace('{marker}', str(marker_count))
-            if _apply_subject_tracking_placeholder is not None:
-                _inc_gender_ctx = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
-                system_prompt = _apply_subject_tracking_placeholder(
-                    system_prompt, include_gender_context=_inc_gender_ctx
-                )
-            # Same rule and text as Balanced/Full: the entry types with gender, empty when none.
-            if gender_instruction_text is not None:
-                system_prompt = system_prompt.replace('{gender_instruction}', gender_instruction_text())
+            system_prompt, relations_sink = build_minimal_system_prompt(
+                custom_prompt, all_text, min_frequency, max_names, max_titles, existing_glossary
+            )
 
-            # Relations Tracker: expand (or strip) {relations_instruction}. Unless the
-            # {fields} header already lists the relations field, the column is declared
-            # as one extra LAST column; its cells are taken off the rows before parsing.
-            # Minimal asks only with its own "Include Relations Column" toggle on as well.
-            relations_sink = None
-            _minimal_relations_on = relations_tracking.minimal_tracking_enabled()
-            if _apply_relations_placeholder is not None:
-                _rel_uses_fields = '{fields}' in system_prompt or '{fields1}' in system_prompt
-                _rel_fields = _minimal_custom_fields()
-                _rel_declare = not (
-                    _rel_uses_fields
-                    and any(relations_tracking.is_relations_field(f) for f in _rel_fields)
-                )
-                if _minimal_relations_on and relations_tracking.RELATIONS_PLACEHOLDER in system_prompt:
-                    relations_sink = _minimal_relations_sink(
-                        system_prompt, _rel_fields, _rel_uses_fields, existing_glossary
-                    )
-                # The example rows of the instruction follow the columns the rows are read with.
-                system_prompt = _apply_relations_placeholder(
-                    system_prompt, enabled=_minimal_relations_on, declare_column=_rel_declare,
-                    columns=relations_sink['columns'] if relations_sink else None,
-                )
-
-            # --- {fields1}, {fields}, {entries} placeholder replacement ---
-            _has_fields1 = '{fields1}' in system_prompt
-            _has_fields = '{fields}' in system_prompt
-            _has_entries = '{entries}' in system_prompt
-            if _has_fields1 or _has_fields or _has_entries:
-                # Build header parts
-                _custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-                try:
-                    _custom_fields = json.loads(_custom_fields_json)
-                except Exception:
-                    _custom_fields = []
-                if (relations_tracking.tracking_enabled() and not _minimal_relations_on
-                        and isinstance(_custom_fields, list)):
-                    # no relations column in Minimal's header unless its toggle asks for it
-                    _custom_fields = [f for f in _custom_fields if not relations_tracking.is_relations_field(f)]
-                _header_parts = ['type', 'raw_name', 'translated_name', 'gender']
-                if _custom_fields:
-                    _header_parts.extend(_custom_fields)
-
-                if _has_fields1:
-                    _sep_joined = '\\x1F'.join(_header_parts)
-                    _f1_str = f"Columns (separated by Unit Separator character \\x1F):\n{_sep_joined}"
-                    system_prompt = system_prompt.replace('{fields1}', _f1_str)
-
-                if _has_fields:
-                    _f_str = f"Columns:\n{', '.join(_header_parts)}"
-                    system_prompt = system_prompt.replace('{fields}', _f_str)
-
-                if _has_entries:
-                    # Build entries phrase from entry types used in the prompt context
-                    _entry_types = ['Character names', 'Terms', 'Location names', 'Ability/Skill names',
-                                    'Item names', 'Organization names', 'Titles/Ranks']
-                    _entries_str = ', '.join(_entry_types[:-1]) + f', & {_entry_types[-1]}'
-                    system_prompt = system_prompt.replace('{entries}', _entries_str)
-
-            # Expand (or strip) description-rule placeholders.
-            # The auto/minimal prompt uses the "Include Description Column"
-            # toggle (GLOSSARY_INCLUDE_DESCRIPTION env var) instead of the
-            # Custom Fields list used by the Balanced/Full prompt.
-            try:
-                from extract_glossary_from_epub import _apply_description_rule_placeholders
-                _inc_desc = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
-                system_prompt = _apply_description_rule_placeholders(
-                    system_prompt, description_active=_inc_desc
-                )
-            except Exception as _desc_err:
-                print(f"⚠️ Description placeholder expansion failed: {_desc_err}")
-            
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"{text_sample}"}

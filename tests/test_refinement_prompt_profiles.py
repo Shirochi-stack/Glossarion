@@ -252,3 +252,147 @@ def test_popup_selects_default_and_custom_with_one_click(gui, refinement, qapp):
         assert combo.currentText() == name
         expected = gui.config[DEFAULT] if name == 'Default' else {'system': 'Draft system', 'user': 'Draft user'}
         assert current_pair(gui) == expected
+
+
+# ---------------------------------------------------------------------------------------------
+# TranslatorGUI's "Refinement Prompt" dialog (refinement output mode / multipass): its bottom row
+# has the Placeholder Text editor's style; Save and the Resets confirm on the button.
+# ---------------------------------------------------------------------------------------------
+
+def _refinement_dialog_method():
+    from pathlib import Path
+    from _src_corpus import find_method
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QSizePolicy, QSpinBox, QTabWidget,
+                                   QTextEdit, QVBoxLayout, QWidget)
+    import os
+    import run_env
+    namespace = {
+        name: value for name, value in locals().items() if name not in ('Path', 'find_method', 'run_env')}
+    namespace.update(Qt=Qt, QComboBox=QComboBox, QDialog=QDialog, QMessageBox=QMessageBox,
+                     QPushButton=QPushButton, REFINEMENT_RAW_PROMPT_ROLES=run_env.REFINEMENT_RAW_PROMPT_ROLES,
+                     _get_disabled_halgakos_icon_path=lambda path: path)
+    source = Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
+    method = find_method("show_refinement_prompt_dialog")
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["show_refinement_prompt_dialog"]
+
+
+def _placeholder_members():
+    """TranslatorGUI's prompt-placeholder sets and _prompt_placeholder_value, taken from its source."""
+    from pathlib import Path
+    source = Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
+    tree = ast.parse(source.read_text(encoding="utf-8-sig"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TranslatorGUI")
+    wanted = {"_SYSTEM_PROMPT_PLACEHOLDERS", "_REFINEMENT_SYSTEM_PLACEHOLDERS", "_REFINEMENT_USER_PLACEHOLDERS",
+              "_prompt_placeholder_value"}
+    body = [n for n in cls.body
+            if (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and n.targets[0].id in wanted)
+            or (isinstance(n, ast.FunctionDef) and n.name in wanted)]
+    namespace = {}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(source), "exec"), namespace)
+    assert wanted <= set(namespace)
+    return {name: namespace[name] for name in wanted}
+
+
+@pytest.fixture
+def refinement_dialog(qapp, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    import qt_widget_helpers
+    beeps = []
+    monkeypatch.setattr(qt_widget_helpers, "saved_beep", lambda: beeps.append(1))
+
+    class Owner(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.config, self.saves, self.logs = {}, [], []
+            self.base_dir = ""
+            self.default_refinement_system_prompt = "Default system"
+            self.default_refinement_user_prompt = "Default user"
+            self.refinement_system_prompt = "Edited system"
+            self.refinement_user_prompt = "Edited user"
+
+        def save_config(self, show_message=True):
+            self.saves.append(show_message)
+
+        def append_log(self, text):
+            self.logs.append(text)
+
+        def _update_refinement_prompt_button_style(self):
+            pass
+
+    Owner.show_refinement_prompt_dialog = _refinement_dialog_method()
+    for name, value in _placeholder_members().items():
+        setattr(Owner, name, value)
+    owner = Owner()
+    owner.show_refinement_prompt_dialog()
+    dialog = owner._refinement_prompt_dialog
+    buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+    yield owner, dialog, buttons, beeps
+    dialog.close()
+    owner.deleteLater()
+    qapp.processEvents()
+
+
+def _full_system_editor(dialog):
+    from PySide6.QtWidgets import QTextEdit
+    editors = [e for e in dialog.findChildren(QTextEdit) if e.toPlainText() == "Edited system"]
+    assert len(editors) == 1  # the Full tab's system prompt
+    return editors[0]
+
+
+def _finish_flash(button):
+    button._saved_flash_timer.stop()
+    button._saved_flash_timer.timeout.emit()
+
+
+def test_refinement_dialog_bottom_row_has_the_house_style(refinement_dialog):
+    import qt_widget_helpers
+    _, dialog, buttons, _ = refinement_dialog
+    labels = ["💾 Save", "🔄 Reset to Default", "🔄 Reset All to Default", "❌ Close"]
+    assert set(labels) <= set(buttons)
+    row = dialog.layout().itemAt(dialog.layout().count() - 1).layout()
+    assert [row.itemAt(i).widget().text() for i in range(row.count())] == labels
+    assert [row.stretch(i) for i in range(row.count())] == [1, 1, 1, 1]
+    for label, kind in zip(labels, ("save", "reset", "reset", "close")):
+        assert qt_widget_helpers.DIALOG_BUTTON_COLORS[kind][0] in buttons[label].styleSheet()
+
+
+def test_refinement_dialog_save_flashes_and_keeps_the_window_open(refinement_dialog):
+    owner, dialog, buttons, beeps = refinement_dialog
+    save = buttons["💾 Save"]
+    _full_system_editor(dialog).setPlainText("New system")
+    save.click()
+    assert owner.config["refinement_system_prompt"] == "New system" and owner.saves == [False]
+    assert save.text() == "💾 Saved!" and beeps == [1]
+    assert dialog.isVisible()  # no delayed close; Close closes it
+    _finish_flash(save)
+    assert save.text() == "💾 Save" and dialog.isVisible()
+    buttons["❌ Close"].click()
+    assert not dialog.isVisible()
+
+
+@pytest.mark.parametrize("label, flashed", [("🔄 Reset to Default", "✅ Reset!"),
+                                            ("🔄 Reset All to Default", "✅ All Reset!")])
+def test_refinement_dialog_reset_asks_first(refinement_dialog, monkeypatch, label, flashed):
+    import review_dialog
+    owner, dialog, buttons, beeps = refinement_dialog
+    asked, answer = [], {"yes": False}
+
+    def confirm(parent, title, text):
+        asked.append((parent, title, text))
+        return answer["yes"]
+
+    monkeypatch.setattr(review_dialog, "confirm_prompt_profile_action", confirm)
+    button, editor = buttons[label], _full_system_editor(dialog)
+    width = button.minimumWidth()
+    button.click()  # No: nothing changes
+    assert len(asked) == 1 and asked[0][:2] == (dialog, "Reset Refinement Prompts")
+    assert editor.toPlainText() == "Edited system" and button.text() == label and beeps == []
+    answer["yes"] = True
+    button.click()
+    assert len(asked) == 2 and editor.toPlainText() == "Default system"
+    assert button.text() == flashed and beeps == [1] and button.minimumWidth() == width
+    assert owner.saves == []  # a reset only fills the editors; Save writes them
+    _finish_flash(button)
+    assert button.text() == label

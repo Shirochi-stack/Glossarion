@@ -766,6 +766,53 @@ def test_instruction_text_is_one_block():
     assert rt.render_relations(rt.relations_at(tracker, "뢤사난", 1)) == "Dihirit Ade: Older Sister"
 
 
+#: The built-in {relations_instruction} text (owner, 2026-11-14: "it should use the {gender_types}
+#: placeholder instead" of "for character entries only"; 1,146 -> 1,151 characters).
+RELATIONS_TEMPLATE = (
+    'The `{field}` column: for {gender_types} entries only, list this character\'s relationships to OTHER named '
+    'characters that are shown or stated in THIS text. Write each as `raw_name: role`, separated by "; ", '
+    'where raw_name is the other character\'s raw_name exactly as in their own entry and role is what THIS '
+    'row\'s character is to that other character, in {language}, 1–3 words (Father, Mother, Daughter, Older '
+    'Sister, Wife, Best Friend, Master, Disciple, Subordinate, Rival, Enemy). Both directions: a '
+    'father\'s row has `<his daughter\'s raw_name>: Father` and the daughter\'s row has `<her father\'s '
+    'raw_name>: Daughter`. List only real, specific relationships; never filler such as Acquaintance, Stranger '
+    'or Unknown, and never a note such as Surname. Keep the same wording for the same relationship; use a '
+    'different word only when the relationship itself changed in this text. Do not guess, do not describe events '
+    'or feelings, never use commas inside this column. Leave it empty for all other entry types, surname-only '
+    'entries, and when no relationship is shown.\n'
+    '{column_rule}\n'
+    'Example rows that mirror each other: `{example_row_1}` and `{example_row_2}`'
+)
+
+
+def test_default_relations_text_uses_gender_types():
+    assert rt._INSTRUCTION_TEMPLATE == RELATIONS_TEMPLATE and len(RELATIONS_TEMPLATE) == 1151
+    columns = ["type", "raw_name", "translated_name", "gender", "description", "relations"]
+    text = rt.instruction_text(columns=columns, gender_types=["character", "titles", "nicknames"])
+    assert text.startswith("The `relations` column: for character, titles, nicknames entries only, list this "
+                           "character's relationships")
+    assert "Leave it empty for all other entry types, surname-only entries, and when no relationship is shown.\n" in text
+    assert len(text) == 1618 and "{gender_types}" not in text
+    # a joined string is taken as it is; no type with gender reads "character" (the sentence stays whole)
+    assert rt.instruction_text(gender_types="character, sect").startswith(
+        "The `relations` column: for character, sect entries only")
+    for nothing in (None, [], "", "  "):
+        assert rt.instruction_text(gender_types=nothing).startswith(
+            "The `relations` column: for character entries only, list")
+    # a user's own text without the token is used as it is
+    assert rt.instruction_text(template="Mine, no tokens.", gender_types=["titles"]) == "Mine, no tokens."
+    assert rt.instruction_text(template="Only {gender_types}.", gender_types=["titles"]) == "Only titles."
+
+
+def test_relations_on_a_titles_row_are_recorded():
+    """The tracker records a relations cell on any row type (the prompt now asks titles/nicknames rows too)."""
+    tracker = rt.empty_tracker()
+    title = {"type": "titles", "raw_name": "공작", "translated_name": "Duke", "relations": "서윤: Father"}
+    stats = rt.record_relations(tracker, [title, _entry("서윤", "Seo-yun", "")], chapter_num=1)
+    assert stats["pairs"] == 1
+    assert rt.render_relations(rt.relations_at(tracker, "서윤", 1)) == "Duke: Father"
+
+
 def _example_rows(text):
     line = text.split("\n")[-1]
     return [next(csv.reader([row])) for row in re.findall(r"`([^`]+)`", line)]

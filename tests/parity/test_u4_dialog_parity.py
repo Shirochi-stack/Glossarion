@@ -876,8 +876,16 @@ def _assistant_dialog_class(side):
     for module in (QtCore, QtGui, QtWidgets):
         ns.update({k: getattr(module, k) for k in dir(module) if not k.startswith("_")})
     ns.update({"os": os, "__file__": str(gm_path)})
+    # The live TranslatorGUI members the current dialog's placeholder links use (display only: the
+    # legacy side never calls them); the class constant is read from the source like the methods.
+    link_members = ("_assistant_prompt_placeholder_value", "_prompt_placeholder_value")
+    tg_class = next(n for n in ast.parse((SRC / "translator_gui.py").read_text(encoding="utf-8-sig")).body
+                    if isinstance(n, ast.ClassDef) and n.name == "TranslatorGUI")
+    constants = [n for n in tg_class.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                 and n.targets[0].id == "_REFINEMENT_SYSTEM_PLACEHOLDERS"]
     body = ([_tg_methods(side)["show_assistant_prompt_dialog"]]
-            + [find_method(n) for n in ("_add_combobox_arrow", "_count_assistant_prompt_tokens")] + helpers)
+            + [find_method(n) for n in ("_add_combobox_arrow", "_count_assistant_prompt_tokens") + link_members]
+            + helpers + constants)
     exec(compile(ast.Module(body=body, type_ignores=[]), f"<assistant dialog {side}>", "exec"), ns)
 
     class AssistantOwner(QMainWindow):
@@ -902,7 +910,8 @@ def _assistant_dialog_class(side):
             self.logs.append(("button_style", self.assistant_prompt))
 
     for name in ("show_assistant_prompt_dialog", "_add_combobox_arrow", "_count_assistant_prompt_tokens",
-                 "_disable_combobox_mousewheel", "_apply_halgakos_combo_icons"):
+                 "_disable_combobox_mousewheel", "_apply_halgakos_combo_icons",
+                 "_REFINEMENT_SYSTEM_PLACEHOLDERS") + link_members:
         setattr(AssistantOwner, name, ns[name])
     return AssistantOwner
 

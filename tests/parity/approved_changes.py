@@ -6157,6 +6157,42 @@ APPROVED = (
         "source": _FRESH_RELATIONS_ROWS,
         "values": {},
     },
+    {
+        "date": "2026-11-14",
+        "what": "AI prompt placeholders shown like links with what each says at the moment on hover "
+                "(qt_widget_helpers.link_placeholders; display only): {target_lang} in the Custom Image Edit "
+                "Prompt dialog, the Balanced/Full placeholders in the Manga Glossary Prompt dialog",
+        "source": {"src/manga_integration.py": [
+            (
+                '        user_prompt_editor.setPlaceholderText("Optional extra instruction for this image edit request")\n'
+                '\n'
+                '        def persist():\n',
+                '        user_prompt_editor.setPlaceholderText("Optional extra instruction for this image edit request")\n'
+                '        # {target_lang} like a link, with the language it becomes on hover (local_inpainter fills it with the\n'
+                '        # output language of the text translation)\n'
+                '        from qt_widget_helpers import link_placeholders, link_placeholders_in_label, target_language_now\n'
+                '        target_lang_now = lambda name: target_language_now(self.main_gui)\n'
+                '        for prompt_widget in (system_prompt_editor, user_prompt_editor):\n'
+                "            link_placeholders(prompt_widget, {'target_lang'}, target_lang_now)\n"
+                "        link_placeholders_in_label(instructions, {'target_lang'}, target_lang_now)\n"
+                '\n'
+                '        def persist():\n',
+            ),
+            (
+                "        prompt_editor.setPlainText(getattr(self, 'manga_glossary_prompt', self._default_manga_glossary_prompt()))\n"
+                "        layout.addWidget(prompt_editor)\n"
+                "\n",
+                "        prompt_editor.setPlainText(getattr(self, 'manga_glossary_prompt', self._default_manga_glossary_prompt()))\n"
+                "        layout.addWidget(prompt_editor)\n"
+                "        # Balanced/Full placeholders like links, with what each says now on hover (the request is build_prompt)\n"
+                "        link_glossary = getattr(self.main_gui, '_link_glossary_prompt_placeholders', None)\n"
+                "        if callable(link_glossary):\n"
+                "            link_glossary(prompt_editor, 'balanced', prompt=prompt_editor.toPlainText)\n"
+                "\n",
+            ),
+        ]},
+        "values": {},
+    },
 )
 
 

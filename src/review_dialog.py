@@ -807,6 +807,7 @@ class ReviewDialog(QDialog):
         prompt_layout.addWidget(self._create_review_profile_row())
         prompt_layout.addWidget(self.prompt_edit)
         self.prompt_edit.textChanged.connect(self._stage_review_prompts)
+        self._link_review_placeholders(self.prompt_edit)
 
         # ── 2. Log / Summary field ──
         log_group = QGroupBox("Review Output")
@@ -1606,6 +1607,12 @@ class ReviewDialog(QDialog):
                 pass
         self._refresh_review_profile_combo()
 
+    def _link_review_placeholders(self, editor):
+        """{target_lang} like a link, with the target language the review is written in on hover
+        (review_generator replaces it with the main window's target language)."""
+        from qt_widget_helpers import link_placeholders, target_language_now
+        link_placeholders(editor, {'target_lang'}, lambda name: target_language_now(self.translator_gui))
+
     def _stage_review_prompts(self, *_args):
         """An edit of the review prompt (or a saved final prompt) goes into the selected profile and the
         prompt mirrors (in memory; saved with the config)."""
@@ -1712,6 +1719,7 @@ class ReviewDialog(QDialog):
         prompt_edit = QPlainTextEdit()
         prompt_edit.setPlainText(getattr(self, '_final_review_prompt', '') or DEFAULT_FINAL_REVIEW_PROMPT)
         prompt_edit.setPlaceholderText("Enter the final review synthesis prompt...")
+        self._link_review_placeholders(prompt_edit)
         prompt_edit.setStyleSheet("""
             QPlainTextEdit {
                 background-color: #383838;

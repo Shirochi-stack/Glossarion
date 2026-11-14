@@ -7565,6 +7565,10 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         prompt_editor = QTextEdit()
         prompt_editor.setPlainText(getattr(self, 'manga_glossary_prompt', self._default_manga_glossary_prompt()))
         layout.addWidget(prompt_editor)
+        # Balanced/Full placeholders like links, with what each says now on hover (the request is build_prompt)
+        link_glossary = getattr(self.main_gui, '_link_glossary_prompt_placeholders', None)
+        if callable(link_glossary):
+            link_glossary(prompt_editor, 'balanced', prompt=prompt_editor.toPlainText)
 
         button_layout = QHBoxLayout()
 
@@ -8934,6 +8938,13 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         user_label = QLabel("User Prompt (optional):")
         user_prompt_editor = QTextEdit()
         user_prompt_editor.setPlaceholderText("Optional extra instruction for this image edit request")
+        # {target_lang} like a link, with the language it becomes on hover (local_inpainter fills it with the
+        # output language of the text translation)
+        from qt_widget_helpers import link_placeholders, link_placeholders_in_label, target_language_now
+        target_lang_now = lambda name: target_language_now(self.main_gui)
+        for prompt_widget in (system_prompt_editor, user_prompt_editor):
+            link_placeholders(prompt_widget, {'target_lang'}, target_lang_now)
+        link_placeholders_in_label(instructions, {'target_lang'}, target_lang_now)
 
         def persist():
             try:

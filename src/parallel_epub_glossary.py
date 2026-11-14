@@ -471,6 +471,7 @@ class ParallelEpubPairDialog(QDialog):
         )
         wrapper_layout.addWidget(self.wrapper_edit)
         controls_layout.addWidget(wrapper_group)
+        self._link_wrapper_placeholders(wrapper_help)
 
         epub_row = QHBoxLayout()
         raw_column = QVBoxLayout()
@@ -588,6 +589,10 @@ class ParallelEpubPairDialog(QDialog):
         self.system_prompt_edit.setMinimumHeight(190)
         prompt_layout.addWidget(self.system_prompt_edit)
         controls_layout.addWidget(prompt_group, 1)
+        # Balanced/Full placeholders like links (this prompt goes through the same build_prompt), live on hover
+        link_glossary = getattr(self.parent(), "_link_glossary_prompt_placeholders", None)
+        if callable(link_glossary):
+            link_glossary(self.system_prompt_edit, "balanced", prompt=self.system_prompt_edit.toPlainText)
         self.content_splitter.setSizes([570, 910])
 
         button_row = QHBoxLayout()
@@ -611,6 +616,20 @@ class ParallelEpubPairDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, title, "", "EPUB files (*.epub)")
         if path:
             self._load_epub(side, path)
+
+    def _link_wrapper_placeholders(self, wrapper_help):
+        """The pair wrapper's placeholders like links, described on hover (parallel_epub_core fills them for
+        each mapped pair)."""
+        from qt_widget_helpers import link_described_placeholders, link_described_placeholders_in_label
+
+        pair_inputs = {
+            "raw_text": "the raw chapter text of each mapped pair.",
+            "translated_text": "the translated chapter text of each mapped pair.",
+            "raw_filename": "the raw HTML file name of each mapped pair.",
+            "translated_filename": "the translated HTML file name of each mapped pair.",
+        }
+        link_described_placeholders(self.wrapper_edit, pair_inputs)
+        link_described_placeholders_in_label(wrapper_help, pair_inputs)
 
     def _create_auto_offset_checkbox(self) -> QCheckBox:
         """Reuse the app's standard checkmark toggle, with a standalone fallback."""

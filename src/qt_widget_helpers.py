@@ -13,15 +13,24 @@
   loading screen as a widget; the Relations Diagram shows it while its data is read).
 * ``flash_saved`` - the Multi API Key Manager's saved confirmation for any Save button: green,
   "💾 Saved!", the Windows notification sound (the Placeholder Text editor, Manage Models).
+* ``dialog_button`` - the Placeholder Text editor's blue Save / red Reset / grey Close bottom-row
+  buttons (also the Refinement Prompt dialog).
+* ``link_placeholders`` / ``link_placeholders_in_label`` - AI prompt placeholders ({name}) shown like links:
+  blue and underlined in a prompt editor, an "Available placeholders" line or a label, with a tooltip
+  that says what the placeholder expands to at the moment of the hover (display only).
 """
 
+import html
 import os
+import re
 import time
 
-from PySide6.QtCore import QRect, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QTransform
-from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                               QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt, QTimer
+from PySide6.QtGui import (QBrush, QColor, QCursor, QInputMethodEvent, QPainter, QPen, QPixmap,
+                           QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTransform)
+from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QSizePolicy, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QToolTip,
+                               QVBoxLayout, QWidget)
 
 # Context menus without the empty icon gutter (Progress Manager rows, the QA scanner's glossary
 # name review)
@@ -409,3 +418,450 @@ def flash_saved(button, text="💾 Saved!", ms=1500, then=None, beep=True):
 
     timer.timeout.connect(restore)
     timer.start(int(ms))
+
+
+# background, border, hover of a dialog's bottom-row buttons (the Placeholder Text editor's row)
+DIALOG_BUTTON_COLORS = {
+    "save": ("#2f5f8f", "#4a78a8", "#3f78ad"),   # blue
+    "reset": ("#6f2f2f", "#944545", "#8a3a3a"),  # red
+    "close": ("#3a3a3a", "#555555", "#4a4a4a"),  # grey
+}
+
+
+def dialog_button(text, kind):
+    """A bottom-row button of the Placeholder Text editor's style: blue ``"save"``, red ``"reset"`` or grey
+    ``"close"``. Its minimum width is its resting width, so a shorter ``flash_saved`` text (e.g. "✅ Reset!")
+    does not move the row."""
+    background, border, hover = DIALOG_BUTTON_COLORS[kind]
+    button = QPushButton(text)
+    button.setAutoDefault(False)
+    button.setFixedHeight(28)
+    button.setStyleSheet(f"""
+        QPushButton {{ background-color: {background}; color: #ffffff; font-size: 11px;
+            font-weight: bold; border: 1px solid {border}; border-radius: 4px; padding: 0px 12px; }}
+        QPushButton:hover {{ background-color: {hover}; }}
+    """)
+    button.ensurePolished()
+    button.setMinimumWidth(button.sizeHint().width())
+    return button
+
+
+# ── AI prompt placeholders shown like links ──────────────────────────────────────────────────────
+# Display only: nothing here changes a prompt's text, its undo history or its modified flag.
+
+#: The app's link blue (the "Available placeholders" lines, focus borders, the context menu border).
+PLACEHOLDER_LINK_COLOR = "#5a9fd4"
+#: The same link on a light input background, where #5a9fd4 reads poorly.
+PLACEHOLDER_LINK_COLOR_ON_LIGHT = "#1f5fa8"
+#: One ``{name}`` token.
+PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_PLACEHOLDER_HREF = "placeholder:"
+_TOOLTIP_WIDTH = 520
+_TOOLTIP_MUTED = "#9aa0a6"
+
+
+def _placeholder_names(names):
+    """The names valid now: ``names`` is a callable (called now) or a collection."""
+    try:
+        value = names() if callable(names) else names
+    except Exception:
+        return frozenset()
+    return value if isinstance(value, frozenset) else frozenset(value or ())
+
+
+def placeholder_spans(text, names):
+    """``[(start, end, name)]`` of each ``{name}`` in ``text`` whose name is valid (``names``)."""
+    if not text or "{" not in text:
+        return []
+    valid = _placeholder_names(names)
+    if not valid:
+        return []
+    return [(m.start(), m.end(), m.group(1)) for m in PLACEHOLDER_RE.finditer(text) if m.group(1) in valid]
+
+
+def placeholder_at(text, index, names):
+    """The ``(start, end, name)`` of the valid placeholder at caret position ``index`` (from its first
+    character's left edge to its last character's right edge), or None."""
+    for start, end, name in placeholder_spans(text, names):
+        if start <= index <= end:
+            return start, end, name
+    return None
+
+
+def placeholder_link_color(widget=None):
+    """The link blue for ``widget``'s input background: #5a9fd4 on the app's dark inputs, a darker blue on a
+    light one."""
+    try:
+        if widget is not None and widget.palette().base().color().lightness() > 160:
+            return PLACEHOLDER_LINK_COLOR_ON_LIGHT
+    except Exception:
+        pass
+    return PLACEHOLDER_LINK_COLOR
+
+
+def _tooltip_lines(lines, muted=False):
+    text = html.escape("\n".join(lines), quote=False).replace("\n", "<br>")
+    return f"<span style='color: {_TOOLTIP_MUTED};'>{text}</span>" if muted else text
+
+
+def _placeholder_tooltip_body(value):
+    """``(html, long)`` for one value (see placeholder_tooltip)."""
+    if isinstance(value, dict):
+        text = str(value.get("text") or "")
+        note = str(value.get("note") or "")
+        if value.get("error"):
+            body = _tooltip_lines([f"The current value could not be read: {value['error']}"], muted=True)
+            return body, False
+        if value.get("per_request"):
+            lines = ["Filled in for each request: " + (text or note)]
+            return _tooltip_lines(lines, muted=True), len(lines[0]) > 70
+        if value.get("active") is False:
+            lines = [str(value.get("inactive") or "Inactive right now: removed from the prompt.")]
+            if note:
+                lines.append(note)
+            return _tooltip_lines(lines, muted=True), any(len(line) > 70 for line in lines)
+        extra = [str(value["extra"])] if value.get("extra") else []
+    else:
+        text, extra = str(value if value is not None else ""), []
+    body = _tooltip_lines([text]) if text else _tooltip_lines(["(empty)"], muted=True)
+    if extra:
+        body += "<br>" + _tooltip_lines(extra, muted=True)
+    return body, len(text) > 300 or any(len(line) > 70 for line in [*text.split("\n"), *extra])
+
+
+def placeholder_tooltip(name, value):
+    """The tooltip of ``{name}`` (rich text, the value shown verbatim and wrapped).
+
+    ``value`` is what the placeholder says now: a str (its expansion), a dict with ``text`` and the optional
+    keys ``active`` (False: removed from the prompt now), ``inactive`` (what removed means there),
+    ``per_request`` (``text`` describes data of each request), ``note`` (shown under an inactive value),
+    ``extra`` (a short muted line under the value), ``error``; or a list of ``(label, value)`` pairs, one
+    section each (e.g. Balanced/Full and Minimal).
+    """
+    sections = value if isinstance(value, list) else [(None, value)]
+    rows = [f"<b>{html.escape('{' + str(name) + '}', quote=False)}</b>"]
+    wide = False
+    for label, item in sections:
+        body, long_body = _placeholder_tooltip_body(item)
+        wide = wide or long_body
+        if label:
+            rows.append(f"<i>{html.escape(str(label), quote=False)}</i>")
+        rows.append(body)
+    width = f" width='{_TOOLTIP_WIDTH}'" if wide else ""
+    cells = "".join(f"<tr><td style='white-space: pre-wrap; padding-top: 2px;'>{row}</td></tr>" for row in rows)
+    return f"<qt><table{width} cellspacing='0' cellpadding='0'>{cells}</table></qt>"
+
+
+def _resolve_placeholder(resolver, name):
+    try:
+        return resolver(name)
+    except Exception as exc:  # a broken resolver must not break the hover
+        return {"error": str(exc) or type(exc).__name__}
+
+
+class PlaceholderHighlighter(QSyntaxHighlighter):
+    """Formats each valid ``{name}`` of a QTextEdit / QPlainTextEdit like a link (blue, underlined).
+
+    ``names``: a callable returning the names valid in that editor now (or a collection); call
+    ``rehighlight()`` after it changes without a text change. Formatting only (QTextLayout formats): the
+    text, the undo stack and the modified flag are untouched.
+    """
+
+    def __init__(self, editor, names):
+        super().__init__(editor.document())
+        self._editor = editor
+        self._names = names
+        self._color = None
+        self._format = QTextCharFormat()
+
+    def set_names(self, names):
+        self._names = names
+        self.rehighlight()
+
+    def _link_format(self):
+        color = placeholder_link_color(self._editor)
+        if color != self._color:
+            self._color = color
+            self._format = QTextCharFormat()
+            self._format.setForeground(QColor(color))
+            self._format.setFontUnderline(True)
+            self._format.setUnderlineColor(QColor(color))
+        return self._format
+
+    def refresh_color(self):
+        """Re-format when the editor's background changed between dark and light."""
+        if self._color is not None and placeholder_link_color(self._editor) != self._color:
+            self.rehighlight()
+
+    def highlightBlock(self, text):
+        spans = placeholder_spans(text, self._names)
+        if spans:
+            link = self._link_format()
+            for start, end, _name in spans:
+                self.setFormat(start, end - start, link)
+
+
+class _PlaceholderLinks(QObject):
+    """Link look + live hover tooltip for the placeholders of one editor or QLineEdit (link_placeholders)."""
+
+    _LINE_REFORMAT_EVENTS = (QEvent.Show, QEvent.FontChange, QEvent.StyleChange, QEvent.PaletteChange)
+
+    def __init__(self, widget, names, resolver):
+        self._widget = widget
+        self._line = isinstance(widget, QLineEdit)
+        self._target = widget if self._line else widget.viewport()
+        super().__init__(self._target)
+        self._names = names
+        self._resolver = resolver
+        self._shown = None
+        self._hand = False
+        self._rest_cursor = None
+        self.highlighter = None if self._line else PlaceholderHighlighter(widget, self._current_names)
+        self._target.setMouseTracking(True)
+        self._target.installEventFilter(self)
+        if self._line:
+            self.refresh()
+
+    def _current_names(self):
+        return _placeholder_names(self._names)
+
+    def update(self, names=None, resolver=None):
+        if names is not None:
+            self._names = names
+        if resolver is not None:
+            self._resolver = resolver
+        self.refresh()
+
+    def refresh(self):
+        """Re-apply the link look (after the valid names changed without a text change)."""
+        if self.highlighter is not None:
+            self.highlighter.rehighlight()
+            return
+        line = self._widget
+        link = QTextCharFormat()
+        color = QColor(placeholder_link_color(line))
+        link.setForeground(color)
+        link.setFontUnderline(True)
+        link.setUnderlineColor(color)
+        cursor = line.cursorPosition()
+        # A QLineEdit takes extra character formats only from an input method event (an empty preedit:
+        # the text, the cursor and the undo history stay as they are).
+        attributes = [QInputMethodEvent.Attribute(QInputMethodEvent.TextFormat, start - cursor, end - start, link)
+                      for start, end, _name in placeholder_spans(line.text(), self._current_names)]
+        QCoreApplication.sendEvent(line, QInputMethodEvent("", attributes))
+
+    def _hit(self, pos):
+        """``(name, rect or None)`` of the placeholder under ``pos`` (target coordinates), or None."""
+        widget = self._widget
+        if self._line:
+            span = placeholder_at(widget.text(), widget.cursorPositionAt(pos), self._current_names)
+            return (span[2], None) if span else None
+        cursor = widget.cursorForPosition(pos)
+        block = cursor.block()
+        span = placeholder_at(block.text(), cursor.positionInBlock(), self._current_names)
+        if span is None:
+            return None
+        first, last = QTextCursor(block), QTextCursor(block)
+        first.setPosition(block.position() + span[0])
+        last.setPosition(block.position() + span[1])
+        left, right = widget.cursorRect(first), widget.cursorRect(last)
+        if left.top() == right.top():  # on one line: the pointer must be on the token itself
+            rect = QRect(left.left(), left.top(), max(1, right.left() - left.left()), left.height())
+            return (span[2], rect) if rect.contains(pos) else None
+        return (span[2], None) if left.top() <= pos.y() <= right.bottom() else None  # wrapped token
+
+    def _set_hand(self, on):
+        if on == self._hand:
+            return
+        self._hand = on
+        if on:
+            self._rest_cursor = self._target.cursor()
+            self._target.setCursor(Qt.PointingHandCursor)
+        elif self._rest_cursor is not None:
+            self._target.setCursor(self._rest_cursor)
+        else:
+            self._target.unsetCursor()
+
+    def _show(self, name, rect, global_pos):
+        tip = placeholder_tooltip(name, _resolve_placeholder(self._resolver, name))
+        if rect is not None:
+            QToolTip.showText(global_pos, tip, self._target, rect)
+        else:
+            QToolTip.showText(global_pos, tip, self._target)
+        self._shown = name
+
+    def _hide(self):
+        self._shown = None
+        QToolTip.hideText()
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.MouseMove:
+            hit = None if event.buttons() != Qt.NoButton else self._hit(event.position().toPoint())
+            self._set_hand(hit is not None)
+            if self._shown is not None and (hit is None or hit[0] != self._shown):
+                if hit is None:
+                    self._hide()
+                else:
+                    self._show(hit[0], hit[1], event.globalPosition().toPoint())
+        elif kind == QEvent.ToolTip:
+            hit = self._hit(event.pos())
+            if hit is not None:
+                self._show(hit[0], hit[1], event.globalPos())
+                return True
+            if self._shown is not None:
+                self._hide()
+        elif kind == QEvent.Leave:
+            self._set_hand(False)
+            if self._shown is not None:
+                self._hide()
+        elif self._line and kind in self._LINE_REFORMAT_EVENTS:
+            self.refresh()
+        elif kind == QEvent.Show and self.highlighter is not None:
+            self.highlighter.refresh_color()
+        return False
+
+
+def link_placeholders(widget, names, resolver):
+    """Show the AI prompt placeholders of a prompt editor (QTextEdit / QPlainTextEdit) or a line (QLineEdit)
+    like links, with a tooltip of what each says at the moment of the hover.
+
+    ``names``: a callable returning the names the code replaces in that prompt now (or a collection); only
+    those are marked. ``resolver(name)``: called at hover time, returns the value (see placeholder_tooltip).
+    The pointer becomes a pointing hand over a placeholder; clicking still places the caret. Calling it
+    again on the same widget replaces ``names`` / ``resolver``. Returns the helper (``refresh()``).
+    """
+    links = getattr(widget, "_placeholder_links", None)
+    if links is not None:
+        links.update(names, resolver)
+        return links
+    links = _PlaceholderLinks(widget, names, resolver)
+    widget._placeholder_links = links
+    return links
+
+
+def link_described_placeholders(widget, descriptions):
+    """link_placeholders for a prompt whose placeholders hold data of each request: ``descriptions`` maps
+    each name to what it is filled with, which the tooltip shows."""
+    return link_placeholders(widget, *described_placeholder_resolver(descriptions))
+
+
+def placeholder_label_html(text, names, color=PLACEHOLDER_LINK_COLOR):
+    """``text`` as label rich text, each valid placeholder a blue, underlined link; reads the same."""
+    def plain(part):
+        return html.escape(part, quote=False).replace("\n", "<br>")
+
+    out, pos = [], 0
+    for start, end, name in placeholder_spans(text or "", names):
+        out.append(plain(text[pos:start]))
+        out.append(f"<a href='{_PLACEHOLDER_HREF}{name}' style='color: {color}; text-decoration: underline;'>"
+                   f"{html.escape(text[start:end], quote=False)}</a>")
+        pos = end
+    out.append(plain((text or "")[pos:]))
+    return "<span style='white-space: pre-wrap;'>" + "".join(out) + "</span>"
+
+
+class _LabelPlaceholderLinks(QObject):
+    """The live hover tooltip of a label's placeholder links (link_placeholders_in_label)."""
+
+    def __init__(self, label):
+        super().__init__(label)
+        self._label = label
+        self.names = ()
+        self.resolver = None
+        self.hovered = None
+        label.linkHovered.connect(self._link_hovered)
+        label.installEventFilter(self)
+
+    def _show(self):
+        QToolTip.showText(QCursor.pos(), placeholder_tooltip(
+            self.hovered, _resolve_placeholder(self.resolver, self.hovered)), self._label)
+
+    def _link_hovered(self, href):
+        if href.startswith(_PLACEHOLDER_HREF):
+            self.hovered = href[len(_PLACEHOLDER_HREF):]
+            self._show()
+        elif self.hovered is not None:
+            self.hovered = None
+            QToolTip.hideText()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.ToolTip and self.hovered is not None:
+            self._show()  # the label's own tooltip (if any) waits until the pointer leaves the link
+            return True
+        if event.type() == QEvent.Leave and self.hovered is not None:
+            self.hovered = None
+            QToolTip.hideText()
+        return False
+
+
+def link_placeholders_in_label(label, names, resolver, text=None):
+    """Show the placeholders of a QLabel's text like links with the live tooltip of link_placeholders.
+
+    ``text``: the label's plain text (default: the text it was given before, or its current text); call
+    this again instead of ``setText`` when the text changes. Word wrap, selection, the context menu and
+    the visible text stay as they were; clicking a link opens nothing.
+    """
+    links = getattr(label, "_placeholder_label_links", None)
+    if text is None:
+        text = links.text if links is not None else label.text()
+    if links is None:
+        links = _LabelPlaceholderLinks(label)
+        label._placeholder_label_links = links
+    links.text, links.names, links.resolver = text, names, resolver
+    label.setTextFormat(Qt.RichText)
+    label.setOpenExternalLinks(False)
+    label.setTextInteractionFlags(label.textInteractionFlags() | Qt.LinksAccessibleByMouse)
+    label.setText(placeholder_label_html(text, names))
+    return links
+
+
+class _PlaceholderNameTooltip(QObject):
+    def __init__(self, widget, name, resolver):
+        super().__init__(widget)
+        self.name = name
+        self.resolver = resolver
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.ToolTip:
+            name = self.name() if callable(self.name) else self.name
+            if name:
+                QToolTip.showText(event.globalPos(), placeholder_tooltip(
+                    name, _resolve_placeholder(self.resolver, name)), obj)
+                return True
+        return False
+
+
+def placeholder_tooltip_for(widget, name, resolver):
+    """``widget``'s tooltip becomes the live value of placeholder ``name`` (a callable: the name now, e.g.
+    the one a combo box has selected), resolved at hover time."""
+    helper = _PlaceholderNameTooltip(widget, name, resolver)
+    widget._placeholder_name_tooltip = helper
+    return helper
+
+
+def described_placeholder_resolver(descriptions):
+    """The resolver of placeholders that hold data of each request: ``descriptions`` maps each name (braces
+    optional) to what it is filled with. Returns ``(names, resolver)``."""
+    descriptions = {str(name).strip("{}"): text for name, text in dict(descriptions).items()}
+    return frozenset(descriptions), lambda name: {"per_request": True, "text": descriptions[name]}
+
+
+def link_described_placeholders_in_label(label, descriptions, text=None):
+    """link_placeholders_in_label for placeholders that hold data of each request (see
+    described_placeholder_resolver)."""
+    names, resolver = described_placeholder_resolver(descriptions)
+    return link_placeholders_in_label(label, names, resolver, text=text)
+
+
+def target_language_now(owner):
+    """What ``{target_lang}`` becomes now for ``owner`` (the main window: its target language selector,
+    see TranslatorGUI._prompt_placeholder_value), else its saved output language."""
+    resolver = getattr(owner, "_prompt_placeholder_value", None)
+    if callable(resolver):
+        value = resolver("target_lang")
+        if isinstance(value, str) and value.strip():
+            return value
+    config = getattr(owner, "config", None) or {}
+    return str(config.get("output_language") or "English")

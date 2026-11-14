@@ -70,13 +70,18 @@ def refinement_reopens_on_source_change() -> bool:
     )
 
 
-def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
+def selected_refinement_types(active_types: Iterable[str], mode: Optional[str] = None,
+                              selected: Optional[Iterable[str]] = None) -> List[str]:
+    """The active entry types refinement sends; ``mode`` ('all'/'selected') and ``selected`` default to
+    GLOSSARY_REFINEMENT_TYPE_MODE / GLOSSARY_REFINEMENT_SELECTED_TYPES (the hover preview passes live ones)."""
     active = [str(t).strip() for t in active_types if str(t).strip()]
-    mode = os.getenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all").strip().lower()
-    if mode != "selected":
+    if mode is None:
+        mode = os.getenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all")
+    if str(mode).strip().lower() != "selected":
         return active
-    raw = os.getenv("GLOSSARY_REFINEMENT_SELECTED_TYPES", "")
-    selected = [t.strip() for t in raw.split(",") if t.strip()]
+    if selected is None:
+        selected = os.getenv("GLOSSARY_REFINEMENT_SELECTED_TYPES", "").split(",")
+    selected = [str(t).strip() for t in selected if str(t).strip()]
     selected_lc = {_refinement_type_key(t) for t in selected}
     return [t for t in active if _refinement_type_key(t) in selected_lc]
 
@@ -575,11 +580,15 @@ def _refinement_budget_label(available_tokens: int, mtoks: int) -> str:
     return f"budget {int(budget):,}" + (f" ({', '.join(parts)})" if parts else "")
 
 
-def _entry_columns(entries: List[Dict]) -> List[str]:
+def _entry_columns(entries: List[Dict], custom_fields: Optional[List[str]] = None) -> List[str]:
+    """The refinement column schema of ``entries``; ``custom_fields``: the configured custom columns
+    (default: GLOSSARY_CUSTOM_FIELDS; the Glossary Manager's hover preview passes its live list)."""
     from glossary_usage import INTERNAL_ENTRY_FIELDS
 
     columns = ["type", "raw_name", "translated_name"]
-    custom_fields = _active_custom_fields()
+    if custom_fields is None:
+        custom_fields = _active_custom_fields()
+    custom_fields = [str(field).strip() for field in custom_fields if str(field).strip()]
     description_active = _description_active(custom_fields)
     discovered = []
     for entry in entries or []:
