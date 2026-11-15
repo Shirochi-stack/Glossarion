@@ -17,10 +17,12 @@
 # wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
 # mobile wheels (cryptography 50.0.2, Pillow 13.0.0) and the on-device engine with vision
 # (llama-cpp-python 0.3.32 with libmtmd; src/mobile/ci/wheels/wheelhouse.toml), which
-# no index has. Android needs prepare + wheels-android, the iOS jobs prepare + wheels-ios. Each
-# build job hands them to flet build through .github/actions/mobile-wheelhouse (strict check +
-# PIP_FIND_LINKS) and checks after every flet build that pip installed them
-# (check_mobile_wheels.py --verify-installed). The smoke jobs assert the versions on the device.
+# no index has; iOS Pillow is PyPI's official wheel retagged with build tag 1000 (pypi.flet.dev's
+# pillow-13.0.0-1 lacks AVIF / ImageCms). Android needs prepare + wheels-android, the iOS jobs
+# prepare + wheels-ios. Each build job hands them to flet build through .github/actions/mobile-wheelhouse
+# (strict check + PIP_FIND_LINKS) and checks after every flet build that pip installed them
+# (check_mobile_wheels.py --verify-installed). The smoke jobs assert the versions on the device
+# (iOS: Pillow's avif and littlecms2 modules too).
 # The built-in engine's llama-cpp-python is our own build (wheelhouse, build 1000: pypi.flet.dev's
 # build 2 has no libmtmd); after every flet build `wheels.py verify-site-packages --package
 # llama-cpp-python` checks what pip installed (that build, the five libraries incl. libmtmd, 16 KB

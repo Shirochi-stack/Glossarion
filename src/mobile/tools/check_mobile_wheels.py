@@ -64,6 +64,9 @@ their mobile wheels:
 * ``--verify-installed SITE_PACKAGES``: offline check that every arch directory of a finished
   ``flet build`` (build/site-packages) holds the wheelhouse copy of each promised package.
 
+A promised target can also be PyPI's official wheel retagged with the manifest's build tag
+(``[wheel.retag]``: iOS Pillow); every check above treats it like a forge-built wheel.
+
 Exit codes: 0 ok, 1 something is not installable, 2 usage/network error.
 """
 from __future__ import annotations
@@ -1094,6 +1097,23 @@ class PromisedWheel:
     requires_by_platform: tuple = ()   # ((platform, (requirement, ...)), ...)
     # The sdist's URL for a device-only pin uv.lock does not hold (sdist_url); "" = from uv.lock.
     sdist_url: str = ""
+    # Targets taken from PyPI's official wheel instead of a forge build ([wheel.retag]): fetched by
+    # URL, checked against the sha256, then retagged with build_tag (wheels.py retag).
+    retag: tuple = ()        # ((target key, url, sha256), ...)
+
+    @property
+    def built_targets(self) -> tuple:
+        """The targets forge builds from the recipe (every target not in ``retag``)."""
+        retagged = {t for t, _u, _s in self.retag}
+        return tuple(t for t in self.targets if t not in retagged)
+
+    def retag_source(self, target_key: str):
+        """(url, sha256) of the official wheel ``target_key`` is retagged from, or None (forge build)."""
+        return next(((u, s) for t, u, s in self.retag if t == target_key), None)
+
+    def official_filename(self, target_key: str) -> str:
+        """PyPI's file name of the official wheel (no build tag)."""
+        return f"{self.name.replace('-', '_')}-{self.version}-{self.tag(target_key)}.whl"
 
     def requires_for(self, target_key: str) -> tuple:
         """The Requires-Dist (without extras) the wheel for ``target_key`` carries."""
@@ -1175,9 +1195,27 @@ def load_wheelhouse_manifest(path) -> WheelhouseManifest:
         if not isinstance(sdist_url, str) or (sdist_url and not re.fullmatch(
                 r"https://files\.pythonhosted\.org/packages/[0-9a-f/]+/[A-Za-z0-9_.-]+\.tar\.gz", sdist_url)):
             raise ManifestError(f"{where}: sdist_url must be a files.pythonhosted.org .tar.gz URL")
+        retag_table = entry.get("retag", {})
+        if not isinstance(retag_table, dict):
+            raise ManifestError(f"{where}: retag must be a table of target = {{ url, sha256 }}")
+        retag = []
+        for target, source in retag_table.items():
+            if target not in targets:
+                raise ManifestError(f"{where}: retag target {target!r} is not in targets")
+            if not isinstance(source, dict) or set(source) != {"url", "sha256"}:
+                raise ManifestError(f"{where}: retag.{target} must be {{ url, sha256 }}")
+            url, sha = source["url"], source["sha256"]
+            if not isinstance(sha, str) or not _SHA256_RE.fullmatch(sha):
+                raise ManifestError(f"{where}: retag.{target}.sha256 must be 64 lowercase hex digits")
+            official = PromisedWheel(canonical(name), version, "", sdist, tuple(targets), ()).official_filename(target)
+            if not isinstance(url, str) or not re.fullmatch(
+                    r"https://files\.pythonhosted\.org/packages/[0-9a-f/]+/" + re.escape(official), url):
+                raise ManifestError(f"{where}: retag.{target}.url must be the files.pythonhosted.org URL of "
+                                    f"{official}")
+            retag.append((target, url, sha))
         seen.add(canonical(name))
         wheels.append(PromisedWheel(canonical(name), version, recipe, sdist, tuple(targets), tuple(reqs),
-                                    by_platform, sdist_url))
+                                    by_platform, sdist_url, tuple(retag)))
     if not wheels:
         raise ManifestError(f"{path}: no [[wheel]] entries")
     return WheelhouseManifest(path, build_tag, wheels, data)

@@ -78,6 +78,10 @@ no Android builds of either (and no iOS cryptography 50.0.2), so CI builds them 
 `check_mobile_wheels.py --wheelhouse-plan` checks the index side plus the planned wheels, and
 the build jobs verify the built wheels (`--verify-installed`: OpenSSL version, undefined
 symbols). The first all-green Build Mobile with these wheels was run 37728461336 (96da1ec6).
+iOS Pillow is not built: the wheelhouse promises PyPI's official 13.0.0 iOS wheels (`[wheel.retag]`
+in `ci/wheels/wheelhouse.toml`: url + sha256), which `wheels.py retag` downloads and retags with
+build tag 1000 (only the file name, WHEEL `Build:` and RECORD's WHEEL row change; verify-native
+proves it), so pypi.flet.dev's reduced `pillow-13.0.0-1` (no AVIF, no ImageCms) cannot win.
 Do not downgrade these pins or bypass the wheel check to make a release.
 
 The wheel check reads a pypi.flet.dev wheel's dependencies from the wheel's own METADATA (HTTP

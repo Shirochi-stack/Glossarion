@@ -2203,3 +2203,350 @@ def test_verify_native_checks_the_llama_wheels_like_the_installed_copy(tmp_path)
         wheel = _zip_tree(arch, tmp_path / f"{target}.whl")
         errors, notes = wh.verify_native_wheel(wheel, "llama-cpp-python", target, "3.5.9", (13, 0), None)
         assert errors == [] and any("lib/libmtmd.dylib" in n for n in notes), (target, errors)
+
+
+# --------------------------------------------------------------------------- retagged official wheels (iOS Pillow)
+# PyPI's official pillow-13.0.0 iOS wheels, promised by [wheel.retag] and retagged with build_tag 1000 so that
+# pypi.flet.dev's reduced pillow-13.0.0-1 (no AVIF / ImageCms) cannot outrank them.
+OFFICIAL_PILLOW_REQS = ['defusedxml; extra == "xmp"', 'olefile; extra == "fpx"']
+FLET_PILLOW_IOS = [f"pillow-13.0.0-1-cp313-cp313-{LABEL[t]}.whl" for t in IOS]
+
+
+def retag_url(target: str) -> str:
+    return f"https://files.pythonhosted.org/packages/ab/cd/{'0' * 60}/pillow-13.0.0-cp313-cp313-{LABEL[target]}.whl"
+
+
+def manifest_with_retag(shas: dict | None = None) -> str:
+    """MANIFEST with pillow promised for iOS too, from PyPI's official wheels ([wheel.retag])."""
+    text = MANIFEST.replace(f'targets = {json.dumps(ANDROID)}\nrequires_dist = {json.dumps(PILLOW_REQS)}',
+                            f'targets = {json.dumps(ANDROID + IOS)}\nrequires_dist = {json.dumps(PILLOW_REQS)}\n'
+                            f'requires_dist_ios = []')
+    assert text != MANIFEST
+    rows = "".join(f'"{t}" = {{ url = "{retag_url(t)}", sha256 = "{(shas or {}).get(t, "9" * 64)}" }}\n' for t in IOS)
+    return text + "\n[wheel.retag]\n" + rows
+
+
+def make_official_pillow(directory: Path, target: str, modules=wh.PILLOW_IOS_MODULES, wheel_build=None) -> Path:
+    """A PyPI-shaped official iOS Pillow wheel: no build tag, Mach-O modules for the slice, extras-only Requires-Dist."""
+    cputype, platform, minos = IOS_SLICES[target]
+    sdk = "iphoneos" if target == "iphoneos.arm64" else "iphonesimulator"
+    files = {"PIL/__init__.py": b"__version__ = '13.0.0'\n", "PIL/_avif.pyi": b"from typing import Any\n"}
+    files.update({f"PIL/{m}.cpython-313-{sdk}.so": make_macho(cputype, platform, minos) for m in modules})
+    path = make_wheel(directory, "pillow", "13.0.0", f"cp313-cp313-{LABEL[target]}", build="",
+                      requires=OFFICIAL_PILLOW_REQS, files=files)
+    if wheel_build:   # an official wheel that already carries a Build line (retag must replace it)
+        dist_info = "pillow-13.0.0.dist-info"
+        with zipfile.ZipFile(path) as zf:
+            members = {n: zf.read(n) for n in zf.namelist()}
+        members[f"{dist_info}/WHEEL"] = members[f"{dist_info}/WHEEL"].replace(
+            b"Tag:", f"Build: {wheel_build}\nTag:".encode(), 1)
+        rows = [_record_line(n, d) for n, d in members.items() if not n.endswith("/RECORD")]
+        members[f"{dist_info}/RECORD"] = ("\n".join(rows + [f"{dist_info}/RECORD,,"]) + "\n").encode()
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for n, d in members.items():
+                zf.writestr(n, d)
+    return path
+
+
+def official_set(directory: Path, **kw) -> dict:
+    """{target: official wheel} for the three iOS slices."""
+    return {t: make_official_pillow(directory, t, **kw) for t in IOS}
+
+
+def use_retag_manifest(proj, officials: dict | None = None) -> Path:
+    shas = {t: cmw.file_sha256(p) for t, p in (officials or {}).items()}
+    path = proj["root"] / "wheelhouse.toml"
+    path.write_text(manifest_with_retag(shas), encoding="utf-8")
+    return path
+
+
+def serve_official(monkeypatch, source: Path) -> list:
+    """download_verified fetches files.pythonhosted.org URLs from ``source`` (still sha256-checked)."""
+    real, asked = wh.download_verified, []
+
+    def fake(url, dest, sha256, attempts=4):
+        asked.append(url)
+        return real((source / url.rsplit("/", 1)[1]).resolve().as_uri(), dest, sha256, attempts=1)
+
+    monkeypatch.setattr(wh, "download_verified", fake)
+    return asked
+
+
+def test_retag_manifest_entries_are_validated(tmp_path):
+    good = manifest_with_retag()
+    p = tmp_path / "m.toml"
+    p.write_text(good, encoding="utf-8")
+    pillow = cmw.load_wheelhouse_manifest(p).wheel("pillow")
+    assert pillow.built_targets == tuple(ANDROID)
+    assert pillow.retag_source("iphoneos.arm64") == (retag_url("iphoneos.arm64"), "9" * 64)
+    assert pillow.retag_source("x86_64") is None
+    assert pillow.official_filename("iphonesimulator.x86_64") == "pillow-13.0.0-cp313-cp313-ios_13_0_x86_64_iphonesimulator.whl"
+    assert pillow.requires_for("iphoneos.arm64") == () and pillow.requires_for("x86_64") == tuple(PILLOW_REQS)
+    for change, message in [
+        (('"iphoneos.arm64" = { url', '"mips" = { url'), "retag target 'mips' is not in targets"),
+        (('sha256 = "' + "9" * 64, 'sha256 = "abc'), "sha256 must be 64"),
+        (("pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphoneos.whl",
+          "pillow-13.0.0-1-cp313-cp313-ios_13_0_arm64_iphoneos.whl"), "files.pythonhosted.org URL of pillow-13.0.0"),
+        (("https://files.pythonhosted.org/packages/ab", "https://pypi.flet.dev/packages/ab"), "files.pythonhosted.org"),
+    ]:
+        text = good.replace(*change, 1)
+        assert text != good
+        p.write_text(text, encoding="utf-8")
+        with pytest.raises(cmw.ManifestError, match=re.escape(message)):
+            cmw.load_wheelhouse_manifest(p)
+
+
+def test_retag_keeps_every_other_member_byte_identical(tmp_path):
+    original = make_official_pillow(tmp_path / "official", "iphoneos.arm64")
+    out = tmp_path / "out" / "pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl"
+    wh.retag_wheel(original, out, 1000)
+    di = "pillow-13.0.0.dist-info"
+    with zipfile.ZipFile(original) as a, zipfile.ZipFile(out) as b:
+        assert a.namelist() == b.namelist()
+        changed = [n for n in a.namelist() if a.read(n) != b.read(n)]
+        assert changed == [f"{di}/WHEEL", f"{di}/RECORD"]
+        assert [(i.date_time, i.external_attr) for i in a.infolist()] == [(i.date_time, i.external_attr) for i in b.infolist()]
+        old_wheel, new_wheel = a.read(f"{di}/WHEEL"), b.read(f"{di}/WHEEL")
+        assert new_wheel == old_wheel.replace(b"Tag: cp313-cp313-ios_13_0_arm64_iphoneos\n",
+                                              b"Tag: cp313-cp313-ios_13_0_arm64_iphoneos\nBuild: 1000\n")
+        old_rows, new_rows = a.read(f"{di}/RECORD").decode().splitlines(), b.read(f"{di}/RECORD").decode().splitlines()
+        diff = [(o, n) for o, n in zip(old_rows, new_rows) if o != n]
+        assert len(old_rows) == len(new_rows) and diff == [(_record_line(f"{di}/WHEEL", old_wheel),
+                                                            _record_line(f"{di}/WHEEL", new_wheel))]
+    ww = cmw.read_wheel(out)
+    assert ww.problems == [] and ww.wheel_build == "1000" and ww.build_text == "1000"
+    assert cmw.check_wheel_record(ww) == []
+    assert wh.compare_retag(original, out, 1000) == []
+    # deterministic: the same input gives the same bytes
+    again = tmp_path / "again" / out.name
+    wh.retag_wheel(original, again, 1000)
+    assert again.read_bytes() == out.read_bytes()
+    # an existing Build line is replaced, not duplicated
+    tagged = make_official_pillow(tmp_path / "tagged", "iphonesimulator.arm64", wheel_build="1")
+    out2 = tmp_path / "out" / "pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl"
+    wh.retag_wheel(tagged, out2, 1000)
+    with zipfile.ZipFile(out2) as zf:
+        assert zf.read(f"{di}/WHEEL").count(b"Build:") == 1 and b"Build: 1000\n" in zf.read(f"{di}/WHEEL")
+    assert cmw.check_wheel_record(cmw.read_wheel(out2)) == []
+
+
+def test_compare_retag_catches_any_other_change(tmp_path):
+    original = make_official_pillow(tmp_path / "official", "iphoneos.arm64")
+    out = tmp_path / "pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl"
+    wh.retag_wheel(original, out, 1000)
+    so = "PIL/_avif.cpython-313-iphoneos.so"
+    tampered = tmp_path / "t" / out.name
+    tampered.parent.mkdir()
+    with zipfile.ZipFile(out) as src, zipfile.ZipFile(tampered, "w") as dst:
+        for info in src.infolist():
+            dst.writestr(info, src.read(info) + (b"\0" if info.filename == so else b""))
+    assert wh.compare_retag(original, tampered, 1000) == [f"{out.name}: {so} differs from {original.name}"]
+    assert any("WHEEL differs" in e and "beyond the build tag" in e for e in wh.compare_retag(original, out, 1001))
+    extra = tmp_path / "e" / out.name
+    extra.parent.mkdir()
+    shutil.copy2(out, extra)
+    with zipfile.ZipFile(extra, "a") as zf:
+        zf.writestr("PIL/_evil.so", b"payload")
+    assert "names or order differ" in wh.compare_retag(original, extra, 1000)[0]
+
+
+def test_retag_command_fetches_checks_the_hash_and_records_provenance(proj, tmp_path, monkeypatch):
+    officials = official_set(tmp_path / "pypi")
+    manifest = use_retag_manifest(proj, officials)
+    asked = serve_official(monkeypatch, tmp_path / "pypi")
+    base = ["--manifest", str(manifest), "--pyproject", str(proj["root"] / "pyproject.toml")]
+    cache, downloads = tmp_path / "cache", tmp_path / "official"
+    assert wh.main(base + ["retag", "--platform", "android", "--downloads", str(downloads), "--cache", str(cache)]) == 0
+    assert asked == [] and not cache.exists()                       # nothing to retag on Android
+    assert wh.main(base + ["retag", "--platform", "ios", "--downloads", str(downloads), "--cache", str(cache)]) == 0
+    assert asked == [retag_url(t) for t in IOS]
+    names = sorted(p.name for p in (cache / "pillow").glob("*.whl"))
+    assert names == sorted(f"pillow-13.0.0-1000-cp313-cp313-{LABEL[t]}.whl" for t in IOS)
+    info = json.loads((cache / "pillow" / "build-info.json").read_text(encoding="utf-8"))
+    row = info["retagged"]["wheels"]["pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl"]
+    assert row["url"] == retag_url("iphoneos.arm64") and row["sha256"] == cmw.file_sha256(officials["iphoneos.arm64"])
+    assert info["retagged"]["build_tag"] == 1000
+    # assemble + provenance with the forge-built cryptography slices next to them
+    full_wheelhouse(cache / "cryptography", targets_crypto=IOS, targets_pillow=[])
+    out = tmp_path / "wheelhouse"
+    assert wh.main(base + ["assemble", "--platform", "ios", "--cache", str(cache), "--out", str(out)]) == 0
+    assert wh.main(base + ["provenance", "--platform", "ios", "--wheelhouse", str(out), "--cache", str(cache),
+                           "--built", "cryptography"]) == 0
+    prov = {e["file"]: e for e in json.loads((out / "provenance.json").read_text(encoding="utf-8"))["wheels"]}
+    pil = prov["pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl"]
+    assert pil["origin"].startswith("PyPI pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphoneos.whl (sha256 ")
+    assert pil["retagged_in_this_run"] and not pil["built_in_this_run"] and pil["build"]["retagged"]
+    crypto = prov["cryptography-50.0.2-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl"]
+    assert crypto["origin"] == "mobile-forge build" and crypto["built_in_this_run"]
+    sums = (out / "SHA256SUMS").read_text(encoding="utf-8")
+    assert all(f"{cmw.file_sha256(out / n)}  {n}" in sums for n in names)
+    assert verify(proj, out, "ios") == 0
+
+
+def test_retag_refuses_an_official_wheel_with_the_wrong_hash(proj, tmp_path, monkeypatch, capsys):
+    officials = official_set(tmp_path / "pypi")
+    shas = {t: cmw.file_sha256(p) for t, p in officials.items()}
+    shas["iphonesimulator.arm64"] = "0" * 64                           # not what PyPI serves
+    (proj["root"] / "wheelhouse.toml").write_text(manifest_with_retag(shas), encoding="utf-8")
+    serve_official(monkeypatch, tmp_path / "pypi")
+    cache, downloads = tmp_path / "cache", tmp_path / "official"
+    argv = ["--manifest", str(proj["root"] / "wheelhouse.toml"), "retag", "--platform", "ios",
+            "--downloads", str(downloads), "--cache", str(cache)]
+    assert wh.main(argv) == 1
+    assert "does not match the pinned " + "0" * 64 in capsys.readouterr().err
+    assert not (downloads / "pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl").exists()
+    assert not (cache / "pillow" / "pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl").exists()
+
+
+def test_ios_pillow_is_promised_in_plan_and_strict_checks(proj, tmp_path):
+    proj["index"].add("flet", "pillow", *FLET_PILLOW_IOS)                # pypi.flet.dev's reduced build 1
+    officials = official_set(tmp_path / "pypi")
+    use_retag_manifest(proj, officials)
+    rc, data = run_main(proj, "--wheelhouse-plan", platform="ios")
+    assert rc == 0, errors_text(data)
+    for t in IOS:
+        c = data["targets"][cmw.TARGETS[t].key]["pillow"]
+        assert (c["file"], c["source"]) == (f"pillow-13.0.0-1000-cp313-cp313-{LABEL[t]}.whl", "planned")
+    whdir = full_wheelhouse(tmp_path / "wh", targets_crypto=IOS, targets_pillow=[])
+    for t, p in officials.items():
+        wh.retag_wheel(p, whdir / f"pillow-13.0.0-1000-cp313-cp313-{LABEL[t]}.whl", 1000)
+    rc, data = run_main(proj, "--wheelhouse", str(whdir), platform="ios")
+    assert rc == 0, errors_text(data)
+    assert {row["name"] for row in data["wheelhouse"]} == {"cryptography", "pillow"}
+    assert all(data["targets"][cmw.TARGETS[t].key]["pillow"]["source"] == "wheelhouse" for t in IOS)
+    # without the wheelhouse pip takes pypi.flet.dev's build 1 (what the last iOS build shipped)
+    rc, data = run_main(proj, platform="ios")
+    assert data["targets"]["ios-device"]["pillow"]["file"] == FLET_PILLOW_IOS[0]
+    # a missing retagged slice fails the strict check
+    missing = whdir / "pillow-13.0.0-1000-cp313-cp313-ios_13_0_x86_64_iphonesimulator.whl"
+    keep = missing.read_bytes()
+    missing.unlink()
+    rc, data = run_main(proj, "--wheelhouse", str(whdir), platform="ios")
+    assert rc == 1 and f"missing {missing.name} (pillow 13.0.0 for iphonesimulator.x86_64)" in errors_text(data)
+    assert "[ios-sim-x86_64] pillow-13.0.0-1-cp313-cp313-ios_13_0_x86_64_iphonesimulator.whl (flet) outranks or " \
+           "ties wheelhouse" in errors_text(data)
+    missing.write_bytes(keep)
+    # an index file that ties (1000) or outranks (1001) it fails too
+    for build in ("1000", "1001"):
+        proj["index"].flet["pillow"] = FLET_PILLOW_IOS + [f"pillow-13.0.0-{build}-cp313-cp313-ios_13_0_arm64_iphoneos.whl"]
+        rc, data = run_main(proj, "--wheelhouse", str(whdir), platform="ios")
+        assert rc == 1 and (f"[ios-device] pillow-13.0.0-{build}-cp313-cp313-ios_13_0_arm64_iphoneos.whl (flet) "
+                            f"outranks or ties wheelhouse") in errors_text(data)
+
+
+def test_verify_installed_proves_ios_pillow_came_from_the_wheelhouse(proj, tmp_path, capsys):
+    use_retag_manifest(proj)
+    root = proj["root"]
+    sp = tmp_path / "site-packages"
+    make_site_packages(sp, IOS)
+    make_site_packages(sp, IOS, name="pillow", version="13.0.0")
+    argv = ["--wheelhouse-manifest", str(root / "wheelhouse.toml"), "--verify-installed", str(sp), "--platform", "ios"]
+    assert cmw.main(argv) == 0, capsys.readouterr().out
+    assert "iphoneos.arm64: pillow 13.0.0 build 1000 cp313-cp313-ios_13_0_arm64_iphoneos (wheelhouse)" in \
+        capsys.readouterr().out
+    flet = tmp_path / "site-packages-flet"
+    make_site_packages(flet, IOS)
+    make_site_packages(flet, IOS, name="pillow", version="13.0.0", build="1")
+    argv[3] = str(flet)
+    assert cmw.main(argv) == 1
+    assert "iphonesimulator.arm64: pillow 13.0.0 was installed from an index, not the wheelhouse (WHEEL Build 1" in \
+        capsys.readouterr().out
+    # PyPI's untagged official wheel straight from the index is not the wheelhouse copy either
+    plain = tmp_path / "site-packages-pypi"
+    make_site_packages(plain, IOS)
+    make_site_packages(plain, IOS, name="pillow", version="13.0.0", build=None)
+    argv[3] = str(plain)
+    assert cmw.main(argv) == 1 and "WHEEL Build (none)" in capsys.readouterr().out
+
+
+def test_verify_native_proves_the_retagged_wheels(proj, tmp_path, capsys):
+    officials = official_set(tmp_path / "official")
+    use_retag_manifest(proj, officials)
+    whdir = tmp_path / "wh"
+    so = "cryptography/hazmat/bindings/_rust.abi3.so"
+    for target, data in FORGE_RUST_SLICES.items():
+        make_wheel(whdir, "cryptography", "50.0.2", f"cp313-cp313-{LABEL[target]}", requires=CRYPTO_REQS,
+                   files={so: data})
+    for t, p in officials.items():
+        wh.retag_wheel(p, whdir / f"pillow-13.0.0-1000-cp313-cp313-{LABEL[t]}.whl", 1000)
+    argv = ["--manifest", str(proj["root"] / "wheelhouse.toml"), "verify-native", "--platform", "ios"]
+    assert wh.main(argv + ["--official", str(tmp_path / "official"), str(whdir)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "every member identical except WHEEL Build and RECORD" in out and "PIL/_avif.cpython-313-iphoneos.so" in out
+    # without the originals nothing proves where the retagged wheels came from
+    assert wh.main(argv + [str(whdir)]) == 1
+    assert "pass --official DIR" in capsys.readouterr().out
+    # an original that is not the manifest's file
+    other = tmp_path / "other"
+    shutil.copytree(tmp_path / "official", other)
+    victim = other / "pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphoneos.whl"
+    victim.write_bytes(victim.read_bytes() + b"\0")
+    assert wh.main(argv + ["--official", str(other), str(whdir)]) == 1
+    assert "is not the manifest's" in capsys.readouterr().out
+    # a reduced Pillow (pypi.flet.dev's: no _avif, no _imagingcms) fails even when retagged faithfully
+    reduced = official_set(tmp_path / "reduced", modules=wh.PILLOW_MODULES)
+    use_retag_manifest(proj, reduced)
+    for t, p in reduced.items():
+        wh.retag_wheel(p, whdir / f"pillow-13.0.0-1000-cp313-cp313-{LABEL[t]}.whl", 1000)
+    assert wh.main(argv + ["--official", str(tmp_path / "reduced"), str(whdir)]) == 1
+    out = capsys.readouterr().out
+    assert "no PIL/_avif*.so" in out and "no PIL/_imagingcms*.so" in out
+
+
+def test_selftest_requires_avif_and_littlecms2_on_ios():
+    def report(modules):
+        r = selftest_report(platform="ios")
+        if modules is not None:
+            r["checks"][1]["detail"]["modules"] = modules
+        return r
+
+    assert wh.check_selftest_report(report({"avif": True, "littlecms2": True}), "ios", "50.0.2", "3.5.9", "13.0.0") == []
+    errs = wh.check_selftest_report(report({"avif": False, "littlecms2": True}), "ios", "50.0.2", "3.5.9", "13.0.0")
+    assert len(errs) == 1 and "Pillow on iOS lacks ['avif']" in errs[0]
+    assert "['avif', 'littlecms2']" in wh.check_selftest_report(report(None), "ios", "50.0.2", "3.5.9", "13.0.0")[0]
+    # Android's self-built Pillow has neither, and that is fine there
+    assert wh.check_selftest_report(selftest_report(), "android", "50.0.2", "3.5.9", "13.0.0") == []
+
+
+def test_real_manifest_retags_pypi_official_ios_pillow():
+    manifest = cmw.load_wheelhouse_manifest(cmw.DEFAULT_WHEELHOUSE_MANIFEST)
+    pillow = manifest.wheel("pillow")
+    assert set(pillow.targets) == set(ANDROID + IOS) and set(pillow.built_targets) == set(ANDROID)
+    assert {t for t, _u, _s in pillow.retag} == set(IOS)
+    assert pillow.requires_for("iphoneos.arm64") == ()
+    for t in IOS:
+        url, sha = pillow.retag_source(t)
+        assert url.endswith("/" + pillow.official_filename(t)) and re.fullmatch(r"[0-9a-f]{64}", sha)
+    assert all(w.retag == () for w in manifest.wheels if w.name != "pillow")
+    android, ios = wh.Ctx(cmw.DEFAULT_WHEELHOUSE_MANIFEST, "android"), wh.Ctx(cmw.DEFAULT_WHEELHOUSE_MANIFEST, "ios")
+    assert android.retagged() == [] and [w.name for w in android.wheels()] == ["cryptography", "pillow", "llama-cpp-python"]
+    assert [w.name for w in ios.wheels()] == ["cryptography", "llama-cpp-python"]
+    assert [(w.name, t) for w, t in ios.retagged()] == [("pillow", t) for t in IOS]
+    assert android.targets() == ANDROID and ios.targets() == IOS
+
+
+def test_workflow_expected_packages_match_the_manifest(capsys):
+    repo = MOBILE.parents[1]
+    workflow = repo / ".github" / "workflows" / "mobile-wheels.yml"
+    if not workflow.is_file():
+        pytest.skip("not a full repository checkout")
+    text = workflow.read_text(encoding="utf-8").replace("\r\n", "\n")
+    expected = dict(re.findall(r'(android|\*)\) expected="([^"]*)"; expected_retagged="[^"]*"', text))
+    retagged = dict(re.findall(r'(android|\*)\) expected="[^"]*"; expected_retagged="([^"]*)"', text))
+    assert set(expected) == set(retagged) == {"android", "*"}
+    base = ["--manifest", str(cmw.DEFAULT_WHEELHOUSE_MANIFEST)]
+    for plat, key in (("android", "android"), ("ios", "*")):
+        assert wh.main(base + ["packages", "--platform", plat]) == 0
+        assert capsys.readouterr().out.strip() == expected[key]
+        assert wh.main(base + ["packages", "--platform", plat, "--retagged"]) == 0
+        assert capsys.readouterr().out.strip() == retagged[key]
+    # the retag step runs only for a platform that retags, after the forge build and before assemble, and
+    # verify-native gets the originals; the Pillow cache stays Android-only (no iOS Pillow is built)
+    steps = text.split("\n      - name: ")
+    names = [s.split("\n", 1)[0] for s in steps]
+    retag = names.index("Fetch and retag PyPI's official wheels (iOS Pillow)")
+    assert names.index("Build wheels (mobile-forge)") < retag < names.index("Assemble the wheelhouse")
+    assert "if: steps.pins.outputs.retagged != ''" in steps[retag] and "--downloads \"$RUNNER_TEMP/official\"" in steps[retag]
+    assert "--official \"$RUNNER_TEMP/official\"" in steps[names.index("Verify the wheelhouse (native binaries)")]
+    assert "inputs.platform == 'android'" in steps[names.index("Restore cached Pillow wheels")]
+    assert 'if [ "$PLATFORM" = android ] && [ "$HIT_PILLOW" != true ]' in steps[names.index("Packages to build")]

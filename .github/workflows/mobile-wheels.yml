@@ -1,11 +1,17 @@
-# Self-built mobile wheels for the security pins: cryptography 50.0.2 (Android + iOS) and Pillow
-# 13.0.0 (Android), and the on-device engine with vision: llama-cpp-python 0.3.32 with libmtmd
+# The mobile wheelhouse for the security pins: cryptography 50.0.2 (Android + iOS) and Pillow
+# 13.0.0 (Android + iOS), and the on-device engine with vision: llama-cpp-python 0.3.32 with libmtmd
 # (Android + iOS; pypi.flet.dev's builds lack libmtmd). No index or release has Android/iOS cp313
-# wheels for these, so this
+# wheels for these that we can ship, so this
 # workflow builds them with flet-dev/mobile-forge (pinned in src/mobile/ci/wheels/wheelhouse.toml),
 # verifies them and uploads them as the artifact mobile-wheelhouse-<platform>. build-mobile.yml
 # calls it once per platform and hands the wheels to `flet build` through PIP_FIND_LINKS
 # (.github/actions/mobile-wheelhouse).
+#
+# iOS Pillow is not compiled: wheelhouse.toml's [wheel.retag] promises PyPI's official
+# pillow-13.0.0 iOS wheels, which `wheels.py retag` downloads (sha256-checked) and retags with the
+# manifest's build tag in every run (cheap, so not cached), so pypi.flet.dev's reduced
+# pillow-13.0.0-1 (no AVIF / ImageCms) cannot outrank them. verify-native proves each is its
+# official original except for the build tag and that it has PIL._avif and PIL._imagingcms.
 #
 # Triggers: workflow_call and workflow_dispatch only. It never publishes: no release, no index
 # upload, no secrets. Finished wheels are cached (actions/cache, exact keys over the manifest,
@@ -109,15 +115,22 @@ jobs:
           } >> "$GITHUB_ENV"
           uv run --no-project python src/mobile/ci/wheels/wheels.py env --platform "$PLATFORM" --format github | tee -a "$GITHUB_OUTPUT"
           # The cache steps below are written per package; fail if the manifest moved on without them.
+          # Retagged official wheels ([wheel.retag]) are neither built nor cached: the retag step makes them.
           case "$PLATFORM" in
-            android) expected="cryptography pillow llama-cpp-python" ;;
-            *) expected="cryptography llama-cpp-python" ;;
+            android) expected="cryptography pillow llama-cpp-python"; expected_retagged="" ;;
+            *) expected="cryptography llama-cpp-python"; expected_retagged="pillow" ;;
           esac
           packages="$(uv run --no-project python src/mobile/ci/wheels/wheels.py packages --platform "$PLATFORM")"
           if [ "$packages" != "$expected" ]; then
             echo "::error title=Mobile wheels::wheelhouse.toml builds '$packages' for $PLATFORM, but this workflow caches '$expected'. Update .github/workflows/mobile-wheels.yml."
             exit 1
           fi
+          retagged="$(uv run --no-project python src/mobile/ci/wheels/wheels.py packages --platform "$PLATFORM" --retagged)"
+          if [ "$retagged" != "$expected_retagged" ]; then
+            echo "::error title=Mobile wheels::wheelhouse.toml retags '$retagged' for $PLATFORM, but this workflow expects '$expected_retagged'. Update .github/workflows/mobile-wheels.yml."
+            exit 1
+          fi
+          echo "retagged=$retagged" | tee -a "$GITHUB_OUTPUT"
 
       - name: Restore cached cryptography wheels
         id: cache-cryptography
@@ -206,6 +219,11 @@ jobs:
           read -r -a packages <<< "$PACKAGES"
           bash src/mobile/ci/wheels/build_wheels.sh "$PLATFORM" "${packages[@]}"
 
+      # After the forge build (its collect empties the cache directory of each package it builds).
+      - name: Fetch and retag PyPI's official wheels (iOS Pillow)
+        if: steps.pins.outputs.retagged != ''
+        run: uv run --no-project python src/mobile/ci/wheels/wheels.py retag --platform "$PLATFORM" --downloads "$RUNNER_TEMP/official" --cache "$WHEELCACHE"
+
       - name: Assemble the wheelhouse
         run: uv run --no-project python src/mobile/ci/wheels/wheels.py assemble --platform "$PLATFORM" --cache "$WHEELCACHE" --out "$WHEELHOUSE"
 
@@ -215,8 +233,10 @@ jobs:
       # Also checks every import of cryptography's _rust module. On Android those resolve against
       # the NDK's API-24 stub libraries: $ANDROID_HOME/ndk/<toolchain.android_ndk>, preinstalled on
       # ubuntu-24.04 (so a cache hit needs no toolchain step); without it the step fails closed.
+      # A retagged wheel must equal its official original in $RUNNER_TEMP/official (sha256 from the
+      # manifest) member for member except WHEEL Build / RECORD; iOS Pillow must have _avif and _imagingcms.
       - name: Verify the wheelhouse (native binaries)
-        run: uv run --no-project python src/mobile/ci/wheels/wheels.py verify-native --platform "$PLATFORM" "$WHEELHOUSE"
+        run: uv run --no-project python src/mobile/ci/wheels/wheels.py verify-native --platform "$PLATFORM" --official "$RUNNER_TEMP/official" "$WHEELHOUSE"
 
       - name: Save cryptography wheels to the cache
         if: success() && contains(steps.todo.outputs.packages, 'cryptography')
