@@ -32,6 +32,10 @@ from qt_widget_helpers import CONTEXT_MENU_STYLE, CheckmarkDelegate, HalgakosLoa
 WINDOW_TITLE = "Relations & Gender Tracker"
 ALL_CHARACTERS = "All characters"
 LOADING_TEXT = "Loading relations…"
+#: Over the diagram while a new arrangement is worked out (Show unlisted names, Focus).
+ARRANGING_TEXT = "Arranging the diagram…"
+#: The spinner waits this long: an arrangement that is ready sooner shows no flicker.
+ARRANGING_DELAY_MS = 120
 HISTORY_HINT = "Click a character to see their relation history."
 #: The empty window while the Relations Tracker is off ({name}: the glossary file's name).
 EMPTY_TEXT = ("No relations tracked for {name} yet.\n\n"
@@ -270,6 +274,7 @@ class _GraphView(QGraphicsView):
         self._auto_fit = True
         self._press_pos = None
         self._content_rect = QRectF()
+        self.overlay = None  # a widget kept over the whole view (the "arranging" spinner)
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setRenderHint(QPainter.TextAntialiasing, True)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
@@ -332,6 +337,8 @@ class _GraphView(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self.overlay is not None:
+            self.overlay.setGeometry(self.rect())
         if self._auto_fit:
             self.fit_all()
 
@@ -726,6 +733,12 @@ class RelationsDiagramDialog(QDialog):
         self._edge_count = 0
         self._positions = {}
         self._layout_key = None
+        # A new arrangement (Show unlisted names, Focus) takes a second or two on a large book:
+        # with load_async it is worked out on the loading thread under a spinner, and each one is
+        # kept until the data changes, so switching back is instant.
+        self._async_layout = bool(load_async)
+        self._layout_cache = {}
+        self._layout_failed = None
         self._refit = False
         self._label_boxes = []
         self._history_links = []
@@ -1007,13 +1020,20 @@ class RelationsDiagramDialog(QDialog):
                 self._stamps[path] = stamps.get(path)
         else:
             positions = None  # this window wrote meanwhile: the layout was made for older data
-        self._after_data_change(payload.get('key'), positions)
+        read = any(payload.get(flag) for flag in ('read_tracker', 'read_gender', 'read_glossary'))
+        self._after_data_change(payload.get('key'), positions, data_changed=read or not current)
 
-    def _after_data_change(self, key=None, positions=None):
-        """The trackers or the glossary changed (a reload, an edit, an undo): redraw, keeping the
-        slider, the focus, the filters, the selection and the user's zoom and pan."""
+    def _after_data_change(self, key=None, positions=None, data_changed=True):
+        """The trackers or the glossary changed (a reload, an edit, an undo), or a new arrangement
+        is in (``data_changed`` False): redraw, keeping the slider, the focus, the filters, the
+        selection and the user's zoom and pan."""
         if self._page is None:
             return
+        if data_changed:
+            # arrangements of the older data go; the one on screen stays for as long as it is kept
+            # on screen (the same names: see below, and ``_layout_for``)
+            self._layout_cache = ({self._layout_key: self._positions}
+                                  if self._layout_key is not None and self._positions else {})
         self._update_chapter_range()
         self._fill_focus_combo()
         self._sync_view_controls()
@@ -1030,6 +1050,12 @@ class RelationsDiagramDialog(QDialog):
                     self._install_layout(current_key, positions, refit=self._view._auto_fit)
                 else:
                     self._start_job()  # a name came or went: lay out again; the names shown stay put meanwhile
+        elif key == current_key:
+            # the arrangement the controls asked for (Show unlisted names, Focus)
+            if positions is not None:
+                self._install_layout(current_key, positions)
+            else:
+                self._layout_failed = current_key  # worked out in place at the redraw
         self.rebuild()
 
     # ── UI ──────────────────────────────────────────────────────────────
@@ -1138,6 +1164,15 @@ class RelationsDiagramDialog(QDialog):
         self._view.on_item_menu = self._on_item_menu
         self._view.on_item_double = self._on_item_double
         splitter.addWidget(self._view)
+        self._arranging = HalgakosLoadingWidget(ARRANGING_TEXT, self._view)
+        self._arranging.setObjectName("arranging")
+        self._arranging.setAttribute(Qt.WA_StyledBackground, True)
+        self._arranging.setStyleSheet("#arranging { background-color: rgba(15, 17, 21, 200); }")
+        self._arranging.hide()
+        self._view.overlay = self._arranging
+        self._arranging_timer = QTimer(self)
+        self._arranging_timer.setSingleShot(True)
+        self._arranging_timer.timeout.connect(self._show_arranging)
         side = QWidget()
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(6, 0, 0, 0)
@@ -1256,6 +1291,8 @@ class RelationsDiagramDialog(QDialog):
     def _install_layout(self, key, positions, refit=True):
         self._positions = positions
         self._layout_key = key
+        self._layout_cache[key] = positions
+        self._layout_failed = None
         self._refit = bool(refit)
         if positions:
             xs = [p[0] for p in positions.values()]
@@ -1265,12 +1302,43 @@ class RelationsDiagramDialog(QDialog):
                                                max(xs) - min(xs) + 180, max(ys) - min(ys) + 52))
 
     def _layout_for(self, show_unlisted, focus):
-        """Positions from the graph of ALL chapters, so nodes stay put while the slider moves."""
+        """Positions from the graph of ALL chapters, so nodes stay put while the slider moves.
+        None while a new arrangement is being worked out on the loading thread (the picture on
+        screen stays; ``_after_data_change`` redraws when it is in)."""
         key = (bool(show_unlisted), focus)
         if key != self._layout_key:
-            self._install_layout(key, self._compute_layout(self.tracker, self.glossary_entries, *key,
-                                                           gender_tracker=self.gender_tracker))
+            cached = self._layout_cache.get(key)
+            if cached is not None:
+                full = self._full_graph(self.tracker, self.glossary_entries, self.gender_tracker, key[0])
+                if set(cached) != {n['id'] for n in full.get('nodes') or []}:
+                    cached = None  # a name came or went since it was worked out
+            if cached is not None:
+                self._install_layout(key, cached)
+            elif self._async_layout and self._positions and key != self._layout_failed:
+                self._start_job()  # no-op while a job runs: its result starts the next one
+                return None
+            else:
+                self._install_layout(key, self._compute_layout(self.tracker, self.glossary_entries, *key,
+                                                               gender_tracker=self.gender_tracker))
         return self._positions
+
+    def _set_arranging(self, on):
+        """The spinner over the diagram: shown after a short wait while an arrangement is worked out."""
+        if on:
+            if not self._arranging.isVisible() and not self._arranging_timer.isActive():
+                self._arranging_timer.start(ARRANGING_DELAY_MS)
+        else:
+            self._arranging_timer.stop()
+            self._arranging.hide()
+
+    def _show_arranging(self):
+        self._arranging.setGeometry(self._view.rect())
+        self._arranging.show()
+        self._arranging.raise_()
+
+    def is_arranging(self):
+        """A new arrangement is being worked out (the diagram shows the previous one meanwhile)."""
+        return self._arranging_timer.isActive() or self._arranging.isVisible()
 
     def _sync_view_controls(self):
         """The Relations / Gender boxes and the Hide button show the tracker's view choices."""
@@ -1294,6 +1362,7 @@ class RelationsDiagramDialog(QDialog):
         if not self._has_content():
             self.empty_label.setText(self.empty_text())  # the toggle may have changed meanwhile
             self._stack.setCurrentWidget(self.empty_label)
+            self._set_arranging(False)
             self._edge_count = 0
             self._node_items = {}
             return
@@ -1312,6 +1381,9 @@ class RelationsDiagramDialog(QDialog):
                                                hidden=view['hidden'], show_relations=view['show_relations'],
                                                show_gender=view['show_gender'])
         positions = self._layout_for(show_unlisted, focus)
+        self._set_arranging(positions is None)
+        if positions is None:
+            return  # being worked out: the previous picture stays under the spinner
 
         self.scene.clear()
         self._node_items = {}

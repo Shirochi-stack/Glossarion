@@ -1468,8 +1468,22 @@ def test_edits_write_the_file_stick_after_a_re_extraction_and_undo(qapp, tmp_pat
         _wait_idle(qapp, dialog)
         # Not in the glossary: shown with "Show unlisted names" (the window says so).
         assert rt.tracker_key("새인물") not in dialog._node_items and "Show unlisted names" in dialog.notice_label.text()
+        # The new arrangement is worked out off the GUI thread (the owner: "a 2 second delay ...
+        # makes the user think it is lagging"): the click returns at once, the previous picture
+        # stays under the spinner, then the new one is drawn.
+        before = dict(dialog._positions)
         dialog.show_unlisted_checkbox.setChecked(True)
-        assert rt.tracker_key("새인물") in dialog._node_items
+        assert dialog.is_busy() and dialog.is_arranging()
+        assert dict(dialog._positions) == before and rt.tracker_key("새인물") not in dialog._node_items
+        _wait_idle(qapp, dialog)
+        assert rt.tracker_key("새인물") in dialog._node_items and not dialog.is_arranging()
+        assert dialog._arranging.isHidden()
+        # Back to an arrangement already worked out for this data: at once, no spinner.
+        dialog.show_unlisted_checkbox.setChecked(False)
+        assert not dialog.is_busy() and not dialog.is_arranging()
+        assert rt.tracker_key("새인물") not in dialog._node_items and dict(dialog._positions) == before
+        dialog.show_unlisted_checkbox.setChecked(True)
+        assert not dialog.is_busy() and rt.tracker_key("새인물") in dialog._node_items
         dialog.show_unlisted_checkbox.setChecked(False)
 
         # Add a relation to a known name picked from the list.
