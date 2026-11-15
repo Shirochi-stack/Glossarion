@@ -530,9 +530,10 @@ def test_the_chapter_number_box_sets_the_exact_chapter(iso, tmp_path, platform):
         ctx = _ctx(session.page, store, schema)
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
         field, slider = diagram.chapter_field, diagram.slider
-        row = diagram.diagram_body.controls[0]
+        line = diagram.controls_box.controls[0]  # the number control and the slider share one line
+        row, cell = line.controls
         assert row.controls == [diagram.chapter_label, diagram.chapter_minus, field, diagram.chapter_plus]
-        assert diagram.diagram_body.controls[1].controls == [slider]
+        assert cell.content.controls == [slider] and slider.expand
         assert (slider.min, slider.max, field.value, field.disabled) == (1, 5, "5", False)
         # typing a chapter and pressing Done moves the slider and redraws
         field.on_focus(None)
@@ -612,6 +613,89 @@ def test_the_chapter_number_box_is_off_for_a_single_chapter(iso, tmp_path):
     asyncio.run(scenario())
 
 
+def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
+    """Owner 2026-11-15: "the relationship diagram in mobile should be zoomed out by default": the whole canvas
+    fits the viewer when the screen opens and when the layout changes (Focus, Unlisted names); the update check,
+    the slider and a later size change (the keyboard) leave the zoom alone."""
+    from glossarion_mobile.ui.glossary.relations_diagram import FIT_PADDING, REFIT_DELAY, RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
+        calls: list = []
+
+        def recorder(name):
+            async def call(*args):
+                calls.append((name, *args))
+            return call
+
+        for name in ("reset", "pan", "zoom"):
+            object.__setattr__(diagram.viewer, name, recorder(name))
+        assert diagram.fit_due and diagram.fit_all() is None  # no size yet: waits for the first one
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"] and not diagram.fit_due
+        scale, dx, dy = calls[2][1], calls[1][1], calls[1][2]
+        width, height = diagram.width, diagram.height
+        assert width * scale <= 560 - 2 * FIT_PADDING + 0.01 and height * scale <= 500 - 2 * FIT_PADDING + 0.01
+        assert scale < 1  # the canvas (at least 676 x 520 dp) is zoomed out to fit
+        assert abs(dx - (560 - width * scale) / 2) < 0.01 and abs(dy - (500 - height * scale) / 2) < 0.01
+        # Flutter stops zooming out where canvas + boundary margin no longer covers the viewport: widened
+        margin = diagram.viewer.boundary_margin.left
+        assert (width + 2 * margin) * scale >= 560 and (height + 2 * margin) * scale >= 500
+        calls.clear()
+        diagram.set_chapter(diagram.low)  # the slider
+        diagram._apply_state(tracker=_tracker())  # the once-a-second update
+        await _settle()
+        assert calls == []
+        # Still as fitted (not zoomed or panned): a new viewer size fits it again, once, when it has settled
+        # (the emulator: a Focus picked with the keyboard open stayed fitted above the closed keyboard).
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=380.0))  # the keyboard opening ...
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))  # ... open
+        await _settle()
+        assert calls == []  # not before the size has settled
+        await asyncio.sleep(REFIT_DELAY + 0.1)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        calls.clear()
+        diagram.set_focus(diagram.all_graph["nodes"][0]["id"])  # a new layout: fitted again
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        calls.clear()
+        diagram.set_unlisted(True)
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        # Full screen gives the viewer more room: a diagram still as fitted is fitted into it ...
+        calls.clear()
+        assert diagram.auto_fit
+        diagram.set_fullscreen(True)
+        diagram._on_viewer_size(types.SimpleNamespace(width=584.0, height=900.0))
+        await asyncio.sleep(REFIT_DELAY + 0.1)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        # ... one the user zoomed or panned is left as it is, in and out of full screen
+        calls.clear()
+        diagram.viewer.on_interaction_start(None)
+        assert not diagram.auto_fit
+        diagram.set_fullscreen(False)
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))
+        diagram.set_fullscreen(True)
+        diagram._on_viewer_size(types.SimpleNamespace(width=584.0, height=900.0))
+        diagram.set_fullscreen(False)
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))
+        await asyncio.sleep(REFIT_DELAY + 0.1)
+        assert calls == []
+        # a huge canvas: far out, the margin grows with it
+        diagram._set_canvas(6000.0, 900.0)
+        scale, _dx, _dy, margin = diagram.fit_transform()
+        assert scale * 6000 <= 560 - 2 * FIT_PADDING + 0.01 and (900 + 2 * margin) * scale >= 260
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram, edge_label_text
 
@@ -625,7 +709,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         conn, session = _TB._fake_session("android")
         ctx = _ctx(session.page, store, schema)
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=entries)
-        assert not diagram.empty and diagram.chapter == 5 and diagram.chapter_label.value == "Up to chapter"
+        assert not diagram.empty and diagram.chapter == 5 and diagram.chapter_label.value == "Up to ch."
         assert diagram.chapter_field.value == "5"
         assert diagram.edge_count() == 2 and diagram.node_count() == 3
         lines = [s for s in diagram.canvas.shapes if type(s).__name__ == "Line"]
@@ -1058,6 +1142,10 @@ def test_sigma_q8_is_recognised_by_its_file(engine_service):
     assert not sw.is_sigma_q8_model("local/sigma-q4") and not sw.is_sigma_q8_model(QWEN)
     assert not sw.is_sigma_q8_model("authchatgpt/auto") and not sw.is_sigma_q8_model(None)
     assert sw.relations_default_for_model(None) is True and sw.relations_default_for_model(SIGMA) is False
+    # owner 2026-11-15: off for every on-device model, on for cloud / remote ones
+    assert sw.relations_default_for_model(QWEN) is False and sw.relations_default_for_model("local/sigma-q4") is False
+    assert sw.relations_default_for_model("authchatgpt/auto") is True
+    assert sw.relations_default_for_model("ollamapull/qwen3:8b") is True  # runs on the user's PC, not the phone
 
 
 def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_service, tmp_path):
@@ -1082,7 +1170,9 @@ def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_serv
     # another model: on again by themselves
     sw.write_setting(store, "model", "authchatgpt/auto")
     assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
-    sw.write_setting(store, "model", QWEN)  # any other model, on-device too
+    sw.write_setting(store, "model", QWEN)  # every on-device model (owner 2026-11-15)
+    assert _toggles(store) == (False, False) and "relations" not in (store.get(FIELDS) or [])
+    sw.write_setting(store, "model", "authchatgpt/auto")
     assert _toggles(store) == (True, True)
     sw.write_setting(store, "model", SIGMA)
     assert _toggles(store) == (False, False)
@@ -1097,7 +1187,7 @@ def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_serv
     for model in (SIGMA, "authchatgpt/auto", QWEN, SIGMA, "authchatgpt/auto"):
         sw.write_setting(store, "model", model)
         assert store.get(TOGGLE) is False
-        assert store.get(MINIMAL_TOGGLE) is (model != SIGMA)
+        assert store.get(MINIMAL_TOGGLE) is (not model.startswith("local/"))
     # Minimal set by hand too: nothing follows the model any more
     sw.write_setting(store, MINIMAL_TOGGLE, False)
     assert not store.has(FRESH)
@@ -1108,23 +1198,201 @@ def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_serv
     store._saver.close()
 
 
-def test_existing_config_without_the_keys_stays_off_on_every_model(engine_service, tmp_path):
+def test_existing_config_without_the_keys_follows_the_model_too(engine_service, tmp_path):
+    """Owner 2026-11-15 ("change the relations toggle defaults to be on. In mobile. Except for on device
+    models"): an existing config whose toggles were never set (the mobile store writes keys sparsely, so they
+    are absent) gets the mobile default too: seeded, so the file is not rewritten for it."""
     from glossarion_mobile.state import setting_writes as sw
 
     path = tmp_path / "config.json"
     original = json.dumps({"model": "authchatgpt/auto", "temperature": 0.5})
     path.write_text(original, encoding="utf-8")
     store = _plain_store(path)
-    assert sw.apply_relations_fresh_defaults(store, fresh=False) == []
-    assert not store.has(TOGGLE) and not store.has(MINIMAL_TOGGLE) and not store.has(FRESH)
-    assert not store.flush() and path.read_text(encoding="utf-8") == original  # byte-identical
-    for model in (SIGMA, QWEN, "authchatgpt/auto"):
+    assert sorted(sw.apply_relations_fresh_defaults(store, fresh=False)) == sorted([TOGGLE, MINIMAL_TOGGLE, FIELDS])
+    assert _toggles(store) == (True, True) and store.get(FIELDS) == ["description", "relations"]
+    assert store.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    assert not store.flush() and path.read_text(encoding="utf-8") == original  # byte-identical until a real save
+    for model, on in ((SIGMA, False), (QWEN, False), ("authchatgpt/auto", True)):
         sw.write_setting(store, "model", model)
-        assert not store.get(TOGGLE) and not store.get(MINIMAL_TOGGLE) and not store.has(FRESH)
+        assert _toggles(store) == (on, on) and ("relations" in (store.get(FIELDS) or [])) is on
+    # a second load of the saved file: nothing new (the toggles are stored now, the mark still lists them)
+    store.flush()
+    store._saver.close()
+    again = _plain_store(path)
+    assert sw.apply_relations_fresh_defaults(again, fresh=False) == [] and _toggles(again) == (True, True)
+    again._saver.close()
+
+
+def test_existing_config_on_an_on_device_model_starts_off(engine_service, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": QWEN, "custom_glossary_fields": []}), encoding="utf-8")
+    store = _plain_store(path)
+    sw.apply_relations_fresh_defaults(store, fresh=False)
+    assert _toggles(store) == (False, False) and store.get(FIELDS) == []  # no relations column
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
     store._saver.close()
 
 
-def test_settings_load_marks_only_a_missing_config_fresh(engine_service, tmp_path):
+def test_a_stored_toggle_is_the_users_and_never_follows(engine_service, tmp_path):
+    """A value in config.json (an explicit false too: set by hand, or a desktop config) is a choice: it stays;
+    only the absent one follows the model."""
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    original = json.dumps({"model": "authchatgpt/auto", TOGGLE: False})
+    path.write_text(original, encoding="utf-8")
+    store = _plain_store(path)
+    sw.apply_relations_fresh_defaults(store, fresh=False)
+    assert store.get(FRESH) == [MINIMAL_TOGGLE] and _toggles(store) == (False, True)
+    for model in (SIGMA, "authchatgpt/auto"):
+        sw.write_setting(store, "model", model)
+        assert store.get(TOGGLE) is False
+    both = tmp_path / "both.json"
+    both.write_text(json.dumps({TOGGLE: False, MINIMAL_TOGGLE: False}), encoding="utf-8")
+    kept = _plain_store(both)
+    assert sw.apply_relations_fresh_defaults(kept, fresh=False) == [] and not kept.has(FRESH)
+    store._saver.close()
+    kept._saver.close()
+
+
+def test_reset_to_default_follows_the_model_again(engine_service, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": "authchatgpt/auto", TOGGLE: False, MINIMAL_TOGGLE: False}), encoding="utf-8")
+    store = _plain_store(path)
+    old = sw.reset_relations_toggle(store, TOGGLE)
+    assert store.get(TOGGLE) is True and store.get(FRESH) == [TOGGLE] and "relations" in store.get(FIELDS)
+    assert old == {TOGGLE: False, FRESH: None, FIELDS: None}
+    sw.write_setting(store, "model", SIGMA)
+    assert store.get(TOGGLE) is False and store.get(MINIMAL_TOGGLE) is False  # Minimal is still the user's
+    sw.restore_relations_toggle(store, old)  # Undo
+    assert store.get(TOGGLE) is False and not store.has(FRESH) and not store.has(FIELDS)
+    store._saver.close()
+
+
+def test_a_run_uses_the_default_of_its_own_model(engine_service, tmp_path):
+    """A chat or the Translate sheet can run another model than the global one (config_overrides): the
+    toggles the user never set follow the RUN's model in the job's config; config.json is untouched."""
+    from glossarion_mobile.services.jobs import JobService
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": "authchatgpt/auto"}), encoding="utf-8")
+    store = _plain_store(path)
+    sw.apply_relations_fresh_defaults(store)
+    assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
+
+    def run_config(overrides, source=None):
+        config = dict(source if source is not None else store.snapshot())
+        config.update(overrides)
+        return sw.with_mobile_relations_defaults(sw.with_mobile_streaming_defaults(config))
+
+    local = run_config({"model": QWEN})
+    assert (local[TOGGLE], local[MINIMAL_TOGGLE]) == (False, False) and "relations" not in local[FIELDS]
+    cloud = run_config({"model": "authchatgpt/auto"})
+    assert (cloud[TOGGLE], cloud[MINIMAL_TOGGLE]) == (True, True) and "relations" in cloud[FIELDS]
+    # a config without the mark (a run before Settings loaded, a loader without the store): absent = following
+    bare = run_config({"model": SIGMA}, source={"model": "authchatgpt/auto"})
+    assert (bare[TOGGLE], bare[MINIMAL_TOGGLE]) == (False, False) and FRESH not in bare
+    bare_cloud = run_config({}, source={"model": "authchatgpt/auto"})
+    assert (bare_cloud[TOGGLE], bare_cloud[MINIMAL_TOGGLE]) == (True, True) and "relations" in bare_cloud[FIELDS]
+    # the global model on-device, the chat on a cloud model: on for that run
+    sw.write_setting(store, "model", QWEN)
+    assert _toggles(store) == (False, False)
+    assert run_config({"model": "authchatgpt/auto"})[TOGGLE] is True
+    # a toggle the user set stays as set in every run
+    sw.write_setting(store, TOGGLE, True)
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    hand = run_config({"model": QWEN})
+    assert hand[TOGGLE] is True and hand[MINIMAL_TOGGLE] is False and "relations" in hand[FIELDS]
+    desktop = run_config({"model": "authchatgpt/auto"}, source={TOGGLE: False, MINIMAL_TOGGLE: False})
+    assert (desktop[TOGGLE], desktop[MINIMAL_TOGGLE]) == (False, False)
+
+    # the job manager builds a run's config that way (store snapshot + the run's overrides)
+    manager = JobService.__new__(JobService)
+    manager.config_store, manager._config_loader = store, None
+    manager._note_job_running = lambda running: None
+    sw.reset_relations_toggle(store, TOGGLE)  # following again
+    job = types.SimpleNamespace(spec=types.SimpleNamespace(params={"config_overrides": {"model": QWEN}}),
+                                instance=None)
+    config = JobService._config_snapshot(manager, job)
+    assert config["model"] == QWEN and config[TOGGLE] is False and "relations" not in config[FIELDS]
+    assert store.get(TOGGLE) is True  # the store keeps the global model's value
+    store._saver.close()
+
+
+def test_restore_and_import_seed_the_untouched_toggles(engine_service, tmp_path, monkeypatch):
+    """A backup restore / config import in the session gets what app start gives it."""
+    from glossarion_mobile.ui.screens import backup
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": "authchatgpt/auto", TOGGLE: False}), encoding="utf-8")
+    store = _plain_store(path)
+    saved = tmp_path / "backup.json"
+    saved.write_text(json.dumps({"model": QWEN}), encoding="utf-8")
+    fake = types.SimpleNamespace(
+        restore_config_backup_file=lambda target, source, safety_backup=None: Path(target).write_text(
+            Path(source).read_text(encoding="utf-8"), encoding="utf-8"),
+        backup_config_file=lambda p: None)
+    monkeypatch.setitem(sys.modules, "config_store", fake)
+    backup.restore_backup(store, str(saved))
+    assert _toggles(store) == (False, False) and store.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    from glossarion_mobile.state import setting_writes as sw
+
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    assert _toggles(store) == (True, True)
+    store._saver.close()
+
+
+def test_settings_counts_a_following_toggle_as_unchanged(engine_service, tmp_path):
+    """The section subtitle, the Modified search filter and the section reset agree with the tile: a toggle
+    that follows the model is the default, not a change."""
+    from glossarion_mobile.state import setting_writes as sw
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.settings.context import SettingsContext
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+    from glossarion_mobile.ui.settings.settings_home import SettingsHome
+
+    schema = _schema()
+    store = _store(tmp_path, schema, {"model": "authchatgpt/auto"})
+    sw.apply_relations_fresh_defaults(store)
+    assert store.is_modified((TOGGLE,))  # seeded on, the desktop default is off
+    ctx = SettingsContext(page=None, store=store, schema=schema)
+    section = next(s for s in schema.sections() if TOGGLE in s.keys)
+    home = SettingsHome(parse_route("/settings"), ctx)
+    assert "changed" not in home._section_tile(section).subtitle.value
+    assert not schema.is_modified(store, TOGGLE) and not schema.is_stored(store, TOGGLE)
+    # the relations column the toggle seeded into Custom Fields is part of that default too
+    assert store.get(FIELDS) == ["description", "relations"] and store.is_modified((FIELDS,))
+    fields_section = next(s for s in schema.sections() if FIELDS in s.keys)
+    assert "changed" not in home._section_tile(fields_section).subtitle.value
+    assert not schema.is_modified(store, FIELDS) and not schema.is_stored(store, FIELDS)
+    fields_page = SectionPage(parse_route(f"/settings/s/{fields_section.id}"), ctx)
+    fields_page.get_body()
+    assert FIELDS not in fields_page.reset_section() and store.get(FIELDS) == ["description", "relations"]
+    fields_tile = fields_page.tile(FIELDS)
+    assert not fields_tile.modified_dot.visible and fields_tile.value_text.value.endswith("· default")
+    page = SectionPage(parse_route(f"/settings/s/{section.id}"), ctx)
+    page.get_body()
+    assert TOGGLE not in page.reset_section() and store.get(TOGGLE) is True
+    # set by hand: a change, and the section reset makes it follow the model again (on), not the desktop off
+    sw.write_setting(store, TOGGLE, False)
+    assert schema.is_modified(store, TOGGLE) is False  # off is the desktop display default
+    assert schema.is_stored(store, TOGGLE)
+    assert TOGGLE in page.reset_section()
+    assert store.get(TOGGLE) is True and sw.relations_follows_model(store, TOGGLE)
+    assert sw.relations_follows_model(store, FIELDS)  # the column came back with it
+    # a column the user added is a change of their own
+    store.set(FIELDS, ["description", "relations", "age"])
+    assert schema.is_modified(store, FIELDS) and not sw.relations_follows_model(store, FIELDS)
+    store._saver.close()
+
+
+def test_settings_load_seeds_the_untouched_toggles(engine_service, tmp_path):
     from glossarion_mobile.ui.settings.integration import SettingsFeature
 
     fresh = _plain_store(tmp_path / "fresh" / "config.json")
@@ -1135,9 +1403,41 @@ def test_settings_load_marks_only_a_missing_config_fresh(engine_service, tmp_pat
     old_path.write_text(json.dumps({"model": "m"}), encoding="utf-8")
     old = _plain_store(old_path)
     asyncio.run(SettingsFeature(page=None, store=old).load())
-    assert old.snapshot() == {"model": "m"}
+    assert _toggles(old) == (True, True) and old.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    assert not old.flush() and json.loads(old_path.read_text(encoding="utf-8")) == {"model": "m"}
     fresh._saver.close()
     old._saver.close()
+
+
+def test_info_sheet_states_the_mobile_default(engine_service, tmp_path):
+    """The info sheet says what the phone does (on; off for on-device models), not the desktop tooltip's
+    "Default OFF." (the desktop text itself is unchanged)."""
+    from glossarion_mobile.ui.settings.tiles import SwitchTile
+
+    schema = _schema()
+    spec = schema.spec(TOGGLE)
+    assert "Default OFF." in spec.tooltip  # the desktop tooltip
+    store = _store(tmp_path, schema)  # with the schema's display defaults
+    ctx = types.SimpleNamespace(store=store, schema=schema, page=None, push=lambda *a: None, say=lambda *a, **k: None)
+    for key in (TOGGLE, MINIMAL_TOGGLE):
+        body = SwitchTile(schema.spec(key), ctx).help_body()
+        assert "Default OFF" not in body and "Default: Off" not in body
+        assert "Default: On (Off while an on-device model is selected)" in body
+    other = SwitchTile(schema.spec("glossary_skip_gender_tracking"), ctx).help_body()
+    assert "Default: " in other and "on-device" not in other
+    # a toggle that follows the model shows as the default (no "modified" dot, nothing to reset) ...
+    import flet as ft
+    from glossarion_mobile.state import setting_writes as sw
+
+    sw.apply_relations_fresh_defaults(store)
+    tile = SwitchTile(schema.spec(TOGGLE), ctx)
+    assert tile.follows_mobile_default() and tile.switch.value is True
+    assert tile.value_text.value == "On · default" and not tile.modified_dot.visible
+    assert not any(isinstance(a, ft.TextButton) for a in tile.open_help().actions)
+    # ... until the user sets it
+    assert tile.apply(False) and not tile.follows_mobile_default()
+    assert store.get(TOGGLE) is False and tile.value_text.value == "Off" and store.get(FRESH) == [MINIMAL_TOGGLE]
+    store._saver.close()
 
 
 def test_reset_settings_starts_a_fresh_config(engine_service, tmp_path):
@@ -1561,6 +1861,147 @@ def test_filters_hide_names_and_are_stored_in_the_tracker_view(iso, tmp_path):
         diagram.relations_chip.on_select(None)
         await diagram.task
         assert "view" not in _saved(rt, glossary) and diagram.edge_count() == 2
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_compact_controls_share_rows_with_short_labels(iso, tmp_path):
+    """Owner 2026-11-15: the controls took half the screen; the slider sits beside the number control
+    and the switches beside the filter chips, with short labels (the tooltips keep the meaning)."""
+    from glossarion_mobile.ui.glossary import relations_diagram as module
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        assert diagram.diagram_body.controls[0] is diagram.controls_box
+        chapter_line, filters, focus_line = diagram.controls_box.controls
+        # Focus beside the summary from WIDE_ROW dp (600 dp phone), under it on a 360 dp phone
+        assert type(focus_line).__name__ == "ResponsiveRow" and focus_line.breakpoints["sm"] == module.WIDE_ROW
+        assert module.WIDE_ROW < 600 - 24
+        assert sum(c.col["sm"] for c in focus_line.controls) == 12
+        assert all(c.col["xs"] == 12 for c in focus_line.controls)
+        # the chapter line: the number group at its natural width, the slider in whatever is left
+        assert chapter_line is diagram.chapter_line and chapter_line.wrap
+        assert chapter_line.controls == [diagram.chapter_row, diagram.slider_cell] and diagram.chapter_row.tight
+        assert diagram.controls_box.horizontal_alignment == module.ft.CrossAxisAlignment.STRETCH
+        assert _find(chapter_line, "rel-slider") is diagram.slider
+        size = types.SimpleNamespace
+        # before any measurement (no page width here) the slider has its own line
+        assert diagram.slider_cell.width is None
+        # 600 dp phone (576 dp of content): the slider takes the rest of the line, no gap
+        diagram._on_chapter_group_size(size(width=245.0, height=48.0))
+        diagram._on_chapter_line_size(size(width=576.0, height=48.0))
+        cell = diagram.slider_cell.width
+        assert cell == 576 - 245 - module.CHAPTER_GAP - 1
+        assert 245 + module.CHAPTER_GAP + cell <= 576
+        # just above the old 480 dp breakpoint, and with the longer "All chapters" label or larger text:
+        # the measured group never overflows, the slider shrinks instead
+        diagram._on_chapter_line_size(size(width=480.0, height=48.0))
+        diagram._on_chapter_group_size(size(width=265.0, height=48.0))
+        assert 265 + module.CHAPTER_GAP + diagram.slider_cell.width <= 480
+        assert diagram.slider_cell.width >= module.SLIDER_MIN
+        # too little left (360 dp phone, or very large text): the slider wraps onto its own line
+        diagram._on_chapter_line_size(size(width=336.0, height=96.0))
+        assert diagram.slider_cell.width is None
+        diagram._on_chapter_line_size(size(width=576.0, height=48.0))
+        diagram._on_chapter_group_size(size(width=420.0, height=48.0))
+        assert diagram.slider_cell.width is None
+        assert filters.wrap and filters.controls == [diagram.former_switch, diagram.unlisted_switch,
+                                                     diagram.relations_chip, diagram.gender_chip, diagram.hide_chip]
+        assert (diagram.former_switch.label, diagram.unlisted_switch.label) == ("Former", "Unlisted")
+        assert "Former relations" in diagram.former_switch.tooltip
+        assert "Unlisted names" in diagram.unlisted_switch.tooltip
+        assert [c.label.value for c in (diagram.relations_chip, diagram.gender_chip, diagram.hide_chip)] == [
+            "Relations", "Gender", "Hide"]
+        assert focus_line.controls[0].controls == [diagram.focus_picker]
+        assert focus_line.controls[1].content is diagram.summary
+        assert diagram.summary.value == "3 characters · 2 relations"
+        # the Hide chip keeps its count
+        diagram.set_hidden(_id(diagram, "민준"))
+        await diagram.task
+        assert diagram.hide_chip.label.value == "Hidden (1)"
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_full_screen_hides_the_controls_and_keeps_the_state(iso, tmp_path):
+    """Owner 2026-11-15: the diagram can fill the screen; the corner button and Android back leave it."""
+    from glossarion_mobile.ui.glossary import relations_diagram as module
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+    tracker_file = Path(rt.tracker_path_for_glossary(str(glossary)))
+    ft = module.ft
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        seo, harin = _id(diagram, "서윤"), _id(diagram, "하린")
+        view, viewer, stack, canvas = diagram.view, diagram.viewer, diagram.stack, diagram.canvas
+        frame = _find(diagram.diagram_area, "rel-frame")
+        assert frame.content is viewer and diagram.fullscreen_button in diagram.diagram_area.controls
+        assert view.appbar is diagram.appbar and view.padding == module.VIEW_PADDING and view.can_pop is not False
+        diagram._on_area_size(types.SimpleNamespace(width=576.0, height=420.0))
+        diagram.set_chapter(1)
+        diagram.set_focus(seo)
+        diagram.set_former(False)
+        diagram.show_history(harin)
+        undo = list(diagram.undo_stack)
+        diagram.fullscreen_button.on_click(None)
+        assert diagram.fullscreen and not diagram.controls_box.visible
+        # a Padding object: the Flet 1.0.3 client kept the old padding for a plain 0 (seen on the emulator)
+        assert view.appbar is None and view.padding == ft.Padding.all(0) and view.can_pop is False
+        assert diagram.fullscreen_button.icon == ft.Icons.FULLSCREEN_EXIT
+        assert diagram.fullscreen_button.tooltip == "Leave full screen"
+        # the same viewer, canvas and state: nothing was rebuilt
+        assert (diagram.viewer, diagram.stack, diagram.canvas, frame.content) == (viewer, stack, canvas, viewer)
+        assert (diagram.chapter, diagram.focus, diagram.show_former, diagram.selected) == (1, seo, False, harin)
+        assert diagram.undo_stack == undo and diagram.diagram_body.controls[1] is diagram.diagram_area
+        diagram._on_area_size(types.SimpleNamespace(width=600.0, height=860.0))
+        assert diagram.area_size == (600.0, 860.0)
+        # names still open their sheet / menu in full screen
+        node = next(c for c in diagram.node_controls if c.key == f"rel-node-{seo}")
+        node.on_click(None)
+        assert diagram.selected == seo
+        node.on_long_press(None)
+        assert diagram.form_sheet is not None
+        diagram._close_form()
+        # the once-a-second check still redraws in full screen
+        rt.edit_tracker(str(tracker_file), lambda t: rt.record_relations(
+            t, [{"raw_name": "민준", "translated_name": "Min-jun", "relations": "하린: Friend"}],
+            field="relations", chapter_index=6, chapter_num=7, chapter_file="ch7.html"))
+        assert await diagram.check_for_update() is True
+        assert diagram.fullscreen and diagram.viewer is viewer and diagram.slider.max == 7
+        assert not diagram.controls_box.visible and view.appbar is None
+        # Android back leaves full screen and stays on the screen
+        await diagram._on_confirm_pop(None)
+        assert not diagram.fullscreen and diagram.controls_box.visible and not diagram.closed
+        assert view.appbar is diagram.appbar and view.padding == module.VIEW_PADDING and view.can_pop is True
+        assert diagram.fullscreen_button.icon == ft.Icons.FULLSCREEN and diagram.viewer is viewer
+        assert (diagram.chapter, diagram.focus, diagram.show_former) == (1, seo, False)
+        # the button toggles both ways
+        diagram.toggle_fullscreen()
+        diagram.fullscreen_button.on_click(None)
+        assert not diagram.fullscreen and diagram.controls_box.visible
+        # an emptied tracker leaves full screen (the empty state shows with the app bar)
+        diagram.toggle_fullscreen()
+        diagram._apply_state(tracker=rt.empty_tracker(), gender=None)
+        assert diagram.empty and not diagram.fullscreen and view.appbar is diagram.appbar
+        diagram.toggle_fullscreen()
+        assert not diagram.fullscreen  # nothing to show full screen
         diagram.close()
         store._saver.close()
 

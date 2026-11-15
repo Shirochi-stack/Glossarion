@@ -11,7 +11,8 @@ stay visible, disabled, with a ReasonChip under the label (nothing hidden,
 
 The rows scroll when they may not fit (a 14-row chapter menu on a phone, any
 menu at large text); a scrolling body makes a Flet 1.0.3 sheet full height, so
-a menu that surely fits at 200 % text keeps a compact body (``show``).
+a menu that surely fits at 200 % text keeps a compact body, and a longer one is
+measured and only as tall as its rows (``show``: ``sheet.compact_or_fitted``).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
-from glossarion_mobile.ui.components.sheet import fits_compact, page_width, sheet_frame, text_height
+from glossarion_mobile.ui.components.sheet import compact_or_fitted, fits_compact, page_width, sheet_frame, text_height
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["ActionItem", "ActionSheet"]
@@ -96,8 +97,9 @@ class ActionSheet:
                 content_padding=ft.Padding.symmetric(vertical=12),
             )
         else:
+            self.frame = sheet_frame(body, padding=ft.Padding.only(bottom=8))
             self.dialog = ft.BottomSheet(
-                content=sheet_frame(body, padding=ft.Padding.only(bottom=8)),
+                content=self.frame,
                 show_drag_handle=True,
                 scrollable=True,
                 draggable=True,  # slides closed (hotfix 3 issue 1); on_cancel answers as for back
@@ -140,7 +142,11 @@ class ActionSheet:
     def show(self, page: Any) -> None:
         self._page = page
         width = min(page_width(page), float(tokens.SIZES["dialog_max"])) if self.tablet else page_width(page)
-        self.body.scroll = None if fits_compact(page, self.estimated_height(width)) else ft.ScrollMode.AUTO
+        estimate = self.estimated_height(width)
+        if self.tablet:
+            self.body.scroll = None if fits_compact(page, estimate) else ft.ScrollMode.AUTO
+        else:  # a long menu is as tall as its rows (measured), scrolling only past the screen
+            self.frame.content.content = compact_or_fitted(self.body, page, estimate)
         page.show_dialog(self.dialog)
 
     def close(self) -> None:

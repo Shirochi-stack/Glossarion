@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.state.setting_writes import relations_follows_model
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.empty_state import EmptyState
@@ -240,7 +241,9 @@ class SettingsHome(HubScreen):
 
     def _section_tile(self, section: SectionInfo) -> ft.ListTile:
         store = self.ctx.store
-        modified = sum(1 for key in section.keys if store.is_modified(self.ctx.schema.path_of(key)))
+        # a Relations Tracker toggle that follows the model holds the mobile default, not a change
+        modified = sum(1 for key in section.keys if store.is_modified(self.ctx.schema.path_of(key))
+                       and not relations_follows_model(store, key))
         count = len(self._listed_keys(section))
         subtitle = f"{count} setting{'s' if count != 1 else ''}"
         if modified:

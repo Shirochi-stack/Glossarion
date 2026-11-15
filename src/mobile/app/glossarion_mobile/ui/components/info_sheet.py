@@ -1,7 +1,8 @@
 """InfoSheet (UI_SPEC §5.2): title + body text in a bottom sheet (help, reasons).
 
-The body scrolls when it may not fit ("Show full translation" opens it with the whole output,
-long settings help); a short note keeps a compact sheet (``show``).
+A short note keeps a compact sheet; a body that may not fit ("Show full translation" opens it with the
+whole output, long settings help) is measured: the sheet is as tall as the text, and scrolls only past
+the screen (``show``: ``components.sheet.compact_or_fitted``).
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from typing import Any, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.components.sheet import fits_compact, page_width, sheet_frame, text_height
+from glossarion_mobile.ui.components.sheet import compact_or_fitted, page_width, sheet_frame, text_height
 
 __all__ = ["InfoSheet"]
 
@@ -32,9 +33,10 @@ class InfoSheet:
         if actions:
             controls.append(ft.Row(list(actions), wrap=True, spacing=8, run_spacing=8))
         self.actions = list(actions or ())
-        self.column = ft.Column(controls, tight=True, spacing=12, scroll=ft.ScrollMode.AUTO)
+        self.column = ft.Column(controls, tight=True, spacing=12)
+        self.frame = sheet_frame(self.column, padding=ft.Padding.only(left=16, right=16, bottom=24))
         self.dialog = ft.BottomSheet(
-            content=sheet_frame(self.column, padding=ft.Padding.only(left=16, right=16, bottom=24)),
+            content=self.frame,
             show_drag_handle=True,
             scrollable=True,
             draggable=True,  # slides closed (hotfix 3 issue 1)
@@ -53,8 +55,8 @@ class InfoSheet:
 
     def show(self, page: Any) -> None:
         self._page = page
-        compact = fits_compact(page, self.estimated_height(page_width(page)))
-        self.column.scroll = None if compact else ft.ScrollMode.AUTO
+        # compact when it surely fits, else as tall as the text measures (never full screen with empty space)
+        self.frame.content.content = compact_or_fitted(self.column, page, self.estimated_height(page_width(page)))
         page.show_dialog(self.dialog)
 
     def close(self) -> None:

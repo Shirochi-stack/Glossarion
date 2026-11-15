@@ -3474,10 +3474,14 @@ class JobService:
                     self._note_job_running(False)  # the job never took its snapshot
                 raise JobError(f"{exc}: assign a Translation key to instance {job.instance} in the Multi-Key Manager"
                                ) from exc
-        # the mobile Streaming default (absent toggles ON) and the thoughts lock; config.json is untouched
-        from glossarion_mobile.state.setting_writes import with_mobile_streaming_defaults
+        # the mobile Streaming default (absent toggles ON) and the thoughts lock, then the Relations Tracker
+        # toggles the user never set for the run's own model (off for on-device); config.json is untouched
+        from glossarion_mobile.state.setting_writes import (
+            with_mobile_relations_defaults,
+            with_mobile_streaming_defaults,
+        )
 
-        return with_mobile_streaming_defaults(config)
+        return with_mobile_relations_defaults(with_mobile_streaming_defaults(config))
 
     @contextlib.contextmanager
     def _watching(self, job: _Job, host: _JobHost) -> Iterator[None]:

@@ -29,6 +29,7 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Optional
 
+from glossarion_mobile.state.setting_writes import relations_follows_model
 from glossarion_mobile.ui.settings.model import (
     ANTI_DUPLICATE_BIAS_SECTION,
     ANTI_DUPLICATE_MASTER,
@@ -355,16 +356,20 @@ class SchemaAccess:
 
     def is_modified(self, store: Any, key: str) -> bool:
         """A tile's "modified" dot / the "Modified" search filter: any key it stands for is stored and differs
-        from its display default."""
+        from its display default. A Relations Tracker toggle that still follows the model holds the mobile
+        default (``setting_writes.relations_follows_model``), not a change."""
         try:
-            return any(store.is_modified(self.path_of(name)) for name in self.represented_keys(key))
+            return any(store.is_modified(self.path_of(name)) and not relations_follows_model(store, name)
+                       for name in self.represented_keys(key))
         except Exception:
             return False
 
     def is_stored(self, store: Any, key: str) -> bool:
-        """Any key the tile ``key`` stands for is in config.json (a section reset has something to remove)."""
+        """Any key the tile ``key`` stands for is in config.json (a section reset has something to remove; a
+        Relations Tracker toggle that follows the model has nothing)."""
         try:
-            return any(store.has(self.path_of(name)) for name in self.represented_keys(key))
+            return any(store.has(self.path_of(name)) and not relations_follows_model(store, name)
+                       for name in self.represented_keys(key))
         except Exception:
             return False
 

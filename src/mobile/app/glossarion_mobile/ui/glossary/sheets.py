@@ -269,7 +269,8 @@ class ModeSheet:
             ft.Text("Append Glossary, Auto-Mapping and Fuzzy Auto-Mapping follow the mode (🔒 in Settings › Glossary "
                     "› General).", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
         ], actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())], key="mode-sheet")
-        self.body = self.dialog.content.content.content  # SafeArea > Container > the sheet's Column
+        # SafeArea > Container > the measured box (components.sheet.fitted_box) > its scrolling Column
+        self.body = self.dialog.content.content.content.content
 
     def choose(self, mode: Optional[str]) -> dict:
         if not mode:
@@ -359,7 +360,8 @@ class PlanGlossarySheet:
         self.tiles = tiles
         self.dialog = sheet(self.title, tiles, actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())],
                             key="pg-sheet")
-        self.body = self.dialog.content.content.content  # SafeArea > Container > the sheet's Column
+        # SafeArea > Container > the measured box (components.sheet.fitted_box) > its scrolling Column
+        self.body = self.dialog.content.content.content.content
 
     # ---- glossary prompt profile -------------------------------------------------------------------
 

@@ -35,6 +35,8 @@ from glossarion_mobile.state.setting_writes import (
     EXTRACTION_KEY,
     MOBILE_STREAMING_DEFAULT,
     PROFILE_KEY,
+    RELATIONS_FRESH_DEFAULT_KEYS,
+    RELATIONS_MOBILE_DEFAULT_TEXT,
     RELATIONS_TRACKER_KEY,
     RULE_KEYS,
     STREAMING_KEY,
@@ -42,7 +44,10 @@ from glossarion_mobile.state.setting_writes import (
     STREAMING_WRITES,
     context_mode_of,
     effective_streaming_values,
+    relations_follows_model,
+    reset_relations_toggle,
     reset_streaming,
+    restore_relations_toggle,
     streaming_states,
     streaming_summary,
     with_mobile_streaming_defaults,
@@ -88,6 +93,7 @@ __all__ = [
     "JsonTile",
     "ListSettingTile",
     "MIRRORS",
+    "MOBILE_DEFAULT_TEXTS",
     "MOBILE_MINIMUMS",
     "MOBILE_READONLY_REASONS",
     "listed_setting",
@@ -216,6 +222,11 @@ def pool_slug_for(key: str) -> Optional[str]:
 #: ``save_profiles`` and could drop built-ins the desktop start-up does not re-add (Manga_*, Original, ...).
 MOBILE_READONLY_REASONS = {"prompt_profiles": "Edited in Settings › Profiles & prompts"}
 
+#: Settings whose mobile default differs from the desktop's and depends on the selected model: key -> (the
+#: desktop tooltip's default sentence, left out of the info sheet; the info sheet's "Default:" text). The
+#: Relations Tracker toggles: on, off while an on-device model is selected (``relations_default_for_model``).
+MOBILE_DEFAULT_TEXTS = {key: ("Default OFF.", RELATIONS_MOBILE_DEFAULT_TEXT) for key in RELATIONS_FRESH_DEFAULT_KEYS}
+
 
 def listed_setting(ctx: Any, spec: Any) -> bool:
     """A setting the Settings pages and search list: available on mobile and something the user can
@@ -287,6 +298,12 @@ class SettingTile:
     @property
     def editable(self) -> bool:
         return self.available and self.lock_reason is None and self.readonly_reason is None
+
+    def follows_mobile_default(self) -> bool:
+        """A Relations Tracker toggle the user never set, or Custom Fields as that toggle left them: the stored
+        value is the mobile default of the selected model (``setting_writes.relations_follows_model``), shown as
+        "· default", nothing to reset."""
+        return relations_follows_model(self.store, self.path)
 
     def default_note(self) -> Optional[str]:
         note = getattr(self.ctx.schema, "default_note", None)
@@ -408,11 +425,12 @@ class SettingTile:
         self._evaluate_rules()
         editable = self.editable
         text = self.summary()
-        stored = self.stored
+        following = self.follows_mobile_default()
+        stored = self.stored and not following  # a value that follows the model is the default, not a choice
         noted = not stored and self.value() is None and bool(self.default_note())
         self.value_text.value = text if (stored or noted) else f"{text} · default"
         self.value_text.color = ft.Colors.PRIMARY if stored and editable else ft.Colors.ON_SURFACE_VARIANT
-        self.modified_dot.visible = self.store.is_modified(self.path)
+        self.modified_dot.visible = not following and self.store.is_modified(self.path)
         self.title_text.color = ft.Colors.ON_SURFACE if editable else ft.Colors.ON_SURFACE_VARIANT
         self.badges.controls = self._badge_controls()
         self.badges.visible = bool(self.badges.controls)
@@ -457,10 +475,11 @@ class SettingTile:
             if extra:  # keys the desktop control writes together with this one, in one store write
                 self.store.set_many({self.path: value, **extra})
             elif len(self.path) == 1 and (self.key in RULE_KEYS
-                                         or self.key in (PROFILE_KEY, EXTRACTION_KEY, RELATIONS_TRACKER_KEY)):
+                                         or self.key in (PROFILE_KEY, EXTRACTION_KEY, *RELATIONS_FRESH_DEFAULT_KEYS)):
                 # the desktop control's side effects (output-mode flags, glossary-mode toggles,
                 # thoughts lock, target-language fan-out, profile extraction method, the On-device
-                # translation profile of the extraction method, the Relations Tracker's custom field)
+                # translation profile of the extraction method, the Relations Tracker's custom field;
+                # a Relations Tracker toggle set by hand stops following the model)
                 write_setting(self.store, self.key, value)
             else:
                 self.store.set(self.path, value)
@@ -486,6 +505,14 @@ class SettingTile:
     def reset(self) -> bool:
         if not self.editable or not self.stored:
             return False
+        if len(self.path) == 1 and self.key in RELATIONS_FRESH_DEFAULT_KEYS:
+            # the mobile default follows the selected model (setting_writes.relations_default_for_model)
+            before = reset_relations_toggle(self.store, self.key)
+            self.refresh()
+            if before:
+                self.ctx.say(f"{self.label} reset to default", "Undo",
+                             lambda: (restore_relations_toggle(self.store, before), self.refresh()))
+            return True
         old = self.store.get(self.path, MISSING)
         self.store.unset(self.path)
         self.refresh()
@@ -511,6 +538,9 @@ class SettingTile:
     def help_body(self) -> str:
         lines: list[str] = []
         tooltip = plain_text(spec_attr(self.spec, "tooltip", ""))
+        mobile_default = MOBILE_DEFAULT_TEXTS.get(self.key) if len(self.path) == 1 else None
+        if mobile_default:  # the desktop tooltip's own "Default OFF." is the desktop's default, not this one
+            tooltip = tooltip.replace(mobile_default[0], "").rstrip()
         if tooltip:
             lines.append(tooltip)
         lines.append("Config key: " + (" › ".join(self.path) if len(self.path) > 1 else self.key))
@@ -518,7 +548,9 @@ class SettingTile:
         if names:
             lines.append("Environment: " + ", ".join(names))
         default = self.default()
-        if self.kind != "secret" and default is not None:
+        if mobile_default:
+            lines.append("Default: " + mobile_default[1])
+        elif self.kind != "secret" and default is not None:
             lines.append("Default: " + summarize(default, self.kind, self.spec))
         elif default is None and self.default_note():
             lines.append(f"Default: {self.default_note()}.")
@@ -536,7 +568,7 @@ class SettingTile:
 
     def open_help(self, e: Any = None) -> InfoSheet:
         actions: list[ft.Control] = []
-        if self.stored and self.editable:
+        if self.stored and self.editable and not self.follows_mobile_default():
             actions.append(ft.TextButton(content="Reset to default", icon=ft.Icons.RESTART_ALT,
                                          on_click=lambda ev: (sheet.close(), self.reset())))
         sheet = InfoSheet(title=self.label, body=self.help_body(), actions=actions)
