@@ -1,24 +1,25 @@
-# Self-built mobile wheels: the security pins (cryptography==50.0.2, pillow==13.0.0) and the on-device
+# The mobile wheelhouse: the security pins (cryptography==50.0.2, pillow==13.0.0) and the on-device
 # engine with vision (llama-cpp-python==0.3.32 with libmtmd).
 #
-# pypi.flet.dev and PyPI have no Android/iOS cp313 wheels for these versions (pypi.flet.dev's
-# llama-cpp-python 0.3.32 builds lack libmtmd: LLAVA_BUILD=OFF), so
-# .github/workflows/mobile-wheels.yml builds them with flet-dev/mobile-forge and the
-# mobile builds feed them to `flet build` through PIP_FIND_LINKS
-# (.github/actions/mobile-wheelhouse). Nothing here is uploaded to an index or a release.
+# No index had Android/iOS cp313 wheels for these versions we could ship (pypi.flet.dev's
+# llama-cpp-python 0.3.32 builds lack libmtmd: LLAVA_BUILD=OFF; its pillow-13.0.0-1 iOS builds lack
+# AVIF, ImageCms, JPEG 2000 and LZMA), so .github/workflows/mobile-wheels.yml builds them with
+# flet-dev/mobile-forge, except the [wheel.retag] targets (iOS Pillow), which are PyPI's official
+# wheels retagged with build_tag. The mobile builds feed the wheelhouse to `flet build` through
+# PIP_FIND_LINKS (.github/actions/mobile-wheelhouse). Nothing here is uploaded to an index or a release.
 #
 # Read by:
-#   ci/wheels/wheels.py             env / fetch / stage-openssl / collect / verify-native / assert-selftest
+#   ci/wheels/wheels.py             env / fetch / stage-openssl / collect / retag / verify-native / assert-selftest
 #   tools/check_mobile_wheels.py    --wheelhouse / --wheelhouse-plan / --verify-wheelhouse / --verify-installed
 #
 # Every sha256 below was checked on 2026-10-07 against the GitHub release asset digest
-# (or PyPI's JSON API for the sdists) AND by hashing the downloaded bytes.
+# (or PyPI's JSON API for the sdists) AND by hashing the downloaded bytes ([wheel.retag]: 2026-11-16).
 # Changing any value here, build_wheels.sh, wheels.py or a recipe changes the wheel
 # cache key, so the next run rebuilds.
 
 schema = 1
 
-# Every wheel we build is tagged <name>-<version>-<build_tag>-cp313-cp313-<platform>.whl.
+# Every wheel we build or retag is tagged <name>-<version>-<build_tag>-cp313-cp313-<platform>.whl.
 # pip ranks a higher build tag above an otherwise identical index file (an exact tie goes
 # to the index), and pypi.flet.dev uses build tags <= 11 today.
 build_tag = 1000
@@ -104,16 +105,27 @@ requires_dist = [
     "typing-extensions>=4.13.2; python_full_version < \"3.11\"",
 ]
 
-# iOS keeps PyPI's official pillow-13.0.0 cp313 wheels; only Android is built here.
-# Android links the flet-lib* C libraries as published on pypi.flet.dev (follow-up: newer
-# libjpeg-turbo / FreeType builds).
+# Android is built here and links the flet-lib* C libraries as published on pypi.flet.dev
+# (follow-up: newer libjpeg-turbo / FreeType builds).
+# iOS ships PyPI's official pillow-13.0.0 cp313 wheels (PIL._avif, PIL._imagingcms and the full
+# codec set, statically linked). pypi.flet.dev's reduced pillow-13.0.0-1 would outrank them (build
+# tag 1 > none) and lacks AVIF and ImageCms (verify-native checks both), so they are promised here:
+# wheels.py retag downloads each [wheel.retag] url, checks its sha256 (PyPI JSON API, confirmed by
+# hashing the downloaded bytes on 2026-11-16) and changes only the file name, WHEEL "Build:" and
+# RECORD's WHEEL row to build_tag. No forge build for them; Requires-Dist: every entry has an extra.
 [[wheel]]
 name = "pillow"
 version = "13.0.0"
 recipe = "recipes/pillow"
 sdist_sha256 = "cdcd1ba258178f7356d74170c9a81ba4eab6a5d55748bc402a5a2a6fe6be3510"
-targets = ["arm64-v8a", "x86_64"]
+targets = ["arm64-v8a", "x86_64", "iphoneos.arm64", "iphonesimulator.arm64", "iphonesimulator.x86_64"]
 requires_dist = ["flet-libjpeg==3.0.90", "flet-libfreetype==2.13.3", "flet-libwebp==1.6.0"]
+requires_dist_ios = []
+
+[wheel.retag]
+"iphoneos.arm64" = { url = "https://files.pythonhosted.org/packages/82/e2/9132d38df320e8099e2642d9fa538f18a7dfebf68a875a31725dc2a115aa/pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphoneos.whl", sha256 = "e98b4f91f99b24b1da72e10621ba181f7281922384a7403094debb4199de6c00" }
+"iphonesimulator.arm64" = { url = "https://files.pythonhosted.org/packages/cb/be/436dac0996876f65ef1916ffb711c5ef4af2ebc57414b6f16642e07f6b47/pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl", sha256 = "34fb3db1149c879343861831728c243c432d4a5afc8f1878ca7612ef8de2a033" }
+"iphonesimulator.x86_64" = { url = "https://files.pythonhosted.org/packages/60/16/7c1007162e4169ea0d5bec47e2e0b2174f56c50cf5b8c02a1dc23e41037e/pillow-13.0.0-cp313-cp313-ios_13_0_x86_64_iphonesimulator.whl", sha256 = "2d50500a4a3bc6469adcdb319cf05d688b08ca3bf0f22a05339f3b25b433a599" }
 
 # The built-in llama.cpp engine with the multimodal library (libmtmd) for vision models. Same
 # version as pypi.flet.dev's build 2 (the pyproject pin), built from forge's recipe with

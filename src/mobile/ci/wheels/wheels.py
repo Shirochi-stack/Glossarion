@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helpers for the self-built mobile wheels (cryptography 50.0.2, Pillow 13.0.0) in CI.
+"""Helpers for the mobile wheelhouse (cryptography 50.0.2, Pillow 13.0.0, llama-cpp-python) in CI.
 
 Stdlib only, Python 3.11+. Every pinned value comes from ``wheelhouse.toml`` (next to this
 file); ``assert-selftest`` also reads the pins in ``src/mobile/pyproject.toml``. The manifest
@@ -7,7 +7,8 @@ model is shared with ``tools/check_mobile_wheels.py``.
 
 Used by ``build_wheels.sh`` and ``.github/workflows/mobile-wheels.yml``:
 
-    packages         the packages the manifest builds for a platform
+    packages         the packages the manifest builds for a platform (--retagged: the packages it
+                     takes from PyPI's official wheels instead, see retag)
     recipe           the recipe directory of a package (checked against the manifest)
     env              shell exports / GitHub outputs: forge + crossenv revs, python-build release,
                      CPython, ABIs, Rust, NDK; writes the PIP_CONSTRAINT file
@@ -19,11 +20,15 @@ Used by ``build_wheels.sh`` and ``.github/workflows/mobile-wheels.yml``:
     stage-opencl     Android: the Khronos OpenCL headers and a link-time libOpenCL.so (ICD loader
                      built with the NDK) into the NDK sysroot, for the engine's optional OpenCL backend
     collect          copy only the promised wheels from forge's dist/ into <cache>/<package>/
+    retag            the manifest's [wheel.retag] targets (iOS Pillow): download PyPI's official
+                     wheel (url + sha256 from the manifest), rewrite only its file name, the WHEEL
+                     "Build:" line and RECORD's WHEEL row to build_tag, into <cache>/<package>/
     assemble         copy a platform's cached wheels into the wheelhouse, write SHA256SUMS
     provenance       write provenance.json into the wheelhouse
     verify-native    static checks of every native binary in the wheelhouse (ELF / Mach-O),
                      including its undefined symbols: what the device's dynamic linker must
-                     resolve (Android: against the NDK's API-level stub libraries)
+                     resolve (Android: against the NDK's API-level stub libraries); a retagged
+                     wheel must equal its official original (--official) member for member
     verify-site-packages
                      after `flet build`: an index-installed native package (llama-cpp-python, the
                      built-in engine) in build/site-packages/<arch> is the pinned build with the
@@ -36,6 +41,7 @@ Exit codes: 0 ok, 1 check or build failure, 2 usage error.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import hashlib
 import json
@@ -98,6 +104,11 @@ CRYPTOGRAPHY_ANDROID_NEEDED = {ANDROID_LIBPYTHON, "libc.so", "libdl.so", "libm.s
 # The NDK sysroot directory of each ABI's stub libraries: sysroot/usr/lib/<triple>/<API level>/.
 NDK_TRIPLE = {"arm64-v8a": "aarch64-linux-android", "x86_64": "x86_64-linux-android"}
 PILLOW_MODULES = ("_imaging", "_imagingft", "_webp")
+# iOS ships PyPI's official wheel (retagged): it also has AVIF and ImageCms (LittleCMS), which
+# pypi.flet.dev's reduced pillow-13.0.0-1 lacks. Checked in the wheel and, by PIL.features name
+# (PILLOW_IOS_FEATURES), in the device self-test.
+PILLOW_IOS_MODULES = PILLOW_MODULES + ("_avif", "_imagingcms")
+PILLOW_IOS_FEATURES = ("avif", "littlecms2")
 PYTHON_FRAMEWORK = "@rpath/Python.framework/Python"
 IOS_ALLOWED_DYLIB = re.compile(r"^(@rpath/Python\.framework/Python|/usr/lib/.+|/System/Library/.+)$")
 # Static OpenSSL archives (stage-openssl keeps exactly the staged pair in the support tree).
@@ -179,8 +190,9 @@ class Ctx:
         return tuple(int(x) for x in self.ios_deployment_target_text.split(".")[:2])
 
     def wheels(self, packages=None) -> list:
-        """The promised wheels with targets on this platform (all, or the named packages)."""
-        on = [w for w in self.manifest.wheels if any(cmw.on_platform(t, self.platform) for t in w.targets)]
+        """The promised wheels forge builds on this platform (all, or the named packages); targets
+        retagged from PyPI's official wheels ([wheel.retag]) are not built (see retagged())."""
+        on = [w for w in self.manifest.wheels if any(cmw.on_platform(t, self.platform) for t in w.built_targets)]
         if not packages:
             return on
         wanted = [cmw.canonical(p) for p in packages]
@@ -190,9 +202,13 @@ class Ctx:
                               f"(it builds: {' '.join(w.name for w in on) or 'nothing'})")
         return [w for w in on if w.name in wanted]
 
+    def retagged(self) -> list:
+        """[(PromisedWheel, target)] of this platform taken from PyPI's official wheels ([wheel.retag])."""
+        return [(w, t) for w, t in self.manifest.promised(self.platform) if w.retag_source(t)]
+
     def targets(self, packages=None) -> list:
-        """Target keys of this platform the wheels need, in TARGETS order."""
-        need = {t for w in self.wheels(packages) for t in w.targets if cmw.on_platform(t, self.platform)}
+        """Target keys of this platform forge builds the wheels for, in TARGETS order."""
+        need = {t for w in self.wheels(packages) for t in w.built_targets if cmw.on_platform(t, self.platform)}
         return [t for t in cmw.TARGETS if t in need]
 
     def recipe_dir(self, wheel) -> Path:
@@ -206,7 +222,7 @@ class Ctx:
                               f"{self.manifest_path.name} has build_tag {self.manifest.build_tag}")
         if cmw.canonical(meta.get("name", "")) != wheel.name:
             raise WheelsError(f"{path}/meta.yaml builds {meta.get('name')!r}, not {wheel.name}")
-        if any(cmw.platform_of(t) == "ios" for t in wheel.targets) and \
+        if any(cmw.platform_of(t) == "ios" for t in wheel.built_targets) and \
                 meta.get("ios_deployment_target") != self.ios_deployment_target_text:
             # forge's compile_env() starts from an empty environment, so an exported
             # IPHONEOS_DEPLOYMENT_TARGET never reaches rustc and the slices would need iOS 10.0.
@@ -687,7 +703,7 @@ def cmd_collect(ctx: Ctx, args) -> None:
         if args.logs and ctx.needs_openssl([w.name]):
             version, spec = openssl_spec(ctx)
             forge_name = recipe_meta(ctx.recipe_dir(w) / "meta.yaml")["name"]
-            for target in w.targets:
+            for target in w.built_targets:
                 if not cmw.on_platform(target, ctx.platform):
                     continue
                 label = cmw.TARGETS[target].label
@@ -703,7 +719,7 @@ def cmd_collect(ctx: Ctx, args) -> None:
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True)
         hashes = {}
-        for target in w.targets:
+        for target in w.built_targets:
             if not cmw.on_platform(target, ctx.platform):
                 continue
             expected = w.filename(target, ctx.manifest.build_tag)
@@ -727,6 +743,146 @@ def _run_env() -> dict:
     return {k.lower(): os.environ.get(k) for k in keys if os.environ.get(k)}
 
 
+# ============================================================================ retagged official wheels
+def _dist_info_dir(names) -> str:
+    tops = sorted({n.split("/", 1)[0] for n in names if "/" in n and n.split("/", 1)[0].endswith(".dist-info")})
+    if len(tops) != 1:
+        raise WheelsError(f"expected one .dist-info directory, found {tops}")
+    return tops[0]
+
+
+def _record_digest(data: bytes) -> str:
+    return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+def retag_wheel_metadata(text: bytes, build_tag: int) -> bytes:
+    """The WHEEL file with ``Build: <build_tag>``: an existing Build line is dropped and the new one
+    goes after the last Tag line; every other line keeps its bytes, order and line ending."""
+    lines = text.decode("utf-8").splitlines(keepends=True)
+    eol = next((ln[len(ln.rstrip("\r\n")):] for ln in lines if ln.endswith(("\n", "\r"))), "\n")
+    kept = [ln for ln in lines if not re.match(r"(?i)^build\s*:", ln)]
+    header_end = next((i for i, ln in enumerate(kept) if not ln.strip()), len(kept))
+    tags = [i for i, ln in enumerate(kept[:header_end]) if re.match(r"(?i)^tag\s*:", ln)]
+    if not tags:
+        raise WheelsError("WHEEL has no Tag line")
+    if not kept[tags[-1]].endswith(("\n", "\r")):
+        kept[tags[-1]] += eol
+    kept.insert(tags[-1] + 1, f"Build: {build_tag}{eol}")
+    return "".join(kept).encode("utf-8")
+
+
+def retag_record(record: bytes, wheel_member: str, wheel_data: bytes) -> bytes:
+    """RECORD with only the row of ``wheel_member`` (the WHEEL file) rehashed for ``wheel_data``."""
+    lines = record.decode("utf-8").splitlines(keepends=True)
+    hits = [i for i, ln in enumerate(lines) if ln.startswith(wheel_member + ",")]
+    if len(hits) != 1:
+        raise WheelsError(f"RECORD has {len(hits)} rows for {wheel_member} (expected one)")
+    line = lines[hits[0]]
+    eol = line[len(line.rstrip("\r\n")):]
+    lines[hits[0]] = f"{wheel_member},{_record_digest(wheel_data)},{len(wheel_data)}{eol}"
+    return "".join(lines).encode("utf-8")
+
+
+def _retagged_members(zf: zipfile.ZipFile, build_tag: int) -> dict:
+    """{member: new bytes} for the two members a retag rewrites (WHEEL, RECORD)."""
+    names = [i.filename for i in zf.infolist()]
+    if len(set(names)) != len(names):
+        raise WheelsError("duplicate member names")
+    di = _dist_info_dir(names)
+    wheel_name, record_name = f"{di}/WHEEL", f"{di}/RECORD"
+    new_wheel = retag_wheel_metadata(zf.read(wheel_name), build_tag)
+    return {wheel_name: new_wheel, record_name: retag_record(zf.read(record_name), wheel_name, new_wheel)}
+
+
+def retag_wheel(src: Path, dest: Path, build_tag: int) -> None:
+    """Write ``dest``: the wheel ``src`` with only its WHEEL "Build:" line and RECORD's WHEEL row
+    changed. Every member keeps its name, order, timestamp, permissions and compression method, and
+    every other member's bytes are copied unchanged (deterministic for a given input)."""
+    src, dest = Path(src), Path(dest)
+    with zipfile.ZipFile(src) as zin:
+        changed = _retagged_members(zin, build_tag)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        with zipfile.ZipFile(part, "w") as zout:
+            for info in zin.infolist():
+                data = changed.get(info.filename)
+                out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+                out.compress_type, out.external_attr, out.create_system = (
+                    info.compress_type, info.external_attr, info.create_system)
+                zout.writestr(out, data if data is not None else zin.read(info))
+    os.replace(part, dest)
+
+
+def compare_retag(original: Path, retagged: Path, build_tag: int) -> list:
+    """Errors unless ``retagged`` is exactly retag_wheel(``original``): the same members in the same
+    order with the same timestamps and permissions, every member byte-identical except WHEEL and
+    RECORD, and those two exactly the retag of the original's."""
+    original, retagged = Path(original), Path(retagged)
+    errors = []
+    try:
+        with zipfile.ZipFile(original) as a, zipfile.ZipFile(retagged) as b:
+            ia, ib = a.infolist(), b.infolist()
+            if [i.filename for i in ia] != [i.filename for i in ib]:
+                return [f"{retagged.name}: its members are not {original.name}'s (names or order differ)"]
+            expected = _retagged_members(a, build_tag)
+            for x, y in zip(ia, ib):
+                want = expected.get(x.filename)
+                if (want if want is not None else a.read(x)) != b.read(y):
+                    errors.append(f"{retagged.name}: {x.filename} differs from {original.name}"
+                                  + (" beyond the build tag" if want is not None else ""))
+                if (x.date_time, x.external_attr) != (y.date_time, y.external_attr):
+                    errors.append(f"{retagged.name}: {x.filename} timestamp or permissions differ from {original.name}")
+    except (zipfile.BadZipFile, OSError, KeyError, UnicodeDecodeError, WheelsError) as e:
+        errors.append(f"{retagged.name}: cannot compare with {original.name} ({type(e).__name__}: {e})")
+    return errors
+
+
+def cmd_retag(ctx: Ctx, args) -> None:
+    """Fetch and retag the platform's [wheel.retag] targets into <cache>/<package>/ (after collect,
+    which empties the cache directory of a package it builds)."""
+    items = ctx.retagged()
+    if not items:
+        log(f"no official wheels to retag for {ctx.platform}")
+        return
+    downloads, cache, tag = Path(args.downloads), Path(args.cache), ctx.manifest.build_tag
+    origins = {}
+    for w, target in items:
+        url, sha = w.retag_source(target)
+        original = downloads / w.official_filename(target)
+        download_verified(url, original, sha)
+        dest = cache / w.name / w.filename(target, tag)
+        retag_wheel(original, dest, tag)
+        errors = compare_retag(original, dest, tag)
+        if errors:
+            raise WheelsError("; ".join(errors))
+        digest = file_sha256(dest)
+        origins.setdefault(w, {})[dest.name] = {"url": url, "sha256": sha, "file": original.name,
+                                                "retagged_sha256": digest}
+        log(f"retagged {original.name} (sha256 {sha}) -> {dest.name} (sha256 {digest}, build {tag})")
+    for w, files in origins.items():
+        info_path = cache / w.name / "build-info.json"
+        info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else \
+            {"package": w.name, "version": w.version, "platform": ctx.platform}
+        info["retagged"] = {
+            "source": "PyPI's official wheels, sha256 from wheelhouse.toml; only the file name, WHEEL Build "
+                      "and RECORD's WHEEL row changed",
+            "build_tag": tag,
+            "retagged_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "workflow_run": _run_env(), "wheels": files,
+        }
+        info_path.write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
+
+
+def wheel_origins(ctx: Ctx) -> dict:
+    """{wheelhouse file name: where it comes from} for the platform's promised wheels."""
+    out = {}
+    for w, target in ctx.manifest.promised(ctx.platform):
+        source = w.retag_source(target)
+        out[w.filename(target, ctx.manifest.build_tag)] = (
+            f"PyPI {w.official_filename(target)} (sha256 {source[1]}), retagged" if source else "mobile-forge build")
+    return out
+
+
 def cmd_assemble(ctx: Ctx, args) -> None:
     cache, out = Path(args.cache), Path(args.out)
     if out.exists():
@@ -739,17 +895,18 @@ def cmd_assemble(ctx: Ctx, args) -> None:
         if len(matches) != 1:
             raise WheelsError(f"{cache / w.name}: expected one {expected}, found {[p.name for p in matches]}")
         shutil.copy2(matches[0], out / matches[0].name)
+    origins = wheel_origins(ctx)
     lines = []
     for whl in sorted(out.glob("*.whl")):
         digest = file_sha256(whl)
         lines.append(f"{digest}  {whl.name}")
-        rows.append(f"| `{whl.name}` | {whl.stat().st_size:,} | `{digest}` |")
+        rows.append(f"| `{whl.name}` | {whl.stat().st_size:,} | `{digest}` | {origins.get(whl.name, '?')} |")
     (out / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
     log(f"wheelhouse {out}: {len(lines)} wheels")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
-            f.write(f"## Mobile wheelhouse ({ctx.platform})\n\n| wheel | bytes | sha256 |\n|---|---|---|\n")
+            f.write(f"## Mobile wheelhouse ({ctx.platform})\n\n| wheel | bytes | sha256 | from |\n|---|---|---|---|\n")
             f.write("\n".join(rows) + "\n\n")
 
 
@@ -757,14 +914,19 @@ def cmd_provenance(ctx: Ctx, args) -> None:
     wheelhouse, cache = Path(args.wheelhouse), Path(args.cache) if args.cache else None
     built = {cmw.canonical(p) for p in (args.built or "").split()}
     version, spec = openssl_spec(ctx)
+    origins = wheel_origins(ctx)
     entries = []
     for whl in sorted(wheelhouse.glob("*.whl")):
         ident = _wheel_identity(whl.name)
         pkg = ident[0] if ident else ""
         info_path = cache / pkg / "build-info.json" if cache is not None and pkg else None
+        retagged = origins.get(whl.name, "").startswith("PyPI ")
         entries.append({
             "file": whl.name, "sha256": file_sha256(whl), "size": whl.stat().st_size, "package": pkg,
-            "built_in_this_run": pkg in built,
+            "origin": origins.get(whl.name),
+            # a retagged official wheel is fetched and retagged in every run (wheels.py retag)
+            "built_in_this_run": pkg in built and not retagged,
+            "retagged_in_this_run": retagged,
             "build": json.loads(info_path.read_text(encoding="utf-8")) if info_path and info_path.is_file() else None,
         })
     doc = {
@@ -1284,11 +1446,29 @@ def verify_native_wheel(path: Path, package: str, target: str, openssl: str, min
                 if not errs:
                     notes.append(f"{path.name}: {name} {describe_macho(parse_macho(data))}")
             errors += [f"{path.name}: {e}" for e in errs]
-        if package == "pillow" and cmw.platform_of(target) == "android":
-            for module in PILLOW_MODULES:
+        if package == "pillow":
+            # iOS: PyPI's official wheel; a build without AVIF / ImageCms is a reduced one (pypi.flet.dev's)
+            for module in PILLOW_MODULES if cmw.platform_of(target) == "android" else PILLOW_IOS_MODULES:
                 if not any(n.rsplit("/", 1)[-1].startswith(module + ".") and n.startswith("PIL/") for n in sos):
                     errors.append(f"{path.name}: no PIL/{module}*.so")
     return errors, notes
+
+
+def verify_retagged(path: Path, w, target: str, official, build_tag: int) -> list:
+    """A retagged wheel is its official original (``official``/<PyPI file name>, sha256 as in the
+    manifest) with only the build tag changed (compare_retag)."""
+    url, sha = w.retag_source(target)
+    name = w.official_filename(target)
+    if not official:
+        return [f"{path.name}: retagged from {name}; pass --official DIR (wheels.py retag's --downloads) to "
+                f"prove it is that wheel"]
+    original = Path(official) / name
+    if not original.is_file():
+        return [f"{original}: missing, so {path.name} cannot be proven to be {url}"]
+    got = file_sha256(original)
+    if got != sha:
+        return [f"{original.name}: sha256 {got} is not the manifest's {sha}"]
+    return compare_retag(original, path, build_tag)
 
 
 def cmd_verify_native(ctx: Ctx, args) -> int:
@@ -1307,6 +1487,12 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
             errors.append(f"{wheelhouse}: expected one {w.filename(target, ctx.manifest.build_tag)}")
             continue
         errs, ns = verify_native_wheel(matches[0], w.name, target, openssl, minos, stubs)
+        if w.retag_source(target):
+            retag_errs = verify_retagged(matches[0], w, target, args.official, ctx.manifest.build_tag)
+            errs += retag_errs
+            if not retag_errs:
+                ns.append(f"{matches[0].name}: PyPI's {w.official_filename(target)} (sha256 "
+                          f"{w.retag_source(target)[1]}), every member identical except WHEEL Build and RECORD")
         errors += errs
         notes += ns
     for n in notes:
@@ -1676,6 +1862,12 @@ def check_selftest_report(report: dict, platform: str, crypto_version: str, open
             errors.append(f"Pillow round-trip failed for {bad} (reported {roundtrip})")
         if pillow.get("font") != "FreeTypeFont":
             errors.append(f"ImageFont.load_default(size=24) gave {pillow.get('font')!r}, expected FreeTypeFont")
+        if platform == "ios":
+            modules = pillow.get("modules") or {}
+            lacking = [m for m in PILLOW_IOS_FEATURES if modules.get(m) is not True]
+            if lacking:
+                errors.append(f"Pillow on iOS lacks {lacking} (reported {modules}): a reduced build, not PyPI's "
+                              f"official wheel from the wheelhouse")
     return errors
 
 
@@ -1821,7 +2013,9 @@ def main(argv=None) -> int:
             p.add_argument("packages", nargs="*", help="packages (default: all the manifest builds for the platform)")
         return p
 
-    add("packages", "print the packages built for the platform")
+    p = add("packages", "print the packages built for the platform")
+    p.add_argument("--retagged", action="store_true",
+                   help="print the packages taken from PyPI's official wheels instead ([wheel.retag])")
     p = add("recipe", "print a package's recipe directory")
     p.add_argument("package")
     p = add("env", "print the pinned build inputs")
@@ -1841,6 +2035,10 @@ def main(argv=None) -> int:
     p.add_argument("--dist", required=True)
     p.add_argument("--cache", required=True)
     p.add_argument("--logs", help="forge's logs/ directory (maturin version for build-info.json)")
+    p = add("retag", "fetch PyPI's official wheels of the [wheel.retag] targets and retag them into the cache")
+    p.add_argument("--downloads", required=True, help="where the official wheels are downloaded (kept for "
+                                                      "verify-native --official)")
+    p.add_argument("--cache", required=True)
     p = add("assemble", "copy the cached wheels into the wheelhouse and write SHA256SUMS")
     p.add_argument("--cache", required=True)
     p.add_argument("--out", required=True)
@@ -1851,6 +2049,8 @@ def main(argv=None) -> int:
     p = add("verify-native", "static checks of the native binaries")
     p.add_argument("--ndk", help="Android NDK whose API-level stub libraries resolve the imports "
                                  "(default: $NDK_HOME, else $ANDROID_HOME/ndk/<toolchain.android_ndk>)")
+    p.add_argument("--official", help="the official wheels retag downloaded (required when the platform has "
+                                      "[wheel.retag] targets)")
     p.add_argument("wheelhouse")
     p = add("verify-site-packages", "static checks of an index-installed native package after flet build")
     p.add_argument("--package", required=True, choices=sorted(SITE_PROFILES))
@@ -1865,7 +2065,10 @@ def main(argv=None) -> int:
     try:
         ctx = Ctx(args.manifest, args.platform, args.pyproject)
         if args.cmd == "packages":
-            print(" ".join(w.name for w in ctx.wheels()))
+            if args.retagged:
+                print(" ".join(dict.fromkeys(w.name for w, _t in ctx.retagged())))
+            else:
+                print(" ".join(w.name for w in ctx.wheels()))
         elif args.cmd == "recipe":
             print(ctx.recipe_dir(ctx.wheels([args.package])[0]))
         elif args.cmd == "env":
@@ -1878,6 +2081,8 @@ def main(argv=None) -> int:
             cmd_stage_opencl(ctx, args)
         elif args.cmd == "collect":
             cmd_collect(ctx, args)
+        elif args.cmd == "retag":
+            cmd_retag(ctx, args)
         elif args.cmd == "assemble":
             cmd_assemble(ctx, args)
         elif args.cmd == "provenance":

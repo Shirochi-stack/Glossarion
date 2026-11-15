@@ -334,12 +334,15 @@ def check_share_link_crypto(ctx: Context) -> dict[str, Any]:
 
 
 _PILLOW_FEATURES = (("jpg", "codec"), ("zlib", "codec"), ("webp", "module"), ("freetype2", "module"))
+# Reported, not required here: PyPI's iOS wheel has them, the Android build does not
+# (ci/wheels/wheels.py assert-selftest requires them on iOS).
+_PILLOW_MODULES = ("avif", "littlecms2")
 
 
 def check_pillow(ctx: Context) -> dict[str, Any]:
     """Pillow's codecs and FreeType (Android: the self-built 13.0.0 wheel on flet-lib*;
-    iOS: PyPI's wheel): JPEG / PNG / WebP round trips through safe_image.open_image and
-    text drawn with the scalable default font."""
+    iOS: PyPI's official wheel, retagged in the wheelhouse): JPEG / PNG / WebP round trips
+    through safe_image.open_image and text drawn with the scalable default font."""
     import io
 
     pil = ctx.need("PIL")
@@ -373,7 +376,9 @@ def check_pillow(ctx: Context) -> dict[str, Any]:
     draw_mod.Draw(canvas).text((2, 2), "Gl", font=font, fill=255)
     if canvas.getbbox() is None:
         raise AssertionError("FreeType drew nothing")
-    return {"version": pil.__version__, "features": found, "roundtrip": roundtrip, "font": type(font).__name__}
+    modules = {name: name in features.modules and bool(features.check_module(name)) for name in _PILLOW_MODULES}
+    return {"version": pil.__version__, "features": found, "roundtrip": roundtrip, "font": type(font).__name__,
+            "modules": modules}
 
 
 _KEY_FILE_NAMES = (".glossarion_key", "glossarion_key.txt")  # api_key_encryption's desktop key files
@@ -806,7 +811,7 @@ def summary_line(result: dict[str, Any]) -> str:
 
 MARKER_WHEELS = "GLOSSARION_WHEELS"
 # What ci/wheels/wheels.py assert-selftest reads from each check's detail.
-_WHEELS_DETAIL = {"fernet": ("version", "openssl"), "pillow": ("version", "features", "roundtrip", "font")}
+_WHEELS_DETAIL = {"fernet": ("version", "openssl"), "pillow": ("version", "features", "roundtrip", "font", "modules")}
 
 
 def wheels_marker_payload(result: dict[str, Any]) -> Optional[dict[str, Any]]:
