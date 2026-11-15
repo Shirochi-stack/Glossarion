@@ -10,10 +10,14 @@ when only one is known, no label when none is. Lines are amber when the relation
 rounded name labels tinted by the gender known at the slider's chapter (female pink, male blue, others grey; unlisted names paler). Names tracked
 for gender but without relations are drawn without lines while Gender is shown.
 
-Controls: "Up to chapter" with a number box (− / + and a typed number, for a book whose slider is too
-coarse) and the chapter slider under it (the last chapter by default), the focus character (radial
-layout around it), "Former relations" (earlier labels in brackets), "Unlisted names", and the
-view filters "Relations" / "Gender" / "Hide" (a searchable checklist of names with "Show all"). The
+Controls, in three compact rows (one line each on a 600 dp phone; a 360 dp phone wraps them): "Up to
+ch." with a number box (− / + and a typed number, for a book whose slider is too coarse) and the chapter
+slider in the rest of the line (its own line when under ``SLIDER_MIN`` dp is left; the last chapter by
+default); the switches "Former" (former relations: earlier labels
+in brackets) and "Unlisted" (unlisted names) with the view filters "Relations" / "Gender" / "Hide" (a
+searchable checklist of names with "Show all"); the focus character (radial layout around it) beside the
+"N characters · M relations" summary. A corner button on the diagram (and Android back to leave) shows
+the diagram full screen, the controls and the app bar hidden. The
 filters are stored per book in the tracker's ``view`` key (``relations_tracking.save_view``, shared with
 the desktop). Node positions come from the all-chapters graph, so nodes stay put while the slider or a
 filter changes.
@@ -78,6 +82,17 @@ NODE_MARGIN = 3
 POLL_SECONDS = 1.0
 UNDO_LIMIT = 20
 GENDER_CHOICES = (("male", "Male"), ("female", "Female"), ("auto", "Not set (automatic)"))
+VIEW_PADDING = 12
+#: the Focus row: from this width (dp) Focus sits beside the summary; narrower the summary goes under it
+WIDE_ROW = 480
+#: the chapter slider stays beside the number group while it gets at least this many dp, else it wraps
+#: onto its own line; CHAPTER_GAP is the space between them
+SLIDER_MIN = 160
+CHAPTER_GAP = 4
+#: a guess of the number group's width (label, − field +) for the first frame, before it is measured;
+#: on the high side so the guessed slider never pushes itself onto the next line
+_CHAPTER_GROUP_GUESS = 280
+_ROW_BREAKPOINTS = {"xs": 0, "sm": WIDE_ROW, "md": 800}
 _SMALL = dict(theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
 
 
@@ -176,6 +191,11 @@ class RelationsDiagram:
         self.watch_task: Any = None
         self.task: Any = None  # the last edit started from a form (tests await it)
         self.reloads = 0
+        self.fullscreen = False
+        #: (width, height) of the diagram area as last laid out (``_on_area_size``); None until reported
+        self.area_size: Optional[tuple] = None
+        self._chapter_line_width = 0.0  # measured widths of the chapter line and its number group
+        self._chapter_group_width = 0.0
         self._layout_key: Any = None
         self.all_graph = self._all_graph() if self.core is not None else {"nodes": [], "edges": []}
         self._size()
@@ -346,6 +366,8 @@ class RelationsDiagram:
         elif self.low is not None and self._num(self.chapter) < self._num(self.low):
             self.chapter = self.low
         self.all_graph = self._all_graph()
+        if self.empty and self.fullscreen:  # the tracker emptied: the empty state shows with the app bar
+            self.set_fullscreen(False)
         if self.empty != was_empty:
             self.safe.content = self._build_body()
             if not self.empty:
@@ -382,12 +404,14 @@ class RelationsDiagram:
         self.add_button = ft.IconButton(icon=ft.Icons.ADD_LINK, tooltip="Add relation", size_constraints=HIT_TARGET,
                                         disabled=not self.tracker_path,
                                         on_click=quiet(lambda: self.add_relation_form(None)), key="rel-add")
-        appbar = ft.AppBar(title=title,
-                           leading=ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", size_constraints=HIT_TARGET,
-                                                 on_click=quiet(self.close), key="rel-close"),
-                           actions=[self.add_button, self.undo_button])
+        self.appbar = ft.AppBar(title=title,
+                                leading=ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", size_constraints=HIT_TARGET,
+                                                      on_click=quiet(self.close), key="rel-close"),
+                                actions=[self.add_button, self.undo_button])
         self.safe = ft.SafeArea(expand=True, content=self._build_body())
-        return ft.View(route="/glossary/relations", appbar=appbar, controls=[self.safe], padding=12)
+        # can_pop turns False in full screen: Android back then leaves full screen (_on_confirm_pop)
+        return ft.View(route="/glossary/relations", appbar=self.appbar, controls=[self.safe], padding=VIEW_PADDING,
+                       on_confirm_pop=self._on_confirm_pop)
 
     def _build_body(self) -> ft.Control:
         if self.empty:
@@ -418,12 +442,12 @@ class RelationsDiagram:
 
     def _build_diagram_body(self) -> ft.Control:
         single, low, high = self._slider_range()
-        self.chapter_label = ft.Text(self._chapter_label(), theme_style=ft.TextThemeStyle.LABEL_LARGE,
-                                     key="rel-chapter-label")
+        self.chapter_label = ft.Text(self._chapter_label(), theme_style=ft.TextThemeStyle.LABEL_LARGE, no_wrap=True,
+                                     tooltip="Show the relations up to this chapter", key="rel-chapter-label")
         # The exact chapter: the slider of a 2,000-chapter book moves many chapters per pixel. The app's
         # number control (Settings' NumberTile: − field +); Done, a tap outside and the loss of focus commit.
         self.chapter_field = commit_on_blur(
-            ft.TextField(value=self._chapter_field_text(), dense=True, width=84, text_align=ft.TextAlign.CENTER,
+            ft.TextField(value=self._chapter_field_text(), dense=True, width=72, text_align=ft.TextAlign.CENTER,
                          keyboard_type=number_keyboard(), disabled=single,
                          content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
                          border_radius=tokens.RADII["field"], on_focus=lambda e: self._chapter_typing(True),
@@ -441,22 +465,29 @@ class RelationsDiagram:
                                 key="rel-slider")
         self.focus_picker = ft.Dropdown(label="Focus", value=ALL_CHARACTERS, dense=True, expand=True,
                                         enable_filter=True, editable=True, options=self._focus_options(),
+                                        content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
                                         on_select=lambda e: self.set_focus(self.focus_picker.value),
                                         key="rel-focus")
-        self.former_switch = toggle(value=self.show_former, label="Former relations",
+        # short labels so the switches and the chips share one line; the tooltips keep the full meaning
+        self.former_switch = toggle(value=self.show_former, label="Former",
+                                    tooltip="Former relations: earlier labels in brackets",
                                     on_change=lambda e: self.set_former(bool(e.control.value)), key="rel-former")
-        self.unlisted_switch = toggle(value=self.show_unlisted, label="Unlisted names",
+        self.unlisted_switch = toggle(value=self.show_unlisted, label="Unlisted",
+                                      tooltip="Unlisted names: names that are not in the glossary",
                                       on_change=lambda e: self.set_unlisted(bool(e.control.value)), key="rel-unlisted")
         view = self.view_choice
-        self.relations_chip = ft.Chip(label=ft.Text("Relations"), selected=view["show_relations"],
+        # no check mark (the selected tint shows the state): it made the row too wide for one line
+        self.relations_chip = ft.Chip(label=ft.Text("Relations"), selected=view["show_relations"], show_checkmark=False,
+                                      tooltip="Show the relation lines",
                                       on_select=quiet(lambda: self.set_relations_shown(
                                           not self.view_choice["show_relations"])),
                                       key="rel-show-relations")
-        self.gender_chip = ft.Chip(label=ft.Text("Gender"), selected=view["show_gender"],
+        self.gender_chip = ft.Chip(label=ft.Text("Gender"), selected=view["show_gender"], show_checkmark=False,
+                                   tooltip="Show the names tracked for gender",
                                    on_select=quiet(lambda: self.set_gender_shown(not self.view_choice["show_gender"])),
                                    key="rel-show-gender")
         self.hide_chip = ft.Chip(label=ft.Text(self._hide_label()), leading=ft.Icon(ft.Icons.VISIBILITY_OFF_OUTLINED),
-                                 on_click=quiet(self.hide_sheet), key="rel-hide")
+                                 tooltip="Hide names from the diagram", on_click=quiet(self.hide_sheet), key="rel-hide")
         self.summary = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                key="rel-summary")
         self.canvas = cv.Canvas(shapes=[], left=0, top=0, width=self.width, height=self.height, key="rel-canvas")
@@ -464,18 +495,43 @@ class RelationsDiagram:
         # zooms far out: a book whose labels need long lines makes a big canvas
         self.viewer = ft.InteractiveViewer(content=self.stack, constrained=False, min_scale=0.02, max_scale=4,
                                            boundary_margin=ft.Margin.all(200), key="rel-viewer")
-        return ft.Column([
-            ft.Row([self.chapter_label, self.chapter_minus, self.chapter_field, self.chapter_plus], spacing=4,
-                   run_spacing=0, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                   key="rel-chapter-row"),
-            ft.Row([self.slider]),
-            ft.Row([self.focus_picker]),
-            ft.Row([self.former_switch, self.unlisted_switch], wrap=True, spacing=12),
-            ft.Row([self.relations_chip, self.gender_chip, self.hide_chip], wrap=True, spacing=8, key="rel-filters"),
-            self.summary,
+        # The controls: three rows, each one line from WIDE_ROW dp (the 360 dp phone wraps them):
+        # chapter box + slider; the switches + the filter chips; Focus + the summary.
+        center = ft.CrossAxisAlignment.CENTER
+        # Chapter line: the number group at its natural width and the slider in the rest of the line
+        # (_fit_chapter_line sizes the slider cell from the measured widths); while that rest is narrower
+        # than SLIDER_MIN, or before the first measurement, the cell has no width and wraps onto its own line.
+        self.chapter_row = ft.Row([self.chapter_label, self.chapter_minus, self.chapter_field, self.chapter_plus],
+                                  spacing=4, tight=True, vertical_alignment=center,
+                                  on_size_change=self._on_chapter_group_size, key="rel-chapter-row")
+        self.slider_cell = ft.Container(content=ft.Row([self.slider]), key="rel-slider-cell")
+        self.chapter_line = ft.Row([self.chapter_row, self.slider_cell], wrap=True, spacing=CHAPTER_GAP,
+                                   run_spacing=0, vertical_alignment=center,
+                                   on_size_change=self._on_chapter_line_size, key="rel-chapter-line")
+        self._fit_chapter_line(push=False)
+        self.controls_box = ft.Column([
+            self.chapter_line,
+            ft.Row([self.former_switch, self.unlisted_switch, self.relations_chip, self.gender_chip, self.hide_chip],
+                   wrap=True, spacing=8, run_spacing=4, vertical_alignment=center, key="rel-filters"),
+            ft.ResponsiveRow([
+                ft.Row([self.focus_picker], col={"xs": 12, "sm": 6, "md": 4}),
+                ft.Container(content=self.summary, col={"xs": 12, "sm": 6, "md": 8}, key="rel-summary-cell"),
+            ], spacing=8, run_spacing=4, vertical_alignment=center, breakpoints=_ROW_BREAKPOINTS,
+                key="rel-focus-line"),
+        ], spacing=4, tight=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, key="rel-controls")
+        # Full screen: the controls (and the app bar) hide and the diagram takes the whole screen; the
+        # button sits on the diagram's top-right corner. The area reports its size (area_size): a
+        # fit-to-view step can re-run there when full screen changes it.
+        self.fullscreen_button = ft.IconButton(icon=ft.Icons.FULLSCREEN, tooltip="Full screen",
+                                               size_constraints=HIT_TARGET, top=6, right=6,
+                                               bgcolor=ft.Colors.with_opacity(0.85, ft.Colors.SURFACE_CONTAINER_HIGH),
+                                               on_click=quiet(self.toggle_fullscreen), key="rel-fullscreen")
+        self.diagram_area = ft.Stack([
             ft.Container(content=self.viewer, expand=True, bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
                          border_radius=12, clip_behavior=ft.ClipBehavior.HARD_EDGE, key="rel-frame"),
-        ], spacing=6, expand=True, key="rel-body")
+            self.fullscreen_button,
+        ], fit=ft.StackFit.EXPAND, expand=True, on_size_change=self._on_area_size, key="rel-area")
+        return ft.Column([self.controls_box, self.diagram_area], spacing=6, expand=True, key="rel-body")
 
     def _update_controls(self) -> None:
         """Slider range, focus list and filter chips after new file contents."""
@@ -507,7 +563,7 @@ class RelationsDiagram:
         return f"Hidden ({count})" if count else "Hide"
 
     def _chapter_label(self) -> str:
-        return "Up to chapter" if self.chapter is not None else "All chapters"
+        return "Up to ch." if self.chapter is not None else "All chapters"
 
     def _chapter_field_text(self) -> str:
         return _chapter_text(self.chapter) if self.chapter is not None else ""
@@ -711,6 +767,76 @@ class RelationsDiagram:
         if self.chapter is None or self._slider_range()[0]:
             return
         self.set_chapter(self._chapter_in_range(self._num(self.chapter) + direction))
+
+    # ---- full screen -------------------------------------------------------------------------------
+
+    def toggle_fullscreen(self) -> None:
+        self.set_fullscreen(not self.fullscreen)
+
+    def set_fullscreen(self, on: bool) -> None:
+        """Full screen: the control rows, the app bar and the page padding go and the diagram area takes
+        the screen; the same corner button or Android back brings them back. Only visibility and the
+        View's chrome change: the viewer (zoom / pan), the canvas and every control keep their state."""
+        on = bool(on) and not self.empty and hasattr(self, "controls_box")
+        if on == self.fullscreen:
+            return
+        self.fullscreen = on
+        self.controls_box.visible = not on
+        self.view.appbar = None if on else self.appbar
+        # (a Padding object: the Flet 1.0.3 client kept the 12 dp padding for a plain 0 on the emulator)
+        self.view.padding = ft.Padding.all(0) if on else VIEW_PADDING
+        self.view.can_pop = not on  # back leaves full screen first (_on_confirm_pop)
+        self.fullscreen_button.icon = ft.Icons.FULLSCREEN_EXIT if on else ft.Icons.FULLSCREEN
+        self.fullscreen_button.tooltip = "Leave full screen" if on else "Full screen"
+        self.ctx.push(self.view)
+
+    async def _on_confirm_pop(self, e: Any = None) -> None:
+        """Android back while the View cannot pop (full screen): leave full screen, stay on the screen."""
+        leave = not self.fullscreen
+        try:
+            await self.view.confirm_pop(leave)
+        except Exception as exc:  # no client (host tests) / the View was replaced
+            log.debug("confirm_pop failed: %s", exc)
+        if not leave:
+            self.set_fullscreen(False)
+
+    def _on_area_size(self, e: Any) -> None:
+        """The diagram area's laid-out size (it grows when full screen hides the controls and shrinks
+        when they come back)."""
+        width, height = float(getattr(e, "width", 0) or 0), float(getattr(e, "height", 0) or 0)
+        if width > 0 and height > 0:
+            self.area_size = (width, height)
+
+    # ---- chapter line: the slider beside the number group --------------------------------------------
+
+    def _on_chapter_line_size(self, e: Any) -> None:
+        width = float(getattr(e, "width", 0) or 0)
+        if width > 0:
+            self._chapter_line_width = width
+            self._fit_chapter_line()
+
+    def _on_chapter_group_size(self, e: Any) -> None:
+        width = float(getattr(e, "width", 0) or 0)
+        if width > 0:
+            self._chapter_group_width = width
+            self._fit_chapter_line()
+
+    def _fit_chapter_line(self, push: bool = True) -> None:
+        """The slider takes what the number group leaves of the chapter line (a fixed share left a gap
+        or let the group overflow its cell); under SLIDER_MIN dp it gets its own line. Measured widths,
+        so a larger text size or the longer "All chapters" label still fit. Before the first
+        measurement the line width comes from the page and the group width from a high guess."""
+        line, group = self._chapter_line_width, self._chapter_group_width
+        if not line:
+            page_width = float(getattr(getattr(self.ctx, "page", None), "width", 0) or 0)
+            line = page_width - 2 * VIEW_PADDING if page_width > 0 else 0.0
+        group = group or _CHAPTER_GROUP_GUESS
+        room = math.floor(line - group - CHAPTER_GAP) - 1 if line else 0  # 1 dp spare: no rounding wrap
+        width = room if room >= SLIDER_MIN else None
+        if width != self.slider_cell.width:
+            self.slider_cell.width = width
+            if push:
+                self.ctx.push(self.slider_cell)
 
     def set_focus(self, node_id: Any) -> None:
         self.focus = None if node_id in (None, "", ALL_CHARACTERS) else str(node_id)
