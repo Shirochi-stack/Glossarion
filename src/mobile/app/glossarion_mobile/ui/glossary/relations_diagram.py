@@ -3,10 +3,11 @@
 A full-screen overlay View over the glossary's relations tracker (``<glossary>_relations_tracker.json``)
 and gender tracker (``<glossary>_gender_tracker.json``): ``relations_tracking.build_graph`` +
 ``layout_graph`` drawn on a ``canvas.Canvas`` inside an ``InteractiveViewer`` (pinch zoom, pan; the manga
-editor's ``_source_viewer`` pattern). Edges are lines with their label at the midpoint
-(``relations_tracking.edge_label_text``: "Father / Daughter", one side alone when only one is known, no
-label when none is), amber when the relation changed; nodes are rounded name labels tinted by the gender
-known at the slider's chapter (female pink, male blue, others grey; unlisted names paler). Names tracked
+editor's ``_source_viewer`` pattern). Edges are lines with their label ON the line where the layout made
+room for it (``layout_graph`` gets the name and label sizes; ``place_labels``; the canvas grows to what
+the layout needs). Labels are ``relations_tracking.edge_label_text``: "Father / Daughter", one side alone
+when only one is known, no label when none is. Lines are amber when the relation changed; nodes are
+rounded name labels tinted by the gender known at the slider's chapter (female pink, male blue, others grey; unlisted names paler). Names tracked
 for gender but without relations are drawn without lines while Gender is shown.
 
 Controls: "Up to chapter" with a number box (− / + and a typed number, for a book whose slider is too
@@ -18,7 +19,9 @@ the desktop). Node positions come from the all-chapters graph, so nodes stay put
 filter changes.
 
 Tapping a node opens a sheet with that character's description at the slider's chapter, gender history
-and relation history; tapping a name there opens that character's sheet. The sheet rows edit and delete
+and relation history; the earlier descriptions sit behind a collapsed "Earlier descriptions (n)" line
+(tapping it shows or hides them; the choice holds while the screen is open). Tapping a name there opens
+that character's sheet. The sheet rows edit and delete
 relations, history entries and descriptions; "Add relation" adds one. A long press on a node offers Add
 relation, Edit description, Set gender, Hide from view and Remove from tracker. Every write is one locked
 load -> modify -> write of the core (``relations_tracking.edit_tracker`` / ``set_gender``); every delete
@@ -37,6 +40,7 @@ import copy
 import logging
 import math
 import os
+import unicodedata
 from typing import Any, Callable, Optional
 
 import flet as ft
@@ -49,7 +53,7 @@ from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.glossary.common import ask, quiet, sheet
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic, toggle
 
-__all__ = ["ALL_CHARACTERS", "EMPTY_BODY", "GENDER_TINTS", "POLL_SECONDS", "RelationsDiagram", "TITLE",
+__all__ = ["ALL_CHARACTERS", "EMPTY_BODY", "EMPTY_BODY_ON", "GENDER_TINTS", "POLL_SECONDS", "RelationsDiagram", "TITLE",
            "edge_label_text"]
 
 log = logging.getLogger("glossarion.glossary.ui")
@@ -58,11 +62,18 @@ TITLE = "Relations & Gender Tracker"
 ALL_CHARACTERS = "__all__"
 EMPTY_BODY = ("Turn on Enable Relations Tracker in Glossary › General, then run a Balanced or Full glossary "
               "extraction.")
+#: the empty state while Enable Relations Tracker is already on
+EMPTY_BODY_ON = "A Balanced or Full glossary extraction fills the tracker."
 #: the desktop diagram's tints (female: the editor's tracked-gender pink; male: the dialog accent)
 GENDER_TINTS = {"female": "#ec4899", "male": "#5a9fd4"}
 NEUTRAL_TINT = "#6b7280"
 NODE_WIDTH = 120
 NODE_HEIGHT = 30
+#: relation labels: text size, the widest a label grows before it wraps, and at most two lines
+LABEL_TEXT_SIZE = 11
+LABEL_MAX_WIDTH = 180
+#: the room a label keeps from a name box
+NODE_MARGIN = 3
 #: the auto-update check (decision B: once a second)
 POLL_SECONDS = 1.0
 UNDO_LIMIT = 20
@@ -75,6 +86,20 @@ def edge_label_text(edge: Any, show_former: bool = False) -> str:
     known, "" when none is; earlier labels in brackets (``relations_tracking.edge_label_text``, shared
     with the desktop diagram)."""
     return _core(None).edge_label_text(edge, show_former)
+
+
+def label_box(text: str) -> tuple:
+    """``(width, height)`` a relation label takes on the canvas (estimated: the canvas measures no
+    text). Wider than ``LABEL_MAX_WIDTH`` it wraps to two lines."""
+    width = sum(LABEL_TEXT_SIZE if unicodedata.east_asian_width(ch) in "WF" else LABEL_TEXT_SIZE * 0.56
+                for ch in str(text))
+    line = LABEL_TEXT_SIZE * 1.35
+    return (min(width, LABEL_MAX_WIDTH), line * 2) if width > LABEL_MAX_WIDTH else (width, line)
+
+
+def node_box(_node: Any = None) -> tuple:
+    """``(width, height)`` of a name pill plus the room labels keep from it."""
+    return NODE_WIDTH + 2 * NODE_MARGIN, NODE_HEIGHT + 2 * NODE_MARGIN
 
 
 def _gender_key(value: Any) -> str:
@@ -132,6 +157,7 @@ class RelationsDiagram:
         self.show_former = True
         self.show_unlisted = False
         self.positions: dict = {}
+        self.layout: dict = {}
         self.graph: dict = {"nodes": [], "edges": []}
         self.all_graph: dict = {"nodes": [], "edges": []}
         self.drawn_edges: list = []
@@ -139,6 +165,10 @@ class RelationsDiagram:
         self.history_sheet: Any = None
         self.form_sheet: Any = None  # the open edit form / menu / Hide sheet
         self.selected: Optional[str] = None  # the character whose sheet is open
+        #: the sheet's "Earlier descriptions (n)": collapsed until tapped; kept while the screen is open
+        self.earlier_open = False
+        self.earlier_button: Any = None
+        self.earlier_list: Any = None
         self.undo_stack: list = []  # [(kind "tracker" | "gender", edit result)]
         self.editing = 0  # edit forms / confirmations / writes of this screen in progress
         self.loading = False
@@ -362,7 +392,7 @@ class RelationsDiagram:
     def _build_body(self) -> ft.Control:
         if self.empty:
             self.body = EmptyState(icon="ACCOUNT_TREE_OUTLINED", title="No relations tracked for this glossary yet",
-                                   body=EMPTY_BODY, key="rel-empty")
+                                   body=EMPTY_BODY_ON if self._tracker_on() else EMPTY_BODY, key="rel-empty")
             return self.body
         if getattr(self, "diagram_body", None) is None:
             self.diagram_body = self._build_diagram_body()
@@ -370,6 +400,15 @@ class RelationsDiagram:
             self._update_controls()
         self.body = self.diagram_body
         return self.body
+
+    def _tracker_on(self) -> bool:
+        """Glossary › General "Enable Relations Tracker" (the empty state's advice depends on it)."""
+        from glossarion_mobile.ui.glossary.relations import TOGGLE_KEY, _get
+
+        try:
+            return bool(_get(self.ctx, TOGGLE_KEY))
+        except Exception:
+            return False
 
     def _slider_range(self) -> tuple:
         single = self.low is None or self.high is None or self.low == self.high
@@ -488,8 +527,13 @@ class RelationsDiagram:
     def _size(self) -> None:
         # Names that have a relation (or gender tracking): an entry may hold only its descriptions.
         count = len(self.all_graph.get("nodes") or [])
-        self.height = float(max(520, int(150 * math.sqrt(max(count, 1)))))
-        self.width = round(self.height * 1.3)
+        # the area the layout starts from; the canvas then grows to what the layout needed
+        self.base_height = float(max(520, int(150 * math.sqrt(max(count, 1)))))
+        self.base_width = round(self.base_height * 1.3)
+        self._set_canvas(*getattr(self, "_grown", (self.base_width, self.base_height)))
+
+    def _set_canvas(self, width: float, height: float) -> None:
+        self.width, self.height = width, height
         if hasattr(self, "canvas"):
             self.canvas.width = self.stack.width = self.width
             self.canvas.height = self.stack.height = self.height
@@ -506,16 +550,31 @@ class RelationsDiagram:
         graph = self.all_graph = self._all_graph()
         focus = self.focus if any(n["id"] == self.focus for n in graph.get("nodes", [])) else None
         key = (tuple(sorted(n["id"] for n in graph.get("nodes", []))),
-               tuple(sorted((e["a"], e["b"]) for e in graph.get("edges", []))), focus, self.width, self.height)
+               tuple(sorted((e["a"], e["b"]) for e in graph.get("edges", []))), focus, self.base_width,
+               self.base_height)
         if not force and key == self._layout_key and self.positions:
             return
         self._layout_key = key
         # a node is drawn centred on its point, so the layout gets the canvas minus half a node on every
         # side: a node at the layout's edge would otherwise be cut off by the Stack
         pad_x, pad_y = NODE_WIDTH / 2 + 8, NODE_HEIGHT / 2 + 8
-        inner = self.core.layout_graph(graph, width=max(self.width - 2 * pad_x, 1), height=max(self.height - 2 * pad_y, 1),
-                                       focus=focus)
-        self.positions = {key: (point[0] + pad_x, point[1] + pad_y) for key, point in inner.items()}
+        # the label sizes with the earlier labels in brackets (the longest text a line gets), so the
+        # names stay put when "Former relations" is switched
+        inner = self.core.layout_graph(graph, width=max(self.base_width - 2 * pad_x, 1),
+                                       height=max(self.base_height - 2 * pad_y, 1), focus=focus, node_size=node_box,
+                                       label_size=lambda e: label_box(text) if (text := edge_label_text(e, True))
+                                       else None)
+        # the layout may push names past the area it was given (to make room for labels): the canvas
+        # grows to hold them
+        left = min((point[0] for point in inner.values()), default=0.0)
+        top = min((point[1] for point in inner.values()), default=0.0)
+        shift_x, shift_y = pad_x - min(left, 0.0), pad_y - min(top, 0.0)
+        self.positions = {key: (point[0] + shift_x, point[1] + shift_y) for key, point in inner.items()}
+        #: the layout as computed: ``core.layout_spot(self.layout, a, b)`` is where it made room for a label
+        self.layout = inner
+        self._grown = (max(self.base_width, max((p[0] for p in self.positions.values()), default=0.0) + pad_x),
+                       max(self.base_height, max((p[1] for p in self.positions.values()), default=0.0) + pad_y))
+        self._set_canvas(*self._grown)
 
     # ---- drawing -----------------------------------------------------------------------------------
 
@@ -532,7 +591,7 @@ class RelationsDiagram:
         amber = semantic("warning", dark)
         line = ft.Colors.with_opacity(0.55, ft.Colors.ON_SURFACE)
         shapes: list = []
-        labels: list = []
+        texts: dict = {}
         self.drawn_edges = []
         for edge in self.graph.get("edges", []):
             a, b = self.positions.get(edge["a"]), self.positions.get(edge["b"])
@@ -544,11 +603,29 @@ class RelationsDiagram:
                                                  style=ft.PaintingStyle.STROKE)))
             text = edge_label_text(edge, self.show_former)
             if text:  # neither side known: no label
-                labels.append(cv.Text((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, text,
-                                      style=ft.TextStyle(size=11, color=amber if edge.get("changed") else ft.Colors.ON_SURFACE),
-                                      alignment=ft.Alignment.CENTER, text_align=ft.TextAlign.CENTER, max_width=180,
-                                      max_lines=2, ellipsis="…"))
+                texts[len(self.drawn_edges)] = text
             self.drawn_edges.append(edge)
+        # above the cap the layout made no room for labels: as on the desktop, only the focused
+        # character's lines keep theirs (else they pile up)
+        label_all = len(self.drawn_edges) <= self.core.ROOM_FOR_LABELS_MAX_EDGES
+        if not label_all:
+            texts = {index: text for index, text in texts.items()
+                     if self.focus in (self.drawn_edges[index]["a"], self.drawn_edges[index]["b"])}
+        # each label ON its line, where the layout made room for it (else the first free spot along it)
+        drawn = [(index, edge["a"], edge["b"]) for index, edge in enumerate(self.drawn_edges)]
+        spots = self.core.place_labels(
+            self.positions, drawn, {key: node_box() for key in self.positions},
+            {index: label_box(text) for index, text in texts.items()},
+            prefer={index: spot for index, a, b in drawn
+                    if (spot := self.core.layout_spot(self.layout, a, b)) is not None})
+        labels = []
+        for index, text in texts.items():
+            x, y = spots[index]
+            changed = self.drawn_edges[index].get("changed")
+            labels.append(cv.Text(x, y, text,
+                                  style=ft.TextStyle(size=LABEL_TEXT_SIZE, color=amber if changed else ft.Colors.ON_SURFACE),
+                                  alignment=ft.Alignment.CENTER, text_align=ft.TextAlign.CENTER,
+                                  max_width=LABEL_MAX_WIDTH, max_lines=2, ellipsis="…"))
         self.canvas.shapes = shapes + labels  # labels over every line
         nodes = []
         for node in self.graph.get("nodes", []):
@@ -573,7 +650,9 @@ class RelationsDiagram:
         self.stack.controls = [self.canvas, *nodes]
         count_nodes, count_edges = len(nodes), len(self.drawn_edges)
         self.summary.value = (f"{count_nodes} character{'s' if count_nodes != 1 else ''} · "
-                              f"{count_edges} relation{'s' if count_edges != 1 else ''}")
+                              f"{count_edges} relation{'s' if count_edges != 1 else ''}"
+                              + ("" if label_all else f" (labels for the Focus character only above "
+                                                      f"{self.core.ROOM_FOR_LABELS_MAX_EDGES})"))
         if push:
             self.ctx.push(self.stack, self.summary, self.chapter_label, self.chapter_field, self.slider)
 
@@ -811,27 +890,56 @@ class RelationsDiagram:
         heading = (f"Description written at chapter {_chapter_text(written.get('chapter_num'))}"
                    if source == "chapter" else "Description (from the glossary; not recorded per chapter yet)")
         lines = [ft.Text(heading, **_SMALL), ft.Text(written["text"], selectable=True)]
-        for old in earlier:
-            lines.append(ft.Text(f"ch {_chapter_text(old.get('chapter_num'))}: {old['text']}", selectable=True, **_SMALL))
         return [ft.Column(lines, spacing=2, tight=True, key="rel-history-description")]
 
+    def _description_row(self, text: str, node_id: str, item: dict, index: int, editable: bool,
+                         selectable: bool = False) -> ft.Control:
+        """One description entry's line with its edit / delete buttons."""
+        where = f"ch {_chapter_text(item.get('chapter_num'))}"
+        row: list = [ft.Text(text, expand=True, selectable=selectable, **_SMALL)]
+        if editable:
+            row += [_icon_button(ft.Icons.EDIT_OUTLINED, f"Edit the description of {where}",
+                                 lambda: self.description_form(node_id, item), f"rel-desc-edit-{index}"),
+                    _icon_button(ft.Icons.DELETE_OUTLINE, f"Delete the description of {where}",
+                                 lambda: self.delete_description(node_id, item), f"rel-desc-delete-{index}")]
+        return ft.Row(row, spacing=0, tight=True)
+
     def _description_edit_row(self, node_id: str) -> list:
-        """Edit / delete buttons for every description entry shown (written and earlier ones)."""
+        """Edit / delete buttons of the description written at the slider's chapter."""
         if not self.tracker_path:
             return []
+        written, _earlier, source = self.description_rows(node_id)
+        if source != "chapter" or written is None:
+            return []
+        where = f"ch {_chapter_text(written.get('chapter_num'))}"
+        return [self._description_row(f"Description, {where}", node_id, written, 0, True)]
+
+    def _earlier_controls(self, node_id: str) -> list:
+        """The earlier descriptions behind one tappable line, collapsed until tapped (a main character
+        has dozens). Tapping shows or hides the list in place; the choice holds while the screen is open."""
+        self.earlier_button = self.earlier_list = None
         written, earlier, source = self.description_rows(node_id)
-        buttons: list = []
-        if source == "chapter" and written is not None:
-            for index, item in enumerate([written] + list(earlier)):
-                where = f"ch {_chapter_text(item.get('chapter_num'))}"
-                buttons.append(ft.Row([
-                    ft.Text(f"Description, {where}", expand=True, **_SMALL),
-                    _icon_button(ft.Icons.EDIT_OUTLINED, f"Edit the description of {where}",
-                                 lambda d=item: self.description_form(node_id, d), f"rel-desc-edit-{index}"),
-                    _icon_button(ft.Icons.DELETE_OUTLINE, f"Delete the description of {where}",
-                                 lambda d=item: self.delete_description(node_id, d), f"rel-desc-delete-{index}"),
-                ], spacing=0, tight=True))
-        return buttons
+        if written is None or not earlier:
+            return []
+        editable = bool(self.tracker_path) and source == "chapter"
+        rows = [self._description_row(f"ch {_chapter_text(old.get('chapter_num'))}: {old['text']}", node_id, old,
+                                      index, editable, selectable=True)
+                for index, old in enumerate(earlier, start=1)]
+        self.earlier_list = ft.Column(rows, spacing=2, tight=True, visible=self.earlier_open, key="rel-earlier-list")
+        self.earlier_button = ft.TextButton(content=f"Earlier descriptions ({len(earlier)})",
+                                            icon=ft.Icons.EXPAND_LESS if self.earlier_open else ft.Icons.EXPAND_MORE,
+                                            on_click=quiet(self.toggle_earlier), key="rel-earlier-toggle")
+        return [self.earlier_button, self.earlier_list]
+
+    def toggle_earlier(self) -> bool:
+        """Show / hide the earlier descriptions (only the line and the list are pushed: no rebuild)."""
+        self.earlier_open = not self.earlier_open
+        if self.earlier_list is not None:
+            self.earlier_list.visible = self.earlier_open
+        if self.earlier_button is not None:
+            self.earlier_button.icon = ft.Icons.EXPAND_LESS if self.earlier_open else ft.Icons.EXPAND_MORE
+        self.ctx.push(self.earlier_button, self.earlier_list)
+        return self.earlier_open
 
     def _gender_controls(self, node_id: str) -> list:
         if not self.view_choice["show_gender"]:
@@ -895,6 +1003,7 @@ class RelationsDiagram:
         same = self.selected == node_id
         self.selected = node_id
         controls: list = self._description_controls(node_id) + self._description_edit_row(node_id)
+        controls += self._earlier_controls(node_id)
         controls += self._gender_controls(node_id)
         if self.view_choice["show_relations"]:
             relations = self._relation_controls(node_id)

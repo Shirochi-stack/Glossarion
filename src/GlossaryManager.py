@@ -708,8 +708,13 @@ def _atomic_write_file(filepath, content, encoding='utf-8'):
                 print(f"⚠️ Fallback write also failed: {e2}")
                 return False
 
-def save_glossary(output_dir, chapters, instructions, language="korean", log_callback=None):
-    """Targeted glossary generator with true CSV format output and parallel processing"""
+def save_glossary(output_dir, chapters, instructions, language="korean", log_callback=None,
+                  relations_output=None):
+    """Targeted glossary generator with true CSV format output and parallel processing
+
+    ``relations_output``: the glossary file whose relations tracker records this run's
+    relations (default ``<output_dir>/glossary.csv``).
+    """
     save_glossary.last_run_complete = False
 
     # If the user stops translation while glossary runs in a subprocess, we must ensure the
@@ -1287,7 +1292,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 getattr(_process_chunks_batch_api, 'last_run_complete', False)
                 and not is_stop_requested()
             )
-            _record_minimal_relations(output_dir, chapters)
+            _record_minimal_relations(output_dir, chapters, relations_output)
             return _parse_csv_to_dict(csv_content)
         else:
             # Strict sequential processing (one API call at a time)
@@ -1592,9 +1597,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         save_glossary.last_run_complete = bool(
             _minimal_scheduled_requests_complete and not is_stop_requested()
         )
-        _record_minimal_relations(output_dir, chapters)
+        _record_minimal_relations(output_dir, chapters, relations_output)
         return _parse_csv_to_dict(csv_content)
-    
+
     # Original single-text processing
     if custom_prompt:
         # Pass cached filtered text if available to avoid re-filtering
@@ -1610,8 +1615,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                                                    min_frequency, max_names, max_titles,
                                                    existing_glossary, output_dir,
                                                    strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback)
-            if result:
-                _record_minimal_relations(output_dir, chapters)
+            # Not gated on ``result``: it is {} for a saved token-efficient glossary too.
+            _record_minimal_relations(output_dir, chapters, relations_output)
             return result
         finally:
             if already_filtered:
@@ -5425,11 +5430,13 @@ def _chapter_plain_text(chapter):
         return body
 
 
-def _record_minimal_relations(output_dir, chapters):
-    """Record the relations cells collected during this run in ``<output_dir>/relations_tracker.json``.
+def _record_minimal_relations(output_dir, chapters, relations_output=None):
+    """Record the relations cells collected during this run in ``<output_dir>/relations_tracker.json``
+    (or the tracker beside ``relations_output``).
 
     Minimal requests carry no chapter, so each relation is filed under the first chapter
-    whose text contains both raw names (else the entry's raw name, else chapter 1).
+    whose text contains both raw names (else the entry's raw name, else chapter 1). A
+    chapter dict's ``chapter_index`` replaces its list position.
     """
     with _minimal_relations_lock:
         cells = _minimal_relations_cells.pop(_minimal_relations_key(output_dir), [])
@@ -5444,6 +5451,8 @@ def _record_minimal_relations(output_dir, chapters):
     positions = {}
     filenames = {}
     for index, chapter in enumerate(chapters or []):
+        if isinstance(chapter, dict) and chapter.get('chapter_index') is not None:
+            index = chapter['chapter_index']
         units.append((index, _chapter_plain_text(chapter)))
         if isinstance(chapter, dict):
             number = chapter.get('actual_chapter_num', chapter.get('num'))
@@ -5458,8 +5467,8 @@ def _record_minimal_relations(output_dir, chapters):
         return record_relations_for_chapters(
             cells,
             units,
-            0,
-            os.path.join(output_dir, "glossary.csv"),
+            units[0][0] if units else 0,
+            relations_output or os.path.join(output_dir, "glossary.csv"),
             source_path=os.getenv("EPUB_PATH", ""),
             chapter_positions=positions,
             chapter_filenames=filenames,

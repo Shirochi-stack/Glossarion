@@ -639,7 +639,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
             def __getattr__(self, name):
                 return getattr(real, name)
 
-            def layout_graph(self, graph, width=1000.0, height=700.0, focus=None):
+            def layout_graph(self, graph, width=1000.0, height=700.0, focus=None, **_sizes):
                 corners = [(0.0, 0.0), (width, height), (width, 0.0), (0.0, height)]
                 return {n["id"]: corners[i % 4] for i, n in enumerate(graph.get("nodes", []))}
 
@@ -682,6 +682,92 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
     asyncio.run(scenario())
 
 
+def test_diagram_hub_labels_do_not_overlap(iso, tmp_path):
+    """The owner's book: a main character with dozens of relations made a knot of labels around it.
+    Pure geometry of what the screen draws: the name pills and the label boxes (``label_box`` of the
+    text at the point drawn) overlap nothing, each label sits ON its line, and the canvas holds every
+    pill, also with that character focused."""
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram, label_box
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = rt.empty_tracker()
+    words = [("Patient", "Healer"), ("Younger Brother", "Older Sister"), ("Student", "Mentor"), ("Rival", "Rival")]
+    rows = [{"raw_name": f"Person {i}", "translated_name": f"Person {i}",
+             "relations": f"Hero: {words[i % 4][1]}" + (f"; Person {i + 1}: Coworker" if i % 4 == 0 else "")}
+            for i in range(32)]
+    rows.insert(0, {"raw_name": "Hero", "translated_name": "Hero",
+                    "relations": "; ".join(f"Person {i}: {words[i % 4][0]}" for i in range(32))})
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+
+    def overlaps(diagram):
+        texts = [s for s in diagram.canvas.shapes if type(s).__name__ == "Text"]
+        lines = [s for s in diagram.canvas.shapes if type(s).__name__ == "Line"]
+        assert len(texts) == len(lines) == 40
+        for text in texts:  # ON a line: on the segment between two drawn names
+            assert any(rt._point_segment_distance((text.x, text.y), (l.x1, l.y1), (l.x2, l.y2)) < 1e-6
+                       for l in lines)
+        labels = []
+        for text in texts:
+            w, h = label_box(text.value)
+            labels.append((text.x - w / 2, text.y - h / 2, text.x + w / 2, text.y + h / 2))
+        names = [(c.left, c.top, c.left + c.width, c.top + c.height) for c in diagram.node_controls]
+        for left, top, right, bottom in names:
+            assert left >= 0 and top >= 0 and right <= diagram.width and bottom <= diagram.height
+
+        def count(first, second, same):
+            return sum(1 for i, a in enumerate(first) for j, b in enumerate(second)
+                       if (not same or j > i) and min(a[2], b[2]) - max(a[0], b[0]) > 0.5
+                       and min(a[3], b[3]) - max(a[1], b[1]) > 0.5)
+        return count(labels, labels, True), count(labels, names, False), count(names, names, True)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
+        assert diagram.node_count() == 33
+        assert overlaps(diagram) == (0, 0, 0)
+        diagram.set_focus(rt.tracker_key("Hero"))
+        assert overlaps(diagram) == (0, 0, 0)
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_diagram_above_the_label_cap_labels_only_the_focus_character(iso, tmp_path):
+    """Above ``ROOM_FOR_LABELS_MAX_EDGES`` lines the layout makes no room for labels, so (as on the
+    desktop) only the Focus character's lines keep theirs, instead of a pile of text."""
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = rt.empty_tracker()
+    count = rt.ROOM_FOR_LABELS_MAX_EDGES + 1
+    rows = [{"raw_name": f"Spoke {i}", "translated_name": f"Spoke {i}", "relations": "Hub: Mentor"}
+            for i in range(count)]
+    rows[0]["relations"] += "; Spoke 1: Rival"
+    rows.insert(0, {"raw_name": "Hub", "translated_name": "Hub",
+                    "relations": "; ".join(f"Spoke {i}: Student" for i in range(count))})
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+
+    def labels(diagram):
+        return [s for s in diagram.canvas.shapes if type(s).__name__ == "Text"]
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
+        assert diagram.edge_count() == count + 1
+        assert labels(diagram) == [] and "Focus character only" in diagram.summary.value
+        diagram.set_focus(rt.tracker_key("Spoke 0"))
+        assert len(labels(diagram)) == 2  # its lines to Hub and to Spoke 1
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_history_sheet_shows_the_description_written_at_the_sliders_chapter(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
 
@@ -716,9 +802,12 @@ def test_history_sheet_shows_the_description_written_at_the_sliders_chapter(iso,
         shown = [t for c in sheet.content.controls for t in texts(c)] if hasattr(sheet.content, "controls") else []
         column = diagram._description_controls(seo)[0]
         assert column.key == "rel-history-description"
-        assert texts(column) == ["Description written at chapter 5", "The heir who lost her friend",
-                                 "ch 1: The heir, first seen"]
+        assert texts(column) == ["Description written at chapter 5", "The heir who lost her friend"]
         assert not shown or "The heir who lost her friend" in shown
+        # the earlier ones sit behind "Earlier descriptions (1)", collapsed
+        toggle_line, listing = diagram._earlier_controls(seo)
+        assert toggle_line.content == "Earlier descriptions (1)" and listing.visible is False
+        assert texts(listing) == ["ch 1: The heir, first seen"]
         # 하린 has none recorded: the glossary's; 민준 has none anywhere: no description block
         harin = next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "하린")
         assert texts(diagram._description_controls(harin)[0])[1] == "A healer, as the glossary has it"
@@ -727,6 +816,57 @@ def test_history_sheet_shows_the_description_written_at_the_sliders_chapter(iso,
         diagram.set_chapter(3)
         assert texts(diagram._description_controls(seo)[0]) == ["Description written at chapter 1",
                                                                 "The heir, first seen"]
+        assert diagram._earlier_controls(seo) == []  # nothing earlier: no line
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_earlier_descriptions_are_collapsed_until_tapped_and_stay_open_across_updates(iso, tmp_path):
+    import flet as ft
+
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = _tracker()
+    for chapter in (1, 2, 3):
+        rt.record_relations(tracker, [{"type": "character", "raw_name": "서윤", "description": f"Seen at {chapter}"}],
+                            chapter_index=chapter - 1, chapter_num=chapter, chapter_file=f"c{chapter}.xhtml")
+    rt, glossary = _book(tmp_path, tracker=tracker)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        seo = _id(diagram, "서윤")
+        sheet = diagram.show_history(seo)
+        line, listing = _find(sheet, "rel-earlier-toggle"), _find(sheet, "rel-earlier-list")
+        assert line.content == "Earlier descriptions (2)" and listing.visible is False
+        assert "Seen at 3" in _texts(sheet) and _find(sheet, "rel-desc-edit-0")  # the current one stays
+        line.on_click(None)
+        assert diagram.earlier_open and listing.visible and line.icon == ft.Icons.EXPAND_LESS
+        assert diagram.history_sheet is sheet  # shown in place, not rebuilt
+        # another writer changes the tracker: the sheet is refreshed and the list stays open
+        rt.edit_tracker(rt.tracker_path_for_glossary(str(glossary)),
+                        lambda t: rt.set_description(t, "서윤", "Seen at 2, rewritten", 2, chapter_file="c2.xhtml"))
+        assert await diagram.check_for_update()
+        assert diagram.history_sheet is sheet and _find(sheet, "rel-earlier-list").visible
+        assert "ch 2: Seen at 2, rewritten" in _texts(sheet)
+        # edit an earlier one while open
+        _find(sheet, "rel-desc-edit-2").on_click(None)
+        assert _find(diagram.form_sheet, "rel-desc-text").value == "Seen at 1"
+        _find(diagram.form_sheet, "rel-desc-text").value = "First seen"
+        _find(diagram.form_sheet, "rel-desc-save").on_click(None)
+        await diagram.task
+        texts = {d["chapter_num"]: d["text"] for d in _saved(rt, glossary)["entries"][seo]["descriptions"]}
+        assert texts[1] == "First seen"
+        assert _find(diagram.history_sheet, "rel-earlier-list").visible
+        # tapping again hides the list
+        _find(diagram.history_sheet, "rel-earlier-toggle").on_click(None)
+        assert not diagram.earlier_open and not _find(diagram.history_sheet, "rel-earlier-list").visible
+        diagram.close()
         store._saver.close()
 
     asyncio.run(scenario())
@@ -734,6 +874,7 @@ def test_history_sheet_shows_the_description_written_at_the_sliders_chapter(iso,
 
 def test_diagram_without_a_tracker_is_an_empty_state_and_opens_as_an_overlay(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations import open_diagram
+    from glossarion_mobile.ui.glossary.relations_diagram import EMPTY_BODY, EMPTY_BODY_ON
 
     schema = _schema()
     store = _store(tmp_path, schema)
@@ -743,11 +884,18 @@ def test_diagram_without_a_tracker_is_an_empty_state_and_opens_as_an_overlay(iso
     async def scenario():
         conn, session = _TB._fake_session("android")
         ctx = _ctx(session.page, store, schema)
+        store.set(TOGGLE, False)
         diagram = await open_diagram(ctx, str(glossary))
         assert diagram.empty and diagram.body.key == "rel-empty"
+        assert EMPTY_BODY in _texts(diagram.body) and EMPTY_BODY_ON not in _texts(diagram.body)
         assert ctx.overlays == [diagram.view]
         diagram.close()
         assert ctx.overlays == []
+        # the toggle already on: it does not say to turn it on
+        store.set(TOGGLE, True)
+        diagram = await open_diagram(ctx, str(glossary))
+        assert EMPTY_BODY_ON in _texts(diagram.body) and EMPTY_BODY not in _texts(diagram.body)
+        diagram.close()
         # a tracker beside the glossary: the diagram has its relations
         rt = importlib.import_module("relations_tracking")
         Path(rt.tracker_path_for_glossary(str(glossary))).write_text(json.dumps(_tracker(), ensure_ascii=False),

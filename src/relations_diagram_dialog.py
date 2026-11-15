@@ -15,9 +15,11 @@ import os
 import re
 import threading
 import time
+import unicodedata
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QKeySequence, QPainter, QPainterPath, QPen,
+                           QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QFormLayout, QFrame,
                                QGraphicsPathItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit,
@@ -31,9 +33,14 @@ WINDOW_TITLE = "Relations & Gender Tracker"
 ALL_CHARACTERS = "All characters"
 LOADING_TEXT = "Loading relations…"
 HISTORY_HINT = "Click a character to see their relation history."
-EMPTY_TEXT = ("No relations tracked for this glossary yet.\n\n"
+#: The empty window while the Relations Tracker is off ({name}: the glossary file's name).
+EMPTY_TEXT = ("No relations tracked for {name} yet.\n\n"
               "Turn on Enable Relations Tracker in Glossary Manager → General Settings, "
               "then run Balanced or Full glossary extraction.")
+#: The empty window while the Relations Tracker is on.
+EMPTY_TRACKING_TEXT = ("Nothing is tracked for {name} yet.\n\n"
+                       "Balanced or Full glossary extraction fills it. "
+                       "This window updates by itself.")
 #: How often the open window checks whether the tracker files or the glossary changed.
 POLL_MS = 1000
 #: How many edits Undo can take back while the window is open.
@@ -53,14 +60,18 @@ EDGE_COLOR = QColor("#8b95a5")
 SELECTED_EDGE_COLOR = QColor("#e5e7eb")
 CHANGED_COLOR = QColor("#f59e0b")  # amber: the relation changed
 LABEL_BG = QColor("#1b1d21")
-#: Above this many visible edges, labels are drawn only for the selected character's edges.
-MAX_LABELLED_EDGES = 120
+#: Above this many visible edges, labels are drawn only for the selected character's edges
+#: (the layout makes room for labels up to the same count).
+MAX_LABELLED_EDGES = relations_tracking.ROOM_FOR_LABELS_MAX_EDGES
 #: How long a name stays outlined after a jump from the side panel.
 FLASH_MS = 1600
 #: Lines and names that do not belong to the selected character fade to this.
 DIMMED_OPACITY = 0.22
-#: Where along its line a label may sit (middle first), so it never floats beside the line.
-LABEL_SPOTS = (0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72)
+#: Name box and label pill padding around their text (width, height), and the margin labels keep
+#: from a name box.
+NAME_PADDING = (18, 10)
+LABEL_PADDING = (12, 6)
+NAME_MARGIN = 3
 #: What a diagram item is (its data(0)): "node<SEP>id" or "edge<SEP>a<SEP>b".
 _KEY_SEP = "\x1f"
 
@@ -215,6 +226,23 @@ def _chapter_text(value):
 edge_label_text = relations_tracking.edge_label_text
 
 
+class _TextWidths:
+    """A font's character widths, measured once on the GUI thread, so the loading thread can size
+    name boxes and labels for the layout without touching Qt fonts."""
+
+    def __init__(self, font):
+        metrics = QFontMetricsF(font)
+        self.height = metrics.height()
+        self.widths = {chr(code): metrics.horizontalAdvance(chr(code)) for code in range(32, 127)}
+        self.wide = metrics.horizontalAdvance("가")
+        letters = [self.widths[ch] for ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+        self.other = sum(letters) / len(letters)
+
+    def width(self, text):
+        return sum(self.widths.get(ch) or (self.wide if unicodedata.east_asian_width(ch) in "WF" else self.other)
+                   for ch in text)
+
+
 class _GraphView(QGraphicsView):
     """Wheel zoom around the cursor, drag to pan.
 
@@ -342,7 +370,7 @@ class _NodeItem(QGraphicsPathItem):
         self.text_item.setFont(font)
         self.text_item.setBrush(QBrush(QColor("#ffffff")))
         text_rect = self.text_item.boundingRect()
-        width, height = text_rect.width() + 18, text_rect.height() + 10
+        width, height = text_rect.width() + NAME_PADDING[0], text_rect.height() + NAME_PADDING[1]
         path = QPainterPath()
         path.addRoundedRect(QRectF(-width / 2, -height / 2, width, height), 8, 8)
         self.setPath(path)
@@ -635,7 +663,7 @@ class RelationsDiagramDialog(QDialog):
         super().__init__(None)
         self._owner = parent
         self._placed = False
-        self.setWindowTitle(WINDOW_TITLE)
+        self.setWindowTitle(f"{WINDOW_TITLE} - {os.path.basename(glossary_path)}" if glossary_path else WINDOW_TITLE)
         self.setModal(False)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self.resize(1200, 780)
@@ -692,6 +720,8 @@ class RelationsDiagramDialog(QDialog):
         self._label_boxes = []
         self._history_links = []
         self._history_actions = []
+        #: "Earlier descriptions" in the side panel is open (this window only; kept through redraws).
+        self._earlier_open = False
         self._selected = None
         self._node_info = {}
         self._reloading = False
@@ -703,6 +733,7 @@ class RelationsDiagramDialog(QDialog):
         self._node_font = QFont("Segoe UI", 10)
         self._node_font.setBold(True)
         self._label_font = QFont("Segoe UI", 8)
+        self._name_widths, self._label_widths = _TextWidths(self._node_font), _TextWidths(self._label_font)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_MS)
         self._poll_timer.timeout.connect(self._poll)
@@ -754,18 +785,35 @@ class RelationsDiagramDialog(QDialog):
 
     @staticmethod
     def _full_graph(tracker, glossary_entries, gender_tracker, show_unlisted):
-        """Every name of every chapter (gender-only names included): what the layout is made of."""
+        """Every name of every chapter (gender-only names included): what the layout is made of.
+        Its edges carry every earlier label (``mode='full'``, as "Show former relations" draws them)."""
         return relations_tracking.build_graph(tracker, glossary_entries, None, show_unlisted=show_unlisted,
-                                              gender_tracker=gender_tracker,
+                                              mode='full', gender_tracker=gender_tracker,
                                               include_gender_only=gender_tracker is not None)
 
-    @classmethod
-    def _compute_layout(cls, tracker, glossary_entries, show_unlisted, focus, gender_tracker=None):
+    def _name_size(self, node):
+        """A name box as drawn (with its outline), plus the margin labels keep from it."""
+        text = str(node.get('label') or node.get('raw_name') or node.get('id'))
+        extra = 2 * NAME_MARGIN + 2
+        return (self._name_widths.width(text) + NAME_PADDING[0] + extra,
+                self._name_widths.height + NAME_PADDING[1] + extra)
+
+    def _label_size(self, edge):
+        """A relation's pill as drawn with the earlier labels in brackets (the longest text a line
+        gets), so "Show former relations" finds room too; None when it has no words (no pill)."""
+        text = edge_label_text(edge, True)
+        if not text:
+            return None
+        return self._label_widths.width(text) + LABEL_PADDING[0], self._label_widths.height + LABEL_PADDING[1]
+
+    def _compute_layout(self, tracker, glossary_entries, show_unlisted, focus, gender_tracker=None):
         """Positions from the graph of ALL chapters, so nodes stay put while the slider moves
-        and the filters hide names."""
-        full = cls._full_graph(tracker, glossary_entries, gender_tracker, show_unlisted)
-        width, height = cls._layout_size(len(full.get('nodes') or []))
-        return relations_tracking.layout_graph(full, width, height, focus=focus)
+        and the filters hide names. Runs on the loading thread too: the sizes come from widths
+        measured on the GUI thread."""
+        full = self._full_graph(tracker, glossary_entries, gender_tracker, show_unlisted)
+        width, height = self._layout_size(len(full.get('nodes') or []))
+        return relations_tracking.layout_graph(full, width, height, focus=focus, node_size=self._name_size,
+                                               label_size=self._label_size)
 
     def _load_in_background(self):
         """The loading thread: plain data only, no Qt objects. The result goes back by signal."""
@@ -833,6 +881,12 @@ class RelationsDiagramDialog(QDialog):
             return True
         entries = self.gender_tracker.get('entries') if isinstance(self.gender_tracker, dict) else None
         return bool(entries) and bool(self._node_info)
+
+    def empty_text(self):
+        """What the empty window says: which glossary, and (with the tracker off) how to turn it on."""
+        name = os.path.basename(self.glossary_path) if self.glossary_path else "this glossary"
+        template = EMPTY_TRACKING_TEXT if relations_tracking.tracking_enabled() else EMPTY_TEXT
+        return template.format(name=name)
 
     def _on_owner_gone(self, *_args):
         try:
@@ -966,7 +1020,7 @@ class RelationsDiagramDialog(QDialog):
         self._stack = QStackedWidget()
         outer.addWidget(self._stack)
 
-        self.empty_label = QLabel(EMPTY_TEXT)
+        self.empty_label = QLabel(self.empty_text())
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setWordWrap(True)
         self.empty_label.setStyleSheet("color: #9ca3af; font-size: 11pt;")
@@ -1216,6 +1270,7 @@ class RelationsDiagramDialog(QDialog):
         if self._loading or self._page is None:
             return  # nothing to draw yet: the loading screen is up
         if not self._has_content():
+            self.empty_label.setText(self.empty_text())  # the toggle may have changed meanwhile
             self._stack.setCurrentWidget(self.empty_label)
             self._edge_count = 0
             self._node_items = {}
@@ -1258,7 +1313,8 @@ class RelationsDiagramDialog(QDialog):
         selected = self._selected if self._selected in self._node_items else None
         related = {selected}
         # Labels steer clear of the name boxes and of each other.
-        placed_labels = [item.sceneBoundingRect().adjusted(-3, -3, 3, 3) for item in self._node_items.values()]
+        placed_labels = [item.sceneBoundingRect().adjusted(-NAME_MARGIN, -NAME_MARGIN, NAME_MARGIN, NAME_MARGIN)
+                         for item in self._node_items.values()]
         to_label = []
         self._label_boxes = []
         for edge in edges:
@@ -1279,7 +1335,8 @@ class RelationsDiagramDialog(QDialog):
                 to_label.append((math.hypot(pb.x() - pa.x(), pb.y() - pa.y()), edge, pa, pb, color))
         # Short edges have the least room, so they choose their label spot first.
         for _length, edge, pa, pb, color in sorted(to_label, key=lambda item: item[0]):
-            self._add_edge_label(edge, pa, pb, color, show_former, placed_labels)
+            self._add_edge_label(edge, pa, pb, color, show_former, placed_labels,
+                                 relations_tracking.layout_spot(positions, edge['a'], edge['b']))
 
         if selected is not None:
             for node_id, item in self._node_items.items():
@@ -1320,9 +1377,10 @@ class RelationsDiagramDialog(QDialog):
             lines.append("Double-click or right-click to edit")
         return lines
 
-    def _add_edge_label(self, edge, pa, pb, color, show_former, placed):
+    def _add_edge_label(self, edge, pa, pb, color, show_former, placed, spot=None):
         """One pill ON its line: the line runs into both ends of the pill, so it is plain
-        which relation the words belong to. It slides along the line to a free spot.
+        which relation the words belong to. It sits where the layout made room for it
+        (``spot``, a fraction of the way from ``pa``), else slides along the line to a free spot.
         A relation with no side known has no words: no pill."""
         text = edge_label_text(edge, show_former)
         if not text:
@@ -1331,17 +1389,12 @@ class RelationsDiagramDialog(QDialog):
         label.setFont(self._label_font)
         label.setBrush(QBrush(color.lighter(125) if edge.get('changed') else QColor("#e5e7eb")))
         rect = label.boundingRect()
-        width, height = rect.width() + 12, rect.height() + 6
-        box, least = None, None
-        for spot in LABEL_SPOTS:
-            cx = pa.x() + (pb.x() - pa.x()) * spot
-            cy = pa.y() + (pb.y() - pa.y()) * spot
-            candidate = QRectF(cx - width / 2, cy - height / 2, width, height)
-            overlap = self._overlap(candidate, placed)
-            if least is None or overlap < least:
-                box, least = candidate, overlap
-            if overlap == 0.0:
-                break
+        width, height = rect.width() + LABEL_PADDING[0], rect.height() + LABEL_PADDING[1]
+        cx, cy, _spot = relations_tracking.label_spot(
+            (pa.x(), pa.y()), (pb.x(), pb.y()), width, height,
+            lambda b: self._overlap(QRectF(b[0], b[1], b[2] - b[0], b[3] - b[1]), placed),
+            relations_tracking.LABEL_SPOTS if spot is None else (spot,) + relations_tracking.LABEL_SPOTS)
+        box = QRectF(cx - width / 2, cy - height / 2, width, height)
         placed.append(box)
         self._label_boxes.append(box)
         pill = QPainterPath()
@@ -1481,7 +1534,16 @@ class RelationsDiagramDialog(QDialog):
         parts = [f"<p style='color:#9ca3af;margin:0 0 2px 0'>{html.escape(heading)}{links}</p>",
                  f"<p style='margin:0 0 10px 0'>{html.escape(written['text'])}</p>"]
         if earlier:
-            parts.append("<p style='color:#9ca3af;margin:0 0 2px 0'>Earlier descriptions</p><ul style='margin:0 0 10px 0'>")
+            # One line until the user opens it: a character can have 20 or more.
+            toggle = self._link("hide" if self._earlier_open else "show",
+                                f"{'hide' if self._earlier_open else 'show'} earlier descriptions",
+                                self.toggle_earlier_descriptions)
+            if not self._earlier_open:
+                parts.append(f"<p style='color:#9ca3af;margin:0 0 10px 0'>Earlier descriptions ({len(earlier)})"
+                             f"&nbsp;&nbsp;{toggle}</p>")
+                return parts
+            parts.append(f"<p style='color:#9ca3af;margin:0 0 2px 0'>Earlier descriptions ({len(earlier)})"
+                         f"&nbsp;&nbsp;{toggle}</p><ul style='margin:0 0 10px 0'>")
             for old in earlier:
                 links = ""
                 if editable:
@@ -1493,6 +1555,24 @@ class RelationsDiagramDialog(QDialog):
                              f"{html.escape(old['text'])}{links}</li>")
             parts.append("</ul>")
         return parts
+
+    def toggle_earlier_descriptions(self):
+        """Open or close "Earlier descriptions" (for every character, while this window is open).
+        The panel stays scrolled where it was."""
+        self._earlier_open = not self._earlier_open
+        if self._selected is None:
+            return
+        bar = self.history_panel.verticalScrollBar()
+        where = bar.value()
+        self.show_history(self._selected)
+        bar.setValue(where)
+        QTimer.singleShot(0, lambda: self._restore_history_scroll(where))
+
+    def _restore_history_scroll(self, where):
+        try:
+            self.history_panel.verticalScrollBar().setValue(where)
+        except RuntimeError:  # the window was closed meanwhile
+            pass
 
     def _gender_html(self, node_id, raw):
         entry = self._glossary_index.get(relations_tracking.tracker_key(raw))

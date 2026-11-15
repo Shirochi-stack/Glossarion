@@ -2084,23 +2084,48 @@ class GlossaryManagerMixin:
     def _on_glossary_manager_relations_history_mode_change(self, index=None):
         self._apply_relations_tracker_settings()
 
+    def _relations_extraction_glossary_paths(self):
+        """The glossary files the current input file's extraction writes (CSV, then JSON)."""
+        try:
+            getter = getattr(self, '_glossary_editor_input_sources', None)
+            sources = list(getter() if callable(getter) else user_selection(self) or [])
+            if not sources or not sources[0]:
+                return []
+            from glossary_paths import get_book_glossary_path
+            base = os.path.splitext(os.path.basename(str(sources[0])))[0]
+            json_path = get_book_glossary_path(glossary_document.unified_glossary_shared_dir(self.config),
+                                               base, f"{base}_glossary.json", create=False)
+            return [os.path.splitext(json_path)[0] + '.csv', json_path]
+        except Exception:
+            return []
+
     def _relations_glossary_path(self):
-        """The glossary loaded in the editor, else the mapped manual glossary."""
-        candidates = []
+        """The book being worked on: the mapped glossary, else the one the current input file's
+        extraction writes, else the Glossary Editor's file, else the configured one. Within the
+        book's own files, then within the fallbacks, the first with a relations or gender tracker
+        beside it wins; else the first existing file."""
+        book = [getattr(self, 'manual_glossary_path', None), getattr(self, 'auto_loaded_glossary_path', None)]
+        book += self._relations_extraction_glossary_paths()
+        fallback = []
         entry = getattr(self, 'editor_file_entry', None)
         if entry is not None:
             try:
-                candidates.append(entry.text())
+                fallback.append(entry.text())
             except Exception:
                 pass
-        candidates.append(getattr(self, 'manual_glossary_path', None))
         try:
-            candidates.append(self.config.get('manual_glossary_path'))
+            fallback.append(self.config.get('manual_glossary_path'))
         except Exception:
             pass
-        for path in candidates:
-            if path and os.path.isfile(str(path)):
-                return str(path)
+        for group in (book, fallback):
+            candidates = [str(path) for path in group if path]
+            for path in candidates:
+                if any(os.path.isfile(tracker) for tracker in (relations_tracking.tracker_path_for_glossary(path),
+                                                               relations_tracking.gender_tracker_path_for_glossary(path))):
+                    return path
+            for path in candidates:
+                if os.path.isfile(path):
+                    return path
         return ''
 
     def _pick_glossary_file(self, parent=None, title="Select glossary file"):
@@ -7491,7 +7516,9 @@ Do not stop after the glossary."""
             "background-color: #3a5f8a; color: white; padding: 4px 10px; border-radius: 3px;"
         )
         relations_diagram_btn.setToolTip(_wrapped_tooltip_html(
-            "Show the relationship diagram for the glossary loaded in the Glossary Editor, with a chapter slider."
+            "Show the relationship diagram for the book being worked on, with a chapter slider. "
+            "That is the mapped glossary, or the one the current input file's extraction writes. "
+            "The window title names the glossary file."
         ))
         relations_diagram_btn.clicked.connect(
             lambda: self._open_relations_diagram(relations_diagram_btn.window()))

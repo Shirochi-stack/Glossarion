@@ -3191,7 +3191,9 @@ def _fit_positions(positions: Dict[str, List[float]], width: float, height: floa
 
 
 def _radial_layout(ids: List[str], adjacency: Dict[str, List[str]], focus: str,
-                   width: float, height: float) -> Dict[str, Tuple[float, float]]:
+                   width: float, height: float, spacing: float = 0.0) -> Dict[str, Tuple[float, float]]:
+    """The focus in the centre, the others on rings by their distance from it. With ``spacing``
+    a crowded ring moves out until its members sit that far apart along it."""
     depth = {focus: 0}
     parent: Dict[str, Optional[str]] = {focus: None}
     order = [focus]
@@ -3214,15 +3216,20 @@ def _radial_layout(ids: List[str], adjacency: Dict[str, List[str]], focus: str,
     cx, cy = width / 2.0, height / 2.0
     angle: Dict[str, float] = {focus: 0.0}
     positions = {focus: (cx, cy)}
+    previous = 0.0
     for ring in sorted(rings):
         members = rings[ring]
         members.sort(key=lambda n: (angle.get(parent.get(n) or "", 10.0), n))
         count = len(members)
         offset = (math.pi / count) * (ring % 2)
+        distance = step * ring
+        if spacing > 0.0:
+            distance = max(distance, previous + step, count * spacing / (2.0 * math.pi))
+        previous = distance
         for index, node in enumerate(members):
             theta = offset + 2.0 * math.pi * index / count
             angle[node] = theta
-            positions[node] = (cx + step * ring * math.cos(theta), cy + step * ring * math.sin(theta))
+            positions[node] = (cx + distance * math.cos(theta), cy + distance * math.sin(theta))
     return positions
 
 
@@ -3495,9 +3502,320 @@ def _refined_layout(ids: List[str], edge_list: List[Tuple[str, str]], width: flo
     return best
 
 
+#: Where along its line a relation's label may sit, as fractions of the way from one end (middle
+#: first). Both diagrams take the first spot where the label covers no name and no other label.
+LABEL_SPOTS = (0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.2, 0.8)
+#: Above this many labelled lines the layout makes room for the name boxes and the focus
+#: character's labels only (both diagrams then label only that character's lines).
+ROOM_FOR_LABELS_MAX_EDGES = 120
+#: Rounds of the pass that pushes overlapping name boxes and labels apart.
+_ROOM_ROUNDS = 150
+#: Box checks one layout may spend on that pass (keeps 1,000 names near a second on a PC).
+_ROOM_BUDGET = 400_000
+#: Space kept between two boxes, so text drawn a little wider than estimated still fits.
+_ROOM_GAP = 4.0
+#: How far a name moves per round, as a share of its pushes. More than all of it: in a crowd the
+#: pushes of the others undo part of each move (measured: 1.6 clears 200 crowded names in 62
+#: rounds; 1.0 still left 26 overlaps after 150).
+_ROOM_STEP = 1.6
+
+Box = Tuple[float, float, float, float]
+
+
+class _BoxGrid:
+    """Boxes ``(x0, y0, x1, y1)`` filed in a coarse grid, to find what a box overlaps quickly."""
+
+    def __init__(self, cell: float) -> None:
+        self.cell = max(float(cell), 1.0)
+        self.cells: Dict[Tuple[int, int], List[int]] = {}
+        self.boxes: List[Box] = []
+
+    def _cells(self, box: Box) -> List[Tuple[int, int]]:
+        c = self.cell
+        ys = range(int(box[1] // c), int(box[3] // c) + 1)
+        return [(gx, gy) for gx in range(int(box[0] // c), int(box[2] // c) + 1) for gy in ys]
+
+    def add(self, box: Box) -> int:
+        index = len(self.boxes)
+        self.boxes.append(box)
+        cells = self.cells
+        for key in self._cells(box):
+            if key in cells:
+                cells[key].append(index)
+            else:
+                cells[key] = [index]
+        return index
+
+    def hits(self, box: Box) -> List[Tuple[int, float]]:
+        """``[(index, shared area)]`` of the boxes ``box`` overlaps (touching edges do not count)."""
+        keys = self._cells(box)
+        cells = self.cells
+        if len(keys) == 1:
+            candidates = cells.get(keys[0], ())
+        else:
+            candidates = set()
+            for key in keys:
+                candidates.update(cells.get(key, ()))
+            candidates = sorted(candidates)
+        x0, y0, x1, y1 = box
+        found = []
+        boxes = self.boxes
+        for index in candidates:
+            ox0, oy0, ox1, oy1 = boxes[index]
+            w = (x1 if x1 < ox1 else ox1) - (x0 if x0 > ox0 else ox0)
+            if w <= 0.0:
+                continue
+            h = (y1 if y1 < oy1 else oy1) - (y0 if y0 > oy0 else oy0)
+            if h > 0.0:
+                found.append((index, w * h))
+        return found
+
+    def overlap(self, box: Box) -> float:
+        return sum(area for _index, area in self.hits(box))
+
+
+def label_spot(pa: Sequence[float], pb: Sequence[float], width: float, height: float,
+               overlap: Callable[[Box], float], spots: Sequence[float] = LABEL_SPOTS) -> Tuple[float, float, float]:
+    """``(cx, cy, t)``: the centre of a ``width`` x ``height`` label ON the line ``pa``-``pb``.
+
+    The first of ``spots`` (fractions of the way from ``pa``) where ``overlap(box)`` is 0 wins,
+    else the spot with the least overlap: the label slides along its line, never off it.
+    """
+    best = None
+    for t in spots:
+        cx = pa[0] + (pb[0] - pa[0]) * t
+        cy = pa[1] + (pb[1] - pa[1]) * t
+        area = overlap((cx - width / 2.0, cy - height / 2.0, cx + width / 2.0, cy + height / 2.0))
+        if best is None or area < best[0]:
+            best = (area, cx, cy, t)
+        if area <= 0.0:
+            break
+    return best[1], best[2], best[3]
+
+
+def _placed_boxes(positions: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
+                  node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+                  gap: float = 0.0, prefer: Optional[Mapping[Any, float]] = None
+                  ) -> Tuple[_BoxGrid, List[Tuple[Any, ...]]]:
+    """Every name box, then every label placed by ``label_spot`` (shorter lines choose first; a
+    label tries its spot in ``prefer`` before ``LABEL_SPOTS``), each box grown by ``gap``. Returns
+    the grid and what each box is: ``("n", id)`` or ``("l", key, a, b, t)``."""
+    prefer = prefer or {}
+    sizes = list(node_size.values()) + list(label_size.values())
+    grid = _BoxGrid(max(max(w for w, _h in sizes), max(h for _w, h in sizes)) if sizes else 100.0)
+    owners: List[Tuple[Any, ...]] = []
+    half = gap / 2.0
+    for node, (w, h) in node_size.items():
+        point = positions.get(node)
+        if point is None:
+            continue
+        grid.add((point[0] - w / 2.0 - half, point[1] - h / 2.0 - half,
+                  point[0] + w / 2.0 + half, point[1] + h / 2.0 + half))
+        owners.append(("n", node))
+    todo = []
+    for key, a, b in edges:
+        size = label_size.get(key)
+        pa, pb = positions.get(a), positions.get(b)
+        if size is None or pa is None or pb is None:
+            continue
+        todo.append((math.hypot(pb[0] - pa[0], pb[1] - pa[1]), len(todo), key, a, b, pa, pb, size))
+    for _length, _order, key, a, b, pa, pb, (w, h) in sorted(todo, key=lambda item: (item[0], item[1])):
+        w, h = w + gap, h + gap
+        spot = prefer.get(key)
+        cx, cy, t = label_spot(pa, pb, w, h, grid.overlap, LABEL_SPOTS if spot is None else (spot,) + LABEL_SPOTS)
+        grid.add((cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0))
+        owners.append(("l", key, a, b, t))
+    return grid, owners
+
+
+def place_labels(positions: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
+                 node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+                 prefer: Optional[Mapping[Any, float]] = None) -> Dict[Any, Tuple[float, float]]:
+    """``{key: (cx, cy)}`` for the labels of ``edges`` (``[(key, a, b)]``) of the sizes in
+    ``label_size``, clear of the name boxes of ``node_size`` and of each other where the line allows.
+    ``prefer`` (``{key: t}``, e.g. from ``layout_spots``) is tried first: the spot the layout made room for."""
+    grid, owners = _placed_boxes(positions, edges, node_size, label_size, prefer=prefer)
+    placed = {}
+    for owner, box in zip(owners, grid.boxes):
+        if owner[0] == "l":
+            placed[owner[1]] = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+    return placed
+
+
+def _unit(dx: float, dy: float) -> Tuple[float, float]:
+    length = math.hypot(dx, dy)
+    return (dx / length, dy / length) if length > 1e-9 else (1.0, 0.0)
+
+
+def _make_room(positions: Dict[str, List[float]], edges: Sequence[Tuple[Any, str, str]],
+               node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]]
+               ) -> Tuple[Dict[str, List[float]], Dict[Any, float]]:
+    """Move names until no name box or label covers another (or the rounds run out).
+
+    A label lives on its line, so it moves by moving the line's ends. Two labels around the
+    same name push their far ends outward: a name with many relations gets longer lines, so
+    its labels have room around it, instead of the whole picture growing. A label that runs
+    into one of its own ends lengthens its line. A label keeps its spot while that spot is free
+    (no jumping back and forth). Returns the positions with the fewest overlaps seen and the
+    spot (``t``) of every label there.
+    """
+    boxes = len(node_size) + len(label_size)
+    rounds = max(8, min(_ROOM_ROUNDS, _ROOM_BUDGET // max(1, boxes * 4)))
+    spots: Dict[Any, float] = {}
+    best: Optional[Tuple[int, Dict[str, List[float]], Dict[Any, float]]] = None
+    for _round in range(rounds):
+        grid, owners = _placed_boxes(positions, edges, node_size, label_size, _ROOM_GAP, spots)
+        spots = {owner[1]: owner[4] for owner in owners if owner[0] == "l"}
+        moves: Dict[str, List[float]] = {}
+
+        def push(node: str, dx: float, dy: float) -> None:
+            move = moves.get(node)
+            if move is None:
+                moves[node] = [dx, dy]
+            else:
+                move[0] += dx
+                move[1] += dy
+
+        def ends_apart(edge: Tuple[Any, ...], fixed: str, amount: float) -> str:
+            """Push the line's other end away from ``fixed`` along the line; returns that end."""
+            other = edge[3] if edge[2] == fixed else edge[2]
+            ux, uy = _unit(positions[other][0] - positions[fixed][0], positions[other][1] - positions[fixed][1])
+            push(other, ux * amount, uy * amount)
+            return other
+
+        found = 0
+        all_boxes = grid.boxes
+        for p, box in enumerate(all_boxes):
+            for q, _area in grid.hits(box):
+                if q <= p:
+                    continue
+                found += 1
+                other = all_boxes[q]
+                dx = (other[0] + other[2] - box[0] - box[2]) / 2.0
+                dy = (other[1] + other[3] - box[1] - box[3]) / 2.0
+                pen_x = (box[2] - box[0] + other[2] - other[0]) / 2.0 - abs(dx)
+                pen_y = (box[3] - box[1] + other[3] - other[1]) / 2.0 - abs(dy)
+                # vx, vy: how far q must move away from p to clear it (a pixel more, so pushes
+                # that partly cancel still end with the two apart instead of touching)
+                if pen_x < pen_y:
+                    pen = pen_x + 1.0
+                    vx, vy = (pen if dx >= 0 else -pen), 0.0
+                else:
+                    pen = pen_y + 1.0
+                    vx, vy = 0.0, (pen if dy >= 0 else -pen)
+                first, second = owners[p], owners[q]
+                if first[0] == "n" and second[0] == "l":
+                    first, second, vx, vy = second, first, -vx, -vy
+                if first[0] == "n":  # two names
+                    push(first[1], -vx / 2.0, -vy / 2.0)
+                    push(second[1], vx / 2.0, vy / 2.0)
+                elif second[0] == "n":  # a label and a name
+                    name = second[1]
+                    if name in (first[2], first[3]):  # its own end: lengthen the line
+                        far = ends_apart(first, name, pen / 2.0)
+                        ux, uy = _unit(positions[name][0] - positions[far][0], positions[name][1] - positions[far][1])
+                        push(name, ux * pen / 2.0, uy * pen / 2.0)
+                    else:
+                        push(name, vx / 2.0, vy / 2.0)
+                        push(first[2], -vx / 2.0, -vy / 2.0)
+                        push(first[3], -vx / 2.0, -vy / 2.0)
+                else:  # two labels
+                    shared = {first[2], first[3]} & {second[2], second[3]}
+                    if len(shared) == 1:
+                        hub = shared.pop()
+                        far_p = ends_apart(first, hub, pen / 2.0)
+                        far_q = ends_apart(second, hub, pen / 2.0)
+                        push(far_p, -vx / 2.0, -vy / 2.0)
+                        push(far_q, vx / 2.0, vy / 2.0)
+                    else:
+                        for node in (first[2], first[3]):
+                            push(node, -vx / 2.0, -vy / 2.0)
+                        for node in (second[2], second[3]):
+                            push(node, vx / 2.0, vy / 2.0)
+        if best is None or found < best[0]:
+            best = (found, {key: list(point) for key, point in positions.items()}, dict(spots))
+        if not found:
+            break
+        for node, (dx, dy) in moves.items():
+            positions[node][0] += dx * _ROOM_STEP
+            positions[node][1] += dy * _ROOM_STEP
+    return best[1], best[2]
+
+
+class Layout(dict):
+    """``{id: (x, y)}`` from ``layout_graph``; ``label_spots`` ``{(a, b): t}``: where along each
+    line (the fraction of the way from ``a``) the layout made room for its label."""
+
+    label_spots: Dict[Tuple[str, str], float] = {}
+
+
+def layout_spot(layout: Mapping[str, Any], a: Any, b: Any) -> Optional[float]:
+    """Where the layout made room for the label of the line ``a``-``b`` (fraction from ``a``), else None."""
+    spots = getattr(layout, "label_spots", None) or {}
+    if (a, b) in spots:
+        return spots[(a, b)]
+    if (b, a) in spots:
+        return 1.0 - spots[(b, a)]
+    return None
+
+
 def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, height: float = 700.0,
-                 focus: Optional[str] = None, seed: int = 0) -> Dict[str, Tuple[float, float]]:
-    """Deterministic positions inside ``width`` x ``height``: seeded force layout, or radial around ``focus``."""
+                 focus: Optional[str] = None, seed: int = 0,
+                 node_size: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+                 label_size: Optional[Callable[[Mapping[str, Any]], Any]] = None) -> Dict[str, Tuple[float, float]]:
+    """Deterministic positions inside ``width`` x ``height``: seeded force layout, or radial around ``focus``.
+
+    ``node_size(node)`` and ``label_size(edge)`` give the drawn ``(width, height)`` of a name box
+    and of a line's label (None: no label), in the units of ``width`` and ``height``. With them a
+    last pass moves names until no box or label covers another (see ``_make_room``); positions may
+    then reach past ``width`` x ``height`` (the caller sizes its canvas to them), and the result is
+    a ``Layout`` whose ``label_spots`` say where each label has its room (see ``layout_spot``).
+    """
+    if node_size is None:
+        return _plain_layout(graph, width, height, focus, seed)
+    nodes: Dict[str, Mapping[str, Any]] = {}
+    for node in (graph or {}).get("nodes") or []:
+        if isinstance(node, Mapping) and node.get("id") is not None:
+            nodes.setdefault(str(node.get("id")), node)
+    edges = []
+    for edge in (graph or {}).get("edges") or []:
+        if isinstance(edge, Mapping):
+            a, b = str(edge.get("a")), str(edge.get("b"))
+            if a in nodes and b in nodes and a != b:
+                edges.append((a, b, edge))
+    names = {key: tuple(node_size(node)) for key, node in nodes.items()}
+    labels: Dict[Any, Tuple[float, float]] = {}
+    if label_size is not None:
+        for index, (_a, _b, edge) in enumerate(edges):
+            size = label_size(edge)
+            if size:
+                labels[index] = tuple(size)
+        if len(labels) > ROOM_FOR_LABELS_MAX_EDGES:
+            # too many to make room for all: the focus character's only (the diagrams then label
+            # only that character's lines)
+            labels = {index: size for index, size in labels.items()
+                      if focus is not None and str(focus) in edges[index][:2]}
+            if len(labels) > ROOM_FOR_LABELS_MAX_EDGES:
+                labels = {}
+    # How far apart names on a ring around a focus should start: about a name box, or a label
+    # (labels sit between two rings, where the ring is shorter). The room pass fixes the rest.
+    spacing = 0.0
+    if names:
+        spacing = 0.8 * sum(w for w, _h in names.values()) / len(names)
+    if labels:
+        spacing = max(spacing, 0.6 * sum(w + h for w, h in labels.values()) / len(labels))
+    positions = _plain_layout(graph, width, height, focus, seed, spacing)
+    if len(positions) < 2:
+        return positions
+    moved, spots = _make_room({key: [point[0], point[1]] for key, point in positions.items()},
+                              [(index, a, b) for index, (a, b, _edge) in enumerate(edges)], names, labels)
+    result = Layout((key, (point[0], point[1])) for key, point in moved.items())
+    result.label_spots = {(edges[index][0], edges[index][1]): t for index, t in spots.items()}
+    return result
+
+
+def _plain_layout(graph: Optional[Mapping[str, Any]], width: float, height: float,
+                  focus: Optional[str], seed: int, spacing: float = 0.0) -> Dict[str, Tuple[float, float]]:
     width = float(width) if width and width > 0 else 1000.0
     height = float(height) if height and height > 0 else 700.0
     nodes = list((graph or {}).get("nodes") or [])
@@ -3520,7 +3838,7 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
             adjacency[b].append(a)
             edge_list.append((a, b))
     if focus is not None and str(focus) in id_set:
-        return _radial_layout(ids, adjacency, str(focus), width, height)
+        return _radial_layout(ids, adjacency, str(focus), width, height, spacing)
 
     n = len(ids)
     if n <= _REFINED_LAYOUT_MAX_NODES:

@@ -2,6 +2,7 @@ import copy
 import csv
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -1147,6 +1148,105 @@ def test_small_layout_is_quick_at_its_largest():
     positions = rt.layout_graph(graph, 1600, 1100)
     assert len(positions) == rt._REFINED_LAYOUT_MAX_NODES
     assert time.perf_counter() - started < 5.0  # generous for slow CI; about half a second here
+
+
+# Room for labels: sizes as both diagrams pass them (a name box, a "Father / Daughter" pill).
+NAME_BOX = (110.0, 30.0)
+LABEL_BOX = (120.0, 22.0)
+
+
+def _hub_graph(leaves=45):
+    """One main character related to everyone, and some of the others related to each other."""
+    nodes = [{"id": "hub"}] + [{"id": f"p{i}"} for i in range(leaves)]
+    edges = [{"a": "hub", "b": f"p{i}", "label_ab": "Patient", "label_ba": "Healer"} for i in range(leaves)]
+    edges += [{"a": f"p{i}", "b": f"p{i + 1}", "label_ab": "Rival", "label_ba": ""} for i in range(0, leaves - 1, 5)]
+    return {"nodes": nodes, "edges": edges}
+
+
+def _sized_layout(graph, focus=None, seed=0):
+    return rt.layout_graph(graph, 1600, 1100, focus=focus, seed=seed, node_size=lambda node: NAME_BOX,
+                           label_size=lambda edge: LABEL_BOX if rt.edge_label_text(edge) else None)
+
+
+def _overlapping_pairs(positions, graph):
+    """Label/label, label/name and name/name pairs that overlap, with the labels where the
+    diagrams put them (``place_labels`` at the layout's spots). Also checks each label is ON its line."""
+    edges = [(i, e["a"], e["b"]) for i, e in enumerate(graph["edges"])]
+    spots = rt.place_labels(positions, edges, {key: NAME_BOX for key in positions},
+                            {i: LABEL_BOX for i, _a, _b in edges},
+                            prefer={i: t for i, a, b in edges if (t := rt.layout_spot(positions, a, b)) is not None})
+    for i, a, b in edges:
+        assert rt._point_segment_distance(spots[i], positions[a], positions[b]) < 1e-6
+
+    def box(center, size):
+        return (center[0] - size[0] / 2, center[1] - size[1] / 2, center[0] + size[0] / 2, center[1] + size[1] / 2)
+    labels = [box(spots[i], LABEL_BOX) for i, _a, _b in edges]
+    names = [box(point, NAME_BOX) for point in positions.values()]
+
+    def count(first, second, same):
+        found = 0
+        for i, p in enumerate(first):
+            for j, q in enumerate(second):
+                if same and j <= i:
+                    continue
+                if min(p[2], q[2]) - max(p[0], q[0]) > 0.01 and min(p[3], q[3]) - max(p[1], q[1]) > 0.01:
+                    found += 1
+        return found
+    return count(labels, labels, True), count(labels, names, False), count(names, names, True)
+
+
+@pytest.mark.parametrize("focus", [None, "hub"])
+def test_a_main_character_with_45_relations_leaves_room_for_every_label(focus):
+    """The owner's book: one name with about 45 relations made a knot of labels in the middle.
+    Its lines get long enough that 45 boxes of 120 x 22 fit around it, each on its own line."""
+    graph = _hub_graph()
+    started = time.perf_counter()
+    positions = _sized_layout(graph, focus)
+    assert time.perf_counter() - started < 5.0  # generous for slow CI; about 0.05 s here
+    assert _overlapping_pairs(positions, graph) == (0, 0, 0)
+    plain = rt.layout_graph(graph, 1600, 1100, focus=focus)
+    if focus:
+        assert positions["hub"] == plain["hub"]  # still in the centre, the others on a ring around it
+    else:
+        # The plain layout (no sizes) is what made the knot: labels on top of each other.
+        assert _overlapping_pairs(plain, graph)[0] > 0
+
+
+def test_room_for_labels_is_deterministic_and_small_diagrams_keep_their_size():
+    graph = _hub_graph()
+    first = _sized_layout(graph, seed=4)
+    again = _sized_layout(graph, seed=4)
+    assert first == again and first.label_spots == again.label_spots
+    assert set(first.label_spots) == {(e["a"], e["b"]) for e in graph["edges"]}
+    assert all(t in rt.LABEL_SPOTS for t in first.label_spots.values())
+    assert rt.layout_spot(first, "p0", "hub") == 1.0 - first.label_spots[("hub", "p0")]
+    assert rt.layout_spot({}, "hub", "p0") is None  # a plain layout has no spots
+
+    # Ten names that already have room: the pass leaves the picture about as it was.
+    small = _team_graph()
+    for edge in small["edges"]:
+        edge["label_ab"] = "Friend"
+    plain = rt.layout_graph(small, 1200, 800)
+    sized = rt.layout_graph(small, 1200, 800, node_size=lambda node: (70.0, 30.0),
+                            label_size=lambda edge: (60.0, 20.0))
+
+    def span(positions):
+        xs = [p[0] for p in positions.values()]
+        ys = [p[1] for p in positions.values()]
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
+    assert span(sized) <= 1.25 * span(plain)
+    assert max(math.dist(plain[key], sized[key]) for key in plain) < 150
+
+
+def test_above_the_label_cap_only_the_focus_characters_labels_get_room():
+    """More labelled lines than ``ROOM_FOR_LABELS_MAX_EDGES``: the diagrams then label only the
+    focus character's lines, so the layout makes room for those and no others."""
+    graph = _hub_graph(rt.ROOM_FOR_LABELS_MAX_EDGES + 5)
+    edges = {(e["a"], e["b"]) for e in graph["edges"]}
+    assert len(edges) > rt.ROOM_FOR_LABELS_MAX_EDGES
+    assert not _sized_layout(graph).label_spots
+    assert set(_sized_layout(graph, focus="p5").label_spots) == {pair for pair in edges if "p5" in pair}
+    assert not _sized_layout(graph, focus="hub").label_spots  # still too many for one name
 
 
 def test_reset_question_is_one_question_for_one_or_both_prompts():
