@@ -617,7 +617,7 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
     """Owner 2026-11-15: "the relationship diagram in mobile should be zoomed out by default": the whole canvas
     fits the viewer when the screen opens and when the layout changes (Focus, Unlisted names); the update check,
     the slider and a later size change (the keyboard) leave the zoom alone."""
-    from glossarion_mobile.ui.glossary.relations_diagram import FIT_PADDING, RelationsDiagram
+    from glossarion_mobile.ui.glossary.relations_diagram import FIT_PADDING, REFIT_DELAY, RelationsDiagram
 
     schema = _schema()
     store = _store(tmp_path, schema)
@@ -650,9 +650,17 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
         calls.clear()
         diagram.set_chapter(diagram.low)  # the slider
         diagram._apply_state(tracker=_tracker())  # the once-a-second update
-        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))  # the keyboard opened
         await _settle()
         assert calls == []
+        # Still as fitted (not zoomed or panned): a new viewer size fits it again, once, when it has settled
+        # (the emulator: a Focus picked with the keyboard open stayed fitted above the closed keyboard).
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=380.0))  # the keyboard opening ...
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))  # ... open
+        await _settle()
+        assert calls == []  # not before the size has settled
+        await asyncio.sleep(REFIT_DELAY + 0.1)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        calls.clear()
         diagram.set_focus(diagram.all_graph["nodes"][0]["id"])  # a new layout: fitted again
         await _settle()
         assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
@@ -665,7 +673,7 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
         assert diagram.auto_fit
         diagram.set_fullscreen(True)
         diagram._on_viewer_size(types.SimpleNamespace(width=584.0, height=900.0))
-        await _settle()
+        await asyncio.sleep(REFIT_DELAY + 0.1)
         assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
         # ... one the user zoomed or panned is left as it is, in and out of full screen
         calls.clear()
@@ -677,7 +685,7 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
         diagram._on_viewer_size(types.SimpleNamespace(width=584.0, height=900.0))
         diagram.set_fullscreen(False)
         diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))
-        await _settle()
+        await asyncio.sleep(REFIT_DELAY + 0.1)
         assert calls == []
         # a huge canvas: far out, the margin grows with it
         diagram._set_canvas(6000.0, 900.0)

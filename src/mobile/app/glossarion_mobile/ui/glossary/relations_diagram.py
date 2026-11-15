@@ -47,7 +47,6 @@ import copy
 import logging
 import math
 import os
-import time
 import unicodedata
 from typing import Any, Callable, Optional
 
@@ -89,8 +88,9 @@ BOUNDARY_MARGIN = 200
 #: the fitted diagram's room from the viewer's edges (dp) and its largest scale (desktop ``fit_all``: 1.4)
 FIT_PADDING = 12
 FIT_MAX_SCALE = 1.4
-#: seconds after a full screen toggle in which the viewer's new size fits a still-fitted diagram again
-REFIT_WINDOW = 1.0
+#: seconds a new viewer size must stay before a still-fitted diagram is fitted into it (the keyboard and
+#: full screen change the size over several frames)
+REFIT_DELAY = 0.15
 UNDO_LIMIT = 20
 GENDER_CHOICES = (("male", "Male"), ("female", "Female"), ("auto", "Not set (automatic)"))
 VIEW_PADDING = 12
@@ -211,7 +211,8 @@ class RelationsDiagram:
         self.fit_due = True
         #: the diagram is as ``fit_all`` left it: the user has not zoomed or panned since (desktop ``_auto_fit``)
         self.auto_fit = True
-        self._refit_until = 0.0  # full screen just changed the viewer's size: fit again while still fitted
+        self._refit_seq = 0  # the viewer's size changes: the last one fits a still-fitted diagram again
+        self.refit_task: Any = None
         self.fit_task: Any = None
         self.viewer_size: Optional[tuple] = None  # (width, height) of the zoom viewer, once laid out
         self.all_graph = self._all_graph() if self.core is not None else {"nodes": [], "edges": []}
@@ -808,10 +809,8 @@ class RelationsDiagram:
         self.view.can_pop = not on  # back leaves full screen first (_on_confirm_pop)
         self.fullscreen_button.icon = ft.Icons.FULLSCREEN_EXIT if on else ft.Icons.FULLSCREEN
         self.fullscreen_button.tooltip = "Leave full screen" if on else "Full screen"
-        if self.auto_fit:
-            # still as fitted: fitted into the new area too (the viewer reports its new size next);
-            # a diagram the user zoomed or panned stays as they left it
-            self._refit_until = time.monotonic() + REFIT_WINDOW
+        # (the viewer reports its new size next: a diagram still as fitted is fitted into it, see
+        # _on_viewer_size; one the user zoomed or panned stays as they left it)
         self.ctx.push(self.view)
 
     async def _on_confirm_pop(self, e: Any = None) -> None:
@@ -885,19 +884,29 @@ class RelationsDiagram:
 
     def _on_viewer_size(self, e: Any) -> None:
         """The viewer's size (Flet ``on_size_change``): kept for ``fit_all``; the first one fits the diagram
-        in. Later ones (the keyboard of the chapter box, a rotation) leave the user's zoom alone."""
+        in. A later one (the keyboard, full screen, a rotation) fits it again only while it is still as
+        fitted (``auto_fit``), once the size has settled: a Focus picked with the keyboard open was fitted
+        into the area above the keyboard and stayed there. A diagram the user zoomed or panned is theirs."""
         try:
             size = (float(e.width), float(e.height))
         except (TypeError, ValueError, AttributeError):
             return
         if size[0] <= 0 or size[1] <= 0:
             return
-        self.viewer_size = size
-        if self.fit_due or (self.auto_fit and time.monotonic() < self._refit_until):
+        previous, self.viewer_size = self.viewer_size, size
+        if self.fit_due:
+            self.fit_all()
+        elif self.auto_fit and size != previous:
+            self._refit_seq += 1
+            self.refit_task = self.ctx.spawn(self._refit_soon(self._refit_seq))
+
+    async def _refit_soon(self, seq: int) -> None:
+        await asyncio.sleep(REFIT_DELAY)
+        if seq == self._refit_seq and self.auto_fit and not self.closed:
             self.fit_all()
 
     def _on_viewer_touch(self, e: Any = None) -> None:
-        """The user zooms or pans: the view is theirs from here (full screen no longer fits it again)."""
+        """The user zooms or pans: the view is theirs from here (a new size no longer fits it again)."""
         self.auto_fit = False
 
     def fit_transform(self) -> Optional[tuple]:
