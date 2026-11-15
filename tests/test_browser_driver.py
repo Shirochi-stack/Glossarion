@@ -527,13 +527,15 @@ def test_gemini_driver_page_runs_the_qt_helper_flow(desktop):
     assert result["answerText"] == "Bonjour" and result["submit_state"]["click"]["ok"] is True
     (page,) = driver.pages
     assert page.scripts == qt_pages[0].scripts
-    # the page as it loaded, the menu (plain search/gemini asks for "Auto"), the prompt, Send, the answer
+    # the page as it loaded, the menu (plain search/gemini asks for "Auto"), the menu shut again (no
+    # attachment), the prompt, Send, the answer
     assert page.scripts[0] == gemini_free.AI_MODE_SNAPSHOT_SCRIPT
     assert page.scripts[1] == gemini_free.AI_MODE_MENU_SCRIPT
     assert page.scripts[2] == gemini_free._ai_mode_select_model_script(gemini_free.AUTO_MODEL)
-    assert page.scripts[3] == gemini_free._ai_mode_set_prompt_script("Translate: bonjour")
-    assert page.scripts[4] == page.scripts[5] == gemini_free.AI_MODE_CLICK_SEND_SCRIPT
-    assert page.scripts[6:] == [gemini_free.AI_MODE_SNAPSHOT_SCRIPT]
+    assert page.scripts[3] == gemini_free.AI_MODE_CLOSE_MENU_SCRIPT
+    assert page.scripts[4] == gemini_free._ai_mode_set_prompt_script("Translate: bonjour")
+    assert page.scripts[5] == page.scripts[6] == gemini_free.AI_MODE_CLICK_SEND_SCRIPT
+    assert page.scripts[7:] == [gemini_free.AI_MODE_SNAPSHOT_SCRIPT]
     assert page.loads == [gemini_free._build_search_base_url()] and page.closed
     assert page.loads == ["https://www.google.com/search?udm=50&hl=en"]          # google.com, AI Mode on
     assert page.owner == gemini_free.BROWSER_OWNER
