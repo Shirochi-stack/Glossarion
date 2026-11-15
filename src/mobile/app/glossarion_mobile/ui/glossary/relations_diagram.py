@@ -461,7 +461,8 @@ class RelationsDiagram:
                                key="rel-summary")
         self.canvas = cv.Canvas(shapes=[], left=0, top=0, width=self.width, height=self.height, key="rel-canvas")
         self.stack = ft.Stack([self.canvas], width=self.width, height=self.height, key="rel-stack")
-        self.viewer = ft.InteractiveViewer(content=self.stack, constrained=False, min_scale=0.25, max_scale=4,
+        # zooms far out: a book whose labels need long lines makes a big canvas
+        self.viewer = ft.InteractiveViewer(content=self.stack, constrained=False, min_scale=0.02, max_scale=4,
                                            boundary_margin=ft.Margin.all(200), key="rel-viewer")
         return ft.Column([
             ft.Row([self.chapter_label, self.chapter_minus, self.chapter_field, self.chapter_plus], spacing=4,
@@ -606,11 +607,16 @@ class RelationsDiagram:
                 texts[len(self.drawn_edges)] = text
             self.drawn_edges.append(edge)
         # above the cap the layout made no room for labels: as on the desktop, only the focused
-        # character's lines keep theirs (else they pile up)
-        label_all = len(self.drawn_edges) <= self.core.ROOM_FOR_LABELS_MAX_EDGES
+        # character's lines keep theirs (else they pile up); the layout counts every chapter's lines,
+        # so an earlier chapter of a book over the cap labels the Focus character's lines only too
+        label_all = (len(self.drawn_edges) <= self.core.ROOM_FOR_LABELS_MAX_EDGES
+                     and not getattr(getattr(self, "layout", None), "labels_capped", False))
         if not label_all:
+            # only those the layout made room for (none when the Focus alone has more lines than the cap)
             texts = {index: text for index, text in texts.items()
-                     if self.focus in (self.drawn_edges[index]["a"], self.drawn_edges[index]["b"])}
+                     if self.focus in (self.drawn_edges[index]["a"], self.drawn_edges[index]["b"])
+                     and self.core.layout_spot(self.layout, self.drawn_edges[index]["a"],
+                                               self.drawn_edges[index]["b"]) is not None}
         # each label ON its line, where the layout made room for it (else the first free spot along it)
         drawn = [(index, edge["a"], edge["b"]) for index, edge in enumerate(self.drawn_edges)]
         spots = self.core.place_labels(

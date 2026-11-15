@@ -63,6 +63,8 @@ LABEL_BG = QColor("#1b1d21")
 #: Above this many visible edges, labels are drawn only for the selected character's edges
 #: (the layout makes room for labels up to the same count).
 MAX_LABELLED_EDGES = relations_tracking.ROOM_FOR_LABELS_MAX_EDGES
+#: The furthest the wheel zooms out: a book whose labels need long lines makes a big picture.
+MIN_ZOOM = 0.01
 #: How long a name stays outlined after a jump from the side panel.
 FLASH_MS = 1600
 #: Lines and names that do not belong to the selected character fade to this.
@@ -71,6 +73,8 @@ DIMMED_OPACITY = 0.22
 #: from a name box.
 NAME_PADDING = (18, 10)
 LABEL_PADDING = (12, 6)
+#: A label wider than this goes on more lines (the owner's book: 3,606 px wide against 5,543).
+LABEL_WRAP_WIDTH = 320
 NAME_MARGIN = 3
 #: What a diagram item is (its data(0)): "node<SEP>id" or "edge<SEP>a<SEP>b".
 _KEY_SEP = "\x1f"
@@ -233,6 +237,7 @@ class _TextWidths:
     def __init__(self, font):
         metrics = QFontMetricsF(font)
         self.height = metrics.height()
+        self.line = metrics.lineSpacing()
         self.widths = {chr(code): metrics.horizontalAdvance(chr(code)) for code in range(32, 127)}
         self.wide = metrics.horizontalAdvance("가")
         letters = [self.widths[ch] for ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"]
@@ -241,6 +246,11 @@ class _TextWidths:
     def width(self, text):
         return sum(self.widths.get(ch) or (self.wide if unicodedata.east_asian_width(ch) in "WF" else self.other)
                    for ch in text)
+
+    def size(self, text):
+        """``(width, height)`` of ``text`` with its newlines, as a QGraphicsSimpleTextItem draws it."""
+        lines = text.split("\n")
+        return max(self.width(line) for line in lines), self.height + (len(lines) - 1) * self.line
 
 
 class _GraphView(QGraphicsView):
@@ -278,7 +288,7 @@ class _GraphView(QGraphicsView):
             return super().wheelEvent(event)
         factor = 1.15 if delta > 0 else 1 / 1.15
         current = self.transform().m11()
-        if (factor > 1 and current > 6.0) or (factor < 1 and current < 0.05):
+        if (factor > 1 and current > 6.0) or (factor < 1 and current < MIN_ZOOM):
             return
         self._auto_fit = False
         self.scale(factor, factor)
@@ -734,6 +744,8 @@ class RelationsDiagramDialog(QDialog):
         self._node_font.setBold(True)
         self._label_font = QFont("Segoe UI", 8)
         self._name_widths, self._label_widths = _TextWidths(self._node_font), _TextWidths(self._label_font)
+        self._label_room = {}  # (a, b): width of the widest line of the longest text (``_label_size``)
+        self._shown_focus = None  # the Focus of the last redraw (a new one is outlined for a moment)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_MS)
         self._poll_timer.timeout.connect(self._poll)
@@ -804,7 +816,15 @@ class RelationsDiagramDialog(QDialog):
         text = edge_label_text(edge, True)
         if not text:
             return None
-        return self._label_widths.width(text) + LABEL_PADDING[0], self._label_widths.height + LABEL_PADDING[1]
+        wrapped = self._wrapped(text)
+        width, height = self._label_widths.size(wrapped)
+        # the text of an earlier chapter goes on lines no wider (see ``_add_edge_label``)
+        self._label_room[(edge.get('a'), edge.get('b'))] = (width, wrapped.count("\n") + 1)
+        return width + LABEL_PADDING[0], height + LABEL_PADDING[1]
+
+    def _wrapped(self, text, limit=LABEL_WRAP_WIDTH):
+        """A label longer than ``limit`` on more lines (see ``wrap_label``)."""
+        return relations_tracking.wrap_label(text, self._label_widths.width, limit)
 
     def _compute_layout(self, tracker, glossary_entries, show_unlisted, focus, gender_tracker=None):
         """Positions from the graph of ALL chapters, so nodes stay put while the slider moves
@@ -1061,7 +1081,9 @@ class RelationsDiagramDialog(QDialog):
         self.focus_combo.setInsertPolicy(QComboBox.NoInsert)
         self.focus_combo.setMinimumWidth(200)
         _style_combo(self.focus_combo)
-        self.focus_combo.setToolTip("Type to search; pick a character to place them in the centre")
+        self.focus_combo.setToolTip("Type to search; pick a character to place them in the centre.\n"
+                                    "A book built round one main character keeps its picture: "
+                                    "the name is outlined for a moment.")
         completer = QCompleter(self.focus_combo.model(), self.focus_combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
@@ -1308,7 +1330,9 @@ class RelationsDiagramDialog(QDialog):
 
         edges = [e for e in graph.get('edges') or [] if e['a'] in self._node_items and e['b'] in self._node_items]
         self._edge_count = len(edges)
-        label_all = len(edges) <= MAX_LABELLED_EDGES
+        # all labels only where the layout made room for all of them (it counts the lines of every
+        # chapter: an earlier chapter of a book over the cap still labels the selected name only)
+        label_all = len(edges) <= MAX_LABELLED_EDGES and not getattr(positions, 'labels_capped', False)
         # A selected character keeps its own lines and labels; everything else fades back.
         selected = self._selected if self._selected in self._node_items else None
         related = {selected}
@@ -1331,7 +1355,14 @@ class RelationsDiagramDialog(QDialog):
             line.setZValue(2 if mine else 1)
             if selected is not None and not mine:
                 line.setOpacity(DIMMED_OPACITY)
-            if mine or (selected is None and label_all):
+            # above the cap the layout made room for the Focus character's labels only (none when
+            # the Focus alone has more lines than the cap): those it made room for are drawn (as on
+            # the phone), a clicked name's only when it is the Focus (else its labels would sit on
+            # other relations' lines)
+            focused = (focus is not None and focus in (edge['a'], edge['b'])
+                       and relations_tracking.layout_spot(positions, edge['a'], edge['b']) is not None)
+            if (label_all and (mine or selected is None)) or (not label_all and focused
+                                                             and (selected is None or mine)):
                 to_label.append((math.hypot(pb.x() - pa.x(), pb.y() - pa.y()), edge, pa, pb, color))
         # Short edges have the least room, so they choose their label spot first.
         for _length, edge, pa, pb, color in sorted(to_label, key=lambda item: item[0]):
@@ -1347,7 +1378,7 @@ class RelationsDiagramDialog(QDialog):
         self.status_label.setText(
             f"{len(self._node_items)} characters, {len(edges)} relations"
             + (f", {hidden} hidden" if hidden else "")
-            + ("" if label_all else f" (labels shown for the selected character only above {MAX_LABELLED_EDGES})")
+            + ("" if label_all else f" (labels shown for the Focus character only above {MAX_LABELLED_EDGES})")
             + " · amber = changed · click a name to show only its relations"
             + (" · right-click to edit" if self.can_edit() else "")
             + " · scroll to zoom, drag to pan")
@@ -1355,6 +1386,11 @@ class RelationsDiagramDialog(QDialog):
         if self._refit:
             self._refit = False
             self._view.fit_all()
+        if focus != self._shown_focus:
+            # a new Focus: outline it (round one main character the picture itself stays as it is)
+            self._shown_focus = focus
+            if focus is not None:
+                self.jump_to(focus)
         if self._selected is not None and self._selected in self._node_info:
             # the slider moved or the data changed: the panel follows, also for a name selected from
             # the panel that is not drawn
@@ -1385,7 +1421,16 @@ class RelationsDiagramDialog(QDialog):
         text = edge_label_text(edge, show_former)
         if not text:
             return None
-        label = QGraphicsSimpleTextItem(text)
+        # wrapped no wider than the layout made room for: the words of an earlier chapter break
+        # into other lines than the longest text's, which could come out wider than its widest
+        # (a text the layout did not see, e.g. just edited, that needs more lines: wrapped as usual)
+        wrapped = self._wrapped(text)
+        room = self._label_room.get((edge.get('a'), edge.get('b')))
+        if room is not None and room[0] < LABEL_WRAP_WIDTH:
+            narrow = self._wrapped(text, room[0] + 0.001)
+            if narrow.count("\n") + 1 <= room[1]:
+                wrapped = narrow
+        label = QGraphicsSimpleTextItem(wrapped)
         label.setFont(self._label_font)
         label.setBrush(QBrush(color.lighter(125) if edge.get('changed') else QColor("#e5e7eb")))
         rect = label.boundingRect()
@@ -1398,7 +1443,8 @@ class RelationsDiagramDialog(QDialog):
         placed.append(box)
         self._label_boxes.append(box)
         pill = QPainterPath()
-        pill.addRoundedRect(box, height / 2, height / 2)
+        radius = min(height, self._label_widths.height + LABEL_PADDING[1]) / 2  # one line's round ends
+        pill.addRoundedRect(box, radius, radius)
         border = QColor(color)
         border.setAlpha(150)
         background = self.scene.addPath(pill, QPen(border, 1.0), QBrush(LABEL_BG))

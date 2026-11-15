@@ -397,6 +397,8 @@ def test_diagram_builds_and_slider_changes_edges(qapp):
         # focus places a character in the centre (radial layout) without changing the edges
         dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(rt.tracker_key("서윤")))
         assert dialog.edge_count() == full
+        # ... and outlines the name for a moment (a book round one main character keeps its picture)
+        assert dialog._node_items[rt.tracker_key("서윤")].pen().widthF() > 4
         history = dialog.show_history(rt.tracker_key("서윤"))
         assert any(h["current"] == "Enemy" for h in history)
         assert "Enemy" in dialog.history_panel.toPlainText()
@@ -579,6 +581,179 @@ def test_diagram_labels_with_former_relations_do_not_overlap(qapp):
             assert _diagram_overlaps(dialog) == (0, 0, 0), value
         assert any("Ally [Former Childhood Friend, Sworn Enemy, " in rt.edge_label_text(e, True)
                    for e in dialog._full_graph(tracker, None, None, False)['edges'])
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def _scene_line_problems(dialog, clearance=6.0):
+    """From the items in the scene: (pills a line that is not their own comes within ``clearance``
+    of, beyond the line's half width; names a line that does not end there comes that near; label
+    pills drawn). Own geometry, independent of the layout's bookkeeping."""
+    import math
+    from PySide6.QtWidgets import QGraphicsLineItem, QGraphicsPathItem
+    from relations_diagram_dialog import _KEY_SEP, _NodeItem
+
+    def to_segment(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length2 = dx * dx + dy * dy
+        t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2))
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+    def meet(p1, p2, p3, p4):
+        def side(a, b, c):
+            return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return (side(p3, p4, p1) > 0) != (side(p3, p4, p2) > 0) and (side(p1, p2, p3) > 0) != (side(p1, p2, p4) > 0)
+
+    def gap(a, b, rect):
+        x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
+        if any(x0 <= p[0] <= x1 and y0 <= p[1] <= y1 for p in (a, b)):
+            return 0.0
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        if any(meet(a, b, corners[i], corners[(i + 1) % 4]) for i in range(4)):
+            return 0.0
+        return min([to_segment(c, a, b) for c in corners]
+                   + [math.hypot(max(x0 - p[0], 0.0, p[0] - x1), max(y0 - p[1], 0.0, p[1] - y1)) for p in (a, b)])
+
+    lines, pills, names = [], [], []
+    for item in dialog.scene.items():
+        key = item.data(0)
+        if isinstance(item, QGraphicsLineItem):
+            line = item.line()
+            _kind, a, b = key.split(_KEY_SEP)
+            lines.append((key, a, b, (line.x1(), line.y1()), (line.x2(), line.y2()), item.pen().widthF() / 2))
+        elif isinstance(item, _NodeItem):
+            names.append((item.node_id, item.sceneBoundingRect()))
+        elif isinstance(item, QGraphicsPathItem) and key and key.startswith("edge"):
+            pills.append((key, item.sceneBoundingRect()))
+    touched = sum(1 for key, rect in pills
+                  if any(gap(p, q, rect) - half < clearance for other, _a, _b, p, q, half in lines if other != key))
+    crossed = sum(1 for node, rect in names
+                  if any(gap(p, q, rect) - half < clearance for _k, a, b, p, q, half in lines if node not in (a, b)))
+    return touched, crossed, len(pills)
+
+
+def test_diagram_lines_stay_clear_of_other_labels_and_names(qapp):
+    """The owner's "the text boxes here don't touch other lines": measured from the drawn items, no
+    relation line comes within 6 px of another relation's pill or of a name it does not end at, in the
+    opening view, with the main character focused, with former relations shown and at an earlier
+    chapter; the names stay put meanwhile and no boxes overlap."""
+    from relations_diagram_dialog import RelationsDiagramDialog
+    tracker = _hub_tracker()
+    rt.record_relations(tracker, [{"raw_name": "Hero", "translated_name": "Hero",
+                                   "relations": "; ".join(f"Person {i}: Sworn Enemy" for i in range(0, 32, 3))}],
+                        field="relations", chapter_index=2, chapter_num=3, chapter_file="c3.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker)
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        qapp.processEvents()
+        positions = dict(dialog._positions)
+        assert _scene_line_problems(dialog) == (0, 0, 41) and _diagram_overlaps(dialog) == (0, 0, 0)
+        dialog.show_former_checkbox.setChecked(True)
+        assert dict(dialog._positions) == positions
+        assert _scene_line_problems(dialog) == (0, 0, 41) and _diagram_overlaps(dialog) == (0, 0, 0)
+        dialog.chapter_slider.setValue(dialog.chapter_slider.minimum())
+        assert dict(dialog._positions) == positions
+        assert _scene_line_problems(dialog) == (0, 0, 40) and _diagram_overlaps(dialog) == (0, 0, 0)
+        dialog.show_former_checkbox.setChecked(False)
+        dialog.chapter_slider.setValue(dialog.chapter_slider.maximum())
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(rt.tracker_key("Hero")))
+        _wait_idle(qapp, dialog)
+        focused = dict(dialog._positions)
+        assert _scene_line_problems(dialog) == (0, 0, 41) and _diagram_overlaps(dialog) == (0, 0, 0)
+        dialog.show_former_checkbox.setChecked(True)
+        dialog.chapter_slider.setValue(dialog.chapter_slider.minimum())
+        assert dict(dialog._positions) == focused
+        assert _scene_line_problems(dialog) == (0, 0, 40) and _diagram_overlaps(dialog) == (0, 0, 0)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_diagram_above_the_label_cap_labels_only_the_focus_characters_lines(qapp):
+    """Over the cap the layout makes room for the Focus character's labels only: a name clicked
+    without a Focus gets no pills (they would sit on other relations' lines), the Focus character's
+    lines get theirs, clear of every other line, also when it is clicked."""
+    from relations_diagram_dialog import MAX_LABELLED_EDGES, RelationsDiagramDialog
+    tracker = rt.empty_tracker()
+    names = [f"인물{i:02d}" for i in range(18)]  # 153 pairs
+    rows = [{"raw_name": n, "translated_name": f"P{i}",
+             "relations": "; ".join(f"{o}: Friend" for o in names if o != n)} for i, n in enumerate(names)]
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker)
+    try:
+        dialog.resize(1200, 780)
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.edge_count() > MAX_LABELLED_EDGES
+        key = rt.tracker_key(names[0])
+        assert _scene_line_problems(dialog)[2] == 0
+        dialog._on_node_clicked(key)
+        qapp.processEvents()
+        assert dialog._selected == key and _scene_line_problems(dialog)[2] == 0
+        dialog._on_node_clicked(key)  # unselect
+        qapp.processEvents()
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(key))
+        _wait_idle(qapp, dialog)
+        assert _scene_line_problems(dialog)[0::2] == (0, 17)
+        dialog._on_node_clicked(key)
+        qapp.processEvents()
+        assert _scene_line_problems(dialog)[0::2] == (0, 17)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_diagram_draws_no_focus_labels_the_layout_made_no_room_for(qapp):
+    """A Focus character with more lines than the cap gets no room for its labels (there is no
+    room for that many): its pills are not drawn either (drawn anyway, 16 of 121 sat on other lines)."""
+    from relations_diagram_dialog import MAX_LABELLED_EDGES, RelationsDiagramDialog
+    tracker = rt.empty_tracker()
+    rows = [{"raw_name": "Hub", "translated_name": "Hub",
+             "relations": "; ".join(f"Spoke {i}: Friend" for i in range(MAX_LABELLED_EDGES + 1))}]
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker)
+    try:
+        dialog.resize(1200, 780)
+        dialog.show()
+        qapp.processEvents()
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(rt.tracker_key("Hub")))
+        _wait_idle(qapp, dialog)
+        assert dialog.edge_count() == MAX_LABELLED_EDGES + 1
+        assert not dialog._positions.label_spots
+        assert _scene_line_problems(dialog)[2] == 0
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_diagram_wraps_a_long_label_onto_more_lines(qapp):
+    """A label wider than ``LABEL_WRAP_WIDTH`` goes on more lines, in the pill the layout made room
+    for: a sentence-long label on one line needed a line as long as itself clear of every other line,
+    which set the width of the owner's whole book."""
+    from PySide6.QtWidgets import QGraphicsSimpleTextItem
+    from relations_diagram_dialog import LABEL_WRAP_WIDTH, RelationsDiagramDialog
+    tracker = _hub_tracker()
+    # a long label: one relation that changed many times, shown with its former labels
+    changes = ["Sworn Enemy", "Reluctant Ally", "Business Partner", "Secret Admirer", "Fiance", "Husband"]
+    for number, label in enumerate(changes, start=3):
+        rt.record_relations(tracker, [{"raw_name": "Hero", "translated_name": "Hero",
+                                       "relations": f"Person 1: {label}"}],
+                            field="relations", chapter_index=number - 1, chapter_num=number,
+                            chapter_file=f"c{number}.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker)
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        qapp.processEvents()
+        dialog.show_former_checkbox.setChecked(True)
+        qapp.processEvents()
+        texts = [item for item in dialog.scene.items()
+                 if isinstance(item, QGraphicsSimpleTextItem) and "Secret Admirer" in item.text()]
+        assert len(texts) == 1 and texts[0].text().count("\n") >= 1
+        assert texts[0].boundingRect().width() <= LABEL_WRAP_WIDTH + 1
+        assert _scene_line_problems(dialog)[:2] == (0, 0) and _diagram_overlaps(dialog) == (0, 0, 0)
     finally:
         dialog.close()
         dialog.deleteLater()
