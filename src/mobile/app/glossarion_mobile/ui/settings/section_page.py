@@ -22,6 +22,8 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
+from glossarion_mobile.state.setting_writes import (RELATIONS_FRESH_DEFAULT_KEYS, relations_follows_model,
+                                                    reset_relations_toggle)
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 from glossarion_mobile.ui.components.empty_state import EmptyState
@@ -508,7 +510,13 @@ class SectionPage(Screen):
             if key in MOBILE_READONLY_REASONS:  # edited on its own page (Prompt profiles: Profiles & prompts)
                 continue
             if ok and self.ctx.schema.lock_reason(spec, self.config_view, include_dependencies=False) is None:
-                if self.ctx.store.unset(self.ctx.schema.path_of(key)):
+                if relations_follows_model(self.ctx.store, key):
+                    pass  # holds the mobile default that follows the model: nothing to reset
+                elif key in RELATIONS_FRESH_DEFAULT_KEYS:
+                    # its default follows the selected model (on, off for on-device): the tile's own reset
+                    if reset_relations_toggle(self.ctx.store, key):
+                        removed.append(key)
+                elif self.ctx.store.unset(self.ctx.schema.path_of(key)):
                     removed.append(key)
         self._on_config_change("")
         return removed

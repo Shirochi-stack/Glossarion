@@ -270,9 +270,10 @@ def build_env_preview(
                                 input_path=input_path)
     host = _PreviewHost()
     try:
-        from glossarion_mobile.state.setting_writes import with_mobile_streaming_defaults
+        from glossarion_mobile.state.setting_writes import with_mobile_relations_defaults, with_mobile_streaming_defaults
 
-        snapshot = with_mobile_streaming_defaults(copy.deepcopy(config))  # what a job runs with
+        # what a job runs with
+        snapshot = with_mobile_relations_defaults(with_mobile_streaming_defaults(copy.deepcopy(config)))
         key = api_key if api_key is not None else str(snapshot.get("api_key") or "")
         if env_builder is None:
             # The real builder imports it anyway (key_pools); importing it first lets
@@ -372,9 +373,10 @@ def run_env_check(
         return EnvCheckResult(False, error="Busy: a job or a preview is using the engine. Try again when it finishes.")
     host = _CheckHost()
     try:
-        from glossarion_mobile.state.setting_writes import with_mobile_streaming_defaults
+        from glossarion_mobile.state.setting_writes import with_mobile_relations_defaults, with_mobile_streaming_defaults
 
-        snapshot = with_mobile_streaming_defaults(copy.deepcopy(config))  # what a job runs with
+        # what a job runs with
+        snapshot = with_mobile_relations_defaults(with_mobile_streaming_defaults(copy.deepcopy(config)))
         snapshot["show_debug_buttons"] = True
         key = str(snapshot.get("api_key") or "")
         try:

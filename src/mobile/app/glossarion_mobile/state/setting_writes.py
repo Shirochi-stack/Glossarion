@@ -76,8 +76,13 @@ __all__ = [
     "RELATIONS_FRESH_DEFAULT_KEYS",
     "apply_relations_fresh_defaults",
     "is_sigma_q8_model",
+    "RELATIONS_MOBILE_DEFAULT_TEXT",
     "relations_default_for_model",
     "relations_fresh_defaults_writes",
+    "relations_follows_model",
+    "with_mobile_relations_defaults",
+    "reset_relations_toggle",
+    "restore_relations_toggle",
     "RULE_KEYS",
     "effective_custom_fields",
     "relations_field_name",
@@ -164,8 +169,9 @@ RELATIONS_FIELD_KEY = "glossary_relations_field_name"
 RELATIONS_DEFAULT_FIELD = "relations"
 #: Minimal Generation "Include Relations Column" (``relations_tracking.CONFIG_MINIMAL``)
 MINIMAL_RELATIONS_KEY = "glossary_minimal_include_relations"
-#: A fresh config's mark (``relations_tracking.FRESH_DEFAULTS_KEY``): the Relations Tracker toggles it lists
-#: follow the selected model (``relations_default_for_model``) until the user sets them
+#: The mark (``relations_tracking.FRESH_DEFAULTS_KEY``) of the Relations Tracker toggles the user never set (a
+#: fresh config's two, an existing config's absent ones): they follow the selected model
+#: (``relations_default_for_model``: on, off for on-device models) until the user sets them
 RELATIONS_FRESH_KEY = "glossary_relations_fresh_defaults"
 RELATIONS_FRESH_DEFAULT_KEYS = (RELATIONS_TRACKER_KEY, MINIMAL_RELATIONS_KEY)
 #: names the relations column can never take (``relations_tracking.RESERVED_FIELD_NAMES``; literals as above)
@@ -941,9 +947,15 @@ def is_sigma_q8_model(model: Any) -> bool:
 
 
 def relations_default_for_model(model: Any) -> bool:
-    """A fresh config's Relations Tracker toggles with ``model`` selected (owner 2026-11-13): off for Sigma Q8,
-    on for every other model (no saved model: ``MOBILE_DEFAULT_MODEL``)."""
-    return not is_sigma_q8_model(model or MOBILE_DEFAULT_MODEL)
+    """The Relations Tracker toggles' mobile default with ``model`` selected (owner 2026-11-15: "on in mobile,
+    except for on device models"): off for every on-device ``local/`` model (Sigma Q8 included, off since
+    2026-11-13), on for every other model (no saved model: ``MOBILE_DEFAULT_MODEL``). The desktop default
+    stays off."""
+    return not _is_local_model(model or MOBILE_DEFAULT_MODEL)
+
+
+#: the toggles' default as the mobile Settings info sheet states it (``relations_default_for_model``)
+RELATIONS_MOBILE_DEFAULT_TEXT = "On (Off while an on-device model is selected)"
 
 
 def relations_fresh_defaults_writes(store: Any) -> dict:
@@ -976,6 +988,52 @@ def relations_fresh_defaults_writes(store: Any) -> dict:
     return values
 
 
+def relations_follows_model(store: Any, key: Any) -> bool:
+    """``key`` holds the mobile default that follows the selected model, not a choice (no "modified" mark,
+    nothing to reset): a Relations Tracker toggle the user never set (``RELATIONS_FRESH_KEY`` lists it), or
+    Custom Fields while it is exactly what that tracker toggle put there (the default columns, the relations
+    column added or removed with the toggle)."""
+    if isinstance(key, (list, tuple)):
+        key = key[0] if len(key) == 1 else None
+    present, following = _stored_value(store, RELATIONS_FRESH_KEY)
+    if not present or not isinstance(following, (list, tuple)):
+        return False
+    if key in RELATIONS_FRESH_DEFAULT_KEYS:
+        return key in following
+    if key != CUSTOM_FIELDS_KEY or RELATIONS_TRACKER_KEY not in following:
+        return False
+    stored, fields = _stored_value(store, CUSTOM_FIELDS_KEY)
+    if not stored:
+        return False
+    try:
+        core = importlib.import_module("relations_tracking")
+    except Exception:
+        return False
+    # Custom Fields as an untouched config has them (``effective_custom_fields`` without a stored list)
+    base = effective_custom_fields({DESCRIPTION_REMOVED_KEY: _stored_value(store, DESCRIPTION_REMOVED_KEY)[1]})
+    _present, on = _stored_value(store, RELATIONS_TRACKER_KEY)
+    return list(fields or []) == list(core.apply_relations_field(base, bool(on), relations_field_name(store)))
+
+
+def with_mobile_relations_defaults(config: Any) -> Any:
+    """A job's config snapshot (changed in place and returned): the Relations Tracker toggles the user never
+    set (listed in ``RELATIONS_FRESH_KEY``, or absent from a config without the mark) take the RUN's own
+    model's mobile default (``relations_default_for_model``; a chat or Translate sheet can run another model
+    than the global one), the relations column added / removed with the tracker. A toggle the user set
+    stays; config.json is never written."""
+    if not isinstance(config, dict):
+        return config
+    present, following = _stored_value(config, RELATIONS_FRESH_KEY)
+    if not present:
+        following = [key for key in RELATIONS_FRESH_DEFAULT_KEYS if key not in config]
+    if not isinstance(following, (list, tuple)) or not following:
+        return config
+    view = dict(config)
+    view[RELATIONS_FRESH_KEY] = list(following)
+    config.update(relations_fresh_defaults_writes(view))
+    return config
+
+
 def _relations_set_by_user(store: Any, key: str) -> list:
     """The user set ``key`` (a Relations Tracker toggle): it stops following the model."""
     present, following = _stored_value(store, RELATIONS_FRESH_KEY)
@@ -986,26 +1044,58 @@ def _relations_set_by_user(store: Any, key: str) -> list:
 
 
 def apply_relations_fresh_defaults(store: Any, fresh: bool = False) -> list:
-    """At load: a fresh config (``fresh``: no config.json) is marked ``RELATIONS_FRESH_KEY``, then the marked
-    toggles take the selected model's default. A fresh config gets them as loaded values (``store.seed``:
-    nothing is written until the first real save); a config that already carried the mark (Reset Settings
-    to Defaults) gets ordinary writes. Returns the keys set."""
+    """At load: the Relations Tracker toggles the config does not hold (never set: the mobile store writes
+    keys sparsely, so an absent key is one the user never chose) are marked ``RELATIONS_FRESH_KEY``, then the
+    marked toggles take the selected model's default (``relations_default_for_model``). That is both toggles
+    of a fresh config (``fresh``: no config.json), and since 2026-11-15 the untouched toggles of an existing
+    one too (owner: "change the relations toggle defaults to be on. In mobile"); a stored value, an explicit
+    false included, is the user's and stays. Marked values are seeded like loaded ones (``store.seed``: nothing
+    is written until the next real save, so the file stays as it was until then); a config that already
+    carried the mark (Reset Settings to Defaults) gets ordinary writes. Returns the keys set."""
     if store is None:
         return []
     seed = getattr(store, "seed", None)
-    if fresh and not _stored_value(store, RELATIONS_FRESH_KEY)[0]:
-        marker = {RELATIONS_FRESH_KEY: list(RELATIONS_FRESH_DEFAULT_KEYS)}
-        if callable(seed):
-            seed(marker)
-        else:
-            _set_many(store, marker)
+    seeding = False
+    if not _stored_value(store, RELATIONS_FRESH_KEY)[0]:
+        untouched = [key for key in RELATIONS_FRESH_DEFAULT_KEYS if fresh or not _stored_value(store, key)[0]]
+        if untouched:
+            seeding = True
+            marker = {RELATIONS_FRESH_KEY: untouched}
+            if callable(seed):
+                seed(marker)
+            else:
+                _set_many(store, marker)
     values = relations_fresh_defaults_writes(store)
     if not values:
         return []
-    if fresh and callable(seed):
+    if seeding and callable(seed):
         seed(values)
         return list(values)
     return _set_many(store, values)
+
+
+def reset_relations_toggle(store: Any, key: str) -> dict:
+    """Settings' "Reset to default" of a Relations Tracker toggle: it follows the selected model again (the
+    mobile default, ``relations_default_for_model``), its relations column with it. Returns ``{key: old
+    value}`` of every key it changed (``None`` for one that was absent) for Undo (``restore_relations_toggle``)."""
+    touched = (key, RELATIONS_FRESH_KEY, CUSTOM_FIELDS_KEY)
+    old = {name: _stored_value(store, name) for name in touched}
+    _present, following = _stored_value(store, RELATIONS_FRESH_KEY)
+    following = list(following) if isinstance(following, (list, tuple)) else []
+    if key not in following:
+        _set_many(store, {RELATIONS_FRESH_KEY: following + [key]})
+    _set_many(store, relations_fresh_defaults_writes(store))
+    return {name: (value if present else None) for name, (present, value) in old.items()
+            if _stored_value(store, name) != (present, value)}
+
+
+def restore_relations_toggle(store: Any, old: Mapping) -> None:
+    """Undo of ``reset_relations_toggle``: the keys as they were (``None``: absent)."""
+    for name, value in dict(old or {}).items():
+        if value is None:
+            _unset(store, name)
+        else:
+            _set_many(store, {name: value})
 
 
 def write_setting(store: Any, key: Any, value: Any) -> list:

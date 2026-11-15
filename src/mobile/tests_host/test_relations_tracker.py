@@ -612,6 +612,62 @@ def test_the_chapter_number_box_is_off_for_a_single_chapter(iso, tmp_path):
     asyncio.run(scenario())
 
 
+def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
+    """Owner 2026-11-15: "the relationship diagram in mobile should be zoomed out by default": the whole canvas
+    fits the viewer when the screen opens and when the layout changes (Focus, Unlisted names); the update check,
+    the slider and a later size change (the keyboard) leave the zoom alone."""
+    from glossarion_mobile.ui.glossary.relations_diagram import FIT_PADDING, RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
+        calls: list = []
+
+        def recorder(name):
+            async def call(*args):
+                calls.append((name, *args))
+            return call
+
+        for name in ("reset", "pan", "zoom"):
+            object.__setattr__(diagram.viewer, name, recorder(name))
+        assert diagram.fit_due and diagram.fit_all() is None  # no size yet: waits for the first one
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"] and not diagram.fit_due
+        scale, dx, dy = calls[2][1], calls[1][1], calls[1][2]
+        width, height = diagram.width, diagram.height
+        assert width * scale <= 560 - 2 * FIT_PADDING + 0.01 and height * scale <= 500 - 2 * FIT_PADDING + 0.01
+        assert scale < 1  # the canvas (at least 676 x 520 dp) is zoomed out to fit
+        assert abs(dx - (560 - width * scale) / 2) < 0.01 and abs(dy - (500 - height * scale) / 2) < 0.01
+        # Flutter stops zooming out where canvas + boundary margin no longer covers the viewport: widened
+        margin = diagram.viewer.boundary_margin.left
+        assert (width + 2 * margin) * scale >= 560 and (height + 2 * margin) * scale >= 500
+        calls.clear()
+        diagram.set_chapter(diagram.low)  # the slider
+        diagram._apply_state(tracker=_tracker())  # the once-a-second update
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))  # the keyboard opened
+        await _settle()
+        assert calls == []
+        diagram.set_focus(diagram.all_graph["nodes"][0]["id"])  # a new layout: fitted again
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        calls.clear()
+        diagram.set_unlisted(True)
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        # a huge canvas: far out, the margin grows with it
+        diagram._set_canvas(6000.0, 900.0)
+        scale, _dx, _dy, margin = diagram.fit_transform()
+        assert scale * 6000 <= 560 - 2 * FIT_PADDING + 0.01 and (900 + 2 * margin) * scale >= 260
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram, edge_label_text
 
@@ -1058,6 +1114,10 @@ def test_sigma_q8_is_recognised_by_its_file(engine_service):
     assert not sw.is_sigma_q8_model("local/sigma-q4") and not sw.is_sigma_q8_model(QWEN)
     assert not sw.is_sigma_q8_model("authchatgpt/auto") and not sw.is_sigma_q8_model(None)
     assert sw.relations_default_for_model(None) is True and sw.relations_default_for_model(SIGMA) is False
+    # owner 2026-11-15: off for every on-device model, on for cloud / remote ones
+    assert sw.relations_default_for_model(QWEN) is False and sw.relations_default_for_model("local/sigma-q4") is False
+    assert sw.relations_default_for_model("authchatgpt/auto") is True
+    assert sw.relations_default_for_model("ollamapull/qwen3:8b") is True  # runs on the user's PC, not the phone
 
 
 def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_service, tmp_path):
@@ -1082,7 +1142,9 @@ def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_serv
     # another model: on again by themselves
     sw.write_setting(store, "model", "authchatgpt/auto")
     assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
-    sw.write_setting(store, "model", QWEN)  # any other model, on-device too
+    sw.write_setting(store, "model", QWEN)  # every on-device model (owner 2026-11-15)
+    assert _toggles(store) == (False, False) and "relations" not in (store.get(FIELDS) or [])
+    sw.write_setting(store, "model", "authchatgpt/auto")
     assert _toggles(store) == (True, True)
     sw.write_setting(store, "model", SIGMA)
     assert _toggles(store) == (False, False)
@@ -1097,7 +1159,7 @@ def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_serv
     for model in (SIGMA, "authchatgpt/auto", QWEN, SIGMA, "authchatgpt/auto"):
         sw.write_setting(store, "model", model)
         assert store.get(TOGGLE) is False
-        assert store.get(MINIMAL_TOGGLE) is (model != SIGMA)
+        assert store.get(MINIMAL_TOGGLE) is (not model.startswith("local/"))
     # Minimal set by hand too: nothing follows the model any more
     sw.write_setting(store, MINIMAL_TOGGLE, False)
     assert not store.has(FRESH)
@@ -1108,23 +1170,201 @@ def test_fresh_config_follows_the_model_until_the_user_sets_a_toggle(engine_serv
     store._saver.close()
 
 
-def test_existing_config_without_the_keys_stays_off_on_every_model(engine_service, tmp_path):
+def test_existing_config_without_the_keys_follows_the_model_too(engine_service, tmp_path):
+    """Owner 2026-11-15 ("change the relations toggle defaults to be on. In mobile. Except for on device
+    models"): an existing config whose toggles were never set (the mobile store writes keys sparsely, so they
+    are absent) gets the mobile default too: seeded, so the file is not rewritten for it."""
     from glossarion_mobile.state import setting_writes as sw
 
     path = tmp_path / "config.json"
     original = json.dumps({"model": "authchatgpt/auto", "temperature": 0.5})
     path.write_text(original, encoding="utf-8")
     store = _plain_store(path)
-    assert sw.apply_relations_fresh_defaults(store, fresh=False) == []
-    assert not store.has(TOGGLE) and not store.has(MINIMAL_TOGGLE) and not store.has(FRESH)
-    assert not store.flush() and path.read_text(encoding="utf-8") == original  # byte-identical
-    for model in (SIGMA, QWEN, "authchatgpt/auto"):
+    assert sorted(sw.apply_relations_fresh_defaults(store, fresh=False)) == sorted([TOGGLE, MINIMAL_TOGGLE, FIELDS])
+    assert _toggles(store) == (True, True) and store.get(FIELDS) == ["description", "relations"]
+    assert store.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    assert not store.flush() and path.read_text(encoding="utf-8") == original  # byte-identical until a real save
+    for model, on in ((SIGMA, False), (QWEN, False), ("authchatgpt/auto", True)):
         sw.write_setting(store, "model", model)
-        assert not store.get(TOGGLE) and not store.get(MINIMAL_TOGGLE) and not store.has(FRESH)
+        assert _toggles(store) == (on, on) and ("relations" in (store.get(FIELDS) or [])) is on
+    # a second load of the saved file: nothing new (the toggles are stored now, the mark still lists them)
+    store.flush()
+    store._saver.close()
+    again = _plain_store(path)
+    assert sw.apply_relations_fresh_defaults(again, fresh=False) == [] and _toggles(again) == (True, True)
+    again._saver.close()
+
+
+def test_existing_config_on_an_on_device_model_starts_off(engine_service, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": QWEN, "custom_glossary_fields": []}), encoding="utf-8")
+    store = _plain_store(path)
+    sw.apply_relations_fresh_defaults(store, fresh=False)
+    assert _toggles(store) == (False, False) and store.get(FIELDS) == []  # no relations column
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
     store._saver.close()
 
 
-def test_settings_load_marks_only_a_missing_config_fresh(engine_service, tmp_path):
+def test_a_stored_toggle_is_the_users_and_never_follows(engine_service, tmp_path):
+    """A value in config.json (an explicit false too: set by hand, or a desktop config) is a choice: it stays;
+    only the absent one follows the model."""
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    original = json.dumps({"model": "authchatgpt/auto", TOGGLE: False})
+    path.write_text(original, encoding="utf-8")
+    store = _plain_store(path)
+    sw.apply_relations_fresh_defaults(store, fresh=False)
+    assert store.get(FRESH) == [MINIMAL_TOGGLE] and _toggles(store) == (False, True)
+    for model in (SIGMA, "authchatgpt/auto"):
+        sw.write_setting(store, "model", model)
+        assert store.get(TOGGLE) is False
+    both = tmp_path / "both.json"
+    both.write_text(json.dumps({TOGGLE: False, MINIMAL_TOGGLE: False}), encoding="utf-8")
+    kept = _plain_store(both)
+    assert sw.apply_relations_fresh_defaults(kept, fresh=False) == [] and not kept.has(FRESH)
+    store._saver.close()
+    kept._saver.close()
+
+
+def test_reset_to_default_follows_the_model_again(engine_service, tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": "authchatgpt/auto", TOGGLE: False, MINIMAL_TOGGLE: False}), encoding="utf-8")
+    store = _plain_store(path)
+    old = sw.reset_relations_toggle(store, TOGGLE)
+    assert store.get(TOGGLE) is True and store.get(FRESH) == [TOGGLE] and "relations" in store.get(FIELDS)
+    assert old == {TOGGLE: False, FRESH: None, FIELDS: None}
+    sw.write_setting(store, "model", SIGMA)
+    assert store.get(TOGGLE) is False and store.get(MINIMAL_TOGGLE) is False  # Minimal is still the user's
+    sw.restore_relations_toggle(store, old)  # Undo
+    assert store.get(TOGGLE) is False and not store.has(FRESH) and not store.has(FIELDS)
+    store._saver.close()
+
+
+def test_a_run_uses_the_default_of_its_own_model(engine_service, tmp_path):
+    """A chat or the Translate sheet can run another model than the global one (config_overrides): the
+    toggles the user never set follow the RUN's model in the job's config; config.json is untouched."""
+    from glossarion_mobile.services.jobs import JobService
+    from glossarion_mobile.state import setting_writes as sw
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": "authchatgpt/auto"}), encoding="utf-8")
+    store = _plain_store(path)
+    sw.apply_relations_fresh_defaults(store)
+    assert _toggles(store) == (True, True) and "relations" in store.get(FIELDS)
+
+    def run_config(overrides, source=None):
+        config = dict(source if source is not None else store.snapshot())
+        config.update(overrides)
+        return sw.with_mobile_relations_defaults(sw.with_mobile_streaming_defaults(config))
+
+    local = run_config({"model": QWEN})
+    assert (local[TOGGLE], local[MINIMAL_TOGGLE]) == (False, False) and "relations" not in local[FIELDS]
+    cloud = run_config({"model": "authchatgpt/auto"})
+    assert (cloud[TOGGLE], cloud[MINIMAL_TOGGLE]) == (True, True) and "relations" in cloud[FIELDS]
+    # a config without the mark (a run before Settings loaded, a loader without the store): absent = following
+    bare = run_config({"model": SIGMA}, source={"model": "authchatgpt/auto"})
+    assert (bare[TOGGLE], bare[MINIMAL_TOGGLE]) == (False, False) and FRESH not in bare
+    bare_cloud = run_config({}, source={"model": "authchatgpt/auto"})
+    assert (bare_cloud[TOGGLE], bare_cloud[MINIMAL_TOGGLE]) == (True, True) and "relations" in bare_cloud[FIELDS]
+    # the global model on-device, the chat on a cloud model: on for that run
+    sw.write_setting(store, "model", QWEN)
+    assert _toggles(store) == (False, False)
+    assert run_config({"model": "authchatgpt/auto"})[TOGGLE] is True
+    # a toggle the user set stays as set in every run
+    sw.write_setting(store, TOGGLE, True)
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    hand = run_config({"model": QWEN})
+    assert hand[TOGGLE] is True and hand[MINIMAL_TOGGLE] is False and "relations" in hand[FIELDS]
+    desktop = run_config({"model": "authchatgpt/auto"}, source={TOGGLE: False, MINIMAL_TOGGLE: False})
+    assert (desktop[TOGGLE], desktop[MINIMAL_TOGGLE]) == (False, False)
+
+    # the job manager builds a run's config that way (store snapshot + the run's overrides)
+    manager = JobService.__new__(JobService)
+    manager.config_store, manager._config_loader = store, None
+    manager._note_job_running = lambda running: None
+    sw.reset_relations_toggle(store, TOGGLE)  # following again
+    job = types.SimpleNamespace(spec=types.SimpleNamespace(params={"config_overrides": {"model": QWEN}}),
+                                instance=None)
+    config = JobService._config_snapshot(manager, job)
+    assert config["model"] == QWEN and config[TOGGLE] is False and "relations" not in config[FIELDS]
+    assert store.get(TOGGLE) is True  # the store keeps the global model's value
+    store._saver.close()
+
+
+def test_restore_and_import_seed_the_untouched_toggles(engine_service, tmp_path, monkeypatch):
+    """A backup restore / config import in the session gets what app start gives it."""
+    from glossarion_mobile.ui.screens import backup
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"model": "authchatgpt/auto", TOGGLE: False}), encoding="utf-8")
+    store = _plain_store(path)
+    saved = tmp_path / "backup.json"
+    saved.write_text(json.dumps({"model": QWEN}), encoding="utf-8")
+    fake = types.SimpleNamespace(
+        restore_config_backup_file=lambda target, source, safety_backup=None: Path(target).write_text(
+            Path(source).read_text(encoding="utf-8"), encoding="utf-8"),
+        backup_config_file=lambda p: None)
+    monkeypatch.setitem(sys.modules, "config_store", fake)
+    backup.restore_backup(store, str(saved))
+    assert _toggles(store) == (False, False) and store.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    from glossarion_mobile.state import setting_writes as sw
+
+    sw.write_setting(store, "model", "authchatgpt/auto")
+    assert _toggles(store) == (True, True)
+    store._saver.close()
+
+
+def test_settings_counts_a_following_toggle_as_unchanged(engine_service, tmp_path):
+    """The section subtitle, the Modified search filter and the section reset agree with the tile: a toggle
+    that follows the model is the default, not a change."""
+    from glossarion_mobile.state import setting_writes as sw
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.settings.context import SettingsContext
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+    from glossarion_mobile.ui.settings.settings_home import SettingsHome
+
+    schema = _schema()
+    store = _store(tmp_path, schema, {"model": "authchatgpt/auto"})
+    sw.apply_relations_fresh_defaults(store)
+    assert store.is_modified((TOGGLE,))  # seeded on, the desktop default is off
+    ctx = SettingsContext(page=None, store=store, schema=schema)
+    section = next(s for s in schema.sections() if TOGGLE in s.keys)
+    home = SettingsHome(parse_route("/settings"), ctx)
+    assert "changed" not in home._section_tile(section).subtitle.value
+    assert not schema.is_modified(store, TOGGLE) and not schema.is_stored(store, TOGGLE)
+    # the relations column the toggle seeded into Custom Fields is part of that default too
+    assert store.get(FIELDS) == ["description", "relations"] and store.is_modified((FIELDS,))
+    fields_section = next(s for s in schema.sections() if FIELDS in s.keys)
+    assert "changed" not in home._section_tile(fields_section).subtitle.value
+    assert not schema.is_modified(store, FIELDS) and not schema.is_stored(store, FIELDS)
+    fields_page = SectionPage(parse_route(f"/settings/s/{fields_section.id}"), ctx)
+    fields_page.get_body()
+    assert FIELDS not in fields_page.reset_section() and store.get(FIELDS) == ["description", "relations"]
+    fields_tile = fields_page.tile(FIELDS)
+    assert not fields_tile.modified_dot.visible and fields_tile.value_text.value.endswith("· default")
+    page = SectionPage(parse_route(f"/settings/s/{section.id}"), ctx)
+    page.get_body()
+    assert TOGGLE not in page.reset_section() and store.get(TOGGLE) is True
+    # set by hand: a change, and the section reset makes it follow the model again (on), not the desktop off
+    sw.write_setting(store, TOGGLE, False)
+    assert schema.is_modified(store, TOGGLE) is False  # off is the desktop display default
+    assert schema.is_stored(store, TOGGLE)
+    assert TOGGLE in page.reset_section()
+    assert store.get(TOGGLE) is True and sw.relations_follows_model(store, TOGGLE)
+    assert sw.relations_follows_model(store, FIELDS)  # the column came back with it
+    # a column the user added is a change of their own
+    store.set(FIELDS, ["description", "relations", "age"])
+    assert schema.is_modified(store, FIELDS) and not sw.relations_follows_model(store, FIELDS)
+    store._saver.close()
+
+
+def test_settings_load_seeds_the_untouched_toggles(engine_service, tmp_path):
     from glossarion_mobile.ui.settings.integration import SettingsFeature
 
     fresh = _plain_store(tmp_path / "fresh" / "config.json")
@@ -1135,9 +1375,41 @@ def test_settings_load_marks_only_a_missing_config_fresh(engine_service, tmp_pat
     old_path.write_text(json.dumps({"model": "m"}), encoding="utf-8")
     old = _plain_store(old_path)
     asyncio.run(SettingsFeature(page=None, store=old).load())
-    assert old.snapshot() == {"model": "m"}
+    assert _toggles(old) == (True, True) and old.get(FRESH) == [TOGGLE, MINIMAL_TOGGLE]
+    assert not old.flush() and json.loads(old_path.read_text(encoding="utf-8")) == {"model": "m"}
     fresh._saver.close()
     old._saver.close()
+
+
+def test_info_sheet_states_the_mobile_default(engine_service, tmp_path):
+    """The info sheet says what the phone does (on; off for on-device models), not the desktop tooltip's
+    "Default OFF." (the desktop text itself is unchanged)."""
+    from glossarion_mobile.ui.settings.tiles import SwitchTile
+
+    schema = _schema()
+    spec = schema.spec(TOGGLE)
+    assert "Default OFF." in spec.tooltip  # the desktop tooltip
+    store = _store(tmp_path, schema)  # with the schema's display defaults
+    ctx = types.SimpleNamespace(store=store, schema=schema, page=None, push=lambda *a: None, say=lambda *a, **k: None)
+    for key in (TOGGLE, MINIMAL_TOGGLE):
+        body = SwitchTile(schema.spec(key), ctx).help_body()
+        assert "Default OFF" not in body and "Default: Off" not in body
+        assert "Default: On (Off while an on-device model is selected)" in body
+    other = SwitchTile(schema.spec("glossary_skip_gender_tracking"), ctx).help_body()
+    assert "Default: " in other and "on-device" not in other
+    # a toggle that follows the model shows as the default (no "modified" dot, nothing to reset) ...
+    import flet as ft
+    from glossarion_mobile.state import setting_writes as sw
+
+    sw.apply_relations_fresh_defaults(store)
+    tile = SwitchTile(schema.spec(TOGGLE), ctx)
+    assert tile.follows_mobile_default() and tile.switch.value is True
+    assert tile.value_text.value == "On · default" and not tile.modified_dot.visible
+    assert not any(isinstance(a, ft.TextButton) for a in tile.open_help().actions)
+    # ... until the user sets it
+    assert tile.apply(False) and not tile.follows_mobile_default()
+    assert store.get(TOGGLE) is False and tile.value_text.value == "Off" and store.get(FRESH) == [MINIMAL_TOGGLE]
+    store._saver.close()
 
 
 def test_reset_settings_starts_a_fresh_config(engine_service, tmp_path):

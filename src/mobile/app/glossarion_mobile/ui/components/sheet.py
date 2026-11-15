@@ -9,10 +9,12 @@ an action row pinned under it; ``bottom_sheet`` builds the sheet around it.
 
 Flet 1.0.3 lays a scrolling Column out at least as tall as its bounded parent
 (``scrollable_control.dart`` ``_InnerConstraintsEnforcer``), so a sheet with a scrolling body
-opens at full height. Sheets that are often short (``ActionSheet``, ``InfoSheet``) estimate their
-height at 200 % text and keep a compact, non-scrolling body only when it surely fits
-(``fits_compact``). ``fitted_column`` is for a body that grows while it is open (an expanding row): it
-measures its content and stays as tall as that, scrolling once that passes the screen.
+opened at full height, with empty space under short content. ``fitted_column`` measures its content
+and stays as tall as that (also while it grows or shrinks), scrolling once that passes the screen;
+``scroll_sheet`` (and so ``glossary.common.sheet``) builds every body that way. Sheets that are often
+short (``ActionSheet``, ``InfoSheet``) estimate their height at 200 % text and keep a compact,
+non-scrolling body when it surely fits (``fits_compact``), else the measured box
+(``compact_or_fitted``).
 
 Flutter's modal sheet wraps the content in ``SafeArea(bottom: false)``, so with Android 15
 edge-to-edge and 3-button navigation the last row sat under the navigation bar. ``sheet_frame``
@@ -43,7 +45,9 @@ __all__ = [
     "install_close_buttons",
     "no_drag_dismiss",
     "with_close_button",
+    "compact_or_fitted",
     "fits_compact",
+    "fitted_box",
     "fitted_column",
     "page_width",
     "scroll_column",
@@ -90,7 +94,14 @@ def scroll_column(
 def fitted_column(controls: Sequence[ft.Control], *, spacing: float = 10, estimate: Optional[float] = None) -> ft.Container:
     """A sheet body as tall as its content, measured, also as it grows or shrinks; past the screen it takes the
     sheet's full height and scrolls. ``estimate``: its height (dp) until the first measure."""
-    content = ft.Column(list(controls), spacing=spacing, tight=True)
+    return fitted_box(ft.Column(list(controls), spacing=spacing, tight=True), estimate=estimate)
+
+
+def fitted_box(content: ft.Column, *, estimate: Optional[float] = None) -> ft.Container:
+    """``content`` (a tight, non-scrolling Column) in a box as tall as it measures (``fitted_column``): the
+    box's scrolling Column is ``box.content``, ``content`` its only child. Setting ``box.content.scroll`` to
+    None keeps a body that surely fits from scrolling at all (``fits_compact``)."""
+    content.scroll = None
     box = ft.Container(content=ft.Column([content], spacing=0, tight=True, scroll=ft.ScrollMode.AUTO), height=estimate)
 
     def measured(e: Any) -> None:
@@ -113,6 +124,20 @@ def fitted_column(controls: Sequence[ft.Control], *, spacing: float = 10, estima
 
     content.on_size_change = measured
     return box
+
+
+def compact_or_fitted(content: ft.Column, page: Any, estimate: float) -> ft.Control:
+    """The body of a sheet that is often short (``InfoSheet``, ``ActionSheet``): ``content`` itself, not
+    scrolling, when its 200 % estimate (``estimate`` dp) surely fits (``fits_compact``); else ``content`` in a
+    ``fitted_box``, as tall as it measures and scrolling only past the screen. (A scrolling Column alone
+    opened such a sheet at full height with empty space under its text: owner 2026-11-15, "update all
+    these info menu to not use up the entire screen space".)"""
+    if fits_compact(page, estimate):
+        content.scroll = None
+        content.on_size_change = None
+        return content
+    # until the first measure: the estimate at 100 % text (the 200 % one would open it far too tall)
+    return fitted_box(content, estimate=max(120.0, estimate / WORST_TEXT_SCALE))
 
 
 # ---- "Close Menu ✕" on every sheet -------------------------------------------------------------
@@ -291,16 +316,22 @@ def scroll_sheet(
     padding: Any = None,
     key: Optional[str] = None,
     scroll: bool = True,
+    estimate: Optional[float] = None,
 ) -> ft.BottomSheet:
     """A scrolling sheet (moved from ``glossary.common.sheet``): title, ``controls`` and an
-    ``actions`` row at the end of the scroll."""
+    ``actions`` row at the end of the scroll. It is only as tall as its rows (``fitted_column``: measured,
+    also while it grows or shrinks; ``estimate`` dp until the first measure) and scrolls once they pass the
+    screen; with the keyboard open the sheet's body gets the room above it and scrolls, so every field and the
+    action row stay reachable. ``scroll=False``: content that surely fits, never measured."""
     body: list = []
     if title:
         body.append(ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600))
     body.extend(controls)
     if actions:
         body.append(ft.Row(list(actions), alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8))
-    return bottom_sheet(sheet_frame(scroll_column(body, spacing=spacing, scroll=scroll), padding=padding), key=key)
+    column = (fitted_column(body, spacing=spacing, estimate=estimate) if scroll
+              else scroll_column(body, spacing=spacing, scroll=False))
+    return bottom_sheet(sheet_frame(column, padding=padding), key=key)
 
 
 # ---- compact-or-scroll estimate ---------------------------------------------------------------

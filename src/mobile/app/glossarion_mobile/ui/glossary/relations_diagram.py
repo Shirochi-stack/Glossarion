@@ -5,7 +5,10 @@ and gender tracker (``<glossary>_gender_tracker.json``): ``relations_tracking.bu
 ``layout_graph`` drawn on a ``canvas.Canvas`` inside an ``InteractiveViewer`` (pinch zoom, pan; the manga
 editor's ``_source_viewer`` pattern). Edges are lines with their label ON the line where the layout made
 room for it (``layout_graph`` gets the name and label sizes; ``place_labels``; the canvas grows to what
-the layout needs). Labels are ``relations_tracking.edge_label_text``: "Father / Daughter", one side alone
+the layout needs). The screen opens zoomed out to the whole diagram, centred, and fits it again when the
+layout changes (Focus, Unlisted names), like the desktop ``fit_all`` (``fit_transform``: reset, pan and
+zoom of the viewer, its boundary margin widened so it may zoom that far out); the update check and the
+slider keep the user's own zoom and pan. Labels are ``relations_tracking.edge_label_text``: "Father / Daughter", one side alone
 when only one is known, no label when none is. Lines are amber when the relation changed; nodes are
 rounded name labels tinted by the gender known at the slider's chapter (female pink, male blue, others grey; unlisted names paler). Names tracked
 for gender but without relations are drawn without lines while Gender is shown.
@@ -76,6 +79,11 @@ LABEL_MAX_WIDTH = 180
 NODE_MARGIN = 3
 #: the auto-update check (decision B: once a second)
 POLL_SECONDS = 1.0
+#: how far past the canvas the viewer pans (dp); ``fit_transform`` widens it when a fit needs more
+BOUNDARY_MARGIN = 200
+#: the fitted diagram's room from the viewer's edges (dp) and its largest scale (desktop ``fit_all``: 1.4)
+FIT_PADDING = 12
+FIT_MAX_SCALE = 1.4
 UNDO_LIMIT = 20
 GENDER_CHOICES = (("male", "Male"), ("female", "Female"), ("auto", "Not set (automatic)"))
 _SMALL = dict(theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
@@ -177,6 +185,9 @@ class RelationsDiagram:
         self.task: Any = None  # the last edit started from a form (tests await it)
         self.reloads = 0
         self._layout_key: Any = None
+        self.fit_due = True
+        self.fit_task: Any = None
+        self.viewer_size: Optional[tuple] = None  # (width, height) of the zoom viewer, once laid out
         self.all_graph = self._all_graph() if self.core is not None else {"nodes": [], "edges": []}
         self._size()
         self.view = self._build_view()
@@ -463,7 +474,9 @@ class RelationsDiagram:
         self.stack = ft.Stack([self.canvas], width=self.width, height=self.height, key="rel-stack")
         # zooms far out: a book whose labels need long lines makes a big canvas
         self.viewer = ft.InteractiveViewer(content=self.stack, constrained=False, min_scale=0.02, max_scale=4,
-                                           boundary_margin=ft.Margin.all(200), key="rel-viewer")
+                                           boundary_margin=ft.Margin.all(BOUNDARY_MARGIN),
+                                           on_size_change=self._on_viewer_size, key="rel-viewer")
+        self.fit_due = True  # the whole diagram is fitted in once the viewer's size is known
         return ft.Column([
             ft.Row([self.chapter_label, self.chapter_minus, self.chapter_field, self.chapter_plus], spacing=4,
                    run_spacing=0, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -716,6 +729,7 @@ class RelationsDiagram:
         self.focus = None if node_id in (None, "", ALL_CHARACTERS) else str(node_id)
         self._layout()
         self.rebuild()
+        self.fit_all()  # a new layout: the whole of it in view again
 
     def set_former(self, on: bool) -> None:
         self.show_former = bool(on)
@@ -728,6 +742,70 @@ class RelationsDiagram:
         self._layout()
         self.rebuild()
         self.ctx.push(self.focus_picker)
+        self.fit_all()
+
+    # ---- fit (desktop RelationsDiagramDialog.fit_all) ------------------------------------------------
+
+    def _on_viewer_size(self, e: Any) -> None:
+        """The viewer's size (Flet ``on_size_change``): kept for ``fit_all``; the first one fits the diagram
+        in. Later ones (the keyboard of the chapter box, a rotation) leave the user's zoom alone."""
+        try:
+            size = (float(e.width), float(e.height))
+        except (TypeError, ValueError, AttributeError):
+            return
+        if size[0] <= 0 or size[1] <= 0:
+            return
+        self.viewer_size = size
+        if self.fit_due:
+            self.fit_all()
+
+    def fit_transform(self) -> Optional[tuple]:
+        """``(scale, dx, dy, margin)`` that shows the whole canvas centred in the viewer (``FIT_PADDING`` dp
+        around it; never above ``FIT_MAX_SCALE``, as on the desktop) and the boundary margin that lets the
+        viewer zoom that far out (Flutter's InteractiveViewer never zooms out past the point where its
+        boundary, the canvas plus the margin, would stop covering the viewport). None before the size is
+        known."""
+        size = getattr(self, "viewer_size", None)
+        if not size or not self.width or not self.height:
+            return None
+        view_w, view_h = size
+        width, height = float(self.width), float(self.height)
+        scale = min((view_w - 2 * FIT_PADDING) / width, (view_h - 2 * FIT_PADDING) / height, FIT_MAX_SCALE)
+        scale = max(scale, 0.02)  # the viewer's min_scale
+        dx, dy = (view_w - width * scale) / 2, (view_h - height * scale) / 2
+        margin = max(BOUNDARY_MARGIN, (view_w / scale - width) / 2, (view_h / scale - height) / 2,
+                     view_w - width, view_h - height) + FIT_PADDING
+        return round(scale, 4), round(dx, 2), round(dy, 2), math.ceil(margin)
+
+    def fit_all(self) -> Any:
+        """Zoom out (or in) so the whole diagram is in view, centred: when the screen opens and when the
+        layout changes (Focus, Unlisted names). Never on the once-a-second update or a slider move, which
+        keep the user's zoom and pan. Before the viewer's size is known it runs on the first size."""
+        if self.empty or not hasattr(self, "viewer"):
+            return None
+        fit = self.fit_transform()
+        if fit is None:
+            self.fit_due = True
+            return None
+        self.fit_due = False
+        self.fit_task = self.ctx.spawn(self._apply_fit(*fit))
+        return self.fit_task
+
+    async def _apply_fit(self, scale: float, dx: float, dy: float, margin: float) -> None:
+        """InteractiveViewer (Flet 1.0.3) has no "set transform": back to the identity, move the canvas to
+        where its fitted top-left goes (at scale 1 a pan is in screen dp), then ``zoom``, which scales about
+        that point (``scaleByDouble`` on the current matrix). The boundary margin is widened first so neither
+        step is clamped."""
+        viewer = self.viewer
+        try:
+            if viewer.boundary_margin != ft.Margin.all(margin):
+                viewer.boundary_margin = ft.Margin.all(margin)
+                self.ctx.push(viewer)
+            await viewer.reset()
+            await viewer.pan(dx, dy)
+            await viewer.zoom(scale)
+        except Exception:  # not on a page (yet), or the screen closed meanwhile
+            log.debug("fitting the relations diagram failed", exc_info=True)
 
     # ---- view filters (stored per book in the tracker's "view" key) --------------------------------
 

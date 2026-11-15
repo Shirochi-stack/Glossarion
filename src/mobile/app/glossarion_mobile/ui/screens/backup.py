@@ -50,6 +50,10 @@ def restore_backup(store: Any, backup_path: str) -> str:
     config_store.restore_config_backup_file(
         store.path, backup_path, safety_backup=lambda: config_store.backup_config_file(store.path))
     store.reload()
+    # as at app start: the Relations Tracker toggles the restored config does not hold follow the model
+    from glossarion_mobile.state.setting_writes import apply_relations_fresh_defaults
+
+    apply_relations_fresh_defaults(store)
     return os.path.basename(backup_path)
 
 
@@ -328,6 +332,10 @@ class BackupScreen(PageScreen):
             store.flush()
             store.backup_now()
             changed = store.revert_to(config)
+            # as at app start: the Relations Tracker toggles the imported config does not hold follow the model
+            from glossarion_mobile.state.setting_writes import apply_relations_fresh_defaults
+
+            apply_relations_fresh_defaults(store)
             store.flush()
             return len(changed)
 

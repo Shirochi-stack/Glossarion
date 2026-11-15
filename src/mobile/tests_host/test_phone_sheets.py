@@ -111,10 +111,12 @@ def assert_phone_sheet(sheet, *targets) -> None:
 
 
 def _column_of(root, target):
-    """The Column that holds ``target`` (its nearest Column ancestor)."""
+    """The Column that scrolls ``target`` (its nearest scrolling Column ancestor: a measured sheet body,
+    ``sheet.fitted_box``, holds its rows in a plain Column inside the scrolling one), else its nearest Column."""
     path = _path(root, target)
     assert path, f"{type(target).__name__} is not in the sheet"
-    return next(c for c in reversed(path[:-1]) if type(c).__name__ == "Column")
+    columns = [c for c in reversed(path[:-1]) if type(c).__name__ == "Column"]
+    return next((c for c in columns if c.scroll is not None), columns[0])
 
 
 def _tile(sheet, title):
