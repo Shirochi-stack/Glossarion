@@ -34,7 +34,7 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Container, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import gender_tracking as _gender
 
@@ -2732,6 +2732,21 @@ def edge_label_text(edge: Mapping[str, Any], show_former: bool = False) -> str:
     return f"{first} / {second}"
 
 
+def wrap_label(text: str, width_of: Callable[[str], float], limit: float) -> str:
+    """``text`` broken between words into lines no wider than ``limit`` (as ``width_of`` measures;
+    a single word wider stays whole on its own line), joined by newlines. A label as long as a
+    sentence on one line needs a line as long as itself clear of every other line: in the middle
+    of a picture there is no such stretch, so those lines ran out past everything else (the
+    owner's book: two labels over 1,000 px wide set the width of the whole picture)."""
+    lines: List[str] = []
+    for word in str(text).split(" "):
+        if lines and width_of(lines[-1] + " " + word) <= limit:
+            lines[-1] += " " + word
+        else:
+            lines.append(word)
+    return "\n".join(lines)
+
+
 def edge_description_lines(edge: Mapping[str, Any], name_for: Callable[[str], Any]) -> List[str]:
     """``["B is Father to A", "A is Daughter to B"]`` for an edge (unknown sides left out);
     ``name_for(node_id)`` gives the shown name. For tooltips and the mobile sheet."""
@@ -3190,10 +3205,48 @@ def _fit_positions(positions: Dict[str, List[float]], width: float, height: floa
     return result
 
 
+#: Rings with more names keep their order (ordering costs the square of the count).
+_RING_ORDER_MAX = 200
+#: When names on the first ring are related to each other they sit at 1, 1 + this and 1 + twice
+#: this times the ring's distance, in turn.
+_RING_STAGGER = 0.3
+
+
+def _ring_order(members: List[str], adjacency: Dict[str, List[str]]) -> List[str]:
+    """``members`` in an order round the ring where names related to each other sit side by side:
+    the lines between them stay short and out at the ring, not across the middle where every line
+    of the focus runs. Each next name is the one with most relations to the last few placed."""
+    if len(members) > _RING_ORDER_MAX:
+        return members
+    inside = set(members)
+    links = {node: [other for other in adjacency.get(node, []) if other in inside and other != node]
+             for node in members}
+    left = list(members)
+    order: List[str] = []
+    while left:
+        if not order or not any(other in left for other in links[order[-1]]):
+            # a new run: the name with most relations among those left
+            pick = max(left, key=lambda node: (sum(1 for other in links[node] if other in left), -left.index(node)))
+        else:
+            recent = order[-3:]
+            pick = max(left, key=lambda node: (sum(2 if other == recent[-1] else 1
+                                                   for other in links[node] if other in recent),
+                                               sum(1 for other in links[node] if other in left), -left.index(node)))
+        order.append(pick)
+        left.remove(pick)
+    return order
+
+
 def _radial_layout(ids: List[str], adjacency: Dict[str, List[str]], focus: str,
-                   width: float, height: float, spacing: float = 0.0) -> Dict[str, Tuple[float, float]]:
+                   width: float, height: float, spacing: float = 0.0,
+                   spoke_size: Optional[Mapping[str, Tuple[float, float]]] = None,
+                   wedges: bool = True) -> Dict[str, Tuple[float, float]]:
     """The focus in the centre, the others on rings by their distance from it. With ``spacing``
-    a crowded ring moves out until its members sit that far apart along it."""
+    a crowded ring moves out until its members sit that far apart along it. ``spoke_size``: the
+    label size of the focus's line to each name on the first ring (see ``_spread_spokes``).
+    ``wedges``: names past the first ring sit in the wedge of the name they hang from (their lines
+    stay short and apart; a crowded wedge moves its ring out), else evenly round their ring (for a
+    diagram that labels and clears the focus's lines only: the rings stay as small as they can)."""
     depth = {focus: 0}
     parent: Dict[str, Optional[str]] = {focus: None}
     order = [focus]
@@ -3206,31 +3259,248 @@ def _radial_layout(ids: List[str], adjacency: Dict[str, List[str]], focus: str,
     max_depth = max(depth.values()) if depth else 0
     unreachable = [i for i in ids if i not in depth]
     rings: Dict[int, List[str]] = {}
+    children: Dict[str, List[str]] = {}
     for node in order[1:]:
         rings.setdefault(depth[node], []).append(node)
+        children.setdefault(parent[node], []).append(node)
+    # how many names hang below each (itself included): each gets a wedge of its parent's that wide
+    below: Dict[str, int] = {}
+    for node in reversed(order):
+        below[node] = 1 + sum(below[child] for child in children.get(node, ()))
     if unreachable:
         max_depth += 1
         rings[max_depth] = unreachable
     radius = min(width, height) / 2.0 * 0.88
     step = radius / max_depth if max_depth else 0.0
     cx, cy = width / 2.0, height / 2.0
+    wedge: Dict[str, Tuple[float, float]] = {}
     angle: Dict[str, float] = {focus: 0.0}
     positions = {focus: (cx, cy)}
     previous = 0.0
     for ring in sorted(rings):
         members = rings[ring]
-        members.sort(key=lambda n: (angle.get(parent.get(n) or "", 10.0), n))
         count = len(members)
-        offset = (math.pi / count) * (ring % 2)
+        thetas: List[float] = []
+        if ring == 1:
+            members[:] = _ring_order(sorted(members), adjacency)
+            thetas, gaps = _spread_spokes([2.0 * math.pi * index / count for index in range(count)],
+                                          [(spoke_size or {}).get(node) for node in members],
+                                          [below[node] for node in members])
+            for index, node in enumerate(members):
+                wedge[node] = (thetas[index] - gaps[index - 1] / 2.0, thetas[index] + gaps[index] / 2.0)
+        elif not wedges and not (unreachable and ring == max_depth):
+            # evenly round the ring, in the order of the names they hang from
+            members.sort(key=lambda n: (angle.get(parent[n], 10.0), n))
+            offset = (math.pi / count) * (ring % 2)
+            thetas = [offset + 2.0 * math.pi * index / count for index in range(count)]
+        elif not (unreachable and ring == max_depth):
+            # each name's children share its wedge, as wide as what hangs below each of them
+            members.sort(key=lambda n: (wedge[parent[n]][0], n))
+            placed = []
+            for owner in dict.fromkeys(parent[n] for n in members):
+                low, high = wedge[owner]
+                kids = sorted(children[owner], key=lambda n: n)
+                total = sum(below[kid] for kid in kids)
+                start = low
+                for kid in kids:
+                    end = start + (high - low) * below[kid] / total
+                    wedge[kid] = (start, end)
+                    placed.append(kid)
+                    start = end
+            members[:] = placed
+            thetas = [(wedge[node][0] + wedge[node][1]) / 2.0 for node in members]
+        else:  # names not related to the focus at all: evenly round the outside
+            offset = (math.pi / count) * (ring % 2)
+            thetas = [offset + 2.0 * math.pi * index / count for index in range(count)]
         distance = step * ring
+        stagger = 0.0
         if spacing > 0.0:
-            distance = max(distance, previous + step, count * spacing / (2.0 * math.pi))
-        previous = distance
+            even = count * spacing / (2.0 * math.pi)
+            if ring > 1 and members and all(node in wedge for node in members):
+                # names share their parent's wedge: far enough out that each wedge holds its names
+                crowded = max(spacing / max(wedge[node][1] - wedge[node][0], 1e-9) for node in members)
+                even = max(even, min(crowded, 4.0 * even))
+            distance = max(distance, previous + step, even)
+            inside = set(members)
+            if ring == 1 and any(other in inside for node in members for other in adjacency.get(node, [])):
+                # names related to each other side by side on one circle: the lines from one of them
+                # to the next two would run almost together, so they sit at three distances
+                stagger = _RING_STAGGER
+        previous = distance * (1.0 + 2.0 * stagger)
         for index, node in enumerate(members):
-            theta = offset + 2.0 * math.pi * index / count
+            theta = thetas[index]
             angle[node] = theta
-            positions[node] = (cx + distance * math.cos(theta), cy + distance * math.sin(theta))
+            reach = distance * (1.0 + stagger * (index % 3))
+            positions[node] = (cx + reach * math.cos(theta), cy + reach * math.sin(theta))
     return positions
+
+
+#: A name's children fan out over at most this share of the full turn, centred away from its parent.
+_FAN_SHARE = 0.8
+#: Children related to other children sit at least this many times as far out as the furthest
+#: child without (the lines between them stay outside the labels round the parent).
+_TREE_OUTER = 1.25
+
+def _tree_layout(ids: Sequence[str], adjacency: Mapping[str, Sequence[str]], root: str,
+                 node_size: Mapping[str, Tuple[float, float]],
+                 label_of: Callable[[str, str], Optional[Tuple[float, float]]]) -> Dict[str, List[float]]:
+    """Every name round the one it hangs from (a tree from ``root``; a name hangs from its related
+    name nearer the root with most relations), ``root`` at ``(0, 0)``: the children of a name fan
+    out round it (all round for the root, away from its parent for the others), in an order where
+    children related to each other sit side by side, each as far out as the label of its line
+    needs to clear the lines beside it (``label_of(a, b)``: that label's size) and as its own
+    children need room. Children with relations to other children sit further out than those
+    without, so the lines between them run outside the labels round the parent. Names that do not
+    reach ``root`` go round the outside, each group the same way round its busiest name. The
+    result lists the names out from the root, each name's children in their order round it."""
+    clear = LINE_CLEARANCE + _ROOM_GAP
+    depth = {root: 0}
+    queue = [root]
+    for node in queue:
+        for other in adjacency.get(node, ()):
+            if other not in depth:
+                depth[other] = depth[node] + 1
+                queue.append(other)
+    parent: Dict[str, Optional[str]] = {root: None}
+    children: Dict[str, List[str]] = {node: [] for node in queue}
+    for node in queue[1:]:
+        ups = [other for other in adjacency.get(node, ()) if depth.get(other) == depth[node] - 1]
+        up = max(ups, key=lambda other: (len(adjacency.get(other, ())), other))
+        parent[node] = up
+        children[up].append(node)
+    below: Dict[str, int] = {}
+    for node in reversed(queue):
+        below[node] = 1 + sum(below[kid] for kid in children[node])
+
+    def extent(node: str, theta: float) -> float:
+        """How far a name's box reaches from its centre in the direction ``theta``."""
+        w, h = node_size.get(node, (0.0, 0.0))
+        return abs(math.cos(theta)) * w / 2.0 + abs(math.sin(theta)) * h / 2.0
+
+    # bottom up: where each child sits relative to its parent, and how far each subtree reaches
+    reach: Dict[str, float] = {}
+    offset: Dict[str, Tuple[float, float]] = {}  # child: (angle from the fan's middle, distance)
+    for node in reversed(queue):
+        kids = children[node]
+        w, h = node_size.get(node, (0.0, 0.0))
+        own = math.hypot(w, h) / 2.0 + clear
+        if not kids:
+            reach[node] = own
+            continue
+        kids[:] = _ring_order(sorted(kids), {k: list(adjacency.get(k, ())) for k in kids})
+        count = len(kids)
+        full = node == root
+        span =2.0 * math.pi if full else min(2.0 * math.pi * _FAN_SHARE, max(math.pi / 2.0, 0.5 * math.pi * count))
+        sizes = [label_of(node, kid) or (0.0, 0.0) for kid in kids]
+        if full:
+            # all round: label-aware gaps (see ``_spread_spokes``), wider for names with more below
+            angles, _gaps = _spread_spokes([2.0 * math.pi * k / count for k in range(count)], sizes,
+                                           [below[kid] for kid in kids])
+        else:
+            # a fan whose middle points at angle 0 (turned away from the parent later); a big
+            # subtree gets a share as wide as it needs
+            weights = [max(lh / 2.0 + clear, lw / 4.0 + clear) + reach[kid] / 2.0 for kid, (lw, lh) in zip(kids, sizes)]
+            total = sum(weights)
+            angles = []
+            run = 0.0
+            for value in weights:
+                share = value / total * span
+                angles.append(run + share / 2.0 - span / 2.0)
+                run += share
+        gaps = []
+        for k in range(count):
+            if count == 1:
+                gaps.append(span / 2.0 if not full else math.pi)
+                continue
+            # (the end children of a fan: the gap to the parent's line beyond the fan's edge)
+            outside = math.pi * (1 - _FAN_SHARE)
+            wrap = angles[0] + 2.0 * math.pi - angles[-1]
+            before = angles[k] - angles[k - 1] if k > 0 else (wrap if full else angles[0] + span / 2.0 + outside)
+            after = angles[k + 1] - angles[k] if k + 1 < count else (wrap if full else span / 2.0 - angles[k] + outside)
+            gaps.append(min(before, after))
+        linked = {kid for kid in kids if any(other in kids for other in adjacency.get(kid, ()))}
+        distances = []
+        for kid, theta, gap, (lw, lh) in zip(kids, angles, gaps, sizes):
+            if full:
+                along = abs(math.cos(theta)) * lw / 2.0 + abs(math.sin(theta)) * lh / 2.0
+                sideways = abs(math.sin(theta)) * lw / 2.0 + abs(math.cos(theta)) * lh / 2.0 + clear
+            else:
+                # (a fan is turned later: the label's own angle is not known yet, so a middling case)
+                along = max(lw, lh) / 2.0
+                sideways = max(lw, lh) / 2.0 * 0.7 + clear
+            pill = along + sideways / max(math.sin(min(gap, math.pi / 2.0)), 0.05)
+            pill = max(pill, own + along + clear)
+            distance = pill + along + clear + math.hypot(*node_size.get(kid, (0.0, 0.0))) / 2.0
+            if len(kids) > 1 and reach[kid] > own:
+                # a child with names below it sits out far enough that their room clears the lines
+                # beside it, but not further than its own reach past the label (a narrow gap is the
+                # placing's to settle, not a reason to carry a whole branch far out)
+                wide = (reach[kid] + clear) / max(math.sin(min(gap, math.pi / 2.0)), 0.05)
+                distance = max(distance, min(wide, distance + reach[kid]))
+            distances.append(distance)
+        plain = [d for kid, d in zip(kids, distances) if kid not in linked and not children[kid]]
+        if plain and linked:
+            outer = max(plain) * _TREE_OUTER
+            distances = [max(d, outer) if kid in linked else d for kid, d in zip(kids, distances)]
+        for kid, theta, distance in zip(kids, angles, distances):
+            offset[kid] = (theta, distance)
+        reach[node] = max(own, max(d + reach[kid] for kid, d in zip(kids, distances)))
+    # top down: positions, each fan turned to point away from the parent
+    positions: Dict[str, List[float]] = {root: [0.0, 0.0]}
+    heading: Dict[str, float] = {root: 0.0}
+    for node in queue[1:]:
+        up = parent[node]
+        theta, distance = offset[node]
+        angle = theta + (heading[up] if parent[up] is not None else 0.0)
+        heading[node] = angle
+        px, py = positions[up]
+        positions[node] = [px + distance * math.cos(angle), py + distance * math.sin(angle)]
+    # the order to place them in (see ``_place_one_by_one``): out from the root, the names with most
+    # relations first (they need the most room), else in their order round their parents
+    order = [root]
+    for node in order:
+        order.extend(children[node])
+    rank = {node: index for index, node in enumerate(order)}
+    order.sort(key=lambda node: (depth[node], -len(adjacency.get(node, ())), rank[node]))
+    positions = {node: positions[node] for node in order}
+    rest = [node for node in ids if node not in depth]
+    if rest:
+        # the names that do not reach the root: each group round its busiest name, under the picture
+        first = max(rest, key=lambda node: (len(adjacency.get(node, ())), node))
+        group = _tree_layout(rest, adjacency, first, node_size, label_of)
+        low_x = min(p[0] for p in group.values())
+        low_y = min(p[1] for p in group.values())
+        for node, (gx, gy) in group.items():
+            positions[node] = [gx - low_x - reach[root], gy - low_y + reach[root] + 4.0 * clear]
+    return positions
+
+
+def _spread_spokes(thetas: List[float], sizes: Sequence[Optional[Tuple[float, float]]],
+                   shares: Sequence[int]) -> Tuple[List[float], List[float]]:
+    """``(directions, gaps)``: directions round a name for its lines, in the same order, and the
+    angle from each to the next. The gap between two lines is as wide as their labels need (a
+    label of width w on a line at angle a reaches ``|sin a| w / 2 + |cos a| h / 2`` sideways, so
+    near-vertical lines with their wide, flat labels get wide gaps and near-horizontal ones narrow
+    gaps), and at least as wide as the names hanging below the two (``shares``) need."""
+    count = len(thetas)
+    if count < 2:
+        return thetas, [2.0 * math.pi] * count
+    start = thetas[0]
+    gaps = [2.0 * math.pi / count] * count
+    for _round in range(6):
+        reach = []
+        for theta, size in zip(thetas, sizes):
+            w, h = size or (0.0, 0.0)
+            reach.append(abs(math.sin(theta)) * w / 2.0 + abs(math.cos(theta)) * h / 2.0 + LINE_CLEARANCE)
+        unit = sum(reach) / count
+        need = [max(reach[i], reach[(i + 1) % count], unit * (shares[i] + shares[(i + 1) % count]) / 2.0)
+                for i in range(count)]
+        total = sum(need)
+        gaps = [2.0 * math.pi * value / total for value in need]
+        thetas = [start]
+        for gap in gaps[:-1]:
+            thetas.append(thetas[-1] + gap)
+    return thetas, gaps
 
 
 #: Up to this many characters the layout is tried several times and the tidiest one kept.
@@ -3502,22 +3772,51 @@ def _refined_layout(ids: List[str], edge_list: List[Tuple[str, str]], width: flo
     return best
 
 
-#: Where along its line a relation's label may sit, as fractions of the way from one end (middle
-#: first). Both diagrams take the first spot where the label covers no name and no other label.
+#: Where along its line a label sits when the layout made no room for it (or it does not fit there),
+#: as fractions of the way from one end (middle first): the first spot clear of the names and the
+#: other labels wins. The layout's own spots (``layout_spot``) may be anywhere on the line.
 LABEL_SPOTS = (0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.2, 0.8)
-#: Above this many labelled lines the layout makes room for the name boxes and the focus
-#: character's labels only (both diagrams then label only that character's lines).
+#: Above this many lines the layout makes room for the name boxes and the focus character's labels
+#: and lines only (both diagrams then label only that character's lines).
 ROOM_FOR_LABELS_MAX_EDGES = 120
-#: Rounds of the pass that pushes overlapping name boxes and labels apart.
-_ROOM_ROUNDS = 150
-#: Box checks one layout may spend on that pass (keeps 1,000 names near a second on a PC).
-_ROOM_BUDGET = 400_000
 #: Space kept between two boxes, so text drawn a little wider than estimated still fits.
 _ROOM_GAP = 4.0
-#: How far a name moves per round, as a share of its pushes. More than all of it: in a crowd the
-#: pushes of the others undo part of each move (measured: 1.6 clears 200 crowded names in 62
-#: rounds; 1.0 still left 26 overlaps after 150).
-_ROOM_STEP = 1.6
+#: How far every line stays from a label that is not its own and from a name it does not end at
+#: (scale 1): 6 px that show at a glance, half the widest line (2.2 px), and a pixel for text drawn
+#: a little wider than estimated.
+LINE_CLEARANCE = 8.0
+#: A problem growing the picture cannot fix: a name (or label) nearer a line than this share of the
+#: room it needs, two lines from one name less than this sine apart.
+_STUCK = 0.05
+#: How far such an end turns round the shared name (radians, about 12 degrees).
+_STUCK_TURN = 0.21
+#: Two lines from one name that only growing the whole picture this many times over would part
+#: turn apart too.
+_TURN_NEED = 4.0
+#: One growth step: every name at least this many times as far from the middle, at most ``_ROOM_GROW_MAX``.
+_ROOM_GROW = 1.08
+_ROOM_GROW_MAX = 1.5
+#: Growth steps at most (1.08 ** 90: 1,000 times the size): the guarantee for what is left.
+_GROW_ROUNDS = 90
+#: Single names are moved out of the way while at most this many problems are left ...
+_RELOCATE_MAX = 40
+#: ... and until this many tries in a row at one size left as many problems.
+_RELOCATE_TRIES = 3
+#: The worst problems tried for room around them alone before the whole picture grows.
+_LOCAL_TRIES = 1
+#: While more problems are left, only those needing this many times the growth most others need
+#: (and at least this much) are tried.
+_HARD_NEED = 3.0
+#: Spots tried for single names in one layout, in all (keeps a big book's layout under a second).
+_RELOCATE_BUDGET = 800
+#: Names tried in one go.
+_RELOCATE_NAMES = 12
+#: Names with more lines than this are not tried (each spot tried costs a look at all their lines).
+_RELOCATE_MAX_LINES = 12
+#: A name with at least this many relations that have no other relation fans them out (see ``_fan_out``).
+_FAN_MIN = 4
+#: Halvings when the grown picture is shrunk back to the smallest size that stays clear.
+_SHRINK_STEPS = 5
 
 Box = Tuple[float, float, float, float]
 
@@ -3647,28 +3946,204 @@ def _unit(dx: float, dy: float) -> Tuple[float, float]:
     return (dx / length, dy / length) if length > 1e-9 else (1.0, 0.0)
 
 
-def _make_room(positions: Dict[str, List[float]], edges: Sequence[Tuple[Any, str, str]],
-               node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]]
-               ) -> Tuple[Dict[str, List[float]], Dict[Any, float]]:
-    """Move names until no name box or label covers another (or the rounds run out).
+def _cells_along(p: Sequence[float], q: Sequence[float], cell: float) -> List[Tuple[int, int]]:
+    """The grid cells the segment ``p``-``q`` passes through, in order (a grid walk, not its bounding box)."""
+    x, y = p[0], p[1]
+    gx, gy = int(math.floor(x / cell)), int(math.floor(y / cell))
+    tx, ty = int(math.floor(q[0] / cell)), int(math.floor(q[1] / cell))
+    cells = [(gx, gy)]
+    dx, dy = q[0] - x, q[1] - y
+    step_x, step_y = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
+    t_max_x = (((gx + (1 if dx > 0 else 0)) * cell - x) / dx) if dx else _BIG
+    t_max_y = (((gy + (1 if dy > 0 else 0)) * cell - y) / dy) if dy else _BIG
+    t_dx = cell / abs(dx) if dx else _BIG
+    t_dy = cell / abs(dy) if dy else _BIG
+    for _step in range(abs(tx - gx) + abs(ty - gy)):
+        if t_max_x < t_max_y:
+            gx += step_x
+            t_max_x += t_dx
+        else:
+            gy += step_y
+            t_max_y += t_dy
+        cells.append((gx, gy))
+    return cells
 
-    A label lives on its line, so it moves by moving the line's ends. Two labels around the
-    same name push their far ends outward: a name with many relations gets longer lines, so
-    its labels have room around it, instead of the whole picture growing. A label that runs
-    into one of its own ends lengthens its line. A label keeps its spot while that spot is free
-    (no jumping back and forth). Returns the positions with the fewest overlaps seen and the
-    spot (``t``) of every label there.
+
+def _hit_interval(px: float, py: float, dx: float, dy: float,
+                  planes: Sequence[Tuple[float, float, float]]) -> Optional[Tuple[float, float]]:
+    """``(lo, hi)``: where along ``p + t * d`` (t in 0..1) a point is inside every half-plane
+    ``mx * x + my * y <= s`` of ``planes``; None when nowhere."""
+    lo, hi = 0.0, 1.0
+    for mx, my, s in planes:
+        k = mx * dx + my * dy
+        r = s - (mx * px + my * py)
+        if -1e-12 < k < 1e-12:
+            if r < 0.0:
+                return None
+            continue
+        v = r / k
+        if k > 0.0:
+            if v < hi:
+                hi = v
+        elif v > lo:
+            lo = v
+        if lo >= hi:
+            return None
+    return lo, hi
+
+
+def _box_planes(box: Box, half_w: float, half_h: float) -> Tuple[Tuple[float, float, float], ...]:
+    """Where the centre of a ``2 * half_w`` x ``2 * half_h`` box overlaps ``box``."""
+    return ((1.0, 0.0, box[2] + half_w), (-1.0, 0.0, half_w - box[0]),
+            (0.0, 1.0, box[3] + half_h), (0.0, -1.0, half_h - box[1]))
+
+
+LineGeo = Tuple[float, float, float, float, float, float, float]
+
+
+def _line_geo(p: Sequence[float], q: Sequence[float]) -> LineGeo:
+    """What the clearance tests need of the line ``p``-``q``, worked out once: its bounding box,
+    unit normal and offset along that normal.
+
+    A box of half sizes ``hw`` x ``hh`` comes within ``LINE_CLEARANCE`` of the line when its centre
+    is inside the line widened by the box grown by the clearance: a six-sided shape bounded by the
+    line's bounding box grown by ``hw + c`` / ``hh + c`` and by two lines along it, ``|nx| (hw + c) +
+    |ny| (hh + c)`` to either side (square corners: a little more room than a round clearance,
+    never less)."""
+    nx, ny = _unit(-(q[1] - p[1]), q[0] - p[0])
+    return (min(p[0], q[0]), max(p[0], q[0]), min(p[1], q[1]), max(p[1], q[1]), nx, ny, nx * p[0] + ny * p[1])
+
+
+def _near_line(x: float, y: float, geo: LineGeo, half_w: float, half_h: float) -> bool:
+    """A ``2 * half_w`` x ``2 * half_h`` box centred on ``(x, y)`` comes within the clearance of the
+    line (see ``_line_geo``)."""
+    big_w, big_h = half_w + LINE_CLEARANCE, half_h + LINE_CLEARANCE
+    x0, x1, y0, y1, nx, ny, across = geo
+    if x <= x0 - big_w or x >= x1 + big_w or y <= y0 - big_h or y >= y1 + big_h:
+        return False
+    return abs(nx * x + ny * y - across) < abs(nx) * big_w + abs(ny) * big_h
+
+
+def _line_interval(px: float, py: float, dx: float, dy: float, geo: LineGeo, half_w: float, half_h: float
+                   ) -> Optional[Tuple[float, float]]:
+    """Where along ``p + t * d`` a box centred there comes within the clearance of the line."""
+    big_w, big_h = half_w + LINE_CLEARANCE, half_h + LINE_CLEARANCE
+    x0, x1, y0, y1, nx, ny, across = geo
+    ex, ey = px + dx, py + dy
+    if ((px if px > ex else ex) <= x0 - big_w or (px if px < ex else ex) >= x1 + big_w
+            or (py if py > ey else ey) <= y0 - big_h or (py if py < ey else ey) >= y1 + big_h):
+        return None
+    reach = abs(nx) * big_w + abs(ny) * big_h
+    side_start = nx * px + ny * py - across
+    side_end = side_start + nx * dx + ny * dy
+    if (side_start >= reach and side_end >= reach) or (side_start <= -reach and side_end <= -reach):
+        return None  # the whole way stays to one side of the line, further than the clearance
+    return _hit_interval(px, py, dx, dy, ((1.0, 0.0, x1 + big_w), (-1.0, 0.0, big_w - x0),
+                                          (0.0, 1.0, y1 + big_h), (0.0, -1.0, big_h - y0),
+                                          (nx, ny, across + reach), (-nx, -ny, reach - across)))
+
+
+def _box_interval(px: float, py: float, dx: float, dy: float, box: Box, half_w: float, half_h: float
+                  ) -> Optional[Tuple[float, float]]:
+    """Where along ``p + t * d`` a box centred there overlaps ``box``."""
+    ex, ey = px + dx, py + dy
+    if ((px if px > ex else ex) <= box[0] - half_w or (px if px < ex else ex) >= box[2] + half_w
+            or (py if py > ey else ey) <= box[1] - half_h or (py if py < ey else ey) >= box[3] + half_h):
+        return None
+    return _hit_interval(px, py, dx, dy, _box_planes(box, half_w, half_h))
+
+
+def _free_stretches(intervals: Sequence[Tuple[float, ...]], margin: float) -> List[Tuple[float, float]]:
+    """The stretches of 0..1 outside every ``(lo, hi, ...)`` of ``intervals``, each ``margin``
+    narrower at both ends (stretches narrower than that are left out)."""
+    free = []
+    start = 0.0
+    for lo, hi in sorted((item[0], item[1]) for item in intervals):
+        if lo > start:
+            free.append((start, lo))
+        if hi > start:
+            start = hi
+    if start < 1.0:
+        free.append((start, 1.0))
+    return [(lo + margin, hi - margin) for lo, hi in free if hi - lo > 2.0 * margin]
+
+
+def _choose_spot(intervals: Sequence[Tuple[float, float, Any]], margin: float, prefer: Optional[float]
+                 ) -> Tuple[float, List[Any]]:
+    """``(t, what is still in the way there)``: a spot in 0..1 outside every ``(lo, hi, what)``,
+    ``margin`` inside the free stretch: ``prefer`` while it is free, else the free spot nearest the
+    middle. With no free spot, the one fewest things cover."""
+    free = _free_stretches(intervals, margin)
+    if prefer is not None and any(lo <= prefer <= hi for lo, hi in free):
+        return prefer, []
+    if free:
+        best = min((min(max(0.5, lo), hi) for lo, hi in free), key=lambda t: (abs(t - 0.5), t))
+        return best, []
+    # no free spot: where the fewest things overlap (a sweep over the ends of the stretches)
+    events = sorted([(lo, 1) for lo, _hi, _what in intervals] + [(hi, -1) for _lo, hi, _what in intervals])
+    depth = sum(1 for lo, _hi, _what in intervals if lo <= 0.0)
+    best_key, best_t = None, 0.5
+    previous = 0.0
+    for value, change in events + [(1.0, 0)]:
+        value = min(max(value, 0.0), 1.0)
+        if value > previous:
+            t = min(max(0.5, previous), value)
+            key = (depth, abs(t - 0.5))
+            if best_key is None or key < best_key:
+                best_key, best_t = key, t
+            previous = value
+        if value > 0.0:
+            depth += change
+    return best_t, [what for lo, hi, what in intervals if lo < best_t < hi]
+
+
+def _scale_up(positions: Dict[str, List[float]], factor: float) -> None:
+    """Every name ``factor`` times as far from the middle: boxes keep their size, so every gap
+    between a label and a line that is not its own grows (unless they meet in a point)."""
+    xs = [p[0] for p in positions.values()]
+    ys = [p[1] for p in positions.values()]
+    cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    for point in positions.values():
+        point[0] = cx + (point[0] - cx) * factor
+        point[1] = cy + (point[1] - cy) * factor
+
+
+def _room_round(positions: Dict[str, List[float]], edges: Sequence[Tuple[Any, str, str]],
+                node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+                name_lines: Sequence[int], spots: Dict[Any, float], cell: float,
+                report: Optional[List[Tuple[float, Tuple[str, ...], Any]]] = None,
+                pinned: Optional[str] = None, turn_need: float = _BIG,
+                lines_seen: Optional[Dict[int, Tuple[Any, ...]]] = None
+                ) -> Tuple[int, Dict[str, List[float]], Dict[Any, float]]:
+    """One look at the picture: ``(problems, moves, label spots)``. ``lines_seen``: as for
+    ``_relocate`` (shared with it).
+
+    Problems are: two boxes (names, labels) overlapping, a line of ``name_lines`` within
+    ``LINE_CLEARANCE`` of a name it does not end at, and a label with no spot on its line that is
+    clear of the other boxes and of every other line by ``LINE_CLEARANCE``. Every label first looks
+    for such a spot along its line (the cheapest fix). ``moves`` fix the problems growing the
+    picture cannot fix (a name on a line, two lines from one name in the same direction, two boxes
+    on the same spot). ``report`` gets ``(grow, names, moves)`` of every problem: about how many
+    times bigger the picture must get to clear it, the names involved and the moves that would fix it.
+    Two lines from one name that growing would part only at more than ``turn_need`` times the size
+    turn apart too; ``pinned`` (the focus) is never the end that turns.
     """
-    boxes = len(node_size) + len(label_size)
-    rounds = max(8, min(_ROOM_ROUNDS, _ROOM_BUDGET // max(1, boxes * 4)))
-    spots: Dict[Any, float] = {}
-    best: Optional[Tuple[int, Dict[str, List[float]], Dict[Any, float]]] = None
-    for _round in range(rounds):
-        grid, owners = _placed_boxes(positions, edges, node_size, label_size, _ROOM_GAP, spots)
-        spots = {owner[1]: owner[4] for owner in owners if owner[0] == "l"}
-        moves: Dict[str, List[float]] = {}
+    clear = LINE_CLEARANCE
+    half = _ROOM_GAP / 2.0
+    moves: Dict[str, List[float]] = {}
 
-        def push(node: str, dx: float, dy: float) -> None:
+    lines_of: Dict[str, int] = {}
+    for _key, a, b in edges:
+        lines_of[a] = lines_of.get(a, 0) + 1
+        lines_of[b] = lines_of.get(b, 0) + 1
+
+    def settle(need: float, names: Tuple[str, ...], suggested: List[Tuple[str, float, float]], stuck: bool) -> None:
+        """One problem: reported, and its moves done when growing cannot fix it."""
+        if report is not None:
+            report.append((need, names, suggested))
+        if not stuck:
+            return
+        for node, dx, dy in suggested:
             move = moves.get(node)
             if move is None:
                 moves[node] = [dx, dy]
@@ -3676,70 +4151,1415 @@ def _make_room(positions: Dict[str, List[float]], edges: Sequence[Tuple[Any, str
                 move[0] += dx
                 move[1] += dy
 
-        def ends_apart(edge: Tuple[Any, ...], fixed: str, amount: float) -> str:
-            """Push the line's other end away from ``fixed`` along the line; returns that end."""
-            other = edge[3] if edge[2] == fixed else edge[2]
-            ux, uy = _unit(positions[other][0] - positions[fixed][0], positions[other][1] - positions[fixed][1])
-            push(other, ux * amount, uy * amount)
-            return other
+    lines = [(positions[a], positions[b]) for _key, a, b in edges]
+    if lines_seen is None:
+        lines_seen = {}
+    geos = []
+    line_cells: List[List[Tuple[int, int]]] = []
+    line_grid: Dict[Tuple[int, int], List[int]] = {}
+    for index, (p, q) in enumerate(lines):
+        ends = (p[0], p[1], q[0], q[1], cell)
+        seen = lines_seen.get(index)
+        if seen is None or seen[0] != ends:
+            seen = lines_seen[index] = (ends, _line_geo(p, q), _cells_along(p, q, cell))
+        geos.append(seen[1])
+        cells = seen[2]
+        line_cells.append(cells)
+        for key in cells:
+            if key in line_grid:
+                line_grid[key].append(index)
+            else:
+                line_grid[key] = [index]
+    grid = _BoxGrid(cell)
+    owners: List[Tuple[Any, ...]] = []
+    for node, (w, h) in node_size.items():
+        point = positions.get(node)
+        if point is None:
+            continue
+        grid.add((point[0] - w / 2.0 - half, point[1] - h / 2.0 - half,
+                  point[0] + w / 2.0 + half, point[1] + h / 2.0 + half))
+        owners.append(("n", node))
+    found = 0
 
-        found = 0
-        all_boxes = grid.boxes
-        for p, box in enumerate(all_boxes):
-            for q, _area in grid.hits(box):
-                if q <= p:
+    def box_push(first: Tuple[Any, ...], box: Box, second: Tuple[Any, ...], other: Box) -> None:
+        """Move names so the boxes of ``first`` and ``second`` (a name or a label) come apart."""
+        dx = (other[0] + other[2] - box[0] - box[2]) / 2.0
+        dy = (other[1] + other[3] - box[1] - box[3]) / 2.0
+        pen_x = (box[2] - box[0] + other[2] - other[0]) / 2.0 - abs(dx)
+        pen_y = (box[3] - box[1] + other[3] - other[1]) / 2.0 - abs(dy)
+        # vx, vy: how far second must move away from first to clear it (a pixel more, so pushes
+        # that partly cancel still end with the two apart instead of touching)
+        if pen_x < pen_y:
+            pen = pen_x + 1.0
+            vx, vy = (pen if dx >= 0 else -pen), 0.0
+        else:
+            pen = pen_y + 1.0
+            vx, vy = 0.0, (pen if dy >= 0 else -pen)
+        if first[0] == "n" and second[0] == "l":
+            first, second, vx, vy = second, first, -vx, -vy
+        # growing by ``need`` parts them: the centres move apart, the boxes keep their size
+        need = min((pen_x + abs(dx)) / max(abs(dx), 1e-9), (pen_y + abs(dy)) / max(abs(dy), 1e-9))
+        names = (tuple(first[1:2] if first[0] == "n" else first[2:4])
+                 + tuple(second[1:2] if second[0] == "n" else second[2:4]))
+        suggested: List[Tuple[str, float, float]] = []
+        if first[0] == "n":  # two names
+            suggested += [(first[1], -vx / 2.0, -vy / 2.0), (second[1], vx / 2.0, vy / 2.0)]
+        elif second[0] == "n":  # a label and a name
+            name = second[1]
+            if name in (first[2], first[3]):  # its own end: lengthen the line
+                far = first[3] if first[2] == name else first[2]
+                ux, uy = _unit(positions[name][0] - positions[far][0], positions[name][1] - positions[far][1])
+                suggested += [(far, -ux * pen / 2.0, -uy * pen / 2.0), (name, ux * pen / 2.0, uy * pen / 2.0)]
+            else:
+                suggested += [(name, vx / 2.0, vy / 2.0), (first[2], -vx / 2.0, -vy / 2.0),
+                              (first[3], -vx / 2.0, -vy / 2.0)]
+        else:  # two labels
+            shared = {first[2], first[3]} & {second[2], second[3]}
+            if len(shared) == 1:
+                hub = shared.pop()
+                for edge, sign in ((first, -1.0), (second, 1.0)):
+                    far = edge[3] if edge[2] == hub else edge[2]
+                    ux, uy = _unit(positions[far][0] - positions[hub][0], positions[far][1] - positions[hub][1])
+                    suggested.append((far, ux * pen / 2.0 + sign * vx / 2.0, uy * pen / 2.0 + sign * vy / 2.0))
+            else:
+                suggested += [(node, -vx / 2.0, -vy / 2.0) for node in (first[2], first[3])]
+                suggested += [(node, vx / 2.0, vy / 2.0) for node in (second[2], second[3])]
+        # growing the picture parts two boxes whose centres differ
+        settle(need, names, suggested, abs(dx) <= 0.5 and abs(dy) <= 0.5)
+
+    def away_from_line(cx: float, cy: float, p: Sequence[float], q: Sequence[float],
+                       half_w: float, half_h: float) -> Tuple[float, float, float, float, float]:
+        """``(ux, uy, short, s, distance)``: the way from the line to the point, how much nearer
+        than the clearance a box there is, where along the line the nearest point is, and how far."""
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        length2 = dx * dx + dy * dy
+        s = 0.0 if length2 < 1e-12 else min(1.0, max(0.0, ((cx - p[0]) * dx + (cy - p[1]) * dy) / length2))
+        ox, oy = cx - (p[0] + s * dx), cy - (p[1] + s * dy)
+        distance = math.hypot(ox, oy)
+        if distance > 1e-6:
+            ux, uy = ox / distance, oy / distance
+        else:
+            ux, uy = _unit(-dy, dx)
+        need = abs(ux) * half_w + abs(uy) * half_h + clear
+        return ux, uy, max(need - distance, 0.0) + 1.0, s, distance
+
+    # two names
+    name_count = len(owners)
+    for p in range(name_count):
+        box = grid.boxes[p]
+        for q, _area in grid.hits(box):
+            if q > p:
+                found += 1
+                box_push(owners[p], box, owners[q], grid.boxes[q])
+    # a line through a name it does not end at
+    if name_lines:
+        wanted = set(name_lines)
+        for p in range(name_count):
+            node = owners[p][1]
+            w, h = node_size[node]
+            cx, cy = positions[node]
+            reach = max(w, h) / 2.0 + clear
+            seen = set()
+            for gx in range(int(math.floor((cx - reach) / cell)), int(math.floor((cx + reach) / cell)) + 1):
+                for gy in range(int(math.floor((cy - reach) / cell)), int(math.floor((cy + reach) / cell)) + 1):
+                    seen.update(line_grid.get((gx, gy), ()))
+            for index in sorted(seen):
+                _key, a, b = edges[index]
+                if node == a or node == b or index not in wanted:
+                    continue
+                pa, pb = lines[index]
+                if not _near_line(cx, cy, geos[index], w / 2.0, h / 2.0):
                     continue
                 found += 1
-                other = all_boxes[q]
-                dx = (other[0] + other[2] - box[0] - box[2]) / 2.0
-                dy = (other[1] + other[3] - box[1] - box[3]) / 2.0
-                pen_x = (box[2] - box[0] + other[2] - other[0]) / 2.0 - abs(dx)
-                pen_y = (box[3] - box[1] + other[3] - other[1]) / 2.0 - abs(dy)
-                # vx, vy: how far q must move away from p to clear it (a pixel more, so pushes
-                # that partly cancel still end with the two apart instead of touching)
-                if pen_x < pen_y:
-                    pen = pen_x + 1.0
-                    vx, vy = (pen if dx >= 0 else -pen), 0.0
+                ux, uy, short, s, distance = away_from_line(cx, cy, pa, pb, w / 2.0, h / 2.0)
+                # the name steps off the line, the line a little the other way (the name all the
+                # way when it sits on the line: growing never takes it off)
+                stuck = distance <= _STUCK * (short + distance)
+                if stuck:
+                    suggested = [(node, ux * short, uy * short)]
                 else:
-                    pen = pen_y + 1.0
-                    vx, vy = 0.0, (pen if dy >= 0 else -pen)
-                first, second = owners[p], owners[q]
-                if first[0] == "n" and second[0] == "l":
-                    first, second, vx, vy = second, first, -vx, -vy
-                if first[0] == "n":  # two names
-                    push(first[1], -vx / 2.0, -vy / 2.0)
-                    push(second[1], vx / 2.0, vy / 2.0)
-                elif second[0] == "n":  # a label and a name
-                    name = second[1]
-                    if name in (first[2], first[3]):  # its own end: lengthen the line
-                        far = ends_apart(first, name, pen / 2.0)
-                        ux, uy = _unit(positions[name][0] - positions[far][0], positions[name][1] - positions[far][1])
-                        push(name, ux * pen / 2.0, uy * pen / 2.0)
-                    else:
-                        push(name, vx / 2.0, vy / 2.0)
-                        push(first[2], -vx / 2.0, -vy / 2.0)
-                        push(first[3], -vx / 2.0, -vy / 2.0)
-                else:  # two labels
-                    shared = {first[2], first[3]} & {second[2], second[3]}
-                    if len(shared) == 1:
-                        hub = shared.pop()
-                        far_p = ends_apart(first, hub, pen / 2.0)
-                        far_q = ends_apart(second, hub, pen / 2.0)
-                        push(far_p, -vx / 2.0, -vy / 2.0)
-                        push(far_q, vx / 2.0, vy / 2.0)
-                    else:
-                        for node in (first[2], first[3]):
-                            push(node, -vx / 2.0, -vy / 2.0)
-                        for node in (second[2], second[3]):
-                            push(node, vx / 2.0, vy / 2.0)
-        if best is None or found < best[0]:
-            best = (found, {key: list(point) for key, point in positions.items()}, dict(spots))
+                    suggested = [(node, ux * short * 0.6, uy * short * 0.6),
+                                 (a, -ux * short * 0.4 * (1.0 - s), -uy * short * 0.4 * (1.0 - s)),
+                                 (b, -ux * short * 0.4 * s, -uy * short * 0.4 * s)]
+                settle((short + distance) / max(distance, 1e-9), (node, a, b), suggested, stuck)
+    # every label: a free spot on its line, else what is in the way gets moves
+    todo = []
+    for index, (key, a, b) in enumerate(edges):
+        size = label_size.get(key)
+        if size is not None:
+            pa, pb = lines[index]
+            todo.append((math.hypot(pb[0] - pa[0], pb[1] - pa[1]), index, key, a, b, size))
+    placed: Dict[Any, float] = {}
+    for length, index, key, a, b, (w, h) in sorted(todo, key=lambda item: (item[0], item[1])):
+        pa, pb = lines[index]
+        dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+        near = set()
+        for gx, gy in line_cells[index]:
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    near.add((gx + ox, gy + oy))
+        near_lines = set()
+        near_boxes = set()
+        for cell_key in near:
+            near_lines.update(line_grid.get(cell_key, ()))
+            near_boxes.update(grid.cells.get(cell_key, ()))
+        intervals = []
+        hw, hh = w / 2.0 + half, h / 2.0 + half
+        # the stretch a label on this line can cover, grown by the clearance: anything outside it
+        # is skipped without a closer look
+        low_x, high_x = min(pa[0], pb[0]) - hw - clear, max(pa[0], pb[0]) + hw + clear
+        low_y, high_y = min(pa[1], pb[1]) - hh - clear, max(pa[1], pb[1]) + hh + clear
+        for other in sorted(near_lines):
+            geo = geos[other]
+            if other == index or geo[1] < low_x or geo[0] > high_x or geo[3] < low_y or geo[2] > high_y:
+                continue
+            span = _line_interval(pa[0], pa[1], dx, dy, geo, w / 2.0, h / 2.0)
+            if span is not None:
+                intervals.append((span[0], span[1], ("line", other)))
+        boxes = grid.boxes
+        for other in sorted(near_boxes):
+            box = boxes[other]
+            if box[2] < low_x or box[0] > high_x or box[3] < low_y or box[1] > high_y:
+                continue
+            span = _box_interval(pa[0], pa[1], dx, dy, box, hw, hh)
+            if span is not None:
+                intervals.append((span[0], span[1], ("box", other)))
+        t, in_way = _choose_spot(intervals, 1.0 / max(length, 1.0), spots.get(key))
+        cx, cy = pa[0] + dx * t, pa[1] + dy * t
+        mine = ("l", key, a, b, t)
+        box = (cx - hw, cy - hh, cx + hw, cy + hh)
+        grid.add(box)
+        owners.append(mine)
+        placed[key] = t
+        for kind, other in in_way:
+            found += 1
+            if kind == "box":
+                box_push(mine, box, owners[other], grid.boxes[other])
+                continue
+            _okey, c, d = edges[other]
+            pc, pd = lines[other]
+            ux, uy, short, _s, distance = away_from_line(cx, cy, pc, pd, w / 2.0, h / 2.0)
+            shared = {a, b} & {c, d}
+            need = (short + distance) / max(distance, 1e-9)
+            if len(shared) == 1:
+                # two lines from one name: turn them apart and lengthen the label's line, so the
+                # label moves out to where the two lines are far enough apart
+                hub = shared.pop()
+                far, far_other = (b if a == hub else a), (d if c == hub else c)
+                ph, pf, po = positions[hub], positions[far], positions[far_other]
+                ex, ey = _unit(pf[0] - ph[0], pf[1] - ph[1])
+                fx, fy = _unit(po[0] - ph[0], po[1] - ph[1])
+                sine = abs(ex * fy - ey * fx)
+                from_hub = math.hypot(cx - ph[0], cy - ph[1])
+                along = max(from_hub / max(math.hypot(pf[0] - ph[0], pf[1] - ph[1]), 1e-9), 0.2)
+                if sine <= _STUCK or need > turn_need:
+                    # (almost) the same direction: growing never parts them (or only by growing the
+                    # whole picture many times over), so the end with fewer lines turns away round
+                    # the shared name (never the pinned focus: its moves are dropped)
+                    mover = far if lines_of.get(far, 0) <= lines_of.get(far_other, 0) else far_other
+                    if mover == pinned:
+                        mover = far_other if mover == far else far
+                    pm = positions[mover]
+                    side = ex * fy - ey * fx
+                    turn = _STUCK_TURN if (side >= 0.0) == (mover == far_other) else -_STUCK_TURN
+                    vx, vy = pm[0] - ph[0], pm[1] - ph[1]
+                    cos_t, sin_t = math.cos(turn), math.sin(turn)
+                    settle(need, (far, far_other, hub),
+                           [(mover, ph[0] + vx * cos_t - vy * sin_t - pm[0], ph[1] + vx * sin_t + vy * cos_t - pm[1])],
+                           True)
+                    continue
+                grow = short / max(sine, 0.25) / (2.0 * along)
+                settle(need, (far, far_other, hub),
+                       [(far, ux * short / (2.0 * along) + ex * grow, uy * short / (2.0 * along) + ey * grow),
+                        (far_other, -ux * short / 2.0, -uy * short / 2.0)], False)
+            else:
+                # the label's line and the other line step apart (the label's line all the way when
+                # the label sits on the other line: growing never parts them)
+                stuck = distance <= _STUCK * (short + distance)
+                if stuck:
+                    suggested = [(node, ux * short, uy * short) for node in (a, b)]
+                else:
+                    suggested = ([(node, ux * short / 2.0, uy * short / 2.0) for node in (a, b)]
+                                 + [(node, -ux * short / 2.0, -uy * short / 2.0) for node in (c, d)])
+                settle(need, (a, b, c, d), suggested, stuck)
+    return found, moves, placed
+
+
+def _relocate(positions: Dict[str, List[float]], edges: Sequence[Tuple[Any, str, str]],
+              node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+              name_lines: Sequence[int], spots: Mapping[Any, float], cell: float,
+              report: Sequence[Tuple[str, ...]], budget: List[int], pinned: Optional[str] = None,
+              lines_seen: Optional[Dict[int, Tuple[Any, ...]]] = None) -> bool:
+    """For each problem in ``report``, try its names (fewest lines first) on spots around where they
+    are and keep a spot where fewer things are in the way of that name, its box, its lines and their
+    labels (the others stay where they are). ``budget[0]``: spots that may still be tried (it goes
+    down; at 0 nothing is tried, so the time stays bounded). ``lines_seen``: what each line's grid
+    cells were worked out from, kept between calls (most lines do not move between them; with
+    1,000 names they cost more than everything else). True when a name moved."""
+    if lines_seen is None:
+        lines_seen = {}
+    if budget[0] <= 0:
+        return False
+    clear = LINE_CLEARANCE
+    half = _ROOM_GAP / 2.0
+    wanted = set(name_lines)
+    incident: Dict[str, List[int]] = {node: [] for node in positions}
+    for index, (_key, a, b) in enumerate(edges):
+        incident[a].append(index)
+        incident[b].append(index)
+    labelled = {index: label_size[key] for index, (key, _a, _b) in enumerate(edges) if key in label_size}
+
+    def build(before=None, moved_node: Optional[str] = None):
+        """The grids of what is placed; after ``moved_node`` moved, ``before`` updated for its lines."""
+        if before is not None:
+            line_grid, geos = before[0], before[1]
+            todo = incident[moved_node]
+        else:
+            line_grid, geos = {}, [None] * len(edges)
+            todo = range(len(edges))
+        for index in todo:
+            _key, a, b = edges[index]
+            pa, pb = positions[a], positions[b]
+            ends = (pa[0], pa[1], pb[0], pb[1], cell)
+            seen = lines_seen.get(index)
+            if before is not None and seen is not None:
+                for cell_key in seen[2]:
+                    line_grid[cell_key].remove(index)
+            if seen is None or seen[0] != ends:
+                seen = lines_seen[index] = (ends, _line_geo(pa, pb), _cells_along(pa, pb, cell))
+            geos[index] = seen[1]
+            for cell_key in seen[2]:
+                line_grid.setdefault(cell_key, []).append(index)
+        names = _BoxGrid(cell)
+        name_of: List[str] = []
+        for node, (w, h) in node_size.items():
+            x, y = positions[node]
+            names.add((x - w / 2.0 - half, y - h / 2.0 - half, x + w / 2.0 + half, y + h / 2.0 + half))
+            name_of.append(node)
+        labels = _BoxGrid(cell)
+        label_of: List[int] = []
+        for index, (w, h) in labelled.items():
+            key, a, b = edges[index]
+            t = spots.get(key)
+            if t is None:
+                continue
+            pa, pb = positions[a], positions[b]
+            x, y = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+            labels.add((x - w / 2.0 - half, y - h / 2.0 - half, x + w / 2.0 + half, y + h / 2.0 + half))
+            label_of.append(index)
+        return line_grid, geos, names, name_of, labels, label_of
+
+    def cost(node: str, x: float, y: float, state, limit: int = 1 << 30) -> int:
+        """What is in the way of ``node`` at ``(x, y)``; counting stops at ``limit``."""
+        line_grid, geos, names, name_of, labels, label_of = state
+        own = set(incident[node])
+        w, h = node_size[node]
+        box = (x - w / 2.0 - half, y - h / 2.0 - half, x + w / 2.0 + half, y + h / 2.0 + half)
+        total = sum(1 for index, _area in names.hits(box) if name_of[index] != node)
+        total += sum(1 for index, _area in labels.hits(box) if label_of[index] not in own)
+        if total >= limit:
+            return total
+        reach = max(w, h) / 2.0 + clear
+        near = set()
+        for gx in range(int(math.floor((x - reach) / cell)), int(math.floor((x + reach) / cell)) + 1):
+            for gy in range(int(math.floor((y - reach) / cell)), int(math.floor((y + reach) / cell)) + 1):
+                near.update(line_grid.get((gx, gy), ()))
+        for index in near:
+            if index not in own and index in wanted and _near_line(x, y, geos[index], w / 2.0, h / 2.0):
+                total += 1
+        mine = []
+        for index in own:
+            _key, a, b = edges[index]
+            other = b if a == node else a
+            q = positions[other]
+            mine.append((math.hypot(q[0] - x, q[1] - y), index, other, q))
+        mine.sort(key=lambda item: (item[0], item[1]))
+        new_boxes: List[Box] = [box]
+        new_geos = {index: _line_geo((x, y), q) for _length, index, _other, q in mine}
+        for length, index, other, q in mine:
+            if total >= limit:
+                return total
+            geo = new_geos[index]
+            cells = set()
+            for gx, gy in _cells_along((x, y), q, cell):
+                for ox in (-1, 0, 1):
+                    for oy in (-1, 0, 1):
+                        cells.add((gx + ox, gy + oy))
+            near_names, near_labels, near_lines = set(), set(), set()
+            for cell_key in cells:
+                near_names.update(names.cells.get(cell_key, ()))
+                near_labels.update(labels.cells.get(cell_key, ()))
+                near_lines.update(line_grid.get(cell_key, ()))
+            if index in wanted:
+                for found in near_names:
+                    third = name_of[found]
+                    if third != node and third != other:
+                        tw, th = node_size[third]
+                        tx, ty = positions[third]
+                        if _near_line(tx, ty, geo, tw / 2.0, th / 2.0):
+                            total += 1
+            for found in near_labels:
+                if label_of[found] in own:
+                    continue
+                lb = labels.boxes[found]
+                if _near_line((lb[0] + lb[2]) / 2.0, (lb[1] + lb[3]) / 2.0, geo,
+                              (lb[2] - lb[0]) / 2.0 - half, (lb[3] - lb[1]) / 2.0 - half):
+                    total += 1
+            size = labelled.get(index)
+            if size is None:
+                continue
+            lw, lh = size
+            hw, hh = lw / 2.0 + half, lh / 2.0 + half
+            dx, dy = q[0] - x, q[1] - y
+            intervals = []
+            for other_line in near_lines:
+                if other_line not in own:
+                    span = _line_interval(x, y, dx, dy, geos[other_line], lw / 2.0, lh / 2.0)
+                    if span is not None:
+                        intervals.append((span[0], span[1], 0))
+            for other_line in own:
+                if other_line != index:
+                    span = _line_interval(x, y, dx, dy, new_geos[other_line], lw / 2.0, lh / 2.0)
+                    if span is not None:
+                        intervals.append((span[0], span[1], 0))
+            boxes = [names.boxes[i] for i in near_names if name_of[i] != node]
+            boxes += [labels.boxes[i] for i in near_labels if label_of[i] not in own]
+            for other_box in boxes + new_boxes:
+                span = _box_interval(x, y, dx, dy, other_box, hw, hh)
+                if span is not None:
+                    intervals.append((span[0], span[1], 0))
+            t, in_way = _choose_spot(intervals, 1.0 / max(length, 1.0), None)
+            total += len(in_way)
+            cx, cy = x + dx * t, y + dy * t
+            new_boxes.append((cx - hw, cy - hh, cx + hw, cy + hh))
+        return total
+
+    moved = False
+    state = build()
+    tried = {pinned} if pinned is not None else set()
+    low_x = min(p[0] for p in positions.values())
+    high_x = max(p[0] for p in positions.values())
+    low_y = min(p[1] for p in positions.values())
+    high_y = max(p[1] for p in positions.values())
+    ring = [(math.cos(2.0 * math.pi * step / 8), math.sin(2.0 * math.pi * step / 8)) for step in range(8)]
+    turns = [(math.cos(angle), math.sin(angle)) for degrees in (8, -8, 20, -20)
+             for angle in (math.radians(degrees),)]
+    for _need, problem, suggested in report:
+        for node in sorted(set(problem), key=lambda item: (len(incident[item]), problem.index(item))):
+            if node in tried or len(incident[node]) > _RELOCATE_MAX_LINES or len(tried) >= _RELOCATE_NAMES:
+                continue
+            tried.add(node)
+            x, y = positions[node]
+            current = cost(node, x, y, state)
+            if current <= 0:
+                continue
+            # the way the problem pushes it (once, and further), nearby spots, and (for a name with
+            # few lines) its line to each other end turned a little or made longer: a crowded name's
+            # lines spread and lengthen
+            spots_to_try = [[(x + dx, y + dy) for name, dx, dy in suggested if name == node and (dx or dy)]]
+            # turned around the other names of the problem (two lines from one name in almost the
+            # same direction come apart), or further from them
+            for other in dict.fromkeys(problem):
+                if other != node:
+                    ox, oy = positions[other]
+                    vx, vy = x - ox, y - oy
+                    spots_to_try.append([(ox + vx * c - vy * s, oy + vx * s + vy * c) for c, s in turns]
+                                        + [(ox + vx * 1.35, oy + vy * 1.35)])
+            spots_to_try += [[(x + ux * radius * cell, y + uy * radius * cell) for ux, uy in ring]
+                             for radius in (1.0, 2.5)]
+            best = None
+            for group in spots_to_try:
+                for spot in group:
+                    if not (low_x <= spot[0] <= high_x and low_y <= spot[1] <= high_y):
+                        continue  # inside the picture as it is: a move never stretches it
+                    if budget[0] <= 0:
+                        break
+                    budget[0] -= 1
+                    value = cost(node, spot[0], spot[1], state, current if best is None else best[0])
+                    if value < current and (best is None or value < best[0]):
+                        best = (value, spot)
+                if best is not None and best[0] == 0:
+                    break
+            if best is not None:
+                positions[node][0], positions[node][1] = best[1]
+                moved = True
+                state = build(state, node)
+                break
+    return moved
+
+
+def _room_cell(node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]]) -> float:
+    """Grid cells at least half the widest box plus the clearance: whatever a label on a line can
+    touch is filed in a cell next to one the line passes through."""
+    sizes = list(node_size.values()) + list(label_size.values())
+    biggest = max(max(w, h) for w, h in sizes) if sizes else 100.0
+    return biggest / 2.0 + LINE_CLEARANCE + _ROOM_GAP
+
+
+def _make_room(positions: Dict[str, List[float]], edges: Sequence[Tuple[Any, str, str]],
+               node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+               name_lines: Optional[Sequence[int]] = None, pinned: Optional[str] = None,
+               spots: Optional[Mapping[Any, float]] = None
+               ) -> Tuple[Dict[str, List[float]], Dict[Any, float], float]:
+    """Move names until no name box or label covers another, no label is touched by a line that
+    is not its own and no line of ``name_lines`` (default: all) runs through a name it does not end at.
+    ``pinned`` (the focus) is never moved by itself and ends where it started.
+
+    Cheapest first: a label takes another free spot on its line (``_room_round``); a name in the
+    way of a problem that would need the picture to grow a lot moves to a nearby spot where less
+    is in the way (``_relocate``: turned round a related name, off a line, further out); room is
+    made round one problem; only then the whole picture grows: names spread, boxes keep their size,
+    so every label gets further from the lines that are not its own (``_grow_and_shrink``, which
+    then shrinks it back as far as it stays clear). ``spots``: where labels sit already (kept while
+    they stay free). Returns the positions, the spot (``t``) of every label and how many times over
+    growing the whole picture made it.
+    """
+    if name_lines is None:
+        name_lines = range(len(edges))
+    name_lines = list(name_lines)
+    cell = _room_cell(node_size, label_size)
+    start ={key: list(point) for key, point in positions.items()}
+    lines_seen: Dict[int, Tuple[Any, ...]] = {}  # each line's grid cells (see ``_relocate``)
+
+    def look(where: Dict[str, List[float]], spots: Dict[Any, float],
+             report: Optional[List[Tuple[float, Tuple[str, ...], Any]]] = None, turn: bool = False):
+        found, moves, spots = _room_round(where, edges, node_size, label_size, name_lines, spots, cell, report,
+                                          pinned, _TURN_NEED if turn else _BIG, lines_seen)
+        if pinned is not None:
+            moves.pop(pinned, None)
+            if report:
+                report[:] = [(need, names, [item for item in suggested if item[0] != pinned])
+                             for need, names, suggested in report]
+        return found, moves, spots
+
+    def relocator() -> Callable[..., bool]:
+        budget = [_RELOCATE_BUDGET]  # spots tried, shared by every relocation of one attempt
+
+        def relocate(where: Dict[str, List[float]], spots: Dict[Any, float], report: List[Tuple[str, ...]],
+                     early: bool = False) -> bool:
+            if early and budget[0] < _RELOCATE_BUDGET * 2 // 3:
+                return False  # the rest is kept for the last few problems, where it helps most
+            return _relocate(where, edges, node_size, label_size, name_lines, spots, cell, report, budget, pinned,
+                             lines_seen)
+        return relocate
+
+    found, positions, spots, growth = _grow_and_shrink(positions, dict(spots or {}), start, look, relocator())
+    if pinned is not None and pinned in positions:
+        # growing moved everything round the middle of the picture: the focus goes back where it was
+        dx, dy = start[pinned][0] - positions[pinned][0], start[pinned][1] - positions[pinned][1]
+        for point in positions.values():
+            point[0] += dx
+            point[1] += dy
+    return positions, spots, growth
+
+
+def _span(positions: Mapping[str, Sequence[float]]) -> Tuple[float, float]:
+    xs = [p[0] for p in positions.values()]
+    ys = [p[1] for p in positions.values()]
+    return max(xs) - min(xs), max(ys) - min(ys)
+
+
+def _area(positions: Mapping[str, Sequence[float]]) -> float:
+    width, height = _span(positions)
+    return width * height
+
+
+def _grow_locally(positions: Dict[str, List[float]], spots: Dict[Any, float], found: int,
+                  report: Sequence[Tuple[float, Tuple[str, ...], Any]], look: Callable[..., Any]
+                  ) -> Optional[Tuple[Dict[str, List[float]], Dict[Any, float]]]:
+    """Room around one problem instead of the whole picture: inside a circle round its names
+    everything grows ``need`` times, outside it everything moves out by as much as the circle grew
+    (no two names get nearer). The first of the worst problems for which that leaves fewer problems
+    wins; None when none does."""
+    tried = 0
+    for need, names, _suggested in sorted(report, key=lambda item: -item[0]):
+        if tried >= _LOCAL_TRIES:
+            break
+        points = [positions[name] for name in dict.fromkeys(names) if name in positions]
+        if not points:
+            continue
+        tried += 1
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+        # local: at most a fifth of the picture, so the picture grows far less than by growing all of it
+        radius = min(max(math.hypot(p[0] - cx, p[1] - cy) for p in points) * 1.25, 0.2 * max(_span(positions))) + 1.0
+        factor = min(max(need, _ROOM_GROW), _ROOM_GROW_MAX)
+        trial = {}
+        for key, (x, y) in positions.items():
+            r = math.hypot(x - cx, y - cy)
+            grown = r * factor if r <= radius else r + (factor - 1.0) * radius
+            scale = grown / r if r > 1e-9 else 1.0
+            trial[key] = [cx + (x - cx) * scale, cy + (y - cy) * scale]
+        trial_found, _moves, trial_spots = look(trial, spots)
+        if trial_found < found:
+            return trial, trial_spots
+    return None
+
+
+def _nudge(positions: Dict[str, List[float]], spots: Dict[Any, float], found: int,
+           report: Sequence[Tuple[float, Tuple[str, ...], Any]], look: Callable[..., Any]
+           ) -> Optional[Tuple[Dict[str, List[float]], Dict[Any, float]]]:
+    """The moves the problems ask for (a name off a line, two lines apart), all at once, once and
+    twice as far; kept when fewer problems are left, else None."""
+    for factor in (1.0, 2.0):
+        trial = {key: list(point) for key, point in positions.items()}
+        for _need, _names, suggested in report:
+            for node, dx, dy in suggested:
+                trial[node][0] += dx * factor
+                trial[node][1] += dy * factor
+        trial_found, _moves, trial_spots = look(trial, spots)
+        if trial_found < found:
+            return trial, trial_spots
+    return None
+
+
+def _grow_and_shrink(positions: Dict[str, List[float]], spots: Dict[Any, float],
+                     start: Mapping[str, Sequence[float]], look: Callable[..., Any],
+                     relocate: Callable[..., bool]
+                     ) -> Tuple[int, Dict[str, List[float]], Dict[Any, float], float]:
+    """Until nothing is in the way: move single names out of the way (``relocate``), make room round
+    a problem (``_grow_locally``) or do the moves the problems ask for (``_nudge``) while that
+    leaves fewer problems, else grow the picture a step (with the moves for what growing cannot
+    fix, from ``_room_round``). Then shrink it back as far as it stays clear, but not
+    below the size it started at. Returns ``(problems left, positions, spots, growth)``: growth is
+    how many times over growing the whole picture made it."""
+    growth = 1.0
+    grown = 0
+    tries = 0
+    before = None  # (problems, positions, moves, spots, report) before names were moved one by one
+    for _round in range(3 * _GROW_ROUNDS):
+        report: List[Tuple[float, Tuple[str, ...]]] = []
+        found, moves, spots = look(positions, spots, report)
+        if not found or grown >= _GROW_ROUNDS:
+            break
+        if before is not None:
+            if found < before[0]:
+                tries = 0
+            else:  # moving them did not help: back to before, and grow
+                found, positions, moves, spots, report = before
+                tries = _RELOCATE_TRIES
+            before = None
+        # problems that growing would take long to clear (or a few left): move one of their names to
+        # a nearby spot where less is in the way, worst first (cheaper than growing the whole picture
+        # for them); kept only when fewer problems are left
+        needs = sorted(item[0] for item in report)
+        outlier = max(_HARD_NEED, _HARD_NEED * needs[len(needs) // 2])
+        hard = sorted((item for item in report if item[0] > outlier or found <= _RELOCATE_MAX),
+                      key=lambda item: -item[0])
+        if tries < _RELOCATE_TRIES and hard:
+            tries += 1
+            before = (found, {key: list(point) for key, point in positions.items()}, moves, spots, report)
+            if relocate(positions, spots, hard, found > _RELOCATE_MAX):
+                continue
+            before = None
+        # then more room where the problems are: the names around each grow apart, everything
+        # further out moves out by as much (kept only when fewer problems are left)
+        if found <= _RELOCATE_MAX:
+            local = _grow_locally(positions, spots, found, report, look)
+            if local is None:
+                local = _nudge(positions, spots, found, report, look)
+            if local is not None:
+                positions, spots = local
+                tries = 0
+                continue
+            # the few problems left would grow the whole picture: two lines from one name that only
+            # many times the size would part turn apart as well (else one such pair next to two names
+            # nothing can move grew the picture a hundred times over)
+            report = []
+            found, moves, spots = look(positions, spots, report, turn=True)
+        for node, (dx, dy) in moves.items():
+            positions[node][0] += dx
+            positions[node][1] += dy
+        # as much as clears about half of the problems (the shrink afterwards takes back too much)
+        needs = sorted(item[0] for item in report)
+        factor = min(max(needs[len(needs) // 2], _ROOM_GROW), _ROOM_GROW_MAX)
+        _scale_up(positions, factor)
+        growth *= factor
+        grown += 1
+        tries = 0
+    for _round in range(_GROW_ROUNDS if found else 0):
+        # the guarantee: growing alone (with the moves for what growing cannot fix)
+        for node, (dx, dy) in moves.items():
+            positions[node][0] += dx
+            positions[node][1] += dy
+        _scale_up(positions, _ROOM_GROW_MAX)
+        growth *= _ROOM_GROW_MAX
+        found, moves, spots = look(positions, spots, turn=True)
         if not found:
             break
-        for node, (dx, dy) in moves.items():
-            positions[node][0] += dx * _ROOM_STEP
-            positions[node][1] += dy * _ROOM_STEP
-    return best[1], best[2]
+    if found:
+        return found, positions, spots, growth
+    size, smallest = max(_span(positions)), max(_span(start))
+    if size <= smallest * 1.001:
+        return found, positions, spots, growth
+    low, high = smallest / size, 1.0
+    best = (positions, spots, 1.0)
+    for _step in range(_SHRINK_STEPS):
+        factor = (low + high) / 2.0
+        trial = {key: list(point) for key, point in positions.items()}
+        _scale_up(trial, factor)
+        problems, _moves, trial_spots = look(trial, spots)
+        if problems:
+            low = factor
+        else:
+            high = factor
+            best = (trial, trial_spots, factor)
+    return 0, best[0], best[1], growth * best[2]
+
+
+class _Placed:
+    """What is placed so far while names are placed one at a time (see ``_place_one_by_one``): name
+    boxes and labels in grids, lines and planned lines ("ghosts": from a placed name to where a
+    related name not yet placed is expected) filed by the grid cells they pass through."""
+
+    def __init__(self, cell: float, node_size: Mapping[str, Tuple[float, float]],
+                 edges: Sequence[Tuple[Any, str, str]], label_size: Mapping[Any, Tuple[float, float]],
+                 name_lines: Sequence[int]) -> None:
+        self.cell = cell
+        self.node_size = node_size
+        self.edges = edges
+        self.label_size = label_size
+        self.name_lines = set(name_lines)
+        self.positions: Dict[str, List[float]] = {}
+        self.name_box: Dict[str, Box] = {}
+        self.name_cells: Dict[Tuple[int, int], set] = {}
+        self.label_box: Dict[int, Box] = {}
+        self.label_cells: Dict[Tuple[int, int], set] = {}
+        self.line_cells: Dict[Tuple[int, int], set] = {}
+        self.cells_of_line: Dict[int, List[Tuple[int, int]]] = {}
+        self.geos: Dict[int, LineGeo] = {}
+        self.ghost_cells: Dict[Tuple[int, int], List[int]] = {}
+        self.ghosts: Dict[int, Tuple[LineGeo, str, str]] = {}
+        self.ghosts_to: Dict[str, List[int]] = {}
+        self.ghost_count = 0
+        self.last_failed = -1
+        self.checks = getattr(self, "checks", 0)  # spots checked so far (kept by ``spread``)
+        self.spots: Dict[Any, float] = {}
+        self.label_size_of = {index: label_size[key] for index, (key, _a, _b) in enumerate(edges) if key in label_size}
+        self.incident: Dict[str, List[Tuple[int, str]]] = {}
+        for index, (_key, a, b) in enumerate(edges):
+            self.incident.setdefault(a, []).append((index, b))
+            self.incident.setdefault(b, []).append((index, a))
+
+    def _around(self, cells: Iterable[Tuple[int, int]]) -> set:
+        """``cells`` and the ring of cells round them."""
+        near = set()
+        for gx, gy in cells:
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    near.add((gx + ox, gy + oy))
+        return near
+
+    def _cells_of(self, box: Box, ring: int = 0) -> List[Tuple[int, int]]:
+        """The cells ``box`` covers, with ``ring`` more all round."""
+        c = self.cell
+        return [(gx, gy) for gx in range(int(box[0] // c) - ring, int(box[2] // c) + 1 + ring)
+                for gy in range(int(box[1] // c) - ring, int(box[3] // c) + 1 + ring)]
+
+    # Everything is filed in the cells it covers and the ring round them, so whatever comes near a
+    # line or a box is found in the cells that line or box itself covers.
+
+    def _add_label(self, index: int, box: Box) -> None:
+        self.label_box[index] = box
+        for cell_key in self._cells_of(box, 1):
+            self.label_cells.setdefault(cell_key, set()).add(index)
+
+    def _drop_label(self, index: int) -> None:
+        box = self.label_box.pop(index)
+        for cell_key in self._cells_of(box, 1):
+            self.label_cells[cell_key].discard(index)
+
+    def _names_on(self, box: Box) -> List[str]:
+        """The names whose boxes overlap ``box`` (touching edges do not count)."""
+        found = set()
+        for cell_key in self._cells_of(box):
+            found.update(self.name_cells.get(cell_key, ()))
+        return [node for node in found
+                if min(box[2], self.name_box[node][2]) > max(box[0], self.name_box[node][0])
+                and min(box[3], self.name_box[node][3]) > max(box[1], self.name_box[node][1])]
+
+    def remove(self, node: str) -> Tuple[float, float, List[Tuple[int, Box, float]]]:
+        """Take ``node``, its lines and their labels out again; returns what ``place`` needs to put
+        them back as they were."""
+        x, y = self.positions.pop(node)
+        box = self.name_box.pop(node)
+        for cell_key in self._cells_of(box, 1):
+            self.name_cells[cell_key].discard(node)
+        labels = []
+        for index, other in self.incident.get(node, ()):
+            geo = self.geos.pop(index, None)
+            if geo is None:
+                continue
+            for cell_key in self.cells_of_line.pop(index):
+                self.line_cells[cell_key].discard(index)
+            if index in self.label_box:
+                labels.append((index, self.label_box[index], self.spots[self.edges[index][0]]))
+                self._drop_label(index)
+                del self.spots[self.edges[index][0]]
+        return x, y, labels
+
+    def _near(self, cells: Iterable[Tuple[int, int]], ghosts: bool) -> Tuple[set, set, set, set]:
+        """``(names, labels, lines, planned lines)`` filed in ``cells`` (planned ones with ``ghosts``)."""
+        near_names, near_labels, near_lines, near_ghosts = set(), set(), set(), set()
+        name_cells, label_cells, line_cells = self.name_cells, self.label_cells, self.line_cells
+        ghost_cells = self.ghost_cells
+        for cell_key in cells:
+            if cell_key in name_cells:
+                near_names.update(name_cells[cell_key])
+            if cell_key in label_cells:
+                near_labels.update(label_cells[cell_key])
+            if cell_key in line_cells:
+                near_lines.update(line_cells[cell_key])
+            if ghosts and cell_key in ghost_cells:
+                near_ghosts.update(ghost_cells[cell_key])
+        return near_names, near_labels, near_lines, near_ghosts
+
+    def _free_spot(self, p: Sequence[float], q: Sequence[float], size: Tuple[float, float],
+                   near: Tuple[set, set, set, set], node: str, skip_line: Optional[int],
+                   more_lines: Iterable[LineGeo], more_boxes: Sequence[Box], skip_labels: Container[int],
+                   from_p: bool) -> Optional[Tuple[float, Box]]:
+        """``(t, box)``: the spot on ``p``-``q`` (fraction from ``p``) for a label of ``size`` clear of
+        the names, labels, lines and planned lines of ``near`` (see ``_near``; planned lines to
+        ``node``, ``skip_line`` and labels of ``skip_labels`` left out) and of ``more_lines`` /
+        ``more_boxes``, nearest ``p`` (``from_p``) or ``q``; None when there is none."""
+        free = self._stretches(p, q, size, near, node, skip_line, more_lines, more_boxes, skip_labels)
+        if not free:
+            return None
+        half = _ROOM_GAP / 2.0
+        hw, hh = size[0] / 2.0 + half, size[1] / 2.0 + half
+        # half a pixel inside the free stretch: the room pass, measuring again, finds it free too
+        inside = 0.5 / max(math.hypot(q[0] - p[0], q[1] - p[1]), 1.0)
+        lo, hi = free[0] if from_p else free[-1]
+        t = min(lo + inside, (lo + hi) / 2.0) if from_p else max(hi - inside, (lo + hi) / 2.0)
+        cx, cy = p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t
+        return t, (cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def ray_room(self, p: Sequence[float], q: Sequence[float], size: Tuple[float, float], node: str,
+                 ghosts: bool) -> List[Tuple[float, float]]:
+        """Where along ``p``-``q`` (as distances from ``p``) a label of ``size`` is clear of what is
+        placed (and, with ``ghosts``, of the planned lines not to ``node``)."""
+        length = math.hypot(q[0] - p[0], q[1] - p[1])
+        free = self._stretches(p, q, size, self._near(_cells_along(p, q, self.cell), ghosts), node, None,
+                               (), (), ())
+        return [(lo * length, hi * length) for lo, hi in free]
+
+    def _stretches(self, p: Sequence[float], q: Sequence[float], size: Tuple[float, float],
+                   near: Tuple[set, set, set, set], node: str, skip_line: Optional[int],
+                   more_lines: Iterable[LineGeo], more_boxes: Sequence[Box], skip_labels: Container[int]
+                   ) -> List[Tuple[float, float]]:
+        """The free stretches of ``p``-``q`` for a label of ``size`` (see ``_free_spot``)."""
+        half = _ROOM_GAP / 2.0
+        lw, lh = size
+        hw, hh = lw / 2.0 + half, lh / 2.0 + half
+        px, py = p[0], p[1]
+        dx, dy = q[0] - px, q[1] - py
+        near_names, near_labels, near_lines, near_ghosts = near
+        intervals = []
+        geos = [self.geos[index] for index in near_lines if index != skip_line]
+        geos += list(more_lines)
+        # the stretch a label on this line can cover, grown by the clearance: what is outside it is
+        # skipped without a closer look
+        reach_x, reach_y = hw + LINE_CLEARANCE, hh + LINE_CLEARANCE
+        low_x, high_x = min(px, q[0]) - reach_x, max(px, q[0]) + reach_x
+        low_y, high_y = min(py, q[1]) - reach_y, max(py, q[1]) + reach_y
+
+        big_w, big_h = lw / 2.0 + LINE_CLEARANCE, lh / 2.0 + LINE_CLEARANCE
+
+        def add_lines(lines: Iterable[LineGeo]) -> None:
+            # ``_line_interval`` written out here (the hottest loop of placing names one at a time)
+            for geo in lines:
+                x0, x1, y0, y1, nx, ny, across = geo
+                if x1 < low_x or x0 > high_x or y1 < low_y or y0 > high_y:
+                    continue
+                reach = (nx if nx > 0.0 else -nx) * big_w + (ny if ny > 0.0 else -ny) * big_h
+                side_start = nx * px + ny * py - across
+                side_end = side_start + nx * dx + ny * dy
+                if (side_start >= reach and side_end >= reach) or (side_start <= -reach and side_end <= -reach):
+                    continue
+                # ``_hit_interval`` written out too: the line's box grown, then the band along it
+                lo, hi = 0.0, 1.0
+                for k, r in ((dx, x1 + big_w - px), (-dx, big_w - x0 + px), (dy, y1 + big_h - py),
+                             (-dy, big_h - y0 + py), (side_end - side_start, reach - side_start),
+                             (side_start - side_end, reach + side_start)):
+                    if -1e-12 < k < 1e-12:
+                        if r < 0.0:
+                            break
+                        continue
+                    v = r / k
+                    if k > 0.0:
+                        if v < hi:
+                            hi = v
+                    elif v > lo:
+                        lo = v
+                    if lo >= hi:
+                        break
+                else:
+                    intervals.append((lo, hi))
+        add_lines(geos)
+        boxes = [self.name_box[found] for found in near_names]
+        boxes += [self.label_box[index] for index in near_labels if index not in skip_labels]
+        for other_box in boxes + list(more_boxes):
+            if other_box[2] < low_x or other_box[0] > high_x or other_box[3] < low_y or other_box[1] > high_y:
+                continue
+            span = _box_interval(px, py, dx, dy, other_box, hw, hh)
+            if span is not None:
+                intervals.append(span)
+        margin = 1.0 / max(math.hypot(dx, dy), 1.0)
+        free = _free_stretches(intervals, margin)
+        if free and near_ghosts:
+            # the planned lines only when the rest leaves room (most spots fail before)
+            add_lines(item[0] for item in (self.ghosts.get(ghost) for ghost in near_ghosts)
+                      if item is not None and item[2] != node)
+            free = _free_stretches(intervals, margin)
+        return free
+
+    def check(self, node: str, x: float, y: float, ghosts: bool = True, limit: int = 1
+              ) -> Tuple[int, List[Tuple[int, Box, float]]]:
+        """``(problems, labels)`` of ``node`` placed at ``(x, y)`` with its lines to the names already
+        placed: its box on a name or within the clearance of a line, a new line within the clearance
+        of a name, a new label with no spot on its line clear of every other box and line (and, with
+        ``ghosts``, of the planned lines). A label already placed that the new box covers or a new
+        line comes near slides along its own line to another free spot (none: a problem).
+        ``labels``: ``(edge, box, t)`` of each new or moved label (``t`` from the edge's first name).
+        Counting stops at ``limit``."""
+        self.checks += 1
+        half = _ROOM_GAP / 2.0
+        w, h = self.node_size[node]
+        box = (x - w / 2.0 - half, y - h / 2.0 - half, x + w / 2.0 + half, y + h / 2.0 + half)
+        bad = len(self._names_on(box))
+        if bad >= limit:
+            return bad, []
+        moving = set()  # labels in the way that must slide along their lines
+        _names, near_labels, near_lines, near_ghosts = self._near(self._cells_of(box), ghosts)
+        for index in near_labels:
+            lb = self.label_box[index]
+            if min(box[2], lb[2]) > max(box[0], lb[0]) and min(box[3], lb[3]) > max(box[1], lb[1]):
+                moving.add(index)
+        for index in near_lines:
+            if index in self.name_lines and _near_line(x, y, self.geos[index], w / 2.0, h / 2.0):
+                bad += 1
+                if bad >= limit:
+                    return bad, []
+        for ghost in near_ghosts:
+            item = self.ghosts.get(ghost)
+            if item is not None and item[2] != node and _near_line(x, y, item[0], w / 2.0, h / 2.0):
+                bad += 1
+                if bad >= limit:
+                    return bad, []
+        positions = self.positions
+        new = []
+        for index, other in self.incident.get(node, ()):
+            q = positions.get(other)
+            if q is not None:
+                new.append((math.hypot(q[0] - x, q[1] - y), index, other, q))
+        new.sort(key=lambda item: (item[0], item[1]))
+        new_geos = {index: _line_geo((x, y), q) for _length, index, _other, q in new}
+        new_near = {}
+        lines_of = self.incident
+        for _length, index, other, q in new:
+            geo = new_geos[index]
+            near = new_near[index] = self._near(_cells_along((x, y), q, self.cell), ghosts)
+            near_names, near_labels = near[0], near[1]
+            if index in self.name_lines:
+                for third in near_names:
+                    if third != node and third != other:
+                        tw, th = self.node_size[third]
+                        tx, ty = positions[third]
+                        if _near_line(tx, ty, geo, tw / 2.0, th / 2.0):
+                            bad += 1
+                            if bad >= limit:
+                                return bad, []
+            for found in near_labels:
+                lb = self.label_box[found]
+                if found not in moving and _near_line((lb[0] + lb[2]) / 2.0, (lb[1] + lb[3]) / 2.0, geo,
+                                                      (lb[2] - lb[0]) / 2.0 - half, (lb[3] - lb[1]) / 2.0 - half):
+                    moving.add(found)
+        if len(moving) > _PLACE_SLIDES:
+            return bad + len(moving), []
+        new_labels: List[Tuple[int, Box, float]] = []
+        # the label that found no room at the last spot tried first: most spots fail on the same one
+        new.sort(key=lambda item: item[1] != self.last_failed)
+        for _length, index, other, q in new:
+            size = self.label_size.get(self.edges[index][0])
+            if size is None:
+                continue
+            spot = self._free_spot((x, y), q, size, new_near[index], node, None,
+                                   [g for i, g in new_geos.items() if i != index],
+                                   [box] + [item[1] for item in new_labels], moving,
+                                   len(lines_of.get(node, ())) >= len(lines_of.get(other, ())))
+            if spot is None:
+                self.last_failed = index
+                bad += 1
+                if bad >= limit:
+                    return bad, []
+                continue
+            t, label = spot
+            # new labels never sit on the new lines: those are among the lines kept clear
+            new_labels.append((index, label, t if self.edges[index][1] == node else 1.0 - t))
+        for index in sorted(moving):
+            _key, a, b = self.edges[index]
+            pa, pb = positions[a], positions[b]
+            spot = self._free_spot(pa, pb, self.label_size[self.edges[index][0]],
+                                   self._near(_cells_along(pa, pb, self.cell), ghosts), node, index,
+                                   list(new_geos.values()), [box] + [item[1] for item in new_labels], moving,
+                                   len(lines_of.get(a, ())) >= len(lines_of.get(b, ())))
+            if spot is None:
+                bad += 1
+                if bad >= limit:
+                    return bad, []
+                continue
+            new_labels.append((index, spot[1], spot[0]))
+        if bad:
+            return bad, []
+        # a label that slid must clear the new labels too, and the new lines the labels that slid
+        for k, (index, label, _t) in enumerate(new_labels):
+            for other_index, other_label, _u in new_labels[:k]:
+                if (min(label[2], other_label[2]) > max(label[0], other_label[0])
+                        and min(label[3], other_label[3]) > max(label[1], other_label[1])):
+                    return 1, []
+        return 0, new_labels
+
+    def place(self, node: str, x: float, y: float, labels: Sequence[Tuple[int, Box, float]]) -> None:
+        """Put ``node`` at ``(x, y)`` with its lines to the names placed and ``labels`` (from ``check``)."""
+        half = _ROOM_GAP / 2.0
+        w, h = self.node_size[node]
+        self.positions[node] = [x, y]
+        box = (x - w / 2.0 - half, y - h / 2.0 - half, x + w / 2.0 + half, y + h / 2.0 + half)
+        self.name_box[node] = box
+        for cell_key in self._cells_of(box, 1):
+            self.name_cells.setdefault(cell_key, set()).add(node)
+        for index, other in self.incident.get(node, ()):
+            q = self.positions.get(other)
+            if q is None or other == node or index in self.geos:
+                continue
+            self.geos[index] = _line_geo((x, y), q)
+            cells = self._around(_cells_along((x, y), q, self.cell))
+            self.cells_of_line[index] = cells
+            for cell_key in cells:
+                self.line_cells.setdefault(cell_key, set()).add(index)
+        for index, box, t in labels:
+            if index in self.label_box:
+                self._drop_label(index)
+            self._add_label(index, box)
+            self.spots[self.edges[index][0]] = t
+        for ghost in self.ghosts_to.pop(node, ()):
+            self.ghosts.pop(ghost, None)
+
+    def extent(self, aspect: float) -> float:
+        """``_drawn_extent`` of what is placed: the larger of its width and ``aspect`` times its height."""
+        boxes = list(self.name_box.values()) + list(self.label_box.values())
+        if not boxes:
+            return 0.0
+        return max(max(b[2] for b in boxes) - min(b[0] for b in boxes),
+                   aspect * (max(b[3] for b in boxes) - min(b[1] for b in boxes))) - _ROOM_GAP
+
+    def spread(self, factor: float, centre: Sequence[float], expected: Callable[[str], Sequence[float]]) -> None:
+        """Everything placed ``factor`` times as far from ``centre`` (boxes keep their size, labels
+        their spot on their lines), the planned lines drawn again to where ``expected`` now says."""
+        cx, cy = centre[0], centre[1]
+        positions = {node: [cx + (p[0] - cx) * factor, cy + (p[1] - cy) * factor]
+                     for node, p in self.positions.items()}
+        plans = [(node, target) for _geo, node, target in self.ghosts.values()]
+        spots = dict(self.spots)
+        order = list(self.name_box)
+        self.__init__(self.cell, self.node_size, self.edges, self.label_size, self.name_lines)
+        for node in order:
+            self.place(node, positions[node][0], positions[node][1], ())
+        half = _ROOM_GAP / 2.0
+        for index, (key, a, b) in enumerate(self.edges):
+            t = spots.get(key)
+            if t is None or a not in positions or b not in positions:
+                continue
+            pa, pb = positions[a], positions[b]
+            lw, lh = self.label_size_of[index]
+            x, y = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+            self._add_label(index, (x - lw / 2.0 - half, y - lh / 2.0 - half, x + lw / 2.0 + half, y + lh / 2.0 + half))
+            self.spots[key] = t
+        for node, target in plans:
+            self.plan(node, target, expected(target))
+
+    def plan(self, node: str, target: str, where: Sequence[float]) -> None:
+        """A planned line from the placed ``node`` to where ``target`` is expected."""
+        p = self.positions[node]
+        if math.hypot(where[0] - p[0], where[1] - p[1]) < 1.0:
+            return
+        self.ghost_count += 1
+        ghost = self.ghost_count
+        self.ghosts[ghost] =(_line_geo(p, where), node, target)
+        self.ghosts_to.setdefault(target, []).append(ghost)
+        for cell_key in self._around(_cells_along(p, where, self.cell)):
+            self.ghost_cells.setdefault(cell_key, []).append(ghost)
+
+
+#: Candidate spots for a name tried round where the guide puts it: rings this far apart (scale 1) ...
+_PLACE_STEP = 36.0
+#: ... first evenly, then each this many times as far, out to ``_PLACE_REACH`` times the guide's size.
+_PLACE_GROW = 1.12
+_PLACE_REACH = 1.5
+#: A name with placed relations is tried out from the busiest of them, turned this far (radians)
+#: from where the guide expects it, at distances each this many times the last ...
+_PLACE_TURNS = tuple(sorted({sign * 0.06 * k for k in range(11) for sign in (1, -1)}
+                            | {sign * value for value in (0.8, 1.05, 1.4, 1.9, 2.4) for sign in (1, -1)} | {math.pi},
+                            key=lambda value: (abs(value), value)))
+#: (1.1: the owner's book 3,892 x 2,907 px in 0.74 s, against 5,532 x 2,607 in 0.97 s at 1.05;
+#: also no larger round a main character with 40 to 45 relations, measured)
+_PLACE_GROW_RAY = 1.1
+#: The picture is made again with this spacing (the smaller kept) while placing names took at most
+#: this many checks of a spot in all (neither spacing wins on every shape: 100 names with 110
+#: random relations, 1,300 checks in 0.14 s, 2,461 x 1,959 px against 2,882 x 2,241; 12 names all
+#: related to each other at phone sizes, 3,900 checks; the owner's book takes 8,000, in 0.75 s).
+_PLACE_GROW_RAY_TOO = 1.05
+_TRY_TOO_CHECKS = 4500
+#: ... and (with more than one) at the nearest of the spots round the middle of them.
+_PLACE_MIDDLE = 200
+#: How much the length of a name's lines counts against a spot, next to its distance from the guide
+#: spot (a little over 1: between the anchor and the guide spot, the nearer the anchor the better).
+_PLACE_SHORTER = 1.05
+#: Spots tried again without keeping the planned lines clear, when none kept them clear.
+_PLACE_UNPLANNED = 400
+#: Spots counted in full for a name no spot suits (the least bad wins; the room pass fixes the rest).
+_PLACE_FALLBACK = 40
+#: Labels already placed that may slide along their lines to make room for one name.
+_PLACE_SLIDES = 8
+#: Spots first tried at least this far apart (then the better ones near the one found).
+_PLACE_COARSE = 90.0
+#: A name with no room: what is placed spreads out this many times over, at most this often.
+_PLACE_SPREAD = 1.2
+_PLACE_REGROW = 6
+
+
+def _place_one_by_one(guide: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
+                      node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+                      name_lines: Sequence[int], cell: float, root: Optional[str] = None,
+                      order: Optional[Sequence[str]] = None, aspect: float = 1.0,
+                      give_up: Optional[float] = None, grow_ray: float = _PLACE_GROW_RAY
+                      ) -> Optional[Tuple[Dict[str, List[float]], Dict[Any, float], int, float, int]]:
+    """Names placed one at a time near where ``guide`` puts them, each at the nearest spot where it
+    and its lines to the names already placed clear everything placed: its box, the lines (no line
+    within the clearance of a name it does not end at or of a label not its own), and a free spot on
+    each new line for its label, nearest the end with more relations. What is placed never moves,
+    so the picture grows only where a name finds no room. Lines from a placed name to a related
+    name not placed yet are planned (towards that name's guide spot, moved as its placed relations
+    moved) and kept clear while there is a choice. ``root`` (default: the name with most lines) is
+    placed first, where the guide puts it. A name with no room anywhere near spreads out what is
+    placed so far (everything placed further from the first name; early on, while little is placed,
+    that costs little room) and tries again. Returns ``(positions, label spots, names placed with
+    a problem left, how many times over spreading made what was placed, how many spots were
+    checked)``; None as soon as what is placed reaches past ``give_up`` (see ``_drawn_extent``:
+    another layout already did better). ``grow_ray``: see ``_PLACE_GROW_RAY``."""
+    placed = _Placed(cell, node_size, edges, label_size, name_lines)
+    lines_of = {node: len(placed.incident.get(node, ())) for node in guide}
+    left = [node for node in guide]
+    if root is None or root not in guide:
+        root = max(left, key=lambda node: (lines_of[node], node))
+    xs = [p[0] for p in guide.values()]
+    ys = [p[1] for p in guide.values()]
+    size = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    rings = []
+    radius = 0.0
+    while radius <= _PLACE_REACH * size:
+        rings.append(radius)
+        radius = radius + _PLACE_STEP if radius < 10 * _PLACE_STEP else radius * _PLACE_GROW
+    pattern = [(0.0, 0.0, 0.0)]
+    for radius in rings[1:]:
+        count = min(32, max(8, int(2.0 * math.pi * radius / _PLACE_STEP)))
+        offset = (math.pi / count) * (len(pattern) % 2)
+        pattern += [(radius * math.cos(offset + 2.0 * math.pi * k / count),
+                     radius * math.sin(offset + 2.0 * math.pi * k / count), radius) for k in range(count)]
+    trouble = 0
+    spread = [1.0]
+    count_placed = {node: 0 for node in guide}
+
+    def expected(node: str) -> Tuple[float, float]:
+        """The guide spot of ``node``, moved as its placed relations (else the nearest placed names) moved."""
+        gx, gy = guide[node]
+        moved = [other for _index, other in placed.incident.get(node, ()) if other in placed.positions]
+        if not moved:
+            near = sorted(placed.positions, key=lambda other: (math.hypot(guide[other][0] - gx, guide[other][1] - gy),
+                                                               other))[:3]
+            moved = near
+        if not moved:
+            return gx, gy
+        dx = sum(placed.positions[o][0] - guide[o][0] for o in moved) / len(moved)
+        dy = sum(placed.positions[o][1] - guide[o][1] for o in moved) / len(moved)
+        return gx + dx, gy + dy
+
+    def candidates_for(node: str, target: Optional[Tuple[float, float]] = None):
+        """``(candidates, rays, anchor, anchor line)``: spots to try, ``(rank, x, y, ray)`` best
+        first, ``ray`` naming the direction from the anchor (the busiest placed relation) it lies on.
+        ``target``: where to look first instead of where the guide expects ``node``."""
+        if target is not None:
+            ex, ey = target
+        else:
+            ex, ey = (guide[node][0], guide[node][1]) if node == root else expected(node)
+        candidates = [(r, ex + px, ey + py, None) for px, py, r in pattern]
+        anchors = [placed.positions[other] for _index, other in placed.incident.get(node, ())
+                   if other in placed.positions]
+        rays: Dict[int, Tuple[float, float, float, float]] = {}  # ray: (ux, uy, need behind the label, length)
+        anchor = anchor_line = None
+        if node != root and anchors:
+            # out from the busiest placed relation, turned a little or more: the name moves out along
+            # its line, the label gets room nearer that relation
+            anchor = max((other for _index, other in placed.incident.get(node, ()) if other in placed.positions),
+                         key=lambda other: (lines_of[other], other))
+            anchor_line = next(index for index, other in placed.incident[node] if other == anchor)
+            ax, ay = placed.positions[anchor]
+            vx, vy = ex - ax, ey - ay
+            base = math.hypot(vx, vy)
+            heading = math.atan2(vy, vx) if base > 1.0 else 0.0
+            far = max(2.5 * base, base + 1500.0)
+            aw, ah = node_size[anchor]
+            nw, nh = node_size[node]
+            lw, lh = label_size.get(edges[anchor_line][0], (0.0, 0.0))
+            candidates = [] if len(anchors) == 1 else candidates
+            add = candidates.append
+            hypot = math.hypot
+            for turn in _PLACE_TURNS:
+                theta = heading + turn
+                ux, uy = math.cos(theta), math.sin(theta)
+                ext_a = abs(ux) * aw / 2.0 + abs(uy) * ah / 2.0
+                ext_n = abs(ux) * nw / 2.0 + abs(uy) * nh / 2.0
+                along = abs(ux) * lw / 2.0 + abs(uy) * lh / 2.0 + _ROOM_GAP
+                ray = len(rays)
+                rays[ray] = (ux, uy, ext_n + along + _ROOM_GAP, far)
+                distance = ext_a + ext_n + 2.0 * LINE_CLEARANCE + (2.0 * along if lw else 0.0)
+                penalty = abs(turn) * base * 0.5
+                while distance <= far:
+                    x, y = ax + ux * distance, ay + uy * distance
+                    add((hypot(x - ex, y - ey) + penalty, x, y, ray))
+                    distance *= grow_ray
+            if len(anchors) > 1:
+                # round the middle of its placed relations too: its lines short
+                bx = sum(p[0] for p in anchors) / len(anchors)
+                by = sum(p[1] for p in anchors) / len(anchors)
+                candidates += [(math.hypot(bx + px - ex, by + py - ey), bx + px, by + py, None)
+                               for px, py, _r in pattern[:_PLACE_MIDDLE]]
+            # nearest the guide spot first, then by the length of its lines; a name with relations
+            # still to place keeps nearer its guide spot (the room round it is planned for them)
+            weight = 1.0 + 0.5 * sum(1 for _index, other in placed.incident.get(node, ())
+                                     if other not in placed.positions)
+            count = len(anchors)
+            hypot = math.hypot
+            ends = [(p[0], p[1]) for p in anchors]
+            candidates = [(rank * weight + _PLACE_SHORTER * sum([hypot(x - px, y - py) for px, py in ends]) / count,
+                           x, y, ray) for rank, x, y, ray in candidates]
+        candidates.sort(key=lambda item: item[0])
+        return candidates, rays, anchor, anchor_line
+
+    def search(node: str, candidates, rays, anchor, anchor_line, use_ghosts: bool, tries: int = 1 << 30):
+        """The best of ``candidates`` where ``node`` fits: first among spots at least
+        ``_PLACE_COARSE`` apart (at most ``tries`` of them), then among the better ones near the spot found."""
+        room: Dict[int, List[Tuple[float, float]]] = {}
+
+        def fits(x: float, y: float, ray: Optional[int]):
+            if ray is not None and anchor_line in placed.label_size_of:
+                # a spot on a ray only when the anchor's label finds room on it before the name
+                ax, ay = placed.positions[anchor]
+                ux, uy, behind, length = rays[ray]
+                free = room.get(ray)
+                if free is None:
+                    free = room[ray] = placed.ray_room((ax, ay), (ax + ux * length, ay + uy * length),
+                                                       placed.label_size_of[anchor_line], node, use_ghosts)
+                reach = math.hypot(x - ax, y - ay) - behind
+                if not any(lo <= reach for lo, _hi in free):
+                    return None
+            bad, labels = placed.check(node, x, y, use_ghosts)
+            return None if bad else labels
+
+        kept: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+        step = _PLACE_COARSE
+        step2 = step * step
+        empty = ()
+        for rank, x, y, ray in candidates:
+            gx, gy = int(x // step), int(y // step)
+            near = False
+            for cell_key in ((gx - 1, gy - 1), (gx - 1, gy), (gx - 1, gy + 1), (gx, gy - 1), (gx, gy),
+                             (gx, gy + 1), (gx + 1, gy - 1), (gx + 1, gy), (gx + 1, gy + 1)):
+                for kx, ky in kept.get(cell_key, empty):
+                    if (x - kx) * (x - kx) + (y - ky) * (y - ky) < step2:
+                        near = True
+                        break
+                if near:
+                    break
+            if near:
+                continue
+            kept.setdefault((gx, gy), []).append((x, y))
+            tries -= 1
+            if tries < 0:
+                return None
+            labels = fits(x, y, ray)
+            if labels is None:
+                continue
+            for finer, fx, fy, fray in candidates:
+                if finer >= rank:
+                    break
+                if math.hypot(fx - x, fy - y) <= 1.5 * step:
+                    finer_labels = fits(fx, fy, fray)
+                    if finer_labels is not None:
+                        return fx, fy, finer_labels
+            return x, y, labels
+        return None
+
+    order_of = {node: index for index, node in enumerate(sorted(guide))}
+    current = root
+    while current is not None:
+        node = current
+        left.remove(node)
+        chosen = None
+        for _attempt in range(_PLACE_REGROW + 1):
+            candidates, rays, anchor, anchor_line = candidates_for(node)
+            # the nearest spot keeping the planned lines clear, else the nearest at all
+            for use_ghosts, high in ((True, len(candidates)), (False, _PLACE_UNPLANNED)):
+                chosen = search(node, candidates[:high], rays, anchor, anchor_line, use_ghosts)
+                if chosen is not None:
+                    break
+            if chosen is not None or len(placed.positions) < 2:
+                break
+            # no room anywhere near: what is placed so far spreads out round the first name (every
+            # gap between a label and a line not its own grows) and the name tries again
+            placed.spread(_PLACE_SPREAD, placed.positions[root], expected)
+            spread[0] *= _PLACE_SPREAD
+        if chosen is None:
+            trouble += 1
+            best = None
+            for _rank, x, y, _ray in candidates[:_PLACE_FALLBACK]:
+                bad, labels = placed.check(node, x, y, False, best[0] if best else 1 << 30)
+                if best is None or bad < best[0]:
+                    best = (bad, x, y, labels)
+            chosen = best[1:]
+        placed.place(node, *chosen)
+        if give_up is not None and placed.extent(aspect) > give_up:
+            return None
+        for _index, other in placed.incident.get(node, ()):
+            count_placed[other] = count_placed.get(other, 0) + 1
+            if other not in placed.positions:
+                placed.plan(node, other, expected(other))
+        current = None
+        if order is not None:
+            current = next((other for other in order if other in left), None)
+        if left and current is None:
+            current = max(left, key=lambda other: (count_placed.get(other, 0) > 0, lines_of[other],
+                                                   count_placed.get(other, 0), -order_of[other]))
+    if not trouble:
+        _pull_in(placed, root, candidates_for, search, aspect)
+    # labels of lines whose spot was never checked (a name placed with problems): the room pass finds one
+    return placed.positions, placed.spots, trouble, spread[0], placed.checks
+
+
+#: Names at the edge of the picture tried nearer their relations, at most this many times in all,
+#: when they reach this far (scale 1) past everything else there.
+_PULL_TRIES = 40
+_PULL_GAIN = 40.0
+#: Spots tried for one such name (the nearest first; it stays where it is when none of them suits).
+_PULL_SPOTS = 60
+
+
+def _pull_in(placed: _Placed, root: str, candidates_for: Callable[..., Any], search: Callable[..., Any],
+             aspect: float = 1.0) -> None:
+    """The picture made smaller: the name (with the names related to it alone) whose box or label
+    reaches furthest past the rest on one side moves to the best spot nearer its relations and the
+    middle where it and its lines still clear everything, while that makes the picture smaller
+    as it is shown in a window ``aspect`` times as wide as high (the sides that decide how far it
+    must be zoomed out are pulled in). Labels that slid for a move slide back when it is undone."""
+    lines_of = {node: len(placed.incident.get(node, ())) for node in placed.positions}
+
+    def size() -> Tuple[float, float]:
+        boxes = list(placed.name_box.values()) + list(placed.label_box.values())
+        return (max(b[2] for b in boxes) - min(b[0] for b in boxes),
+                max(b[3] for b in boxes) - min(b[1] for b in boxes))
+
+    def extent() -> float:
+        """How far the picture must be zoomed out to fit the window (larger: further)."""
+        width, height = size()
+        return max(width, aspect * height)
+
+    def group_of(node: str) -> List[str]:
+        """``node`` and the names related to it alone (they move with it)."""
+        return [node] + sorted(other for _index, other in placed.incident.get(node, ())
+                               if lines_of.get(other) == 1 and other != root)
+
+    def outermost(side: int) -> Optional[Tuple[str, float]]:
+        """The name to move for ``side`` (0 left, 1 top, 2 right, 3 bottom) and how far what moves
+        with it reaches past everything else there."""
+        sign = 1.0 if side < 2 else -1.0
+        items = [(sign * box[side], ("n", node)) for node, box in placed.name_box.items()]
+        items += [(sign * box[side], ("l", index)) for index, box in placed.label_box.items()]
+        items.sort()
+        kind, what = items[0][1]
+        if kind == "n":
+            node = what
+        else:  # a label: the end of its line with fewer relations moves
+            _key, a, b = placed.edges[what]
+            node = a if (lines_of[a], a) < (lines_of[b], b) else b
+        if lines_of.get(node) == 1:
+            node = next(other for _index, other in placed.incident[node])  # a name alone with its relation
+        if node == root:
+            return None
+        moving = set(group_of(node))
+        lines = {index for member in moving for index, _other in placed.incident.get(member, ())}
+        rest = [value for value, (kind, what) in items
+                if not ((kind == "n" and what in moving) or (kind == "l" and what in lines))]
+        return (node, (rest[0] - items[0][0]) if rest else 0.0)
+
+    def target_of(node: str, x: float, y: float) -> Tuple[float, float]:
+        rx, ry = placed.positions[root]
+        ends = [placed.positions[other] for _index, other in placed.incident.get(node, ()) if other in placed.positions]
+        mx = sum(p[0] for p in ends) / len(ends)
+        my = sum(p[1] for p in ends) / len(ends)
+        # half way from where it is to (near) the middle of its relations, a step towards the root
+        mx, my = mx + (rx - mx) * 0.3, my + (ry - my) * 0.3
+        return x + (mx - x) * 0.5, y + (my - y) * 0.5
+
+    tried = set()
+    budget = _PULL_TRIES
+    while budget > 0:
+        todo = []
+        width, height = size()
+        for side in ((0, 2) if width >= aspect * height else (1, 3)):
+            pick = outermost(side)
+            if pick is not None and pick[0] not in tried and pick[1] > _PULL_GAIN and pick[0] not in todo:
+                todo.append(pick[0])
+        if not todo:
+            break
+        for node in todo:
+            budget -= 1
+            tried.add(node)
+            before = extent()
+            group = group_of(node)
+            old = {member: placed.remove(member) for member in reversed(group)}
+            done: List[Tuple[str, List[Tuple[int, Box, float]]]] = []  # (name, labels that slid for it)
+            ox, oy = old[node][0], old[node][1]
+            for member in group:
+                if not any(other in placed.positions for _index, other in placed.incident.get(member, ())):
+                    break  # nothing placed to hang from (a group on its own): it stays
+                mx, my = old[member][0], old[member][1]
+                if member == node:
+                    target = target_of(node, mx, my)
+                else:  # where it was next to the name it hangs from
+                    px, py = placed.positions[node]
+                    target = (px + mx - ox, py + my - oy)
+                candidates, rays, anchor, anchor_line = candidates_for(member, target)
+                found = search(member, candidates, rays, anchor, anchor_line, False, _PULL_SPOTS)
+                if found is None:
+                    break
+                own = {index for index, _other in placed.incident.get(member, ())}
+                slid = [(index, placed.label_box[index], placed.spots[placed.edges[index][0]])
+                        for index, _box, _t in found[2] if index not in own and index in placed.label_box]
+                placed.place(member, *found)
+                done.append((member, slid))
+            if len(done) == len(group) and extent() < before * 0.999:
+                tried.clear()
+                tried.add(node)
+                continue
+            # undo: what moved goes back, the labels that slid for it slide back
+            for member, slid in reversed(done):
+                placed.remove(member)
+                for index, box, t in slid:
+                    placed._drop_label(index)
+                    placed._add_label(index, box)
+                    placed.spots[placed.edges[index][0]] = t
+            for member in group:
+                placed.place(member, *old[member])
 
 
 class Layout(dict):
@@ -3747,6 +5567,12 @@ class Layout(dict):
     line (the fraction of the way from ``a``) the layout made room for its label."""
 
     label_spots: Dict[Tuple[str, str], float] = {}
+    #: More lines than ``ROOM_FOR_LABELS_MAX_EDGES``: room was made for the focus character's labels only.
+    labels_capped: bool = False
+    #: How many times over the last resort of the room pass, growing the whole picture, made it.
+    growth: float = 1.0
+    #: How many times over names placed early were spread out to make room for one placed later.
+    spread: float = 1.0
 
 
 def layout_spot(layout: Mapping[str, Any], a: Any, b: Any) -> Optional[float]:
@@ -3766,10 +5592,14 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
     """Deterministic positions inside ``width`` x ``height``: seeded force layout, or radial around ``focus``.
 
     ``node_size(node)`` and ``label_size(edge)`` give the drawn ``(width, height)`` of a name box
-    and of a line's label (None: no label), in the units of ``width`` and ``height``. With them a
-    last pass moves names until no box or label covers another (see ``_make_room``); positions may
-    then reach past ``width`` x ``height`` (the caller sizes its canvas to them), and the result is
-    a ``Layout`` whose ``label_spots`` say where each label has its room (see ``layout_spot``).
+    and of a line's label (None: no label), in the units of ``width`` and ``height``. With them the
+    names are placed one at a time where they, their lines and labels clear everything placed
+    (``_place_one_by_one``, round a main character as a tree out from it, see ``_tree_root``), and
+    a last pass checks that no box or label covers another and no line comes near a label or a
+    name it does not end at, moving names (growing the whole picture only as the last resort) until
+    none does (see ``_make_room``); positions may then reach past ``width`` x ``height`` (the
+    caller sizes its canvas to them), and the result is a ``Layout`` whose ``label_spots`` say
+    where each label has its room (see ``layout_spot``).
     """
     if node_size is None:
         return _plain_layout(graph, width, height, focus, seed)
@@ -3790,13 +5620,19 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
             size = label_size(edge)
             if size:
                 labels[index] = tuple(size)
+    capped = len(labels) > ROOM_FOR_LABELS_MAX_EDGES or len(edges) > ROOM_FOR_LABELS_MAX_EDGES
+    # Every line stays clear of the names it does not end at; above ``_NAME_LINES_MAX_EDGES``
+    # lines only the focus character's lines do (checking them all against every name costs seconds).
+    name_lines = list(range(len(edges)))
+    if capped:
+        # too many to make room for all: the focus character's only (the diagrams then label
+        # only that character's lines)
+        mine = [index for index, (a, b, _edge) in enumerate(edges) if focus is not None and str(focus) in (a, b)]
+        labels = {index: labels[index] for index in mine if index in labels}
         if len(labels) > ROOM_FOR_LABELS_MAX_EDGES:
-            # too many to make room for all: the focus character's only (the diagrams then label
-            # only that character's lines)
-            labels = {index: size for index, size in labels.items()
-                      if focus is not None and str(focus) in edges[index][:2]}
-            if len(labels) > ROOM_FOR_LABELS_MAX_EDGES:
-                labels = {}
+            labels = {}
+        if len(edges) > _NAME_LINES_MAX_EDGES:
+            name_lines = mine
     # How far apart names on a ring around a focus should start: about a name box, or a label
     # (labels sit between two rings, where the ring is shorter). The room pass fixes the rest.
     spacing = 0.0
@@ -3804,18 +5640,339 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
         spacing = 0.8 * sum(w for w, _h in names.values()) / len(names)
     if labels:
         spacing = max(spacing, 0.6 * sum(w + h for w, h in labels.values()) / len(labels))
-    positions = _plain_layout(graph, width, height, focus, seed, spacing)
+    centre = _hang_point(str(focus), edges) if focus is not None and str(focus) in nodes else None
+    if centre is not None and not capped and _tree_root(edges, None) is not None:
+        # Round one main character the picture is that character's whatever the focus: rings or a
+        # tree round any other name made the main character a branch with its many lines far out
+        # (the owner's book focused on a name with 11 relations: 9,708 px wide against 6,044).
+        # The same picture as without a focus, moved so the focus sits where the rings put it.
+        base = layout_graph(graph, width, height, None, seed, node_size, label_size)
+        if centre in base:
+            goal = _plain_layout(graph, width, height, centre, seed).get(centre, base[centre])
+            dx, dy = goal[0] - base[centre][0], goal[1] - base[centre][1]
+            moved_base = Layout((key, (point[0] + dx, point[1] + dy)) for key, point in base.items())
+            for attribute in ("label_spots", "labels_capped", "growth", "spread"):
+                setattr(moved_base, attribute, getattr(base, attribute))
+            return moved_base
+    spokes = {}
+    if centre is not None:
+        for index, (a, b, _edge) in enumerate(edges):
+            if index in labels and centre in (a, b):
+                spokes[b if a == centre else a] = labels[index]
+    positions = _plain_layout(graph, width, height, centre, seed, spacing, spokes, wedges=not capped)
     if len(positions) < 2:
         return positions
-    moved, spots = _make_room({key: [point[0], point[1]] for key, point in positions.items()},
-                              [(index, a, b) for index, (a, b, _edge) in enumerate(edges)], names, labels)
+    # Names without a line (gender tracked only) take no part in making room: growing the picture
+    # would carry them off with it. They go in rows under it.
+    linked = {a for a, _b, _edge in edges} | {b for _a, b, _edge in edges}
+    loose = {key for key in positions if key not in linked} if linked else set()
+    start = {key: [point[0], point[1]] for key, point in positions.items() if key not in loose}
+    keyed = [(index, a, b) for index, (a, b, _edge) in enumerate(edges)]
+    boxes = {key: size for key, size in names.items() if key not in loose}
+    pinned = centre if centre is not None and centre in positions else None
+    if focus is None or str(focus) not in positions:
+        _fan_out(start, [(a, b) for a, b, _edge in edges], labels, names)
+    guide = {key: list(point) for key, point in start.items()}
+    spots: Dict[Any, float] = {}
+    spread = 1.0
+    cell = _room_cell(boxes, labels)
+    aspect = float(width) / float(height) if width and height else 1.0
+    # Names are placed one at a time (see ``_place_one_by_one``) unless the rings or the force
+    # layout already leave room for everything, or every line runs from one name (a plain star:
+    # the rings and the room pass make it smaller, measured).
+    star = len(edges) > 2 and bool(set.intersection(*({a, b} for a, b, _edge in edges)))
+    placed = (not capped and not star
+              and bool(_room_round(start, keyed, boxes, labels, name_lines, {}, cell)[0]))
+    if not placed:
+        moved, spots, growth = _make_room(start, keyed, boxes, labels, name_lines, pinned=pinned, spots=spots)
+    else:
+        # Guided by the force layout (or the rings round the focus) and, round a main character,
+        # also by a tree out from it; each placed with candidate spots on its rays this far apart:
+        # the smallest picture is kept (no guide and no spacing wins on every shape, measured; the
+        # second spacing only while placing took few checks), each try given up once it is larger.
+        attempts = [(start, pinned, None)]
+        hub = _tree_root(edges, pinned)
+        if hub is not None:
+            adjacency: Dict[str, List[str]] = {}
+            between: Dict[Tuple[str, str], Tuple[float, float]] = {}
+            for index, (a, b, _edge) in enumerate(edges):
+                adjacency.setdefault(a, []).append(b)
+                adjacency.setdefault(b, []).append(a)
+                if index in labels:
+                    between[(a, b)] = between[(b, a)] = labels[index]
+            tree = _tree_layout(sorted(start), adjacency, hub, boxes, lambda a, b: between.get((a, b)))
+            ox, oy = positions[hub]
+            tree_start = {key: [ox + x, oy + y] for key, (x, y) in tree.items()}
+            attempts.append((tree_start, hub, list(tree_start)))
+        best = None
+        work = 0
+        for grow_ray in (_PLACE_GROW_RAY, _PLACE_GROW_RAY_TOO):
+            if best is not None and work > _TRY_TOO_CHECKS:
+                break
+            for guide_start, root, order in attempts:
+                done = _place_one_by_one(guide_start, keyed, boxes, labels, name_lines, cell, root, order, aspect,
+                                         None if best is None else _GIVE_UP * best[0], grow_ray)
+                if done is None:
+                    continue
+                work += done[4]
+                other, other_spots, other_growth = _make_room(done[0], keyed, boxes, labels, name_lines,
+                                                              pinned=pinned, spots=done[1])
+                size = _drawn_extent(other, keyed, boxes, labels, other_spots, aspect)
+                if best is None or size < best[0]:
+                    best = (size, other, other_spots, other_growth, done[3])
+        _size, moved, spots, growth, spread = best
+    if placed and len(boxes) <= _COMPARE_MAX_NAMES:
+        # a few names: the room pass alone is cheap here, and keeps the picture nearest the guide;
+        # kept unless placing one by one ends clearly smaller
+        other, other_spots, other_growth = _make_room(guide, keyed, boxes, labels, name_lines, pinned=pinned)
+        if (_drawn_extent(moved, keyed, boxes, labels, spots, aspect)
+                > _COMPARE_GAIN * _drawn_extent(other, keyed, boxes, labels, other_spots, aspect)):
+            moved, spots, growth, spread = other, other_spots, other_growth, 1.0
+    if spots and labels:
+        spots = _slide_labels(moved, keyed, boxes, labels, name_lines, spots, cell)
+    if loose:
+        _place_in_rows(moved, [key for key in positions if key in loose], names)
     result = Layout((key, (point[0], point[1])) for key, point in moved.items())
     result.label_spots = {(edges[index][0], edges[index][1]): t for index, t in spots.items()}
+    result.labels_capped = capped
+    result.growth = growth
+    result.spread = spread
     return result
 
 
+def _slide_labels(positions: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
+                  node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+                  name_lines: Sequence[int], spots: Mapping[Any, float], cell: float) -> Dict[Any, float]:
+    """``spots`` with each label slid along its line to the free spot nearest the end with more
+    relations, where that is nearer than its spot now (free: clear of every name, every other label
+    and every other line, as when names are placed). A label was placed when its line was drawn,
+    nearest that end then; what was placed later, and the room pass, may have left room nearer
+    (the owner's book: 60 of 115 labels were past 60 % of their line from that end)."""
+    placed = _Placed(cell, node_size, edges, label_size, name_lines)
+    for node in sorted(positions):
+        if node in node_size:
+            placed.place(node, positions[node][0], positions[node][1], ())
+    half = _ROOM_GAP / 2.0
+    lines_of = {node: len(placed.incident.get(node, ())) for node in positions}
+    result = dict(spots)
+    for index, (key, a, b) in enumerate(edges):
+        t, size = spots.get(key), label_size.get(key)
+        if t is None or size is None or a not in placed.positions or b not in placed.positions:
+            continue
+        pa, pb = placed.positions[a], placed.positions[b]
+        x, y = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+        placed._add_label(index, (x - size[0] / 2.0 - half, y - size[1] / 2.0 - half,
+                                  x + size[0] / 2.0 + half, y + size[1] / 2.0 + half))
+    # twice: a label that slid may leave room nearer for one looked at before it
+    for index, (key, a, b) in list(enumerate(edges)) * 2:
+        if index not in placed.label_box:
+            continue
+        pa, pb = placed.positions[a], placed.positions[b]
+        size = label_size[key]
+        old = placed.label_box[index]
+        placed._drop_label(index)
+        free = placed._stretches(pa, pb, size, placed._near(_cells_along(pa, pb, cell), False), a, index,
+                                 (), (), ())
+        t = result[key]
+        from_a = lines_of.get(a, 0) >= lines_of.get(b, 0)
+        if free:
+            inside = 0.5 / max(math.hypot(pb[0] - pa[0], pb[1] - pa[1]), 1.0)
+            lo, hi = free[0] if from_a else free[-1]
+            new = min(lo + inside, (lo + hi) / 2.0) if from_a else max(hi - inside, (lo + hi) / 2.0)
+            here = any(low <= t <= high for low, high in free)
+            if not here or (new < t if from_a else new > t):
+                cx, cy = pa[0] + (pb[0] - pa[0]) * new, pa[1] + (pb[1] - pa[1]) * new
+                placed._add_label(index, (cx - size[0] / 2.0 - half, cy - size[1] / 2.0 - half,
+                                          cx + size[0] / 2.0 + half, cy + size[1] / 2.0 + half))
+                result[key] = new
+                continue
+        placed._add_label(index, old)
+    return result
+
+
+#: Above the label cap, up to this many lines all stay clear of the names they do not end at (above
+#: it the picture that needs grows fast: a main character with 30 relations among 70 names and 160
+#: lines in all, 5,800 px; with 300 lines, 17,600 against 5,200 when only the focus's lines do).
+_NAME_LINES_MAX_EDGES = 160
+
+
+#: Up to this many names with relations the room pass alone is tried too, and kept unless placing
+#: one by one ends smaller than this share of it.
+_COMPARE_MAX_NAMES = 40
+_COMPARE_GAIN = 0.85
+#: The tree out from a main character is given up once what it has placed reaches this many times
+#: past the picture the force layout gave (the room pass may still make it smaller: by up to a
+#: quarter, measured, round a main character with 45 relations).
+_GIVE_UP = 1.35
+
+
+def _drawn_extent(positions: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
+                  node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
+                  spots: Mapping[Any, float], aspect: float) -> float:
+    """How far the names and labels (at ``spots``) must be zoomed out to fit a window ``aspect``
+    times as wide as high: the larger of the width and ``aspect`` times the height."""
+    boxes = []
+    for node, (w, h) in node_size.items():
+        x, y = positions[node]
+        boxes.append((x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0))
+    for key, a, b in edges:
+        t, size = spots.get(key), label_size.get(key)
+        if t is None or size is None:
+            continue
+        pa, pb = positions[a], positions[b]
+        x, y = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+        boxes.append((x - size[0] / 2.0, y - size[1] / 2.0, x + size[0] / 2.0, y + size[1] / 2.0))
+    if not boxes:
+        return 0.0
+    return max(max(b[2] for b in boxes) - min(b[0] for b in boxes),
+               aspect * (max(b[3] for b in boxes) - min(b[1] for b in boxes)))
+
+
+def _tree_root(edges: Sequence[Tuple[str, str, Any]], pinned: Optional[str]) -> Optional[str]:
+    """The name a labelled layout hangs everything from (see ``_tree_layout``) when one name has
+    at least twice the relations of any other and is related to at least a third of all names with
+    relations (a book round one main character): the focus, else that name. None: the rings round
+    the focus or the force layout suit better (a tree out from the root spreads a sparse picture
+    with long branches far out), or every line runs from one name (a plain star: the rings and the
+    room pass, measured smaller there)."""
+    if pinned is not None and all(pinned in (a, b) for a, b, _edge in edges):
+        return None
+    count: Dict[str, int] = {}
+    for a, b, _edge in edges:
+        count[a] = count.get(a, 0) + 1
+        count[b] = count.get(b, 0) + 1
+    if len(count) < 3:
+        return None
+    ranked = sorted(count, key=lambda node: (-count[node], node))
+    top, second = count[ranked[0]], count[ranked[1]]
+    if top >= 2 * second and 3 * top >= len(count) and top < len(edges):
+        # (``layout_graph`` lays such a graph out without its focus, see there)
+        return pinned if pinned is not None else ranked[0]
+    return None
+
+
+def _hang_point(focus: str, edges: Sequence[Tuple[str, str, Any]]) -> str:
+    """The name the rings of a focus go round: the focus itself, but for a focus with one relation
+    the name it hangs from (along a chain of names with two relations, to the first name with more).
+
+    The rings round a leaf would hold everything else in the one wedge of its only relation: that
+    name's lines would all run out to one side and past the leaf, almost side by side, and the room
+    pass would grow the picture to hundreds of times its size. Round the name it hangs from, the
+    leaf is one of its first ring and the picture is that name's own."""
+    links: Dict[str, set] = {}
+    for a, b, _edge in edges:
+        links.setdefault(a, set()).add(b)
+        links.setdefault(b, set()).add(a)
+    previous, node = None, focus
+    seen = {focus}
+    while len(links.get(node, ())) - (previous is not None) == 1:
+        nxt = next(iter(links[node] - {previous}))
+        if nxt in seen:
+            break
+        seen.add(nxt)
+        previous, node = node, nxt
+        if len(links[node]) != 2:
+            break
+    return node if len(links.get(node, ())) >= 3 else focus
+
+
+def _fan_out(positions: Dict[str, List[float]], pairs: Sequence[Tuple[str, str]],
+             label_size: Mapping[int, Tuple[float, float]], node_size: Mapping[str, Tuple[float, float]]) -> None:
+    """Around a name with several relations that have no other relation (leaves), those names
+    spread evenly over the free directions between its other lines, far enough out that the label
+    on each line clears the lines beside it: a label of width w on a line at angle a reaches
+    ``|sin a| w / 2 + |cos a| h / 2`` sideways, which needs a distance of that (plus the clearance)
+    over the sine of the angle to the next line."""
+    links: Dict[str, List[Tuple[str, int]]] = {}
+    for index, (a, b) in enumerate(pairs):
+        links.setdefault(a, []).append((b, index))
+        links.setdefault(b, []).append((a, index))
+    done = set()
+    for hub in sorted(links, key=lambda node: (-len(links[node]), node)):
+        leaves = [(other, index) for other, index in links[hub] if len(links[other]) == 1 and other not in done]
+        if len(leaves) < _FAN_MIN or hub in done or 2 * len(leaves) < len(links[hub]):
+            continue  # mostly lines to names with other relations: the gaps between those decide
+        hx, hy = positions[hub]
+
+        def angle_of(node: str) -> float:
+            return math.atan2(positions[node][1] - hy, positions[node][0] - hx) % (2.0 * math.pi)
+        fixed = sorted(angle_of(other) for other, _index in links[hub] if len(links[other]) != 1)
+        leaves.sort(key=lambda item: (angle_of(item[0]), item[0]))
+        every = sorted(angle_of(other) for other, _index in links[hub])
+
+        def roomy(other: str, index: int) -> bool:
+            """The label in the middle of the line already clears the lines on both sides."""
+            theta = angle_of(other)
+            position = every.index(theta)
+            gap = min((theta - every[position - 1]) % (2.0 * math.pi) or 2.0 * math.pi,
+                      (every[(position + 1) % len(every)] - theta) % (2.0 * math.pi) or 2.0 * math.pi)
+            w, h = label_size.get(index, (0.0, 0.0))
+            sideways = abs(math.sin(theta)) * w / 2.0 + abs(math.cos(theta)) * h / 2.0 + LINE_CLEARANCE
+            distance = math.hypot(positions[other][0] - hx, positions[other][1] - hy)
+            return distance / 2.0 * math.sin(min(gap, math.pi / 2.0)) >= sideways
+        if all(roomy(other, index) for other, index in leaves):
+            done.add(hub)
+            continue  # nothing to spread: the picture stays as it was
+        lengths = sorted(math.hypot(positions[other][0] - hx, positions[other][1] - hy) for other, _i in links[hub])
+        longest = 2.5 * lengths[len(lengths) // 2]
+        if not fixed:
+            # all around: gaps as wide as the labels need (see ``_spread_spokes``)
+            start = angle_of(leaves[0][0])
+            thetas, gaps = _spread_spokes([start + 2.0 * math.pi * k / len(leaves) for k in range(len(leaves))],
+                                          [label_size.get(index) for _other, index in leaves], [1] * len(leaves))
+            slots = [(theta, min(gaps[k - 1], gaps[k])) for k, theta in enumerate(thetas)]
+            longest = _BIG
+        else:
+            # each leaf stays in the gap between two other lines it is in now, spread evenly there
+            groups: Dict[int, List[int]] = {}
+            for order, (other, _index) in enumerate(leaves):
+                theta = angle_of(other)
+                gap = sum(1 for value in fixed if value <= theta) % len(fixed)
+                groups.setdefault(gap, []).append(order)
+            slots = [(0.0, 0.0)] * len(leaves)
+            for gap, members in groups.items():
+                low = fixed[gap - 1]
+                high = fixed[gap] if gap > 0 else fixed[0] + 2.0 * math.pi
+                width = (high - low) % (2.0 * math.pi) or 2.0 * math.pi
+                for k, order in enumerate(members):
+                    slots[order] = (low + width * (k + 1) / (len(members) + 1), width / (len(members) + 1))
+        for (other, index), (theta, spacing) in zip(leaves, slots):
+            w, h = label_size.get(index, (0.0, 0.0))
+            sideways = abs(math.sin(theta)) * w / 2.0 + abs(math.cos(theta)) * h / 2.0 + LINE_CLEARANCE
+            # the label in the middle of the line clears the lines beside it
+            need = 2.0 * sideways / max(math.sin(min(spacing, math.pi / 2.0)), 0.05) + max(node_size[other]) / 2.0
+            # (between other lines not further out than the hub's lines reach: a narrow gap is the
+            # growing's to fix, not one long line's)
+            distance = max(math.hypot(positions[other][0] - hx, positions[other][1] - hy), min(need, longest))
+            positions[other] = [hx + distance * math.cos(theta), hy + distance * math.sin(theta)]
+            done.add(other)
+        done.add(hub)
+
+
+def _place_in_rows(positions: Dict[str, List[float]], loose: Sequence[str],
+                   node_size: Mapping[str, Tuple[float, float]]) -> None:
+    """``loose`` names in rows under the names of ``positions``, as wide as the picture, clear of
+    every line and label (all of those are above the rows)."""
+    gap = _ROOM_GAP + 2.0 * LINE_CLEARANCE
+    lefts = [p[0] - node_size[key][0] / 2.0 for key, p in positions.items()]
+    rights = [p[0] + node_size[key][0] / 2.0 for key, p in positions.items()]
+    bottom = max(p[1] + node_size[key][1] / 2.0 for key, p in positions.items())
+    left, right = min(lefts), max(rights)
+    right = max(right, left + max(node_size[key][0] for key in loose))
+    row_height = max(node_size[key][1] for key in loose) + gap
+    x, y = left, bottom + gap + row_height / 2.0
+    for key in loose:
+        w = node_size[key][0]
+        if x > left and x + w > right:
+            x, y = left, y + row_height
+        positions[key] = [x + w / 2.0, y]
+        x += w + gap
+
+
 def _plain_layout(graph: Optional[Mapping[str, Any]], width: float, height: float,
-                  focus: Optional[str], seed: int, spacing: float = 0.0) -> Dict[str, Tuple[float, float]]:
+                  focus: Optional[str], seed: int, spacing: float = 0.0,
+                  spoke_size: Optional[Mapping[str, Tuple[float, float]]] = None,
+                  wedges: bool = True) -> Dict[str, Tuple[float, float]]:
     width = float(width) if width and width > 0 else 1000.0
     height = float(height) if height and height > 0 else 700.0
     nodes = list((graph or {}).get("nodes") or [])
@@ -3838,7 +5995,7 @@ def _plain_layout(graph: Optional[Mapping[str, Any]], width: float, height: floa
             adjacency[b].append(a)
             edge_list.append((a, b))
     if focus is not None and str(focus) in id_set:
-        return _radial_layout(ids, adjacency, str(focus), width, height, spacing)
+        return _radial_layout(ids, adjacency, str(focus), width, height, spacing, spoke_size, wedges)
 
     n = len(ids)
     if n <= _REFINED_LAYOUT_MAX_NODES:
@@ -3862,6 +6019,14 @@ def _plain_layout(graph: Optional[Mapping[str, Any]], width: float, height: floa
     cutoff2 = cell * cell
     gravity = 0.02
     cx, cy = width / 2.0, height / 2.0
+    # For a diagram that makes room for labels (``spacing``): two well-connected names pull less
+    # and push each other more, so a name with many relations gets long lines and two of them do
+    # not sit side by side with their lines to the same names running almost together.
+    degree = {node: 0 for node in ids}
+    for a, b in edge_list:
+        degree[a] += 1
+        degree[b] += 1
+    weight = {node: (degree[node] + 1.0) ** 0.75 if spacing > 0.0 else 1.0 for node in ids}
     for _iteration in range(iterations):
         disp = {node: [0.0, 0.0] for node in ids}
         grid: Dict[Tuple[int, int], List[str]] = {}
@@ -3887,7 +6052,7 @@ def _plain_layout(graph: Optional[Mapping[str, Any]], width: float, height: floa
                     if dist2 < 1e-6:
                         ddx, ddy = rng.random() - 0.5, rng.random() - 0.5
                         dist2 = ddx * ddx + ddy * ddy + 1e-6
-                    factor = k2 / dist2
+                    factor = k2 / dist2 * weight[u]
                     dv[0] += ddx * factor
                     dv[1] += ddy * factor
         for a, b in edge_list:
@@ -3895,7 +6060,7 @@ def _plain_layout(graph: Optional[Mapping[str, Any]], width: float, height: floa
             bx, by = positions[b]
             ddx, ddy = ax - bx, ay - by
             dist = math.sqrt(ddx * ddx + ddy * ddy) or 1e-3
-            force = dist / k
+            force = dist / (k * min(weight[a], weight[b]))
             fx, fy = ddx * force, ddy * force
             disp[a][0] -= fx
             disp[a][1] -= fy

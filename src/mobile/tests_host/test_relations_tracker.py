@@ -12,6 +12,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import math
 import sys
 import types
 from pathlib import Path
@@ -735,6 +736,95 @@ def test_diagram_hub_labels_do_not_overlap(iso, tmp_path):
     asyncio.run(scenario())
 
 
+def _line_gaps(diagram):
+    """From what the screen draws (canvas lines, label texts sized by ``label_box``, name pills):
+    ``(labels a line that is not their own comes within 6 px of, beyond its half width; names a line
+    not ending there comes that near; labels drawn)``. Own geometry, not the layout's bookkeeping."""
+    from glossarion_mobile.ui.glossary.relations_diagram import label_box
+
+    def to_segment(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length2 = dx * dx + dy * dy
+        t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2))
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+    def meet(p1, p2, p3, p4):
+        def side(a, b, c):
+            return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return (side(p3, p4, p1) > 0) != (side(p3, p4, p2) > 0) and (side(p1, p2, p3) > 0) != (side(p1, p2, p4) > 0)
+
+    def gap(a, b, box):
+        x0, y0, x1, y1 = box
+        if any(x0 <= p[0] <= x1 and y0 <= p[1] <= y1 for p in (a, b)):
+            return 0.0
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        if any(meet(a, b, corners[i], corners[(i + 1) % 4]) for i in range(4)):
+            return 0.0
+        return min([to_segment(c, a, b) for c in corners]
+                   + [math.hypot(max(x0 - p[0], 0.0, p[0] - x1), max(y0 - p[1], 0.0, p[1] - y1)) for p in (a, b)])
+
+    lines = [((s.x1, s.y1), (s.x2, s.y2), (s.paint.stroke_width or 1.4) / 2)
+             for s in diagram.canvas.shapes if type(s).__name__ == "Line"]
+    texts = [s for s in diagram.canvas.shapes if type(s).__name__ == "Text"]
+    touched = 0
+    for text in texts:
+        own = [i for i, (a, b, _half) in enumerate(lines) if to_segment((text.x, text.y), a, b) < 1e-6]
+        assert len(own) == 1  # ON its line
+        w, h = label_box(text.value)
+        box = (text.x - w / 2, text.y - h / 2, text.x + w / 2, text.y + h / 2)
+        touched += any(gap(a, b, box) - half < 6.0 for i, (a, b, half) in enumerate(lines) if i != own[0])
+    crossed = 0
+    for pill in diagram.node_controls:
+        box = (pill.left, pill.top, pill.left + pill.width, pill.top + pill.height)
+        centre = (pill.left + pill.width / 2, pill.top + pill.height / 2)
+        crossed += any(gap(a, b, box) - half < 6.0 for a, b, half in lines
+                       if math.dist(a, centre) > 1e-6 and math.dist(b, centre) > 1e-6)
+    return touched, crossed, len(texts)
+
+
+def test_diagram_lines_stay_clear_of_other_labels_and_names(iso, tmp_path):
+    """The owner's "the text boxes here don't touch other lines" on the phone: no relation line comes
+    within 6 px of another relation's label or of a name it does not end at, in the opening view,
+    without former relations, at an earlier chapter and with the main character focused."""
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = rt.empty_tracker()
+    words = [("Patient", "Healer"), ("Younger Brother", "Older Sister"), ("Student", "Mentor"), ("Rival", "Rival")]
+    rows = [{"raw_name": f"Person {i}", "translated_name": f"Person {i}",
+             "relations": f"Hero: {words[i % 4][1]}" + (f"; Person {i + 1}: Coworker" if i % 4 == 0 else "")}
+            for i in range(32)]
+    rows.insert(0, {"raw_name": "Hero", "translated_name": "Hero",
+                    "relations": "; ".join(f"Person {i}: {words[i % 4][0]}" for i in range(32))})
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    rt.record_relations(tracker, [{"raw_name": "Hero", "translated_name": "Hero",
+                                   "relations": "; ".join(f"Person {i}: Sworn Enemy" for i in range(0, 32, 3))}],
+                        field="relations", chapter_index=1, chapter_num=2, chapter_file="c2.xhtml")
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
+        positions = dict(diagram.positions)
+        assert _line_gaps(diagram) == (0, 0, 40)
+        diagram.set_former(False)
+        assert _line_gaps(diagram) == (0, 0, 40)
+        diagram.set_chapter(1)
+        assert diagram.positions == positions and _line_gaps(diagram) == (0, 0, 40)
+        diagram.set_chapter(2)
+        diagram.set_focus(rt.tracker_key("Hero"))
+        focused = dict(diagram.positions)
+        assert _line_gaps(diagram) == (0, 0, 40)
+        diagram.set_former(True)
+        diagram.set_chapter(1)
+        assert diagram.positions == focused and _line_gaps(diagram) == (0, 0, 40)
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_diagram_above_the_label_cap_labels_only_the_focus_character(iso, tmp_path):
     """Above ``ROOM_FOR_LABELS_MAX_EDGES`` lines the layout makes no room for labels, so (as on the
     desktop) only the Focus character's lines keep theirs, instead of a pile of text."""
@@ -763,6 +853,10 @@ def test_diagram_above_the_label_cap_labels_only_the_focus_character(iso, tmp_pa
         assert labels(diagram) == [] and "Focus character only" in diagram.summary.value
         diagram.set_focus(rt.tracker_key("Spoke 0"))
         assert len(labels(diagram)) == 2  # its lines to Hub and to Spoke 1
+        # the Hub alone has more lines than the cap: the layout made no room for its labels, so
+        # none are drawn (drawn anyway, some sat on other lines)
+        diagram.set_focus(rt.tracker_key("Hub"))
+        assert not diagram.layout.label_spots and labels(diagram) == []
         store._saver.close()
 
     asyncio.run(scenario())

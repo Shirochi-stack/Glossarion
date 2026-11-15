@@ -1218,7 +1218,7 @@ def test_room_for_labels_is_deterministic_and_small_diagrams_keep_their_size():
     again = _sized_layout(graph, seed=4)
     assert first == again and first.label_spots == again.label_spots
     assert set(first.label_spots) == {(e["a"], e["b"]) for e in graph["edges"]}
-    assert all(t in rt.LABEL_SPOTS for t in first.label_spots.values())
+    assert all(0.0 <= t <= 1.0 for t in first.label_spots.values())  # anywhere on the line
     assert rt.layout_spot(first, "p0", "hub") == 1.0 - first.label_spots[("hub", "p0")]
     assert rt.layout_spot({}, "hub", "p0") is None  # a plain layout has no spots
 
@@ -1247,6 +1247,329 @@ def test_above_the_label_cap_only_the_focus_characters_labels_get_room():
     assert not _sized_layout(graph).label_spots
     assert set(_sized_layout(graph, focus="p5").label_spots) == {pair for pair in edges if "p5" in pair}
     assert not _sized_layout(graph, focus="hub").label_spots  # still too many for one name
+
+
+# Lines clear of labels and names: the owner's "you are being too modest with the spacing", relation
+# lines ran through the label pills of other relations. The checks below use their own geometry.
+CLEARANCE = 6.0  # what must show between a line's edge and a label or name box (scale 1)
+LINE_HALF_WIDTH = 1.1  # the widest line drawn is 2.2 px
+
+
+def _point_to_segment(p, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2))
+    return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+
+def _segments_meet(p1, p2, p3, p4):
+    def side(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    return (side(p3, p4, p1) > 0) != (side(p3, p4, p2) > 0) and (side(p1, p2, p3) > 0) != (side(p1, p2, p4) > 0)
+
+
+def _segment_to_box(a, b, box):
+    """Distance between the segment a-b and the rectangle (x0, y0, x1, y1); 0 when they meet."""
+    x0, y0, x1, y1 = box
+    if any(x0 <= p[0] <= x1 and y0 <= p[1] <= y1 for p in (a, b)):
+        return 0.0
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    if any(_segments_meet(a, b, corners[i], corners[(i + 1) % 4]) for i in range(4)):
+        return 0.0
+    near = min(_point_to_segment(c, a, b) for c in corners)
+    return min([near] + [math.hypot(max(x0 - p[0], 0.0, p[0] - x1), max(y0 - p[1], 0.0, p[1] - y1)) for p in (a, b)])
+
+
+def _box(center, size):
+    return (center[0] - size[0] / 2, center[1] - size[1] / 2, center[0] + size[0] / 2, center[1] + size[1] / 2)
+
+
+def _line_problems(positions, graph, name_box, label_box):
+    """(labels touched by another line, names crossed by a line not ending there, overlapping boxes)
+    for the labels where the diagrams put them (``place_labels`` at the layout's spots), with
+    ``name_box`` / ``label_box`` the sizes the layout got. Also checks each label sits ON its line."""
+    edges = [(i, e["a"], e["b"]) for i, e in enumerate(graph["edges"])]
+    spots = rt.place_labels(positions, edges, {key: name_box for key in positions},
+                            {i: label_box for i, _a, _b in edges},
+                            prefer={i: t for i, a, b in edges if (t := rt.layout_spot(positions, a, b)) is not None})
+    for i, a, b in edges:
+        assert _point_to_segment(spots[i], positions[a], positions[b]) < 1e-6
+    labels = {i: _box(spots[i], label_box) for i, _a, _b in edges}
+    names = {key: _box(point, name_box) for key, point in positions.items()}
+    need = CLEARANCE + LINE_HALF_WIDTH
+    touched = sum(1 for i, box in labels.items()
+                  if any(_segment_to_box(positions[a], positions[b], box) < need for j, a, b in edges if j != i))
+    crossed = sum(1 for key, box in names.items()
+                  if any(_segment_to_box(positions[a], positions[b], box) < need for _j, a, b in edges
+                         if key not in (a, b)))
+    boxes = list(labels.values()) + list(names.values())
+    overlaps = sum(1 for i, p in enumerate(boxes) for q in boxes[i + 1:]
+                   if min(p[2], q[2]) - max(p[0], q[0]) > 0.01 and min(p[3], q[3]) - max(p[1], q[1]) > 0.01)
+    return touched, crossed, overlaps
+
+
+def _dense_graph(count=12):
+    """Everyone related to everyone: the lines cross through the middle."""
+    names = [f"k{i}" for i in range(count)]
+    return {"nodes": [{"id": n} for n in names],
+            "edges": [{"a": a, "b": b, "label_ab": "Friend", "label_ba": ""} for i, a in enumerate(names)
+                      for b in names[i + 1:]]}
+
+
+def _two_hubs_graph(each=30, shared=10):
+    """Two main characters with ``each`` relations, ``shared`` of the names related to both."""
+    both = [f"m{i}" for i in range(shared)]
+    only_a = [f"a{i}" for i in range(each - shared)]
+    only_b = [f"b{i}" for i in range(each - shared)]
+    nodes = [{"id": n} for n in ["A", "B"] + both + only_a + only_b]
+    edges = [{"a": "A", "b": n, "label_ab": "Patient", "label_ba": "Healer"} for n in both + only_a]
+    edges += [{"a": "B", "b": n, "label_ab": "Student", "label_ba": "Mentor"} for n in both + only_b]
+    return {"nodes": nodes, "edges": edges}
+
+
+@pytest.mark.parametrize("shape, focus", [("hub", None), ("hub", "hub"), ("dense", None), ("dense", "k0"),
+                                          ("two hubs", None), ("two hubs", "A")])
+def test_no_line_touches_a_label_or_a_name_it_does_not_end_at(shape, focus):
+    """Every label is at least 6 px (plus half the widest line) from every line that is not its own,
+    and every name that far from every line not ending there, with no boxes overlapping: around a
+    main character with 45 relations and links between the others, in a group where everyone is
+    related to everyone, and for two main characters sharing names; with and without a focus."""
+    graph = {"hub": _hub_graph, "dense": _dense_graph, "two hubs": _two_hubs_graph}[shape]()
+    started = time.perf_counter()
+    positions = _sized_layout(graph, focus)
+    assert time.perf_counter() - started < 15.0  # generous for slow CI; about 0.1 to 1 s here
+    assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+    # Deterministic: the same again.
+    again = _sized_layout(graph, focus)
+    assert again == positions and again.label_spots == positions.label_spots
+    if focus:
+        assert positions[focus] == rt.layout_graph(graph, 1600, 1100, focus=focus)[focus]  # still in the middle
+
+
+def _drawn_size_and_label_distances(positions, graph, hub):
+    """((width, height) of every name box and label as drawn, sorted distances from ``hub`` to the
+    labels of its relations), with the labels where the diagrams put them."""
+    edges = [(i, e["a"], e["b"]) for i, e in enumerate(graph["edges"])]
+    spots = rt.place_labels(positions, edges, {key: NAME_BOX for key in positions},
+                            {i: LABEL_BOX for i, _a, _b in edges},
+                            prefer={i: t for i, a, b in edges if (t := rt.layout_spot(positions, a, b)) is not None})
+    boxes = [_box(p, NAME_BOX) for p in positions.values()] + [_box(s, LABEL_BOX) for s in spots.values()]
+    size = (max(b[2] for b in boxes) - min(b[0] for b in boxes), max(b[3] for b in boxes) - min(b[1] for b in boxes))
+    return size, sorted(math.dist(spots[i], positions[hub]) for i, a, b in edges if hub in (a, b))
+
+
+@pytest.mark.parametrize("focus", [None, "hub"])
+def test_a_main_character_with_45_relations_and_links_between_them_stays_compact(focus):
+    """The room the labels need came from growing the whole picture: the owner's book opened at
+    13,214 x 9,346 px as a cloud of dots, no label near the main character. Names are now placed
+    one at a time where they and their lines clear everything: 45 relations of 110 x 30 names with
+    120 x 22 labels, and 15 more lines between the others crossing the fan, fit in about
+    2,500 x 2,100 px, the main character's labels within about 1,000 px of it, and growing the
+    whole picture (the last resort) is not needed."""
+    graph = _hub_graph()
+    graph["edges"] += [{"a": f"p{i}", "b": f"p{(i + 7) % 45}", "label_ab": "Friend", "label_ba": ""}
+                       for i in range(0, 45, 3)]
+    positions = _sized_layout(graph, focus)
+    assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+    (width, height), distances = _drawn_size_and_label_distances(positions, graph, "hub")
+    assert width < 3200 and height < 3200  # about 2,460 x 2,110 here
+    assert distances[len(distances) // 2] < 700  # about 530
+    assert distances[-1] < 1300  # about 960
+    assert positions.growth < 1.1  # 1.0 here
+
+
+@pytest.mark.parametrize("focus", [None, "A"])
+def test_two_main_characters_sharing_names_stay_compact(focus):
+    """Two main characters with 30 relations each, 10 names related to both: about 2,000 to
+    2,400 px square with no line near a label or a name it does not end at, without growing the
+    whole picture."""
+    graph = _two_hubs_graph()
+    positions = _sized_layout(graph, focus)
+    assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+    (width, height), distances = _drawn_size_and_label_distances(positions, graph, "A")
+    assert width < 3000 and height < 3000  # about 1,970 x 2,130 (2,320 x 2,370 round A)
+    assert distances[-1] < 1300  # about 950
+    assert positions.growth < 1.1  # 1.0 here
+
+
+def _hub_with_links():
+    graph = _hub_graph()
+    graph["edges"] += [{"a": f"p{i}", "b": f"p{(i + 7) % 45}", "label_ab": "Friend", "label_ba": ""}
+                       for i in range(0, 45, 3)]
+    return graph
+
+
+def _extent(positions, graph, aspect=1600 / 1100):
+    (width, height), _distances = _drawn_size_and_label_distances(positions, graph, "hub")
+    return max(width, aspect * height)
+
+
+def test_a_focus_round_a_main_character_keeps_the_main_characters_picture():
+    """Round one main character, any focus gives the picture without a focus, moved: rings or a tree
+    round another name made the main character a branch with its many lines far out (the owner's book
+    focused on a name with 11 relations: 9,708 px wide against 6,044)."""
+    graph = _hub_with_links()
+    plain = _sized_layout(graph)
+    for focus in ("p0", "p3", "hub"):
+        focused = _sized_layout(graph, focus)
+        dx, dy = focused["hub"][0] - plain["hub"][0], focused["hub"][1] - plain["hub"][1]
+        assert all(math.isclose(focused[k][0] - dx, plain[k][0], abs_tol=1e-6)
+                   and math.isclose(focused[k][1] - dy, plain[k][1], abs_tol=1e-6) for k in plain)
+        assert focused.label_spots == plain.label_spots
+        assert _line_problems(focused, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+
+
+def test_names_at_the_edge_of_the_picture_are_pulled_in(monkeypatch):
+    """The name reaching furthest past the rest moves nearer its relations where it still clears
+    everything: round a main character with 45 relations and links between the others, the picture
+    as the window shows it is about 2,750 px across against 3,700 without."""
+    graph = _hub_with_links()
+    pulled = _extent(_sized_layout(graph), graph)
+    monkeypatch.setattr(rt, "_pull_in", lambda *args, **kwargs: None)
+    assert pulled < 0.85 * _extent(_sized_layout(graph), graph)
+
+
+def test_labels_slide_to_the_free_spot_nearest_the_busier_end(monkeypatch):
+    """A label sits at the free spot on its line nearest the name with more relations: placed when
+    its line was drawn, it slides there when names placed later (and the room pass) left room nearer.
+    The main character's labels come nearer it, and fewer labels sit past 60 % of their line."""
+    graph = _hub_with_links()
+
+    def far_and_distances(positions):
+        lines = {}
+        for e in graph["edges"]:
+            lines[e["a"]] = lines.get(e["a"], 0) + 1
+            lines[e["b"]] = lines.get(e["b"], 0) + 1
+        far = 0
+        for e in graph["edges"]:
+            a, b = (e["a"], e["b"]) if lines[e["a"]] >= lines[e["b"]] else (e["b"], e["a"])
+            t = rt.layout_spot(positions, a, b)
+            far += t is not None and t > 0.6
+        return far, _drawn_size_and_label_distances(positions, graph, "hub")[1]
+
+    slid = _sized_layout(graph)
+    assert _line_problems(slid, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+    far, distances = far_and_distances(slid)
+    monkeypatch.setattr(rt, "_slide_labels", lambda positions, edges, nodes, labels, lines, spots, cell: spots)
+    far_before, distances_before = far_and_distances(_sized_layout(graph))
+    assert far < far_before and sum(distances) < sum(distances_before)
+
+
+def test_wrap_label_breaks_between_words():
+    width = len  # one unit per character
+    assert rt.wrap_label("Mentor / Student", width, 40) == "Mentor / Student"
+    assert rt.wrap_label("Husband [Fiance, Secret Admirer] / Wife", width, 20) == "Husband [Fiance,\nSecret Admirer] /\nWife"
+    assert rt.wrap_label("Supercalifragilistic word", width, 10) == "Supercalifragilistic\nword"
+
+
+def test_above_the_cap_every_line_stays_clear_of_names_up_to_a_limit():
+    """121 lines (one over the cap): no line runs through a name it does not end at, with and without
+    a focus (only the focus character's lines did: 14 to 28 names crossed); above
+    ``_NAME_LINES_MAX_EDGES`` lines only the focus character's lines are kept clear."""
+    graph = _spoke_graph(total=121, spokes=40)
+    need = CLEARANCE + LINE_HALF_WIDTH
+    for focus in (None, "Main"):
+        positions = _sized_layout(graph, focus)
+        assert positions.labels_capped
+        crossed = sum(1 for key, point in positions.items()
+                      if any(_segment_to_box(positions[e["a"]], positions[e["b"]], _box(point, NAME_BOX)) < need
+                             for e in graph["edges"] if key not in (e["a"], e["b"])))
+        assert crossed == 0
+    assert 121 <= rt._NAME_LINES_MAX_EDGES < 300
+
+
+def _spoke_graph(total=119, spokes=40, seed=7):
+    """A main character with ``spokes`` relations and random links between the others, up to
+    ``total`` relations (the review's shape, under the label cap)."""
+    import random
+    rnd = random.Random(seed)
+    pairs = [("Main", f"p{i}") for i in range(spokes)]
+    extra = set()
+    while len(pairs) + len(extra) < total:
+        a, b = sorted(rnd.sample(range(70), 2))
+        extra.add((f"p{a}", f"p{b}"))
+    pairs += sorted(extra)
+    ids = sorted({n for pair in pairs for n in pair})
+    return {"nodes": [{"id": n} for n in ids],
+            "edges": [{"a": a, "b": b, "label_ab": "Friend", "label_ba": ""} for a, b in pairs]}
+
+
+def test_a_focus_with_one_relation_is_drawn_round_the_name_it_hangs_from():
+    """Focusing a name whose only relation is a main character with 40 relations grew the picture to
+    over 100,000 px in several seconds: everything sat in the one wedge of the leaf's only line. The
+    rings now go round the main character (the leaf on its first ring), the picture that main
+    character's own; also along a chain of names with two relations, but never for a plain chain."""
+    graph = _spoke_graph()
+    links = {}
+    for e in graph["edges"]:
+        links.setdefault(e["a"], set()).add(e["b"])
+        links.setdefault(e["b"], set()).add(e["a"])
+    leaf = next(n for n in sorted(links) if links[n] == {"Main"})
+    started = time.perf_counter()
+    positions = _sized_layout(graph, leaf)
+    assert time.perf_counter() - started < 15.0  # about half a second here; was 3.7 s
+    assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+    assert positions == _sized_layout(graph, "Main")
+    xs, ys = [p[0] for p in positions.values()], [p[1] for p in positions.values()]
+    assert max(max(xs) - min(xs), max(ys) - min(ys)) < 20000  # was over 100,000
+    chain = [(e["a"], e["b"], e) for e in graph["edges"]] + [(leaf, "tail1", None), ("tail1", "tail2", None)]
+    assert rt._hang_point("tail2", chain) == "Main" and rt._hang_point("Main", chain) == "Main"
+    path = [("a", "b", None), ("b", "c", None)]
+    assert rt._hang_point("a", path) == "a"
+
+
+def test_above_the_cap_a_focus_keeps_the_rings_small():
+    """Above the label cap only the focus character's lines get room: the names past its first ring
+    sit evenly round their rings instead of in wedges (which pushed the rings out much further: here
+    4,900 px against 7,200, with 1,000 names 9,500 against 24,900)."""
+    graph = _spoke_graph(total=300, spokes=12)
+    sized = _sized_layout(graph, "Main")
+    assert sized.labels_capped
+    xs, ys = [p[0] for p in sized.values()], [p[1] for p in sized.values()]
+    assert max(max(xs) - min(xs), max(ys) - min(ys)) < 6000
+    boxes = [_box(point, NAME_BOX) for point in sized.values()]
+    assert not any(min(p[2], q[2]) - max(p[0], q[0]) > 0.01 and min(p[3], q[3]) - max(p[1], q[1]) > 0.01
+                   for i, p in enumerate(boxes) for q in boxes[i + 1:])
+
+
+def test_the_plain_layout_left_lines_through_labels():
+    """What the owner saw: before the lines counted, the hub's spokes ran through its labels."""
+    graph = _hub_graph()
+    plain = rt.layout_graph(graph, 1600, 1100)
+    plain = rt.Layout(plain)
+    plain.label_spots = {(e["a"], e["b"]): 0.5 for e in graph["edges"]}
+    assert _line_problems(plain, graph, NAME_BOX, LABEL_BOX)[0] > 0
+
+
+@pytest.mark.parametrize("count", [5, 10])
+def test_small_diagrams_with_room_are_not_blown_up(count):
+    """A few names whose lines already clear every label keep about their size: the picture may grow
+    by at most a quarter in area (the bound asserted), and stays as tidy as checked above."""
+    names = [f"s{i}" for i in range(count)]
+    graph = {"nodes": [{"id": n} for n in names],
+             "edges": [{"a": names[i], "b": names[i + 1], "label_ab": "Friend", "label_ba": ""}
+                       for i in range(count - 1)]}
+    plain = rt.layout_graph(graph, 1200, 800)
+    sized = rt.layout_graph(graph, 1200, 800, node_size=lambda node: (70.0, 30.0),
+                            label_size=lambda edge: (60.0, 20.0))
+
+    def area(positions):
+        xs = [p[0] for p in positions.values()]
+        ys = [p[1] for p in positions.values()]
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
+    assert area(sized) <= 1.25 * area(plain)
+    assert _line_problems(sized, graph, (70.0, 30.0), (60.0, 20.0)) == (0, 0, 0)
+
+
+def test_names_without_a_line_sit_in_rows_under_the_picture():
+    """A name tracked for gender only has no line: growing the picture for the labels does not carry
+    it off into a corner; it sits under the names that have lines, clear of every box."""
+    graph = _hub_graph(12)
+    graph["nodes"] += [{"id": "lone1"}, {"id": "lone2"}]
+    positions = _sized_layout(graph)
+    lowest = max(positions[n["id"]][1] for n in graph["nodes"] if not n["id"].startswith("lone"))
+    assert positions["lone1"][1] > lowest + NAME_BOX[1] and positions["lone1"][1] == positions["lone2"][1]
+    assert positions["lone2"][0] - positions["lone1"][0] >= NAME_BOX[0]
 
 
 def test_reset_question_is_one_question_for_one_or_both_prompts():
