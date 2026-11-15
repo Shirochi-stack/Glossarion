@@ -1334,6 +1334,7 @@ def test_eval_script_wraps_every_route_script(tmp_path):
         gemini_free.AI_MODE_CLICK_SEND_SCRIPT,
         gemini_free.AI_MODE_SNAPSHOT_SCRIPT,
         gemini_free.AI_MODE_MENU_SCRIPT,
+        gemini_free.AI_MODE_CLOSE_MENU_SCRIPT,
         gemini_free._ai_mode_select_model_script("4 carbon"),
         gemini_free._ai_mode_stage_file_script(0, "chapter \"1\" `x` ${y}.html", "text/plain", "file", "QUJD"),
         gemini_free._ai_mode_attach_script("image"),

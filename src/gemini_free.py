@@ -994,47 +994,71 @@ AI_MODE_SNAPSHOT_SCRIPT = r"""
 })()
 """
 
-# Page script (shared head): ``modelItems()`` is the model entries of AI Mode's attach menu, the
-# menu that holds "Add images" / "Add files". Other menus of the page have radio entries too
-# (the phone layout's search filters: "Past hour", "Verbatim").
+# Page script (shared head): ``attachMenu()`` is AI Mode's attach menu, the menu that holds
+# "Add images" / "Add files" (desktop) or "Gallery" / "Camera" / "Files" (phone layout), or the
+# file inputs; ``modelItems()`` is its model entries. Other menus of the page have radio entries
+# too (the phone layout's search filters: "Past hour", "Verbatim").
 _AI_MODE_MODEL_ITEMS_JS = r"""
   const textOf = (item) => (item.innerText || item.textContent || "").replace(/\s+/g, " ").trim();
+  const attachMenu = () => Array.from(document.querySelectorAll('[role="menu"]')).find((entry) =>
+    entry.querySelector('input[type="file"]') ||
+    Array.from(entry.querySelectorAll('[role="menuitem"]')).some((item) =>
+      /^(add (files|images)|files$|gallery$)/i.test(item.getAttribute("aria-label") || textOf(item))));
   const modelItems = () => {
-    const menu = Array.from(document.querySelectorAll('[role="menu"]')).find((entry) =>
-      Array.from(entry.querySelectorAll('[role="menuitem"]')).some((item) =>
-        /^add (files|images)/i.test(item.getAttribute("aria-label") || textOf(item))));
+    const menu = attachMenu();
     return menu ? Array.from(menu.querySelectorAll('[role="menuitemradio"]')) : [];
+  };
+  const menuOpener = () => {
+    const labelOf = (element) => element.getAttribute("aria-label") || "";
+    const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+    return buttons.find((button) => /^add files/i.test(labelOf(button))) ||
+      buttons.find((button) => button.getAttribute("aria-haspopup") === "menu" &&
+        /\b(add|attach|upload)\b/i.test(labelOf(button)));
   };
 """
 
 # Page script: open AI Mode's "Add files, tools, and select a model" menu when its file inputs
-# and model entries are not in the page yet, and list them (JSON: ok, inputs, models).
+# and model entries are not in the page yet, and list them (JSON: ok, inputs, models). The
+# phone layout has a camera input (``capture``, images only) next to the prompt box before the
+# menu opens: that one does not count, or the menu with the general file input stays shut.
 AI_MODE_MENU_SCRIPT = r"""
 (() => {
-  const labelOf = (element) => element.getAttribute("aria-label") || "";
 __MODEL_ITEMS__
-  const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
-  const opener = buttons.find((button) => /^add files/i.test(labelOf(button))) ||
-    buttons.find((button) => button.getAttribute("aria-haspopup") === "menu" &&
-      /\b(add|attach|upload)\b/i.test(labelOf(button)));
+  const opener = menuOpener();
   const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+  const pickers = inputs.filter((input) => !input.hasAttribute("capture"));
   const models = modelItems().map((item) => ({
     label: textOf(item),
     checked: item.getAttribute("aria-checked") === "true",
     disabled: item.getAttribute("aria-disabled") === "true"
   }));
+  const ready = pickers.length > 0 || models.length > 0;
   let clicked = false;
-  if (opener && !inputs.length && !models.length && opener.getAttribute("aria-expanded") !== "true") {
+  if (opener && !ready && opener.getAttribute("aria-expanded") !== "true") {
     opener.click();
     clicked = true;
   }
   return JSON.stringify({
-    ok: inputs.length > 0 || models.length > 0,
+    ok: ready,
     opener: !!opener,
     clicked,
     inputs: inputs.map((input) => input.accept || ""),
     models
   });
+})()
+""".replace("__MODEL_ITEMS__", _AI_MODE_MODEL_ITEMS_JS.strip("\n"))
+
+# Page script: close the attach / model menu when it is still open (its button toggles it), so
+# the prompt is typed and sent with the menu shut, as a user would (JSON: open, clicked). The
+# phone layout's menu stays open after the model step when that picked nothing (signed out there
+# is no "Auto"); picking a file closes it by itself.
+AI_MODE_CLOSE_MENU_SCRIPT = r"""
+(() => {
+__MODEL_ITEMS__
+  const opener = menuOpener();
+  const open = !!opener && opener.getAttribute("aria-expanded") === "true";
+  if (open) opener.click();
+  return JSON.stringify({open, clicked: open});
 })()
 """.replace("__MODEL_ITEMS__", _AI_MODE_MODEL_ITEMS_JS.strip("\n"))
 
@@ -1088,10 +1112,12 @@ def _ai_mode_attach_script(kind: str) -> str:
   const staged = (window.__glossarionAiFiles || []).filter((file) => file && file.kind === kind);
   const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
   const takesImages = (input) => /image\//i.test(input.accept || "");
-  // the phone layout has camera inputs (``capture``) before its image picker
-  const picker = (entry) => takesImages(entry) && !entry.hasAttribute("capture") && entry.multiple;
+  // the phone layout has camera inputs (``capture``) before its image picker; the camera renames
+  // what it takes ("image_<time>_0.png"), so its chip never shows the attachment's name
+  const gallery = (entry) => takesImages(entry) && !entry.hasAttribute("capture");
+  const picker = (entry) => gallery(entry) && entry.multiple;
   const input = kind === "image"
-    ? (inputs.find(picker) || inputs.find(takesImages) || inputs.find((entry) => !entry.accept))
+    ? (inputs.find(picker) || inputs.find(gallery) || inputs.find((entry) => !entry.accept))
     : (inputs.find((entry) => !takesImages(entry)) || null);
   if (!input) {
     return JSON.stringify({ok: false, error: "AI Mode file input not found", inputs: inputs.map((entry) => entry.accept || "")});
@@ -1113,17 +1139,19 @@ def _ai_mode_attach_script(kind: str) -> str:
 def _ai_mode_upload_state_script(names: Iterable[str]) -> str:
     """Page script: which of the attachments ``names`` show as a chip in the prompt box, and how
     many uploads the page finished (JSON: chips, uploads; ``uploads`` -1 when the page cannot
-    tell)."""
+    tell). A file chip is labelled with the file name; the phone layout's image chip is a
+    thumbnail whose only label is its "Remove <name>" button."""
     return r"""
 (() => {
   const names = __NAMES__;
   const labels = new Set(Array.from(document.querySelectorAll("[aria-label]")).map((element) => element.getAttribute("aria-label")));
+  const shown = (name) => labels.has(name) || labels.has("Remove " + name);
   let uploads = -1;
   try {
     uploads = performance.getEntriesByType("resource")
       .filter((entry) => /\/crupload(\?|$)/.test(entry.name) && entry.responseEnd > 0).length;
   } catch (error) {}
-  return JSON.stringify({chips: names.filter((name) => labels.has(name)), uploads});
+  return JSON.stringify({chips: names.filter(shown), uploads});
 })()
 """.replace("__NAMES__", json.dumps([str(name) for name in names], ensure_ascii=False))
 
@@ -1786,6 +1814,8 @@ def _submit_ai_mode_request(
     upload_state: Dict[str, Any] = {}
     if files:
         upload_state = _attach_ai_mode_files(files, run_js, wait_ms, deadline=deadline)
+    elif _run_page_json(run_js, AI_MODE_CLOSE_MENU_SCRIPT, js_timeout_ms=10000).get("clicked"):
+        wait_ms(300)  # the model step left the menu open: shut it before the prompt is typed
 
     set_state = _run_page_json(run_js, _ai_mode_set_prompt_script(str(request.get("prompt") or "")), js_timeout_ms=15000)
     if not set_state.get("ok"):

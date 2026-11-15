@@ -336,6 +336,10 @@ class Page:
             return json.dumps({"ok": True, "opener": True, "clicked": False, "inputs": ["image/png", ""],
                                "models": [{"label": label, "checked": index == 0, "disabled": False}
                                           for index, label in enumerate(self.models)]})
+        if script == gf.AI_MODE_CLOSE_MENU_SCRIPT:
+            self.calls.append("close")
+            still_open = self.selected is None                                # picking an entry shuts the menu
+            return json.dumps({"open": still_open, "clicked": still_open})
         if "const want = " in script:
             want = json.loads(re.search(r'const want = (".*?");', script).group(1))
             self.calls.append(f"select:{want}")
@@ -388,7 +392,7 @@ def submit(page, request, **kwargs):
 def test_flow_of_a_plain_request_asks_for_auto():
     page = Page()
     result = submit(page, gf._build_ai_mode_request([{"role": "user", "content": "Say hello in French."}]))
-    assert page.calls == ["snapshot", "menu", "select:auto", "prompt", "send", "snapshot"]
+    assert page.calls == ["snapshot", "menu", "select:auto", "close", "prompt", "send", "snapshot"]
     assert page.selected == "Auto" and result["model_label"] == "Auto"
     assert page.prompt == "Say hello in French." and result["answerText"] == "Bonjour"
     assert gf._extract_rendered_content(result) == "Bonjour"
@@ -574,6 +578,227 @@ def test_flow_lists_the_models_of_the_page():
     result = submit(page, {"list_models": True})
     assert page.calls == ["snapshot", "menu"] and not page.sent
     assert gf._model_ids(result["models"]) == ["search/gemini", "search/gemini-3.8-flash", "search/gemini-4-carbon"]
+
+
+# ============================================================================ the route's scripts on a fake DOM
+# The attach and model scripts run for real (Node) on a small fake DOM of AI Mode's prompt box.
+# PHONE is what google.com served an Android user agent at 600 px (seen live 2026-11-15, signed
+# out; Glossarion Mobile's WebView sends its own Android user agent): before the "Add files, tools,
+# and select a model" menu opens the page holds ONE file input, the camera input of the "Upload
+# image" button (image accept list, capture="environment"). The menu adds "Gallery" (images,
+# multiple), "Camera" (images, capture) and "Files" (no accept, multiple) entries with an input
+# each, "Create images" / "Canvas" checkboxes and the model radio; the search filter menus ("Any
+# time", "All results") are always in the page. Picking a file closes the menu and removes its
+# inputs; so does a second click on the menu's button (aria-expanded back to "false"). A file chip is a group labelled with the file name plus a "Remove <name>" button; an
+# image chip is a thumbnail with only the "Remove <name>" button, and the camera input renames
+# what it takes ("image_<time>_0.png"). DESKTOP is the layout of the route's notes: the menu
+# entries are "Add images" / "Add files" and every chip is labelled with the file name.
+_FAKE_AI_MODE_JS = r"""
+const vm = require("vm");
+const readline = require("readline");
+const LAYOUT = process.argv[2];
+const IMAGES = "image/avif,image/bmp,image/heic,image/heif,image/jpeg,image/png,image/tiff,image/webp,.heic,.heif";
+class El {
+  constructor(tag, attrs = {}, children = []) {
+    this.tagName = tag.toUpperCase(); this.attrs = {}; this.children = []; this.parentElement = null;
+    for (const [name, value] of Object.entries(attrs)) if (value !== undefined) this.attrs[name] = String(value);
+    this.multiple = "multiple" in attrs; delete this.attrs.multiple;
+    this.accept = this.attrs.accept || ""; this.files = null;
+    children.forEach((child) => this.append(child));
+  }
+  append(child) { child.parentElement = this; this.children.push(child); return child; }
+  remove() { const parent = this.parentElement; if (parent) parent.children = parent.children.filter((c) => c !== this); this.parentElement = null; }
+  getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; }
+  hasAttribute(name) { return name in this.attrs; }
+  setAttribute(name, value) { this.attrs[name] = String(value); }
+  get innerText() { return this.attrs["data-text"] || this.children.map((c) => c.innerText).join(" ").trim(); }
+  get textContent() { return this.innerText; }
+  *walk() { for (const child of this.children) { yield child; yield* child.walk(); } }
+  matches(selector) {
+    return selector.split(",").some((one) => {
+      const parts = one.trim().match(/^([a-z]*)((?:\[[^\]]+\])*)$/i);
+      if (parts[1] && this.tagName !== parts[1].toUpperCase()) return false;
+      return [...parts[2].matchAll(/\[([\w-]+)(?:="?([^"\]]*)"?)?\]/g)].every(([, name, value]) =>
+        value === undefined ? this.hasAttribute(name) : this.getAttribute(name) === value);
+    });
+  }
+  querySelectorAll(selector) { return [...this.walk()].filter((el) => el.matches(selector)); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  click() { if (this.onclick) this.onclick(); }
+  dispatchEvent(event) { if (event.type === "change" && this.onchange) this.onchange(); return true; }
+}
+const uploads = [];
+const body = new El("body");
+const chips = body.append(new El("div"));
+const fileInput = (attrs) => new El("input", Object.assign({type: "file"}, attrs));
+const filterMenu = (labels) => new El("div", {role: "menu"}, labels.map((label) =>
+  new El("div", {role: "menuitemradio", "data-text": label})));
+body.append(filterMenu(["Any time", "Past hour"]));
+body.append(filterMenu(["All results", "Verbatim"]));
+let menu = null;
+const opener = body.append(new El("button", {"aria-label": "Add files, tools, and select a model",
+  "aria-haspopup": "menu", "aria-expanded": "false"}));
+const take = (input, renamed, labelled) => () => {
+  for (const file of input.files) {
+    const name = renamed ? "image_1794754951580_0.png" : file.name;
+    const chip = chips.append(new El("div", labelled ? {role: "group", "aria-label": name} : {}));
+    chip.append(new El("div", {role: "button", "aria-label": "Remove " + name}));
+    uploads.push({name: "https://lensfrontend-pa.clients6.google.com/v1/crupload", responseEnd: 12.5, file: file.name, mime: file.type});
+  }
+  if (menu) { menu.remove(); menu = null; opener.setAttribute("aria-expanded", "false"); }
+};
+const entry = (label, attrs, renamed, labelled) => {
+  const input = fileInput(attrs);
+  input.onchange = take(input, renamed, labelled);
+  return new El("button", {role: "menuitem", "aria-label": label}, [input]);
+};
+if (LAYOUT === "phone") {
+  const camera = fileInput({accept: IMAGES, capture: "environment"});
+  camera.onchange = take(camera, true, false);
+  body.append(new El("button", {"aria-label": "Upload image"}, [camera]));
+}
+opener.onclick = () => {
+  if (menu) { menu.remove(); menu = null; opener.setAttribute("aria-expanded", "false"); return; }
+  const model = new El("button", {role: "menuitemradio", "aria-label": "4 Hydrogen • Everyday help",
+    "aria-checked": "true", "aria-disabled": "true", "data-text": "4 Hydrogen • Everyday help"});
+  menu = body.append(new El("div", {role: "menu"}, LAYOUT === "phone" ? [
+    entry("Gallery", {accept: IMAGES, multiple: true}, false, false),
+    entry("Camera", {accept: "image/jpeg,image/png,image/webp,image/avif", capture: "environment"}, true, false),
+    entry("Files", {multiple: true}, false, true),
+    new El("button", {role: "menuitemcheckbox", "aria-label": "Create images"}),
+    new El("button", {role: "menuitemcheckbox", "aria-label": "Canvas"}),
+    model,
+  ] : [
+    entry("Add images", {accept: IMAGES, multiple: true}, false, true),
+    entry("Add files", {multiple: true}, false, true),
+    model,
+  ]));
+  opener.setAttribute("aria-expanded", "true");
+};
+class DataTransfer { constructor() { const list = (this.files = []); this.items = {add: (file) => list.push(file)}; } }
+const context = vm.createContext({document: body, DataTransfer, File, Event, atob, JSON,
+  performance: {getEntriesByType: (type) => (type === "resource" ? uploads : [])}});
+context.window = context;
+const lines = readline.createInterface({input: process.stdin});
+lines.on("line", (line) => {
+  const ask = JSON.parse(line);
+  let answer;
+  try {
+    answer = ask.script === "__state__"
+      ? {value: {uploads: uploads.map((u) => [u.file, u.mime]), menuOpen: !!menu}}
+      : {value: vm.runInContext(ask.script, context)};
+  } catch (error) { answer = {error: String(error && error.message || error)}; }
+  process.stdout.write(JSON.stringify(answer === undefined ? {value: null} : answer) + "\n");
+});
+"""
+
+
+class DomPage:
+    """``run_js`` on the fake AI Mode DOM (one Node process holds the page between scripts)."""
+
+    def __init__(self, tmp_path, layout):
+        import shutil
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("Node is needed to run the route's page scripts")
+        script = tmp_path / "fake_ai_mode.js"
+        script.write_text(_FAKE_AI_MODE_JS, encoding="utf-8")
+        self.proc = subprocess.Popen([node, str(script), layout], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, encoding="utf-8")
+
+    def run_js(self, script, js_timeout_ms=15000):
+        self.proc.stdin.write(json.dumps({"script": script}) + "\n")
+        self.proc.stdin.flush()
+        answer = json.loads(self.proc.stdout.readline())
+        assert "error" not in answer, answer["error"]
+        return answer["value"]
+
+    def state(self):
+        return self.run_js("__state__")
+
+    def close(self):
+        self.proc.stdin.close()
+        self.proc.wait(timeout=10)
+
+
+@pytest.fixture
+def dom_page(tmp_path, clean):
+    clock = {"now": 1000.0}
+    clean.setattr(gf.time, "time", lambda: clock["now"])                     # waits pass at once
+    pages = []
+
+    def open_page(layout):
+        page = DomPage(tmp_path, layout)
+        page.wait = lambda ms: clock.__setitem__("now", clock["now"] + ms / 1000.0)
+        pages.append(page)
+        return page
+
+    yield open_page
+    for page in pages:
+        page.close()
+
+
+def chapter_and_picture_request():
+    return gf._build_ai_mode_request(
+        [{"role": "system", "content": "Translate to English."},
+         {"role": "user", "content": [{"type": "text", "text": "<p>안녕하세요, 형님.</p>"}, png_part(b"\x89PNG one")]}])
+
+
+@pytest.mark.parametrize("layout", ["phone", "desktop"])
+def test_text_and_image_attachments_reach_both_layouts(dom_page, layout):
+    """The phone layout's camera input is in the page before the menu opens: the menu must still
+    be opened (for its general file input), each kind reopens it (picking a file closes it), and
+    the image goes to the gallery input, never the camera, whose chip has another name."""
+    page = dom_page(layout)
+    request = chapter_and_picture_request()
+    state = gf._attach_ai_mode_files(request["files"], page.run_js, page.wait, deadline=None)
+    assert state == {"chips": ["chapter.html", "image001.png"], "uploads": 2}
+    assert page.state() == {"uploads": [["chapter.html", "text/plain"], ["image001.png", "image/png"]],
+                            "menuOpen": False}
+
+
+def test_phone_layout_image_alone_goes_to_the_gallery_input(dom_page):
+    page = dom_page("phone")
+    request = gf._build_ai_mode_request([{"role": "user", "content": [{"type": "text", "text": "What is this?"},
+                                                                      png_part(b"\x89PNG one")]}])
+    assert gf._attach_ai_mode_files(request["files"], page.run_js, page.wait, deadline=None)["chips"] == ["image001.png"]
+    assert page.state()["uploads"] == [["image001.png", "image/png"]]
+
+
+@pytest.mark.parametrize("layout", ["phone", "desktop"])
+def test_model_menu_is_read_on_both_layouts(dom_page, layout):
+    page = dom_page(layout)
+    assert gf._read_ai_mode_models(page.run_js, page.wait) == ["4 Hydrogen • Everyday help"]
+    # the search filter radios of the phone layout are not models
+    assert gf._select_ai_mode_model("auto", page.run_js, page.wait, required=False) == ""
+    with pytest.raises(gf.AIModeError, match="offered: 4 Hydrogen"):
+        gf._select_ai_mode_model("4 carbon", page.run_js, page.wait)
+
+
+@pytest.mark.parametrize("layout", ["phone", "desktop"])
+def test_request_without_attachments_is_typed_with_the_menu_shut(dom_page, layout):
+    """Signed out there is no "Auto": the model step opens the menu and picks nothing. With no
+    attachment to close it, the route shuts it before the prompt is typed and sent."""
+    page = dom_page(layout)
+    seen = []
+
+    def run_js(script, js_timeout_ms=15000):
+        if script == gf.AI_MODE_SNAPSHOT_SCRIPT:
+            sent = "send" in [step for step, _open in seen]
+            return json.dumps(snapshot("Bonjour" if sent else "", aiMode=sent, complete=sent))
+        for step, marker in (("prompt", "AI Mode textarea not found"), ("send", "AI Mode send button not ready")):
+            if marker in script:
+                seen.append((step, page.state()["menuOpen"]))
+                return json.dumps({"ok": True})
+        return page.run_js(script, js_timeout_ms)
+
+    request = gf._build_ai_mode_request([{"role": "system", "content": "Answer in French."},
+                                         {"role": "user", "content": "Say hello."}])
+    assert request["files"] == []
+    result = gf._submit_ai_mode_request(request, run_js=run_js, wait_ms=page.wait,
+                                        base_url=gf._build_search_base_url(), timeout=30)
+    assert result["answerText"] == "Bonjour" and result["model_label"] == ""
+    assert seen == [("prompt", False), ("send", False)]
 
 
 # ============================================================================ entry points
