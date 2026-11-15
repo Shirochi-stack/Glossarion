@@ -8323,10 +8323,11 @@ def _minimal_pass_environment():
         # Removed, not blanked: save_glossary checks os.path.exists on it.
         "MANUAL_GLOSSARY": None,
     }
-    if relations_tracking.tracking_enabled():
-        # Relations come from the Balanced/Full requests; the extra pass only finds names.
+    if relations_tracking.tracking_enabled() and not relations_tracking.minimal_tracking_enabled():
+        # Minimal's "Include Relations Column" is off: the extra pass only finds names.
         # The relations field leaves the custom fields too, or the pass (tracker off)
-        # would ask for it and save it as an ordinary column.
+        # would ask for it and save it as an ordinary column. With that toggle on the
+        # pass asks for relations exactly as standalone Minimal does.
         overrides[relations_tracking.ENV_ENABLE] = "0"
         try:
             fields = json.loads(os.environ.get("GLOSSARY_CUSTOM_FIELDS") or "[]")
@@ -8339,7 +8340,32 @@ def _minimal_pass_environment():
     return _environment_overrides(overrides)
 
 
-def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=None):
+def _minimal_pass_chapters(chapters, chapter_refs=None):
+    """The chapter dicts save_glossary is given.
+
+    save_glossary reads chapter["body"]; plain text is wrapped. ``chapter_refs(index,
+    chapter)`` gives ``(chapter_index, chapter_num, chapter_file)``, the refs the book's
+    own requests date relations with; GlossaryManager._record_minimal_relations reads
+    them back from chapter_index / actual_chapter_num / original_basename.
+    """
+    result = []
+    for index, chapter in enumerate(chapters or []):
+        item = dict(chapter) if isinstance(chapter, dict) else {"body": chapter}
+        refs = chapter_refs(index, chapter) if callable(chapter_refs) else None
+        if refs:
+            ref_index, ref_num, ref_file = refs
+            if ref_index is not None:
+                item["chapter_index"] = ref_index
+            if ref_num not in (None, ""):
+                item["actual_chapter_num"] = ref_num
+            if ref_file:
+                item["original_basename"] = ref_file
+        result.append(item)
+    return result
+
+
+def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=None,
+                               output_file=None, chapter_refs=None):
     """Run the Minimal extractor first and return its entries.
 
     Minimal (GlossaryManager.save_glossary) is pattern/frequency based, so it
@@ -8347,6 +8373,10 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
     per-chapter extraction. Its results are merged into the Balanced/Full
     glossary rather than kept in a separate file, which is why the pass is run
     inside a subfolder of the same book glossary directory.
+
+    With Minimal's "Include Relations Column" on, the relations it returns are
+    recorded in the book's tracker (the one beside ``output_file``), dated by
+    ``chapter_refs`` (see _minimal_pass_chapters).
 
     Returns a list of entry dicts, or [] when the pass produced nothing. Never
     raises: a failed extra pass must not take down the main extraction.
@@ -8369,13 +8399,9 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
         _record_minimal_pass_progress("failed", context=context, error=str(e)[:200])
         return []
 
-    # save_glossary() consumes chapter dicts and reads chapter["body"]; this
-    # module carries chapters as plain extracted text, so wrap them. `body` is
-    # the only field it touches, and clean_html() leaves tag-free text alone.
-    minimal_chapters = [
-        {"body": text} if not isinstance(text, dict) else text
-        for text in chapters
-    ]
+    minimal_chapters = _minimal_pass_chapters(chapters, chapter_refs)
+    # The pass's relations go to the book's tracker, not minimal_pass/.
+    save_kwargs = {"relations_output": output_file} if output_file else {}
 
     try:
         if callable(check_stop) and check_stop():
@@ -8393,7 +8419,7 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
         run_started = time.time()
         try:
             with _minimal_pass_environment():
-                GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
+                GlossaryManager.save_glossary(pass_dir, minimal_chapters, "", **save_kwargs)
         finally:
             if callable(set_hook):
                 set_hook(None)
@@ -8475,13 +8501,15 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
 
 def seed_glossary_with_minimal_pass(
     chapters, glossary_dir, output_file, existing=None, check_stop=None,
-    context=None,
+    context=None, chapter_refs=None,
 ):
     """Run the Minimal pass and merge its entries into an existing glossary.
 
     Shared by every mode that can seed a glossary this way: Balanced/Full and
     the standalone Extract Glossary button both go through main(), while
     Single Pass extracts during translation and calls this directly.
+    ``chapter_refs(index, chapter)`` gives ``(chapter_index, chapter_num,
+    chapter_file)`` for the pass's relations (see _minimal_pass_chapters).
 
     Returns the merged entry list, or None when nothing was seeded (toggle
     off, the pass already ran for this book, or it produced no entries).
@@ -8501,7 +8529,8 @@ def seed_glossary_with_minimal_pass(
     existing = [e for e in (existing or []) if isinstance(e, dict)]
 
     entries = _run_minimal_glossary_pass(
-        chapters, glossary_dir, check_stop=check_stop, context=context
+        chapters, glossary_dir, check_stop=check_stop, context=context,
+        output_file=output_file, chapter_refs=chapter_refs,
     )
     if not entries:
         return None
@@ -9233,6 +9262,8 @@ def main(log_callback=None, stop_callback=None):
         existing=glossary,
         check_stop=check_stop,
         context=progress_context,
+        # the refs the chapter requests below give update_relations_tracker
+        chapter_refs=lambda i, _chap: (i, _chapter_positions.get(i, i + 1), _chapter_filenames.get(i, "")),
     )
     if _seeded is not None:
         glossary[:] = _seeded

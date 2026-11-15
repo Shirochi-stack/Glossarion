@@ -14254,12 +14254,26 @@ def _seed_single_pass_glossary_with_minimal(chapters, output_dir, check_stop=Non
         # Single Pass keeps its own progress file, so hand the pass that
         # context or its status row would be written to the wrong book.
         context = _single_pass_glossary_context(glossary_extractor, json_path, progress_path)
+        progress = glossary_extractor.load_progress(context=context)
+
+        def _chapter_refs(_index, chapter):
+            # The refs the Single Pass responses date relations with (spine index, not
+            # the position in this list). A chapter without a spine file keeps the default.
+            if not isinstance(chapter, dict):
+                return None
+            chapter_file = _single_pass_progress_chapter_file(chapter)
+            if not chapter_file:
+                return None
+            return _single_pass_chapter_refs(
+                output_dir, chapter.get('actual_chapter_num', chapter.get('num')), chapter_file, progress)
+
         glossary_extractor.seed_glossary_with_minimal_pass(
             chapters,
             glossary_dir,
             json_path,
             check_stop=check_stop,
             context=context,
+            chapter_refs=_chapter_refs,
         )
     except Exception as e:
         print(f"⚠️ Minimal glossary pass failed for Single Pass, continuing: {e}")

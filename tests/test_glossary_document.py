@@ -629,7 +629,7 @@ REWIRE_SPANS = (
     # from the GUI-free cores shared with mobile)
     (758, 757, 520), (782, 794, 1),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
-    (1800, 1799, 379),  # Relations Tracker
+    (1800, 1799, 404),  # Relations Tracker
     (1800, 1810, 3),
     # U9 gap closures: Entry Type Configuration / Custom Fields call the glossary_document rules
     (1934, 1933, 2),  # Relations Tracker + Minimal Include Relations Column
@@ -670,7 +670,7 @@ REWIRE_SPANS = (
     (6036, 6036, 1), (6090, 6090, 1), (6107, 6107, 1), (6146, 6146, 1), (6150, 6150, 1), (6162, 6162, 1),
     # the editor's "Glossary File:" ◀ combo ▶ row is qt_widget_helpers.NavComboRow (shared with the QA
     # scanner's glossary name review); its ◀/▶ and arrow-visibility helpers are the row's
-    (7072, 7071, 117),  # Relations Tracker
+    (7072, 7071, 119),  # Relations Tracker
     # placeholder links: Single Pass Header Prompt and its hint, glossary refinement line and prompts
     (7200, 7199, 1), (7249, 7248, 1), (7485, 7484, 1), (7495, 7494, 1), (7503, 7502, 1),
     (7601, 7632, 9),

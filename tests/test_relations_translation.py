@@ -422,3 +422,20 @@ def test_single_pass_with_the_tracker_off_keeps_a_users_relations_column(tk, env
     csv_path = tk._single_pass_glossary_paths(str(out))[2]
     assert "Best Friend" in open(csv_path, encoding="utf-8").read()
     assert not os.path.exists(rt.tracker_path_for_glossary(csv_path))
+
+
+def test_single_pass_minimal_pass_dates_relations_like_the_single_pass_responses(tk, env, tmp_path):
+    """The extra Minimal pass gets the chapter refs _persist_single_pass_glossary uses, not list positions."""
+    import extract_glossary_from_epub as eg
+    out = _single_pass(env, tmp_path)
+    seen = {}
+    env.setattr(eg, "_add_minimal_pass_enabled", lambda: True)
+    env.setattr(eg, "seed_glossary_with_minimal_pass",
+                lambda chapters, glossary_dir, output_file, **kwargs: seen.update(kwargs, output_file=output_file))
+    chapters = [{"num": 7, "original_basename": "ch007.xhtml", "body": "서윤"}, "plain text", {"num": 9, "body": "x"}]
+    tk._seed_single_pass_glossary_with_minimal(chapters, str(out))
+    refs = seen["chapter_refs"]
+    assert seen["output_file"] == tk._single_pass_glossary_paths(str(out))[1]
+    # list position 0, but the Single Pass response of this chapter is recorded under index 6
+    assert refs(0, chapters[0]) == tk._single_pass_chapter_refs(str(out), 7, "ch007.xhtml", {}) == (6, 7, "ch007.xhtml")
+    assert refs(1, chapters[1]) is None and refs(2, chapters[2]) is None  # no spine file: the default dating

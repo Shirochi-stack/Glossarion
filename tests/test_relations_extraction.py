@@ -786,6 +786,103 @@ def test_add_minimal_pass_environment_drops_the_relations_field(eg, _env):
     assert json.loads(os.environ["GLOSSARY_CUSTOM_FIELDS"]) == ["description", "relations"]
 
 
+def test_add_minimal_pass_environment_keeps_relations_with_minimal_toggle_on(eg, _env):
+    """Minimal's "Include Relations Column" on: the pass asks for relations as standalone Minimal does."""
+    _env.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps(["description", "relations"]))
+    _on(_env)
+    _env.setenv(rt.ENV_MINIMAL, "1")
+    with eg._minimal_pass_environment():
+        assert os.environ[rt.ENV_ENABLE] == "1"
+        assert json.loads(os.environ["GLOSSARY_CUSTOM_FIELDS"]) == ["description", "relations"]
+        assert os.environ["ENABLE_AUTO_GLOSSARY"] == "1"
+
+
+_PASS_CHAPTERS = ["서윤은 도현을 보았다. 서윤과 도현은 걸었다.", "서윤은 하린을 만났다. 하린과 서윤은 웃었다."]
+_PASS_RESPONSE = (
+    "type,raw_name,translated_name,gender,description\n"
+    "character,서윤,Seo-yun,female,Heir of the house,도현: Older Brother; 하린: Best Friend\n"
+    "character,도현,Do-hyeon,male,Captain of the gate,서윤: Younger Sister\n"
+    "character,하린,Ha-rin,female,Apprentice healer\n"
+)
+
+
+def _run_minimal_pass(eg, gm, _env, tmp_path, monkeypatch, minimal_toggle):
+    """seed_glossary_with_minimal_pass with the real save_glossary and a fake API: (sent prompts, paths)."""
+    import unified_api_client as uac
+    from types import SimpleNamespace
+
+    sent = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.context = None
+
+    def send(messages, **kwargs):
+        sent.append(messages[0]["content"])
+        return SimpleNamespace(content=_PASS_RESPONSE), "stop", None
+
+    monkeypatch.setattr(uac, "UnifiedClient", FakeClient)
+    monkeypatch.setattr(gm, "send_with_interrupt", send)
+    monkeypatch.setattr(gm, "_stop_requested", False)
+    monkeypatch.setattr(gm, "_get_stop_file_path", lambda: None)
+    for key, value in {"MODEL": "local/test-model", "API_KEY": "test-key", "THREAD_SUBMISSION_DELAY_SECONDS": "0",
+                       "GLOSSARY_MAX_OUTPUT_TOKENS": "4096", "GLOSSARY_MIN_FREQUENCY": "1",
+                       "GLOSSARY_ADD_MINIMAL_PASS": "1", "GLOSSARY_INCLUDE_DESCRIPTION": "1",
+                       "GLOSSARY_TARGET_LANGUAGE": "English"}.items():
+        monkeypatch.setenv(key, value)
+    # OUTPUT_DIRECTORY would move save_glossary's folder away from minimal_pass/
+    for key in ("AUTO_GLOSSARY_PROMPT", "MANUAL_GLOSSARY", "TRANSLATION_CANCELLED", "GRACEFUL_STOP",
+                "OUTPUT_DIRECTORY"):
+        monkeypatch.delenv(key, raising=False)
+    _on(_env)
+    _env.setenv(rt.ENV_MINIMAL, minimal_toggle)
+    glossary_dir = tmp_path / "Glossary" / "Book"
+    glossary_dir.mkdir(parents=True)
+    output = glossary_dir / "Book_glossary.json"
+    context = eg.make_glossary_progress_context(progress_file=str(glossary_dir / "Book_glossary_progress.json"),
+                                                output_file=str(output))
+    merged = eg.seed_glossary_with_minimal_pass(
+        list(_PASS_CHAPTERS), str(glossary_dir), str(output), existing=[], context=context,
+        # the refs main() gives update_relations_tracker for these chapters
+        chapter_refs=lambda i, _chap: (i + 3, i + 10, f"ch{i + 10}.xhtml"),
+    )
+    return sent, merged, glossary_dir, output
+
+
+def _saved_glossary_texts(glossary_dir, output):
+    paths = [glossary_dir / "minimal_pass" / "glossary.csv", output, output.with_suffix(".csv")]
+    return {p.name: p.read_text(encoding="utf-8") for p in paths if p.exists()}
+
+
+def test_add_minimal_pass_records_relations_in_the_book_tracker(eg, gm, _env, tmp_path, monkeypatch, capsys):
+    sent, merged, glossary_dir, output = _run_minimal_pass(eg, gm, _env, tmp_path, monkeypatch, "1")
+    assert sent and all("The `relations` column:" in prompt for prompt in sent)
+    assert merged and {e["raw_name"] for e in merged} >= {"서윤", "도현", "하린"}
+    # The book's tracker, dated with the chapter refs of the Balanced/Full requests.
+    data = _tracker_without_time(rt.tracker_path_for_glossary(str(output)))
+    first = data["entries"]["도현"]["relations"]["서윤"]["occurrences"][0]
+    assert (first["chapter_index"], first["chapter_num"], first["chapter_file"]) == (3, 10, "ch10.xhtml")
+    second = data["entries"]["하린"]["relations"]["서윤"]["occurrences"][0]
+    assert (second["chapter_index"], second["chapter_num"], second["chapter_file"]) == (4, 11, "ch11.xhtml")
+    assert data["glossary_path"] == str(output)
+    # Nothing in minimal_pass/, and the relations column is never saved.
+    assert not (glossary_dir / "minimal_pass" / rt.TRACKER_BASENAME).exists()
+    texts = _saved_glossary_texts(glossary_dir, output)
+    assert {"glossary.csv", output.with_suffix(".csv").name} <= set(texts)
+    for text in texts.values():
+        assert "Older Brother" not in text and "Younger Sister" not in text and "relations" not in text
+    assert all("relations" not in e and "Older Brother" not in json.dumps(e, ensure_ascii=False) for e in merged)
+    assert "🔗 Relations tracker: Ch. 10" in capsys.readouterr().out
+
+
+def test_add_minimal_pass_without_minimal_toggle_asks_no_relations(eg, gm, _env, tmp_path, monkeypatch):
+    sent, merged, glossary_dir, output = _run_minimal_pass(eg, gm, _env, tmp_path, monkeypatch, "0")
+    assert sent and not any("relations" in prompt for prompt in sent)
+    assert merged
+    assert not os.path.exists(rt.tracker_path_for_glossary(str(output)))
+    assert not (glossary_dir / "minimal_pass" / rt.TRACKER_BASENAME).exists()
+
+
 def test_minimal_detach_respects_quoted_commas(gm, _env):
     """A quoted description with a comma is one cell, not the relations cell (review blocker)."""
     sink = _sink(gm)

@@ -492,6 +492,98 @@ def test_diagram_is_tidy_and_fitted(qapp):
         dialog.deleteLater()
 
 
+def _hub_tracker(leaves=32):
+    """A main character related to everyone (labels of different lengths), a few of the others
+    related to each other, and one more relation from chapter 2 on."""
+    tracker = rt.empty_tracker()
+    words = [("Patient", "Healer"), ("Younger Brother", "Older Sister"), ("Student", "Mentor"), ("Rival", "Rival")]
+    hub_cells, rows = [], []
+    for i in range(leaves):
+        mine, theirs = words[i % len(words)]
+        hub_cells.append(f"Person {i}: {mine}")
+        cell = f"Hero: {theirs}"
+        if i % 4 == 0 and i + 1 < leaves:
+            cell += f"; Person {i + 1}: Coworker"
+        rows.append({"raw_name": f"Person {i}", "translated_name": f"Person {i}", "relations": cell})
+    rows.insert(0, {"raw_name": "Hero", "translated_name": "Hero", "relations": "; ".join(hub_cells)})
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+    rt.record_relations(tracker, [{"raw_name": "Person 2", "translated_name": "Person 2",
+                                   "relations": "Person 9: Fiancee"},
+                                  {"raw_name": "Person 9", "translated_name": "Person 9"}],
+                        field="relations", chapter_index=1, chapter_num=2, chapter_file="c2.xhtml")
+    return tracker
+
+
+def _diagram_overlaps(dialog, tolerance=1.0):
+    """(label/label, label/name, name/name) pairs of drawn boxes that overlap by more than
+    ``tolerance`` pixels both ways (rounding, not real overlap, stays under it on any font)."""
+    labels = list(dialog._label_boxes)
+    names = [item.sceneBoundingRect() for item in dialog._node_items.values()]
+
+    def count(first, second, same):
+        found = 0
+        for i, a in enumerate(first):
+            for j, b in enumerate(second):
+                shared = a.intersected(b)
+                if (not same or j > i) and shared.width() > tolerance and shared.height() > tolerance:
+                    found += 1
+        return found
+    return count(labels, labels, True), count(labels, names, False), count(names, names, True)
+
+
+def test_diagram_hub_labels_do_not_overlap(qapp):
+    """The owner's book: a main character with dozens of relations made a knot of label pills
+    around it. Every pill now has room on its own line, also with that character focused, and
+    the names stay put while the slider moves."""
+    from relations_diagram_dialog import RelationsDiagramDialog
+    dialog = RelationsDiagramDialog(None, tracker=_hub_tracker())
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.node_count() == 33 and len(dialog._label_boxes) == dialog.edge_count() == 41
+        assert _diagram_overlaps(dialog) == (0, 0, 0)
+        positions = dict(dialog._positions)
+        dialog.chapter_slider.setValue(1)
+        assert dialog.edge_count() == 40 and dict(dialog._positions) == positions
+        assert _diagram_overlaps(dialog) == (0, 0, 0)
+        dialog.chapter_slider.setValue(dialog.chapter_slider.maximum())
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(rt.tracker_key("Hero")))
+        _wait_idle(qapp, dialog)
+        assert len(dialog._label_boxes) == 41 and _diagram_overlaps(dialog) == (0, 0, 0)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_diagram_labels_with_former_relations_do_not_overlap(qapp):
+    """"Show former relations" writes every earlier label in brackets: the layout makes room for
+    that longer text too, at every chapter, and the names stay put when it is ticked."""
+    from relations_diagram_dialog import RelationsDiagramDialog
+    tracker = _hub_tracker()
+    for chapter, word in ((3, "Sworn Enemy"), (4, "Former Childhood Friend"), (5, "Ally")):
+        rt.record_relations(tracker, [{"raw_name": "Hero", "translated_name": "Hero",
+                                       "relations": "; ".join(f"Person {i}: {word}" for i in range(32))}],
+                            field="relations", chapter_index=chapter - 1, chapter_num=chapter,
+                            chapter_file=f"c{chapter}.xhtml")
+    dialog = RelationsDiagramDialog(None, tracker=tracker)
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        qapp.processEvents()
+        positions = dict(dialog._positions)
+        dialog.show_former_checkbox.setChecked(True)
+        assert dict(dialog._positions) == positions
+        for value in range(dialog.chapter_slider.minimum(), dialog.chapter_slider.maximum() + 1):
+            dialog.chapter_slider.setValue(value)
+            assert _diagram_overlaps(dialog) == (0, 0, 0), value
+        assert any("Ally [Former Childhood Friend, Sworn Enemy, " in rt.edge_label_text(e, True)
+                   for e in dialog._full_graph(tracker, None, None, False)['edges'])
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
 def test_a_name_in_the_side_panel_jumps_to_it_in_the_diagram(qapp):
     from PySide6.QtCore import QUrl
     from relations_diagram_dialog import CHANGED_COLOR, RelationsDiagramDialog
@@ -574,7 +666,11 @@ def test_diagram_panel_shows_the_description_written_at_the_sliders_chapter(qapp
         dialog._on_node_clicked(seo)
         text = dialog.history_panel.toPlainText()
         assert "Description written at chapter 40" in text and "The heir, betrayed by <Ha-rin>" in text
-        assert "Earlier descriptions" in text and "Ch. 1: The heir of the Baek house" in text
+        # Earlier descriptions start folded to one line.
+        assert "Earlier descriptions (1)" in text and "The heir of the Baek house" not in text
+        dialog.toggle_earlier_descriptions()
+        text = dialog.history_panel.toPlainText()
+        assert "Earlier descriptions (1)" in text and "Ch. 1: The heir of the Baek house" in text
         assert "The glossary's present text" not in text
         assert "Enemy" in text  # the relation history still follows
         # Moving the slider shows what was written by then, with the panel left open.
@@ -674,14 +770,16 @@ def test_diagram_opens_at_once_with_a_loading_screen(qapp, tmp_path, monkeypatch
         dialog.deleteLater()
 
 
-def test_diagram_async_empty_state_and_early_close(qapp, tmp_path):
+def test_diagram_async_empty_state_and_early_close(qapp, tmp_path, monkeypatch):
     from relations_diagram_dialog import EMPTY_TEXT, RelationsDiagramDialog
+    monkeypatch.delenv(rt.ENV_ENABLE, raising=False)
     glossary = tmp_path / "Book_glossary.csv"
     glossary.write_text("type,raw_name,translated_name\ncharacter,서윤,Seo-yun\n", encoding="utf-8")
     dialog = RelationsDiagramDialog(None, glossary_path=str(glossary), load_async=True)
     try:
         _wait_loaded(qapp, dialog)
-        assert dialog._stack.currentWidget() is dialog.empty_label and dialog.empty_label.text() == EMPTY_TEXT
+        assert dialog._stack.currentWidget() is dialog.empty_label
+        assert dialog.empty_label.text() == EMPTY_TEXT.format(name="Book_glossary.csv")
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -775,18 +873,153 @@ def test_diagram_click_on_a_large_graph_rebuilds_after_the_press(qapp):
         dialog.deleteLater()
 
 
-def test_diagram_empty_state(qapp, tmp_path):
-    from relations_diagram_dialog import EMPTY_TEXT, RelationsDiagramDialog
+def test_diagram_empty_state(qapp, tmp_path, monkeypatch):
+    from relations_diagram_dialog import EMPTY_TEXT, EMPTY_TRACKING_TEXT, WINDOW_TITLE, RelationsDiagramDialog
+    monkeypatch.delenv(rt.ENV_ENABLE, raising=False)
     glossary = tmp_path / "Book_glossary.csv"
     glossary.write_text("type,raw_name,translated_name\ncharacter,서윤,Seo-yun\n", encoding="utf-8")
     dialog = RelationsDiagramDialog(None, glossary_path=str(glossary))
     try:
+        # The window says which glossary it shows.
+        assert dialog.windowTitle() == f"{WINDOW_TITLE} - Book_glossary.csv"
         assert dialog._stack.currentWidget() is dialog.empty_label
-        assert dialog.empty_label.text() == EMPTY_TEXT
+        # Tracker off: name the file and say how to turn it on.
+        assert dialog.empty_label.text() == EMPTY_TEXT.format(name="Book_glossary.csv")
+        assert "Turn on Enable Relations Tracker" in dialog.empty_label.text()
         assert dialog.edge_count() == 0
+        # Tracker on (the GUI's environment): no "turn it on"; extraction fills it, the window updates itself.
+        monkeypatch.setenv(rt.ENV_ENABLE, "1")
+        dialog.rebuild()
+        text = dialog.empty_label.text()
+        assert text == EMPTY_TRACKING_TEXT.format(name="Book_glossary.csv")
+        assert "Turn on" not in text and "Book_glossary.csv" in text
+        assert "Balanced or Full glossary extraction" in text and "updates by itself" in text
+        assert "—" not in text and "—" not in EMPTY_TEXT
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+def test_empty_window_switches_to_the_diagram_when_the_tracker_appears(qapp, tmp_path, monkeypatch):
+    """Opened before the extraction wrote any tracker: the once-a-second check brings the diagram in."""
+    import json
+    monkeypatch.setenv(rt.ENV_ENABLE, "1")
+    glossary = tmp_path / "Book_glossary.csv"
+    glossary.write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    dialog = _open_book(qapp, glossary)
+    try:
+        assert dialog._stack.currentWidget() is dialog.empty_label
+        assert dialog._poll_timer.isActive()
+        assert not dialog._poll()  # nothing changed yet
+        tracker = _team_tracker()
+        names = sorted({str(item.get("raw_name") or key) for key, item in tracker["entries"].items()})
+        glossary.write_text("type,raw_name,translated_name\n" + "".join(f"character,{n},{n}\n" for n in names),
+                            encoding="utf-8")
+        (tmp_path / "Book_relations_tracker.json").write_text(json.dumps(tracker, ensure_ascii=False),
+                                                              encoding="utf-8")
+        import time
+        deadline = time.monotonic() + 20
+        while dialog._stack.currentWidget() is not dialog._page and time.monotonic() < deadline:
+            qapp.processEvents()  # the real timer, not a direct call
+            time.sleep(0.01)
+        _wait_idle(qapp, dialog)
+        assert dialog._stack.currentWidget() is dialog._page
+        assert dialog.node_count() == 10 and dialog.edge_count() == 15
+    finally:
+        _close(qapp, dialog)
+
+
+def _owner_session(gui, tmp_path):
+    """The owner's session: a 7,603-entry glossary still in the Glossary Editor, the mapping cleared by a
+    fresh Full extraction of Book.epub, and that extraction writing Glossary/Book/Book_glossary.csv
+    with its relations tracker beside it."""
+    other =tmp_path / "Other" / "Other_glossary.csv"
+    other.parent.mkdir()
+    other.write_text("type,raw_name,translated_name\ncharacter,X,X\n", encoding="utf-8")
+    book_dir = pathlib.Path(os.environ["OUTPUT_DIRECTORY"]) / "Glossary" / "Book"
+    book_dir.mkdir(parents=True)
+    book = _write_book(book_dir, _team_tracker())
+    epub = tmp_path / "Book.epub"
+    epub.write_bytes(b"")
+    if getattr(gui, "editor_file_entry", None) is None:
+        gui.editor_file_entry = QLineEdit()  # the Glossary Editor tab is not built in this harness
+    gui.editor_file_entry.setText(str(other))
+    gui.manual_glossary_path = None
+    gui.auto_loaded_glossary_path = None
+    gui.config["manual_glossary_path"] = str(other)
+    gui.selected_files = [str(epub)]
+    return other, book
+
+
+def test_view_diagram_shows_the_book_being_extracted_not_the_editors_file(gui, tmp_path):
+    other, book = _owner_session(gui, tmp_path)
+    assert gui._relations_extraction_glossary_paths()[0] == str(book)
+    assert gui._relations_glossary_path() == str(book)
+    dialog = gui._open_relations_diagram(None)
+    try:
+        assert dialog.glossary_path == str(book) and dialog.windowTitle().endswith(" - Book_glossary.csv")
+        _wait_loaded(QApplication.instance(), dialog)
+        assert dialog.node_count() == 10
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+    # The Glossary Editor's own button keeps opening the editor's file.
+    editor = gui._open_relations_diagram(None, glossary_path=gui.editor_file_entry.text())
+    try:
+        assert editor.glossary_path == str(other)
+    finally:
+        editor.close()
+        editor.deleteLater()
+
+
+def test_relations_glossary_path_order_and_tracker_preference(gui, tmp_path):
+    import json
+    other, book = _owner_session(gui, tmp_path)
+    mapped = tmp_path / "Mapped_glossary.csv"
+    mapped.write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    # A mapped glossary with a tracker comes first.
+    (tmp_path / "Mapped_gender_tracker.json").write_text(json.dumps({"version": 2, "entries": {}}), encoding="utf-8")
+    gui.manual_glossary_path = str(mapped)
+    assert gui._relations_glossary_path() == str(mapped)
+    gui.manual_glossary_path = None
+    gui.auto_loaded_glossary_path = str(mapped)
+    assert gui._relations_glossary_path() == str(mapped)
+    # A mapped glossary without any tracker loses to a later book file (the extraction's) that has one.
+    (tmp_path / "Mapped_gender_tracker.json").unlink()
+    assert gui._relations_glossary_path() == str(book)
+    # No tracker anywhere: the first existing file, in the same order.
+    (book.parent / "Book_relations_tracker.json").unlink()
+    assert gui._relations_glossary_path() == str(mapped)
+    gui.auto_loaded_glossary_path = None
+    assert gui._relations_glossary_path() == str(book)
+    book.unlink()
+    assert gui._relations_glossary_path() == str(other)  # the editor's file
+    gui.editor_file_entry.setText("")
+    gui.selected_files = []
+    assert gui._relations_extraction_glossary_paths() == []
+    assert gui._relations_glossary_path() == str(other)  # the configured one
+    # The extraction's target with only a tracker so far still opens (the glossary follows).
+    gui.selected_files = [str(tmp_path / "Book.epub")]
+    (book.parent / "Book_relations_tracker.json").write_text(json.dumps(_team_tracker()), encoding="utf-8")
+    assert gui._relations_glossary_path() == str(book)
+    tip = gui.relations_diagram_btn.toolTip()
+    assert "Glossary Editor" not in tip and "book being worked on" in tip
+
+
+def test_relations_glossary_path_unrelated_tracker_never_beats_the_book(gui, tmp_path):
+    import json
+    other, book = _owner_session(gui, tmp_path)
+    # The book's extraction has just started: its glossary exists, its tracker not yet.
+    (book.parent / "Book_relations_tracker.json").unlink()
+    # The editor's and the configured glossary still have a tracker from an earlier run.
+    (other.parent / "Other_relations_tracker.json").write_text(json.dumps(_team_tracker()), encoding="utf-8")
+    assert gui._relations_glossary_path() == str(book)
+    gui.manual_glossary_path = str(book)
+    assert gui._relations_glossary_path() == str(book)
+    # With no book file at all, the editor's file is the fallback.
+    gui.manual_glossary_path = None
+    book.unlink()
+    assert gui._relations_glossary_path() == str(other)
 
 
 def test_save_settings_and_reopen_wiring_cover_the_toggle():
@@ -861,6 +1094,7 @@ def test_tracker_window_title_filter_row_and_menus(qapp):
     from relations_diagram_dialog import WINDOW_TITLE, RelationsDiagramDialog, _item_key
     dialog = RelationsDiagramDialog(None, tracker=_team_tracker())
     try:
+        # No glossary file (a tracker handed in): the plain title.
         assert dialog.windowTitle() == WINDOW_TITLE == "Relations & Gender Tracker"
         for box in (dialog.show_relations_checkbox, dialog.show_gender_checkbox):
             assert box.isChecked() and [w.text() for w in box.findChildren(QLabel)] == ["✓"]
@@ -1450,3 +1684,99 @@ def test_tracker_window_still_appears_at_once(qapp, tmp_path):
         assert dialog.node_count() == 15
     finally:
         _close(qapp, dialog)
+
+
+def _described_tracker():
+    """The team, with a description of the leader at chapters 2 to 13 and of 성규 at chapters 2 to 4."""
+    tracker = _team_tracker()
+    for chapter in range(2, 14):
+        rows = [{"raw_name": "민", "description": f"Leader, as of chapter {chapter}"}]
+        if chapter <= 4:
+            rows.append({"raw_name": "성규", "description": f"Member, as of chapter {chapter}"})
+        rt.record_relations(tracker, rows, field="relations", chapter_index=chapter - 1, chapter_num=chapter,
+                            chapter_file=f"c{chapter}.xhtml")
+    return tracker
+
+
+def _click_panel_link(qapp, dialog, text):
+    from PySide6.QtCore import QUrl
+    entry = dialog.history_action(text)
+    assert entry is not None, text
+    dialog._on_history_link(QUrl(f"act:{dialog._history_actions.index(entry)}"))
+    qapp.processEvents()
+
+
+def test_earlier_descriptions_fold_to_one_line(qapp, tmp_path, isolated, monkeypatch):
+    calls, answer = isolated
+    answer["value"] = True
+    glossary = _write_book(tmp_path, _described_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    leader, member = rt.tracker_key("민"), rt.tracker_key("성규")
+    try:
+        dialog._on_node_clicked(leader)
+        text = dialog.history_panel.toPlainText()
+        # Folded by default: one line with the count and "show"; the current description stays whole.
+        assert "Description written at chapter 13" in text and "Leader, as of chapter 13" in text
+        assert "Earlier descriptions (11)  show" in text.replace("\xa0", " ")
+        assert "as of chapter 12" not in text and "as of chapter 2" not in text
+        assert dialog.history_action("edit description ch 2") is None
+        assert dialog.history_action("edit description ch 13") is not None
+        # A long panel scrolled down stays where it was when the list opens.
+        dialog.history_panel.setMaximumHeight(160)
+        qapp.processEvents()
+        dialog.show_history(leader)
+        qapp.processEvents()
+        bar = dialog.history_panel.verticalScrollBar()
+        assert bar.maximum() > 40
+        bar.setValue(40)
+        before = pathlib.Path(path).read_bytes()
+        _click_panel_link(qapp, dialog, "show earlier descriptions")
+        qapp.processEvents()
+        assert bar.value() == 40
+        assert pathlib.Path(path).read_bytes() == before  # nothing saved for this
+        text = dialog.history_panel.toPlainText()
+        assert "Earlier descriptions (11)  hide" in text.replace("\xa0", " ")
+        assert "Ch. 2: Leader, as of chapter 2" in text and "Ch. 12: Leader, as of chapter 12" in text
+        assert dialog.history_action("hide earlier descriptions") is not None
+        # Open after an automatic reload (another writer changed the tracker).
+        rt.edit_tracker(path, lambda t: rt.set_description(t, "민", "Leader, rewritten", 5))
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        text = dialog.history_panel.toPlainText()
+        assert "Ch. 5: Leader, rewritten" in text and "Ch. 2: Leader, as of chapter 2" in text
+        # And for the next character picked.
+        dialog._on_node_clicked(member)
+        text = dialog.history_panel.toPlainText()
+        assert "Earlier descriptions (2)" in text and "Ch. 2: Member, as of chapter 2" in text
+        # The earlier rows' edit and delete links still work.
+        def rewrite(d):
+            d.fields[1].setPlainText("Member, fixed by hand")
+            return True
+
+        seen = _answer_dialogs(monkeypatch, rewrite)
+        _click_panel_link(qapp, dialog, "edit description ch 3")
+        assert seen and seen[-1].windowTitle() == "Edit description"
+        history = {str(d.get("chapter_num")): d["text"] for d in rt.description_history(rt.load_tracker(path), "성규")}
+        assert history["3"] == "Member, fixed by hand"
+        assert "Ch. 3: Member, fixed by hand" in dialog.history_panel.toPlainText()  # still open after the edit
+        _click_panel_link(qapp, dialog, "delete description ch 2")
+        assert calls and "written at chapter 2" in calls[-1]
+        history = {str(d.get("chapter_num")) for d in rt.description_history(rt.load_tracker(path), "성규")}
+        assert "2" not in history
+        text = dialog.history_panel.toPlainText()
+        assert "Earlier descriptions (1)  hide" in text.replace("\xa0", " ")
+        # "hide" folds it again, for every character.
+        _click_panel_link(qapp, dialog, "hide earlier descriptions")
+        assert "Earlier descriptions (1)  show" in dialog.history_panel.toPlainText().replace("\xa0", " ")
+        dialog._on_node_clicked(leader)
+        assert "Ch. 2: Leader" not in dialog.history_panel.toPlainText()
+    finally:
+        _close(qapp, dialog)
+    # Each window starts folded.
+    again = _open_book(qapp, glossary)
+    try:
+        again._on_node_clicked(leader)
+        assert "Earlier descriptions (11)  show" in again.history_panel.toPlainText().replace("\xa0", " ")
+    finally:
+        _close(qapp, again)
