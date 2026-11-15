@@ -530,9 +530,10 @@ def test_the_chapter_number_box_sets_the_exact_chapter(iso, tmp_path, platform):
         ctx = _ctx(session.page, store, schema)
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
         field, slider = diagram.chapter_field, diagram.slider
-        row = diagram.diagram_body.controls[0]
+        line = diagram.controls_box.controls[0]  # the number control and the slider share one line
+        row, cell = line.controls
         assert row.controls == [diagram.chapter_label, diagram.chapter_minus, field, diagram.chapter_plus]
-        assert diagram.diagram_body.controls[1].controls == [slider]
+        assert cell.content.controls == [slider] and slider.expand
         assert (slider.min, slider.max, field.value, field.disabled) == (1, 5, "5", False)
         # typing a chapter and pressing Done moves the slider and redraws
         field.on_focus(None)
@@ -659,6 +660,25 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
         diagram.set_unlisted(True)
         await _settle()
         assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        # Full screen gives the viewer more room: a diagram still as fitted is fitted into it ...
+        calls.clear()
+        assert diagram.auto_fit
+        diagram.set_fullscreen(True)
+        diagram._on_viewer_size(types.SimpleNamespace(width=584.0, height=900.0))
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        # ... one the user zoomed or panned is left as it is, in and out of full screen
+        calls.clear()
+        diagram.viewer.on_interaction_start(None)
+        assert not diagram.auto_fit
+        diagram.set_fullscreen(False)
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))
+        diagram.set_fullscreen(True)
+        diagram._on_viewer_size(types.SimpleNamespace(width=584.0, height=900.0))
+        diagram.set_fullscreen(False)
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=260.0))
+        await _settle()
+        assert calls == []
         # a huge canvas: far out, the margin grows with it
         diagram._set_canvas(6000.0, 900.0)
         scale, _dx, _dy, margin = diagram.fit_transform()
@@ -681,7 +701,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         conn, session = _TB._fake_session("android")
         ctx = _ctx(session.page, store, schema)
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=entries)
-        assert not diagram.empty and diagram.chapter == 5 and diagram.chapter_label.value == "Up to chapter"
+        assert not diagram.empty and diagram.chapter == 5 and diagram.chapter_label.value == "Up to ch."
         assert diagram.chapter_field.value == "5"
         assert diagram.edge_count() == 2 and diagram.node_count() == 3
         lines = [s for s in diagram.canvas.shapes if type(s).__name__ == "Line"]
@@ -1833,6 +1853,147 @@ def test_filters_hide_names_and_are_stored_in_the_tracker_view(iso, tmp_path):
         diagram.relations_chip.on_select(None)
         await diagram.task
         assert "view" not in _saved(rt, glossary) and diagram.edge_count() == 2
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_compact_controls_share_rows_with_short_labels(iso, tmp_path):
+    """Owner 2026-11-15: the controls took half the screen; the slider sits beside the number control
+    and the switches beside the filter chips, with short labels (the tooltips keep the meaning)."""
+    from glossarion_mobile.ui.glossary import relations_diagram as module
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        assert diagram.diagram_body.controls[0] is diagram.controls_box
+        chapter_line, filters, focus_line = diagram.controls_box.controls
+        # Focus beside the summary from WIDE_ROW dp (600 dp phone), under it on a 360 dp phone
+        assert type(focus_line).__name__ == "ResponsiveRow" and focus_line.breakpoints["sm"] == module.WIDE_ROW
+        assert module.WIDE_ROW < 600 - 24
+        assert sum(c.col["sm"] for c in focus_line.controls) == 12
+        assert all(c.col["xs"] == 12 for c in focus_line.controls)
+        # the chapter line: the number group at its natural width, the slider in whatever is left
+        assert chapter_line is diagram.chapter_line and chapter_line.wrap
+        assert chapter_line.controls == [diagram.chapter_row, diagram.slider_cell] and diagram.chapter_row.tight
+        assert diagram.controls_box.horizontal_alignment == module.ft.CrossAxisAlignment.STRETCH
+        assert _find(chapter_line, "rel-slider") is diagram.slider
+        size = types.SimpleNamespace
+        # before any measurement (no page width here) the slider has its own line
+        assert diagram.slider_cell.width is None
+        # 600 dp phone (576 dp of content): the slider takes the rest of the line, no gap
+        diagram._on_chapter_group_size(size(width=245.0, height=48.0))
+        diagram._on_chapter_line_size(size(width=576.0, height=48.0))
+        cell = diagram.slider_cell.width
+        assert cell == 576 - 245 - module.CHAPTER_GAP - 1
+        assert 245 + module.CHAPTER_GAP + cell <= 576
+        # just above the old 480 dp breakpoint, and with the longer "All chapters" label or larger text:
+        # the measured group never overflows, the slider shrinks instead
+        diagram._on_chapter_line_size(size(width=480.0, height=48.0))
+        diagram._on_chapter_group_size(size(width=265.0, height=48.0))
+        assert 265 + module.CHAPTER_GAP + diagram.slider_cell.width <= 480
+        assert diagram.slider_cell.width >= module.SLIDER_MIN
+        # too little left (360 dp phone, or very large text): the slider wraps onto its own line
+        diagram._on_chapter_line_size(size(width=336.0, height=96.0))
+        assert diagram.slider_cell.width is None
+        diagram._on_chapter_line_size(size(width=576.0, height=48.0))
+        diagram._on_chapter_group_size(size(width=420.0, height=48.0))
+        assert diagram.slider_cell.width is None
+        assert filters.wrap and filters.controls == [diagram.former_switch, diagram.unlisted_switch,
+                                                     diagram.relations_chip, diagram.gender_chip, diagram.hide_chip]
+        assert (diagram.former_switch.label, diagram.unlisted_switch.label) == ("Former", "Unlisted")
+        assert "Former relations" in diagram.former_switch.tooltip
+        assert "Unlisted names" in diagram.unlisted_switch.tooltip
+        assert [c.label.value for c in (diagram.relations_chip, diagram.gender_chip, diagram.hide_chip)] == [
+            "Relations", "Gender", "Hide"]
+        assert focus_line.controls[0].controls == [diagram.focus_picker]
+        assert focus_line.controls[1].content is diagram.summary
+        assert diagram.summary.value == "3 characters · 2 relations"
+        # the Hide chip keeps its count
+        diagram.set_hidden(_id(diagram, "민준"))
+        await diagram.task
+        assert diagram.hide_chip.label.value == "Hidden (1)"
+        diagram.close()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_full_screen_hides_the_controls_and_keeps_the_state(iso, tmp_path):
+    """Owner 2026-11-15: the diagram can fill the screen; the corner button and Android back leave it."""
+    from glossarion_mobile.ui.glossary import relations_diagram as module
+    from glossarion_mobile.ui.glossary.relations import open_diagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt, glossary = _book(tmp_path)
+    tracker_file = Path(rt.tracker_path_for_glossary(str(glossary)))
+    ft = module.ft
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = await open_diagram(ctx, str(glossary))
+        seo, harin = _id(diagram, "서윤"), _id(diagram, "하린")
+        view, viewer, stack, canvas = diagram.view, diagram.viewer, diagram.stack, diagram.canvas
+        frame = _find(diagram.diagram_area, "rel-frame")
+        assert frame.content is viewer and diagram.fullscreen_button in diagram.diagram_area.controls
+        assert view.appbar is diagram.appbar and view.padding == module.VIEW_PADDING and view.can_pop is not False
+        diagram._on_area_size(types.SimpleNamespace(width=576.0, height=420.0))
+        diagram.set_chapter(1)
+        diagram.set_focus(seo)
+        diagram.set_former(False)
+        diagram.show_history(harin)
+        undo = list(diagram.undo_stack)
+        diagram.fullscreen_button.on_click(None)
+        assert diagram.fullscreen and not diagram.controls_box.visible
+        # a Padding object: the Flet 1.0.3 client kept the old padding for a plain 0 (seen on the emulator)
+        assert view.appbar is None and view.padding == ft.Padding.all(0) and view.can_pop is False
+        assert diagram.fullscreen_button.icon == ft.Icons.FULLSCREEN_EXIT
+        assert diagram.fullscreen_button.tooltip == "Leave full screen"
+        # the same viewer, canvas and state: nothing was rebuilt
+        assert (diagram.viewer, diagram.stack, diagram.canvas, frame.content) == (viewer, stack, canvas, viewer)
+        assert (diagram.chapter, diagram.focus, diagram.show_former, diagram.selected) == (1, seo, False, harin)
+        assert diagram.undo_stack == undo and diagram.diagram_body.controls[1] is diagram.diagram_area
+        diagram._on_area_size(types.SimpleNamespace(width=600.0, height=860.0))
+        assert diagram.area_size == (600.0, 860.0)
+        # names still open their sheet / menu in full screen
+        node = next(c for c in diagram.node_controls if c.key == f"rel-node-{seo}")
+        node.on_click(None)
+        assert diagram.selected == seo
+        node.on_long_press(None)
+        assert diagram.form_sheet is not None
+        diagram._close_form()
+        # the once-a-second check still redraws in full screen
+        rt.edit_tracker(str(tracker_file), lambda t: rt.record_relations(
+            t, [{"raw_name": "민준", "translated_name": "Min-jun", "relations": "하린: Friend"}],
+            field="relations", chapter_index=6, chapter_num=7, chapter_file="ch7.html"))
+        assert await diagram.check_for_update() is True
+        assert diagram.fullscreen and diagram.viewer is viewer and diagram.slider.max == 7
+        assert not diagram.controls_box.visible and view.appbar is None
+        # Android back leaves full screen and stays on the screen
+        await diagram._on_confirm_pop(None)
+        assert not diagram.fullscreen and diagram.controls_box.visible and not diagram.closed
+        assert view.appbar is diagram.appbar and view.padding == module.VIEW_PADDING and view.can_pop is True
+        assert diagram.fullscreen_button.icon == ft.Icons.FULLSCREEN and diagram.viewer is viewer
+        assert (diagram.chapter, diagram.focus, diagram.show_former) == (1, seo, False)
+        # the button toggles both ways
+        diagram.toggle_fullscreen()
+        diagram.fullscreen_button.on_click(None)
+        assert not diagram.fullscreen and diagram.controls_box.visible
+        # an emptied tracker leaves full screen (the empty state shows with the app bar)
+        diagram.toggle_fullscreen()
+        diagram._apply_state(tracker=rt.empty_tracker(), gender=None)
+        assert diagram.empty and not diagram.fullscreen and view.appbar is diagram.appbar
+        diagram.toggle_fullscreen()
+        assert not diagram.fullscreen  # nothing to show full screen
         diagram.close()
         store._saver.close()
 
