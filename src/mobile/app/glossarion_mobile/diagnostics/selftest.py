@@ -315,7 +315,7 @@ def check_share_link_crypto(ctx: Context) -> dict[str, Any]:
 
     ctx.need("cryptography.hazmat.primitives.ciphers.aead")
     websockets_client = ctx.need("websockets.sync.client")
-    from glossarion_mobile.services.share_providers import send_e2ee
+    import share_hosting_send as send_e2ee
 
     def b64(text: str) -> bytes:
         return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))

@@ -585,11 +585,36 @@ class LibraryScreen(Screen):
                             show_language=self.show_language, show_progress=self.show_progress,
                             page_size=str(self.page_size_raw).lower(), on_change=self.apply_filter_change,
                             initial_tab=tab if isinstance(tab, int) else 0,
-                            series=self._series_choices(), series_selected=self.series_filter)
+                            series=self._series_choices(), series_selected=self.series_filter,
+                            cloud_tab=self._cloud_tab())
         self.sheet = sheet
         if self.ctx.page is not None:
             sheet.show(self.ctx.page)
         return sheet
+
+    def _cloud_tab(self) -> Any:
+        """Library settings › Cloud over the app's services (``ctx.extras``: read late, they install after the
+        Library): the same Drive sync / cloud copy / share-link state as Settings › Cloud sync & sharing."""
+        from glossarion_mobile.ui.screens.cloud_sync import LibraryCloudTab
+
+        extras = self.ctx.extras
+        return LibraryCloudTab(drive=extras.get("drive_sync"), cloud=extras.get("cloud_sync"),
+                               shares=extras.get("share_links"), platform=self.ctx.platform, page=self.ctx.page,
+                               say=self.ctx.say, spawn=self.ctx.spawn, io=self.ctx.io, go=self.ctx.go)
+
+    def _drive_sync(self) -> Any:
+        from glossarion_mobile.ui.screens.cloud_sync import DriveSyncFacade
+
+        return DriveSyncFacade(self.ctx.extras.get("drive_sync"))
+
+    def sync_to_drive(self, book: Mapping[str, Any]) -> bool:
+        """Card ⋯ › Sync to Drive now: queue the book's upload (the mode chosen in the Cloud settings)."""
+        facade = self._drive_sync()
+        service = facade.service
+        queued = bool(service is not None and service.sync_book(dict(book)))
+        self.ctx.say(f"Uploading “{book.get('name') or 'the book'}” to Google Drive" if queued
+                     else "Google Drive sync is not set up")
+        return queued
 
     def apply_filter_change(self, name: str, value: Any) -> None:
         service = self.service
@@ -845,6 +870,12 @@ class LibraryScreen(Screen):
             ActionItem("\U0001f4c1 Files", lambda: self.open_files(book), icon="FOLDER_OPEN",
                        disabled_reason=None if folder else "No output folder"),
             ActionItem("↗ Share", lambda: self.ctx.spawn(self.share_books([book])), icon="IOS_SHARE"),
+        ]
+        if self._drive_sync().active():  # only while Google Drive sync is on and connected (Library settings › Cloud)
+            from glossarion_mobile.ui.screens.cloud_sync import DRIVE_SYNC_NOW_LABEL
+
+            items.append(ActionItem(DRIVE_SYNC_NOW_LABEL, lambda: self.sync_to_drive(book), icon="CLOUD_UPLOAD"))
+        items += [
             ActionItem("🖥 Migrate Job to PC", lambda: self.ctx.spawn(self.ctx.migrate_job(book, folder)),
                        icon="DESKTOP_WINDOWS", disabled_reason=None if folder else "No output folder"),
             ActionItem("\U0001f4cb Copy Path", lambda: self.copy_path(book), icon="CONTENT_COPY",

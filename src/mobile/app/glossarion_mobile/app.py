@@ -180,6 +180,7 @@ class GlossarionApp:
         # via link": every provider off until enabled + consented in Settings › Cloud sync & sharing).
         self.cloud_sync: Any = None
         self.share_links: Any = None
+        self.drive_sync: Any = None  # Google Drive sync (services/drive_sync.py), set by _install_drive_sync
         self.keyboard: Any = None
         self.freeze_watchdog: Any = None
 
@@ -294,6 +295,7 @@ class GlossarionApp:
         await self._install_series()  # optional chat Series (U9; after the chat and the Library)
         await self._install_cloud()  # U10 cloud sync (after the jobs, the chat and the Library)
         await self._install_share_links()  # U10 share links (after files, the Library and the chat)
+        self._install_drive_sync()  # Google Drive sync (after the share links: it uses their Google sign-in)
         self._u10_ready()  # Result cards rendered before these two services re-read their actions
         self._install_keyboard()  # Ctrl+= / Ctrl+- / Ctrl+0 text size on hardware keyboards (U9)
         self._install_diagnostics()  # HTTP log / payload / memory switches, cache cap, freeze watchdog (U9)
@@ -507,6 +509,17 @@ class GlossarionApp:
         except Exception:
             log.exception("share links unavailable; Share file via link stays disabled")
 
+    def _install_drive_sync(self) -> None:
+        """Google Drive sync (``services/drive_sync.py`` over the shared ``drive_sync_core``): off until the user
+        connects Google Drive and turns it on in Library settings › Cloud or Settings › Cloud sync & sharing; then a
+        Library job's DONE uploads the book in the chosen mode."""
+        try:
+            from glossarion_mobile.services.drive_sync import MobileDriveSync
+
+            self.drive_sync = MobileDriveSync.from_app(self)
+        except Exception:
+            log.exception("Google Drive sync unavailable; its settings stay disabled")
+
     def _on_share_link_change(self, kind: str) -> None:
         """U10: an upload the user started failed while the app is hidden -> one notification (failures only,
         like the cloud sync; the route opens the Book page, never a path or a link)."""
@@ -519,7 +532,7 @@ class GlossarionApp:
             if state.phase != "failed":
                 return
             from glossarion_mobile.services.cloud_sync import CloudNotifier
-            from glossarion_mobile.services.share_providers import provider_info
+            from share_hosting import provider_info
             from glossarion_mobile.ui.screens.cloud_sync import share_failed_notice
 
             label = provider_info(state.provider).label
@@ -963,6 +976,12 @@ class GlossarionApp:
                     bridge.shutdown()  # unregister the browser driver, cancel its pages
                 except Exception:
                     log.exception("shutting the webview bridge down failed")
+            drive = getattr(self, "drive_sync", None)
+            if drive is not None:
+                try:
+                    drive.shutdown()  # cancel a running Drive upload, drop the queue
+                except Exception:
+                    log.exception("stopping Google Drive sync failed")
         self.lifecycle.append(f"{time.strftime('%H:%M:%S')} {name}")
         del self.lifecycle[:-12]
         log.info("lifecycle: %s", name)

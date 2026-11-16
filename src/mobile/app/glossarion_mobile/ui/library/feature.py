@@ -332,6 +332,7 @@ class LibraryFeature:
         ctx.extras.update({
             "cloud_sync": lambda: getattr(app, "cloud_sync", None),
             "share_links": lambda: getattr(app, "share_links", None),
+            "drive_sync": lambda: getattr(app, "drive_sync", None),  # Google Drive sync (Library settings › Cloud)
             "open_url": getattr(opener, "launch", None) if opener is not None else None,
             "read_clipboard": getattr(clipboard, "get", None) if clipboard is not None else None,
         })

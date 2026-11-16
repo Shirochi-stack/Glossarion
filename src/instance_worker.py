@@ -97,6 +97,10 @@ ORPHAN_EXIT_SECONDS = 15.0
 #: Printed on its own line when the run asks for the post-translation QA scan; the main window
 #: runs it once every instance has finished (desktop: ``trigger_qa_scan_signal``).
 QA_SCAN_MARKER = "##GLOSSARION_INSTANCE_QA_SCAN##"
+#: Prefix of the line ``<marker><kind>\t<path>`` an instance prints when the compile at the end of
+#: its run produced a file (``drive_sync_core.compile_finished``); the main window reports it to its
+#: own listeners (the Library's Google Drive sync), since none is registered in this process.
+COMPILED_MARKER = "##GLOSSARION_INSTANCE_COMPILED##"
 
 #: The parent's per-process / per-run variables an instance must not inherit: its stop files,
 #: watchdog folder and run id, and instance 1's key narrowing (``MULTI_API_KEYS``, ``CONFIG_FILE``,
@@ -502,6 +506,30 @@ def _forward_qa_scan_request(owner, log):
     owner._ui_request = ui_request
 
 
+def _forward_compiles(log):
+    """Report this instance's end-of-run compiles to the main window (:data:`COMPILED_MARKER`).
+    Returns the listener to remove afterwards, or None."""
+    try:
+        import drive_sync_core
+    except Exception:
+        return None
+
+    def listener(kind, path, error):
+        if path and not error:
+            log(f"{COMPILED_MARKER}{kind}\t{path}")
+
+    drive_sync_core.add_compile_listener(listener)
+    return listener
+
+
+def parse_compiled_marker(line):
+    """``(kind, path)`` for a :data:`COMPILED_MARKER` line, else None."""
+    if not isinstance(line, str) or not line.startswith(COMPILED_MARKER):
+        return None
+    kind, sep, path = line[len(COMPILED_MARKER):].partition("\t")
+    return (kind, path) if sep and path else None
+
+
 def run_job(job, host=None, parent=None):
     """Run one instance's translation or glossary extraction and return its exit code.
 
@@ -531,6 +559,7 @@ def run_job(job, host=None, parent=None):
     restore_keys = None
     outcome = None
     stop_seen = False
+    compile_listener = _forward_compiles(log) if kind == "translation" else None
     try:
         with job_runner.job_process_state():
             config = load_config(config_path)
@@ -584,6 +613,13 @@ def run_job(job, host=None, parent=None):
             pass
         if restore_keys is not None:
             restore_keys()
+        if compile_listener is not None:
+            try:
+                import drive_sync_core
+
+                drive_sync_core.remove_compile_listener(compile_listener)
+            except Exception:
+                pass
     if stop_seen:
         return EXIT_STOPPED
     return EXIT_OK if outcome else EXIT_FAILED

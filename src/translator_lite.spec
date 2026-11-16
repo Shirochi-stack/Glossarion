@@ -274,6 +274,7 @@ app_files = [
 
 	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB â€” removes Chromium)
 	# ('epub_library.py', '.'),
+	# ('library_cloud_ui.py', '.'),  # Library settings / Share (Qt; with epub_library)
 
 	# RPG Maker handler
 	('rpgmaker_handler.py', '.'),
@@ -358,6 +359,16 @@ app_files = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     ('browser_driver.py', '.'),
     ('update_core.py', '.'),
+    # Library cloud (Google Drive sync + Share via link): GUI-free shared core, also used by
+    # Glossarion Mobile; the compile hooks in the core desktop modules import it
+    ('share_hosting.py', '.'),
+    ('share_hosting_gofile.py', '.'),
+    ('share_hosting_pixeldrain.py', '.'),
+    ('share_hosting_send.py', '.'),
+    ('share_hosting_transferit.py', '.'),
+    ('google_drive_core.py', '.'),
+    ('drive_sync_core.py', '.'),
+    ('library_cloud.py', '.'),
     ('safe_image.py', '.'),
     ('tor_proxy.py', '.'),
 ]
@@ -495,6 +506,7 @@ app_modules = [
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
 	# 'epub_library',  # EXCLUDED in Lite — removes Chromium WebEngine (152 MB)
+	# 'library_cloud_ui',  # Library settings / Share (Qt; with epub_library)
 	'rpgmaker_handler',  # RPG Maker game file handler
 
     # Added: src modules that were missing from this spec
@@ -586,6 +598,16 @@ app_modules = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     'browser_driver',
     'update_core',
+    # Library cloud (Google Drive sync + Share via link): GUI-free shared core, also used by
+    # Glossarion Mobile; the compile hooks in the core desktop modules import it
+    'share_hosting',
+    'share_hosting_gofile',
+    'share_hosting_pixeldrain',
+    'share_hosting_send',
+    'share_hosting_transferit',
+    'google_drive_core',
+    'drive_sync_core',
+    'library_cloud',
     'safe_image',
     'tor_proxy',
 ]

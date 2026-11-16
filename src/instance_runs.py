@@ -171,6 +171,18 @@ def visible_log(gui):
     return widget if widget is not None else gui.log_text
 
 
+def _report_instance_compile(kind, path):
+    """An instance process compiled *path* at the end of its run: report it to this process's
+    compile listeners (the Library's Google Drive sync), which the instance process does not have.
+    Only queues work; never raises."""
+    try:
+        import drive_sync_core
+
+        drive_sync_core.compile_finished(kind, path)
+    except Exception:
+        pass
+
+
 def _log_widget(gui, number):
     """Instance *number*'s log, made like ``log_text`` the first time it is needed."""
     logs = gui._instance_logs
@@ -849,6 +861,10 @@ class InstanceRun(QObject):
                 line = raw.rstrip("\r\n").split("\r")[-1]
                 if self.kind == "translation" and line == instance_worker.QA_SCAN_MARKER:
                     self.qa_requested.add(child.number)
+                    continue
+                compiled = instance_worker.parse_compiled_marker(line)
+                if compiled is not None:
+                    _report_instance_compile(*compiled)
                     continue
                 with self._pending_lock:
                     self._pending.append((child.number, line))

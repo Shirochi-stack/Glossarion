@@ -25281,6 +25281,18 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     html = _fix_img_p_nesting(html)
 
     return html
+
+
+def _report_compiled_output(kind, path):
+    """The compile at the end of the run produced *path*: tell the front end (the desktop Library's
+    Google Drive sync listens; with no listener this does nothing). Never raises."""
+    try:
+        import drive_sync_core
+        drive_sync_core.compile_finished(kind, path)
+    except Exception:
+        pass
+
+
 # =====================================================
 # MAIN TRANSLATION FUNCTION
 # =====================================================
@@ -29451,6 +29463,7 @@ def main(log_callback=None, stop_callback=None):
                 if not compiled_epub or not os.path.isfile(compiled_epub):
                     print("❌ EPUB build did not produce an output file")
                     return False
+                _report_compiled_output("epub", compiled_epub)
                 print("✅ Image mode EPUB passthrough complete:", out)
             except Exception as e:
                 print(f"❌ EPUB build failed: {e}")
@@ -34184,7 +34197,9 @@ def main(log_callback=None, stop_callback=None):
                     shutil.copy2(src_file, combined_path)
                 
                 print(f"   • Output: {combined_path}")
-                
+                if combined_path.lower().endswith('.pdf'):
+                    _report_compiled_output("pdf", combined_path)
+
                 total_time = time.time() - translation_start_time
                 hours = int(total_time // 3600)
                 minutes = int((total_time % 3600) // 60)
@@ -34491,7 +34506,9 @@ def main(log_callback=None, stop_callback=None):
                             combined.write(content)
             
             print(f"   • Combined file with preserved sections: {combined_path}")
-            
+            if input_path.lower().endswith('.pdf'):
+                _report_compiled_output("pdf", combined_path)
+
             total_time = time.time() - translation_start_time
             hours = int(total_time // 3600)
             minutes = int((total_time % 3600) // 60)
@@ -34595,6 +34612,7 @@ def main(log_callback=None, stop_callback=None):
                 if not compiled_epub or not os.path.isfile(compiled_epub):
                     print("❌ EPUB build did not produce an output file")
                     return False
+                _report_compiled_output("epub", compiled_epub)
                 print("✅ All done: your final EPUB is in", out)
 
             total_time = time.time() - translation_start_time

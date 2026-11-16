@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QFormL
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import relations_tracking
-from qt_widget_helpers import CONTEXT_MENU_STYLE, CheckmarkDelegate, HalgakosLoadingWidget
+from qt_widget_helpers import CONTEXT_MENU_STYLE, CheckmarkDelegate, HalgakosLoadingWidget, style_combo
 
 WINDOW_TITLE = "Relations & Gender Tracker"
 ALL_CHARACTERS = "All characters"
@@ -184,23 +184,8 @@ def _plain_spinbox(low, high, value, width=96):
     return spin
 
 
-def _style_combo(combo):
-    """The app's dropdown look: the Halgakos icon as the arrow (``review_dialog._halgakos_arrow_style``, as on the
-    Glossary Manager's "Earlier relations shown"), and the mouse wheel does not change the choice."""
-    combo.wheelEvent = lambda event: event.ignore()
-    try:
-        from review_dialog import _halgakos_arrow_style
-        combo.setStyleSheet(_halgakos_arrow_style(16) + """
-            QComboBox { padding-right: 24px; }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 22px;
-                border-left: 1px solid #4a5568;
-            }
-        """)
-    except Exception:
-        pass
+#: The app's dropdown look (Halgakos arrow, no wheel); moved to qt_widget_helpers.style_combo.
+_style_combo = style_combo
 
 
 def _gender_key(value):

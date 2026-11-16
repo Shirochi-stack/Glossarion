@@ -9155,8 +9155,23 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         except Exception:
             pass
 
+    def _install_library_cloud_hook(self):
+        """Library settings › Google Drive sync: every compile (this hook and the compile at the end
+        of a translation run) is reported to library_cloud, which uploads in the background when the
+        user turned sync on. Nothing is read or sent here."""
+        try:
+            import library_cloud
+            library_cloud.install_compile_hook(log_line=self.append_log)
+        except Exception as exc:
+            print(f"[LibraryCloud] compile hook not installed: {exc}")
+
     def _notify_compile_result(self, kind, path=None, error=None):
         """TextJobsMixin compile runners: the success / failure message boxes."""
+        try:
+            import drive_sync_core
+            drive_sync_core.compile_finished(kind, path, error)
+        except Exception:
+            pass
         if kind == 'pdf':
             if error is None:
                 QTimer.singleShot(
@@ -9191,6 +9206,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         # Connect the log signal to append_log_direct
         self.log_signal.connect(self.append_log_direct)
+        self._install_library_cloud_hook()
         self.auth_status_ready_signal.connect(self._receive_auth_status_snapshot)
         self.log_queue_ready_signal.connect(self._schedule_gui_log_drain)
         # Connect thread complete signal to update buttons
@@ -9577,6 +9593,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 pass
 
             self._request_hard_stop_for_shutdown()
+            # Library Google Drive sync: cancel a running upload, drop queued ones
+            try:
+                import library_cloud
+                library_cloud.uninstall_compile_hook()
+                library_cloud.reset_instance()
+            except Exception as e:
+                print(f"[CLOSE] Could not stop the Drive sync: {e}")
             # Multi-instance: no instance process outlives the window (instance_runs)
             try:
                 instance_runs.shutdown(self)

@@ -325,6 +325,7 @@ class AccountsProfilesFeature:
             opener = getattr(app, "opener", None)
             return CloudSyncScreen(match, ctx, cloud=lambda: getattr(app, "cloud_sync", None),
                                    shares=lambda: getattr(app, "share_links", None), platform=self._platform(),
+                                   drive=lambda: getattr(app, "drive_sync", None),
                                    open_url=getattr(opener, "launch", None) if opener is not None else None,
                                    share_text=getattr(files, "share_text", None) if files is not None else None,
                                    show_in_files=getattr(files, "show_in_files", None) if files is not None else None)
