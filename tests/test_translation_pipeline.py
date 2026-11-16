@@ -104,7 +104,7 @@ GLOSSARY_MOVED = (
     "_sync_automapped_glossaries_to_output",
 )
 MOVED = TRANSLATION_MOVED + GLOSSARY_MOVED
-NEW_METHODS = ("_prepare_translation_run", "_translation_worker")
+NEW_METHODS = ("_prepare_translation_run", "_translation_worker", "_glossary_setup_refusal")
 
 #: The documented edits per moved method: (old text, new text, occurrences).
 EDITS = {
@@ -266,6 +266,32 @@ WORKER_EDITS = [
      "        except Exception as e:\n"
      '            self.append_log(f"❌ Error in thread: {e}")\n            import traceback\n'
      "            self.append_log(traceback.format_exc())\n            return False\n        finally:\n", 1),
+    # 2026-11-16: without a key, a model or credentials the glossary pre-pass refuses every file; the run
+    # ends with that reason instead of "glossary generation is complete" and the approval question
+    ("                    self.append_log(f\"📑 Running glossary extraction before translation...\")\n"
+     "                    self.append_log(f\"{'='*60}\")\n"
+     "                    \n",
+     "                    self.append_log(f\"📑 Running glossary extraction before translation...\")\n"
+     "                    self.append_log(f\"{'='*60}\")\n"
+     "\n"
+     "                    # Without a key, a model or credentials the extraction refuses every file and\n"
+     "                    # generates nothing; the steps below would still report it complete and ask to\n"
+     "                    # accept the glossary. End the run with the reason (the translation makes the\n"
+     "                    # same checks and could not start either).\n"
+     "                    self._run_setup_error = self._glossary_setup_refusal() if has_text_files else None\n"
+     "                    if self._run_setup_error:\n"
+     "                        self.append_log(f\"❌ Error: {self._run_setup_error}\")\n"
+     "                        self.append_log(\n"
+     "                            \"⏹️ Translation cancelled: glossary generation could not start\"\n"
+     "                        )\n"
+     "                        if saved_env:\n"
+     "                            for key, val in saved_env.items():\n"
+     "                                if val is None:\n"
+     "                                    os.environ.pop(key, None)\n"
+     "                                else:\n"
+     "                                    os.environ[key] = val\n"
+     "                        return False\n"
+     "\n", 1),
 ]
 #: U3 fix pass: the set-up's Library raw-input registry write is the _record_library_raw_inputs
 #: hook (TranslatorGUI's override keeps the epub_library import; the GUI-free default skips it)
@@ -762,6 +788,42 @@ def test_await_direct_text_glossary_approval_asks_the_host(tmp_path):
     assert owner._await_direct_text_glossary_approval("") is False
     assert host.questions == [("direct_text_glossary_approval", {"path": os.path.abspath(str(glossary))}),
                               ("direct_text_glossary_approval", {"path": ""})]
+
+
+def test_glossary_setup_refusal_uses_the_extraction_checks(tmp_path):
+    """Owner's phone, 2026-11-16: a keyed model without an API key. The glossary pre-pass refused the book
+    ("❌ Error: Please enter your API key."), and the run then said "glossary generation is complete" and asked
+    to accept a glossary nothing had generated. The refusal is known before the pass starts."""
+    owner = _owner(_Host(), "GlossaryPipelineMixin")
+    owner.config = {}
+    key = types.SimpleNamespace(value="")
+    owner.api_key_entry = types.SimpleNamespace(text=lambda: key.value)
+
+    owner.model_var = ""
+    assert owner._glossary_setup_refusal() == "No model is selected."
+    owner.model_var = "claude-sonnet-5-5"
+    assert owner._glossary_setup_refusal() == "Please enter your API key."
+    key.value = "sk-test"
+    assert owner._glossary_setup_refusal() is None
+    key.value = ""
+    for keyless in ("authnan/moonshotai/kimi", "ollamapull/qwen3.5:0.8b", "google-translate-free"):
+        owner.model_var = keyless
+        assert owner._glossary_setup_refusal() is None, keyless
+    owner.model_var = "vertex/gemini-3-pro"
+    assert owner._glossary_setup_refusal() == "Google Cloud credentials required for Vertex AI models."
+    credentials = tmp_path / "service-account.json"
+    credentials.write_text("{}", encoding="utf-8")
+    owner.config = {"google_cloud_credentials": str(credentials)}
+    assert owner._glossary_setup_refusal() is None
+    assert owner.host.logs == []  # it only answers; the caller logs
+
+
+def test_the_refusal_wording_is_the_extraction_runners_own():
+    """One wording for the same refusal: what ``_extract_glossary_from_text_file`` logs."""
+    runner = _src_text("text_jobs")
+    for reason in ("Please enter your API key.", "Google Cloud credentials required for Vertex AI models."):
+        assert f'self.append_log("❌ Error: {reason}")' in runner, reason
+        assert f'return "{reason}"' in _src_text(MODULE), reason
 
 
 def test_gui_method_defaults():
