@@ -12,6 +12,12 @@ import pytest
 from unified_api_client import UnifiedClient, UnifiedClientError
 
 
+@pytest.fixture(autouse=True)
+def _tmp_ocagy_workspace(tmp_path, monkeypatch):
+    # The ocagy route keeps its state and lock files there: never the real one.
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "ocagy-workspace"))
+
+
 def test_zen_catalog_uses_cli_instead_of_http(monkeypatch):
     import ocagy_cli
     calls = []
