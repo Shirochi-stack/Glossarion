@@ -203,13 +203,13 @@ class MangaTab:
 class TranslationModel:
     """The manga translator's own model + API key (``services.manga`` PREF_MODEL / PREF_API_KEY in
     Prefs, the key ``ENC:``), remembered between runs: the shared ``ModelPicker`` (the ModelSheet in
-    field mode) and the KeyEditor's ``KeyField`` (Paste · Copy · Test). Empty = the main model /
+    field mode) and the KeyEditor's ``KeyField`` (Save · Copy · Test). Empty = the main model /
     API key, which the field shows as its hint; "Use main" forgets both. Start and the editor steps
     send them with every job (``services.manga.translation_params``)."""
 
     def __init__(self, ctx: Any) -> None:
         from glossarion_mobile.services import manga as svc
-        from glossarion_mobile.ui.screens.key_editor import KeyField
+        from glossarion_mobile.ui.screens.key_editor import KeyField, store_saver
         from glossarion_mobile.ui.sheets.model_sheet import ModelPicker, sheet_env
 
         self.ctx = ctx
@@ -223,6 +223,10 @@ class TranslationModel:
         key = svc.translation_api_key(self.prefs)
         self.key_field = KeyField(
             value=key, label="API key", on_change=self._on_key,
+            # Save calls the service itself: ``_on_key`` reports a refused key (this phone cannot encrypt) in a
+            # snackbar and returns, which Save would show as "Saved".
+            on_save=store_saver(lambda value: svc.save_translation_api_key(self.prefs, value), self.prefs)
+            if self.prefs is not None else None,
             hint="Empty: the main API key",
             on_test=(lambda value: env.test_key(value or str(ctx.cfg("api_key", "") or ""), self.model))
             if env.test_key is not None else None,

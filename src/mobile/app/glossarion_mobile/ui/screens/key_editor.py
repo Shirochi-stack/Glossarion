@@ -1,6 +1,6 @@
 """KeyField and KeyEditor (UI_SPEC §4.12, §5.7, §5.9).
 
-``KeyField`` is the shared secret input: masked ``sk-…a1B2`` text with reveal (eye), Paste,
+``KeyField`` is the shared secret input: masked ``sk-…a1B2`` text with reveal (eye), Save,
 Copy and Test → status chip (empty · masked · revealed · testing · passed · failed). It is
 used by the ModelSheet route row, Poe setup, the Endpoints page and the KeyEditor.
 
@@ -17,6 +17,7 @@ it is stored (``KeysController.update_key``). It builds on ``settings.editors.Fu
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -28,7 +29,7 @@ from glossarion_mobile.ui.settings.editors import FullScreenEditor
 from glossarion_mobile.ui.settings.model import mask_secret
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic, toggle
 
-__all__ = ["KeyEditor", "KeyField", "TEST_LABELS", "normalize_test_result"]
+__all__ = ["KeyEditor", "KeyField", "TEST_LABELS", "normalize_test_result", "store_saver"]
 
 log = logging.getLogger("glossarion.keys")
 
@@ -86,8 +87,25 @@ def _push(*controls: Any) -> None:
             pass
 
 
+def store_saver(put: Callable[[str], Any], store: Any) -> Callable[[str], Any]:
+    """An ``on_save`` for a key kept in a debounced store (``MobileConfigStore``, ``Prefs``): ``put(value)``
+    stores it as an edit does, then the file is written now, off the UI thread. The saver returns why the key
+    was not saved (text returned by ``put``, or the store's write error), or None."""
+
+    async def save(value: str) -> Optional[str]:
+        problem = await await_handler(put, value)
+        if isinstance(problem, str) and problem:
+            return problem
+        flush = getattr(store, "flush", None)
+        if flush is not None:
+            await asyncio.to_thread(flush)
+        return getattr(store, "save_error", None) or None
+
+    return save
+
+
 class KeyField(ft.Column):
-    """Masked secret field: eye · Paste · Copy · Test → status chip."""
+    """Masked secret field: eye · Save · Copy · Test → status chip."""
 
     def __init__(
         self,
@@ -95,8 +113,9 @@ class KeyField(ft.Column):
         value: str = "",
         label: str = "API key",
         on_change: Optional[Callable[[str], Any]] = None,
+        on_save: Optional[Callable[[str], Any]] = None,  # Save pressed: value -> None, or why it was not saved
         on_test: Optional[Callable[[str], Any]] = None,  # async value -> result
-        read_clipboard: Optional[Callable[[], Any]] = None,  # async -> str | None
+        read_clipboard: Optional[Callable[[], Any]] = None,  # not used: the row has no Paste button (callers pass it)
         copy_text: Optional[Callable[[str], Any]] = None,
         hint: Optional[str] = None,
         test_reason: Optional[str] = None,  # Test disabled with this reason
@@ -106,8 +125,8 @@ class KeyField(ft.Column):
         text = "" if value is None else str(value)
         self.encrypted = text.startswith("ENC:")
         self.on_change_value = on_change
+        self.on_save = on_save
         self.on_test = on_test
-        self.read_clipboard = read_clipboard
         self.copy_text = copy_text
         self.state = "masked" if text and not self.encrypted else "empty"
         self.result: Optional[dict] = None
@@ -124,8 +143,11 @@ class KeyField(ft.Column):
             on_change=self._on_change,
             expand=True,
         )
-        self.paste_button = ft.IconButton(icon=ft.Icons.CONTENT_PASTE, tooltip="Paste", on_click=self._on_paste,
-                                          size_constraints=HIT_TARGET, disabled=read_clipboard is None)
+        # Save, where a Paste button was: the phone's keyboard and long-press already paste, and the key is stored
+        # as it is typed, but nothing on the row said so. The button writes it now and shows "Saved". It is left
+        # out where the form around the field has its own Save (the KeyEditor passes no ``on_save``).
+        self.save_button = ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save", on_click=self._on_save,
+                                         size_constraints=HIT_TARGET, visible=on_save is not None)
         self.copy_button = ft.IconButton(icon=ft.Icons.CONTENT_COPY, tooltip="Copy", on_click=self._on_copy,
                                          size_constraints=HIT_TARGET, disabled=copy_text is None)
         reason = test_reason if on_test is not None else (test_reason or "Testing needs the key service")
@@ -137,7 +159,7 @@ class KeyField(ft.Column):
         self.message = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                visible=False, selectable=True)
         self.controls = [
-            ft.Row([self.field, self.paste_button, self.copy_button], spacing=0,
+            ft.Row([self.field, self.save_button, self.copy_button], spacing=0,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([self.test_button, self.ring, self.status_chip], spacing=8, wrap=True,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -177,21 +199,33 @@ class KeyField(ft.Column):
 
     # ---- actions --------------------------------------------------------------------------------------
 
-    async def paste(self) -> Optional[str]:
-        if self.read_clipboard is None:
-            return None
-        try:
-            text = await await_handler(self.read_clipboard)
-        except Exception as exc:
-            log.info("clipboard read failed: %s", exc)
-            return None
-        text = str(text or "").strip()
-        if text:
-            self.set_value(text)
-        return text or None
+    async def save(self) -> bool:
+        """Save pressed: ``on_save`` stores the value and writes the file; the line under the field says "Saved"
+        only after that, and "Not saved: <reason>" otherwise."""
+        if self.on_save is None:
+            return False
+        if self.encrypted:
+            # The field is empty over a key this device cannot read, and nothing was typed: storing the empty
+            # field would erase that key.
+            problem = "enter the key again"
+        else:
+            try:
+                problem = await await_handler(self.on_save, self.value)
+            except Exception as exc:
+                log.info("key save failed: %s", exc)
+                problem = str(getattr(exc, "message", "") or exc) or type(exc).__name__
+        self._clear_result()
+        if problem:
+            self.message.value, self.message.color = f"Not saved: {problem}", ft.Colors.ERROR
+        else:
+            self.message.value = "Saved" if self.value else "Saved (no key)"
+            self.message.color = semantic("success")
+        self.message.visible = True
+        _push(self)
+        return not problem
 
-    async def _on_paste(self, e: Any = None) -> None:
-        await self.paste()
+    async def _on_save(self, e: Any = None) -> None:
+        await self.save()
 
     async def _on_copy(self, e: Any = None) -> None:
         if self.copy_text is not None and self.value:
@@ -226,6 +260,7 @@ class KeyField(ft.Column):
         self.status_chip.leading = ft.Icon(icon, color=color, size=16)
         self.status_chip.visible = True
         self.message.value = str(result.get("message") or "")
+        self.message.color = ft.Colors.ON_SURFACE_VARIANT      # Save's "Saved" is shown in the success colour
         self.message.visible = bool(self.message.value)
         self.ring.visible = False
         self.test_button.disabled = self.on_test is None

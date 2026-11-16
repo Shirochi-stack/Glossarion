@@ -1551,13 +1551,14 @@ class ModelSheet:
             controls.append(ft.Row([*chips, ft.TextButton(content="Accounts", on_click=lambda e: self._accounts())],
                                    wrap=True, spacing=6))
         if info.needs_key and self.env.store is not None:
-            from glossarion_mobile.ui.screens.key_editor import KeyField
+            from glossarion_mobile.ui.screens.key_editor import KeyField, store_saver
 
             store = self.env.store
             self.key_field = KeyField(
                 value=str(store.get("api_key", "") or ""),
                 label="API key",
                 on_change=lambda value: store.set("api_key", value),
+                on_save=store_saver(lambda value: store.set("api_key", value), store),
                 on_test=(lambda value: self.env.test_key(value, info.model)) if self.env.test_key is not None else None,
                 read_clipboard=self.env.read_clipboard,
                 copy_text=self.env.copy_text,
@@ -2196,9 +2197,10 @@ class PoeSetupSheet:
         store = self.env.store
         current = str(store.get("api_key", "") or "") if store is not None else ""
         cookie = current[4:] if current.startswith("p-b:") else ""
-        from glossarion_mobile.ui.screens.key_editor import KeyField
+        from glossarion_mobile.ui.screens.key_editor import KeyField, store_saver
 
         self.field = KeyField(value=cookie, label="p-b cookie value", on_change=self.save,
+                              on_save=store_saver(self.save, store) if store is not None else None,
                               on_test=(lambda value: self.env.test_key(self.api_key_for(value), self.model))
                               if self.env.test_key is not None else None,
                               read_clipboard=self.env.read_clipboard, copy_text=self.env.copy_text, key="poe-cookie")
@@ -2233,13 +2235,17 @@ class PoeSetupSheet:
             return ""
         return value if value.startswith("p-b:") else f"p-b:{value}"
 
-    def save(self, cookie: str) -> None:
+    def save(self, cookie: str) -> Optional[str]:
+        """Store the cookie as the API key. An empty field stores nothing (the API key is left as it is); the
+        text returned then is what the field's Save button shows."""
         store = self.env.store
         if store is None:
-            return
+            return None
         value = self.api_key_for(cookie)
-        if value:
-            store.set("api_key", value)
+        if not value:
+            return "enter the cookie value"
+        store.set("api_key", value)
+        return None
 
     def show(self, page: Any) -> None:
         self._page = page

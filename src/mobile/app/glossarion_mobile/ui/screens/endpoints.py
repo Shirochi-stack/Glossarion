@@ -343,18 +343,22 @@ class EndpointsScreen(Screen):  # type: ignore[misc,valid-type]
                             padding=ft.Padding.only(left=12, right=12, bottom=6))
 
     def _secret_field(self, key: str, tile: Any) -> "ft.Control":
-        """Secrets: the masked KeyField (eye · paste · copy) under the tile, writing the same key."""
-        from glossarion_mobile.ui.screens.key_editor import KeyField
+        """Secrets: the masked KeyField (eye · Save · Copy) under the tile, writing the same key."""
+        from glossarion_mobile.ui.screens.key_editor import KeyField, store_saver
 
-        def save(value: str) -> None:
+        def save(value: str) -> Optional[str]:
+            """Store the value; why it was not stored (the field's Save button shows it), else None."""
             if value:
-                tile.apply(value)
+                if not tile.apply(value):
+                    return str(getattr(tile, "error", "") or "this setting cannot be changed")
             elif self.ctx.store.has(key):
                 self.ctx.store.unset(key)
                 tile.refresh()
+            return None
 
         current = self.ctx.store.get(key, "") or ""
-        field = KeyField(value=str(current), label=tile.label, on_change=save, read_clipboard=self.read_clipboard,
+        field = KeyField(value=str(current), label=tile.label, on_change=save,
+                         on_save=store_saver(save, self.ctx.store), read_clipboard=self.read_clipboard,
                          copy_text=self.copy_text, test_reason="Use Test connection")
         self.secret_fields[key] = field
         return ft.Container(content=field, padding=ft.Padding.only(left=12, right=12, bottom=8))
