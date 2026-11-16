@@ -1647,6 +1647,120 @@ def _start_background_plugin_update(executable: str, logger: Callable[[str], Non
         _PLUGIN_UPDATE_THREAD.start()
 
 
+# Google answers a request from a plugin version it no longer accepts with this
+# sentence as the model's reply ("This version of Antigravity is no longer
+# supported. Please download and install the latest version ..."). It is not a
+# translation: the request waits for the plugin update and is sent again.
+_UNSUPPORTED_PLUGIN_NOTICE = "this version of antigravity is no longer supported"
+# The longest a request waits for that update: plugin download, CLI download,
+# CLI install and the check after the switch.
+OCAGY_UNSUPPORTED_PLUGIN_WAIT_SECONDS = (
+    OCAGY_PLUGIN_UPDATE_TIMEOUT_SECONDS + OCAGY_CLI_DOWNLOAD_TIMEOUT_SECONDS + OCAGY_CLI_UPDATE_TIMEOUT_SECONDS + 300
+)
+_UNSUPPORTED_PLUGIN_LOCK = threading.Lock()
+_UNSUPPORTED_PLUGIN_NOTICE_LOGGED: Dict[str, float] = {}
+_UNSUPPORTED_PLUGIN_CHECK_FORCED: Dict[str, float] = {}
+
+
+def _is_unsupported_plugin_notice(text: Any) -> bool:
+    """True when a reply is Google's "this version is no longer supported" sentence."""
+    content = _clean_text(str(text or "")).strip()
+    return len(content) < 1000 and content.casefold().startswith(_UNSUPPORTED_PLUGIN_NOTICE)
+
+
+class _UnsupportedNoticeFilter:
+    """Keeps that sentence out of the stream log (one copy per request of a batch).
+
+    The first characters of a reply are held back until they can no longer be
+    the start of the sentence; everything else passes through unchanged.
+    """
+
+    def __init__(self) -> None:
+        self.held = ""
+        self.is_notice: Optional[bool] = None  # None: not decided yet
+
+    def feed(self, fragment: str) -> str:
+        """Return the text to log now ("" while undecided or for the notice)."""
+        if self.is_notice is not None:
+            return "" if self.is_notice else fragment
+        self.held += fragment
+        head = self.held.lstrip().casefold()
+        if head.startswith(_UNSUPPORTED_PLUGIN_NOTICE):
+            self.is_notice = True
+            return ""
+        if _UNSUPPORTED_PLUGIN_NOTICE.startswith(head):
+            return ""
+        self.is_notice = False
+        text, self.held = self.held, ""
+        return text
+
+    def rest(self) -> str:
+        """Text still held when the stream ended before a decision (a very short reply)."""
+        if self.is_notice is None:
+            text, self.held = self.held, ""
+            return text
+        return ""
+
+
+def _wait_for_newer_plugin(used_version: Optional[str], executable: str, logger: Callable[[str], None]) -> bool:
+    """After Google refused the plugin version a request used: wait for a newer one.
+
+    Checks npm now (whatever the 12 h interval says, once an hour per refused
+    version) and waits for the background update, Stop-aware and capped. One
+    log line however many requests wait. Returns True when the workspace now
+    uses another plugin version, so the request can be sent again.
+    """
+
+    def moved_on() -> bool:
+        return _installed_plugin_version(_plugin_spec()) != used_version
+
+    if _PLUGIN_PACKAGE_OVERRIDE:
+        return False
+    if moved_on():
+        return True  # updated while this request was running
+    key = str(used_version or "")
+    now = time.monotonic()
+    with _UNSUPPORTED_PLUGIN_LOCK:
+        announce = now - _UNSUPPORTED_PLUGIN_NOTICE_LOGGED.get(key, float("-inf")) >= OCAGY_PLUGIN_UPDATE_RETRY_SECONDS
+        if announce:
+            _UNSUPPORTED_PLUGIN_NOTICE_LOGGED[key] = now
+        force = now - _UNSUPPORTED_PLUGIN_CHECK_FORCED.get(key, float("-inf")) >= OCAGY_PLUGIN_UPDATE_RETRY_SECONDS
+        if force:
+            _UNSUPPORTED_PLUGIN_CHECK_FORCED[key] = now
+            thread = _PLUGIN_UPDATE_THREAD
+            if thread is None or not thread.is_alive():
+                state = _read_plugin_state()
+                state.pop("checked_at", None)
+                state.pop("check_failed_at", None)
+                _write_plugin_state(state)
+            # Started under the lock: the other waiting requests then see the thread.
+            _start_background_plugin_update(executable, logger)
+    if announce:
+        logger(
+            f"⏳ OcAgy: Google no longer accepts {_PLUGIN_NAME}"
+            + (f" {used_version}" if used_version else "")
+            + ". Waiting for the plugin update, then sending the request again..."
+        )
+    deadline = time.monotonic() + OCAGY_UNSUPPORTED_PLUGIN_WAIT_SECONDS
+    while not moved_on():
+        thread = _PLUGIN_UPDATE_THREAD
+        if thread is None or not thread.is_alive() or time.monotonic() >= deadline:
+            break
+        if is_cancelled():
+            raise OcAgyError(_CANCELLED_MESSAGE)
+        thread.join(OCAGY_LOCK_POLL_SECONDS)
+    return moved_on()
+
+
+def _unsupported_plugin_error(used_version: Optional[str]) -> OcAgyError:
+    return OcAgyError(
+        f"Google no longer accepts this version of the Antigravity plugin ({_PLUGIN_NAME}"
+        + (f" {used_version}" if used_version else "")
+        + "), and Glossarion could not switch to a newer one. The log shows why the plugin update "
+        "did not happen; without one, wait for a new plugin release."
+    )
+
+
 def _workspace_dir() -> Path:
     path = _workspace_base()
     path.mkdir(parents=True, exist_ok=True)
@@ -3647,6 +3761,8 @@ def _send_via_server(
         thinking_started = False
         first_text = False
         stream_thinking = _forced_stream_thinking_logging_enabled(log_stream)
+        # Google's "no longer supported" reply to an outdated plugin is not logged.
+        notice_filter = _UnsupportedNoticeFilter()
 
         def consume(event: Dict[str, Any]) -> None:
             nonlocal thinking_started, first_text
@@ -3657,6 +3773,9 @@ def _send_via_server(
                         logger("🧠 [ocagy] Thinking...")
                     _stream_log_text(fragment, thinking_buffer, logger)
                 elif fragment_type == "text" and log_stream:
+                    fragment = notice_filter.feed(fragment)
+                    if not fragment:
+                        continue
                     if not first_text:
                         first_text = True
                         logger(f"OpenCode Antigravity: first token in {time.time() - started:.1f}s, streaming...")
@@ -3764,6 +3883,10 @@ def _send_via_server(
             tail = "".join(thinking_buffer).strip()
             if tail:
                 logger(f"    {tail}")
+        if log_stream:
+            held = notice_filter.rest()
+            if held:
+                text_buffer.append(held)
         if log_stream and text_buffer:
             tail = "".join(text_buffer).strip()
             if tail:
@@ -3855,6 +3978,7 @@ def _send_chat_completion_buffered(
     max_tokens: int = 65536,
     timeout: float = 1800,
     log_fn: Optional[Callable[[str], None]] = None,
+    _after_plugin_update: bool = False,
 ) -> Dict[str, Any]:
     """Run one isolated ``opencode run --format json`` request via the plugin."""
     if is_cancelled():
@@ -3870,6 +3994,7 @@ def _send_chat_completion_buffered(
         # Other providers use OpenCode's own stored login, not an Antigravity slot.
         account_number, selected = 0, None
     ensure_auth_plugin_installed(exe, log_fn=logger)
+    plugin_version = _installed_plugin_version(_plugin_spec())
     prompt = build_prompt(messages)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
@@ -3973,6 +4098,18 @@ def _send_chat_completion_buffered(
         if fallback:
             content = fallback
     content = _clean_text(content)
+    if _is_unsupported_plugin_notice(content):
+        if not _after_plugin_update and _wait_for_newer_plugin(plugin_version, exe, logger):
+            return _send_chat_completion_buffered(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                log_fn=log_fn,
+                _after_plugin_update=True,
+            )
+        raise _unsupported_plugin_error(plugin_version)
     if not content:
         detail = _clean_text(stderr)
         raise OcAgyError("OpenCode Antigravity returned an empty response." + (f" Details: {detail}" if detail else ""))
@@ -4026,8 +4163,13 @@ def send_chat_completion(
     timeout: float = 1800,
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
+    _after_plugin_update: bool = False,
 ) -> Dict[str, Any]:
-    """Run one isolated request through OpenCode's live local event API."""
+    """Run one isolated request through OpenCode's live local event API.
+
+    When Google answers that the plugin version is no longer supported, the
+    request waits for the plugin update and is sent once more with the new one.
+    """
     if is_cancelled():
         raise OcAgyError("OpenCode Antigravity request cancelled by user")
 
@@ -4041,6 +4183,7 @@ def send_chat_completion(
         # Other providers use OpenCode's own stored login, not an Antigravity slot.
         account_number, selected = 0, None
     ensure_auth_plugin_installed(exe, log_fn=logger)
+    plugin_version = _installed_plugin_version(_plugin_spec())
     prompt = build_prompt(messages)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
@@ -4082,6 +4225,19 @@ def send_chat_completion(
 
     elapsed = time.time() - start
     content = _clean_text(str(result.get("content", "") or ""))
+    if _is_unsupported_plugin_notice(content):
+        if not _after_plugin_update and _wait_for_newer_plugin(plugin_version, exe, logger):
+            return send_chat_completion(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                log_fn=log_fn,
+                log_stream=log_stream,
+                _after_plugin_update=True,
+            )
+        raise _unsupported_plugin_error(plugin_version)
     if not content:
         raise OcAgyError("OpenCode Antigravity returned an empty response.")
 
