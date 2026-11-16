@@ -3528,3 +3528,204 @@ def test_login_window_points_to_glossarion_quota_button(tmp_path, monkeypatch):
 
     script = commands[0][-1]
     assert "quota" in script.lower() and "not the plugin menu" in script
+
+
+# --- Google's "this version is no longer supported" reply to an outdated plugin ---
+
+UNSUPPORTED_NOTICE = (
+    "This version of Antigravity is no longer supported. Please download and install the latest version at "
+    "https://antigravity.google/download to continue using the agent and unlock our latest models, "
+    "including Gemini 4 Argon on eligible plans."
+)
+
+
+def test_unsupported_plugin_notice_is_recognised():
+    assert ocagy_cli._is_unsupported_plugin_notice(UNSUPPORTED_NOTICE)
+    assert ocagy_cli._is_unsupported_plugin_notice("\n  " + UNSUPPORTED_NOTICE.upper() + "\n")
+    assert not ocagy_cli._is_unsupported_plugin_notice("This version of the story is no longer supported by the guild.")
+    assert not ocagy_cli._is_unsupported_plugin_notice("")
+    # A long translation that happens to start with the sentence is a translation.
+    assert not ocagy_cli._is_unsupported_plugin_notice(UNSUPPORTED_NOTICE + " word" * 300)
+
+
+def test_unsupported_plugin_notice_never_reaches_the_stream_log():
+    pieces = [UNSUPPORTED_NOTICE[index:index + 7] for index in range(0, len(UNSUPPORTED_NOTICE), 7)]
+    notice = ocagy_cli._UnsupportedNoticeFilter()
+    assert [notice.feed(piece) for piece in pieces] == [""] * len(pieces)
+    assert notice.rest() == ""
+
+    # Ordinary text passes through unchanged, also when it starts like the sentence.
+    ordinary = ocagy_cli._UnsupportedNoticeFilter()
+    out = [ordinary.feed(piece) for piece in ("This vers", "ion of the tale", " begins.", "\nNext line")]
+    assert out[0] == "" and "".join(out) == "This version of the tale begins.\nNext line"
+    assert ordinary.rest() == ""
+    direct = ocagy_cli._UnsupportedNoticeFilter()
+    assert direct.feed("<h1>Chapter 1</h1>") == "<h1>Chapter 1</h1>"
+
+    # A reply that ends while still undecided is logged at the end.
+    short = ocagy_cli._UnsupportedNoticeFilter()
+    assert short.feed("This") == "" and short.rest() == "This" and short.rest() == ""
+
+
+def _unsupported_request_stubs(monkeypatch, tmp_path, replies):
+    """send_chat_completion with stand-ins; ``replies`` are the model replies in order."""
+    sent = []
+
+    def fake_server_send(**kwargs):
+        sent.append(kwargs["model_id"])
+        return {"content": replies[len(sent) - 1], "finish_reason": "stop", "usage": None, "raw_response": []}
+
+    version = {"value": "1.6.0"}
+    monkeypatch.setattr(ocagy_cli, "ensure_opencode_installed", lambda log_fn=None: "opencode")
+    monkeypatch.setattr(ocagy_cli, "ensure_auth_plugin_installed", lambda *_a, **_k: None)
+    monkeypatch.setattr(ocagy_cli, "_require_oauth_account", lambda _number: {})
+    monkeypatch.setattr(ocagy_cli, "_request_subprocess_env", lambda *_a, **_k: {})
+    monkeypatch.setattr(ocagy_cli, "_write_workspace_config", lambda *_a, **_k: None)
+    monkeypatch.setattr(ocagy_cli, "_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(ocagy_cli, "_plugin_spec", lambda: f"{NAME}@latest")
+    monkeypatch.setattr(ocagy_cli, "_installed_plugin_version", lambda _spec: version["value"])
+    monkeypatch.setattr(ocagy_cli, "_send_via_server", fake_server_send)
+    ocagy_cli.reset_cancel()
+    return sent, version
+
+
+def _send_unsupported_test_request(logs):
+    return ocagy_cli.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="ocagy/gemini-3.8-flash-low",
+        timeout=30,
+        log_fn=logs.append,
+    )
+
+
+def test_request_waits_for_the_plugin_update_and_is_sent_again(monkeypatch, tmp_path):
+    sent, version = _unsupported_request_stubs(monkeypatch, tmp_path, [UNSUPPORTED_NOTICE, "<p>Translated.</p>"])
+    waits = []
+
+    def wait(used, executable, logger):
+        waits.append(used)
+        version["value"] = "2.1.2"
+        return True
+
+    monkeypatch.setattr(ocagy_cli, "_wait_for_newer_plugin", wait)
+    logs = []
+
+    result = _send_unsupported_test_request(logs)
+
+    assert result["content"] == "<p>Translated.</p>"
+    assert len(sent) == 2 and waits == ["1.6.0"]
+    assert not [line for line in logs if "no longer supported" in line]
+
+
+def test_request_fails_once_when_no_newer_plugin_arrives(monkeypatch, tmp_path):
+    sent, _version = _unsupported_request_stubs(monkeypatch, tmp_path, [UNSUPPORTED_NOTICE])
+    monkeypatch.setattr(ocagy_cli, "_wait_for_newer_plugin", lambda *_a: False)
+    logs = []
+
+    with pytest.raises(ocagy_cli.OcAgyError, match=r"no longer accepts this version of the Antigravity plugin \(.* 1\.6\.0\)"):
+        _send_unsupported_test_request(logs)
+
+    assert len(sent) == 1  # the notice is never returned as a translation
+    assert not [line for line in logs if "no longer supported" in line]
+
+
+def test_request_is_sent_again_only_once(monkeypatch, tmp_path):
+    sent, version = _unsupported_request_stubs(monkeypatch, tmp_path, [UNSUPPORTED_NOTICE, UNSUPPORTED_NOTICE])
+    waits = []
+
+    def wait(used, executable, logger):
+        waits.append(used)
+        version["value"] = "2.1.2"
+        return True
+
+    monkeypatch.setattr(ocagy_cli, "_wait_for_newer_plugin", wait)
+
+    with pytest.raises(ocagy_cli.OcAgyError, match=r"2\.1\.2\)"):
+        _send_unsupported_test_request([])
+
+    assert len(sent) == 2 and waits == ["1.6.0"]
+
+
+def _unsupported_wait_stubs(monkeypatch, *, update_seconds, new_version):
+    """The background update as a stand-in thread that installs ``new_version`` (None: nothing newer)."""
+    version = {"value": "1.6.0"}
+    starts = []
+    release = threading.Event()
+
+    def start(executable, logger):
+        def run():
+            release.wait(update_seconds)
+            if new_version:
+                version["value"] = new_version
+
+        starts.append(executable)
+        thread = threading.Thread(target=run, daemon=True)
+        monkeypatch.setattr(ocagy_cli, "_PLUGIN_UPDATE_THREAD", thread)
+        thread.start()
+
+    monkeypatch.setattr(ocagy_cli, "_PLUGIN_PACKAGE_OVERRIDE", "")
+    monkeypatch.setattr(ocagy_cli, "_PLUGIN_UPDATE_THREAD", None)
+    monkeypatch.setattr(ocagy_cli, "_UNSUPPORTED_PLUGIN_NOTICE_LOGGED", {})
+    monkeypatch.setattr(ocagy_cli, "_UNSUPPORTED_PLUGIN_CHECK_FORCED", {})
+    monkeypatch.setattr(ocagy_cli, "_plugin_spec", lambda: f"{NAME}@latest")
+    monkeypatch.setattr(ocagy_cli, "_installed_plugin_version", lambda _spec: version["value"])
+    monkeypatch.setattr(ocagy_cli, "_start_background_plugin_update", start)
+    ocagy_cli.reset_cancel()
+    return version, starts, release
+
+
+def test_waiting_requests_log_one_line_and_force_one_check(monkeypatch):
+    _version, starts, _release = _unsupported_wait_stubs(monkeypatch, update_seconds=0.4, new_version="2.1.2")
+    # The regular check ran a moment ago: the refusal still makes npm be asked now.
+    ocagy_cli._write_plugin_state({"checked_at": time.time(), "spec": f"{NAME}@latest", "version": "1.6.0"})
+    logs = []
+    results = []
+    workers = [
+        threading.Thread(target=lambda: results.append(ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", logs.append)))
+        for _ in range(4)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+
+    assert results == [True, True, True, True]
+    assert len(starts) == 1
+    assert len(logs) == 1 and "Google no longer accepts" in logs[0] and "1.6.0" in logs[0]
+    assert "checked_at" not in ocagy_cli._read_plugin_state()
+    # A request that finishes after the update needs no wait and logs nothing.
+    assert ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", logs.append) is True
+    assert len(logs) == 1 and len(starts) == 1
+
+
+def test_no_newer_plugin_is_checked_once_per_hour_not_per_request(monkeypatch):
+    _version, starts, _release = _unsupported_wait_stubs(monkeypatch, update_seconds=0.05, new_version=None)
+    logs = []
+
+    assert ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", logs.append) is False
+    assert ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", logs.append) is False
+    assert ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", logs.append) is False
+
+    assert len(starts) == 1 and len(logs) == 1
+
+
+def test_stop_ends_the_wait_for_the_plugin_update(monkeypatch):
+    _version, _starts, release = _unsupported_wait_stubs(monkeypatch, update_seconds=30, new_version="2.1.2")
+    try:
+        outcome, worker = _run_in_thread(lambda: ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", lambda _m: None))
+        worker.join(0.6)
+        assert worker.is_alive()
+        ocagy_cli.cancel_stream()
+        worker.join(3)
+        assert not worker.is_alive() and "cancelled by user" in str(outcome.get("error"))
+    finally:
+        ocagy_cli._CANCEL_EVENT.clear()
+        release.set()
+
+
+def test_explicit_plugin_package_never_waits_for_an_update(monkeypatch):
+    _version, starts, _release = _unsupported_wait_stubs(monkeypatch, update_seconds=0.05, new_version="2.1.2")
+    monkeypatch.setattr(ocagy_cli, "_PLUGIN_PACKAGE_OVERRIDE", f"{NAME}@1.6.0")
+
+    assert ocagy_cli._wait_for_newer_plugin("1.6.0", "opencode", lambda _m: None) is False
+    assert starts == []
