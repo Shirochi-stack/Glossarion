@@ -37,6 +37,8 @@ ARRANGING_TEXT = "Arranging the diagram…"
 #: The spinner waits this long: an arrangement that is ready sooner shows no flicker.
 ARRANGING_DELAY_MS = 120
 HISTORY_HINT = "Click a character to see their relation history."
+#: The Focus box's tooltip (the phone's Focus picker says the same).
+FOCUS_TIP = "Type to search; pick a character to rebuild the diagram round them."
 #: The empty window while the Relations Tracker is off ({name}: the glossary file's name).
 EMPTY_TEXT = ("No relations tracked for {name} yet.\n\n"
               "Turn on Enable Relations Tracker in Glossary Manager → General Settings, "
@@ -413,20 +415,30 @@ class _NodeItem(QGraphicsPathItem):
 
     def set_selected_look(self, selected):
         self._selected_look = bool(selected)
-        pen = self.pen()
-        pen.setWidthF(3.0 if selected else 1.4)
-        pen.setColor(QColor("#ffffff") if selected else self._border)
-        self.setPen(pen)
+        self._update_pen()
 
     def set_flash(self, on):
         """A thick amber outline for a moment: "here it is" after a jump from the side panel."""
-        if on:
-            pen = self.pen()
+        self._flash = bool(on)
+        self._update_pen()
+
+    def set_focus_look(self, on):
+        """The thick amber outline for as long as this name is the Focus (the picture is built round it)."""
+        self._focus_look = bool(on)
+        self._update_pen()
+
+    def _update_pen(self):
+        pen = self.pen()
+        if getattr(self, '_flash', False) or getattr(self, '_focus_look', False):
             pen.setWidthF(4.5)
             pen.setColor(CHANGED_COLOR)
-            self.setPen(pen)
+        elif getattr(self, '_selected_look', False):
+            pen.setWidthF(3.0)
+            pen.setColor(QColor("#ffffff"))
         else:
-            self.set_selected_look(getattr(self, '_selected_look', False))
+            pen.setWidthF(1.4)
+            pen.setColor(self._border)
+        self.setPen(pen)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self._on_click is not None:
@@ -758,7 +770,6 @@ class RelationsDiagramDialog(QDialog):
         self._label_font = QFont("Segoe UI", 8)
         self._name_widths, self._label_widths = _TextWidths(self._node_font), _TextWidths(self._label_font)
         self._label_room = {}  # (a, b): width of the widest line of the longest text (``_label_size``)
-        self._shown_focus = None  # the Focus of the last redraw (a new one is outlined for a moment)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_MS)
         self._poll_timer.timeout.connect(self._poll)
@@ -1042,6 +1053,10 @@ class RelationsDiagramDialog(QDialog):
             self.history_title.setText(HISTORY_HINT)
             self.history_panel.clear()
         current_key = (self.show_unlisted_checkbox.isChecked(), self.focus_id())
+        if not data_changed and key is not None and key != current_key and positions is not None:
+            # the controls moved on while it was worked out (another Focus picked): kept, so going
+            # back to it is instant
+            self._layout_cache[key] = positions
         if self._layout_key == current_key:
             full = self._full_graph(self.tracker, self.glossary_entries, self.gender_tracker, current_key[0])
             ids = {n['id'] for n in full.get('nodes') or []}
@@ -1107,9 +1122,7 @@ class RelationsDiagramDialog(QDialog):
         self.focus_combo.setInsertPolicy(QComboBox.NoInsert)
         self.focus_combo.setMinimumWidth(200)
         _style_combo(self.focus_combo)
-        self.focus_combo.setToolTip("Type to search; pick a character to place them in the centre.\n"
-                                    "A book built round one main character keeps its picture: "
-                                    "the name is outlined for a moment.")
+        self.focus_combo.setToolTip(FOCUS_TIP)
         completer = QCompleter(self.focus_combo.model(), self.focus_combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
@@ -1298,8 +1311,15 @@ class RelationsDiagramDialog(QDialog):
             xs = [p[0] for p in positions.values()]
             ys = [p[1] for p in positions.values()]
             # Room for the name boxes around the outermost positions.
-            self._view.set_content_rect(QRectF(min(xs) - 90, min(ys) - 26,
-                                               max(xs) - min(xs) + 180, max(ys) - min(ys) + 52))
+            left, top, right, bottom = min(xs) - 90, min(ys) - 26, max(xs) + 90, max(ys) + 26
+            focus = key[1] if key else None
+            if focus in positions:
+                # built round the Focus: the area to fit reaches as far on each side of it, so the
+                # fitted view has the Focus in the middle
+                fx, fy = positions[focus]
+                half_w, half_h = max(fx - left, right - fx), max(fy - top, bottom - fy)
+                left, top, right, bottom = fx - half_w, fy - half_h, fx + half_w, fy + half_h
+            self._view.set_content_rect(QRectF(left, top, right - left, bottom - top))
 
     def _layout_for(self, show_unlisted, focus):
         """Positions from the graph of ALL chapters, so nodes stay put while the slider moves.
@@ -1454,19 +1474,30 @@ class RelationsDiagramDialog(QDialog):
             + " · amber = changed · click a name to show only its relations"
             + (" · right-click to edit" if self.can_edit() else "")
             + " · scroll to zoom, drag to pan")
-        self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-200, -200, 200, 200))
+        if focus in self._node_items:
+            self._node_items[focus].set_focus_look(True)  # outlined for as long as it is the Focus
+        self.scene.setSceneRect(self._scene_rect())
         if self._refit:
             self._refit = False
             self._view.fit_all()
-        if focus != self._shown_focus:
-            # a new Focus: outline it (round one main character the picture itself stays as it is)
-            self._shown_focus = focus
-            if focus is not None:
-                self.jump_to(focus)
         if self._selected is not None and self._selected in self._node_info:
             # the slider moved or the data changed: the panel follows, also for a name selected from
             # the panel that is not drawn
             self.show_history(self._selected)
+
+    def _scene_rect(self):
+        """What the view may scroll over: every item and the area fitted (``set_content_rect``), as
+        far on each side of that area's middle (the Focus) and 200 px more, so the fitted view is
+        never pushed off the Focus by the edge of the scene."""
+        rect = self.scene.itemsBoundingRect()
+        content = QRectF(self._view._content_rect)
+        if content.isEmpty():
+            return rect.adjusted(-200, -200, 200, 200)
+        rect = rect.united(content)
+        middle = content.center()
+        half_w = max(middle.x() - rect.left(), rect.right() - middle.x()) + 200
+        half_h = max(middle.y() - rect.top(), rect.bottom() - middle.y()) + 200
+        return QRectF(middle.x() - half_w, middle.y() - half_h, 2 * half_w, 2 * half_h)
 
     @staticmethod
     def _overlap(box, others):

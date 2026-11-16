@@ -1387,7 +1387,9 @@ def test_two_main_characters_sharing_names_stay_compact(focus):
     positions = _sized_layout(graph, focus)
     assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
     (width, height), distances = _drawn_size_and_label_distances(positions, graph, "A")
-    assert width < 3000 and height < 3000  # about 1,970 x 2,130 (2,320 x 2,370 round A)
+    # about 1,970 x 2,130; built round A (B and its names outside A's ring) about 3,590 x 3,100
+    limit = 3000 if focus is None else 4200
+    assert width < limit and height < limit
     assert distances[-1] < 1300  # about 950
     assert positions.growth < 1.1  # 1.0 here
 
@@ -1404,19 +1406,44 @@ def _extent(positions, graph, aspect=1600 / 1100):
     return max(width, aspect * height)
 
 
-def test_a_focus_round_a_main_character_keeps_the_main_characters_picture():
-    """Round one main character, any focus gives the picture without a focus, moved: rings or a tree
-    round another name made the main character a branch with its many lines far out (the owner's book
-    focused on a name with 11 relations: 9,708 px wide against 6,044)."""
+def _links(graph):
+    links = {}
+    for e in graph["edges"]:
+        links.setdefault(e["a"], set()).add(e["b"])
+        links.setdefault(e["b"], set()).add(e["a"])
+    return links
+
+
+def _centred_extent(positions, graph, focus, aspect=1600 / 1100):
+    """How far the view must zoom out to show every name and label with ``focus`` in its middle."""
+    edges = [(i, e["a"], e["b"]) for i, e in enumerate(graph["edges"])]
+    spots = rt.place_labels(positions, edges, {key: NAME_BOX for key in positions},
+                            {i: LABEL_BOX for i, _a, _b in edges},
+                            prefer={i: t for i, a, b in edges if (t := rt.layout_spot(positions, a, b)) is not None})
+    boxes = [_box(p, NAME_BOX) for p in positions.values()] + [_box(s, LABEL_BOX) for s in spots.values()]
+    fx, fy = positions[focus]
+    width = 2 * max(fx - min(b[0] for b in boxes), max(b[2] for b in boxes) - fx)
+    height = 2 * max(fy - min(b[1] for b in boxes), max(b[3] for b in boxes) - fy)
+    return max(width, aspect * height)
+
+
+def test_a_focus_round_a_main_character_rebuilds_the_picture_round_that_name():
+    """Owner 2026-11-16: the Focus "doesn't do anything ... rebuild the picture round the picked name".
+    Round one main character, a focus on another name gave the picture without a focus, moved. Now the
+    picture is built round the picked name: it stays where the rings put the centre, its relations are
+    the nearest names round it (no other name inside their ring), everything stays clear, and the view
+    centred on it is at most about twice as far zoomed out as the picture without a focus."""
     graph = _hub_with_links()
     plain = _sized_layout(graph)
+    links = _links(graph)
     for focus in ("p0", "p3", "hub"):
         focused = _sized_layout(graph, focus)
-        dx, dy = focused["hub"][0] - plain["hub"][0], focused["hub"][1] - plain["hub"][1]
-        assert all(math.isclose(focused[k][0] - dx, plain[k][0], abs_tol=1e-6)
-                   and math.isclose(focused[k][1] - dy, plain[k][1], abs_tol=1e-6) for k in plain)
-        assert focused.label_spots == plain.label_spots
+        if focus != "hub":
+            assert focused != plain
+        assert focused[focus] == rt.layout_graph(graph, 1600, 1100, focus=focus)[focus]
+        assert rt._ring_holds(focused, focus, links[focus])
         assert _line_problems(focused, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+        assert _centred_extent(focused, graph, focus) < 2.2 * _extent(plain, graph)
 
 
 def test_names_at_the_edge_of_the_picture_are_pulled_in(monkeypatch):
@@ -1494,28 +1521,155 @@ def _spoke_graph(total=119, spokes=40, seed=7):
             "edges": [{"a": a, "b": b, "label_ab": "Friend", "label_ba": ""} for a, b in pairs]}
 
 
-def test_a_focus_with_one_relation_is_drawn_round_the_name_it_hangs_from():
+def test_a_focus_with_one_relation_is_the_centre_too():
     """Focusing a name whose only relation is a main character with 40 relations grew the picture to
-    over 100,000 px in several seconds: everything sat in the one wedge of the leaf's only line. The
-    rings now go round the main character (the leaf on its first ring), the picture that main
-    character's own; also along a chain of names with two relations, but never for a plain chain."""
+    over 100,000 px in several seconds: everything sat in the one wedge of the leaf's only line, whose
+    lines ran past the leaf. The rings then went round the main character instead; now the leaf is the
+    centre again (its relation the only name in its ring), and the names round the main character fan out
+    over three quarters of the turn at most, away from the leaf (``_WEDGE_MAX``), placed one by one."""
     graph = _spoke_graph()
-    links = {}
-    for e in graph["edges"]:
-        links.setdefault(e["a"], set()).add(e["b"])
-        links.setdefault(e["b"], set()).add(e["a"])
+    links = _links(graph)
     leaf = next(n for n in sorted(links) if links[n] == {"Main"})
     started = time.perf_counter()
     positions = _sized_layout(graph, leaf)
-    assert time.perf_counter() - started < 15.0  # about half a second here; was 3.7 s
+    assert time.perf_counter() - started < 15.0  # about a second here; was 3.7 s
     assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0)
-    assert positions == _sized_layout(graph, "Main")
-    xs, ys = [p[0] for p in positions.values()], [p[1] for p in positions.values()]
-    assert max(max(xs) - min(xs), max(ys) - min(ys)) < 20000  # was over 100,000
-    chain = [(e["a"], e["b"], e) for e in graph["edges"]] + [(leaf, "tail1", None), ("tail1", "tail2", None)]
-    assert rt._hang_point("tail2", chain) == "Main" and rt._hang_point("Main", chain) == "Main"
-    path = [("a", "b", None), ("b", "c", None)]
-    assert rt._hang_point("a", path) == "a"
+    assert positions[leaf] == rt.layout_graph(graph, 1600, 1100, focus=leaf)[leaf]
+    assert rt._ring_holds(positions, leaf, {"Main"})
+    nearest = min((n for n in positions if n != leaf), key=lambda n: math.dist(positions[n], positions[leaf]))
+    assert nearest == "Main"
+    assert _centred_extent(positions, graph, leaf) < 2.2 * _extent(_sized_layout(graph), graph)  # was over 100,000
+    # a plain star (no other lines): round a leaf too
+    star = _hub_graph()
+    star["edges"] = [e for e in star["edges"] if "hub" in (e["a"], e["b"])]
+    positions = _sized_layout(star, "p7")
+    assert _line_problems(positions, star, NAME_BOX, LABEL_BOX) == (0, 0, 0)
+    assert rt._ring_holds(positions, "p7", {"hub"})
+
+
+def _chain_graph():
+    """A chain of 30 names, one of them with 8 names hanging from it."""
+    names = [f"c{i}" for i in range(30)]
+    edges = [{"a": names[i], "b": names[i + 1], "label_ab": "Sibling", "label_ba": ""} for i in range(29)]
+    edges += [{"a": "c10", "b": f"l{i}", "label_ab": "Guard", "label_ba": "Lord"} for i in range(8)]
+    return {"nodes": [{"id": n} for n in names + [f"l{i}" for i in range(8)]], "edges": edges}
+
+
+def _sparse_graph():
+    """60 names: a random tree and 12 more lines."""
+    import random
+    rnd = random.Random(3)
+    names = [f"s{i}" for i in range(60)]
+    pairs = {(names[rnd.randrange(i)], names[i]) for i in range(1, 60)}
+    while len(pairs) < 72:
+        a, b = sorted(rnd.sample(range(60), 2))
+        pairs.add((names[a], names[b]))
+    return {"nodes": [{"id": n} for n in names],
+            "edges": [{"a": a, "b": b, "label_ab": "Friend", "label_ba": "Ally"} for a, b in sorted(pairs)]}
+
+
+def _focus_roles(graph):
+    """The names to focus on: the busiest, one with about 10 relations, a leaf of the busiest, a leaf of
+    another name, a name on a chain (two relations), and "iso" (no relations)."""
+    links = _links(graph)
+    order = sorted(links, key=lambda n: (-len(links[n]), n))
+    hub = order[0]
+    roles = {"hub": hub, "ten": min(order[1:], key=lambda n: (abs(len(links[n]) - 10), n))}
+    leaves = [n for n in sorted(links) if len(links[n]) == 1]
+    roles["leaf of the hub"] = next((n for n in leaves if links[n] == {hub}), None)
+    roles["leaf of another"] = next((n for n in leaves if links[n] != {hub}), None)
+    roles["chain"] = next((n for n in sorted(links) if len(links[n]) == 2), None)
+    roles["isolated"] = "iso"
+    return {role: name for role, name in roles.items() if name is not None}
+
+
+_SHAPES = {"hub": _hub_with_links, "two hubs": _two_hubs_graph, "chain": _chain_graph, "sparse": _sparse_graph,
+           "dense": lambda: _spoke_graph(total=300, spokes=12)}
+
+
+@pytest.mark.parametrize("shape", sorted(_SHAPES))
+def test_every_shape_is_rebuilt_round_the_focus(shape):
+    """The owner's "rebuild the picture round the picked name", for every shape and every kind of name:
+    the focus stays where the rings put the centre, its relations are the nearest names round it (no other
+    name inside their ring), nothing covers anything and no line runs through a label or a name it does
+    not end at (above the cap: no names overlap and the focus's lines clear every name), the same input
+    gives the same picture; a name with no relations sits clear of everything, the others where the
+    picture without it puts them."""
+    graph = _SHAPES[shape]()
+    graph["nodes"].append({"id": "iso"})
+    links = _links(graph)
+    need = CLEARANCE + LINE_HALF_WIDTH
+    for role, focus in _focus_roles(graph).items():
+        started = time.perf_counter()
+        positions = _sized_layout(graph, focus)
+        assert time.perf_counter() - started < 20.0, role  # under 2 s here
+        again = _sized_layout(graph, focus)
+        assert again == positions and again.label_spots == positions.label_spots, role
+        if role == "isolated":
+            rest = {"nodes": [n for n in graph["nodes"] if n["id"] != focus], "edges": graph["edges"]}
+            without = _sized_layout(rest)
+            assert all(positions[key] == point for key, point in without.items()), role
+            box = _box(positions[focus], NAME_BOX)
+            assert all(_segment_to_box(positions[e["a"]], positions[e["b"]], box) >= need for e in graph["edges"])
+            assert not any(min(box[2], b[2]) - max(box[0], b[0]) > 0.01 and min(box[3], b[3]) - max(box[1], b[1]) > 0.01
+                           for b in (_box(p, NAME_BOX) for key, p in positions.items() if key != focus)), role
+            continue
+        assert positions[focus] == rt.layout_graph(graph, 1600, 1100, focus=focus)[focus], role
+        # (names with no relations at all go in rows under the picture, as without a focus)
+        linked = {key: point for key, point in positions.items() if key in links}
+        assert rt._ring_holds(linked, focus, links[focus]), role
+        nearest = min((n for n in linked if n != focus), key=lambda n: math.dist(positions[n], positions[focus]))
+        assert nearest in links[focus], role
+        if positions.labels_capped:
+            boxes = [_box(p, NAME_BOX) for p in positions.values()]
+            assert not any(min(p[2], q[2]) - max(p[0], q[0]) > 0.01 and min(p[3], q[3]) - max(p[1], q[1]) > 0.01
+                           for i, p in enumerate(boxes) for q in boxes[i + 1:]), role
+            assert not any(_segment_to_box(positions[e["a"]], positions[e["b"]], _box(point, NAME_BOX)) < need
+                           for e in graph["edges"] if focus in (e["a"], e["b"])
+                           for key, point in positions.items() if key not in (e["a"], e["b"])), role
+        else:
+            assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0), role
+
+
+@pytest.mark.parametrize("shape, bound", [("two hubs", 3.0), ("chain", 3.0), ("sparse", 2.2)])
+def test_a_name_at_the_edge_of_the_book_keeps_the_view_small(shape, bound):
+    """Review 2026-11-16: round a name at the edge of the book, the rings and the tree out from it put
+    everything on one side of it, and the view centred on it zoomed out up to 6.4 times as far as the
+    picture without a focus (these names; the owner's book: over twice for 10 of 62 names). The picture without a
+    focus, with the focus drawn in among its relations and the others kept out of their ring, is tried
+    too (``_kept_guide``): round the names furthest from the busiest name the view stays within about
+    twice in a sparse book, and under three times at the end of a chain or round a leaf of one of two
+    main characters (measured here: up to 2.9; the owner's book: over twice for 2 of 62 names)."""
+    graph = _SHAPES[shape]()
+    links = _links(graph)
+    hub = max(sorted(links), key=lambda n: len(links[n]))
+    depth = {hub: 0}
+    queue = [hub]
+    for node in queue:
+        for other in sorted(links[node]):
+            if other not in depth:
+                depth[other] = depth[node] + 1
+                queue.append(other)
+    furthest = sorted(depth, key=lambda n: (-depth[n], n))[:3]
+    plain = _extent(_sized_layout(graph), graph)
+    for focus in furthest:
+        positions = _sized_layout(graph, focus)
+        assert rt._ring_holds(positions, focus, links[focus]), focus
+        assert _line_problems(positions, graph, NAME_BOX, LABEL_BOX) == (0, 0, 0), focus
+        assert _centred_extent(positions, graph, focus) < bound * plain, focus
+
+
+def test_the_ring_of_a_focus():
+    """``focus_ring`` / ``_ring_holds``: the ring through the focus's relations, by angle."""
+    positions = {"f": (0.0, 0.0), "a": (100.0, 0.0), "b": (0.0, 100.0), "c": (-200.0, 0.0), "x": (40.0, 40.0)}
+    ring = rt.focus_ring(positions, "f", ["a", "b", "c"])
+    assert rt._inside_ring(ring, 50.0, 0.0) and not rt._inside_ring(ring, 0.0, 150.0)
+    assert rt._inside_ring(ring, -140.0, 0.0) and not rt._inside_ring(ring, 0.0, -160.0)  # (from c at 200 to a at 100)
+    assert not rt._ring_holds(positions, "f", ["a", "b", "c"])  # x is inside
+    positions["x"] = (300.0, 300.0)
+    assert rt._ring_holds(positions, "f", ["a", "b", "c"]) and rt._ring_holds(positions, None, ["a"])
+    assert rt.focus_ring(positions, "f", []) is None
+    assert rt._inside_ring(rt.focus_ring(positions, "f", ["c"]), 0.0, 199.0)  # one relation: a circle
 
 
 def test_above_the_cap_a_focus_keeps_the_rings_small():
