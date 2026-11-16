@@ -8,6 +8,8 @@ and accepts its consent text (the callers enforce that; nothing here uploads on 
   reachable (Android: Downloads/Glossarion; iOS: its Files path; desktop: its folder), opens
   https://transfer.it/start in the browser and lets the user paste the link back. transfer.it's
   private API is never called (MEGA's Terms "Our IP": API use needs developer registration and approval);
+* ``share_hosting_litterbox`` - Litterbox (Catbox's temporary host): anonymous uploads that expire by
+  themselves after 1 hour to 3 days and cannot be deleted earlier;
 * ``share_hosting_gofile`` - Gofile's documented API with one reused anonymous guest account;
 * ``share_hosting_send`` - Send (send.vis.ee, the timvisee/send protocol): encrypted on the device,
   the key only in the link's ``#`` fragment;
@@ -68,8 +70,9 @@ __all__ = [
 
 log = logging.getLogger("glossarion.share")
 
-#: Menu order (UI_SPEC U10): the handoff first (no third-party API), then the direct providers.
-PROVIDER_IDS = ("transferit", "gofile", "send", "pixeldrain", "gdrive")
+#: Menu order (owner, 2026-11-16): Google Drive first (a sync account, not a hosting site), then Litterbox,
+#: Gofile, Send, the transfer.it handoff, pixeldrain.
+PROVIDER_IDS = ("gdrive", "litterbox", "gofile", "send", "transferit", "pixeldrain")
 
 #: Gofile 429: wait for Retry-After (and retry once) only when it is at most this long (seconds).
 MAX_RETRY_AFTER = 60.0
@@ -215,6 +218,14 @@ class ProviderInfo:
 GIB = 1024 ** 3
 
 _INFO = {
+    "litterbox": ProviderInfo(
+        id="litterbox", label="Litterbox", operator="Catbox LLC", country="United States",
+        site="https://litterbox.catbox.moe", e2ee=False, direct=True, needs_api_key=False, can_delete=False,
+        max_bytes=1000 ** 3,
+        retention="Deleted automatically after the time chosen in the share settings (1 hour to 3 days; 3 days "
+                  "unless you change it). It cannot be deleted earlier, not even by you.",
+        terms_url="https://catbox.moe/legal.php",
+    ),
     "transferit": ProviderInfo(
         id="transferit", label="transfer.it", operator="Mega Privacy (NZ) Limited, a MEGA group company",
         country="New Zealand", site="https://transfer.it", e2ee=False, direct=False, needs_api_key=False,
@@ -304,7 +315,8 @@ def consent_text(provider_id: str, *, file_name: str = "", size: Optional[int] =
         lines.append(f"Share file via link sends {what} from this {device} to {info.label}, which gives you a link."
                      f"{run_by} Glossarion normally keeps everything on your {device}.")
     else:
-        lines.append(f"Share file via link opens {info.label} in the browser.{run_by} You pick {what} there and "
+        chosen = what if file_name else "the file"  # not "You pick the file you pick there"
+        lines.append(f"Share file via link opens {info.label} in the browser.{run_by} You pick {chosen} there and "
                      f"upload it yourself; Glossarion sends nothing to {info.label}.")
     lines.append("Anyone who has the link can download the file, and links can be forwarded. Share it only with "
                  "people you trust.")

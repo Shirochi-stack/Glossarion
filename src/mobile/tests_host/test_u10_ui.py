@@ -858,8 +858,9 @@ def test_facades_drive_the_real_services_without_network(tmp_path):
         await share.load()
         facade = u10.ShareFacade(share)
         listed = facade.providers()
-        assert [p["id"] for p in listed][:2] == ["transferit", "gofile"] and not any(p["enabled"] for p in listed)
-        assert listed[0]["handoff"] and listed[2]["e2ee"] and listed[3]["needs_key"]
+        assert [p["id"] for p in listed] == ["litterbox", "gofile", "send", "transferit", "pixeldrain"]
+        assert not any(p["enabled"] for p in listed)
+        assert not listed[0]["can_delete"] and listed[2]["e2ee"] and listed[3]["handoff"] and listed[4]["needs_key"]
         assert all(reason for _p, reason in facade.menu(str(epub)))  # everything off until turned on
         consent = facade.consent(listed[1], str(epub), 7)
         assert consent["lines"] and consent["checkbox"]
@@ -993,6 +994,40 @@ def test_settings_destination_switch_formats_queue_and_forget():
         assert cloud.calls[-1] == ("forget_destination",) and screen.destination_text.value == "Not set"
         screen.dispose()
         assert not cloud.listeners and not shares.listeners
+
+    run(scenario())
+
+
+def test_litterbox_settings_row_offers_its_link_lifetimes():
+    class LitterShares(FakeShares):
+        def __init__(self) -> None:
+            super().__init__()
+            self.infos["litterbox"] = _info("litterbox", "Litterbox", can_delete=False)
+            self.litter = {"time": "72h"}
+
+        def provider_states(self) -> list:
+            states = super().provider_states()
+            return [types.SimpleNamespace(info=self.infos["litterbox"], enabled=False, consented=False,
+                                          has_key=False, reason="Turn it on in Settings › Cloud sync & sharing")] + states
+
+        def litterbox_options(self) -> dict:
+            return dict(self.litter)
+
+        async def set_litterbox_options(self, *, time: Any = None) -> dict:
+            self.calls.append(("set_litterbox_options", time))
+            self.litter["time"] = time
+            return dict(self.litter)
+
+    async def scenario():
+        shares = LitterShares()
+        screen, _ctx = _screen("android", FakeCloud(), shares, FakePage())
+        await screen.refresh()
+        assert list(screen.provider_switches)[0] == "litterbox"
+        dropdown = screen.litterbox_time
+        assert dropdown.value == "72h" and [o.text for o in dropdown.options] == ["1 hour", "12 hours", "1 day",
+                                                                                   "3 days"]
+        await screen.set_litterbox_options(time="12h")
+        assert ("set_litterbox_options", "12h") in shares.calls and screen.litterbox_time.value == "12h"
 
     run(scenario())
 

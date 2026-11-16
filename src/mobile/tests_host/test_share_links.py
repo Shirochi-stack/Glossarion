@@ -459,6 +459,48 @@ def gofile():
     fake.close()
 
 
+class LitterboxFake(_Server):
+    """``POST /resources/internals/api.php`` (multipart ``reqtype``, ``time``, ``fileToUpload``): the answer is
+    the link in plain text, like litterbox.catbox.moe."""
+
+    def __init__(self) -> None:
+        self.uploads: list = []  # (fields without the file, file name, content)
+        self.script: list = []  # queued (status, body) answers
+        super().__init__(self._handler())
+
+    def _handler(self):
+        fake = self
+
+        class Handler(_Quiet):
+            def do_POST(self):
+                body = self._body()
+                parts = _parse_multipart(body, self.headers["Content-Type"])
+                filename, content = parts.pop("fileToUpload")
+                with fake.lock:
+                    fake.requests.append(("POST", self.path))
+                    fake.uploads.append(({k: v[1].decode() for k, v in parts.items()}, filename, content))
+                    status, answer = fake.script.pop(0) if fake.script else (200, b"https://litter.catbox.moe/ab12cd.epub")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+
+        return Handler
+
+    def provider(self):
+        import share_hosting_litterbox as lb
+
+        return lb.LitterboxProvider(sp.HttpClient(), api_url=self.base + "/resources/internals/api.php")
+
+
+@pytest.fixture
+def litterbox():
+    fake = LitterboxFake()
+    yield fake
+    fake.close()
+
+
 @pytest.fixture
 def pixeldrain():
     fake = PixeldrainFake()
@@ -608,7 +650,7 @@ def test_every_provider_is_off_by_default_and_nothing_is_sent(env, gofile):
     async def run():
         await svc.load()
         states = svc.provider_states()
-        assert [s.id for s in states] == ["transferit", "gofile", "send", "pixeldrain"]
+        assert [s.id for s in states] == ["litterbox", "gofile", "send", "transferit", "pixeldrain"]
         assert all(not s.enabled and not s.consented and not s.ready for s in states)
         with pytest.raises(sp.ShareError) as info:
             await svc.upload("gofile", path, book=workspace)
@@ -622,9 +664,9 @@ def test_every_provider_is_off_by_default_and_nothing_is_sent(env, gofile):
         with pytest.raises(sp.ShareError) as info:
             await svc.upload("gofile", path, book=workspace)
         assert info.value.code == "consent"
+        off = "Turn it on in Settings › Cloud sync & sharing"
         assert [r for (_, r) in svc.menu(path)] == [
-            "Turn it on in Settings › Cloud sync & sharing", "Read and accept what this service can see first",
-            "Turn it on in Settings › Cloud sync & sharing", "Turn it on in Settings › Cloud sync & sharing"]
+            off, "Read and accept what this service can see first", off, off, off]
 
     asyncio.run(run())
     assert gofile.requests == []
@@ -738,7 +780,9 @@ def test_drive_android_consent_connect_and_disconnect(env):
 
     async def scenario():
         svc = _service(env, platform="android", native=Native())
-        assert [state.id for state in svc.provider_states()][-1] == "gdrive"
+        # Google Drive leads the list: a sync account, not a hosting site (owner, 2026-11-16)
+        assert [state.id for state in svc.provider_states()] == ["gdrive", "litterbox", "gofile", "send", "transferit",
+                                                                 "pixeldrain"]
         with pytest.raises(sp.ShareError, match="Turn on Google Drive"):
             await svc.connect_drive()
         await svc.set_enabled("gdrive", True, consent=True)
@@ -895,6 +939,41 @@ def test_gofile_upload_reuses_one_guest_account_and_deletes_the_folder(env, gofi
     assert len(gofile.folders) == 1
     method, route, auth, body = gofile.requests[-1]
     assert (method, route) == ("DELETE", "/contents") and auth == auth2 and set(body) == {"contentsId"}
+
+
+def test_litterbox_upload_sends_the_chosen_expiry_and_cannot_be_deleted(env, litterbox):
+    svc = _service(env, providers={"litterbox": litterbox.provider()})
+    workspace, path = _book(env)
+
+    async def run():
+        await _enable(svc, "litterbox")
+        assert svc.litterbox_options() == {"time": "72h"}  # 3 days unless changed
+        first = await svc.upload("litterbox", path, book=workspace)
+        assert await svc.set_litterbox_options(time="12h") == {"time": "12h"}
+        assert await svc.set_litterbox_options(time="5y") == {"time": "72h"}  # not an API value: the default
+        await svc.set_litterbox_options(time="1h")
+        second = await svc.upload("litterbox", path, book=workspace)
+        litterbox.script.append((200, b"<html>File type not allowed</html>"))
+        with pytest.raises(sp.ShareError) as refused:
+            await svc.upload("litterbox", path, book=workspace)
+        with pytest.raises(sp.ShareError) as undeletable:
+            await svc.delete_link(first.id)
+        return first, second, refused.value, undeletable.value
+
+    started = time.time()
+    first, second, refused, undeletable = asyncio.run(run())
+    assert [fields for fields, _name, _content in litterbox.uploads] == [
+        {"reqtype": "fileupload", "time": "72h"}, {"reqtype": "fileupload", "time": "1h"},
+        {"reqtype": "fileupload", "time": "1h"}]
+    assert litterbox.uploads[0][1] == "Novel.epub" and litterbox.uploads[0][2] == Path(path).read_bytes()
+    assert first.url == "https://litter.catbox.moe/ab12cd.epub" and not first.can_delete and not first.e2ee
+    assert started + 3 * 86400 - 5 <= first.expires <= time.time() + 3 * 86400
+    assert second.expires <= time.time() + 3600 and "expires in 1 h" in second.summary
+    assert refused.code == "server" and "<html>" not in refused.message
+    assert undeletable.code == "unsupported"
+    assert sp.provider_info("litterbox").max_bytes == 1000 ** 3
+    store = json.loads((env["data"] / sl.STORE_FILE).read_text("utf-8"))
+    assert store["litterbox"] == {"time": "1h"} and len(store["links"]) == 2
 
 
 def test_multipart_body_escapes_the_file_name_like_browsers(tmp_path):

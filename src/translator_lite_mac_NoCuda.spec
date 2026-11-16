@@ -350,6 +350,7 @@ app_files = [
     # Glossarion Mobile; the compile hooks in the core desktop modules import it
     ('share_hosting.py', '.'),
     ('share_hosting_gofile.py', '.'),
+    ('share_hosting_litterbox.py', '.'),
     ('share_hosting_pixeldrain.py', '.'),
     ('share_hosting_send.py', '.'),
     ('share_hosting_transferit.py', '.'),
@@ -590,6 +591,7 @@ app_modules = [
     # Glossarion Mobile; the compile hooks in the core desktop modules import it
     'share_hosting',
     'share_hosting_gofile',
+    'share_hosting_litterbox',
     'share_hosting_pixeldrain',
     'share_hosting_send',
     'share_hosting_transferit',

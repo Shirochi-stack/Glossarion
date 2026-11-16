@@ -613,7 +613,8 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             config_keys_before = set(json.loads(Path(os.environ["CONFIG_FILE"]).read_text("utf-8")))
 
             # ---- defaults: every provider off, nothing sent --------------------------------------------------
-            assert [s.id for s in shares.provider_states()] == ["transferit", "gofile", "send", "pixeldrain"]
+            assert [s.id for s in shares.provider_states()] == ["litterbox", "gofile", "send", "transferit",
+                                                                "pixeldrain"]
             assert all(not s.enabled and not s.consented for s in shares.provider_states())
             # the Result card's button stays tappable with every service off: it opens the service list,
             # which turns one on behind its consent sheet
@@ -650,7 +651,7 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
                                  app.shell.top_screen.provider_switches else None, 30)
             assert cloud is not None, "Settings › Cloud sync & sharing did not load its providers"
             assert {pid: sw.value for pid, sw in cloud.provider_switches.items()} == {
-                "transferit": False, "gofile": False, "send": False, "pixeldrain": False}
+                "litterbox": False, "gofile": False, "send": False, "transferit": False, "pixeldrain": False}
 
             async def switch_on(pid: str, *, accept: bool = True) -> list:
                 switch = cloud.provider_switches[pid]
@@ -721,13 +722,13 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key="share-file-0")
             await d.wait(key="share-settings", timeout=30)
             menu = _visible(tester, r"^share-provider-")
-            assert [k for k, _c in menu] == ["share-provider-transferit", "share-provider-gofile", "share-provider-send",
-                                             "share-provider-pixeldrain"], menu
+            assert [k for k, _c in menu] == ["share-provider-litterbox", "share-provider-gofile", "share-provider-send",
+                                             "share-provider-transferit", "share-provider-pixeldrain"], menu
             from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
 
             for key, control in menu:
                 assert tile_reason_chip(control) is None, f"{key} is off: {tile_reason_chip(control)}"
-            assert "Open transfer.it…" in _texts_under(menu[0][1])
+            assert "Open transfer.it…" in _texts_under(dict(menu)["share-provider-transferit"])
             await d.tap(key="share-provider-send")
             send_url = await wait_link_sheet()
             send_link_base, _, send_key = send_url.partition("#")
