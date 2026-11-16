@@ -1642,6 +1642,12 @@ class ChatFeature:
                 self._record_raw_blocking(source)
             self.runs.relocate_output(cid, folder, target)
             self._cloud_moved(folder, target, merge)  # U10: records follow (a merge keeps the Library book's)
+            drive = getattr(self.app, "drive_sync", None)
+            if drive is not None:  # Google Drive sync: the book's compiled output now that it is a Library book
+                try:
+                    drive.on_workspace_moved(folder, target, merged=merge)
+                except Exception:
+                    log.exception("queueing the Drive sync of a migrated workspace failed")
             shares = getattr(self.app, "share_links", None)
             if shares is not None:  # U10: the book's saved share links follow it into the Library
                 try:

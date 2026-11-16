@@ -1,4 +1,4 @@
-"""Library filter sheet (UI_SPEC §3.1): ``TabBar`` Filter · Sort · Display.
+"""Library filter sheet (UI_SPEC §3.1): ``TabBar`` Filter · Sort · Display · Cloud.
 
 * **Filter:** format chips All / EPUB / TXT / PDF / HTML / IMG (``epub_library_format_filter``);
   tri-state state chips (In progress · Ready to compile · Not started · Outdated ·
@@ -9,6 +9,9 @@
   ``epub_library_card_size``) · Raw titles (``epub_library_show_raw_titles``) ·
   Show language badge · Show progress bar on cover · Page size 20 / 50 / 100 /
   250 / 500 / All (``epub_library_page_size``).
+* **Cloud:** ``ui.screens.cloud_sync.LibraryCloudTab``: Google Drive sync first (the same section and service as
+  Settings › Cloud sync & sharing, so a change in one shows in the other at once), then one line each for the
+  device cloud copy and the share-link services, and a button to the full page.
 
 Every change is applied at once through ``on_change(field, value)``; the home
 screen persists the desktop keys (sparse writes) and the mobile-only display
@@ -64,6 +67,7 @@ class FilterSheet:
         initial_tab: int = 0,
         series: Sequence[tuple] = (),  # U9: (sid, name, colour hex) of every series
         series_selected: Optional[str] = None,
+        cloud_tab: Any = None,  # ui.screens.cloud_sync.LibraryCloudTab (the home screen builds it with the services)
     ) -> None:
         self.state = state
         self.view_mode = view_mode
@@ -107,12 +111,20 @@ class FilterSheet:
         self.progress_switch = toggle(label="Show progress bar on cover", value=show_progress,
                                          on_change=lambda e: self._emit("show_progress", bool(e.control.value)),
                                          key="show-progress")
+        if cloud_tab is None:  # no services wired (tests, a failed install): the tab says so
+            from glossarion_mobile.ui.screens.cloud_sync import LibraryCloudTab
+
+            cloud_tab = LibraryCloudTab()
+        self.cloud_tab = cloud_tab
+        if getattr(cloud_tab, "close", "") is None:
+            cloud_tab.close = self.close  # "Open Cloud sync & sharing" closes this sheet first
         self.tabs = ft.Tabs(
-            length=3,
-            selected_index=max(0, min(2, initial_tab)),
+            length=4,
+            selected_index=max(0, min(3, initial_tab)),
             content=ft.Column([
-                ft.TabBar(tabs=[ft.Tab(label="Filter"), ft.Tab(label="Sort"), ft.Tab(label="Display")]),
-                ft.TabBarView(controls=[self._filter_tab(), self._sort_tab(), self._display_tab()],
+                ft.TabBar(tabs=[ft.Tab(label="Filter"), ft.Tab(label="Sort"), ft.Tab(label="Display"),
+                                ft.Tab(label="Cloud")]),
+                ft.TabBarView(controls=[self._filter_tab(), self._sort_tab(), self._display_tab(), cloud_tab.control],
                               height=_TAB_HEIGHT),
             ], tight=True, spacing=0),
         )
@@ -121,6 +133,7 @@ class FilterSheet:
             show_drag_handle=True,
             scrollable=True,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+            on_dismiss=self._on_dismiss,
         )
 
     # ---- tabs --------------------------------------------------------------------------------
@@ -270,9 +283,16 @@ class FilterSheet:
 
     def show(self, page: Any) -> None:
         self._page = page
+        if getattr(self.cloud_tab, "page", None) is None:
+            self.cloud_tab.page = page
         page.show_dialog(self.sheet)
+        self.cloud_tab.attach()  # reads the cloud state and follows its changes while the sheet is open
+
+    def _on_dismiss(self, e: Any = None) -> None:
+        self.cloud_tab.dispose()
 
     def close(self) -> None:
+        self.cloud_tab.dispose()
         close_dialog(self._page, self.sheet)
 
     def snapshot(self) -> Mapping[str, Any]:

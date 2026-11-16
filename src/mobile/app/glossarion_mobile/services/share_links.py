@@ -2,12 +2,13 @@
 
 What it does, and what it never does:
 
-* Every provider (``share_providers``: the transfer.it browser handoff, Gofile, Send end-to-end
+* Every provider (the shared ``share_hosting*`` / ``google_drive_core`` modules in src/, also used by
+  the desktop Library: the transfer.it browser handoff, Gofile, Send end-to-end
   encrypted, pixeldrain with the user's key) is **off** until the user turns it on in Settings ›
   Cloud sync & sharing and accepts its consent sheet (``consent_text``: the file leaves the phone,
   who can read it, what the service sees, how long it lasts). A new consent text (version) asks again.
 * Uploads happen only when the user taps (``upload``): never after a compile, never on launch,
-  never retried by themselves (the Gofile 429 rule in ``share_providers.gofile`` is the one
+  never retried by themselves (the Gofile 429 rule in ``share_hosting_gofile`` is the one
   exception the critic allows). transfer.it is a browser handoff (``start_handoff`` +
   ``add_pasted_link``): Glossarion makes no request to transfer.it.
 * Compiled book files under the Library or Output folders qualify, as do the workspace and raw
@@ -51,11 +52,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
-from glossarion_mobile.services.share_providers import (
+from share_hosting import (  # shared with the desktop Library (was services.share_providers)
     PROVIDER_IDS,
     CancelToken,
     ConsentText,
     ProviderInfo,
+    SecretBox,
     ShareError,
     UploadResult,
     consent_text,
@@ -124,84 +126,8 @@ def _under(path: str, root: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class SecretBox:
-    """``ENC:`` Fernet values with the app's ``api_key_encryption`` handler (SecureStorage key).
-
-    ``seal`` refuses (``ShareError('secrets_unavailable')``) instead of storing plain text when the
-    handler cannot really encrypt (no ``cryptography``, or the mobile keys were not installed), and
-    ``open`` refuses instead of returning a value it could not decrypt.
-    """
-
-    def __init__(self, *, ready: Optional[Callable[[], bool]] = None, handler: Any = None) -> None:
-        self._ready = ready
-        self._handler_override = handler
-        self._ok: Optional[bool] = None  # the encrypt/decrypt probe, run once (off the UI loop at load)
-
-    def _handler(self) -> Any:
-        if self._handler_override is not None:
-            return self._handler_override
-        import api_key_encryption  # shared; its key comes from the Keystore / Keychain on a phone
-
-        return api_key_encryption.get_handler()
-
-    def available(self) -> bool:
-        if self._ready is not None:
-            try:
-                if not self._ready():
-                    return False
-            except Exception:
-                return False
-        if self._ok:
-            return True
-        self._ok = self._probe()
-        return self._ok
-
-    def _probe(self) -> bool:
-        try:
-            handler = self._handler()
-        except Exception:
-            return False
-        cipher = getattr(handler, "cipher", None)
-        if cipher is None or type(cipher).__name__ != "Fernet":
-            return False
-        probe = "glossarion-share-probe"
-        try:
-            token = handler.encrypt_value(probe)
-            return isinstance(token, str) and token.startswith("ENC:") and token != probe \
-                and handler.decrypt_value(token) == probe
-        except Exception:
-            return False
-
-    def seal(self, value: str) -> str:
-        value = str(value)
-        if not self.available():
-            raise ShareError("secrets_unavailable", "Secure storage is not available on this phone, so Glossarion "
-                             "cannot keep share links or keys safely.")
-        token = self._handler().encrypt_value(value)
-        if not isinstance(token, str) or not token.startswith("ENC:") or token == value:
-            raise ShareError("secrets_unavailable", "Could not encrypt the value; nothing was saved.")
-        return token
-
-    def open(self, token: Any) -> str:
-        text = str(token or "")
-        if not text.startswith("ENC:"):
-            raise ShareError("secrets_unavailable", "A stored share-link value is not encrypted; it was ignored.")
-        if self._ready is not None and not self._ready():
-            raise ShareError("secrets_unavailable", "Secure storage is not ready yet.")
-        value = self._handler().decrypt_value(text)
-        if not isinstance(value, str) or value == text:
-            raise ShareError("secrets_unavailable", "A stored share-link value could not be decrypted (the app's "
-                             "keys changed).")
-        return value
-
-    def seal_json(self, value: Any) -> str:
-        return self.seal(json.dumps(value, separators=(",", ":"), sort_keys=True))
-
-    def open_json(self, token: Any) -> Any:
-        try:
-            return json.loads(self.open(token))
-        except ValueError:
-            raise ShareError("secrets_unavailable", "A stored share-link value is damaged.") from None
+# ``SecretBox`` lives in the shared ``share_hosting`` (the desktop Library seals its secrets the same
+# way); it is imported above and stays importable from here.
 
 
 # ---------------------------------------------------------------------------
@@ -498,8 +424,8 @@ class ShareLinkService:
         is_busy: Optional[Callable[[str], bool]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        from glossarion_mobile.services.share_providers.google_drive import DriveOAuth
-        from glossarion_mobile.services.share_providers.transferit_handoff import TransferItHandoff
+        from google_drive_core import DriveOAuth
+        from share_hosting_transferit import TransferItHandoff
 
         self.store = ShareLinkStore(store_path)
         self.run_io = run_io or _to_thread
@@ -586,10 +512,10 @@ class ShareLinkService:
     def providers(self) -> dict:
         """The direct providers (built on first use)."""
         if self._providers is None:
-            from glossarion_mobile.services.share_providers.gofile import GofileProvider
-            from glossarion_mobile.services.share_providers.google_drive import GoogleDriveProvider
-            from glossarion_mobile.services.share_providers.pixeldrain import PixeldrainProvider
-            from glossarion_mobile.services.share_providers.send_e2ee import SendProvider
+            from share_hosting_gofile import GofileProvider
+            from google_drive_core import GoogleDriveProvider
+            from share_hosting_pixeldrain import PixeldrainProvider
+            from share_hosting_send import SendProvider
 
             self._providers = {"gofile": GofileProvider(), "send": SendProvider(),
                                "pixeldrain": PixeldrainProvider(), "gdrive": GoogleDriveProvider()}
@@ -749,7 +675,7 @@ class ShareLinkService:
         return bool((self.store.read().get("secrets") or {}).get("pixeldrain_key"))
 
     async def set_pixeldrain_key(self, key: str) -> ProviderState:
-        from glossarion_mobile.services.share_providers.pixeldrain import clean_api_key
+        from share_hosting_pixeldrain import clean_api_key
 
         clean = clean_api_key(key)
         await self.load()
@@ -801,13 +727,15 @@ class ShareLinkService:
             raise ShareError("auth", f"Google Drive sign-in could not complete (Google error {error[7:]}).")
         raise ShareError("auth", "Google Drive sign-in could not complete. Try again.")
 
-    async def connect_drive(self) -> ProviderState:
-        from glossarion_mobile.services.share_providers.google_drive import authorization_request
+    async def connect_drive(self, *, for_sync: bool = False) -> ProviderState:
+        """Sign in to Google Drive (native). ``for_sync``: the Google Drive sync section asks (it showed its own
+        consent first), so the share-link site does not need to be on. One grant serves both."""
+        from google_drive_core import authorization_request
 
         await self.load()
         async with self._drive_auth_lock:
             state = self.provider_state("gdrive")
-            if not (state.enabled and state.consented):
+            if not for_sync and not (state.enabled and state.consented):
                 raise ShareError("consent", "Turn on Google Drive sharing and accept its terms first.")
             if not self.secrets.available():
                 raise ShareError("secrets_unavailable", "Secure storage is unavailable.")
@@ -905,14 +833,14 @@ class ShareLinkService:
     # ---- Send defaults ----------------------------------------------------------------------------------
 
     def send_options(self) -> dict:
-        from glossarion_mobile.services.share_providers.send_e2ee import SendProvider
+        from share_hosting_send import SendProvider
 
         raw = self.store.read().get("send") or {}
         expire, downloads = SendProvider.options(raw)
         return {"expire": expire, "downloads": downloads}
 
     async def set_send_options(self, *, expire: Optional[int] = None, downloads: Optional[int] = None) -> dict:
-        from glossarion_mobile.services.share_providers.send_e2ee import SendProvider
+        from share_hosting_send import SendProvider
 
         await self.load()
         current = self.send_options()
@@ -1279,7 +1207,7 @@ class ShareLinkService:
 
     async def add_pasted_link(self, text: str, *, path: Optional[str] = None, book: Optional[str] = None) -> ShareLink:
         """Save the transfer.it link the user pasted (validated) on the book."""
-        from glossarion_mobile.services.share_providers.transferit_handoff import parse_link
+        from share_hosting_transferit import parse_link
 
         await self.load()
         url = parse_link(text)

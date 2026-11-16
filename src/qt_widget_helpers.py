@@ -58,6 +58,26 @@ ARROW_STYLE = ("QPushButton { background: #444; color: white; border-radius: 4px
                "QPushButton:hover { background: #666; }")
 
 
+def style_combo(combo):
+    """The app's dropdown look: the Halgakos icon as the arrow (``review_dialog._halgakos_arrow_style``, as on the
+    Glossary Manager's "Earlier relations shown"), and the mouse wheel does not change the choice. (Moved here
+    from relations_diagram_dialog so the Library settings use the same one.)"""
+    combo.wheelEvent = lambda event: event.ignore()
+    try:
+        from review_dialog import _halgakos_arrow_style
+        combo.setStyleSheet(_halgakos_arrow_style(16) + """
+            QComboBox { padding-right: 24px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 22px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+    except Exception:
+        pass
+
+
 class NavComboRow(QWidget):
     """``label`` ◀ combo ▶: the arrows wrap around and show only when there is more than one item;
     the mouse wheel does not change the selection."""

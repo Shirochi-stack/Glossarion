@@ -35,6 +35,9 @@ What lives here (UI only; the services own every rule, record and network call):
 * ``U10Actions``: Send now, the per-book Default / Always / Never sheet, "Share file via link" (file choice →
   provider sheet → consent → upload progress → link sheet; the transfer.it hand-off with paste-back) and the
   saved-link rows; one implementation for the Book page's Output tab and the chat Result card;
+* ``DriveSyncFacade`` / ``DriveSyncSection``: Google Drive sync (``services.drive_sync`` over the shared
+  ``drive_sync_core``), the first card of the Settings page and of ``LibraryCloudTab`` (Library settings › Cloud):
+  one service behind both, so a change in either view shows in the other at once;
 * ``CloudSyncScreen``: the Settings page.
 
 Blocking work never runs on the UI loop: service getters run through the screen's / context's io runner; the
@@ -68,7 +71,12 @@ __all__ = [
     "CLOUD_ROUTE",
     "CloudFacade",
     "CloudSyncScreen",
+    "DRIVE_SYNC_NOW_LABEL",
+    "DRIVE_SYNC_TITLE",
+    "DriveSyncFacade",
+    "DriveSyncSection",
     "EXPLAINER",
+    "LibraryCloudTab",
     "FORMATS",
     "NOT_LISTED_HELP_ANDROID",
     "NOT_LISTED_HELP_IOS",
@@ -86,6 +94,7 @@ __all__ = [
     "cloud_progress_text",
     "compiled_kinds",
     "destination_text",
+    "drive_last_sync_text",
     "file_status_line",
     "link_meta_text",
     "queue_reason_text",
@@ -1444,7 +1453,7 @@ class U10Actions:
         return await self.provider_sheet(path, identity)
 
     async def migrate_job(self, workspace: str, raw: str, identity: str) -> Any:
-        from glossarion_mobile.services.share_providers import ShareError
+        from share_hosting import ShareError
 
         prepare = getattr(self.shares.service, "prepare_migration", None)
         if not callable(prepare):
@@ -1922,6 +1931,501 @@ DESTINATIONS = (
      "Copies replace themselves in Downloads/Glossarion; a backup app such as TeraBox, FolderSync or Syncthing can "
      "upload that folder.", "PHONE_ANDROID"),
 )
+# ---------------------------------------------------------------------------
+# Google Drive sync (services.drive_sync over the shared drive_sync_core): one section, shown at the top of this
+# page AND of Library settings › Cloud, both over the same service (a change in one shows in the other at once)
+# ---------------------------------------------------------------------------
+
+DRIVE_SYNC_TITLE = "Google Drive sync"
+DRIVE_SYNC_INTRO = ("Uploads your books to a folder in your own Google Drive after each compile. Off until you connect "
+                    "an account and turn it on.")
+DRIVE_SWITCH_LABEL = "Upload to Google Drive after each compile"
+DRIVE_MODE_LABEL = "What to upload"
+DRIVE_FOLDER_LABEL = "Drive folder"
+DRIVE_SYNC_NOW_LABEL = "☁️ Sync to Drive now"
+DRIVE_CONSENT_TITLE = "Connect Google Drive?"
+DRIVE_CONSENT_BODY = ("Glossarion signs in with your Google account on this phone and uploads your books into the Drive "
+                      "folder you name. It can only see the files it made in your Drive. Uploads go straight from "
+                      "this phone to Google; Glossarion's developer receives nothing. Uploads use mobile data on a "
+                      "mobile connection.")
+DRIVE_DISCONNECT_BODY = ("Google Drive sync and Google Drive share links stop until you connect again. Files already "
+                         "uploaded stay in your Drive.")
+DRIVE_NO_ACCOUNT_REASON = "Connect Google Drive first"
+DRIVE_NO_ACCOUNT_DETAIL = (f"Sign in with Google in {DRIVE_SYNC_TITLE} (here, or in Library settings › Cloud) before "
+                           "turning uploads on. Nothing is sent before that.")
+DRIVE_PHONE_ONLY_DETAIL = ("Google Drive sign-in uses the phone's own Google sign-in (Android and iOS). The desktop app "
+                           "has its own in the Library's ⚙️ Settings.")
+DRIVE_OPEN_FULL = "Open Cloud sync & sharing"
+REASON_DETAILS[DRIVE_NO_ACCOUNT_REASON] = DRIVE_NO_ACCOUNT_DETAIL
+
+
+def _drive_core() -> Any:
+    """``drive_sync_core`` (the shared modes, labels and folder note), or None in a tree without it."""
+    try:
+        import drive_sync_core
+
+        return drive_sync_core
+    except Exception:
+        log.debug("drive_sync_core unavailable", exc_info=True)
+        return None
+
+
+def drive_mode_labels() -> dict:
+    core = _drive_core()
+    return dict(core.MODE_LABELS) if core is not None else {}
+
+
+def drive_last_sync_text(record: Any, now: Optional[float] = None) -> str:
+    """"Last sync: Book · 1 new, 0 updated, 3 unchanged · 5 min ago" (the desktop Library's wording), or
+    "No sync yet."."""
+    if not isinstance(record, Mapping):
+        return "No sync yet."
+    mark = "" if record.get("ok") else "⚠️ "
+    parts = [str(record.get("label") or "book"), str(record.get("summary") or ""), ago_text(record.get("time"), now)]
+    return f"{mark}Last sync: " + " · ".join(p for p in parts if p)
+
+
+def drive_status_text(state: Mapping) -> str:
+    if not state.get("available"):
+        return NO_SERVICE_REASON
+    if not state.get("signed_in"):
+        return "Not connected"
+    if state.get("busy"):
+        current = str(state.get("current") or "").strip()
+        return "Connected · uploading" + (f" {current}" if current else "") + "…"
+    return "Connected to Google Drive"
+
+
+class DriveSyncFacade:
+    """The one place that names the Drive sync service's members (``services.drive_sync.MobileDriveSync``,
+    ``app.drive_sync``); a missing service (desktop ``flet run``, no share links) answers safely."""
+
+    OPS = ("set_enabled", "set_mode", "set_folder", "connect", "disconnect")
+
+    def __init__(self, service: Any = None) -> None:
+        self._source = service
+
+    @property
+    def service(self) -> Any:
+        return _source(self._source)
+
+    @property
+    def available(self) -> bool:
+        return self.service is not None
+
+    @staticmethod
+    def default_state() -> dict:
+        core = _drive_core()
+        return {"available": False, "supported": False, "signed_in": False, "enabled": False,
+                "mode": getattr(core, "DEFAULT_MODE", "compiled"), "folder": getattr(core, "DEFAULT_FOLDER", "Glossarion"),
+                "last_sync": None, "busy": False, "current": ""}
+
+    def snapshot(self) -> dict:
+        """Blocking-safe (a store read): ``available``, ``supported``, ``signed_in``, ``enabled``, ``mode``,
+        ``folder``, ``last_sync``, ``busy``, ``current``."""
+        state = self.default_state()
+        service = self.service
+        fn = getattr(service, "ui_state", None) if service is not None else None
+        if not callable(fn):
+            return state
+        try:
+            raw = fn()
+        except Exception:
+            log.exception("reading the Drive sync state failed")
+            return state
+        if isinstance(raw, Mapping):
+            state.update({k: raw[k] for k in raw if k in state})
+            state["available"] = True
+        return state
+
+    def active(self) -> bool:
+        """Sync on and connected (UI loop; a store read)."""
+        service = self.service
+        fn = getattr(service, "active", None) if service is not None else None
+        try:
+            return bool(fn()) if callable(fn) else False
+        except Exception:
+            return False
+
+    async def call(self, op: str, *args: Any) -> dict:
+        service = self.service
+        fn = getattr(service, op, None) if service is not None and op in self.OPS + ("sync_book",) else None
+        if not callable(fn):
+            return {"ok": False, "message": NO_SERVICE_REASON, "unavailable": True}
+        try:
+            value = await _resolve(fn(*args))
+        except Exception as exc:
+            log.info("drive sync %s failed: %s", op, getattr(exc, "code", type(exc).__name__))
+            return {"ok": False, "message": str(getattr(exc, "message", "") or exc) or exc.__class__.__name__,
+                    "code": str(getattr(exc, "code", "") or "")}
+        if value is False:
+            return {"ok": False, "message": "", "value": value}
+        return {"ok": True, "message": "", "value": value}
+
+    def subscribe(self, listener: Callable[..., Any]) -> Callable[[], None]:
+        service = self.service
+        fn = getattr(service, "subscribe", None) if service is not None else None
+        if not callable(fn):
+            return lambda: None
+        try:
+            unsub = fn(listener)
+        except Exception:
+            return lambda: None
+        return unsub if callable(unsub) else (lambda: None)
+
+
+class DriveSyncSection:
+    """The Google Drive sync controls: connect state with Sign in / Disconnect (the existing native sign-in,
+    behind a consent dialog), the upload switch, the folder name (with the ``drive.file`` note), the mode
+    dropdown and the last sync line. ``show(dialog)`` opens a ConfirmDialog; ``push(*controls)`` repaints."""
+
+    def __init__(self, facade: DriveSyncFacade, *, platform: str = "desktop", say: Optional[Callable[..., Any]] = None,
+                 spawn: Optional[Callable[[Any], Any]] = None, io: Optional[Callable[..., Any]] = None,
+                 show: Optional[Callable[[Any], Any]] = None, push: Optional[Callable[..., Any]] = None,
+                 key: str = "drive", now: Optional[Callable[[], float]] = None) -> None:
+        self.facade = facade
+        self.platform = platform
+        self._say = say
+        self._spawn = spawn
+        self._io = io
+        self._show = show
+        self._push = push
+        self.key = key
+        self.clock = now or time.time
+        self.state: dict = facade.default_state()
+        self.loaded = False
+        self.folder_dirty = False
+        self._unsub: Optional[Callable[[], None]] = None
+        self._refreshing = False
+        self._again = False
+        core = _drive_core()
+        self.status = ft.Text("…", theme_style=ft.TextThemeStyle.BODY_MEDIUM, expand=True, key=f"{key}-status")
+        self.account_button = ft.FilledTonalButton(content="Sign in with Google", icon=ft.Icons.LOGIN,
+                                                   on_click=lambda e: self.spawn(self.account()),
+                                                   key=f"{key}-account")
+        self.reason_row = ft.Row([], wrap=True, key=f"{key}-reason")
+        self.switch = toggle(value=False, on_change=self._on_switch, key=f"{key}-enabled")
+        self.folder_field = ft.TextField(label=DRIVE_FOLDER_LABEL, value=self.state["folder"], dense=True, expand=True,
+                                         on_change=self._on_folder_typed,
+                                         on_submit=lambda e: self.spawn(self.save_folder()), key=f"{key}-folder")
+        self.folder_save = ft.TextButton(content="Save", on_click=lambda e: self.spawn(self.save_folder()),
+                                         key=f"{key}-folder-save")
+        self.folder_note = ft.Text(getattr(core, "FOLDER_NOTE", ""), theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                   color=ft.Colors.ON_SURFACE_VARIANT, key=f"{key}-folder-note")
+        self.mode_dropdown = ft.Dropdown(
+            label=DRIVE_MODE_LABEL, value=self.state["mode"], dense=True, expand=True, key=f"{key}-mode",
+            options=[ft.DropdownOption(key=mode, text=label) for mode, label in drive_mode_labels().items()],
+            on_select=self._on_mode)
+        self.last_sync = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                 key=f"{key}-last")
+
+    # ---- plumbing ----
+
+    def say(self, message: str) -> None:
+        if message and self._say is not None:
+            self._say(message)
+
+    def spawn(self, coro: Any) -> Any:
+        if self._spawn is not None:
+            return self._spawn(coro)
+        return asyncio.ensure_future(coro)
+
+    async def io(self, fn: Callable[..., Any], *args: Any) -> Any:
+        if self._io is not None:
+            return await self._io(fn, *args)
+        return fn(*args)
+
+    def push(self, *controls: Any) -> None:
+        if self._push is not None:
+            self._push(*controls)
+            return
+        for control in controls:
+            try:
+                control.update()
+            except Exception:
+                pass
+
+    def show(self, dialog: Any) -> Any:
+        if self._show is not None:
+            return self._show(dialog)
+        return dialog
+
+    # ---- layout ----
+
+    def controls(self, *, intro: bool = True) -> list:
+        rows: list = []
+        if intro:
+            rows.append(ft.Text(DRIVE_SYNC_INTRO, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                color=ft.Colors.ON_SURFACE_VARIANT))
+        rows += [
+            ft.Row([ft.Icon(ft.Icons.CLOUD_OUTLINED), self.status, self.account_button], spacing=8,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            self.reason_row,
+            switch_row(self.switch, DRIVE_SWITCH_LABEL),
+            # no wrap: an expanding child inside a wrapping Row is a Flutter layout error
+            ft.Row([self.folder_field, self.folder_save], spacing=8,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            self.folder_note,
+            ft.Row([self.mode_dropdown]),
+            self.last_sync,
+        ]
+        self.render()
+        return rows
+
+    # ---- life ----
+
+    def attach(self) -> None:
+        if self._unsub is None:
+            self._unsub = self.facade.subscribe(self._on_change)
+        self.spawn(self.refresh())
+
+    def detach(self) -> None:
+        if self._unsub is not None:
+            try:
+                self._unsub()
+            except Exception:
+                pass
+            self._unsub = None
+
+    def _on_change(self, *args: Any) -> None:
+        if self._refreshing:
+            self._again = True
+            return
+        try:
+            self.spawn(self.refresh())
+        except Exception:
+            log.debug("drive sync refresh failed", exc_info=True)
+
+    async def refresh(self) -> dict:
+        if self._refreshing:
+            self._again = True
+            return self.state
+        self._refreshing = True
+        try:
+            while True:
+                self._again = False
+                self.state = await self.io(self.facade.snapshot)
+                self.loaded = True
+                self.render()
+                if not self._again:
+                    break
+        finally:
+            self._refreshing = False
+        return self.state
+
+    def unavailable_reason(self) -> Optional[str]:
+        if not self.state.get("available"):
+            return NO_SERVICE_REASON
+        if self.platform not in ("android", "ios") or not self.state.get("supported"):
+            return PHONE_ONLY
+        return None
+
+    def render(self) -> None:
+        state = self.state
+        unavailable = self.unavailable_reason()
+        signed_in = bool(state.get("signed_in"))
+        enabled = bool(state.get("enabled"))
+        self.status.value = drive_status_text(state)
+        self.account_button.content = "Disconnect" if signed_in else "Sign in with Google"
+        self.account_button.icon = ft.Icons.LINK_OFF if signed_in else ft.Icons.LOGIN
+        self.account_button.disabled = bool(unavailable)
+        reason = unavailable or (DRIVE_NO_ACCOUNT_REASON if not signed_in else None)
+        detail = DRIVE_PHONE_ONLY_DETAIL if reason == PHONE_ONLY else reason_detail(reason)
+        self.reason_row.controls = ([ReasonChip(reason=reason, detail=detail, key=f"{self.key}-chip")]
+                                    if reason else [])
+        self.switch.value = enabled
+        self.switch.disabled = bool(unavailable) or (not signed_in and not enabled)  # off is always allowed
+        if not self.folder_dirty:
+            self.folder_field.value = str(state.get("folder") or "")
+        self.folder_field.disabled = self.folder_save.disabled = bool(unavailable)
+        self.mode_dropdown.value = str(state.get("mode") or "compiled")
+        self.mode_dropdown.disabled = bool(unavailable)
+        self.last_sync.value = drive_last_sync_text(state.get("last_sync"), self.clock())
+        self.push(self.status, self.account_button, self.reason_row, self.switch, self.folder_field,
+                  self.folder_save, self.mode_dropdown, self.last_sync)
+
+    # ---- handlers ----
+
+    async def _apply(self, op: str, *args: Any, failed: str = "Could not change the setting") -> dict:
+        result = await self.facade.call(op, *args)
+        if not result.get("ok"):
+            self.say(str(result.get("message") or failed))
+        await self.refresh()
+        return result
+
+    def _on_switch(self, e: Any = None) -> None:
+        value = bool(getattr(getattr(e, "control", None), "value", self.switch.value))
+        self.spawn(self.set_enabled(value))
+
+    async def set_enabled(self, value: bool) -> dict:
+        reason = self.unavailable_reason() or (DRIVE_NO_ACCOUNT_REASON if value and not self.state.get("signed_in")
+                                               else None)
+        if reason and value:
+            self.switch.value = False
+            self.push(self.switch)
+            self.say(REASON_DETAILS.get(reason, reason))
+            return {"ok": False, "message": reason}
+        return await self._apply("set_enabled", bool(value))
+
+    def _on_mode(self, e: Any = None) -> None:
+        value = str(getattr(getattr(e, "control", None), "value", None) or self.mode_dropdown.value or "")
+        self.spawn(self.set_mode(value))
+
+    async def set_mode(self, mode: str) -> dict:
+        if mode not in drive_mode_labels():
+            return {"ok": False, "message": "Unknown mode"}
+        return await self._apply("set_mode", mode)
+
+    def _on_folder_typed(self, e: Any = None) -> None:
+        self.folder_dirty = True
+
+    async def save_folder(self) -> dict:
+        text = str(self.folder_field.value or "").strip()
+        self.folder_dirty = False
+        return await self._apply("set_folder", text, failed="Could not save the folder")
+
+    async def account(self) -> Any:
+        """Sign in (consent dialog first) or Disconnect (asks first). Returns the dialog it opened."""
+        if self.unavailable_reason():
+            self.say(REASON_DETAILS.get(self.unavailable_reason() or "", "") or DRIVE_PHONE_ONLY_DETAIL)
+            return None
+        if self.state.get("signed_in"):
+            async def disconnect() -> None:
+                result = await self._apply("disconnect", failed="Could not disconnect Google Drive")
+                if result.get("ok"):
+                    self.say("Google Drive disconnected")
+
+            return self.show(ConfirmDialog(title="Disconnect Google Drive?", body=DRIVE_DISCONNECT_BODY,
+                                           confirm_label="Disconnect", destructive=True, on_confirm=disconnect))
+
+        async def connect() -> None:
+            result = await self._apply("connect", failed="Google Drive sign-in failed")
+            if result.get("ok"):
+                self.say("Google Drive connected")
+
+        return self.show(ConfirmDialog(title=DRIVE_CONSENT_TITLE, body=DRIVE_CONSENT_BODY, confirm_label="Sign in",
+                                       on_confirm=connect))
+
+
+class LibraryCloudTab:
+    """Library settings › Cloud: the Google Drive sync section first (the same service and state as Settings ›
+    Cloud sync & sharing), then one line each for the device cloud copy and the share-link services, and a
+    button to the full page."""
+
+    def __init__(self, *, drive: Any = None, cloud: Any = None, shares: Any = None, platform: str = "desktop",
+                 page: Any = None, say: Optional[Callable[..., Any]] = None, spawn: Optional[Callable[[Any], Any]] = None,
+                 io: Optional[Callable[..., Any]] = None, go: Optional[Callable[..., Any]] = None,
+                 close: Optional[Callable[[], Any]] = None) -> None:
+        self.page = page
+        self.drive_facade = DriveSyncFacade(drive)
+        self.cloud_facade = CloudFacade(cloud)
+        self.share_facade = ShareFacade(shares)
+        self._io = io
+        self._spawn = spawn
+        self.go = go
+        self.close = close
+        self.section = DriveSyncSection(self.drive_facade, platform=platform, say=say, spawn=spawn, io=io,
+                                        show=self._show_dialog, key="lib-drive")
+        self.device_line = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="lib-cloud-device")
+        self.share_line = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="lib-cloud-share")
+        self.open_button = ft.TextButton(content=DRIVE_OPEN_FULL, icon=ft.Icons.OPEN_IN_NEW,
+                                         on_click=lambda e: self.open_full(), key="lib-cloud-open")
+        self._unsubs: list = []
+        self._refreshing = False
+        self._again = False
+        title = ft.Text(DRIVE_SYNC_TITLE, theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY)
+        other = ft.Text("Copies and share links", theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY)
+        self.control = ft.ListView([title, *self.section.controls(intro=False), ft.Divider(), other,
+                                    self.device_line, self.share_line, self.open_button],
+                                   spacing=tokens.SPACING["sm"], padding=ft.Padding.only(top=12), key="lib-cloud-tab")
+
+    def _show_dialog(self, dialog: Any) -> Any:
+        if self.page is not None:
+            dialog.show(self.page)
+        return dialog
+
+    def spawn(self, coro: Any) -> Any:
+        if self._spawn is not None:
+            return self._spawn(coro)
+        return asyncio.ensure_future(coro)
+
+    async def io(self, fn: Callable[..., Any], *args: Any) -> Any:
+        if self._io is not None:
+            return await self._io(fn, *args)
+        return fn(*args)
+
+    def attach(self) -> None:
+        """Subscribe to the three services and read them (the sheet was shown)."""
+        self.section.attach()
+        if not self._unsubs:
+            self._unsubs = [self.cloud_facade.subscribe(self._on_change), self.share_facade.subscribe(self._on_change)]
+        self.spawn(self.refresh())
+
+    def dispose(self) -> None:
+        self.section.detach()
+        for unsub in self._unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._unsubs = []
+
+    def _on_change(self, *args: Any) -> None:
+        if self._refreshing:
+            self._again = True
+            return
+        self.spawn(self.refresh())
+
+    def _read(self) -> tuple:
+        return self.cloud_facade.snapshot(), self.share_facade.providers()
+
+    async def refresh(self) -> None:
+        if self._refreshing:
+            self._again = True
+            return
+        self._refreshing = True
+        try:
+            while True:
+                self._again = False
+                cloud_state, providers = await self.io(self._read)
+                self.render(cloud_state, providers)
+                if not self._again:
+                    break
+        finally:
+            self._refreshing = False
+
+    def render(self, cloud_state: Mapping, providers: Sequence[Mapping]) -> None:
+        if not self.cloud_facade.available:
+            device = f"Copy to your cloud app: {NO_SERVICE_REASON.lower()}"
+        else:
+            dest = cloud_state.get("destination") if isinstance(cloud_state.get("destination"), Mapping) else None
+            auto = "automatic" if cloud_state.get("enabled") else "automatic copies off"
+            device = f"Copy to your cloud app: {destination_text(dest)}"
+            if dest:
+                device += f" · {auto} · {summary_text(cloud_state)}"
+        on = [str(p.get("label") or p.get("id")) for p in providers if p.get("enabled")]
+        if not self.share_facade.available:
+            share = f"{SHARE_LABEL}: {NO_SERVICE_REASON.lower()}"
+        else:
+            share = f"{SHARE_LABEL}: " + (", ".join(on) + " on" if on else "every service is off")
+        self.device_line.value = device
+        self.share_line.value = share
+        for control in (self.device_line, self.share_line):
+            try:
+                control.update()
+            except Exception:
+                pass
+
+    def open_full(self) -> None:
+        if self.close is not None:
+            try:
+                self.close()
+            except Exception:
+                log.debug("closing the Library settings sheet failed", exc_info=True)
+        if self.go is not None:
+            self.go(ROUTE_NAME)
+
+
 #: Send (send.vis.ee) link options: (seconds, label) and download counts (the service clamps them too).
 SEND_EXPIRY_CHOICES = ((300, "5 minutes"), (3600, "1 hour"), (86400, "1 day"), (259200, "3 days"))
 SEND_DOWNLOAD_CHOICES = (1, 2, 3, 5, 10, 20)
@@ -1933,11 +2437,15 @@ class CloudSyncScreen(PageScreen):
     def __init__(self, match: Any, ctx: Any, *, cloud: Any = None, shares: Any = None, platform: str = "desktop",
                  open_url: Optional[Callable[[str], Any]] = None, share_text: Optional[Callable[[str], Any]] = None,
                  show_in_files: Optional[Callable[[str], Any]] = None,
-                 now: Optional[Callable[[], float]] = None) -> None:
+                 now: Optional[Callable[[], float]] = None, drive: Any = None) -> None:
         super().__init__(match, ctx)
         self.platform = platform
         self.facade = CloudFacade(cloud)
         self.share_facade = ShareFacade(shares)
+        self.drive_facade = DriveSyncFacade(drive)
+        # Google Drive sync, at the top (the same section and service as Library settings › Cloud)
+        self.drive_section = DriveSyncSection(self.drive_facade, platform=platform, say=self.say, spawn=self.spawn,
+                                              io=self.io, show=self.show, push=self.push, key="drive", now=now)
         self.actions_ = U10Actions(
             cloud=self.facade, shares=self.share_facade, page=self.page, say=self.say, spawn=self.spawn, io=self.io,
             go=getattr(ctx, "go", None), copy_text=getattr(ctx, "copy_text", None), share_text=share_text,
@@ -2023,6 +2531,7 @@ class CloudSyncScreen(PageScreen):
             self.providers_column,
         ]
         body = self.scaffold([
+            section(DRIVE_SYNC_TITLE, self.drive_section.controls(), key="drive-card"),
             section("Copy books to your cloud", cloud_rows, key="cloud-card"),
             section("Activity", activity_rows, key="cloud-activity-card"),
             section(SHARE_LABEL, share_rows, key="share-card"),
@@ -2034,13 +2543,16 @@ class CloudSyncScreen(PageScreen):
         if not self._unsubs:
             self._unsubs.append(self.facade.subscribe(self._on_change))
             self._unsubs.append(self.share_facade.subscribe(self._on_change))
+        self.drive_section.attach()  # subscribes once and reads the Drive sync state
         self.spawn(self.refresh())
 
     def app_resumed(self) -> None:
         """Back from the system picker or the cloud app: the destination may have changed."""
         self.spawn(self.refresh())
+        self.spawn(self.drive_section.refresh())
 
     def dispose(self) -> None:
+        self.drive_section.detach()
         for unsub in self._unsubs:
             try:
                 unsub()

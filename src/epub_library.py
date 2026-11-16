@@ -3582,6 +3582,17 @@ class EpubLibraryDialog(LibraryShelfMixin, QDialog):
         refresh_btn.clicked.connect(self._load_books)
         header.addWidget(refresh_btn)
 
+        # Library settings: Google Drive sync and Share via link
+        # (library_cloud_ui.LibrarySettingsDialog).
+        self._library_settings_btn = QPushButton("⚙️  Settings")
+        self._library_settings_btn.setToolTip(
+            "Library settings: Google Drive sync and Share via link")
+        self._library_settings_btn.setFixedHeight(28)
+        self._library_settings_btn.setCursor(Qt.PointingHandCursor)
+        self._library_settings_btn.setStyleSheet(refresh_btn.styleSheet())
+        self._library_settings_btn.clicked.connect(self._open_library_settings)
+        header.addWidget(self._library_settings_btn)
+
         root.addLayout(header)
         root.addSpacing(6)
 
@@ -5085,6 +5096,31 @@ class EpubLibraryDialog(LibraryShelfMixin, QDialog):
             return
         self._set_cards_compiling(folder, True)
         self._watch_compile_for_folder(folder, gui)
+
+    # -- Library settings / Share / Drive sync (library_cloud_ui) ------------
+
+    def _open_library_settings(self):
+        from library_cloud_ui import open_library_settings
+        return open_library_settings(self)
+
+    def _compile_callback_for(self, book: dict):
+        """The Library's own Compile EPUB / PDF for *book* (None when it has no workspace)."""
+        from library_cloud_ui import book_can_compile, book_output_folder
+        kind = book_can_compile(book)
+        if not kind:
+            return None
+        folder = book_output_folder(book)
+        if kind == "pdf":
+            return lambda: self._compile_pdf_for_folder(folder)
+        return lambda: self._compile_epub_for_folder(folder)
+
+    def _share_book(self, book: dict):
+        from library_cloud_ui import open_share_dialog
+        return open_share_dialog(self, book, compile_cb=self._compile_callback_for(book))
+
+    def _sync_book_to_drive(self, book: dict):
+        from library_cloud_ui import sync_book_now
+        return sync_book_now(self, book)
 
     def _translate_metadata_for_books(self, books: list[dict]) -> bool:
         """Run the normal metadata phase for every resolvable selected EPUB."""
@@ -6797,6 +6833,24 @@ class EpubLibraryDialog(LibraryShelfMixin, QDialog):
             )
             translation_action.triggered.connect(
                 lambda: _open_folder_in_explorer(translation_target))
+        # Share by link / Google Drive sync (Library settings; library_cloud_ui).
+        menu.addSeparator()
+        share_action = menu.addAction("\U0001f4e4  Share…")
+        share_action.setToolTip(
+            "Upload this book's compiled file to a sharing site and get a link "
+            "(sites are set up in Library settings).")
+        share_action.triggered.connect(lambda: self._share_book(book))
+        try:
+            from library_cloud_ui import drive_sync_on
+            _drive_on = drive_sync_on(self)
+        except Exception:
+            _drive_on = False
+        if _drive_on:
+            drive_action = menu.addAction("☁️  Sync to Drive now")
+            drive_action.setToolTip(
+                "Upload this book to your Google Drive folder now, in the "
+                "mode chosen in Library settings.")
+            drive_action.triggered.connect(lambda: self._sync_book_to_drive(book))
         menu.addSeparator()
         copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
@@ -8091,16 +8145,9 @@ class _ChapterVirtualList(QWidget):
 # (library_core, imported above; see DISCREPANCIES U5 "Phase-1 splits").
 
 
-class _BookMetadataEditDialog(QDialog):
-    """Compact editor for the output workspace's metadata.json."""
-
-    def __init__(self, values: dict, parent=None):
-        super().__init__(parent)
-        self._initial_values = dict(values or {})
-        self.setWindowTitle("Edit EPUB Metadata")
-        self.setModal(True)
-        self.setMinimumWidth(620)
-        self.setStyleSheet("""
+#: The Library's small form dialogs (Edit EPUB Metadata; Library settings and Share in
+#: library_cloud_ui).
+_LIBRARY_FORM_STYLE = """
             QDialog { background: #161622; color: #e0e0e0; }
             QLabel { color: #aeb3c7; font-size: 9pt; }
             QLineEdit, QPlainTextEdit {
@@ -8119,7 +8166,19 @@ class _BookMetadataEditDialog(QDialog):
             QPushButton:hover {
                 background: #3a3a5e; border-color: #6c63ff;
             }
-        """)
+        """
+
+
+class _BookMetadataEditDialog(QDialog):
+    """Compact editor for the output workspace's metadata.json."""
+
+    def __init__(self, values: dict, parent=None):
+        super().__init__(parent)
+        self._initial_values = dict(values or {})
+        self.setWindowTitle("Edit EPUB Metadata")
+        self.setModal(True)
+        self.setMinimumWidth(620)
+        self.setStyleSheet(_LIBRARY_FORM_STYLE)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 18, 18, 18)
@@ -8532,6 +8591,16 @@ class BookDetailsDialog(BookDetailsMixin, QDialog):
         except Exception:
             self._translate_metadata_btn.setVisible(False)
         actions.addWidget(self._translate_metadata_btn)
+
+        # Share by link (Library settings › Share via link; library_cloud_ui).
+        self._share_btn = QPushButton("\U0001f4e4  Share")
+        self._share_btn.setCursor(Qt.PointingHandCursor)
+        self._share_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._share_btn.setToolTip(
+            "Upload this book's compiled file to a sharing site and get a link.")
+        self._share_btn.setStyleSheet(self._translate_metadata_btn.styleSheet())
+        self._share_btn.clicked.connect(self._on_share_clicked)
+        actions.addWidget(self._share_btn)
 
         actions.addStretch()
         center.addLayout(actions)
@@ -9916,6 +9985,12 @@ class BookDetailsDialog(BookDetailsMixin, QDialog):
                 parent_lib._watch_compile_for_folder(out_folder, gui)
             except Exception:
                 pass
+
+    def _on_share_clicked(self):
+        """Share this book's compiled file by link (compile first from here when it has none)."""
+        from library_cloud_ui import book_can_compile, open_share_dialog
+        compile_cb = self._on_compile_epub_clicked if book_can_compile(self._book) else None
+        return open_share_dialog(self, self._book, compile_cb=compile_cb)
 
     # _metadata_editor_values, _source_metadata_values moved verbatim to library_core.BookDetailsMixin (inherited).
 

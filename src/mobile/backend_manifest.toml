@@ -82,6 +82,11 @@ modules = [
   "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
   # The Hayai OCR provider's onnxruntime recognizer (ocr_manager imports it on load).
   "hayai_ocr",
+  # Library cloud shared core (moved out of services/share_providers so the desktop Library uses the
+  # same code): share-link providers, Google Drive OAuth / REST client, and the Drive sync planner +
+  # worker the mobile DONE hook runs. (library_cloud is the desktop's store and stays out.)
+  "share_hosting", "share_hosting_gofile", "share_hosting_pixeldrain", "share_hosting_send",
+  "share_hosting_transferit", "google_drive_core", "drive_sync_core",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).

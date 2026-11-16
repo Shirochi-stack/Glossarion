@@ -132,6 +132,8 @@ __all__ = [
     "collect_outputs",
     "error_code",
     "is_own_location",
+    "is_raw_source",
+    "job_books",
     "output_kind",
     "select_outputs",
 ]
@@ -525,6 +527,63 @@ def select_outputs(book: Mapping[str, Any], *, lister: Optional[Callable[[Mappin
     reported = [os.fspath(p) for p in reported or () if p]
     return choose_outputs(collect_outputs(book, lister=lister, reported=reported,
                                           reported_anywhere=reported_anywhere), reported)
+
+
+def is_raw_source(path: str, library: Any) -> bool:
+    """``path`` lies in the Library's Raw folder (untranslated sources never leave the phone)."""
+    if library is None or not path:
+        return False
+    try:
+        root = library.library_root()
+    except Exception:
+        return False
+    return bool(root) and _under(path, os.path.join(str(root), "Raw"))
+
+
+def job_books(snap: Any, library: Any = None) -> list:
+    """``[(identity, reported paths, single)]`` of the Library books a finished job may have changed (the job
+    kinds in :data:`TRIGGER_KINDS`); used by this service's DONE hook and the Google Drive sync's
+    (``services.drive_sync``)."""
+    spec = getattr(snap, "spec", None)
+    if str(getattr(spec, "kind", "") or "") not in TRIGGER_KINDS:
+        return []
+    # A chat translation (direct_text) is not a trigger: its book is uploaded once the auto-migrate moved
+    # it into the Library (on_workspace_moved). A chat card's Compile of a book already in the Library is;
+    # one of a workspace still in Attachments is dropped by the drain (it waits for the Library).
+    origin = getattr(spec, "origin", None) or {}
+    params = getattr(spec, "params", None) or {}
+    folders: list = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value and os.path.isabs(value):
+            if _norm(value) not in {_norm(f) for f in folders}:
+                folders.append(os.path.abspath(value))
+
+    add(params.get("folder"))
+    for name in ("folders", "output_roots"):
+        values = params.get(name)
+        if isinstance(values, Mapping) or isinstance(values, (str, bytes)):
+            # Tools › Headers & metadata maps {raw source: output root}: neither side is a book workspace
+            # (iterating it would take the raw EPUB as a book); its bid / output_dirs name the books
+            continue
+        for value in values or ():
+            add(value)
+    for value in (getattr(snap, "output_dirs", None) or {}).values():
+        add(value)
+    add(getattr(snap, "output_dir", None))
+    bid = origin.get("bid") if isinstance(origin, Mapping) and origin.get("type") == "library" else None
+    if bid and library is not None and hasattr(library, "identity_for_bid"):
+        try:
+            add(library.identity_for_bid(str(bid)))
+        except Exception:
+            pass
+    # never a job's input file (the untranslated source a Tools job reads) nor anything in Library/Raw
+    inputs = {_norm(p) for p in (getattr(spec, "inputs", None) or ()) if isinstance(p, str) and p}
+    folders = [f for f in folders if not is_raw_source(f, library)
+               and not (_norm(f) in inputs and os.path.isfile(f))]
+    reported = [os.fspath(p) for p in (getattr(snap, "outputs", None) or ()) if p]
+    single = len(folders) == 1
+    return [(folder, reported, single) for folder in folders]
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1334,58 +1393,13 @@ class CloudSyncService:
     # ---- triggers ----------------------------------------------------------------------------------
 
     def _job_books(self, snap: Any) -> list:
-        """``[(identity, reported paths, single)]`` of the Library books a job may have changed."""
-        spec = getattr(snap, "spec", None)
-        if str(getattr(spec, "kind", "") or "") not in TRIGGER_KINDS:
-            return []
-        # A chat translation (direct_text) is not a trigger: its book is uploaded once the auto-migrate moved
-        # it into the Library (on_workspace_moved). A chat card's Compile of a book already in the Library is;
-        # one of a workspace still in Attachments is dropped by the drain (it waits for the Library).
-        origin = getattr(spec, "origin", None) or {}
-        params = getattr(spec, "params", None) or {}
-        folders: list = []
-
-        def add(value: Any) -> None:
-            if isinstance(value, str) and value and os.path.isabs(value):
-                if _norm(value) not in {_norm(f) for f in folders}:
-                    folders.append(os.path.abspath(value))
-
-        add(params.get("folder"))
-        for name in ("folders", "output_roots"):
-            values = params.get(name)
-            if isinstance(values, Mapping) or isinstance(values, (str, bytes)):
-                # Tools › Headers & metadata maps {raw source: output root}: neither side is a book workspace
-                # (iterating it would take the raw EPUB as a book); its bid / output_dirs name the books
-                continue
-            for value in values or ():
-                add(value)
-        for value in (getattr(snap, "output_dirs", None) or {}).values():
-            add(value)
-        add(getattr(snap, "output_dir", None))
-        bid = origin.get("bid") if isinstance(origin, Mapping) and origin.get("type") == "library" else None
-        if bid and self.library is not None and hasattr(self.library, "identity_for_bid"):
-            try:
-                add(self.library.identity_for_bid(str(bid)))
-            except Exception:
-                pass
-        # never a job's input file (the untranslated source a Tools job reads) nor anything in Library/Raw
-        inputs = {_norm(p) for p in (getattr(spec, "inputs", None) or ()) if isinstance(p, str) and p}
-        folders = [f for f in folders if not self._is_raw_source(f)
-                   and not (_norm(f) in inputs and os.path.isfile(f))]
-        reported = [os.fspath(p) for p in (getattr(snap, "outputs", None) or ()) if p]
-        single = len(folders) == 1
-        return [(folder, reported, single) for folder in folders]
+        """``[(identity, reported paths, single)]`` of the Library books a job may have changed
+        (:func:`job_books`, shared with the Google Drive sync's DONE hook)."""
+        return job_books(snap, self.library)
 
     def _is_raw_source(self, path: str) -> bool:
         """``path`` lies in the Library's Raw folder (untranslated sources never leave the phone)."""
-        library = self.library
-        if library is None or not path:
-            return False
-        try:
-            root = library.library_root()
-        except Exception:
-            return False
-        return bool(root) and _under(path, os.path.join(str(root), "Raw"))
+        return is_raw_source(path, self.library)
 
     def on_job_transition(self, snap: Any, previous: Any = None) -> None:
         """JobService transition (UI loop, synchronous): a Library job reached DONE -> its books are queued

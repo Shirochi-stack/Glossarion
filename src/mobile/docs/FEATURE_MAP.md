@@ -1222,6 +1222,8 @@ Not desktop features (no inventory rows; tests/parity/DISCREPANCIES.md "U10"). U
 | d | Per-book Default / Always / Never and Send now | Book › Output › Cloud & sharing; chat Result card "Send to cloud" | **New** (U10) |
 | e | Share file via link: transfer.it hand-off, Gofile, Send (end-to-end encrypted), pixeldrain (user's key) | Book › Output › Share file via link + Saved links; chat Result card; Data › Cloud sync & sharing (service switches, consent sheets, pixeldrain key, Send options) | **New** (U10): tap only, every service off until enabled with consent; transfer.it is a browser hand-off (no API call); secrets encrypted |
 | f | Cloud / upload failure and "needs a save location" notifications | `jobs.action` notifications (routes only) | **New** (U10): failures only; progress in the shared foreground notification |
+| g | Google Drive sync: Compiled output only / Full output folder / Full output folder + raw source (RAW subfolder), into a named Drive folder, updated in place on recompile | Data › Cloud sync & sharing (first card) and Library settings › Cloud (the same section and service); Book card ⋯ › ☁️ Sync to Drive now | Shared with the desktop Library's ⚙️ Settings (`drive_sync_core`, `google_drive_core`); mobile signs in with the share-link service's native Google sign-in (`drive.file`), no share-link site needed; off by default; uploads after a Library job's DONE (`services/drive_sync.py`) |
+| h | Library settings › Cloud tab | Library ⋯ › Library settings (4th tab) | Google Drive sync on top, then the device cloud copy and share-link summaries, and Open Cloud sync & sharing (UI_SPEC §3.1) |
 
 ## 19. desktop-additions: desktop features added after the inventory
 

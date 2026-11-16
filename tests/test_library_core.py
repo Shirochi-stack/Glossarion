@@ -665,6 +665,17 @@ LIBRARY_CLASSES_CHANGED = {
         "_chapter_page_bounds", "_update_chapter_pagination_controls", "_open_reader",
     },
 }
+#: Library cloud (Library settings ⚙ button, Share…, Sync to Drive now; library_cloud_ui),
+#: 2026-11: methods added to / changed in the Qt classes on purpose.
+LIBRARY_CLOUD_ADDED = {
+    "EpubLibraryDialog": {"_open_library_settings", "_compile_callback_for", "_share_book", "_sync_book_to_drive"},
+    "BookDetailsDialog": {"_on_share_clicked"},
+}
+LIBRARY_CLOUD_CHANGED = {
+    "EpubLibraryDialog": {"_setup_ui", "_show_context_menu"},
+    "BookDetailsDialog": {"_setup_ui"},
+    "_BookMetadataEditDialog": {"__init__"},  # its style became epub_library._LIBRARY_FORM_STYLE
+}
 _READER_CLASSES = {"_EpubCacheLoaderThread", "_OverlayMergeThread", "_ReaderImagePreloadThread",
                    "_WorkspaceReaderLoaderThread", "_EpubSearchThread", "_EpubLoaderThread",
                    "EpubReaderDialog"}
@@ -688,6 +699,8 @@ def test_qt_library_classes_changed_only_the_documented_methods(el, legacy_tree)
         old, new = members(old_node), members(new_classes[name])
         added = set(new) - set(old)
         changed = {m for m, text in new.items() if m in old and old[m] != text}
+        added -= LIBRARY_CLOUD_ADDED.get(name, set())
+        changed -= LIBRARY_CLOUD_CHANGED.get(name, set())
         assert not added, (name, added)
         if changed:
             seen[name] = changed

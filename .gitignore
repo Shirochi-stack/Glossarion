@@ -231,6 +231,8 @@ tests/**
 !tests/test_library_core.py
 !tests/test_reader_doc.py
 !tests/test_progress_core.py
+!tests/test_cloud_drive_core.py
+!tests/test_library_cloud_desktop.py
 !tests/test_progress_actions.py
 !tests/test_glossary_progress_core.py
 !tests/test_glossary_special_rows.py
