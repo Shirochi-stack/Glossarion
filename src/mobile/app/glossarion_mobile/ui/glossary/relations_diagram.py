@@ -26,12 +26,13 @@ filters are stored per book in the tracker's ``view`` key (``relations_tracking.
 the desktop). Node positions come from the all-chapters graph, so nodes stay put while the slider or a
 filter changes.
 
-Tapping a node opens a sheet with that character's description at the slider's chapter, gender history
-and relation history; the earlier descriptions sit behind a collapsed "Earlier descriptions (n)" line
-(tapping it shows or hides them; the choice holds while the screen is open). Tapping a name there opens
-that character's sheet. The sheet rows edit and delete
-relations, history entries and descriptions; "Add relation" adds one. A long press on a node offers Add
-relation, Edit description, Set gender, Hide from view and Remove from tracker. Every write is one locked
+Tapping a node makes it the Focus (the picture rebuilt round it, the Focus picker showing it). A long
+press on a node opens its menu: Details and history, Add relation, Edit description, Set gender, Hide
+from view and Remove from tracker. "Details and history" is a sheet with that character's description at
+the slider's chapter, gender history and relation history; the earlier descriptions sit behind a collapsed
+"Earlier descriptions (n)" line (tapping it shows or hides them; the choice holds while the screen is
+open). Tapping a name there opens that character's sheet. The sheet rows edit and delete relations,
+history entries and descriptions; "Add relation" adds one. Every write is one locked
 load -> modify -> write of the core (``relations_tracking.edit_tracker`` / ``set_gender``); every delete
 asks first (``common.ask``); the last edits can be undone (app bar Undo, or the snackbar's Undo).
 
@@ -802,7 +803,7 @@ class RelationsDiagram:
                 bgcolor=ft.Colors.with_opacity(0.9 if listed else 0.45, tint),
                 border=ft.Border.all(2 if selected else 1, amber if selected else tint),
                 tooltip=str(node.get("raw_name") or node["id"]),
-                on_click=quiet(lambda n=node: self.show_history(n["id"])),
+                on_click=quiet(lambda n=node: self.tap_node(n["id"])),
                 on_long_press=quiet(lambda n=node: self.node_menu(n["id"])), key=f"rel-node-{node['id']}"))
         self.node_controls = nodes
         self.stack.controls = [self.canvas, *nodes]
@@ -941,6 +942,17 @@ class RelationsDiagram:
         that name in the middle; "All characters" goes back to the picture without a focus. Returns the task."""
         self.focus = None if node_id in (None, "", ALL_CHARACTERS) else str(node_id)
         return self.relayout()  # a new layout: the whole of it in view again
+
+    def tap_node(self, node_id: Any) -> Any:
+        """A tap on a name makes it the Focus: the Focus picker shows it and the picture is rebuilt round it
+        (``set_focus``). The name that already is the Focus stays as it is. The menu (history, edits) is the
+        long press (``node_menu``). Returns the layout task, None when nothing changes."""
+        node_id = str(node_id)
+        if node_id == self.focus:
+            return None
+        self.focus_picker.value = node_id
+        self.ctx.push(self.focus_picker)
+        return self.set_focus(node_id)
 
     def set_former(self, on: bool) -> None:
         self.show_former = bool(on)
@@ -1620,7 +1632,8 @@ class RelationsDiagram:
                                self._form_actions(submit, error, "rel-gender"), key="rel-gender-sheet")
 
     def node_menu(self, node_id: str) -> Any:
-        """Long press on a name: Add relation, Edit description, Set gender, Hide from view, Remove."""
+        """Long press on a name: Details and history (the character's sheet, ``show_history``), Add relation,
+        Edit description, Set gender, Hide from view, Remove."""
         node_id = str(node_id)
         own = self._label(node_id)
 
@@ -1633,7 +1646,8 @@ class RelationsDiagram:
                                on_click=quiet(run), key=key)
 
         editable = bool(self.tracker_path)
-        rows = [item(ft.Icons.ADD_LINK, "Add relation…", lambda: self.add_relation_form(node_id), "rel-menu-add", editable),
+        rows = [item(ft.Icons.HISTORY, "Details and history", lambda: self.show_history(node_id), "rel-menu-history"),
+                item(ft.Icons.ADD_LINK, "Add relation…", lambda: self.add_relation_form(node_id), "rel-menu-add", editable),
                 item(ft.Icons.NOTES, "Edit description…", lambda: self.description_form(node_id), "rel-menu-description",
                      editable),
                 item(ft.Icons.WC, "Set gender…", lambda: self.gender_form(node_id), "rel-menu-gender", bool(self.path)),

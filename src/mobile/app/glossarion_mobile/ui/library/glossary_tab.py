@@ -155,8 +155,6 @@ class GlossaryTab:
     # ---- build -----------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
-        self.file_chip = ft.Chip(label=ft.Text("\U0001f4c1 —", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                                 on_click=lambda e: self.page.open_files(), visible=False, key="gp-file")
         self.banner = ft.Container(content=ft.Text(DELETED_BANNER), bgcolor=ft.Colors.TERTIARY_CONTAINER,
                                    border_radius=tokens.RADII["card"], padding=8, visible=False, key="gp-deleted")
         extract_ok = self.page.service.has_job_kind("extract_glossary")
@@ -196,13 +194,13 @@ class GlossaryTab:
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="gp-bulk")
         self.root = ft.Column([
-            # as compact as Chapters (owner 2026-10-31): the folder chip, the buttons, the stats, one line of totals.
-            # ⋯ sits by the chip, whose long name gives way: next to the buttons it wrapped to a row of its own.
+            # as compact as Chapters (owner 2026-10-31): the buttons, the stats, one line of totals. No file chip
+            # (owner 2026-11-16: redundant, ⋯ › Files opens the same place and names the file): ⋯ ends the
+            # buttons' row, which wraps inside the width left of it, so ⋯ never drops to a row of its own.
             ft.Container(content=ft.Column([
-                ft.Row([ft.Container(content=self.file_chip, expand=True, alignment=ft.Alignment.CENTER_LEFT),
-                        self.more_menu], spacing=0),
                 self.banner,
-                ft.Row(tools, wrap=True, spacing=8, run_spacing=4),
+                ft.Row([ft.Row(tools, wrap=True, spacing=8, run_spacing=4, expand=True), self.more_menu],
+                       spacing=0, vertical_alignment=ft.CrossAxisAlignment.START, key="gp-tools"),
                 self.stats_row,
                 ft.Row([self.total_text, self.summary_text], spacing=8),
                 self.selection_bar.control,
@@ -275,9 +273,6 @@ class GlossaryTab:
             return
         self.loading.visible = self.busy.active
         self.banner.visible = view.deleted
-        name = os.path.basename(view.path) if view.path else ""
-        self.file_chip.visible = bool(name)
-        self.file_chip.label = ft.Text(f"\U0001f4c1 {name}", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         self.file_item.content = self._file_details()
         self.ctx.spawn(self.reload_file_summary(view.glossary_file or ""))
         # Issue 13: "Continue" (not "Continue extraction") so the ⋯ menu stays on the same row

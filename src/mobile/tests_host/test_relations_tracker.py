@@ -751,9 +751,11 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         assert all("[" not in edge_label_text(e, False) for e in diagram.drawn_edges)
         await diagram.set_focus(next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤"))
         assert diagram.edge_count() == 2
-        # tapping a name opens its relation history
+        # a hold opens the name's menu; its first row is the relation history
         node = next(c for c in diagram.node_controls if c.key.endswith("서윤") or "Seo-yun" in c.content.value)
-        node.on_click(None)
+        node.on_long_press(None)
+        assert diagram.history_sheet is None
+        _find(diagram.form_sheet, "rel-menu-history").on_click(None)
         sheet = diagram.history_sheet
         assert sheet is not None and sheet.key.startswith("rel-history-sheet-") and _open_dialogs(session.page)[-1] is sheet
         rows = diagram.history_rows(next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤"))
@@ -763,8 +765,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         diagram.set_chapter(1)
         assert {r["current"] for r in diagram.history_rows(seo)} == {"Best Friend"}
         diagram.set_chapter(5)
-        node = next(c for c in diagram.node_controls if c.key.endswith("서윤") or "Seo-yun" in c.content.value)
-        node.on_click(None)  # again: the previous sheet is closed first, one live sheet per key
+        diagram.show_history(seo)  # again: the previous sheet is closed first, one live sheet per key
         await _settle()
         live = [d for d in _open_dialogs(session.page) if (d.key or "").startswith("rel-history-sheet-")]
         assert len(live) == 1 and live[0] is diagram.history_sheet
@@ -899,6 +900,26 @@ def test_diagram_focus_rebuilds_the_picture_round_the_name_and_fits_it_in_the_mi
         await second
         hx, hy = diagram.positions[rt.tracker_key("Hero")]
         assert diagram.focus == rt.tracker_key("Hero")
+        # a tap on a name is the Focus pick (owner, 2026-11-16: it opened the sheet and never focused)
+        other = rt.tracker_key("Person 9")
+        pill = next(c for c in diagram.node_controls if c.key == f"rel-node-{other}")
+        pill.on_click(None)
+
+        def centred() -> bool:
+            x, y = diagram.positions.get(other, (-1.0, -1.0))
+            return diagram.focus == other and abs(x - diagram.width / 2) < 1e-6 and abs(y - diagram.height / 2) < 1e-6
+
+        for _ in range(200):  # the new arrangement is worked out on the io pool
+            if centred():
+                break
+            await asyncio.sleep(0.05)
+        assert centred()
+        assert diagram.focus_picker.value == other and diagram.history_sheet is None
+        pill = next(c for c in diagram.node_controls if c.key == f"rel-node-{other}")
+        assert pill.border.top.width == 2
+        assert diagram.tap_node(other) is None  # the Focus name again: nothing to rebuild
+        await diagram.set_focus(rt.tracker_key("Hero"))
+        hx, hy = diagram.positions[rt.tracker_key("Hero")]
         assert abs(hx - diagram.width / 2) < 1e-6 and abs(hy - diagram.height / 2) < 1e-6
         await diagram.set_focus(ALL_CHARACTERS)
         assert diagram.focus is None and diagram.positions == plain
@@ -2115,12 +2136,14 @@ def test_full_screen_hides_the_controls_and_keeps_the_state(iso, tmp_path):
         assert diagram.undo_stack == undo and diagram.diagram_body.controls[1] is diagram.diagram_area
         diagram._on_area_size(types.SimpleNamespace(width=600.0, height=860.0))
         assert diagram.area_size == (600.0, 860.0)
-        # names still open their sheet / menu in full screen
+        # names still take a tap (the Focus; this one already is) and a hold (the menu, with the sheet) in full screen
         node = next(c for c in diagram.node_controls if c.key == f"rel-node-{seo}")
         node.on_click(None)
-        assert diagram.selected == seo
+        assert (diagram.focus, diagram.selected) == (seo, harin)
         node.on_long_press(None)
         assert diagram.form_sheet is not None
+        _find(diagram.form_sheet, "rel-menu-history").on_click(None)
+        assert diagram.selected == seo
         diagram._close_form()
         # the once-a-second check still redraws in full screen
         rt.edit_tracker(str(tracker_file), lambda t: rt.record_relations(
