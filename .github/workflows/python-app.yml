@@ -74,6 +74,10 @@ jobs:
         QT_QPA_PLATFORM: offscreen
       run: |
         pip install --no-cache-dir pytest
+        # Own process: this file's UnifiedClient tests and the tests of the list
+        # below change shared client state for each other.
+        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic -rs --junitxml=build/test-results/ocagy.xml \
+          tests/test_ocagy_cli.py
         python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic -rs --junitxml=build/test-results/python.xml \
           tests/test_anti_duplicate_wire.py \
           tests/test_mobile_runtime.py \

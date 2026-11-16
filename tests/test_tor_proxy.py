@@ -17,9 +17,11 @@ import tor_proxy
 
 
 @pytest.fixture(autouse=True)
-def enable_tor_for_existing_route_tests(monkeypatch):
+def enable_tor_for_existing_route_tests(monkeypatch, tmp_path):
     monkeypatch.setenv("GLOSSARION_TOR_ENABLED", "1")
     monkeypatch.setenv("GLOSSARION_TOR_INSTANCES", "1")
+    # OpenCode starts take a lock file in the ocagy workspace: never the real one.
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "ocagy-workspace"))
 
 
 def test_parallel_pool_rotates_between_independent_instances(monkeypatch):

@@ -25,6 +25,12 @@ def _clean_progress_line(value: str) -> str:
     return line[:2000]
 
 
+# After a timeout or stop, how long to wait for the killed command's output pipe
+# to close. A grandchild that survived the kill (Windows: cmd.exe of a .cmd shim
+# is killed, node keeps the pipe) must not hold the caller any longer than this.
+KILL_GRACE_SECONDS = 5.0
+
+
 def run_logged_subprocess(
     command: List[str],
     *,
@@ -33,8 +39,17 @@ def run_logged_subprocess(
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     popen_kwargs: Optional[Dict[str, Any]] = None,
+    terminate_fn: Optional[Callable[[subprocess.Popen], None]] = None,
+    stop_check: Optional[Callable[[], bool]] = None,
+    popen_fn: Optional[Callable[..., subprocess.Popen]] = None,
 ) -> Dict[str, Any]:
-    """Run a command while forwarding merged stdout/stderr lines to ``log_fn``."""
+    """Run a command while forwarding merged stdout/stderr lines to ``log_fn``.
+
+    The call returns at most ``KILL_GRACE_SECONDS`` after ``timeout`` (or after
+    ``stop_check()`` turns true): the command is stopped with ``terminate_fn``
+    (default: terminate, then kill, the direct child) and its output is no
+    longer awaited. ``popen_fn`` replaces ``subprocess.Popen`` for the start.
+    """
     logger = log_fn or (lambda _message: None)
     kwargs: Dict[str, Any] = {
         "stdout": subprocess.PIPE,
@@ -48,7 +63,7 @@ def run_logged_subprocess(
         "env": env,
     }
     kwargs.update(popen_kwargs or {})
-    process = subprocess.Popen(command, **kwargs)
+    process = (popen_fn or subprocess.Popen)(command, **kwargs)
 
     output_queue: queue.Queue = queue.Queue()
     reader_finished = object()
@@ -68,20 +83,39 @@ def run_logged_subprocess(
     last_logged = ""
     reader_done = False
     timed_out = False
+    cancelled = False
+    stopped_at: Optional[float] = None
     deadline = time.monotonic() + max(0.1, float(timeout))
 
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 and process.poll() is None:
-            timed_out = True
+    def stop_process() -> None:
+        if terminate_fn is not None:
             try:
-                process.terminate()
-                process.wait(timeout=3)
+                terminate_fn(process)
             except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
+                pass
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    while True:
+        if stopped_at is None:
+            if time.monotonic() >= deadline:
+                if process.poll() is None:
+                    timed_out = True
+                    stop_process()
+                stopped_at = time.monotonic()
+            elif stop_check is not None and process.poll() is None and stop_check():
+                cancelled = True
+                stop_process()
+                stopped_at = time.monotonic()
+        elif time.monotonic() - stopped_at >= KILL_GRACE_SECONDS:
+            break  # a surviving grandchild still holds the pipe; stop waiting for it
 
         try:
             item = output_queue.get(timeout=0.1)
@@ -111,8 +145,11 @@ def run_logged_subprocess(
         returncode = int(process.returncode if process.returncode is not None else -1)
 
     output = "\n".join(tail)
-    return {
+    result = {
         "returncode": returncode,
         "output": output[-6000:] if output else "No installer output was returned.",
         "timed_out": timed_out,
     }
+    if cancelled:
+        result["cancelled"] = True
+    return result
