@@ -1022,7 +1022,11 @@ def test_sent_to_library_card_progress_opens_the_chapters_whatever_exists(iso, o
         assert done.state is JobState.DONE, (done.state, done.error)
         page = await open_progress(app, driver)
         chapters = [row for row in page.chapters.visible if row.kind == "chapter"]
-        assert chapters and all(row.status == "completed" for row in chapters), [r.status for r in chapters]
+        # Special files are always listed, marked as skipped (nav.xhtml here); every other chapter is done.
+        skipped = [row for row in chapters if row.status == "skipped"]
+        translated = [row for row in chapters if row.status != "skipped"]
+        assert translated and all(row.status == "completed" for row in translated), [r.status for r in chapters]
+        assert all(row.label == "Special file (Skipped)" for row in skipped), [r.label for r in skipped]
 
     with FakeLLMServer() as server:
         asyncio.run(_session(iso, server, {CHAT_LIBRARY_BOOK: epub}, body))
