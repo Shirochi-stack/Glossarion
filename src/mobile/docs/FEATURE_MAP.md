@@ -692,7 +692,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | # | Feature | Mobile surface | Notes |
 |---|---|---|---|
 | 0 | Open Progress Manager (routing) | Book › Chapters; Tools › Progress (`?out=`) for chat workspaces, non-Library outputs, ZIPs, image folders; Job card › Progress |  |
-| 1 | Output folder resolution and creation | Book › Chapters and Tools › Progress header: output-folder chip (tap → Files); "📁 Created: <folder>" snackbar | Automatic resolution |
+| 1 | Output folder resolution and creation | Book › Chapters and Tools › Progress header: output-folder chip (tap → Files); "📁 Created: <folder>" snackbar | Automatic resolution. Book › Chapters has no folder chip since m5 (owner 2026-11-16): the folder opens from Chapters ⋯ › Files and Overview's 📁 icon |
 | 2 | Workspace source link (source_epub.txt + Library registry) | Automatic (no control) on open; the raw link shows on Book › Output › Raw source row | Automatic |
 | 3 | Auto-discovery of existing outputs | Automatic (no control) on full refresh (⟳ Refresh / pull-to-refresh) | Automatic. A desktop regex bug is recorded; it is fixed only in a separate, user-approved commit |
 | 4 | Missing-file cleanup on open | Automatic (no control) during a read-write refresh | Automatic |
@@ -706,9 +706,9 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 12 | PDF Vision OCR summary row | Pinned summary row |  |
 | 13 | Image Generation summary row | Pinned summary row |  |
 | 14 | Row status vocabulary, icons and colors | StatusAvatar + StatusChip (PM vocabulary) |  |
-| 15 | Output-mode aware view (Text/Vision/Image/Video/Audio/Refinement) | Mode badge; labels Reset TTS / Not Refined / No TTS |  |
+| 15 | Output-mode aware view (Text/Vision/Image/Video/Audio/Refinement) | Mode badge; labels Reset TTS / Not Refined / No TTS | On the Book page the badge is the summary strip's above the tabs (m5: none in the Chapters header) |
 | 16 | Statistics bar with jump-to-status | StatusChipRow (tap filters, long-press jumps) |  |
-| 17 | Show special files toggle | Chapters filter menu (persisted `epub_details_show_special_files`) |  |
+| 17 | Show special files toggle | Chapters filter menu (persisted `epub_details_show_special_files`) | Mobile divergence (owner 2026-11-16, m5): no toggle in the mobile Chapters menu; special files are always listed, a skipped one as "⏭️ Special file (Skipped)" and not counted in Total; the key stays (desktop, Reader) |
 | 18 | Show Model Info toggle | Chapters filter menu (persisted) |  |
 | 19 | Selection controls | Selection top bar (Select all, Select ▾ by status, Clear) |  |
 | 20 | Retranslate Selected | Bottom bar Retranslate (verbatim confirm) |  |
@@ -732,7 +732,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 38 | Multi-file Progress Manager | Tools › Progress output dropdown | Adapted: Library books get their own pages |
 | 39 | Image folder / single image retranslation | Chapters thumbnail-grid variant (Mark as Skipped / Delete Selected) | Ported to v2.1 structure |
 | 40 | Parallel EPUB pair Progress Manager | Tools › Progress (parallel context) |  |
-| 41 | Glossary Progress dialog | Book › Glossary tab; Tools › Glossary progress |  |
+| 41 | Glossary Progress dialog | Book › Glossary tab; Tools › Glossary progress | Mobile (m5): the rows follow the extractor's special-file decision from the user's config (protect-interior included; `special_files`), and each file it skips is listed at its spine position as "⏭️ Special file (Skipped)"; the desktop panel is unchanged |
 | 42 | Glossary Progress: Mark as Completed / Remove from progress | Glossary tab selection bar + row ⋯ (Mark as completed / Remove from progress) | Writes use the extractor's lock + atomic replace (desktop plain dumps recorded as a bug) |
 | 43 | Glossary Progress: Footnotes and completed summary | Glossary tab row ⋯ › Show footnote; selection More › Show glossary footnote(s) / Generate completed summary (share .md) |  |
 | 44 | Glossary Progress: Manual glossary refinement | Glossary tab ✨ Refinement → preview sheet → job; row ⋯ › ✨ Refine this |  |
@@ -962,7 +962,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 30 | Library loading spinner / toast / F11 fullscreen | Skeletons, snackbars | F11 n/a |
 | 31 | Book Details hero page | Book › Overview hero; Reader top bar ⓘ Book Details and ⋯ › Open Book Details (the Book page of the book or file the Reader shows; hotfix 3) | New: from the Reader |
 | 32 | Start reading / Read raw source | Overview "📖  Open Reader" (raw source only while nothing is translated); the Reader switches Original / Translated / Bilingual | Adapted: one button |
-| 33 | Edit metadata.json | Overview › Edit → metadata form; ⋯ Edit raw JSON (CodeEditor) (the resolved workspace; an organized book edits its workspace's metadata.json) |  |
+| 33 | Edit metadata.json | Overview › Edit → metadata form; ⋯ Edit raw JSON (CodeEditor) (the resolved workspace; an organized book edits its workspace's metadata.json) | m5: ✏️ Edit sits in the Overview hero beside the cover (no METADATA section) |
 | 34 | Chapter list (Book Details) | Book › Chapters (PM parity; filters persisted via `epub_details_*` incl. rows per page); a book without a workspace lists its EPUB's own chapters (`BookDetailsModel.row_specs`) |  |
 | 35 | Translate / Retranslate this chapter (Book Details) | Chapters row ⋯ (SINGLE_CHAPTER job) |  |
 | 36 | Reader: open modes (plain / overlay / dual-path / PDF workspace) | Reader (plain / overlay / dual-path / PDF workspace) |  |
@@ -1034,7 +1034,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 43 | Target language list | ModelSheet › Language; all language fields |  |
 | 44 | Emoticon whitelist for QA scanning | Settings › QA › Foreign characters |  |
 | 45 | Gemini prohibited-use refusal detection | Automatic (no control); ErrorCard "Blocked by the provider's safety filter" | Automatic |
-| 46 | EPUB metadata extraction/merge helpers | Automatic (no control); used by the Book › Overview metadata list | Automatic |
+| 46 | EPUB metadata extraction/merge helpers | Automatic (no control); used by the Book › Overview metadata list | Automatic. m5: the values show in the Overview hero (title, author, publisher when set, language / year chips) |
 | 47 | Hard stop / shutdown progress restore | Jobs › Interrupted recovery | Automatic |
 | 48 | Startup splash and module preloading | Native splash + immediate shell + warm import ("Preparing engine…" on Send and the drawer status) | Adapted: native splash, then the shell at once; until the warm import ends Send shows `blocked` "Preparing engine…" and the drawer status chip says so (no separate Boot View); undecryptable keys: Settings home notice |
 | 49 | Dialog fade animations / spinning Halgakos icons | M3 motion tokens; Halgakos in the native splash, the drawer header, About and the empty states | Adapted |

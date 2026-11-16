@@ -53,6 +53,8 @@ DELETED_BANNER = "⚠️ Progress file was deleted. Waiting for a new glossary p
 EMPTY_BODY = "Run glossary extraction to see chapter progress. Refinement entry types are listed below."
 GLOSSARY_TOOLS_REASON = "The Glossary Manager is not available in this session"
 REFINE_REASON = "Glossary refinement is not available in this session"
+#: A special file glossary extraction skips (Translate special files off) has no progress to mark or remove.
+SPECIAL_ROW_REASON = "Glossary extraction skips this special file; it has no progress entry"
 
 
 #: More changed rows than this rebuild the mounted window once instead of row-by-row replacements.
@@ -523,6 +525,8 @@ class GlossaryTab:
             return "No glossary progress file"
         if self.view.deleted:
             return "The glossary progress file was deleted"
+        if action in ("mark_completed", "remove") and rows and all(r.kind == "special" for r in rows):
+            return SPECIAL_ROW_REASON
         if action == "mark_completed" and rows and all(r.status == "completed" for r in rows):
             return "Already completed"
         if action == "mark_completed" and rows and all(r.kind == "minimal" for r in rows):

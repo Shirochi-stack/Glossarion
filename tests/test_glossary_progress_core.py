@@ -116,7 +116,10 @@ BLOCKS = [
                            "            from app_paths import _get_app_dir\n")]),
     (22136, 22159, 4, 0, []),
     (22543, 22649, 4, 0, []),
-    (23524, 23574, 8, 0, []),
+    (23524, 23574, 8, 0, [  # m5 2026-11-16: '' = no file yet (mobile glossary_special_preview_rows), no warning
+        ("    gp_data = _gp_load_progress_dict(gp_path)",
+         "    # '' (no file): the mobile list before any glossary progress file exists (``glossary_special_preview_rows``)\n"
+         "    gp_data = _gp_load_progress_dict(gp_path) if gp_path else {}")]),
     (23575, 24546, 8, 0, [("(_d or gp_data).get('chapter_numbers', {})",
                            "(_d or _current_gp_data()).get('chapter_numbers', {})"),
                           # 2026-11-02: an OPF href is a URL, decoded when read

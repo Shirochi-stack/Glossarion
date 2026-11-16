@@ -2420,10 +2420,11 @@ class ChatView:
         opener = self.plan_glossary_opener
         if opener is None:
             return self.open_chat_settings()
+        # owner 2026-11-16: from a chat card it opens short on the Glossary mode tile, like the ＋ sheet
         return opener(effective=self._plan_glossary_label(), inputs=[p for p in inputs if p],
                       on_changed=self.apply_settings_changed,
                       glossary_override_mode=self.settings().glossary_override_mode,
-                      chat_overrides=self.env.chats.overrides(self.cid) if self.bound else None)
+                      chat_overrides=self.env.chats.overrides(self.cid) if self.bound else None, preview=True)
 
     def open_choose_chapters(self, plan: dict, *, batch: bool = False,
                              panel: Optional[RunOptionsPanel] = None) -> Optional[ChooseChaptersSheet]:

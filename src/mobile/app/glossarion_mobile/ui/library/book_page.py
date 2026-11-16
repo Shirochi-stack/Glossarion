@@ -368,6 +368,8 @@ class BookPageScreen(Screen):
             observe = getattr(getattr(self.service, "config", None), "observe", None)
             if callable(observe):
                 self._unsubs.append(observe("output_mode", self._on_output_mode_changed))
+                for key in pm.GLOSSARY_SPECIAL_FILE_KEYS:
+                    self._unsubs.append(observe(key, self._on_special_files_changed))
             jobs = self.ctx.jobs
             subscribe = getattr(jobs, "subscribe", None) if jobs is not None else None
             if callable(subscribe):
@@ -432,6 +434,19 @@ class BookPageScreen(Screen):
         def refresh():
             if self._unsubs:
                 self.ctx.spawn(self.reload_progress(wait=True))
+
+        dispatcher = self.ctx.dispatcher
+        if dispatcher is not None and getattr(dispatcher, "bound", False):
+            dispatcher.post(refresh)
+        else:
+            refresh()
+
+    def _on_special_files_changed(self, _key: str, _value: Any) -> None:
+        """Settings › Translate special files, the keyword / exact lists or the in-between rule changed: the
+        Glossary list re-reads them (``pm.load_glossary_view``), so it shows what the next extraction sends."""
+        def refresh():
+            if self._unsubs and self.glossary is not None:
+                self.ctx.spawn(self.reload_glossary(force=True))
 
         dispatcher = self.ctx.dispatcher
         if dispatcher is not None and getattr(dispatcher, "bound", False):

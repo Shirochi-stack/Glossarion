@@ -2114,7 +2114,8 @@ def test_overview_tags_sit_beside_the_cover(platform):
     overview, body = overview_for({"language": "ko", "tags": "Fantasy, TS, Academy, Growth"})
     hero_column = overview.hero.controls[1]
     assert overview.hero.controls[0] is overview.cover
-    assert hero_column.controls[-2:] == [overview.hero_chips, overview.tags_row]  # right under the chips
+    # right under the chips; the metadata editor's ✏️ Edit follows them (m5: no METADATA section)
+    assert hero_column.controls[-3:] == [overview.hero_chips, overview.tags_row, overview.edit_button]
     assert overview.tags_row.visible and overview.tags_row.wrap
     assert [chip.label.value for chip in overview.tags_row.controls] == ["Fantasy", "TS", "Academy", "Growth"]
     assert "TAGS" not in _texts(body)  # no section of its own

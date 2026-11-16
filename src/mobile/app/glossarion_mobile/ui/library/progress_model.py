@@ -101,10 +101,15 @@ _DEFAULT_GROUPS = {
     "skipped": ("skipped",),
 }
 
+#: The mark of a special file a run skips, in both lists (owner 2026-11-16: special files are always listed on
+#: mobile): Chapters relabels the Progress Manager's "Skipped" special rows, the Glossary list's special rows
+#: (``glossary_progress_core.GLOSSARY_SPECIAL_SKIPPED_LABEL``, status ``skipped_special``) carry the same words.
+SPECIAL_SKIPPED_LABEL = "Special file (Skipped)"
+
 #: Glossary chip groups (``glossary_progress_core.GLOSSARY_STATUS_GROUPS`` wins).
 GP_GROUPS = {
     "completed": ("completed",),
-    "skipped": ("skipped", "skipped_empty", "skipped_image_only", "skipped_title_header_only"),
+    "skipped": ("skipped", "skipped_empty", "skipped_image_only", "skipped_title_header_only", "skipped_special"),
     "in_progress": ("in_progress", "partially_in_progress"),
     "failed": ("failed", "qa_failed"),
     "merged": ("merged",),
@@ -128,7 +133,7 @@ _GP_CHIP = {
 _GP_LABELS = {
     "completed": "Completed", "skipped": "Skipped", "skipped_empty": "Empty (Skipped)",
     "skipped_image_only": "Image Only (Skipped)", "skipped_title_header_only": "Title/Header Only (Skipped)",
-    "failed": "Failed", "qa_failed": "Qa Failed", "merged": "Merged", "in_progress": "In Progress",
+    "skipped_special": SPECIAL_SKIPPED_LABEL, "failed": "Failed", "qa_failed": "Qa Failed", "merged": "Merged", "in_progress": "In Progress",
     "partially_in_progress": "In Progress", "not_completed": "Not Completed", "not_refined": "Not Refined",
     "refine_failed": "Refine Failed",
 }
@@ -398,12 +403,15 @@ def _row_vm(pres: Any) -> RowVM:
     except (TypeError, ValueError):
         opf_position = None
     is_special = bool(getattr(pres, "is_special", False))
+    hidden = bool(getattr(pres, "hidden", False))
+    # a special file the run skips (the rows desktop's "Show special files" reveals): always listed on mobile
+    skipped_special = status == "skipped" and (is_special or hidden)
     return RowVM(
         key=str(getattr(pres, "row_id", "") or f"row:{getattr(pres, 'progress_key', '') or filename}"),
         kind=str(getattr(pres, "kind", "chapter") or "chapter"),
         status=status,
         icon=str(getattr(pres, "icon", "") or "❓"),
-        label=str(getattr(pres, "label", status) or status),
+        label=SPECIAL_SKIPPED_LABEL if skipped_special else str(getattr(pres, "label", status) or status),
         title=str(getattr(pres, "title", "") or filename),
         subtitle=str(getattr(pres, "subtitle", "") or ""),
         badges=tuple(str(b) for b in (getattr(pres, "badges", ()) or ()) if b),
@@ -414,8 +422,8 @@ def _row_vm(pres: Any) -> RowVM:
         output_file=str(getattr(pres, "output_file", "") or ""),
         filename=filename,
         is_special=is_special,
-        skipped_special=status == "skipped" and is_special,
-        hidden_unless_special=bool(getattr(pres, "hidden", False)),
+        skipped_special=skipped_special,
+        hidden_unless_special=hidden,
         search_text=" ".join(s for s in search if s),
         model=str(getattr(pres, "model", "") or ""),
         opf_position=opf_position,
@@ -470,6 +478,16 @@ def _chips(stats: Any, groups: Mapping[str, tuple]) -> tuple:
                  for group in PM_GROUP_ORDER if group in spec and (group in groups or group in _DEFAULT_GROUPS))
 
 
+def _total_label(total: int, chunks: int) -> str:
+    """"Total: N" / "Total: N (N-k chapters + k chunks)": ``progress_core._progress_total_label`` (the desktop
+    statistics label), here over the countable rows."""
+    try:
+        from progress_core import _progress_total_label
+    except Exception:  # the pure app modules import without the backend
+        return f"Total: {total}"
+    return _progress_total_label(total, chunks)
+
+
 def _view(book_progress: Any, *, groups: Mapping[str, tuple], show_special: bool, show_model: bool,
           created: Optional[str] = None) -> ProgressView:
     stats = book_progress.stats
@@ -479,7 +497,8 @@ def _view(book_progress: Any, *, groups: Mapping[str, tuple], show_special: bool
     return ProgressView(
         rows=rows,
         chips=_chips(stats, groups),
-        total_text=str(getattr(stats, "total_label", "") or f"Total: {total}"),
+        # the skipped rows (special files, which mobile always lists) are not counted (owner 2026-11-16)
+        total_text=_total_label(max(0, total - skipped), int(getattr(stats, "chunks", 0) or 0)),
         completed=int(getattr(stats, "completed", 0) or 0),
         total=max(0, total - skipped),
         mode=str(getattr(stats, "mode", "text") or "text"),
@@ -1192,6 +1211,26 @@ def parallel_context_for(source: Any) -> Optional[dict]:
     return PARALLEL_CONTEXTS.get(_norm_path(source)) if source else None
 
 
+#: The config keys ``glossary_special_files`` reads (the Book page reloads the Glossary list when one changes).
+GLOSSARY_SPECIAL_FILE_KEYS = ("translate_special_files", "special_file_keywords", "special_file_exact",
+                              "never_consider_in_between_files_as_special")
+
+
+def glossary_special_files(service: Any) -> Optional[dict]:
+    """Blocking: the glossary extractor's special-file settings for the user's config
+    (``epub_special_files.glossary_special_file_settings_for_owner`` over a ``ProgressOwner``, seeded like the
+    desktop start-up and a job's owner): Translate special files, the keyword / exact lists and "Never consider
+    in-between files as special". Never this process's environment, which the app does not set. None when the
+    backend is missing (the rows then stay the core's own)."""
+    try:
+        from epub_special_files import glossary_special_file_settings_for_owner
+
+        return glossary_special_file_settings_for_owner(make_owner(service))
+    except Exception:
+        log.debug("glossary special-file settings unavailable", exc_info=True)
+        return None
+
+
 def load_glossary_view(service: Any, book: Mapping[str, Any], *, previous: Optional[GlossaryView] = None,
                        progress: Optional[ProgressView] = None) -> GlossaryView:
     """Blocking: the Glossary tab model (``glossary_progress_core``)."""
@@ -1212,28 +1251,50 @@ def load_glossary_view(service: Any, book: Mapping[str, Any], *, previous: Optio
             return GlossaryView(path=previous.path, book_title=previous.book_title or title, rows=previous.rows,
                                 chips=previous.chips, total_text=previous.total_text, deleted=True,
                                 glossary_file=previous.glossary_file, groups=groups, state=model)
+        # Settings › Translate special files / the keyword lists / the in-between rule changed since the model
+        # was built: the rows follow the settings the next extraction will use (request 3)
+        if hasattr(gpc, "glossary_special_files_changed"):
+            special = glossary_special_files(service)
+            if special is not None and gpc.glossary_special_files_changed(model, special):
+                gpc.apply_glossary_special_files(model, special)
         data = gpc.reload_glossary_progress(model)
     else:
         prog = getattr(state, "data", {}).get("prog") if state is not None else None
         pair = parallel_context_for(source)
+        special = None
         if pair is not None:  # Parallel EPUB pair: the working EPUB's progress, the mapped raw chapters
             model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog,
                                                source_override=pair.get("generated_path") or None,
                                                source_filenames=list(pair.get("raw_filenames") or []) or None)
         else:
-            model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog)
+            # the rows follow the extractor's own special-file decision from the user's settings (request 3)
+            special = glossary_special_files(service)
+            model = gpc.open_glossary_progress(owner, source, output_dir=output_dir, prog=prog, special_files=special)
             if model is None:
                 # a chat book: its glossary progress sits beside the workspace (``workspace_root_owner``)
                 beside = workspace_root_owner(service, book)
                 if beside is not None:
-                    model = gpc.open_glossary_progress(beside, source, output_dir=output_dir, prog=prog)
+                    model = gpc.open_glossary_progress(beside, source, output_dir=output_dir, prog=prog,
+                                                       special_files=special)
         if model is None:
-            return GlossaryView(book_title=title, empty=True, groups=groups)
+            # no glossary progress file yet: the files the first extraction will skip are listed already, at
+            # their spine position with the Skipped special mark, under the empty state (requests 2 and 3c)
+            special_rows: tuple = ()
+            if pair is None and special is not None and hasattr(gpc, "glossary_special_preview_rows"):
+                try:
+                    special_rows = tuple(_gp_row_vm(row, i) for i, row in enumerate(
+                        gpc.glossary_special_preview_rows(owner, source, special)))
+                except Exception:
+                    log.debug("listing the special files before extraction failed", exc_info=True)
+            return GlossaryView(book_title=title, empty=True, groups=groups, rows=special_rows)
         path = model._find_gp_for_file(model.fp) or getattr(model, "gp_path", None)
         data = None
     rows = [_gp_row_vm(row, i) for i, row in enumerate(gpc.glossary_rows(model, data))]
     pinned = [r for r in rows if r.pinned]
-    stats = gpc.glossary_stats(model, data) or {}
+    stats = dict(gpc.glossary_stats(model, data) or {})
+    special = sum(1 for r in rows if r.kind == "special")
+    if special:  # the Skipped chip counts the listed special files; Total stays the extractor's chapters
+        stats["skipped"] = int(stats.get("skipped", 0) or 0) + special
     glossary_file = None
     try:
         glossary_file = gpc.find_glossary_file(model)

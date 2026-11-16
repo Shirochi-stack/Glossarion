@@ -351,7 +351,7 @@ def test_add_translation_epub_lists_its_own_chapters(env):
         texts = TLU._texts(chapters.root)
         assert NO_WORKSPACE not in texts
         assert "\U0001f4d6 Chapters in this EPUB · 4" in texts
-        assert not chapters.folder_chip.visible and not chapters.banner.visible
+        assert not hasattr(chapters, "folder_chip") and not chapters.banner.visible  # no folder chip (m5)
         # At a glance: "4 chapters" instead of the error
         glance = TLU._texts(screen.overview.glance)
         assert any("4 chapters" in text for text in glance) and NO_WORKSPACE not in glance

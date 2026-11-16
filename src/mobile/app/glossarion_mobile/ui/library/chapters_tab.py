@@ -1,7 +1,8 @@
 """Book page › Chapters: Progress Manager parity (UI_SPEC §3.7; Retranslation_GUI single-file view).
 
-Header: "📁 <output folder>" chip (Files) + "Mode: Text" badge + Run translation · Run QA scan (the book's
-one-tap Quick Scan); both wait, disabled with the reason as tooltip, while a translation or glossary run goes
+Header: Run translation · Run QA scan (the book's one-tap Quick Scan) in one row sharing the width (the band
+above the tabs already names the book and its mode; ⋯ › Files opens the folder); both wait, disabled with the
+reason as tooltip, while a translation or glossary run goes
 or one is queued for this book (``book_page.run_wait_reason``, followed live on every jobs event). Stats row: the
 ``progress_core`` stats as chips "✅ Completed n" · "🔗 Merged n" · "🔄 In Progress n" ·
 "❓ Pending n" · "⬜ Not Translated n" (Not Refined / No TTS by mode) · "❌ Failed n"
@@ -10,11 +11,12 @@ long-press jumps to the next matching row and wraps (``GestureDetector``, deskto
 click behaviour). "Total: N (N-k chapters + k chunks)".
 
 Toolbar: "🔍 Search chapters…" (titles, file names, chunk text, QA issues), a
-filter menu (Show special files · Show model info · Show raw titles, persisted as
-``epub_details_show_special_files`` / ``retranslation_show_model_info`` /
+filter menu (Show model info · Show raw titles, persisted as ``retranslation_show_model_info`` /
 ``epub_details_show_raw_titles``; Rows per page = ``epub_details_chapter_page_size``;
 QA failures only; Chunked chapters only) and ⋯ (Manual editing · 🔍 Edit
-Translation · 📊 Glossary Progress · ⟳ Refresh · Files).
+Translation · 📊 Glossary Progress · ⟳ Refresh · Files). Special files are always listed (owner 2026-11-16, no
+"Show special files" item on mobile): a special file translation skips reads "⏭️ Special file (Skipped)"
+(``progress_model.SPECIAL_SKIPPED_LABEL``) and is not counted in the total.
 
 Rows: StatusAvatar · line 1 · line 2 (output file or model, chunk summary) ·
 badges · expandable QA line · expandable chunk children "↳ Chunk i/T". The list
@@ -60,7 +62,7 @@ from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.pull_to_refresh import PullToRefresh
 from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.library import progress_model as pm
-from glossarion_mobile.ui.library.common import BusyBar, icon_button, mode_badge, stat_chip, status_avatar, tinted
+from glossarion_mobile.ui.library.common import BusyBar, icon_button, stat_chip, status_avatar, tinted
 from glossarion_mobile.ui.library.models import PAGE_SIZES, page_size_value
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
@@ -86,6 +88,16 @@ RETRANSLATE_QUEUED = "Queued: resetting {count} row(s) for retranslation · runs
 QA_QUEUED = "Queued: QA scan · runs after the current job"
 # Hotfix 1 issue 7: Run QA scan (the book's one-tap Quick Scan, next to Run translation)
 QA_RUNNING = "This book's QA scan is already queued or running"
+#: The header's two buttons (one row, sharing the width) and their side padding in dp.
+RUN_TRANSLATION_LABEL = "Run translation"
+RUN_QA_LABEL = "Run QA scan"
+HEADER_BUTTON_PADDING = 12
+
+
+def _one_line(label: str) -> ft.Text:
+    """A button label that never wraps: a label too wide for its half of the row ends in "…"."""
+    return ft.Text(label, max_lines=1, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)
+
 QA_UNAVAILABLE = "QA scans are not available in this session"
 QA_NO_FOLDER = "No output folder to scan"
 #: The desktop result-box titles of the Progress Manager actions (a long result text opens in a sheet under
@@ -199,7 +211,9 @@ class ChaptersTab:
         cfg = page.service.cfg
         self.filter_group: Optional[str] = initial_filter
         self.query = ""
-        self.show_special = bool(cfg("epub_details_show_special_files", cfg("translate_special_files", False)))
+        # Always on (owner 2026-11-16): special files are listed, a skipped one marked "Special file (Skipped)".
+        # The desktop toggle's key (epub_details_show_special_files) stays for the desktop and the Reader.
+        self.show_special = True
         self.show_model = bool(cfg("retranslation_show_model_info", True))
         self.raw_titles = bool(cfg("epub_details_show_raw_titles", False))
         self.page_size_raw = cfg("epub_details_chapter_page_size", 20)
@@ -240,9 +254,8 @@ class ChaptersTab:
     # ---- build ----------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
-        self.folder_chip = ft.Chip(label=ft.Text("\U0001f4c1 —"), on_click=lambda e: self.page.open_files(),
-                                   key="ch-folder")
-        self.mode = mode_badge(pm.mode_label("text"), key="ch-mode")
+        # Owner 2026-11-16: no folder chip and no mode badge here - the band above the tabs shows the book's name
+        # and "Mode: …", and ⋯ › Files (also Overview's folder icon) opens the files.
         self.stats_row = ft.Row(spacing=6, run_spacing=6, scroll=ft.ScrollMode.AUTO,
                                 wrap=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="ch-stats")
         self.total_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="ch-total")
@@ -264,12 +277,18 @@ class ChaptersTab:
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="ch-bulk")
         # U13 item 1: the desktop "Run Translation" for this book: pending / failed chapters are translated
-        self.run_button = ft.FilledTonalButton(content="Run translation", icon=ft.Icons.PLAY_ARROW, key="ch-run",
+        # One row on a 360 dp phone (owner 2026-11-16): the two buttons share the width, no wrap. 12 dp side
+        # padding instead of M3's 16 / 24 for an icon button leaves "Run translation" ~17 dp of room in its half
+        # at text scale 1.0; a wider system font or a larger text size ends the label in "…" rather than wrapping.
+        header_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=HEADER_BUTTON_PADDING))
+        self.run_button = ft.FilledTonalButton(content=_one_line(RUN_TRANSLATION_LABEL), icon=ft.Icons.PLAY_ARROW,
+                                               key="ch-run", style=header_style, expand=True,
                                                on_click=lambda e: self.ctx.spawn(self.run_translation()))
         # Hotfix 1 issue 7: the book's QA scan next to it; both wait while a translation / glossary run goes
-        self.qa_button = ft.FilledTonalButton(content="Run QA scan", icon=ft.Icons.FACT_CHECK, key="ch-qa",
+        self.qa_button = ft.FilledTonalButton(content=_one_line(RUN_QA_LABEL), icon=ft.Icons.FACT_CHECK, key="ch-qa",
+                                              style=header_style, expand=True,
                                               on_click=lambda e: self.ctx.spawn(self.run_qa_scan()))
-        header = ft.Row([self.folder_chip, self.mode, self.run_button, self.qa_button], spacing=8, wrap=True)
+        header = ft.Row([self.run_button, self.qa_button], spacing=8, key="ch-actions")
         self.sync_run_buttons()
         if self.image_folder:
             return self._build_image_folder(header)
@@ -338,11 +357,6 @@ class ChaptersTab:
         """The loaded view's output folder, else the book's resolved workspace (``pm.book_workspace``)."""
         folder = self.view.output_dir if self.view is not None else ""
         return folder or pm.book_workspace(self.page.service, self.page.book)
-
-    def _apply_image_header(self, view: pm.ProgressView) -> None:
-        folder = view.output_dir or pm.book_workspace(self.page.service, self.page.book)
-        self.folder_chip.label = ft.Text(f"\U0001f4c1 {os.path.basename(folder) if folder else '—'}")
-        self.mode.content.value = pm.mode_label(view.mode)
 
     def _image_source(self) -> str:
         service = self.page.service
@@ -496,7 +510,6 @@ class ChaptersTab:
             return ft.PopupMenuItem(content=label, checked=value, on_click=lambda e: handler(), key=key)
 
         return [
-            check("Show special files", self.show_special, self.toggle_special, "f-special"),
             check("Show model info", self.show_model, self.toggle_model, "f-model"),
             check("Show raw titles", self.raw_titles, self.toggle_raw_titles, "f-raw"),
             ft.PopupMenuItem(content=f"Rows per page: {self._page_size_label()}",
@@ -521,7 +534,6 @@ class ChaptersTab:
         if getattr(self, "root", None) is None:
             return
         if self.image_folder:
-            self._apply_image_header(view)
             self.ctx.spawn(self.reload_images())
             return
         self.spine_mode = bool(getattr(view, "no_workspace", False))
@@ -531,10 +543,6 @@ class ChaptersTab:
             self.ctx.push(self.root)
             return
         self.loading.visible = self.busy.active
-        folder = view.output_dir or pm.book_workspace(self.page.service, self.page.book)
-        self.folder_chip.label = ft.Text(f"\U0001f4c1 {os.path.basename(folder) if folder else '—'}")
-        self.folder_chip.visible = self.mode.visible = True
-        self.mode.content.value = pm.mode_label(view.mode)
         self._render_chips()
         self.total_text.value = view.total_text
         if view.error:
@@ -581,7 +589,6 @@ class ChaptersTab:
             self._sync_selection()
         self.filter_group = None
         self.loading.visible = self.busy.active
-        self.folder_chip.visible = self.mode.visible = False
         self.stats_row.controls = []
         details = self.page.details
         if details is None or (details.get("chapters_info") is None and not details.get("error")):
@@ -629,11 +636,7 @@ class ChaptersTab:
     def _filtered(self) -> list:
         groups = self.view.groups if self.view is not None else {}
         out = []
-        for row in self.rows:
-            if row.hidden_unless_special and not self.show_special:
-                continue
-            if row.skipped_special and not self.show_special:
-                continue
+        for row in self.rows:  # special files are never filtered out (owner 2026-11-16)
             if self.filter_group and row.status not in groups.get(self.filter_group, (self.filter_group,)):
                 if not any(child.status in groups.get(self.filter_group, ()) for child in row.children):
                     continue
@@ -954,11 +957,6 @@ class ChaptersTab:
         self.query = str(self.search.value or "").strip()
         self._render_list(self._filtered())
         self.ctx.push(self.list_holder)
-
-    def toggle_special(self) -> None:
-        self.show_special = not self.show_special
-        self.page.service.set_cfg("epub_details_show_special_files", self.show_special)
-        self._after_toggle(reload=True)
 
     def toggle_model(self) -> None:
         self.show_model = not self.show_model

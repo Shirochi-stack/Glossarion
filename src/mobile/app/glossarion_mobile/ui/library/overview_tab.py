@@ -1,13 +1,13 @@
 """Book page › Overview (UI_SPEC §3.6; epub_library ``BookDetailsDialog`` hero).
 
-Hero (cover 120 x 180 phone / 240 x 340 tablet, title, author, chips 🌐 language ·
-📅 year · type, and the book's tags under them), the in-progress strip "⏳  Translation in progress — d/t chapters
+Hero (cover 120 x 180 phone / 240 x 340 tablet, title, author, 🏛️ publisher (when set), chips 🌐 language ·
+📅 year · type, the book's tags under them and ✏️ Edit, the metadata editor; no separate METADATA section,
+owner 2026-11-16), the in-progress strip "⏳  Translation in progress — d/t chapters
 (p%)", the reading actions ("📖  Open Reader", "Continue · Ch 12 · 43%"; the Reader itself
 switches Original / Translated / Bilingual),
 the icon row (Translate… · Compile · Translate Metadata · Share · Files; each
 dimmed with a reason when its target can't be resolved), SYNOPSIS (4 lines,
-expandable; "No synopsis available."), METADATA (📘 Title · ✍️ Author · 🏛️
-Publisher · 🌐 Language · 📅 Year, "—" when missing; ✏️ Edit) and "At a
+expandable; "No synopsis available.") and "At a
 glance" (the Chapters stats chips, the glossary summary, the last job; a book with no output
 workspace shows its EPUB's "📖 N chapters"). The workspace (Compile, Files, ✏️ Edit) is the
 book's resolved one (``progress_model.book_workspace``).
@@ -17,7 +17,7 @@ the OPF, then the card) and its display helpers when the core offers them.
 
 Until the preview-phase details arrive the hero is a ``Skeleton("hero")`` (UI_SPEC §7.4). On a large
 phone in landscape (UI_SPEC §1.1) the same controls are arranged in two columns: hero, strip, read
-buttons and icon row | synopsis, metadata and at a glance (``apply_layout``, called from
+buttons and icon row | synopsis and at a glance (``apply_layout``, called from
 ``BookPageScreen.apply_size_class``; each arrangement gets fresh keys, Flet 1.0.3 freezes a subtree
 re-rendered under the same key).
 """
@@ -46,9 +46,6 @@ __all__ = ["OPEN_READER", "OverviewTab", "hero_values", "opens_raw_only", "progr
 
 OPEN_READER = "\U0001f4d6  Open Reader"
 NO_SYNOPSIS = "No synopsis available."
-DASH = "—"
-_METADATA_ROWS = (("title", "\U0001f4d8 Title"), ("author", "✍️ Author"), ("publisher", "\U0001f3db️ Publisher"),
-                  ("language", "\U0001f310 Language"), ("year", "\U0001f4c5 Year"))
 
 
 def _first(*values: Any) -> str:
@@ -192,8 +189,12 @@ class OverviewTab:
                                      key="ov-synopsis")
         self.synopsis_toggle = ft.TextButton(content="More", on_click=self._toggle_synopsis, visible=False,
                                              key="ov-synopsis-more")
-        self.metadata_rows = ft.Column(spacing=2, key="ov-metadata")
-        self.edit_button = ft.TextButton(content="✏️  Edit", on_click=self._on_edit, key="ov-edit")
+        # Owner 2026-11-16: no METADATA section - the publisher joins the title / author / chips beside the cover
+        # (only when set), and the metadata editor's ✏️ Edit sits there too.
+        self.publisher_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                      selectable=True, visible=False, key="ov-publisher")
+        self.edit_button = ft.TextButton(content="✏️  Edit", on_click=self._on_edit, key="ov-edit",
+                                         style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8)))
         # The tags sit beside the cover, under the language / type chips: the cover is taller than the
         # title, author and chips, which left that space empty (owner); no separate TAGS section.
         self.tags_row = ft.Row(wrap=True, spacing=6, run_spacing=4, visible=False, key="ov-tags")
@@ -201,8 +202,9 @@ class OverviewTab:
         self.error_text = ft.Text("", color=ft.Colors.ERROR, visible=False, key="ov-error")
         self.hero = ft.Row([
             self.cover,
-            ft.Column([self.title_text, self.author_text, self.hero_chips, self.tags_row], spacing=4, expand=True,
-                      tight=True),
+            ft.Column([self.title_text, self.author_text, self.publisher_text, self.hero_chips, self.tags_row,
+                       self.edit_button], spacing=4, expand=True, tight=True,
+                      horizontal_alignment=ft.CrossAxisAlignment.START),
         ], vertical_alignment=ft.CrossAxisAlignment.START, spacing=12, key="ov-hero")
         self.skeleton = Skeleton("hero", count=2, label="Loading book…", key="ov-skeleton").control
         self.left_items = [
@@ -217,8 +219,6 @@ class OverviewTab:
             section_title("SYNOPSIS"),
             self.synopsis_text,
             self.synopsis_toggle,
-            ft.Row([section_title("METADATA"), self.edit_button], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            self.metadata_rows,
             section_title("At a glance"),
             self.glance,
         ]
@@ -269,6 +269,9 @@ class OverviewTab:
         self.hero.visible = not loading
         self.title_text.value = values["title"]
         self.author_text.value = values["author"] or ""
+        self.author_text.visible = bool(values["author"])
+        self.publisher_text.value = f"\U0001f3db️ {values['publisher']}" if values["publisher"] else ""
+        self.publisher_text.visible = bool(values["publisher"])
         chips = []
         if values["language"]:
             chips.append(ft.Chip(label=ft.Text(f"\U0001f310 {values['language']}"), key="chip-lang"))
@@ -300,11 +303,6 @@ class OverviewTab:
         self.synopsis_text.max_lines = None if self.synopsis_expanded else 4
         self.synopsis_toggle.visible = bool(synopsis) and (len(synopsis) > 280 or synopsis.count("\n") > 3)
         self.synopsis_toggle.content = "Less" if self.synopsis_expanded else "More"
-        self.metadata_rows.controls = [
-            ft.Row([ft.Text(label_text, width=120, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text(values.get(key) or DASH, expand=True, selectable=True)], key=f"meta-{key}")
-            for key, label_text in _METADATA_ROWS
-        ]
         has_workspace = bool(pm.book_workspace(service, book))
         self.edit_button.disabled = not has_workspace
         self.edit_button.tooltip = None if has_workspace else "No output workspace yet"
