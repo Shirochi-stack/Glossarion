@@ -21,7 +21,8 @@ Environment variables:
     OCAGY_CLI_PATH          Explicit path to opencode/opencode.exe.
     OPENCODE_CLI_PATH       Alternate explicit path.
     OCAGY_WORKSPACE         Base workspace used for isolated CLI requests.
-    OCAGY_PLUGIN_PACKAGE    Plugin package (default: opencode-antigravity-auth@latest).
+    OCAGY_PLUGIN_PACKAGE    Fixed plugin package; turns Glossarion's plugin auto-update off
+                            (default: the newest npm release, checked every 12 hours).
 """
 from __future__ import annotations
 
@@ -56,7 +57,29 @@ _CANCEL_EVENT = threading.Event()
 _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 _ACTIVE_LOCK = threading.RLock()
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_PLUGIN_PACKAGE = str(os.environ.get("OCAGY_PLUGIN_PACKAGE", "opencode-antigravity-auth@latest") or "opencode-antigravity-auth@latest").strip()
+_PLUGIN_NAME = "opencode-antigravity-auth"
+# An explicit OCAGY_PLUGIN_PACKAGE turns Glossarion's plugin auto-update off.
+_PLUGIN_PACKAGE_OVERRIDE = str(os.environ.get("OCAGY_PLUGIN_PACKAGE", "") or "").strip()
+_PLUGIN_PACKAGE = _PLUGIN_PACKAGE_OVERRIDE or f"{_PLUGIN_NAME}@latest"
+_PLUGIN_REGISTRY_URL = f"https://registry.npmjs.org/{_PLUGIN_NAME}/latest"
+OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS = 12 * 3600
+OCAGY_PLUGIN_UPDATE_RETRY_SECONDS = 3600
+OCAGY_PLUGIN_REGISTRY_TIMEOUT_SECONDS = 5.0
+_PLUGIN_STATE_FILENAME = "glossarion-plugin-state.json"
+OCAGY_PLUGIN_UPDATE_TIMEOUT_SECONDS = 900
+_PLUGIN_UPDATE_LOCK = threading.RLock()
+_PLUGIN_UPDATE_THREAD_LOCK = threading.Lock()
+_PLUGIN_UPDATE_THREAD: Optional[threading.Thread] = None
+# Held while npm replaces the OpenCode CLI; new OpenCode processes wait for it
+# (running ones keep their loaded binary), so none starts from a half-written install.
+_OPENCODE_CLI_UPDATE_LOCK = threading.Lock()
+# The plugin's README names the oldest OpenCode its legacy entrypoint supports
+# ("OpenCode 1.18.29+ remains supported ..." in 2.x). This table is only used
+# when that sentence cannot be read from the downloaded package.
+_PLUGIN_MIN_OPENCODE_BY_MAJOR: Dict[int, Tuple[int, int, int]] = {2: (1, 18, 29)}
+_PLUGIN_MIN_OPENCODE_RE = re.compile(
+    r"OpenCode\s+\**v?(\d+\.\d+\.\d+)\+?\**\s+remains\s+supported", re.IGNORECASE
+)
 OPENCODE_NPM_INSTALL_COMMAND = "npm install -g --allow-scripts=opencode-ai opencode-ai"
 NODEJS_WINGET_INSTALL_COMMAND = "winget install --id OpenJS.NodeJS.LTS --exact"
 OPENCODE_INSTALL_TIMEOUT_SECONDS = 600
@@ -79,6 +102,10 @@ _CATALOG_MODEL_VARIANTS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
         "gemini-3-flash",
         ("minimal", "low", "medium", "high"),
     ),
+    # Plugin 2.x: the thinking tier is part of Google's model ID, not a variant.
+    ("google/antigravity-gemini-3.8-flash-low", "gemini-3.8-flash-low", ()),
+    ("google/antigravity-gemini-3.8-flash-medium", "gemini-3.8-flash-medium", ()),
+    ("google/antigravity-gemini-3.8-flash-high", "gemini-3.8-flash-high", ()),
     ("google/antigravity-claude-sonnet-4-6", "claude-sonnet-4-6", ()),
     (
         "google/antigravity-claude-opus-4-6-thinking",
@@ -233,6 +260,7 @@ def _run_setup_command(
     log_fn: Optional[Callable[[str], None]] = None,
     timeout: int = OPENCODE_INSTALL_TIMEOUT_SECONDS,
     cwd: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     logger = log_fn or (lambda _message: None)
     command_text = _format_setup_command(command)
@@ -243,7 +271,7 @@ def _run_setup_command(
             log_fn=logger,
             timeout=max(1, int(timeout)),
             cwd=str(cwd) if cwd is not None else None,
-            env=_subprocess_env(),
+            env=env if env is not None else _subprocess_env(),
             popen_kwargs={"creationflags": _creation_flags()},
         )
     except Exception as exc:
@@ -320,6 +348,8 @@ def _opencode_install_command() -> Optional[List[str]]:
 
 def ensure_opencode_installed(log_fn=None) -> str:
     """Find OpenCode or install it automatically, retaining manual fallback text."""
+    with _OPENCODE_CLI_UPDATE_LOCK:
+        pass  # only blocks while a CLI update is running
     try:
         return find_executable()
     except OcAgyError:
@@ -380,13 +410,36 @@ def ensure_opencode_installed(log_fn=None) -> str:
 def _plugin_fallback_instructions() -> str:
     return (
         "Fallback: verify that the Glossarion workspace opencode.json contains "
-        f'\"plugin\": [\"{_PLUGIN_PACKAGE}\"], then run `opencode models google` '
+        f'\"plugin\": [\"{_plugin_spec()}\"], then run `opencode models google` '
         "or `opencode auth login` once."
     )
 
 
+def _verify_auth_plugin(executable: str, logger: Callable[[str], None], workspace: Path) -> Tuple[bool, str]:
+    """Load the configured plugin through OpenCode (installing it when missing)."""
+    result = _run_setup_command(
+        [executable, "models", "google"],
+        action="OpenCode Antigravity auth plugin installation",
+        log_fn=logger,
+        timeout=OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS,
+        cwd=workspace,
+    )
+    output = str(result.get("output") or "")
+    if not result.get("ok") or "google/antigravity-" not in output.lower():
+        return False, str(
+            result.get("error")
+            or "OpenCode finished without exposing any Antigravity plugin models."
+        )
+    return True, ""
+
+
 def ensure_auth_plugin_installed(executable: str, log_fn=None) -> None:
-    """Resolve and verify opencode-antigravity-auth through OpenCode itself."""
+    """Resolve and verify opencode-antigravity-auth through OpenCode itself.
+
+    Runs once per process. A missing plugin is pinned to the newest npm release
+    before OpenCode loads it; an installed plugin is checked for updates in the
+    background (see ``_update_auth_plugin``) so requests never wait on npm.
+    """
     logger = log_fn or (lambda _message: None)
     key = str(Path(executable).resolve(strict=False)).casefold()
     if key in _PLUGIN_BOOTSTRAPPED_EXECUTABLES:
@@ -398,40 +451,585 @@ def ensure_auth_plugin_installed(executable: str, log_fn=None) -> None:
 
         workspace = _workspace_dir()
         _secure_plugin_account_storage(required=False)
-        logger(
-            "🧩 Ensuring the OpenCode Antigravity auth plugin is installed "
-            f"({_PLUGIN_PACKAGE})..."
-        )
-        result = _run_setup_command(
-            [executable, "models", "google"],
-            action="OpenCode Antigravity auth plugin installation",
-            log_fn=logger,
-            timeout=OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS,
-            cwd=workspace,
-        )
-        output = str(result.get("output") or "")
-        if not result.get("ok") or "google/antigravity-" not in output.lower():
-            detail = str(
-                result.get("error")
-                or "OpenCode finished without exposing any Antigravity plugin models."
+        verified = False
+        if not _PLUGIN_PACKAGE_OVERRIDE and _installed_plugin_version(_plugin_spec()) is None:
+            # First install (or a cleared cache): pin the newest release before
+            # OpenCode loads the plugin for the first time.
+            verified = _update_auth_plugin(executable, logger, force=True)
+            workspace = _workspace_dir()
+        if not verified:
+            logger(
+                "🧩 Ensuring the OpenCode Antigravity auth plugin is installed "
+                f"({_plugin_spec()})..."
             )
-            raise OcAgyError(
-                "Glossarion could not install or verify opencode-antigravity-auth automatically.\n"
-                f"Installer details: {detail}\n\n{_plugin_fallback_instructions()}"
-            )
+            ok, detail = _verify_auth_plugin(executable, logger, workspace)
+            if not ok:
+                raise OcAgyError(
+                    "Glossarion could not install or verify opencode-antigravity-auth automatically.\n"
+                    f"Installer details: {detail}\n\n{_plugin_fallback_instructions()}"
+                )
 
         _secure_plugin_account_storage(required=True)
         _PLUGIN_BOOTSTRAPPED_EXECUTABLES.add(key)
-        logger("✅ OpenCode Antigravity auth plugin is installed and ready.")
+        version = _installed_plugin_version(_plugin_spec())
+        logger(
+            "✅ OpenCode Antigravity auth plugin is installed and ready"
+            + (f" ({_PLUGIN_NAME} {version})." if version else ".")
+        )
+        _start_background_plugin_update(executable, logger)
+
+
+# ---------------------------------------------------------------------------
+# Plugin auto-update
+#
+# OpenCode installs a plugin given as ``name@spec`` once into
+# <cache>/opencode/packages/<name>@<spec> and never re-resolves it, so
+# ``@latest`` stays on whatever was newest on the first run. Glossarion therefore
+# resolves the newest release itself and pins that exact version in the
+# workspace config. Each version gets its own cache folder, so the previous
+# working version stays installed and switching back needs no download.
+# ---------------------------------------------------------------------------
+
+
+def _workspace_base() -> Path:
+    configured = str(os.environ.get("OCAGY_WORKSPACE", "") or "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".glossarion" / "opencode_antigravity"
+
+
+def _plugin_state_path() -> Path:
+    return _workspace_base() / _PLUGIN_STATE_FILENAME
+
+
+def _read_plugin_state() -> Dict[str, Any]:
+    try:
+        payload = json.loads(_plugin_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_plugin_state(state: Dict[str, Any]) -> None:
+    path = _plugin_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _plugin_spec() -> str:
+    """The plugin entry Glossarion writes into the workspace opencode.json."""
+    if _PLUGIN_PACKAGE_OVERRIDE:
+        return _PLUGIN_PACKAGE_OVERRIDE
+    spec = str(_read_plugin_state().get("spec") or "")
+    if re.fullmatch(re.escape(_PLUGIN_NAME) + r"@(?:latest|\d+\.\d+\.\d+)", spec):
+        return spec
+    return _PLUGIN_PACKAGE
+
+
+def _opencode_cache_dir() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser() / "opencode"
+
+
+def _plugin_package_dir(spec: str) -> Path:
+    return _opencode_cache_dir() / "packages" / spec
+
+
+def _plugin_root(spec: str) -> Path:
+    return _plugin_package_dir(spec) / "node_modules" / _PLUGIN_NAME
+
+
+def _installed_plugin_version(spec: str) -> Optional[str]:
+    try:
+        payload = json.loads((_plugin_root(spec) / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = str(payload.get("version", "") or "").strip() if isinstance(payload, dict) else ""
+    return version or None
+
+
+def _version_tuple(value: Any) -> Optional[Tuple[int, int, int]]:
+    match = re.search(r"(?<![\d.])(\d+)\.(\d+)\.(\d+)(?![\d.]*-)", str(value or ""))
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3))) if match else None
+
+
+def _format_version(value: Optional[Tuple[int, int, int]]) -> str:
+    return ".".join(str(part) for part in value) if value else "unknown"
+
+
+def _fetch_latest_plugin_version(timeout: float = OCAGY_PLUGIN_REGISTRY_TIMEOUT_SECONDS) -> str:
+    """Return the npm ``latest`` release of the plugin (no account data is sent)."""
+    request = urllib.request.Request(
+        _PLUGIN_REGISTRY_URL,
+        headers={"Accept": "application/json", "User-Agent": "Glossarion"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read(1 << 20).decode("utf-8", errors="replace"))
+    version = str(payload.get("version", "") if isinstance(payload, dict) else "").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise OcAgyError(f"npm returned no release version for {_PLUGIN_NAME}")
+    return version
+
+
+def _opencode_version(executable: str) -> Optional[Tuple[int, int, int]]:
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_creation_flags(),
+            check=False,
+            env=_subprocess_env(),
+        )
+    except Exception:
+        return None
+    return _version_tuple(_clean_text((result.stdout or "") + "\n" + (result.stderr or "")))
+
+
+def _plugin_min_opencode(root: Path, version: str) -> Optional[Tuple[int, int, int]]:
+    """Oldest OpenCode CLI the downloaded plugin states it supports."""
+    try:
+        match = _PLUGIN_MIN_OPENCODE_RE.search((root / "README.md").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        match = None
+    if match:
+        return _version_tuple(match.group(1))
+    major = (_version_tuple(version) or (0, 0, 0))[0]
+    known = [key for key in _PLUGIN_MIN_OPENCODE_BY_MAJOR if key <= major]
+    return _PLUGIN_MIN_OPENCODE_BY_MAJOR[max(known)] if known else None
+
+
+def _opencode_update_command(executable: str, major: int) -> Optional[List[str]]:
+    """Update command for an OpenCode CLI installed the way Glossarion installs it.
+
+    That is any npm-global ``opencode-ai`` (whoever installed it) or, on
+    Linux/macOS, the official install script's ~/.opencode/bin. npm stays within
+    ``major`` (the newest ``major.x.y``), so it never jumps to an untested major.
+    """
+    override = str(os.environ.get("OCAGY_OPENCODE_INSTALL_CMD", "") or "").strip()
+    if override:
+        return _split_setup_override(override)
+    resolved = str(Path(executable).resolve(strict=False)).replace("\\", "/").casefold()
+    if "/node_modules/opencode-ai/" in resolved or (Path(executable).parent / "node_modules" / "opencode-ai").is_dir():
+        npm = _candidate_command("npm")
+        if npm:
+            return [npm, "install", "-g", "--allow-scripts=opencode-ai", f"opencode-ai@{int(major)}"]
+    if os.name != "nt" and "/.opencode/bin/" in resolved:
+        return _opencode_install_command()
+    return None
+
+
+def _plugin_update_due(state: Dict[str, Any], now: float) -> bool:
+    failed = float(state.get("check_failed_at") or 0)
+    if failed and now - failed < OCAGY_PLUGIN_UPDATE_RETRY_SECONDS:
+        return False
+    checked = float(state.get("checked_at") or 0)
+    return not checked or now - checked >= OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS
+
+
+def _mark_plugin_retry(state: Dict[str, Any], now: float) -> None:
+    """A transient failure: try again after OCAGY_PLUGIN_UPDATE_RETRY_SECONDS."""
+    state["check_failed_at"] = now
+    state.pop("checked_at", None)
+
+
+def _storage_hook_fingerprint() -> str:
+    """Identify the storage hook's anchors and replacements (changes when a release changes them)."""
+    import proxy_token_storage
+
+    texts: List[str] = []
+
+    def walk(code: Any) -> None:
+        for const in code.co_consts:
+            if isinstance(const, str):
+                texts.append(const)
+            elif hasattr(const, "co_consts"):
+                walk(const)
+
+    for name in ("patch_ocagy", "_patch_ocagy_save_serialization", "_patch_ocagy_oauth"):
+        function = getattr(proxy_token_storage, name, None)
+        code = getattr(function, "__code__", None)
+        if code is not None:
+            walk(code)
+    return hashlib.sha256("\0".join(texts).encode("utf-8")).hexdigest()[:16]
+
+
+def _plugin_version_rejected(state: Dict[str, Any], version: str, now: float) -> bool:
+    entry = (state.get("rejected") or {}).get(version)
+    if not isinstance(entry, dict):
+        return False
+    # A hook-incompatible version stays rejected only while the hook is unchanged
+    # (a Glossarion release with new anchors tries it again); a failed check is
+    # retried after a week.
+    if entry.get("permanent"):
+        return entry.get("hook") == _storage_hook_fingerprint()
+    return now - float(entry.get("at") or 0) < 7 * 86400
+
+
+def _reject_plugin_version(state: Dict[str, Any], version: str, reason: str, *, permanent: bool) -> None:
+    rejected = state.setdefault("rejected", {})
+    entry: Dict[str, Any] = {"reason": reason[:300], "at": time.time(), "permanent": permanent}
+    if permanent:
+        entry["hook"] = _storage_hook_fingerprint()
+    rejected[version] = entry
+
+
+def _install_plugin_candidate(executable: str, spec: str, logger: Callable[[str], None]) -> str:
+    """Let OpenCode download one plugin version into its cache, without accounts.
+
+    The new version is not yet patched with Glossarion's encrypted storage hook,
+    so it runs once against an empty, throw-away config and data directory: it
+    can neither read nor rewrite the real account store. Returns an error text,
+    or "" on success.
+    """
+    base = _workspace_base()
+    base.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix="plugin-update-", dir=str(base)))
+    try:
+        (stage / "opencode.json").write_text(
+            json.dumps({"$schema": "https://opencode.ai/config.json", "plugin": [spec], "share": "disabled"}),
+            encoding="utf-8",
+        )
+        env = _subprocess_env(stage / "config")
+        for name, folder in (("XDG_CONFIG_HOME", "xdg-config"), ("XDG_DATA_HOME", "data"), ("APPDATA", "appdata")):
+            (stage / folder).mkdir(parents=True, exist_ok=True)
+            env[name] = str(stage / folder)
+        (stage / "config").mkdir(parents=True, exist_ok=True)
+        # Load only the throw-away config: without this OpenCode also reads the
+        # opencode.json of parent folders, i.e. the real workspace config with
+        # the installed plugin, and that run hung until its timeout in a test.
+        env["OPENCODE_CONFIG"] = str(stage / "opencode.json")
+        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+        env.pop("OPENCODE_CONFIG_CONTENT", None)
+        result = _run_setup_command(
+            [executable, "models", "google"],
+            action=f"Download of {spec}",
+            log_fn=logger,
+            timeout=OCAGY_PLUGIN_UPDATE_TIMEOUT_SECONDS,
+            cwd=stage,
+            env=env,
+        )
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    version = spec.rsplit("@", 1)[-1]
+    if _installed_plugin_version(spec) == version:
+        return ""
+    return str(result.get("error") or f"OpenCode did not install {spec}")
+
+
+def _update_auth_plugin(
+    executable: str,
+    logger: Callable[[str], None],
+    *,
+    force: bool = False,
+) -> bool:
+    """Move the workspace to the newest plugin release when that is safe.
+
+    Called from the background update thread, and on a first install (no plugin
+    cached yet) from the route's start. Returns True when a new version was
+    switched to and passed its check. Every failure leaves the previously
+    configured version in place and is logged once. The check after a switch
+    (``opencode models google``) proves the plugin loads and lists its models;
+    it sends no generation request.
+    """
+    if _PLUGIN_PACKAGE_OVERRIDE:
+        return False
+    from proxy_token_storage import patch_ocagy
+
+    with _PLUGIN_UPDATE_LOCK:
+        state = _read_plugin_state()
+        now = time.time()
+        current_spec = _plugin_spec()
+        current_version = _installed_plugin_version(current_spec)
+        current_text = current_version or current_spec
+
+        if not force and not _plugin_update_due(state, now):
+            return False
+        try:
+            target = _fetch_latest_plugin_version()
+        except Exception as exc:
+            _mark_plugin_retry(state, now)
+            _write_plugin_state(state)
+            logger(
+                f"⚠️ OcAgy: could not check npm for a newer {_PLUGIN_NAME} "
+                f"({_quota_error_message(exc)}); using the installed plugin"
+                + (f" {current_version}." if current_version else ".")
+            )
+            return False
+        state["checked_at"] = now
+        state.pop("check_failed_at", None)
+        if current_version and (_version_tuple(target) or (0, 0, 0)) <= (_version_tuple(current_version) or (0, 0, 0)):
+            state.setdefault("spec", current_spec)
+            state.setdefault("version", current_version)
+            _write_plugin_state(state)
+            return False
+        if _plugin_version_rejected(state, target, now):
+            _write_plugin_state(state)
+            return False
+
+        spec = f"{_PLUGIN_NAME}@{target}"
+        root = _plugin_root(spec)
+        if _installed_plugin_version(spec) != target:
+            logger(
+                f"⬆️ OcAgy: downloading {_PLUGIN_NAME} {target}"
+                + (f" (installed: {current_version})..." if current_version else "...")
+            )
+            # The throw-away run prints OpenCode's whole Google catalog, and it
+            # exits with "Provider not found: google" on OpenCode 1.x even when
+            # the download worked (no accounts, no model config). Keep only the
+            # command line; a real failure is logged once below.
+            error = _install_plugin_candidate(
+                executable,
+                spec,
+                lambda message: None if str(message).lstrip().startswith(("↳", "❌")) else logger(message),
+            )
+            if error:
+                _mark_plugin_retry(state, now)
+                _write_plugin_state(state)
+                logger(f"⚠️ OcAgy: could not download {spec}: {error[:300]}. Keeping {current_text}.")
+                return False
+
+        required_files = [
+            root / "dist" / "src" / "plugin" / "storage.js",
+            root / "dist" / "src" / "plugin" / "auth.js",
+            root / "dist" / "src" / "antigravity" / "oauth.js",
+        ]
+        if not all(path.is_file() for path in required_files):
+            shutil.rmtree(_plugin_package_dir(spec), ignore_errors=True)
+            _mark_plugin_retry(state, now)
+            _write_plugin_state(state)
+            logger(f"⚠️ OcAgy: the download of {spec} is incomplete; it was removed. Keeping {current_text}.")
+            return False
+        try:
+            patch_ocagy(root)
+        except Exception as exc:
+            # Never run a plugin that would store OAuth credentials in plaintext.
+            shutil.rmtree(_plugin_package_dir(spec), ignore_errors=True)
+            _reject_plugin_version(state, target, str(exc), permanent=True)
+            _write_plugin_state(state)
+            logger(
+                f"⚠️ OcAgy: {spec} does not match Glossarion's encrypted account storage hook ({exc}); "
+                f"not switching to it. Keeping {current_text}."
+            )
+            return False
+
+        required = _plugin_min_opencode(root, target)
+        cli_version = _opencode_version(executable) if required else None
+        if required and (cli_version is None or cli_version < required):
+            need = f"{_PLUGIN_NAME} {target} needs OpenCode {_format_version(required)} or newer (installed: {_format_version(cli_version)})"
+            major = max((cli_version or (0, 0, 0))[0], required[0])
+            command = _opencode_update_command(executable, major)
+            if command is None:
+                _write_plugin_state(state)
+                logger(
+                    f"⚠️ OcAgy: {need}. This OpenCode was not installed through npm or the OpenCode "
+                    f"install script, so Glossarion does not update it; run `opencode upgrade`. Keeping {current_text}."
+                )
+                return False
+            # Runs in the background update thread (npm replaces a running
+            # opencode.exe fine on Windows: it moves the busy folder aside).
+            # New OpenCode processes wait on the lock until npm has finished.
+            logger(f"⬆️ OcAgy: {need}. Updating OpenCode; new OcAgy requests wait until it finishes...")
+            with _OPENCODE_CLI_UPDATE_LOCK:
+                result = _run_setup_command(
+                    command,
+                    action="OpenCode CLI update",
+                    log_fn=lambda message: None if str(message).lstrip().startswith("↳") else logger(message),
+                )
+                try:
+                    executable = find_executable()
+                except OcAgyError:
+                    pass
+                new_cli = _opencode_version(executable)
+            if not result.get("ok") or new_cli is None or new_cli < required:
+                # Next attempt with the next regular check (12 h), never on app start.
+                _write_plugin_state(state)
+                detail = str(result.get("error") or "").strip().splitlines()
+                logger(
+                    f"⚠️ OcAgy: the OpenCode update did not reach {_format_version(required)} "
+                    f"(now: {_format_version(new_cli)}"
+                    + (f"; {detail[0][:300]}" if detail else "")
+                    + f"). Keeping {current_text}; Glossarion tries again in "
+                    f"{OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS // 3600} h."
+                )
+                return False
+            logger(f"✅ OcAgy: OpenCode CLI updated {_format_version(cli_version)} → {_format_version(new_cli)}.")
+
+        state.update(
+            spec=spec,
+            version=target,
+            previous_spec=current_spec,
+            previous_version=current_version,
+            updated_at=now,
+        )
+        _write_plugin_state(state)
+        workspace = _workspace_dir()
+        ok, detail = _verify_auth_plugin(executable, logger, workspace)
+        if not ok:
+            state.update(spec=current_spec, version=current_version)
+            _reject_plugin_version(state, target, detail, permanent=False)
+            _write_plugin_state(state)
+            _workspace_dir()
+            logger(f"⚠️ OcAgy: {spec} failed its check ({detail[:300]}); restored {current_text}.")
+            return False
+        new_models = sorted(
+            set(_declared_google_models()) - set(_declared_google_models(current_spec))
+        )
+        logger(
+            f"✅ OcAgy: updated {_PLUGIN_NAME} {current_version or 'not installed'} → {target}."
+            + (f" New models: {', '.join(model.replace('antigravity-', '', 1) for model in new_models)}." if new_models and current_version else "")
+        )
+        return True
+
+
+def _start_background_plugin_update(executable: str, logger: Callable[[str], None]) -> None:
+    """Check npm for a newer plugin at most every OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS."""
+    global _PLUGIN_UPDATE_THREAD
+    if _PLUGIN_PACKAGE_OVERRIDE or not _plugin_update_due(_read_plugin_state(), time.time()):
+        return
+    with _PLUGIN_UPDATE_THREAD_LOCK:
+        if _PLUGIN_UPDATE_THREAD is not None and _PLUGIN_UPDATE_THREAD.is_alive():
+            return
+
+        def run() -> None:
+            try:
+                _update_auth_plugin(executable, logger)
+            except Exception as exc:  # never disturb translation
+                logger(f"⚠️ OcAgy: plugin update check failed: {_quota_error_message(exc)}")
+
+        _PLUGIN_UPDATE_THREAD = threading.Thread(target=run, name="ocagy-plugin-update", daemon=True)
+        _PLUGIN_UPDATE_THREAD.start()
 
 
 def _workspace_dir() -> Path:
-    configured = str(os.environ.get("OCAGY_WORKSPACE", "") or "").strip()
-    path = Path(configured).expanduser() if configured else Path.home() / ".glossarion" / "opencode_antigravity"
+    path = _workspace_base()
     path.mkdir(parents=True, exist_ok=True)
     _write_workspace_config(path)
     _ensure_plugin_config()
     return path
+
+
+_DEFAULT_MODALITIES: Dict[str, List[str]] = {"input": ["text", "image", "pdf"], "output": ["text"]}
+
+
+def _js_block(source: str, start: int) -> str:
+    """Return the ``{...}`` block that opens at or after ``start`` in JS source."""
+    opening = source.find("{", start)
+    if opening < 0:
+        return ""
+    depth = 0
+    for index in range(opening, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening:index + 1]
+    return ""
+
+
+def _js_model_definition(body: str, name: str) -> Optional[Dict[str, Any]]:
+    limit = re.search(r"limit:\s*\{\s*context:\s*(\d+),\s*output:\s*(\d+)", body)
+    if not limit:
+        return None
+    definition: Dict[str, Any] = {
+        "name": name.replace("(Antigravity)", "(Antigravity OAuth)"),
+        "temperature": True,
+        "limit": {"context": int(limit.group(1)), "output": int(limit.group(2))},
+        "modalities": json.loads(json.dumps(_DEFAULT_MODALITIES)),
+    }
+    variants_at = body.find("variants:")
+    if variants_at >= 0:
+        block = _js_block(body, variants_at)
+        variants: Dict[str, Any] = {}
+        for variant, level in re.findall(r"(\w+):\s*\{\s*thinkingLevel:\s*\"(\w+)\"\s*\}", block):
+            variants[variant] = {"thinkingLevel": level}
+        for variant, budget in re.findall(
+            r"(\w+):\s*\{\s*thinkingConfig:\s*\{\s*thinkingBudget:\s*(\d+)\s*\}\s*\}", block
+        ):
+            variants[variant] = {"thinkingConfig": {"thinkingBudget": int(budget)}}
+        if variants:
+            definition["variants"] = variants
+    return definition
+
+
+_DECLARED_MODELS_CACHE: Dict[str, Tuple[Tuple[float, ...], Dict[str, Dict[str, Any]]]] = {}
+
+
+def _plugin_declared_models(root: Path) -> Dict[str, Dict[str, Any]]:
+    """Model definitions an installed plugin declares for OpenCode 1.x configs.
+
+    OpenCode 1.x only offers models listed in the config; the plugin keeps its
+    own list in dist/src/plugin/config/models.js (plus the Gemini 3.8 Flash tier
+    loop in models-v2.js). Reading them lets new plugin models appear without a
+    Glossarion release. Anything that cannot be parsed is skipped.
+    """
+    config_dir = Path(root) / "dist" / "src" / "plugin" / "config"
+    files = [config_dir / "models.js", config_dir / "models-v2.js"]
+    try:
+        stamp = tuple(path.stat().st_mtime if path.is_file() else 0.0 for path in files)
+    except OSError:
+        return {}
+    cache_key = str(config_dir).casefold()
+    cached = _DECLARED_MODELS_CACHE.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        return json.loads(json.dumps(cached[1]))
+
+    models: Dict[str, Dict[str, Any]] = {}
+    try:
+        source = files[0].read_text(encoding="utf-8")
+    except OSError:
+        source = ""
+    for match in re.finditer(r"\"(antigravity-[a-z0-9][a-z0-9.\-]*)\"\s*:\s*\{", source):
+        body = _js_block(source, match.end() - 1)
+        name = re.search(r"name:\s*\"([^\"]+)\"", body)
+        definition = _js_model_definition(body, name.group(1) if name else match.group(1))
+        if definition:
+            models[match.group(1)] = definition
+    try:
+        source_v2 = files[1].read_text(encoding="utf-8")
+    except OSError:
+        source_v2 = ""
+    for match in re.finditer(
+        r"for\s*\(const\s+(\w+)\s+of\s+\[([^\]]*)\]\)\s*\{\s*\w+\[`(antigravity-[a-z0-9][a-z0-9.\-]*)-\$\{\1\}`\]\s*=\s*\{",
+        source_v2,
+    ):
+        body = _js_block(source_v2, match.end() - 1)
+        template = re.search(r"name:\s*`([^`]+)`", body)
+        for tier in re.findall(r"[\"']([a-z]+)[\"']", match.group(2)):
+            name = (template.group(1) if template else f"{match.group(3)}-{tier}").replace(
+                "${" + match.group(1) + "}", tier
+            )
+            definition = _js_model_definition(body, name)
+            if definition:
+                models[f"{match.group(3)}-{tier}"] = definition
+    _DECLARED_MODELS_CACHE[cache_key] = (stamp, models)
+    return json.loads(json.dumps(models))
+
+
+def _active_plugin_root(spec: Optional[str] = None) -> Optional[Path]:
+    spec = spec or _plugin_spec()
+    root = _plugin_root(spec)
+    if root.is_dir():
+        return root
+    for candidate in _plugin_install_candidates():
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _declared_google_models(spec: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Google models written into the workspace config: Glossarion's + the plugin's."""
+    models = json.loads(json.dumps(_STATIC_GOOGLE_MODELS))
+    root = _active_plugin_root(spec)
+    if root is not None:
+        for model_id, definition in _plugin_declared_models(root).items():
+            # Glossarion's own entries keep their names and limits stable.
+            models.setdefault(model_id, definition)
+    return models
 
 
 def _workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
@@ -439,7 +1037,7 @@ def _workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
     # normal OpenCode projects while still reusing the plugin's account store.
     config: Dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
-        "plugin": [_PLUGIN_PACKAGE],
+        "plugin": [_plugin_spec()],
         "share": "disabled",
         "permission": {"*": "deny"},
         "agent": {
@@ -458,7 +1056,18 @@ def _workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
             "google": {
                 # OpenCode only forwards the agent's numeric temperature when
                 # the selected custom model advertises temperature support.
-                "models": {
+                "models": _declared_google_models(),
+            }
+        },
+    }
+    if temperature is not None:
+        config["agent"]["glossarion"]["temperature"] = float(temperature)
+    return config
+
+
+# Glossarion's fixed entries. Models the installed plugin declares are added to
+# these by _declared_google_models(), so new plugin models need no release.
+_STATIC_GOOGLE_MODELS: Dict[str, Dict[str, Any]] = {
                     "antigravity-gemini-3.1-pro": {
                         "name": "Gemini 3.1 Pro (Antigravity OAuth)",
                         "temperature": True,
@@ -507,13 +1116,17 @@ def _workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
                             "max": {"thinkingConfig": {"thinkingBudget": 32768}},
                         },
                     },
-                }
-            }
-        },
+}
+# Plugin 2.x serves Gemini 3.8 Flash as three Google model IDs; the thinking
+# tier is part of the ID, so these entries have no variants.
+for _tier in ("low", "medium", "high"):
+    _STATIC_GOOGLE_MODELS[f"antigravity-gemini-3.8-flash-{_tier}"] = {
+        "name": f"Gemini 3.8 Flash ({_tier}) (Antigravity OAuth)",
+        "temperature": True,
+        "limit": {"context": 1048576, "output": 65536},
+        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
     }
-    if temperature is not None:
-        config["agent"]["glossarion"]["temperature"] = float(temperature)
-    return config
+del _tier
 
 
 def _write_workspace_config(path: Path, *, temperature: Optional[float] = None) -> Path:
@@ -917,10 +1530,10 @@ def _plugin_install_candidates() -> Iterable[Path]:
     if override:
         yield Path(override).expanduser()
 
-    package_name = "opencode-antigravity-auth"
-    cache_base = Path(
-        os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
-    ).expanduser() / "opencode"
+    package_name = _PLUGIN_NAME
+    cache_base = _opencode_cache_dir()
+    # The configured version first: it is the one OpenCode loads.
+    yield _plugin_root(_plugin_spec())
     yield cache_base / "node_modules" / package_name
     yield cache_base / "packages" / _PLUGIN_PACKAGE / "node_modules" / package_name
     packages_dir = cache_base / "packages"
@@ -939,8 +1552,16 @@ def _secure_plugin_account_storage(*, required):
         if required:
             raise OcAgyError("Cannot locate the OAuth plugin to enable encrypted credential storage")
         return
+    active = _plugin_root(_plugin_spec())
+    active_installed = (active / "dist" / "src" / "plugin" / "storage.js").is_file()
     for root in dict.fromkeys(roots):
-        patch_ocagy(root)
+        try:
+            patch_ocagy(root)
+        except Exception:
+            # Other cached versions are not loaded; only the configured one
+            # (or every one, when it is missing) must carry the hook.
+            if not active_installed or root == active:
+                raise
     load_accounts(_config_dir() / "antigravity-accounts.json", migrate=True)
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     migrate_opencode_oauth(data_home / "opencode" / "auth.json")
@@ -1079,20 +1700,32 @@ def _aggregate_antigravity_quota(models: Any) -> Dict[str, Dict[str, Any]]:
         return groups
     for model_name, raw_info in models.items():
         info = raw_info if isinstance(raw_info, dict) else {}
-        combined = f"{model_name} {info.get('displayName', '')} {info.get('modelName', '')}".lower()
-        if "claude" in combined:
-            group = "claude"
-        elif "gemini-3" in combined or "gemini 3" in combined:
-            group = "gemini-flash" if "flash" in combined else "gemini-pro"
-        else:
+        model_id = str(model_name or "").strip().lower()
+        # Same selection and grouping as the plugin (2.x): chat models only,
+        # Gemini split into Flash and Pro, so Gemini 3.8 Flash and later
+        # Gemini generations are counted too.
+        if info.get("disabled") or not re.match(r"(gemini-|claude-)", model_id):
             continue
+        if re.search(r"image|imagen|-(disabled|tiered)$", model_id):
+            continue
+        group = "claude" if "claude" in model_id else ("gemini-flash" if "flash" in model_id else "gemini-pro")
         quota = info.get("quotaInfo")
         if not isinstance(quota, dict):
             continue
         remaining = _normalize_quota_fraction(quota.get("remainingFraction"))
         reset_time = str(quota.get("resetTime", "") or "")
-        existing = groups.setdefault(group, {"model_count": 0})
+        existing = groups.setdefault(group, {"model_count": 0, "models": []})
         existing["model_count"] += 1
+        model_entry: Dict[str, Any] = {
+            "model_id": str(model_name),
+            "label": str(info.get("displayName") or model_name),
+        }
+        if remaining is not None:
+            model_entry["remaining_fraction"] = remaining
+        if _quota_reset_timestamp(reset_time) is not None:
+            model_entry["reset_time"] = reset_time
+            model_entry["reset_in"] = _quota_reset_in(reset_time)
+        existing["models"].append(model_entry)
         if remaining is not None:
             current = existing.get("remaining_fraction")
             existing["remaining_fraction"] = remaining if current is None else min(current, remaining)
@@ -1103,6 +1736,8 @@ def _aggregate_antigravity_quota(models: Any) -> Dict[str, Dict[str, Any]]:
         ):
             existing["reset_time"] = reset_time
             existing["reset_in"] = _quota_reset_in(reset_time)
+    for group in groups.values():
+        group["models"].sort(key=lambda item: str(item["label"]).casefold())
     return groups
 
 
@@ -1266,11 +1901,22 @@ def normalize_polled_models(raw_models: Iterable[str]) -> List[str]:
         else:
             result.append(f"ocagy/{friendly}")
 
-    # Preserve future plugin models even before Glossarion gives them a friendly
-    # alias. resolve_model() already accepts the retained antigravity-* suffix.
+    # Models the installed plugin declares get the same friendly form (variants
+    # expanded); anything else keeps its antigravity-* suffix, which
+    # resolve_model() accepts as is.
+    declared = {key.casefold(): value for key, value in _declared_google_models().items()}
     for key in sorted(set(available) - known):
-        raw_model = available[key]
-        result.append(f"ocagy/{raw_model.split('/', 1)[1]}")
+        provider_model = available[key].split("/", 1)[1]
+        definition = declared.get(provider_model.casefold())
+        if definition is None:
+            result.append(f"ocagy/{provider_model}")
+            continue
+        friendly = provider_model[len("antigravity-"):]
+        variants = list((definition.get("variants") or {}).keys())
+        if variants:
+            result.extend(f"ocagy/{friendly}-{variant}" for variant in variants)
+        else:
+            result.append(f"ocagy/{friendly}")
     return list(dict.fromkeys(result))
 
 
@@ -1368,6 +2014,7 @@ def launch_login(log_fn=None) -> Dict[str, Any]:
             "$Host.UI.RawUI.WindowTitle='Glossarion OCAGY Login'; "
             "Write-Host 'Glossarion OCAGY OAuth setup' -ForegroundColor Cyan; "
             "Write-Host 'Select Google, then OAuth with Google (Antigravity).' -ForegroundColor Yellow; "
+            "Write-Host 'Quotas: use the chart (quota) button next to OCAGY Login in Glossarion, not the plugin menu.' -ForegroundColor Yellow; "
             f"Set-Location -LiteralPath {json.dumps(str(workspace))}; "
             f"& {json.dumps(exe)} auth login; "
             "Write-Host ''; Write-Host 'When login is complete, return to Glossarion. The account count updates automatically; click the quota button for live usage.' -ForegroundColor Green"
@@ -1480,6 +2127,10 @@ def resolve_model(model: str) -> Tuple[str, Optional[str]]:
         ("gemini-3-flash-low", "google/antigravity-gemini-3-flash", "low"),
         ("gemini-3-flash-medium", "google/antigravity-gemini-3-flash", "medium"),
         ("gemini-3-flash-high", "google/antigravity-gemini-3-flash", "high"),
+        # Gemini 3.8 Flash: the tier is part of Google's model ID (no variant).
+        ("gemini-3.8-flash-low", "google/antigravity-gemini-3.8-flash-low", None),
+        ("gemini-3.8-flash-medium", "google/antigravity-gemini-3.8-flash-medium", None),
+        ("gemini-3.8-flash-high", "google/antigravity-gemini-3.8-flash-high", None),
         ("claude-sonnet-4-6", "google/antigravity-claude-sonnet-4-6", None),
         ("claude-opus-4-6-thinking-low", "google/antigravity-claude-opus-4-6-thinking", "low"),
         ("claude-opus-4-6-thinking-max", "google/antigravity-claude-opus-4-6-thinking", "max"),
@@ -1489,6 +2140,23 @@ def resolve_model(model: str) -> Tuple[str, Optional[str]]:
             return model_id, variant
     if value.startswith("antigravity-"):
         return "google/" + value, None
+    if value:
+        # Models the installed plugin declares: an exact model ID wins over a
+        # <model>-<variant> split (gemini-3.8-flash-high is itself an ID).
+        definitions = _declared_google_models()
+        declared = {key.casefold(): key for key in definitions}
+        variants = {
+            key.casefold(): [str(name) for name in (definition.get("variants") or {})]
+            for key, definition in definitions.items()
+        }
+        exact = declared.get(f"antigravity-{value}")
+        if exact:
+            return "google/" + exact, None
+        for key, names in variants.items():
+            base = key[len("antigravity-"):] if key.startswith("antigravity-") else key
+            for name in names:
+                if value == f"{base}-{name.casefold()}":
+                    return "google/" + declared[key], name
     if not value:
         return "google/antigravity-gemini-3.1-pro", "high"
     raise OcAgyError(

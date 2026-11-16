@@ -2,9 +2,11 @@ import ast
 import json
 import os
 import queue
+import re
 import stat
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -16,6 +18,17 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import ocagy_cli
+
+
+@pytest.fixture(autouse=True)
+def _no_plugin_update_network(monkeypatch):
+    """Tests never reach npm or start the background plugin update."""
+
+    def offline(*_args, **_kwargs):
+        raise OSError("npm registry disabled in tests")
+
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", offline)
+    monkeypatch.setattr(ocagy_cli, "_start_background_plugin_update", lambda *_a, **_k: None)
 
 
 def test_zen_poll_accepts_only_free_cli_catalog_rows(monkeypatch):
@@ -2041,3 +2054,465 @@ def test_empty_safety_toggle_defaults_to_enabled(monkeypatch):
         )
         is False
     )
+
+# --- Plugin auto-update, plugin-declared models and quota grouping ---------
+# ocagy/ keeps opencode-antigravity-auth (and, when the plugin needs it, the
+# OpenCode CLI) current without manual steps; models and quota follow the plugin.
+
+NAME = ocagy_cli._PLUGIN_NAME
+
+
+def _fake_plugin(cache: Path, spec: str, version: str, *, readme: str = "", models_js: str = "") -> Path:
+    root = cache / "opencode" / "packages" / spec / "node_modules" / NAME
+    for relative in ("dist/src/plugin/storage.js", "dist/src/plugin/auth.js", "dist/src/antigravity/oauth.js"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// fake\n", encoding="utf-8")
+    (root / "package.json").write_text(json.dumps({"name": NAME, "version": version}), encoding="utf-8")
+    if readme:
+        (root / "README.md").write_text(readme, encoding="utf-8")
+    if models_js:
+        config = root / "dist" / "src" / "plugin" / "config"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "models.js").write_text(models_js, encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(ocagy_cli, "_PLUGIN_PACKAGE_OVERRIDE", "")
+    monkeypatch.setattr(ocagy_cli, "_start_background_plugin_update", lambda *_a, **_k: None)
+    patched = []
+    import proxy_token_storage
+
+    monkeypatch.setattr(proxy_token_storage, "patch_ocagy", lambda root: patched.append(Path(root)))
+    monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: (1, 19, 5))
+    monkeypatch.setattr(ocagy_cli, "_verify_auth_plugin", lambda *_a, **_k: (True, ""))
+    installs = []
+
+    def fake_install(executable, spec, logger):
+        installs.append(spec)
+        _fake_plugin(cache, spec, spec.rsplit("@", 1)[1], readme="OpenCode 1.18.29+ remains supported through the legacy entrypoint")
+        return ""
+
+    monkeypatch.setattr(ocagy_cli, "_install_plugin_candidate", fake_install)
+    # An existing user: OpenCode resolved @latest once, to 1.6.0, and kept it.
+    _fake_plugin(cache, f"{NAME}@latest", "1.6.0")
+    return {"cache": cache, "patched": patched, "installs": installs, "tmp": tmp_path}
+
+
+def _latest(version):
+    return lambda *_a, **_k: version
+
+
+def test_cached_latest_is_detected_as_installed_version(env):
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    assert ocagy_cli._installed_plugin_version(ocagy_cli._plugin_spec()) == "1.6.0"
+
+
+def test_registry_unreachable_keeps_installed_plugin_and_logs_one_line(env, monkeypatch):
+    def offline(*_a, **_k):
+        raise OSError("network is unreachable")
+
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", offline)
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is False
+
+    assert len(logs) == 1 and "could not check npm" in logs[0] and "1.6.0" in logs[0]
+    assert env["installs"] == []
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    state = ocagy_cli._read_plugin_state()
+    assert state["check_failed_at"] > 0
+    # No second network attempt within the retry window.
+    assert ocagy_cli._plugin_update_due(state, state["check_failed_at"] + 60) is False
+
+
+def test_same_version_does_nothing(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("1.6.0"))
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is False
+
+    assert logs == [] and env["installs"] == []
+    state = ocagy_cli._read_plugin_state()
+    assert state["version"] == "1.6.0"
+    assert ocagy_cli._plugin_update_due(state, state["checked_at"] + 3600) is False
+    assert ocagy_cli._plugin_update_due(state, state["checked_at"] + ocagy_cli.OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS) is True
+
+
+def test_newer_version_is_pinned_patched_and_logged(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is True
+
+    assert env["installs"] == [f"{NAME}@2.1.2"]
+    assert env["patched"] == [ocagy_cli._plugin_root(f"{NAME}@2.1.2")]
+    assert ocagy_cli._plugin_spec() == f"{NAME}@2.1.2"
+    config = json.loads((env["tmp"] / "workspace" / "opencode.json").read_text(encoding="utf-8"))
+    assert config["plugin"] == [f"{NAME}@2.1.2"]
+    assert any(f"updated {NAME} 1.6.0 → 2.1.2" in line for line in logs)
+    # The previous version stays cached for a rollback without a download.
+    assert ocagy_cli._installed_plugin_version(f"{NAME}@latest") == "1.6.0"
+    assert ocagy_cli._read_plugin_state()["previous_spec"] == f"{NAME}@latest"
+
+
+def test_hook_incompatible_version_is_not_used(env, monkeypatch):
+    import proxy_token_storage
+
+    def incompatible(_root):
+        raise RuntimeError("OcAgy credential adapter is incompatible; refusing plaintext storage")
+
+    monkeypatch.setattr(proxy_token_storage, "patch_ocagy", incompatible)
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("3.0.0"))
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is False
+
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    assert not ocagy_cli._plugin_package_dir(f"{NAME}@3.0.0").exists()
+    assert any("storage hook" in line and "Keeping 1.6.0" in line for line in logs)
+    state = ocagy_cli._read_plugin_state()
+    assert ocagy_cli._plugin_version_rejected(state, "3.0.0", state["checked_at"] + 30 * 86400)
+
+
+def test_failed_check_after_switch_restores_previous_setup(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    monkeypatch.setattr(ocagy_cli, "_verify_auth_plugin", lambda *_a, **_k: (False, "plugin crashed on load"))
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is False
+
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    config = json.loads((env["tmp"] / "workspace" / "opencode.json").read_text(encoding="utf-8"))
+    assert config["plugin"] == [f"{NAME}@latest"]
+    assert any("restored 1.6.0" in line for line in logs)
+
+
+def test_failed_download_keeps_old_setup_and_retries_later(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    monkeypatch.setattr(ocagy_cli, "_install_plugin_candidate", lambda *_a, **_k: "npm ETIMEDOUT")
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is False
+
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    assert any("could not download" in line and "Keeping 1.6.0" in line for line in logs)
+    state = ocagy_cli._read_plugin_state()
+    assert not ocagy_cli._plugin_version_rejected(state, "2.1.2", state["check_failed_at"])
+    assert ocagy_cli._plugin_update_due(state, state["check_failed_at"] + ocagy_cli.OCAGY_PLUGIN_UPDATE_RETRY_SECONDS)
+
+
+def test_old_cli_is_updated_by_the_background_check(env, monkeypatch):
+    versions = {"cli": (1, 18, 16)}
+    monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: versions["cli"])
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    majors = []
+
+    def update_command(_exe, major):
+        majors.append(major)
+        return ["npm", "install", "-g", f"opencode-ai@{major}"]
+
+    monkeypatch.setattr(ocagy_cli, "_opencode_update_command", update_command)
+    monkeypatch.setattr(ocagy_cli, "find_executable", lambda *_a: "opencode")
+    commands = []
+
+    def fake_setup(command, **kwargs):
+        # New OpenCode processes must wait while npm replaces the CLI.
+        assert ocagy_cli._OPENCODE_CLI_UPDATE_LOCK.locked()
+        commands.append(command)
+        versions["cli"] = (1, 19, 5)
+        return {"ok": True, "output": ""}
+
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is True
+
+    assert majors == [1]  # stays within the installed major
+    assert commands == [["npm", "install", "-g", "opencode-ai@1"]]
+    assert ocagy_cli._plugin_spec() == f"{NAME}@2.1.2"
+    assert not ocagy_cli._OPENCODE_CLI_UPDATE_LOCK.locked()
+    assert any("needs OpenCode 1.18.29 or newer (installed: 1.18.16)" in line for line in logs)
+    assert any("OpenCode CLI updated 1.18.16 → 1.19.5" in line for line in logs)
+
+
+def test_failed_cli_update_never_blocks_the_next_start(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: (1, 18, 16))
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    monkeypatch.setattr(ocagy_cli, "_opencode_update_command", lambda _exe, major: ["npm", "install", "-g", f"opencode-ai@{major}"])
+    monkeypatch.setattr(ocagy_cli, "find_executable", lambda *_a: "opencode")
+    runs = []
+
+    def failing_setup(command, **kwargs):
+        runs.append(command)
+        kwargs["log_fn"]("   ↳ npm ERR! code EACCES")
+        return {"ok": False, "error": "OpenCode CLI update exited with code 243: npm ERR! code EACCES", "output": ""}
+
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", failing_setup)
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append) is False
+
+    assert len(runs) == 1
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    assert not any("↳" in line for line in logs)  # npm's own output stays out of the log
+    assert any("did not reach 1.18.29" in line and "EACCES" in line and "Keeping 1.6.0" in line for line in logs)
+    state = ocagy_cli._read_plugin_state()
+    assert "pending" not in state
+    # Not retried on the next start or within the retry hour, only with the next regular check.
+    assert ocagy_cli._plugin_update_due(state, state["checked_at"] + ocagy_cli.OCAGY_PLUGIN_UPDATE_RETRY_SECONDS) is False
+    assert ocagy_cli._plugin_update_due(state, state["checked_at"] + ocagy_cli.OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS) is True
+    monkeypatch.setattr(ocagy_cli, "_verify_auth_plugin", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(ocagy_cli, "_PLUGIN_BOOTSTRAPPED_EXECUTABLES", set())
+    monkeypatch.setattr(ocagy_cli, "_secure_plugin_account_storage", lambda **_k: None)
+    ocagy_cli.ensure_auth_plugin_installed("opencode", log_fn=logs.append)
+    assert len(runs) == 1
+
+
+def test_requests_wait_for_a_running_cli_update(monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "find_executable", lambda *_a: "opencode")
+    finished = threading.Event()
+
+    def request():
+        ocagy_cli.ensure_opencode_installed()
+        finished.set()
+
+    with ocagy_cli._OPENCODE_CLI_UPDATE_LOCK:
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        assert not finished.wait(0.3)
+    assert finished.wait(5)
+
+
+def test_cli_update_command_stays_within_the_major(monkeypatch, tmp_path):
+    monkeypatch.delenv("OCAGY_OPENCODE_INSTALL_CMD", raising=False)
+    monkeypatch.setattr(ocagy_cli, "_candidate_command", lambda name: "npm" if name == "npm" else None)
+    exe = tmp_path / "npm-prefix" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+
+    assert ocagy_cli._opencode_update_command(str(exe), 1) == [
+        "npm", "install", "-g", "--allow-scripts=opencode-ai", "opencode-ai@1"
+    ]
+    assert ocagy_cli._opencode_update_command(str(tmp_path / "elsewhere" / "opencode.exe"), 1) is None
+
+
+def test_hook_rejection_is_void_after_the_hook_changes(env, monkeypatch):
+    state = {}
+    ocagy_cli._reject_plugin_version(state, "3.0.0", "incompatible", permanent=True)
+    far_future = time.time() + 365 * 86400
+    assert ocagy_cli._plugin_version_rejected(state, "3.0.0", far_future)
+
+    # A Glossarion release with new anchors: the rejected version is tried again.
+    monkeypatch.setattr(ocagy_cli, "_storage_hook_fingerprint", lambda: "new-anchors")
+    assert not ocagy_cli._plugin_version_rejected(state, "3.0.0", far_future)
+
+
+def test_storage_hook_fingerprint_follows_the_real_hook():
+    import proxy_token_storage
+
+    fingerprint = ocagy_cli._storage_hook_fingerprint()
+    assert re.fullmatch(r"[0-9a-f]{16}", fingerprint)
+    assert fingerprint == ocagy_cli._storage_hook_fingerprint()
+    assert proxy_token_storage.patch_ocagy.__code__ is not None
+
+
+def test_cli_not_installed_by_glossarion_is_left_alone(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: (1, 18, 16))
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    monkeypatch.setattr(ocagy_cli, "_opencode_update_command", lambda _exe, _major: None)
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin("opencode", logs.append, force=True) is False
+
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+    assert any("opencode upgrade" in line for line in logs)
+
+
+def test_cli_new_enough_is_never_touched(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: (1, 18, 32))
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    monkeypatch.setattr(ocagy_cli, "_opencode_update_command", lambda _exe, _major: pytest.fail("CLI update attempted"))
+
+    assert ocagy_cli._update_auth_plugin("opencode", lambda _m: None) is True
+
+
+def test_explicit_plugin_package_disables_auto_update(env, monkeypatch):
+    monkeypatch.setattr(ocagy_cli, "_PLUGIN_PACKAGE_OVERRIDE", f"{NAME}@1.6.0")
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", lambda *_a: pytest.fail("registry used"))
+
+    assert ocagy_cli._update_auth_plugin("opencode", lambda _m: None, force=True) is False
+    assert ocagy_cli._plugin_spec() == f"{NAME}@1.6.0"
+
+
+def test_candidate_download_never_sees_the_real_account_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "real-config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "real-data"))
+    captured = {}
+
+    def fake_setup(command, **kwargs):
+        captured.update(kwargs)
+        captured["config"] = json.loads((Path(kwargs["cwd"]) / "opencode.json").read_text(encoding="utf-8"))
+        _fake_plugin(tmp_path / "cache", f"{NAME}@2.1.2", "2.1.2")
+        return {"ok": True, "output": ""}
+
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    assert ocagy_cli._install_plugin_candidate("opencode", f"{NAME}@2.1.2", lambda _m: None) == ""
+
+    env = captured["env"]
+    assert captured["config"]["plugin"] == [f"{NAME}@2.1.2"]
+    assert "provider" not in captured["config"]
+    assert str(tmp_path / "real-config") != env["OPENCODE_CONFIG_DIR"]
+    assert str(tmp_path / "real-data") != env["XDG_DATA_HOME"]
+    assert env["XDG_CACHE_HOME"] == str(tmp_path / "cache")  # installs into the real cache
+    # Only the throw-away config is loaded, never the workspace opencode.json above the stage.
+    assert env["OPENCODE_CONFIG"] == str(Path(captured["cwd"]) / "opencode.json")
+    assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert not Path(captured["cwd"]).exists()  # throw-away stage removed
+
+
+def test_first_install_pins_newest_release_before_opencode_loads_it(env, monkeypatch):
+    import shutil
+
+    shutil.rmtree(env["cache"] / "opencode" / "packages")
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    monkeypatch.setattr(ocagy_cli, "_secure_plugin_account_storage", lambda **_k: None)
+    executable = str(env["tmp"] / "opencode-first")
+    ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES.discard(str(Path(executable).resolve(strict=False)).casefold())
+    logs = []
+
+    ocagy_cli.ensure_auth_plugin_installed(executable, log_fn=logs.append)
+
+    assert env["installs"] == [f"{NAME}@2.1.2"]
+    assert ocagy_cli._plugin_spec() == f"{NAME}@2.1.2"
+    assert any("ready (opencode-antigravity-auth 2.1.2)" in line for line in logs)
+
+
+def test_gemini_38_flash_tiers_resolve_to_model_ids_without_variant():
+    for tier in ("low", "medium", "high"):
+        for prefix in ("ocagy", "ocagy0", "ocagy1"):
+            assert ocagy_cli.resolve_model(f"{prefix}/gemini-3.8-flash-{tier}") == (
+                f"google/antigravity-gemini-3.8-flash-{tier}",
+                None,
+            )
+    # Existing saved ids keep resolving.
+    assert ocagy_cli.resolve_model("ocagy/gemini-3-flash-high") == ("google/antigravity-gemini-3-flash", "high")
+    assert ocagy_cli.resolve_model("ocagy/antigravity-gemini-3.8-flash-high") == (
+        "google/antigravity-gemini-3.8-flash-high",
+        None,
+    )
+
+
+def test_workspace_declares_gemini_38_flash_and_polls_it():
+    models = ocagy_cli._workspace_config()["provider"]["google"]["models"]
+    for tier in ("low", "medium", "high"):
+        assert models[f"antigravity-gemini-3.8-flash-{tier}"]["limit"]["output"] == 65536
+        assert "variants" not in models[f"antigravity-gemini-3.8-flash-{tier}"]
+    polled = ocagy_cli.normalize_polled_models([
+        "google/antigravity-gemini-3.1-pro",
+        "google/antigravity-gemini-3.8-flash-high",
+        "google/antigravity-gemini-3.8-flash-low",
+        "google/antigravity-gemini-3.8-flash-medium",
+    ])
+    assert polled == [
+        "ocagy/gemini-3.1-pro-high",
+        "ocagy/gemini-3.1-pro-low",
+        "ocagy/gemini-3.8-flash-low",
+        "ocagy/gemini-3.8-flash-medium",
+        "ocagy/gemini-3.8-flash-high",
+    ]
+
+
+def test_model_declared_only_by_the_plugin_is_offered_and_routed(env):
+    root = ocagy_cli._plugin_root(f"{NAME}@latest")
+    config = root / "dist" / "src" / "plugin" / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "models.js").write_text(
+        "export const OPENCODE_MODEL_DEFINITIONS = {\n"
+        '    "antigravity-gemini-9-pro": {\n'
+        '        name: "Gemini 9 Pro (Antigravity)",\n'
+        "        limit: { context: 2000000, output: 131072 },\n"
+        "        modalities: DEFAULT_MODALITIES,\n"
+        "        variants: {\n"
+        '            low: { thinkingLevel: "low" },\n'
+        '            high: { thinkingLevel: "high" },\n'
+        "        },\n"
+        "    },\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    models = ocagy_cli._workspace_config()["provider"]["google"]["models"]
+    assert models["antigravity-gemini-9-pro"]["limit"] == {"context": 2000000, "output": 131072}
+    assert models["antigravity-gemini-9-pro"]["variants"]["high"] == {"thinkingLevel": "high"}
+    assert models["antigravity-gemini-9-pro"]["temperature"] is True
+    assert ocagy_cli.normalize_polled_models(["google/antigravity-gemini-9-pro"]) == [
+        "ocagy/gemini-9-pro-low",
+        "ocagy/gemini-9-pro-high",
+    ]
+    assert ocagy_cli.resolve_model("ocagy/gemini-9-pro-high") == ("google/antigravity-gemini-9-pro", "high")
+    assert ocagy_cli._model_output_limit("google/antigravity-gemini-9-pro") == 131072
+
+
+def test_real_plugin_2x_declarations_parse_when_available():
+    """Parses the published 2.1.2 layout (skipped when no copy is cached)."""
+    root = ocagy_cli._active_plugin_root(f"{NAME}@2.1.2")
+    if root is None or ocagy_cli._installed_plugin_version(f"{NAME}@2.1.2") != "2.1.2":
+        pytest.skip("opencode-antigravity-auth 2.1.2 is not cached on this machine")
+    declared = ocagy_cli._plugin_declared_models(root)
+    assert {f"antigravity-gemini-3.8-flash-{tier}" for tier in ("low", "medium", "high")} <= set(declared)
+
+
+def test_quota_groups_include_gemini_38_flash_per_model():
+    groups = ocagy_cli._aggregate_antigravity_quota({
+        "gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.9, "resetTime": "2030-01-01T00:00:00Z"}},
+        "gemini-3.8-flash-high": {
+            "displayName": "Gemini 3.8 Flash (High)",
+            "quotaInfo": {"remainingFraction": 0.4, "resetTime": "2030-01-01T05:00:00Z"},
+        },
+        "gemini-3.8-flash-low": {"quotaInfo": {"remainingFraction": 0.5}},
+        "gemini-3.1-pro-high": {"quotaInfo": {"remainingFraction": 0.7}},
+        "gemini-4-argon-high": {"quotaInfo": {"remainingFraction": 0.2}},
+        "claude-opus-4-6-thinking": {"quotaInfo": {"remainingFraction": 1.0}},
+        "gemini-3-pro-image": {"quotaInfo": {"remainingFraction": 0.0}},
+        "gemini-2.5-flash-disabled": {"quotaInfo": {"remainingFraction": 0.0}},
+        "gpt-oss-120b-medium": {"quotaInfo": {"remainingFraction": 0.0}},
+        "gemini-3-old": {"disabled": True, "quotaInfo": {"remainingFraction": 0.0}},
+    })
+
+    flash = groups["gemini-flash"]
+    assert flash["model_count"] == 3
+    assert flash["remaining_fraction"] == 0.4
+    labels = [model["label"] for model in flash["models"]]
+    assert "Gemini 3.8 Flash (High)" in labels and "gemini-3.8-flash-low" in labels
+    high = next(model for model in flash["models"] if model["model_id"] == "gemini-3.8-flash-high")
+    assert high["remaining_fraction"] == 0.4 and high["reset_in"]
+    assert groups["gemini-pro"]["model_count"] == 2  # 3.1 Pro and Gemini 4
+    assert groups["gemini-pro"]["remaining_fraction"] == 0.2
+    assert groups["claude"]["model_count"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the PowerShell login window is Windows-only")
+def test_login_window_points_to_glossarion_quota_button(tmp_path, monkeypatch):
+    commands = []
+
+    class FakeProcess:
+        pid = 1
+
+    monkeypatch.setattr(ocagy_cli, "ensure_opencode_installed", lambda log_fn=None: "opencode")
+    monkeypatch.setattr(ocagy_cli, "ensure_auth_plugin_installed", lambda *_a, **_k: None)
+    monkeypatch.setattr(ocagy_cli, "_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(ocagy_cli.subprocess, "Popen", lambda args, **_k: commands.append(args) or FakeProcess())
+
+    ocagy_cli.launch_login()
+
+    script = commands[0][-1]
+    assert "quota" in script.lower() and "not the plugin menu" in script

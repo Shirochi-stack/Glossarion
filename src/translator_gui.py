@@ -14379,8 +14379,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         group_labels = (
             ('claude', 'Claude'),
-            ('gemini-pro', 'Gemini 3 Pro'),
-            ('gemini-flash', 'Gemini 3 Flash'),
+            ('gemini-pro', 'Gemini Pro'),
+            ('gemini-flash', 'Gemini Flash'),
         )
         for account in accounts:
             email = account.get('email') or f"Account {int(account.get('index', 0) or 0) + 1}"
@@ -14397,6 +14397,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     data = antigravity.get(key)
                     if isinstance(data, dict):
                         quota_line(label, data)
+                        # Per model, so new models (e.g. Gemini 3.8 Flash) are visible.
+                        for model in data.get('models') or []:
+                            quota_line(model.get('label') or model.get('model_id', '?'), model, indent="         ")
             else:
                 self.append_log(
                     f"      ⚠️ {account.get('antigravity_error', 'No quota information returned')}"
