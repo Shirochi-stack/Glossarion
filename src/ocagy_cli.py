@@ -83,10 +83,12 @@ OCAGY_CLOCK_SKEW_SECONDS = 600
 OCAGY_LOCK_POLL_SECONDS = 0.2
 _UPDATE_LOCK_FILENAME = "glossarion-update.lock"
 _LAUNCH_LOCK_FILENAME = "glossarion-launch.lock"
-# A request waits this long for a running CLI update (bounded by its own timeout).
-OCAGY_LAUNCH_WAIT_SECONDS = OCAGY_CLI_UPDATE_TIMEOUT_SECONDS + 60
 # The CLI update waits this long for OpenCode starts in progress, then skips.
 OCAGY_CLI_UPDATE_LAUNCH_WAIT_SECONDS = 60
+# A request waits this long for a running CLI install or update. That is the
+# longest the launch lock can be held exclusively: the wait above (new starts
+# already queue behind the waiting writer), npm's own cap, and the kill.
+OCAGY_LAUNCH_WAIT_SECONDS = OCAGY_CLI_UPDATE_LAUNCH_WAIT_SECONDS + OCAGY_CLI_UPDATE_TIMEOUT_SECONDS + 30
 # The plugin's README names the oldest OpenCode its legacy entrypoint supports
 # ("OpenCode 1.18.29+ remains supported ..." in 2.x). This table is only used
 # when that sentence cannot be read from the downloaded package.
@@ -102,8 +104,9 @@ OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS = 300
 # Glossarion process doing the same (that work is bounded by its own timeouts).
 OCAGY_PLUGIN_SETUP_WAIT_SECONDS = OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS * 2 + 60
 # A request that must install a missing OpenCode CLI waits this long for another
-# thread or process that holds the update lock (a plugin download is the longest).
-OCAGY_CLI_INSTALL_WAIT_SECONDS = OCAGY_PLUGIN_UPDATE_TIMEOUT_SECONDS + 60
+# thread or process that holds the update lock. The longest holder is another
+# install of a missing CLI (Node.js, then OpenCode), then a plugin download.
+OCAGY_CLI_INSTALL_WAIT_SECONDS = max(OCAGY_PLUGIN_UPDATE_TIMEOUT_SECONDS, 2 * OPENCODE_INSTALL_TIMEOUT_SECONDS) + 60
 _PLUGIN_BOOTSTRAP_LOCK = threading.Lock()
 _PLUGIN_BOOTSTRAPPED_EXECUTABLES: set[str] = set()
 _ANTIGRAVITY_CLOUD_CODE_BASE = "https://cloudcode-pa.googleapis.com"
@@ -446,8 +449,8 @@ def _opencode_launch_slot(
         raise OcAgyError(_CANCELLED_MESSAGE) from None
     except _LockWaitTimeout:
         raise OcAgyError(
-            f"An OpenCode update by Glossarion was still running after {int(cap)} s, "
-            "so OpenCode was not started. Try again when the update has finished."
+            f"An OpenCode install or update by Glossarion was still running after {int(cap)} s, "
+            "so OpenCode was not started. Try again when it has finished."
         ) from None
 
 
@@ -707,22 +710,14 @@ def ensure_opencode_installed(log_fn=None) -> str:
         except OcAgyError:
             pass
 
-    # One installer across threads and Glossarion processes (the update lock),
-    # and no OpenCode start anywhere while npm writes the CLI (the launch lock,
-    # exclusive). Both waits are Stop-aware and capped; so is the install.
+    # One installer across threads and Glossarion processes (the update lock).
+    # The wait is Stop-aware and capped; so is the install.
     try:
         with _coordination_lock(
             _UPDATE_LOCK_FILENAME,
             _UPDATE_LOCAL_LOCK,
             exclusive=True,
             timeout=OCAGY_CLI_INSTALL_WAIT_SECONDS,
-            should_stop=is_cancelled,
-            logger=logger,
-        ), _coordination_lock(
-            _LAUNCH_LOCK_FILENAME,
-            _LAUNCH_LOCAL_LOCK,
-            exclusive=True,
-            timeout=OCAGY_CLI_UPDATE_LAUNCH_WAIT_SECONDS,
             should_stop=is_cancelled,
             logger=logger,
         ):
@@ -737,10 +732,12 @@ def ensure_opencode_installed(log_fn=None) -> str:
 
 
 def _install_missing_opencode(logger: Callable[[str], None]) -> str:
-    """Install OpenCode when it is still missing; the caller holds both locks.
+    """Install OpenCode when it is still missing; the caller holds the update lock.
 
     Re-checks first: another thread or process may have installed it while this
-    one waited. Stop ends a running installer at once (its whole tree).
+    one waited. Stop ends a running installer at once (its whole tree). No
+    OpenCode starts anywhere while the OpenCode installer writes the CLI (the
+    launch lock, exclusive); the Node.js install before it does not block starts.
     """
     try:
         return find_executable()
@@ -770,12 +767,20 @@ def _install_missing_opencode(logger: Callable[[str], None]) -> str:
             details.append("npm and a supported automatic Node.js installer were not found.")
 
     if command is not None:
-        install_result = _run_setup_command(
-            command,
-            action="OpenCode installation",
-            log_fn=logger,
-            stop_check=is_cancelled,
-        )
+        with _coordination_lock(
+            _LAUNCH_LOCK_FILENAME,
+            _LAUNCH_LOCAL_LOCK,
+            exclusive=True,
+            timeout=OCAGY_CLI_UPDATE_LAUNCH_WAIT_SECONDS,
+            should_stop=is_cancelled,
+            logger=logger,
+        ):
+            install_result = _run_setup_command(
+                command,
+                action="OpenCode installation",
+                log_fn=logger,
+                stop_check=is_cancelled,
+            )
         if install_result.get("cancelled"):
             raise OcAgyError(_CANCELLED_MESSAGE)
         if not install_result.get("ok"):
@@ -1027,13 +1032,17 @@ def _opencode_version(executable: str) -> Optional[Tuple[int, int, int]]:
 
     None also covers an unreadable version (no output, an error, a timeout) and
     pre-releases such as 0.0.0-dev-... or 2.0.0-beta.1. Bounded: on timeout the
-    whole process tree is killed.
+    whole process tree is killed. On a request (a first install) Stop ends it
+    with the route's cancelled error; the background update is not interrupted.
     """
     result = _run_setup_command(
         [executable, "--version"],
         action="OpenCode version check",
         timeout=30,
+        stop_check=_launch_wait_stop(None),
     )
+    if result.get("cancelled"):
+        raise OcAgyError(_CANCELLED_MESSAGE)
     if not result.get("ok"):
         return None
     return _version_tuple(_clean_text(str(result.get("output") or "")))
@@ -1073,12 +1082,15 @@ def _path_within(path: Path, folder: Path) -> bool:
         return False
 
 
-def _npm_for_global_opencode(executable: str) -> Optional[str]:
-    """The npm whose global prefix holds this OpenCode CLI (an ``opencode-ai`` install), else None.
+def _npm_for_global_opencode(executable: str) -> Optional[Tuple[str, Path, Path]]:
+    """(npm, global prefix, package folder) when this OpenCode CLI is an
+    ``opencode-ai`` install under that npm's global prefix, else None.
 
     Only such a CLI is updated automatically, by that same npm. OpenCode from
     bun, yarn, another Node version (nvm), the install script or a package
-    manager is left alone: npm would add a second global copy instead.
+    manager is left alone: npm would add a second global copy instead. The
+    update passes the returned prefix to npm explicitly, so npm writes exactly
+    where the CLI was found, also when npm printed its prefix masked.
     """
     npm = _candidate_command("npm")
     if not npm:
@@ -1098,14 +1110,14 @@ def _npm_for_global_opencode(executable: str) -> Optional[str]:
         return None
     for package in (prefix / "node_modules" / "opencode-ai", prefix / "lib" / "node_modules" / "opencode-ai"):
         if _path_within(exe, package):
-            return npm
+            return npm, prefix, package
         # npm's own shims: <prefix>/opencode.cmd on Windows, <prefix>/bin/opencode elsewhere.
         if (
             package.is_dir()
             and exe.name.casefold().startswith("opencode")
             and any(_path_within(exe.parent, folder) and _path_within(folder, exe.parent) for folder in (prefix, prefix / "bin"))
         ):
-            return npm
+            return npm, prefix, package
     return None
 
 
@@ -1302,31 +1314,40 @@ def _update_opencode_cli(
     left to the background check (a request), else None.
     """
     need = f"{_PLUGIN_NAME} {target} needs OpenCode {_format_version(required)} or newer"
-    # `npm prefix -g` runs only here, when the plugin needs a newer CLI.
-    npm = _npm_for_global_opencode(executable)
-    manual = _manual_cli_update_command(bool(npm), required)
     if cli_version is None:
         why = "the installed OpenCode version could not be read or is not a stable release"
     elif cli_version[0] != required[0]:
         why = f"the installed OpenCode {_format_version(cli_version)} is a different major version"
-    elif not npm:
+    else:
+        why = ""
+    if not why and not allow_update:
+        # A request runs no npm command at all, not even `npm prefix -g`: the
+        # background check finds out whether it can update this CLI.
+        logger(
+            f"⚠️ OcAgy: {need} (installed: {_format_version(cli_version)}). "
+            "Glossarion updates OpenCode in the background when it can."
+        )
+        return ""
+    # `npm prefix -g` runs only here: in the background, when the plugin needs a newer CLI.
+    found = _npm_for_global_opencode(executable) if allow_update else None
+    npm, prefix, package = found if found else ("", None, None)
+    manual = _manual_cli_update_command(bool(npm), required)
+    if not why and not npm:
         why = (
             f"the installed OpenCode {_format_version(cli_version)} is not a global npm install "
             "that Glossarion can update with npm"
         )
-    else:
-        why = ""
+    if not why and not os.access(str(package.parent), os.W_OK):
+        # e.g. a root-owned /usr/local: npm would fail with EACCES on every check.
+        why = (
+            f"the installed OpenCode {_format_version(cli_version)} is in a folder "
+            "Glossarion may not write to"
+        )
     if why:
         logger(f"⚠️ OcAgy: {need}; {why}. Keeping {current_text}. To use it, run: {manual}")
         return None
-    if not allow_update:
-        logger(
-            f"⚠️ OcAgy: {need} (installed: {_format_version(cli_version)}). "
-            "Glossarion updates OpenCode in the background."
-        )
-        return ""
 
-    retry =f"Keeping {current_text}; Glossarion tries again in {OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS // 3600} h."
+    retry = f"Keeping {current_text}; Glossarion tries again in {OCAGY_PLUGIN_UPDATE_INTERVAL_SECONDS // 3600} h."
     logger(f"⬆️ OcAgy: {need} (installed: {_format_version(cli_version)}). Updating OpenCode with npm...")
     # 1. Download (slow, network): into a throw-away folder; requests run on.
     version, reason = _download_opencode_cli(npm, cli_version[0])
@@ -1344,9 +1365,11 @@ def _update_opencode_cli(
     # 2. Replace the global CLI offline from npm's cache (a few seconds). npm
     # replaces a running opencode.exe fine on Windows (it moves the busy folder
     # aside). No Glossarion process starts OpenCode meanwhile: the launch lock
-    # is held exclusively, and every start takes it shared.
+    # is held exclusively, and every start takes it shared. The prefix is the
+    # folder the CLI was found under, so npm writes there and nowhere else.
     command = [
-        npm, "install", "-g", "--offline", "--no-audit", "--no-fund", "--allow-scripts=opencode-ai", f"opencode-ai@{version}",
+        npm, "install", "-g", "--prefix", str(prefix), "--offline", "--no-audit", "--no-fund",
+        "--allow-scripts=opencode-ai", f"opencode-ai@{version}",
     ]
     try:
         with _coordination_lock(
@@ -1362,14 +1385,15 @@ def _update_opencode_cli(
                 log_fn=_quiet,
                 timeout=OCAGY_CLI_UPDATE_TIMEOUT_SECONDS,
             )
-            try:
-                executable = find_executable()
-            except OcAgyError:
-                pass
-            new_cli = _opencode_version(executable)
     except _LockWaitTimeout:
         logger(f"⚠️ OcAgy: OpenCode stayed busy starting requests, so it was not updated now. {retry}")
         return None
+    # npm is done: requests start again while the new version is read.
+    try:
+        executable = find_executable()
+    except OcAgyError:
+        pass
+    new_cli = _opencode_version(executable)
     if not result.get("ok") or new_cli is None or new_cli < required:
         # Next attempt with the next regular check (12 h), never on app start.
         reason = str(result.get("reason") or "")

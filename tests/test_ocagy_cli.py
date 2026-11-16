@@ -2242,7 +2242,10 @@ def test_old_cli_is_updated_by_the_background_check(env, monkeypatch):
     versions = {"cli": (1, 18, 16)}
     monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: versions["cli"])
     monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
-    monkeypatch.setattr(ocagy_cli, "_npm_for_global_opencode", lambda _exe: "npm")
+    prefix = env["tmp"] / "npm-prefix"
+    package = prefix / "node_modules" / "opencode-ai"
+    package.mkdir(parents=True)
+    monkeypatch.setattr(ocagy_cli, "_npm_for_global_opencode", lambda _exe: ("npm", prefix, package))
     majors = []
 
     def download(npm, major):
@@ -2269,9 +2272,11 @@ def test_old_cli_is_updated_by_the_background_check(env, monkeypatch):
     assert ocagy_cli._update_auth_plugin("opencode", logs.append) is True
 
     assert majors == [1]  # stays within the installed major
-    # The global CLI is replaced offline, from what the download put in npm's cache.
+    # The global CLI is replaced offline, from what the download put in npm's
+    # cache, and npm is told to write under the prefix the CLI was found in.
     assert commands == [[
-        "npm", "install", "-g", "--offline", "--no-audit", "--no-fund", "--allow-scripts=opencode-ai", "opencode-ai@1.19.5"
+        "npm", "install", "-g", "--prefix", str(prefix), "--offline", "--no-audit", "--no-fund",
+        "--allow-scripts=opencode-ai", "opencode-ai@1.19.5",
     ]]
     assert ocagy_cli._plugin_spec() == f"{NAME}@2.1.2"
     assert not ocagy_cli._LAUNCH_LOCAL_LOCK.held_exclusive_by_me()
@@ -2287,7 +2292,7 @@ def _fake_npm_runs(monkeypatch, *, npm_returncode=0, download_returncode=0, vers
     def fake(command, *, log_fn, timeout, cwd=None, env=None, **_kwargs):
         calls.append(list(command))
         logger = log_fn or (lambda _m: None)
-        if "install" in command and "--prefix" in command:  # the download into a throw-away folder
+        if "install" in command and "--ignore-scripts" in command:  # the download into a throw-away folder
             for line in ["npm warn deprecated something", "added 3 packages in 40s"]:
                 logger(f"   ↳ {line}")
             if download_returncode:
@@ -2342,9 +2347,12 @@ def test_background_update_logs_one_short_line_per_event(env, monkeypatch, tmp_p
 
     assert ocagy_cli._update_auth_plugin(exe, logs.append) is True
 
-    download = next(call for call in calls if "--prefix" in call)
-    assert download[-1] == "opencode-ai@1" and "--ignore-scripts" in download
-    assert ["npm", "install", "-g", "--offline", "--no-audit", "--no-fund", "--allow-scripts=opencode-ai", "opencode-ai@1.19.5"] in calls
+    download = next(call for call in calls if "--ignore-scripts" in call)
+    assert download[-1] == "opencode-ai@1" and "-g" not in download
+    assert [
+        "npm", "install", "-g", "--prefix", str(tmp_path / "npm-prefix"), "--offline", "--no-audit", "--no-fund",
+        "--allow-scripts=opencode-ai", "opencode-ai@1.19.5",
+    ] in calls
     assert calls.index(download) < calls.index(next(call for call in calls if "-g" in call))
     assert not Path(download[download.index("--prefix") + 1]).exists()  # throw-away folder removed
     assert len(logs) == 4, logs  # downloading, updating OpenCode, CLI updated, plugin updated
@@ -2512,15 +2520,15 @@ def test_cli_counts_as_npm_global_only_under_the_prefix_of_the_npm_that_would_up
         return str(path)
 
     # Windows layout: <prefix>/node_modules/opencode-ai, shim <prefix>/opencode.cmd
-    assert ocagy_cli._npm_for_global_opencode(_npm_global_opencode(tmp_path)) == "npm"
-    assert ocagy_cli._npm_for_global_opencode(touch(prefix / "opencode.cmd")) == "npm"
+    assert ocagy_cli._npm_for_global_opencode(_npm_global_opencode(tmp_path))[0] == "npm"
+    assert ocagy_cli._npm_for_global_opencode(touch(prefix / "opencode.cmd"))[0] == "npm"
     native = prefix / "node_modules" / "opencode-ai" / "node_modules" / "opencode-windows-x64" / "bin" / "opencode.exe"
-    assert ocagy_cli._npm_for_global_opencode(touch(native)) == "npm"
+    assert ocagy_cli._npm_for_global_opencode(touch(native))[0] == "npm"
     # POSIX layout: <prefix>/lib/node_modules/opencode-ai (bin/opencode links into it)
     posix = tmp_path / "posix-prefix"
     monkeypatch.setattr(ocagy_cli, "_npm_global_prefix", lambda _npm: posix)
-    assert ocagy_cli._npm_for_global_opencode(touch(posix / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode")) == "npm"
-    assert ocagy_cli._npm_for_global_opencode(touch(posix / "bin" / "opencode")) == "npm"
+    assert ocagy_cli._npm_for_global_opencode(touch(posix / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode"))[0] == "npm"
+    assert ocagy_cli._npm_for_global_opencode(touch(posix / "bin" / "opencode"))[0] == "npm"
     # Elsewhere: bun / yarn globals, another Node version's npm (nvm), the install script.
     for other in (
         tmp_path / "home" / ".bun" / "install" / "global" / "node_modules" / "opencode-ai" / "bin" / "opencode",
@@ -2532,8 +2540,13 @@ def test_cli_counts_as_npm_global_only_under_the_prefix_of_the_npm_that_would_up
     # npm prints a UUID-like folder name as "***": matched against the CLI's own folders.
     masked = tmp_path / "0f6b2a51-1a51-418f-a84d-a6f4a388cde5" / "prefix"
     monkeypatch.setattr(ocagy_cli, "_npm_global_prefix", lambda _npm: tmp_path / "***" / "prefix")
-    assert ocagy_cli._npm_for_global_opencode(touch(masked / "node_modules" / "opencode-ai" / "bin" / "opencode")) == "npm"
-    assert ocagy_cli._npm_for_global_opencode(touch(masked / "opencode.cmd")) == "npm"
+    found = ocagy_cli._npm_for_global_opencode(touch(masked / "node_modules" / "opencode-ai" / "bin" / "opencode"))
+    assert found[0] == "npm"
+    # The real folder comes back: the update passes it to npm as --prefix, so npm
+    # writes where the CLI is even if its own (masked) prefix is another folder.
+    assert Path(found[1]).resolve() == masked.resolve()
+    assert Path(found[2]).resolve() == (masked / "node_modules" / "opencode-ai").resolve()
+    assert ocagy_cli._npm_for_global_opencode(touch(masked / "opencode.cmd"))[0] == "npm"
     assert ocagy_cli._npm_for_global_opencode(touch(tmp_path / "other" / "x" / "node_modules" / "opencode-ai" / "bin" / "opencode")) is None
     # `npm prefix -g` failing, or no npm at all: never treated as npm-global.
     monkeypatch.setattr(ocagy_cli, "_npm_global_prefix", lambda _npm: None)
@@ -2583,6 +2596,71 @@ def test_opencode_version_timeout_is_unreadable(monkeypatch):
     assert ocagy_cli._opencode_version("opencode") is None
 
 
+def test_version_check_on_a_request_is_ended_by_stop(monkeypatch):
+    seen = {}
+
+    def fake_setup(command, **kwargs):
+        seen.update(kwargs)
+        return {"ok": False, "cancelled": True, "reason": "stopped"}
+
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    with pytest.raises(ocagy_cli.OcAgyError, match="cancelled by user"):
+        ocagy_cli._opencode_version("opencode")
+    assert seen["stop_check"] is ocagy_cli.is_cancelled  # a request thread; None on the background thread
+
+
+def test_cli_in_a_folder_glossarion_may_not_write_to_is_left_alone(env, monkeypatch, tmp_path):
+    exe = _npm_global_opencode(tmp_path)
+    monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: (1, 18, 16))
+    monkeypatch.setattr(ocagy_cli, "_candidate_command", lambda name: "npm" if name == "npm" else None)
+    monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
+    # e.g. a root-owned /usr/local/lib/node_modules: npm would fail with EACCES every 12 h.
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", lambda *_a, **_k: pytest.fail("npm run"))
+    real_access = os.access
+    monkeypatch.setattr(
+        ocagy_cli.os,
+        "access",
+        lambda path, mode, **kwargs: False if str(path).endswith("node_modules") else real_access(path, mode, **kwargs),
+    )
+    logs = []
+
+    assert ocagy_cli._update_auth_plugin(exe, logs.append) is False
+
+    hint = [line for line in logs if "needs OpenCode" in line]
+    assert len(hint) == 1 and "may not write to" in hint[0] and "run: npm install -g opencode-ai@1" in hint[0], logs
+    assert ocagy_cli._plugin_spec() == f"{NAME}@latest"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the automatic Node.js install is Windows-only")
+def test_node_install_does_not_block_opencode_starts(monkeypatch):
+    """Missing CLI and no npm: only the OpenCode installer holds the launch lock exclusively."""
+    done = {"node": False, "cli": False}
+    held = []
+
+    def find(*_a):
+        if done["cli"]:
+            return "opencode"
+        raise ocagy_cli.OcAgyError("not found")
+
+    def fake_setup(command, **kwargs):
+        assert ocagy_cli._UPDATE_LOCAL_LOCK.held_exclusive_by_me()
+        held.append((command[0], ocagy_cli._LAUNCH_LOCAL_LOCK.held_exclusive_by_me()))
+        done["node" if command[0] == "winget" else "cli"] = True
+        return {"ok": True, "output": ""}
+
+    monkeypatch.setattr(ocagy_cli, "find_executable", find)
+    monkeypatch.setattr(
+        ocagy_cli, "_opencode_install_command", lambda: ["npm", "install", "-g", "opencode-ai"] if done["node"] else None
+    )
+    monkeypatch.setattr(ocagy_cli, "_nodejs_install_command", lambda: ["winget", "install", "node"])
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    assert ocagy_cli.ensure_opencode_installed() == "opencode"
+
+    assert held == [("winget", False), ("npm", True)]
+
+
 def test_first_install_never_runs_npm_on_the_request(env, monkeypatch, tmp_path):
     import shutil
 
@@ -2591,6 +2669,7 @@ def test_first_install_never_runs_npm_on_the_request(env, monkeypatch, tmp_path)
     monkeypatch.setattr(ocagy_cli, "_opencode_version", lambda _exe: (1, 18, 16))
     monkeypatch.setattr(ocagy_cli, "_candidate_command", lambda name: "npm" if name == "npm" else None)
     monkeypatch.setattr(ocagy_cli, "_run_setup_command", lambda *_a, **_k: pytest.fail("npm run on a request"))
+    monkeypatch.setattr(ocagy_cli, "_npm_for_global_opencode", lambda _exe: pytest.fail("npm prefix read on a request"))
     monkeypatch.setattr(ocagy_cli, "_fetch_latest_plugin_version", _latest("2.1.2"))
     logs = []
 
