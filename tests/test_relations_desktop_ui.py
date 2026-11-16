@@ -558,6 +558,120 @@ def test_diagram_hub_labels_do_not_overlap(qapp):
         dialog.deleteLater()
 
 
+def _in_the_middle(dialog, node_id):
+    """The name is in the middle of the fitted view (within 2 screen pixels)."""
+    view = dialog._view
+    at = view.mapFromScene(dialog._node_items[node_id].pos())
+    middle = view.viewport().rect().center()
+    return abs(at.x() - middle.x()) <= 2 and abs(at.y() - middle.y()) <= 2
+
+
+def test_focus_rebuilds_the_picture_round_the_name_and_keeps_it_outlined(qapp):
+    """Owner 2026-11-16: "the dropdown here doesn't do anything ... rebuild the picture round the picked
+    name": round a main character, picking another name gives a new layout built round that name (its
+    relations the nearest names, see ``relations_tracking.focus_ring``), fitted with it in the middle of the
+    view, and the name stays outlined for as long as it is the Focus (not for a moment); "All characters"
+    gives the picture without a focus and the normal fit back."""
+    from relations_diagram_dialog import ALL_CHARACTERS, CHANGED_COLOR, FOCUS_TIP, RelationsDiagramDialog
+    dialog = RelationsDiagramDialog(None, tracker=_hub_tracker())
+    try:
+        dialog.resize(1300, 850)
+        dialog.show()
+        for _ in range(4):
+            qapp.processEvents()
+        assert dialog.focus_combo.toolTip() == FOCUS_TIP
+        plain = dict(dialog._positions)
+        picked, hero = rt.tracker_key("Person 4"), rt.tracker_key("Hero")
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(picked))
+        _wait_idle(qapp, dialog)
+        qapp.processEvents()
+        assert dict(dialog._positions) != plain  # rebuilt, not the same picture moved
+        assert rt._ring_holds(dialog._positions, picked, {hero, rt.tracker_key("Person 5")})
+        item = dialog._node_items[picked]
+        assert _in_the_middle(dialog, picked)
+        assert _diagram_overlaps(dialog) == (0, 0, 0) and _scene_line_problems(dialog)[:2] == (0, 0)
+        # outlined, and still after the moment a jump's outline lasts, a slider move and a click elsewhere
+        assert item.pen().color() == CHANGED_COLOR and item.pen().widthF() > 4
+        dialog.jump_to(picked)
+        dialog._end_flash(picked, item)
+        assert item.pen().color() == CHANGED_COLOR and item.pen().widthF() > 4
+        dialog.chapter_slider.setValue(1)
+        dialog._on_node_clicked(hero)
+        item = dialog._node_items[picked]
+        assert item.pen().color() == CHANGED_COLOR and item.pen().widthF() > 4
+        assert dialog._node_items[hero].pen().widthF() < 4  # the clicked name has the selected look
+        dialog.clear_selection()
+        dialog.chapter_slider.setValue(dialog.chapter_slider.maximum())
+        # a new size keeps it in the middle of the fitted view
+        dialog.resize(1100, 900)
+        for _ in range(4):
+            qapp.processEvents()
+        assert _in_the_middle(dialog, picked)
+        # back to all characters: the picture without a focus, no outline
+        dialog.focus_combo.setCurrentIndex(0)
+        assert dialog.focus_combo.currentText() == ALL_CHARACTERS and dialog.focus_id() is None
+        _wait_idle(qapp, dialog)
+        assert dict(dialog._positions) == plain
+        assert all(node.pen().widthF() < 4 for node in dialog._node_items.values())
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_focus_through_the_loading_thread(qapp, tmp_path, isolated):
+    """The arrangement round a Focus is worked out on the loading thread under the spinner: a Focus picked
+    while another is worked out wins (the earlier one is kept for going back, at once); Show unlisted names
+    and the chapter slider keep the Focus; a write the window sees at its once-a-second check lays the book
+    out again round the Focus, still in the middle and outlined."""
+    import time
+    glossary = _write_book(tmp_path, _hub_tracker())
+    path = rt.tracker_path_for_glossary(str(glossary))
+    dialog = _open_book(qapp, glossary)
+    try:
+        plain = dict(dialog._positions)
+        first, second = rt.tracker_key("Person 8"), rt.tracker_key("Person 20")
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(first))
+        assert dialog.is_busy() and dialog.is_arranging() and dict(dialog._positions) == plain
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(second))  # while the first is worked out
+        _wait_idle(qapp, dialog)
+        _wait_idle(qapp, dialog)
+        assert dialog._layout_key == (False, second) and not dialog.is_arranging()
+        qapp.processEvents()
+        assert _in_the_middle(dialog, second) and dialog._node_items[second].pen().widthF() > 4
+        # back to the first: worked out already, at once
+        dialog.focus_combo.setCurrentIndex(dialog.focus_combo.findData(first))
+        assert not dialog.is_busy() and dialog._layout_key == (False, first)
+        assert dialog._node_items[first].pen().widthF() > 4
+        focused = dict(dialog._positions)
+        dialog.chapter_slider.setValue(dialog.chapter_slider.minimum())
+        assert dict(dialog._positions) == focused and dialog._node_items[first].pen().widthF() > 4
+        dialog.chapter_slider.setValue(dialog.chapter_slider.maximum())
+        dialog.show_unlisted_checkbox.setChecked(True)
+        _wait_idle(qapp, dialog)
+        assert dialog._layout_key == (True, first) and dialog._node_items[first].pen().widthF() > 4
+        dialog.show_unlisted_checkbox.setChecked(False)
+        assert dict(dialog._positions) == focused
+        # an extraction adds a name: laid out again round the Focus (the test makes the once-a-second
+        # check itself below: the window's own timer firing first made it see nothing new)
+        dialog._poll_timer.stop()
+        time.sleep(0.05)
+        rt.edit_tracker(path, lambda t: rt.record_relations(
+            t, [{"raw_name": "Person 8", "translated_name": "Person 8", "relations": "Newcomer: Friend"}],
+            field="relations", chapter_index=2, chapter_num=3, chapter_file="c3.xhtml"))
+        dialog.show_unlisted_checkbox.setChecked(True)
+        _wait_idle(qapp, dialog)
+        assert dialog._poll() is True
+        _wait_idle(qapp, dialog)
+        _wait_idle(qapp, dialog)
+        newcomer = rt.tracker_key("Newcomer")
+        assert newcomer in dialog._positions and dialog._layout_key == (True, first)
+        assert rt._ring_holds(dialog._positions, first, {rt.tracker_key("Hero"), newcomer, rt.tracker_key("Person 9")})
+        qapp.processEvents()
+        assert _in_the_middle(dialog, first) and dialog._node_items[first].pen().widthF() > 4
+    finally:
+        _close(qapp, dialog)
+
+
 def test_diagram_labels_with_former_relations_do_not_overlap(qapp):
     """"Show former relations" writes every earlier label in brackets: the layout makes room for
     that longer text too, at every chapter, and the names stay put when it is ticked."""

@@ -9,6 +9,7 @@ history sheet, empty state). Every rule comes from the shared ``relations_tracki
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
 import importlib.util
 import json
@@ -661,11 +662,11 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
         await asyncio.sleep(REFIT_DELAY + 0.1)
         assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
         calls.clear()
-        diagram.set_focus(diagram.all_graph["nodes"][0]["id"])  # a new layout: fitted again
+        await diagram.set_focus(diagram.all_graph["nodes"][0]["id"])  # a new layout: fitted again
         await _settle()
         assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
         calls.clear()
-        diagram.set_unlisted(True)
+        await diagram.set_unlisted(True)
         await _settle()
         assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
         # Full screen gives the viewer more room: a diagram still as fitted is fitted into it ...
@@ -729,13 +730,18 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
                 return {n["id"]: corners[i % 4] for i, n in enumerate(graph.get("nodes", []))}
 
         diagram.core = _Corners()
-        diagram.set_focus(None)
+        await diagram.set_focus(None)
         assert len(diagram.node_controls) == 3
         for pill in diagram.node_controls:
             assert pill.left >= 0 and pill.top >= 0
             assert pill.left + pill.width <= diagram.width and pill.top + pill.height <= diagram.height
+        # ... also round a Focus at a corner (the canvas then reaches as far on its other sides)
+        await diagram.set_focus(diagram.all_graph["nodes"][0]["id"])
+        for pill in diagram.node_controls:
+            assert pill.left >= 0 and pill.top >= 0
+            assert pill.left + pill.width <= diagram.width and pill.top + pill.height <= diagram.height
         diagram.core = real
-        diagram.set_focus(None)
+        await diagram.set_focus(None)
         assert diagram.positions == positions
         diagram.set_chapter(1)
         assert diagram.edge_count() == 1 and diagram.chapter_field.value == "1"
@@ -743,7 +749,7 @@ def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp
         diagram.set_chapter(5)
         diagram.set_former(False)
         assert all("[" not in edge_label_text(e, False) for e in diagram.drawn_edges)
-        diagram.set_focus(next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤"))
+        await diagram.set_focus(next(n["id"] for n in diagram.graph["nodes"] if n["raw_name"] == "서윤"))
         assert diagram.edge_count() == 2
         # tapping a name opens its relation history
         node = next(c for c in diagram.node_controls if c.key.endswith("서윤") or "Seo-yun" in c.content.value)
@@ -813,8 +819,144 @@ def test_diagram_hub_labels_do_not_overlap(iso, tmp_path):
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
         assert diagram.node_count() == 33
         assert overlaps(diagram) == (0, 0, 0)
-        diagram.set_focus(rt.tracker_key("Hero"))
+        await diagram.set_focus(rt.tracker_key("Hero"))
         assert overlaps(diagram) == (0, 0, 0)
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+def test_diagram_focus_rebuilds_the_picture_round_the_name_and_fits_it_in_the_middle(iso, tmp_path):
+    """Owner 2026-11-16: the Focus "doesn't do anything ... rebuild the picture round the picked name": round a
+    main character with 32 relations, picking one of them rebuilds the layout round that name (worked out on the
+    io pool: the screen keeps the old picture meanwhile), its relations are the nearest names round it, the canvas
+    reaches as far on each side of it, so the fit puts it in the middle of the viewer, also after a new viewer
+    size; it stays outlined; a later pick wins over an earlier one still being worked out; "All characters" goes
+    back to the picture without a focus."""
+    from glossarion_mobile.ui.glossary.relations_diagram import (ALL_CHARACTERS, FOCUS_TIP, REFIT_DELAY,
+                                                                 RelationsDiagram)
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = rt.empty_tracker()
+    words = [("Patient", "Healer"), ("Younger Brother", "Older Sister"), ("Student", "Mentor"), ("Rival", "Rival")]
+    rows = [{"raw_name": f"Person {i}", "translated_name": f"Person {i}",
+             "relations": f"Hero: {words[i % 4][1]}" + (f"; Person {i + 1}: Coworker" if i % 4 == 0 else "")}
+            for i in range(32)]
+    rows.insert(0, {"raw_name": "Hero", "translated_name": "Hero",
+                    "relations": "; ".join(f"Person {i}: {words[i % 4][0]}" for i in range(32))})
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
+        assert diagram.focus_picker.tooltip == FOCUS_TIP
+        calls: list = []
+
+        def recorder(name):
+            async def call(*args):
+                calls.append((name, *args))
+            return call
+
+        for name in ("reset", "pan", "zoom"):
+            object.__setattr__(diagram.viewer, name, recorder(name))
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))
+        await _settle()
+        plain = dict(diagram.positions)
+        picked = rt.tracker_key("Person 4")  # related to Hero and to Person 5
+        calls.clear()
+        task = diagram.set_focus(picked)
+        assert diagram.positions == plain  # not laid out on the loop: the old picture stays meanwhile
+        await task
+        await _settle()
+        assert diagram.positions != plain and diagram.focus == picked
+        own = {rt.tracker_key("Hero"), rt.tracker_key("Person 5")}
+        assert rt._ring_holds(diagram.positions, picked, own)  # its relations are the nearest names
+        fx, fy = diagram.positions[picked]
+        assert abs(fx - diagram.width / 2) < 1e-6 and abs(fy - diagram.height / 2) < 1e-6
+        scale, (dx, dy) = calls[-1][1], calls[-2][1:3]
+        assert abs(dx + scale * fx - 280) < 0.05 and abs(dy + scale * fy - 250) < 0.05  # the viewer's middle
+        for pill in diagram.node_controls:
+            assert pill.left >= 0 and pill.top >= 0
+            assert pill.left + pill.width <= diagram.width and pill.top + pill.height <= diagram.height
+        node = next(c for c in diagram.node_controls if c.key == f"rel-node-{picked}")
+        assert node.border.top.width == 2  # outlined while it is the Focus
+        # a new viewer size (the keyboard closing) fits it again, still in the middle
+        calls.clear()
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=800.0))
+        await asyncio.sleep(REFIT_DELAY + 0.1)
+        scale, (dx, dy) = calls[-1][1], calls[-2][1:3]
+        assert abs(dx + scale * fx - 280) < 0.05 and abs(dy + scale * fy - 400) < 0.05
+        diagram.chapter = 1
+        diagram.rebuild()  # the slider keeps the picture and the outline
+        node = next(c for c in diagram.node_controls if c.key == f"rel-node-{picked}")
+        assert diagram.positions[picked] == (fx, fy) and node.border.top.width == 2
+        # two picks in a row: the later one is drawn, whichever finishes first
+        first, second = diagram.set_focus(rt.tracker_key("Person 9")), diagram.set_focus(rt.tracker_key("Hero"))
+        await first
+        await second
+        hx, hy = diagram.positions[rt.tracker_key("Hero")]
+        assert diagram.focus == rt.tracker_key("Hero")
+        assert abs(hx - diagram.width / 2) < 1e-6 and abs(hy - diagram.height / 2) < 1e-6
+        await diagram.set_focus(ALL_CHARACTERS)
+        assert diagram.focus is None and diagram.positions == plain
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("new_name", [False, True])
+def test_a_file_update_during_a_focus_pick_keeps_the_pick_and_its_fit(iso, tmp_path, new_name):
+    """Review 2026-11-16: the once-a-second check reloading the tracker while a Focus is still being laid out
+    (an extraction writing it) after the user panned: a write that changes no name leaves the pick's layout
+    running; one that adds a name lays out again; either way the pick is fitted with the Focus in the middle."""
+    from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+    rt = importlib.import_module("relations_tracking")
+    tracker = rt.empty_tracker()
+    rows = [{"raw_name": f"Person {i}", "translated_name": f"Person {i}",
+             "relations": "Hero: Mentor" + (f"; Person {i + 1}: Coworker" if i % 4 == 0 else "")} for i in range(24)]
+    rows.insert(0, {"raw_name": "Hero", "translated_name": "Hero",
+                    "relations": "; ".join(f"Person {i}: Student" for i in range(24))})
+    rt.record_relations(tracker, rows, field="relations", chapter_index=0, chapter_num=1, chapter_file="c1.xhtml")
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
+        calls: list = []
+
+        def recorder(name):
+            async def call(*args):
+                calls.append((name, *args))
+            return call
+
+        for name in ("reset", "pan", "zoom"):
+            object.__setattr__(diagram.viewer, name, recorder(name))
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))
+        await _settle()
+        diagram._on_viewer_touch()  # the user zoomed or panned before picking
+        calls.clear()
+        picked = rt.tracker_key("Person 4")
+        first = diagram.set_focus(picked)
+        written = copy.deepcopy(tracker)
+        if new_name:
+            rt.record_relations(written, [{"raw_name": "Guard", "translated_name": "Guard",
+                                           "relations": "Person 7: Friend"}],
+                                field="relations", chapter_index=1, chapter_num=2, chapter_file="c2.xhtml")
+        diagram._apply_state(tracker=written)
+        assert (diagram.layout_task is first) is not new_name  # an unchanged set of names does not restart it
+        await diagram.layout_task
+        await _settle()
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"] and diagram.auto_fit
+        fx, fy = diagram.positions[picked]
+        scale, (dx, dy) = calls[-1][1], calls[-2][1:3]
+        assert abs(dx + scale * fx - 280) < 0.05 and abs(dy + scale * fy - 250) < 0.05
+        assert (rt.tracker_key("Guard") in diagram.positions) is new_name
         store._saver.close()
 
     asyncio.run(scenario())
@@ -898,8 +1040,9 @@ def test_diagram_lines_stay_clear_of_other_labels_and_names(iso, tmp_path):
         diagram.set_chapter(1)
         assert diagram.positions == positions and _line_gaps(diagram) == (0, 0, 40)
         diagram.set_chapter(2)
-        diagram.set_focus(rt.tracker_key("Hero"))
+        await diagram.set_focus(rt.tracker_key("Hero"))
         focused = dict(diagram.positions)
+        assert focused != positions  # rebuilt round the Focus
         assert _line_gaps(diagram) == (0, 0, 40)
         diagram.set_former(True)
         diagram.set_chapter(1)
@@ -935,11 +1078,11 @@ def test_diagram_above_the_label_cap_labels_only_the_focus_character(iso, tmp_pa
         diagram = RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=tracker, entries=None)
         assert diagram.edge_count() == count + 1
         assert labels(diagram) == [] and "Focus character only" in diagram.summary.value
-        diagram.set_focus(rt.tracker_key("Spoke 0"))
+        await diagram.set_focus(rt.tracker_key("Spoke 0"))
         assert len(labels(diagram)) == 2  # its lines to Hub and to Spoke 1
         # the Hub alone has more lines than the cap: the layout made no room for its labels, so
         # none are drawn (drawn anyway, some sat on other lines)
-        diagram.set_focus(rt.tracker_key("Hub"))
+        await diagram.set_focus(rt.tracker_key("Hub"))
         assert not diagram.layout.label_spots and labels(diagram) == []
         store._saver.close()
 
@@ -1080,7 +1223,7 @@ def test_diagram_without_a_tracker_is_an_empty_state_and_opens_as_an_overlay(iso
                                                                      encoding="utf-8")
         diagram = await open_diagram(ctx, str(glossary))
         assert not diagram.empty and diagram.edge_count() == 0  # names not in the glossary are unlisted
-        diagram.set_unlisted(True)
+        await diagram.set_unlisted(True)  # laid out on the io pool
         assert diagram.edge_count() == 2
         glossary.write_text("type,raw_name,translated_name,gender\ncharacter,서윤,Seo-yun,female\n"
                             "character,하린,Ha-rin,female\ncharacter,민준,Min-jun,male\n", encoding="utf-8")
@@ -1956,7 +2099,7 @@ def test_full_screen_hides_the_controls_and_keeps_the_state(iso, tmp_path):
         assert view.appbar is diagram.appbar and view.padding == module.VIEW_PADDING and view.can_pop is not False
         diagram._on_area_size(types.SimpleNamespace(width=576.0, height=420.0))
         diagram.set_chapter(1)
-        diagram.set_focus(seo)
+        await diagram.set_focus(seo)
         diagram.set_former(False)
         diagram.show_history(harin)
         undo = list(diagram.undo_stack)
@@ -2028,7 +2171,7 @@ def test_auto_update_reloads_external_changes_and_keeps_the_view(iso, tmp_path, 
         diagram = await open_diagram(ctx, str(glossary))
         seo, harin = _id(diagram, "서윤"), _id(diagram, "하린")
         assert await diagram.check_for_update() is False  # nothing changed: stat only
-        diagram.set_focus(seo)
+        await diagram.set_focus(seo)
         diagram.show_history(harin)
         viewer = diagram.viewer
         # at the last chapter: follows the new last chapter

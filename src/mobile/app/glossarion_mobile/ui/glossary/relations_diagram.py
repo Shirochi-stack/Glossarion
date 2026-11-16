@@ -18,7 +18,8 @@ ch." with a number box (− / + and a typed number, for a book whose slider is t
 slider in the rest of the line (its own line when under ``SLIDER_MIN`` dp is left; the last chapter by
 default); the switches "Former" (former relations: earlier labels
 in brackets) and "Unlisted" (unlisted names) with the view filters "Relations" / "Gender" / "Hide" (a
-searchable checklist of names with "Show all"); the focus character (radial layout around it) beside the
+searchable checklist of names with "Show all"); the Focus character (the diagram rebuilt round them on the
+io pool, fitted with them in the middle and outlined while they are the Focus) beside the
 "N characters · M relations" summary. A corner button on the diagram (and Android back to leave) shows
 the diagram full screen, the controls and the app bar hidden. The
 filters are stored per book in the tracker's ``view`` key (``relations_tracking.save_view``, shared with
@@ -60,13 +61,15 @@ from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.glossary.common import ask, quiet, sheet
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic, toggle
 
-__all__ = ["ALL_CHARACTERS", "EMPTY_BODY", "EMPTY_BODY_ON", "GENDER_TINTS", "POLL_SECONDS", "RelationsDiagram", "TITLE",
+__all__ = ["ALL_CHARACTERS", "EMPTY_BODY", "EMPTY_BODY_ON", "FOCUS_TIP", "GENDER_TINTS", "POLL_SECONDS", "RelationsDiagram", "TITLE",
            "edge_label_text"]
 
 log = logging.getLogger("glossarion.glossary.ui")
 
 TITLE = "Relations & Gender Tracker"
 ALL_CHARACTERS = "__all__"
+#: the Focus picker's tooltip (the desktop Focus box says the same)
+FOCUS_TIP = "Type to search; pick a character to rebuild the diagram round them."
 EMPTY_BODY = ("Turn on Enable Relations Tracker in Glossary › General, then run a Balanced or Full glossary "
               "extraction.")
 #: the empty state while Enable Relations Tracker is already on
@@ -208,6 +211,10 @@ class RelationsDiagram:
         self._chapter_line_width = 0.0  # measured widths of the chapter line and its number group
         self._chapter_group_width = 0.0
         self._layout_key: Any = None
+        self._layout_seq = 0  # each new arrangement; one worked out on the io pool is drawn only while still the last
+        self.layout_task: Any = None  # the last arrangement worked out on the io pool (tests await it)
+        self._pending_key: Any = None  # the key of that arrangement while it is still being worked out
+        self._fit_pending = False  # it owes a fit (a Focus pick), also when a later one replaces it
         self.fit_due = True
         #: the diagram is as ``fit_all`` left it: the user has not zoomed or panned since (desktop ``_auto_fit``)
         self.auto_fit = True
@@ -393,7 +400,18 @@ class RelationsDiagram:
         if not self.empty:
             self._update_controls()
             self._size()
-            self._layout(force=False)
+            wanted = self._layout_job()[0]
+            if self._pending_key is not None:
+                # an arrangement is still being worked out (a Focus just picked): it is redone only when a
+                # name or a pair came or went, and a fit it owed is still made (``relayout``)
+                if wanted != self._pending_key:
+                    self.relayout(fit=False)
+            elif self.positions and self._layout_key is not None and wanted != self._layout_key:
+                # a name or a pair came or went: laid out again on the io pool (round the Focus that
+                # takes longer); the names shown stay put meanwhile
+                self.relayout(fit=False)
+            else:
+                self._layout(force=False)
             self.rebuild(push=False)
         self._refresh_undo(push=False)
         self.ctx.push(self.safe, self.undo_button)
@@ -484,7 +502,8 @@ class RelationsDiagram:
         self.focus_picker = ft.Dropdown(label="Focus", value=ALL_CHARACTERS, dense=True, expand=True,
                                         enable_filter=True, editable=True, options=self._focus_options(),
                                         content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-                                        on_select=lambda e: self.set_focus(self.focus_picker.value),
+                                        tooltip=FOCUS_TIP,
+                                        on_select=lambda e: [self.set_focus(self.focus_picker.value)] and None,
                                         key="rel-focus")
         # short labels so the switches and the chips share one line; the tooltips keep the full meaning
         self.former_switch = toggle(value=self.show_former, label="Former",
@@ -492,7 +511,8 @@ class RelationsDiagram:
                                     on_change=lambda e: self.set_former(bool(e.control.value)), key="rel-former")
         self.unlisted_switch = toggle(value=self.show_unlisted, label="Unlisted",
                                       tooltip="Unlisted names: names that are not in the glossary",
-                                      on_change=lambda e: self.set_unlisted(bool(e.control.value)), key="rel-unlisted")
+                                      on_change=lambda e: [self.set_unlisted(bool(e.control.value))] and None,
+                                      key="rel-unlisted")
         view = self.view_choice
         # no check mark (the selected tint shows the state): it made the row too wide for one line
         self.relations_chip = ft.Chip(label=ft.Text("Relations"), selected=view["show_relations"], show_checkmark=False,
@@ -622,36 +642,91 @@ class RelationsDiagram:
             options.append(ft.DropdownOption(key=node["id"], text=str(node.get("label") or node["id"])))
         return options
 
-    def _layout(self, force: bool = True) -> None:
-        """Node positions from the all-chapters graph (stable while the slider and the filters move); an
-        update that leaves the names and pairs as they were keeps the positions."""
+    def _layout_job(self) -> tuple:
+        """``(key, graph, focus, base size)`` of the arrangement the controls ask for: the all-chapters
+        graph (stable while the slider and the filters move) round the Focus."""
         graph = self.all_graph = self._all_graph()
         focus = self.focus if any(n["id"] == self.focus for n in graph.get("nodes", [])) else None
         key = (tuple(sorted(n["id"] for n in graph.get("nodes", []))),
                tuple(sorted((e["a"], e["b"]) for e in graph.get("edges", []))), focus, self.base_width,
                self.base_height)
+        return key, graph, focus, (self.base_width, self.base_height)
+
+    def _arrange(self, graph: dict, focus: Optional[str], base: tuple) -> Any:
+        """The layout itself (blocking; plain data only, so it may run on the io pool). A node is drawn
+        centred on its point, so the layout gets the canvas minus half a node on every side: a node at the
+        layout's edge would otherwise be cut off by the Stack. The label sizes are those with the earlier
+        labels in brackets (the longest text a line gets), so the names stay put when "Former relations"
+        is switched."""
+        pad_x, pad_y = NODE_WIDTH / 2 + 8, NODE_HEIGHT / 2 + 8
+        return self.core.layout_graph(graph, width=max(base[0] - 2 * pad_x, 1), height=max(base[1] - 2 * pad_y, 1),
+                                      focus=focus, node_size=node_box,
+                                      label_size=lambda e: label_box(text) if (text := edge_label_text(e, True))
+                                      else None)
+
+    def _layout(self, force: bool = True) -> None:
+        """Node positions worked out here and now (the screen's first picture, an update of the files); an
+        update that leaves the names and pairs as they were keeps the positions."""
+        key, graph, focus, base = self._layout_job()
         if not force and key == self._layout_key and self.positions:
             return
+        self._layout_seq += 1  # a new arrangement still being worked out on the io pool is not wanted now
+        self._pending_key = None
+        self._install_layout(key, self._arrange(graph, focus, base), focus, base)
+
+    def relayout(self, fit: bool = True) -> Any:
+        """A new arrangement (Focus, Unlisted names) worked out on the io pool, so the screen does not
+        freeze while a large book is laid out round a name: the picture on screen stays until it is in,
+        then it is drawn and (``fit``, or while still as fitted) fitted. A fit asked for is kept when a
+        later arrangement replaces this one before it is in (a file update during a Focus pick). Returns
+        the task."""
+        self._layout_seq += 1
+        seq = self._layout_seq
+        key, graph, focus, base = self._layout_job()
+        self._pending_key = key
+        self._fit_pending = self._fit_pending or fit
+
+        async def run() -> None:
+            try:
+                inner = await self.ctx.io(self._arrange, graph, focus, base)
+            except Exception:
+                log.debug("laying out the relations diagram failed", exc_info=True)
+                if seq == self._layout_seq:
+                    self._pending_key = None
+                return
+            if seq != self._layout_seq or self.closed or self.empty:
+                return  # the controls moved on meanwhile: the later arrangement is drawn instead
+            fit_now = self._fit_pending or self.auto_fit
+            self._pending_key, self._fit_pending = None, False
+            self._install_layout(key, inner, focus, base)
+            self.rebuild()
+            if fit_now:
+                self.fit_all()
+
+        self.layout_task = self.ctx.spawn(run())
+        return self.layout_task
+
+    def _install_layout(self, key: tuple, inner: Any, focus: Optional[str], base: tuple) -> None:
+        """Positions on the canvas from the layout: it may push names past the area it was given (to make
+        room for labels), so the canvas grows to hold them; built round a Focus, the canvas reaches as far
+        on each side of it, so the fitted view has the Focus in the middle."""
         self._layout_key = key
-        # a node is drawn centred on its point, so the layout gets the canvas minus half a node on every
-        # side: a node at the layout's edge would otherwise be cut off by the Stack
         pad_x, pad_y = NODE_WIDTH / 2 + 8, NODE_HEIGHT / 2 + 8
-        # the label sizes with the earlier labels in brackets (the longest text a line gets), so the
-        # names stay put when "Former relations" is switched
-        inner = self.core.layout_graph(graph, width=max(self.base_width - 2 * pad_x, 1),
-                                       height=max(self.base_height - 2 * pad_y, 1), focus=focus, node_size=node_box,
-                                       label_size=lambda e: label_box(text) if (text := edge_label_text(e, True))
-                                       else None)
-        # the layout may push names past the area it was given (to make room for labels): the canvas
-        # grows to hold them
-        left = min((point[0] for point in inner.values()), default=0.0)
-        top = min((point[1] for point in inner.values()), default=0.0)
-        shift_x, shift_y = pad_x - min(left, 0.0), pad_y - min(top, 0.0)
-        self.positions = {key: (point[0] + shift_x, point[1] + shift_y) for key, point in inner.items()}
+        if focus is not None and focus in inner:
+            fx, fy = inner[focus]
+            half_w = max(max(abs(p[0] - fx) for p in inner.values()) + pad_x, base[0] / 2)
+            half_h = max(max(abs(p[1] - fy) for p in inner.values()) + pad_y, base[1] / 2)
+            self.positions = {name: (p[0] - fx + half_w, p[1] - fy + half_h) for name, p in inner.items()}
+            self._grown = (2 * half_w, 2 * half_h)
+        else:
+            left = min((point[0] for point in inner.values()), default=0.0)
+            top = min((point[1] for point in inner.values()), default=0.0)
+            shift_x, shift_y = pad_x - min(left, 0.0), pad_y - min(top, 0.0)
+            self.positions = {name: (point[0] + shift_x, point[1] + shift_y) for name, point in inner.items()}
+            self._grown = (max(base[0], max((p[0] for p in self.positions.values()), default=0.0) + pad_x),
+                           max(base[1], max((p[1] for p in self.positions.values()), default=0.0) + pad_y))
         #: the layout as computed: ``core.layout_spot(self.layout, a, b)`` is where it made room for a label
         self.layout = inner
-        self._grown = (max(self.base_width, max((p[0] for p in self.positions.values()), default=0.0) + pad_x),
-                       max(self.base_height, max((p[1] for p in self.positions.values()), default=0.0) + pad_y))
         self._set_canvas(*self._grown)
 
     # ---- drawing -----------------------------------------------------------------------------------
@@ -861,24 +936,22 @@ class RelationsDiagram:
             if push:
                 self.ctx.push(self.slider_cell)
 
-    def set_focus(self, node_id: Any) -> None:
+    def set_focus(self, node_id: Any) -> Any:
+        """The picture rebuilt round the picked name (on the io pool, see ``relayout``), then fitted with
+        that name in the middle; "All characters" goes back to the picture without a focus. Returns the task."""
         self.focus = None if node_id in (None, "", ALL_CHARACTERS) else str(node_id)
-        self._layout()
-        self.rebuild()
-        self.fit_all()  # a new layout: the whole of it in view again
+        return self.relayout()  # a new layout: the whole of it in view again
 
     def set_former(self, on: bool) -> None:
         self.show_former = bool(on)
         self.rebuild()
 
-    def set_unlisted(self, on: bool) -> None:
+    def set_unlisted(self, on: bool) -> Any:
         self.show_unlisted = bool(on)
         self.all_graph = self._all_graph()
         self.focus_picker.options = self._focus_options()
-        self._layout()
-        self.rebuild()
         self.ctx.push(self.focus_picker)
-        self.fit_all()
+        return self.relayout()
 
     # ---- fit (desktop RelationsDiagramDialog.fit_all) ------------------------------------------------
 

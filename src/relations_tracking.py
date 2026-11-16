@@ -22,6 +22,7 @@ Nothing heavy is imported at import time (no Qt, no Flet, no app modules).
 
 from __future__ import annotations
 
+import bisect
 import copy
 import csv
 import difflib
@@ -3210,6 +3211,10 @@ _RING_ORDER_MAX = 200
 #: When names on the first ring are related to each other they sit at 1, 1 + this and 1 + twice
 #: this times the ring's distance, in turn.
 _RING_STAGGER = 0.3
+#: The widest wedge (radians) a name on the first ring shares out among the names hanging from it:
+#: round a focus with one relation that name's wedge would be the full turn, and its lines to the
+#: names on the far side of the focus would run through the focus.
+_WEDGE_MAX = 1.5 * math.pi
 
 
 def _ring_order(members: List[str], adjacency: Dict[str, List[str]]) -> List[str]:
@@ -3281,19 +3286,30 @@ def _radial_layout(ids: List[str], adjacency: Dict[str, List[str]], focus: str,
         members = rings[ring]
         count = len(members)
         thetas: List[float] = []
-        if ring == 1:
+        outside = bool(unreachable) and ring == max_depth
+        if ring == 1 and not outside:
             members[:] = _ring_order(sorted(members), adjacency)
             thetas, gaps = _spread_spokes([2.0 * math.pi * index / count for index in range(count)],
                                           [(spoke_size or {}).get(node) for node in members],
                                           [below[node] for node in members])
             for index, node in enumerate(members):
-                wedge[node] = (thetas[index] - gaps[index - 1] / 2.0, thetas[index] + gaps[index] / 2.0)
-        elif not wedges and not (unreachable and ring == max_depth):
-            # evenly round the ring, in the order of the names they hang from
+                low, high = thetas[index] - gaps[index - 1] / 2.0, thetas[index] + gaps[index] / 2.0
+                if high - low > _WEDGE_MAX:
+                    # (a focus with one or two relations) not round the far side of the focus: the
+                    # lines from this name to its own would run through the focus there
+                    low, high = thetas[index] - _WEDGE_MAX / 2.0, thetas[index] + _WEDGE_MAX / 2.0
+                wedge[node] = (low, high)
+        elif not wedges and not outside:
+            # evenly round the ring, in the order of the names they hang from; past a focus with one
+            # relation not round its far side (see above)
             members.sort(key=lambda n: (angle.get(parent[n], 10.0), n))
-            offset = (math.pi / count) * (ring % 2)
-            thetas = [offset + 2.0 * math.pi * index / count for index in range(count)]
-        elif not (unreachable and ring == max_depth):
+            if ring == 2 and len(rings[1]) == 1:
+                middle = angle[rings[1][0]]
+                thetas = [middle - _WEDGE_MAX / 2.0 + _WEDGE_MAX * (index + 0.5) / count for index in range(count)]
+            else:
+                offset = (math.pi / count) * (ring % 2)
+                thetas = [offset + 2.0 * math.pi * index / count for index in range(count)]
+        elif not outside:
             # each name's children share its wedge, as wide as what hangs below each of them
             members.sort(key=lambda n: (wedge[parent[n]][0], n))
             placed = []
@@ -5145,13 +5161,14 @@ class _Placed:
         for ghost in self.ghosts_to.pop(node, ()):
             self.ghosts.pop(ghost, None)
 
-    def extent(self, aspect: float) -> float:
-        """``_drawn_extent`` of what is placed: the larger of its width and ``aspect`` times its height."""
+    def extent(self, aspect: float, around: Optional[str] = None) -> float:
+        """``_drawn_extent`` of what is placed: the larger of its width and ``aspect`` times its height
+        (``around``: of the area centred on that name, see ``_centred_size``)."""
         boxes = list(self.name_box.values()) + list(self.label_box.values())
         if not boxes:
             return 0.0
-        return max(max(b[2] for b in boxes) - min(b[0] for b in boxes),
-                   aspect * (max(b[3] for b in boxes) - min(b[1] for b in boxes))) - _ROOM_GAP
+        width, height = _centred_size(boxes, self.positions.get(around) if around is not None else None)
+        return max(width, aspect * height) - _ROOM_GAP
 
     def spread(self, factor: float, centre: Sequence[float], expected: Callable[[str], Sequence[float]]) -> None:
         """Everything placed ``factor`` times as far from ``centre`` (boxes keep their size, labels
@@ -5228,11 +5245,55 @@ _PLACE_SPREAD = 1.2
 _PLACE_REGROW = 6
 
 
+def _ring_of(placed: "_Placed", centre: str, own: Iterable[str]) -> Optional[Tuple[float, float, List[Tuple[float, float]]]]:
+    """The first ring round ``centre`` (see ``focus_ring``) from what is placed; None before it has any."""
+    if centre not in placed.positions:
+        return None
+    return focus_ring(placed.positions, centre, [other for other in own if other in placed.positions])
+
+
+def focus_ring(positions: Mapping[str, Sequence[float]], centre: str, own: Iterable[str]
+               ) -> Optional[Tuple[float, float, List[Tuple[float, float]]]]:
+    """``(x, y, [(angle, distance), ...])``: the ring through ``own`` (the focus's relations) round
+    ``centre``, by angle; between two of them its distance from the centre goes linearly from one's
+    to the other's (one alone: a circle). None without any. See ``_inside_ring``."""
+    cx, cy = positions[centre][0], positions[centre][1]
+    points = sorted((math.atan2(positions[other][1] - cy, positions[other][0] - cx) % (2.0 * math.pi),
+                     math.hypot(positions[other][0] - cx, positions[other][1] - cy)) for other in own)
+    return (cx, cy, points) if points else None
+
+
+def _ring_holds(positions: Mapping[str, Sequence[float]], centre: Optional[str], own: Iterable[str]) -> bool:
+    """No name but the focus's own relations (``own``) lies inside their ring round the focus
+    ``centre`` (see ``focus_ring``); True without a focus."""
+    own = set(own)
+    if centre is None or centre not in positions or not own:
+        return True
+    ring = focus_ring(positions, centre, [other for other in own if other in positions])
+    return ring is None or not any(_inside_ring(ring, point[0], point[1]) for key, point in positions.items()
+                                   if key != centre and key not in own)
+
+
+def _inside_ring(ring: Tuple[float, float, List[Tuple[float, float]]], x: float, y: float) -> bool:
+    """``(x, y)`` is not further from the ring's centre than the ring is in that direction."""
+    cx, cy, points = ring
+    distance = math.hypot(x - cx, y - cy)
+    if len(points) == 1:
+        return distance <= points[0][1]
+    theta = math.atan2(y - cy, x - cx) % (2.0 * math.pi)
+    after = bisect.bisect_left(points, (theta, -1.0)) % len(points)
+    (t0, r0), (t1, r1) = points[after - 1], points[after]
+    span = (t1 - t0) % (2.0 * math.pi) or 2.0 * math.pi
+    share = ((theta - t0) % (2.0 * math.pi)) / span
+    return distance <= r0 + (r1 - r0) * share
+
+
 def _place_one_by_one(guide: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
                       node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
                       name_lines: Sequence[int], cell: float, root: Optional[str] = None,
                       order: Optional[Sequence[str]] = None, aspect: float = 1.0,
-                      give_up: Optional[float] = None, grow_ray: float = _PLACE_GROW_RAY
+                      give_up: Optional[float] = None, grow_ray: float = _PLACE_GROW_RAY,
+                      centred: bool = False
                       ) -> Optional[Tuple[Dict[str, List[float]], Dict[Any, float], int, float, int]]:
     """Names placed one at a time near where ``guide`` puts them, each at the nearest spot where it
     and its lines to the names already placed clear everything placed: its box, the lines (no line
@@ -5246,12 +5307,15 @@ def _place_one_by_one(guide: Mapping[str, Sequence[float]], edges: Sequence[Tupl
     that costs little room) and tries again. Returns ``(positions, label spots, names placed with
     a problem left, how many times over spreading made what was placed, how many spots were
     checked)``; None as soon as what is placed reaches past ``give_up`` (see ``_drawn_extent``:
-    another layout already did better). ``grow_ray``: see ``_PLACE_GROW_RAY``."""
+    another layout already did better). ``grow_ray``: see ``_PLACE_GROW_RAY``. ``centred``: the
+    picture is built round ``root`` (the focus): it is shown centred on it (see ``_pull_in``), and
+    no other name goes nearer it than the furthest of its own relations placed (place those first)."""
     placed = _Placed(cell, node_size, edges, label_size, name_lines)
     lines_of = {node: len(placed.incident.get(node, ())) for node in guide}
     left = [node for node in guide]
     if root is None or root not in guide:
         root = max(left, key=lambda node: (lines_of[node], node))
+    own = {other for _index, other in placed.incident.get(root, ())} if centred else set()
     xs = [p[0] for p in guide.values()]
     ys = [p[1] for p in guide.values()]
     size = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
@@ -5350,8 +5414,12 @@ def _place_one_by_one(guide: Mapping[str, Sequence[float]], edges: Sequence[Tupl
         """The best of ``candidates`` where ``node`` fits: first among spots at least
         ``_PLACE_COARSE`` apart (at most ``tries`` of them), then among the better ones near the spot found."""
         room: Dict[int, List[Tuple[float, float]]] = {}
+        # built round a focus: a name not related to it stays outside the ring of the focus's relations
+        ring = _ring_of(placed, root, own) if own and node != root and node not in own else None
 
         def fits(x: float, y: float, ray: Optional[int]):
+            if ring is not None and _inside_ring(ring, x, y):
+                return None
             if ray is not None and anchor_line in placed.label_size_of:
                 # a spot on a ray only when the anchor's label finds room on it before the name
                 ax, ay = placed.positions[anchor]
@@ -5428,7 +5496,7 @@ def _place_one_by_one(guide: Mapping[str, Sequence[float]], edges: Sequence[Tupl
                     best = (bad, x, y, labels)
             chosen = best[1:]
         placed.place(node, *chosen)
-        if give_up is not None and placed.extent(aspect) > give_up:
+        if give_up is not None and placed.extent(aspect, root if centred else None) > give_up:
             return None
         for _index, other in placed.incident.get(node, ()):
             count_placed[other] = count_placed.get(other, 0) + 1
@@ -5441,7 +5509,7 @@ def _place_one_by_one(guide: Mapping[str, Sequence[float]], edges: Sequence[Tupl
             current = max(left, key=lambda other: (count_placed.get(other, 0) > 0, lines_of[other],
                                                    count_placed.get(other, 0), -order_of[other]))
     if not trouble:
-        _pull_in(placed, root, candidates_for, search, aspect)
+        _pull_in(placed, root, candidates_for, search, aspect, centred)
     # labels of lines whose spot was never checked (a name placed with problems): the room pass finds one
     return placed.positions, placed.spots, trouble, spread[0], placed.checks
 
@@ -5455,18 +5523,18 @@ _PULL_SPOTS = 60
 
 
 def _pull_in(placed: _Placed, root: str, candidates_for: Callable[..., Any], search: Callable[..., Any],
-             aspect: float = 1.0) -> None:
+             aspect: float = 1.0, centred: bool = False) -> None:
     """The picture made smaller: the name (with the names related to it alone) whose box or label
     reaches furthest past the rest on one side moves to the best spot nearer its relations and the
     middle where it and its lines still clear everything, while that makes the picture smaller
     as it is shown in a window ``aspect`` times as wide as high (the sides that decide how far it
-    must be zoomed out are pulled in). Labels that slid for a move slide back when it is undone."""
+    must be zoomed out are pulled in; ``centred``: the window is centred on ``root``, so the side
+    further from it decides). Labels that slid for a move slide back when it is undone."""
     lines_of = {node: len(placed.incident.get(node, ())) for node in placed.positions}
 
     def size() -> Tuple[float, float]:
         boxes = list(placed.name_box.values()) + list(placed.label_box.values())
-        return (max(b[2] for b in boxes) - min(b[0] for b in boxes),
-                max(b[3] for b in boxes) - min(b[1] for b in boxes))
+        return _centred_size(boxes, placed.positions[root] if centred else None)
 
     def extent() -> float:
         """How far the picture must be zoomed out to fit the window (larger: further)."""
@@ -5591,6 +5659,12 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
                  label_size: Optional[Callable[[Mapping[str, Any]], Any]] = None) -> Dict[str, Tuple[float, float]]:
     """Deterministic positions inside ``width`` x ``height``: seeded force layout, or radial around ``focus``.
 
+    With a ``focus`` the picture is built round it, whatever the shape of the book: it is the centre,
+    its relations are the nearest names round it (no other name inside their ring, see
+    ``focus_ring``), the others further out by their distance from it, the names with no path to it
+    outside; a focus with no relations sits at the free spot nearest the middle of the picture the
+    others make without a focus. The caller centres its view on the focus.
+
     ``node_size(node)`` and ``label_size(edge)`` give the drawn ``(width, height)`` of a name box
     and of a line's label (None: no label), in the units of ``width`` and ``height``. With them the
     names are placed one at a time where they, their lines and labels clear everything placed
@@ -5640,20 +5714,13 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
         spacing = 0.8 * sum(w for w, _h in names.values()) / len(names)
     if labels:
         spacing = max(spacing, 0.6 * sum(w + h for w, h in labels.values()) / len(labels))
-    centre = _hang_point(str(focus), edges) if focus is not None and str(focus) in nodes else None
-    if centre is not None and not capped and _tree_root(edges, None) is not None:
-        # Round one main character the picture is that character's whatever the focus: rings or a
-        # tree round any other name made the main character a branch with its many lines far out
-        # (the owner's book focused on a name with 11 relations: 9,708 px wide against 6,044).
-        # The same picture as without a focus, moved so the focus sits where the rings put it.
-        base = layout_graph(graph, width, height, None, seed, node_size, label_size)
-        if centre in base:
-            goal = _plain_layout(graph, width, height, centre, seed).get(centre, base[centre])
-            dx, dy = goal[0] - base[centre][0], goal[1] - base[centre][1]
-            moved_base = Layout((key, (point[0] + dx, point[1] + dy)) for key, point in base.items())
-            for attribute in ("label_spots", "labels_capped", "growth", "spread"):
-                setattr(moved_base, attribute, getattr(base, attribute))
-            return moved_base
+    # The picture is built round the focus: it is the centre, its relations the nearest names round
+    # it, the others further out by their distance from it (rings, a tree out from it, or the picture
+    # without a focus with the focus drawn in among its relations: the smallest view centred on it).
+    centre = str(focus) if focus is not None and str(focus) in nodes else None
+    if centre is not None and edges and not any(centre in (a, b) for a, b, _edge in edges):
+        # a focus with no relations: the picture without it, and it at the free spot nearest the middle
+        return _round_a_loner(graph, width, height, centre, seed, node_size, label_size, nodes, edges, names)
     spokes = {}
     if centre is not None:
         for index, (a, b, _edge) in enumerate(edges):
@@ -5680,44 +5747,64 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
     # Names are placed one at a time (see ``_place_one_by_one``) unless the rings or the force
     # layout already leave room for everything, or every line runs from one name (a plain star:
     # the rings and the room pass make it smaller, measured).
-    star = len(edges) > 2 and bool(set.intersection(*({a, b} for a, b, _edge in edges)))
-    placed = (not capped and not star
+    # Round a focus they are placed one by one also above the label cap (room is made for its labels
+    # only) and round a leaf of a star: there the rings and the room pass let other names in among
+    # the focus's own relations.
+    shared = set.intersection(*({a, b} for a, b, _edge in edges)) if edges else set()
+    star = len(edges) > 2 and bool(shared) and (pinned is None or pinned in shared)
+    own = {b if a == pinned else a for a, b, _edge in edges if pinned in (a, b)} if pinned is not None else set()
+    placed = ((not capped or pinned is not None) and not star
               and bool(_room_round(start, keyed, boxes, labels, name_lines, {}, cell)[0]))
     if not placed:
         moved, spots, growth = _make_room(start, keyed, boxes, labels, name_lines, pinned=pinned, spots=spots)
     else:
         # Guided by the force layout (or the rings round the focus) and, round a main character,
-        # also by a tree out from it; each placed with candidate spots on its rays this far apart:
-        # the smallest picture is kept (no guide and no spacing wins on every shape, measured; the
-        # second spacing only while placing took few checks), each try given up once it is larger.
-        attempts = [(start, pinned, None)]
+        # also by a tree out from it; round a focus also by the picture without one (see
+        # ``_kept_guide``); each placed with candidate spots on its rays this far apart: the smallest
+        # picture is kept (no guide and no spacing wins on every shape, measured; the second spacing
+        # only while placing took few checks, and not round a focus, which already tries more
+        # guides), each try given up once it is larger.
+        attempts = [(start, pinned, _out_from(pinned, edges, start) if pinned is not None else None)]
+        adjacency: Dict[str, List[str]] = {}
+        between: Dict[Tuple[str, str], Tuple[float, float]] = {}
+        for index, (a, b, _edge) in enumerate(edges):
+            adjacency.setdefault(a, []).append(b)
+            adjacency.setdefault(b, []).append(a)
+            if index in labels:
+                between[(a, b)] = between[(b, a)] = labels[index]
         hub = _tree_root(edges, pinned)
         if hub is not None:
-            adjacency: Dict[str, List[str]] = {}
-            between: Dict[Tuple[str, str], Tuple[float, float]] = {}
-            for index, (a, b, _edge) in enumerate(edges):
-                adjacency.setdefault(a, []).append(b)
-                adjacency.setdefault(b, []).append(a)
-                if index in labels:
-                    between[(a, b)] = between[(b, a)] = labels[index]
             tree = _tree_layout(sorted(start), adjacency, hub, boxes, lambda a, b: between.get((a, b)))
             ox, oy = positions[hub]
             tree_start = {key: [ox + x, oy + y] for key, (x, y) in tree.items()}
             attempts.append((tree_start, hub, list(tree_start)))
+        if pinned is not None:
+            # also the picture the book has without a focus, the focus drawn in among its relations
+            # and the others kept out of their ring as they are placed round it: round a name at the
+            # edge of the book the rings and the tree out from it put everything on one side of it,
+            # and the view centred on it grew to over twice the picture without a focus (the owner's
+            # book, measured over every name: 22 of 62 names; with this guide too, 1)
+            kept, kept_order = _kept_guide(graph, width, height, seed, spacing, capped, edges, labels, names, start,
+                                           adjacency, between, boxes, pinned, own)
+            attempts.append((kept, pinned, kept_order))
         best = None
         work = 0
         for grow_ray in (_PLACE_GROW_RAY, _PLACE_GROW_RAY_TOO):
-            if best is not None and work > _TRY_TOO_CHECKS:
+            if best is not None and (work > _TRY_TOO_CHECKS or pinned is not None):
                 break
             for guide_start, root, order in attempts:
                 done = _place_one_by_one(guide_start, keyed, boxes, labels, name_lines, cell, root, order, aspect,
-                                         None if best is None else _GIVE_UP * best[0], grow_ray)
+                                         None if best is None or best[0][0] else
+                                         (_GIVE_UP if pinned is None else _GIVE_UP_FOCUS) * best[0][1], grow_ray,
+                                         centred=pinned is not None and root == pinned)
                 if done is None:
                     continue
                 work += done[4]
                 other, other_spots, other_growth = _make_room(done[0], keyed, boxes, labels, name_lines,
                                                               pinned=pinned, spots=done[1])
-                size = _drawn_extent(other, keyed, boxes, labels, other_spots, aspect)
+                # (round a focus: a picture whose first ring holds only the focus's relations first)
+                size = (not _ring_holds(other, pinned, own),
+                        _drawn_extent(other, keyed, boxes, labels, other_spots, aspect, pinned))
                 if best is None or size < best[0]:
                     best = (size, other, other_spots, other_growth, done[3])
         _size, moved, spots, growth, spread = best
@@ -5725,9 +5812,14 @@ def layout_graph(graph: Optional[Mapping[str, Any]], width: float = 1000.0, heig
         # a few names: the room pass alone is cheap here, and keeps the picture nearest the guide;
         # kept unless placing one by one ends clearly smaller
         other, other_spots, other_growth = _make_room(guide, keyed, boxes, labels, name_lines, pinned=pinned)
-        if (_drawn_extent(moved, keyed, boxes, labels, spots, aspect)
-                > _COMPARE_GAIN * _drawn_extent(other, keyed, boxes, labels, other_spots, aspect)):
+        if (_ring_holds(other, pinned, own) >= _ring_holds(moved, pinned, own)
+                and _drawn_extent(moved, keyed, boxes, labels, spots, aspect, pinned)
+                > _COMPARE_GAIN * _drawn_extent(other, keyed, boxes, labels, other_spots, aspect, pinned)):
             moved, spots, growth, spread = other, other_spots, other_growth, 1.0
+    if pinned is not None and pinned in moved:
+        # the focus where the rings have it, whichever guide won (the picture moved as a whole)
+        dx, dy = positions[pinned][0] - moved[pinned][0], positions[pinned][1] - moved[pinned][1]
+        moved = {key: [point[0] + dx, point[1] + dy] for key, point in moved.items()}
     if spots and labels:
         spots = _slide_labels(moved, keyed, boxes, labels, name_lines, spots, cell)
     if loose:
@@ -5804,13 +5896,18 @@ _COMPARE_GAIN = 0.85
 #: past the picture the force layout gave (the room pass may still make it smaller: by up to a
 #: quarter, measured, round a main character with 45 relations).
 _GIVE_UP = 1.35
+#: ... and round a focus (three guides are tried, see ``layout_graph``) as soon as it is larger than
+#: the smallest so far, centred on the focus (the owner's book over every name: the time the median
+#: name takes from 2.2 to 1.9 times the picture without a focus, the sizes as good).
+_GIVE_UP_FOCUS = 1.0
 
 
 def _drawn_extent(positions: Mapping[str, Sequence[float]], edges: Sequence[Tuple[Any, str, str]],
                   node_size: Mapping[str, Tuple[float, float]], label_size: Mapping[Any, Tuple[float, float]],
-                  spots: Mapping[Any, float], aspect: float) -> float:
+                  spots: Mapping[Any, float], aspect: float, around: Optional[str] = None) -> float:
     """How far the names and labels (at ``spots``) must be zoomed out to fit a window ``aspect``
-    times as wide as high: the larger of the width and ``aspect`` times the height."""
+    times as wide as high: the larger of the width and ``aspect`` times the height. ``around``: a
+    name the window centres on (the focus): the width and height reach as far on its other side."""
     boxes = []
     for node, (w, h) in node_size.items():
         x, y = positions[node]
@@ -5824,8 +5921,19 @@ def _drawn_extent(positions: Mapping[str, Sequence[float]], edges: Sequence[Tupl
         boxes.append((x - size[0] / 2.0, y - size[1] / 2.0, x + size[0] / 2.0, y + size[1] / 2.0))
     if not boxes:
         return 0.0
-    return max(max(b[2] for b in boxes) - min(b[0] for b in boxes),
-               aspect * (max(b[3] for b in boxes) - min(b[1] for b in boxes)))
+    width, height = _centred_size(boxes, positions[around] if around in positions else None)
+    return max(width, aspect * height)
+
+
+def _centred_size(boxes: Sequence[Box], centre: Optional[Sequence[float]]) -> Tuple[float, float]:
+    """``(width, height)`` of what ``boxes`` cover; with a ``centre``, of the area centred on it that
+    holds them all (as far on each side of it as they reach on the further side)."""
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    if centre is None:
+        return x1 - x0, y1 - y0
+    cx, cy = centre[0], centre[1]
+    return 2.0 * max(cx - x0, x1 - cx), 2.0 * max(cy - y0, y1 - cy)
 
 
 def _tree_root(edges: Sequence[Tuple[str, str, Any]], pinned: Optional[str]) -> Optional[str]:
@@ -5846,34 +5954,149 @@ def _tree_root(edges: Sequence[Tuple[str, str, Any]], pinned: Optional[str]) -> 
     ranked = sorted(count, key=lambda node: (-count[node], node))
     top, second = count[ranked[0]], count[ranked[1]]
     if top >= 2 * second and 3 * top >= len(count) and top < len(edges):
-        # (``layout_graph`` lays such a graph out without its focus, see there)
         return pinned if pinned is not None else ranked[0]
     return None
 
 
-def _hang_point(focus: str, edges: Sequence[Tuple[str, str, Any]]) -> str:
-    """The name the rings of a focus go round: the focus itself, but for a focus with one relation
-    the name it hangs from (along a chain of names with two relations, to the first name with more).
-
-    The rings round a leaf would hold everything else in the one wedge of its only relation: that
-    name's lines would all run out to one side and past the leaf, almost side by side, and the room
-    pass would grow the picture to hundreds of times its size. Round the name it hangs from, the
-    leaf is one of its first ring and the picture is that name's own."""
-    links: Dict[str, set] = {}
+def _out_from(centre: str, edges: Sequence[Tuple[str, str, Any]], names: Iterable[str]) -> List[str]:
+    """``names`` in the order to place them round ``centre``: out from it by the number of steps
+    from it, the names with most relations first at each step (those not reaching it last)."""
+    links: Dict[str, List[str]] = {}
     for a, b, _edge in edges:
-        links.setdefault(a, set()).add(b)
-        links.setdefault(b, set()).add(a)
-    previous, node = None, focus
-    seen = {focus}
-    while len(links.get(node, ())) - (previous is not None) == 1:
-        nxt = next(iter(links[node] - {previous}))
-        if nxt in seen:
-            break
-        seen.add(nxt)
-        previous, node = node, nxt
-        if len(links[node]) != 2:
-            break
-    return node if len(links.get(node, ())) >= 3 else focus
+        links.setdefault(a, []).append(b)
+        links.setdefault(b, []).append(a)
+    depth = {centre: 0}
+    queue = [centre]
+    for node in queue:
+        for other in links.get(node, ()):
+            if other not in depth:
+                depth[other] = depth[node] + 1
+                queue.append(other)
+    far = len(depth) + 1
+    return sorted(names, key=lambda node: (depth.get(node, far), -len(links.get(node, ())), node))
+
+
+#: In the guide from the picture without a focus (``_kept_guide``) the focus moves this share of the
+#: way from where that picture has it to the middle of the picture.
+_KEPT_PULL = 0.5
+
+
+def _kept_guide(graph: Optional[Mapping[str, Any]], width: float, height: float, seed: int, spacing: float,
+                capped: bool, edges: Sequence[Tuple[str, str, Any]], labels: Mapping[Any, Tuple[float, float]],
+                names: Mapping[str, Tuple[float, float]], start: Mapping[str, Sequence[float]],
+                adjacency: Mapping[str, Sequence[str]], between: Mapping[Tuple[str, str], Tuple[float, float]],
+                boxes: Mapping[str, Tuple[float, float]], centre: str, own: Iterable[str]
+                ) -> Tuple[Dict[str, List[float]], List[str]]:
+    """``(guide, order)`` for the names ``start`` holds, round ``centre``: where the picture without
+    a focus would have them (the tree out from the main character, else the force layout), with
+    ``centre`` moved part of the way to the middle of that picture (see ``_KEPT_PULL``) and its
+    relations (``own``) drawn in close round it; the order places the focus, then its relations, then
+    the rest as that picture does. Placed round the focus (``_place_one_by_one``) the book keeps its
+    shape, and the focus sits inside it rather than at its edge, where the rings or a tree out from
+    a name at the edge of the book put it."""
+    hub = _tree_root(edges, None)
+    first = [centre] + sorted((other for other in own if other in start),
+                              key=lambda other: (-len(adjacency.get(other, ())), other))
+    if hub is not None:
+        tree = _tree_layout(sorted(start), adjacency, hub, boxes, lambda a, b: between.get((a, b)))
+        guide = {key: [point[0], point[1]] for key, point in tree.items() if key in start}
+        order = first + [key for key in guide if key not in first]
+    else:
+        plain = _plain_layout(graph, width, height, None, seed, spacing, {}, wedges=not capped)
+        guide = {key: [plain[key][0], plain[key][1]] for key in start}
+        _fan_out(guide, [(a, b) for a, b, _edge in edges], labels, names)
+        order = first
+    if centre not in guide:
+        return guide, order
+    # the focus part of the way to the middle (the view is centred on it), its relations moved in
+    # along their directions from it to no further than their lines and labels need
+    xs = [point[0] for point in guide.values()]
+    ys = [point[1] for point in guide.values()]
+    mx, my = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    gx, gy = guide[centre]
+    px, py = gx + (mx - gx) * _KEPT_PULL, gy + (my - gy) * _KEPT_PULL
+    guide[centre] = [px, py]
+    fw, fh = names[centre]
+    clear = 2.0 * LINE_CLEARANCE + _ROOM_GAP
+    for index, (a, b, _edge) in enumerate(edges):
+        if centre not in (a, b):
+            continue
+        other = b if a == centre else a
+        if other not in guide:
+            continue
+        ox, oy = guide[other]
+        dx, dy = ox - gx, oy - gy
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            dx, dy, length = 1.0, 0.0, 1.0
+        ux, uy = dx / length, dy / length
+        ow, oh = names[other]
+        lw, lh = labels.get(index, (0.0, 0.0))
+        short = (abs(ux) * (fw + ow) / 2.0 + abs(uy) * (fh + oh) / 2.0 + 2.0 * (abs(ux) * lw + abs(uy) * lh)
+                 + 2.0 * clear)
+        reach = min(math.hypot(ox - px, oy - py), short)
+        guide[other] = [px + ux * reach, py + uy * reach]
+    return guide, order
+
+
+def _round_a_loner(graph: Optional[Mapping[str, Any]], width: float, height: float, centre: str, seed: int,
+                   node_size: Callable[[Mapping[str, Any]], Any],
+                   label_size: Optional[Callable[[Mapping[str, Any]], Any]],
+                   nodes: Mapping[str, Mapping[str, Any]], edges: Sequence[Tuple[str, str, Any]],
+                   names: Mapping[str, Tuple[float, float]]) -> "Layout":
+    """A focus with no relations (gender tracked only): the picture without it, as without a focus,
+    and the focus at the free spot nearest the middle of that picture, clear of every name, label and
+    line: the centre of the diagram."""
+    rest = dict(graph or {})
+    rest["nodes"] = [node for key, node in nodes.items() if key != centre]
+    base = layout_graph(rest, width, height, None, seed, node_size, label_size)
+    keyed = [(index, a, b) for index, (a, b, _edge) in enumerate(edges)]
+    spots: Dict[int, float] = {}
+    sizes: Dict[int, Tuple[float, float]] = {}
+    for index, a, b in keyed:
+        t = layout_spot(base, a, b)
+        size = label_size(edges[index][2]) if label_size is not None and t is not None else None
+        if size:
+            spots[index] = t if (a, b) in base.label_spots else 1.0 - t
+            sizes[index] = tuple(size)
+    boxes = {key: names[key] for key in base}
+    boxes[centre] = names[centre]
+    cell = _room_cell(boxes, sizes)
+    placed = _Placed(cell, boxes, keyed, sizes, range(len(keyed)))
+    for key in sorted(base):
+        placed.place(key, base[key][0], base[key][1], ())
+    half = _ROOM_GAP / 2.0
+    for index, t in spots.items():
+        _key, a, b = keyed[index]
+        pa, pb = base[a], base[b]
+        x, y = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+        lw, lh = sizes[index]
+        placed._add_label(index, (x - lw / 2.0 - half, y - lh / 2.0 - half, x + lw / 2.0 + half, y + lh / 2.0 + half))
+    linked = {a for a, _b, _edge in edges} | {b for _a, b, _edge in edges}
+    middle = [base[key] for key in base if key in linked] or list(base.values())
+    mx = (min(p[0] for p in middle) + max(p[0] for p in middle)) / 2.0
+    my = (min(p[1] for p in middle) + max(p[1] for p in middle)) / 2.0
+    span = max(_span({key: base[key] for key in base}) + (1.0,))
+    spot = None
+    radius = 0.0
+    while spot is None and radius <= span:
+        count = 1 if radius == 0.0 else max(8, int(2.0 * math.pi * radius / (_PLACE_STEP / 2.0)))
+        tries = sorted(((radius * math.cos(2.0 * math.pi * k / count), radius * math.sin(2.0 * math.pi * k / count))
+                        for k in range(count)), key=lambda d: (abs(d[1]), d[0], d[1]))
+        for dx, dy in tries:
+            bad, moved = placed.check(centre, mx + dx, my + dy, False)
+            if not bad and not moved:
+                spot = (mx + dx, my + dy)
+                break
+        radius += _PLACE_STEP / 2.0
+    if spot is None:  # (nothing free inside the picture) under it
+        bottom = max(b[3] for b in placed.name_box.values())
+        spot = (mx, bottom + names[centre][1] + _ROOM_GAP + 2.0 * LINE_CLEARANCE)
+    result = Layout((key, (point[0], point[1])) for key, point in base.items())
+    result[centre] = spot
+    for attribute in ("label_spots", "labels_capped", "growth", "spread"):
+        setattr(result, attribute, getattr(base, attribute))
+    return result
 
 
 def _fan_out(positions: Dict[str, List[float]], pairs: Sequence[Tuple[str, str]],
