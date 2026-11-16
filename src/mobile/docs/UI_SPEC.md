@@ -881,6 +881,7 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
   - **Map glossaries**: Batch only; desktop "Map Glossaries to EPUBs".
   - **Review glossary**: opens the glossary editor in single-file mode.
 - A link "Change glossary mode" goes to Settings › Glossary › General.
+- **From a chat card** (the Plan card and the BatchPlanCard, owner 2026-11-16): on the phone app the sheet opens as a short preview, like the ＋ sheet (§2.5; the same `components.drag_sheet.preview_sheet`): the title and the whole "Glossary mode" tile show, the profile dropdown, prompt card, the actions and Done wait under a swipe up (full height), a swipe down closes it. The mode tile still opens the ModeSheet on top, and the "Close Menu" strip and Back close it. Without the extension (desktop `flet run`), and from the TranslateSheet, it is the ordinary sheet, only as tall as its rows.
 
 #### 2.12.2 Queued
 "Queued · starts after <title>" with **Cancel**.
@@ -1282,8 +1283,10 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 
 **Hero.**
 - Cover 120 × 180 (phone) / 240 × 340 (tablet); title (titleLarge, raw toggle); author.
+- 🏛️ publisher under the author, only when the book has one (an empty author line is hidden too).
 - Chips: 🌐 language · 📅 year · type.
 - The book's tags as wrapping chips under those chips, beside the cover (hidden when the book has none). There is no separate TAGS section.
+- "✏️ Edit" under them (the metadata editor below). There is no separate METADATA section (owner 2026-11-16): everything it listed is beside the cover, once, and a missing value shows nothing (no "—" rows). In the two-column landscape arrangement the hero, with Edit, stays in the left column.
 
 **Progress strip** (in-progress books only): "⏳  Translation in progress — {done}/{total} chapters ({pct}%)" in the #ffd166 / #6c63ff style. It is hidden when completed.
 
@@ -1296,9 +1299,8 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 
 **SYNOPSIS.** Expandable to 4 lines, with "No synopsis available." as fallback.
 
-**METADATA list.**
-- 📘 Title · ✍️ Author · 🏛️ Publisher · 🌐 Language · 📅 Year; missing values show "—".
-- "✏️ Edit" (enabled only when a workspace exists) opens `/library/book/<bid>/metadata`:
+**Metadata editor.**
+- The hero's "✏️ Edit" (enabled only when a workspace exists, "No output workspace yet" as its tooltip otherwise) opens `/library/book/<bid>/metadata`:
   - a full-screen form: Title, Author, Publisher, Language, Date, Tags (comma/newline), Synopsis;
   - note: "Changes are saved to the output workspace's metadata.json. The original EPUB is not modified.";
   - saved via `merge_manual_metadata_edits` + `save_metadata_json_atomic`.
@@ -1312,8 +1314,7 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 ### 3.7 Chapters tab (Progress Manager parity; `progress_core.build_book_progress`)
 
 **Header.**
-- An output-folder chip "📁 <folder name>" (tap → FileBrowser at `/tools/files/<oid>`) and the output-mode badge.
-- **Run translation** · **Run QA scan** (hotfix 1 #7). The Translate sheet runs with the model picked last (the one a new chat starts on), else the All-chats model. A Resume on the Jobs page of any translating job runs on the model the drawer shows; a chat's own Resume keeps that chat's model. The sheet is as tall as its content; its Model, Profile and language chips open the ModelSheet on that tab and change the All-chats value. Run QA scan queues the book's one-tap Quick Scan (the chat's scan, `qa_model.qa_spec` with `CHAT_QA_MODE`; the mobile duplicate-check sample size 0 unless one is saved) on its workspace and raw source; when it ends the rows reload, the Output tab is marked stale and a snackbar offers the report. Both buttons are disabled, with the reason as tooltip, while any translation or glossary run is active (one job at a time; also at its glossary gate) or one is queued for this book (`book_page.run_wait_reason`); Run QA scan also while this book's scan is queued or running. They follow the jobs events, so they turn back on as soon as the run ends.
+- **Run translation** · **Run QA scan** (hotfix 1 #7) in one row, sharing its width (no wrap on a 360-412 dp phone at normal text size): 12 dp side padding instead of M3's 16 / 24 dp for an icon button, and one-line labels that end in "…" rather than wrap when a wider system font or a larger text size does not fit. There is no folder chip and no mode badge here (owner 2026-11-16): the summary strip above the tabs names the book and its mode, and the folder opens from ⋯ › Files and Overview's 📁 icon. The Translate sheet runs with the model picked last (the one a new chat starts on), else the All-chats model. A Resume on the Jobs page of any translating job runs on the model the drawer shows; a chat's own Resume keeps that chat's model. The sheet is as tall as its content; its Model, Profile and language chips open the ModelSheet on that tab and change the All-chats value. Run QA scan queues the book's one-tap Quick Scan (the chat's scan, `qa_model.qa_spec` with `CHAT_QA_MODE`; the mobile duplicate-check sample size 0 unless one is saved) on its workspace and raw source; when it ends the rows reload, the Output tab is marked stale and a snackbar offers the report. Both buttons are disabled, with the reason as tooltip, while any translation or glossary run is active (one job at a time; also at its glossary gate) or one is queued for this book (`book_page.run_wait_reason`); Run QA scan also while this book's scan is queued or running. They follow the jobs events, so they turn back on as soon as the run ends.
 - When the Progress Manager logic creates a missing output folder, a snackbar shows "📁 Created: <folder>".
 - **Feedback** (hotfix 1 #9, desktop refresh-then-message): every action (mark Completed / Failed / In progress, Restore In Progress Status, Remove QA Failed / Pending / refinement marks, Delete, Retranslate, bulk selection actions) runs the tab's progress bar while it writes; then the rows, the stats chips and the strip refresh at once and the desktop result text follows ("Successfully marked 1 as failed.", "Removed failed mark from 1 chapters."; a sheet when long). A failed write or reload says why. "Queued…" appears only when the strip already shows another job of this book.
 
@@ -1333,12 +1334,11 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 - **Long-press** jumps to the next matching row and wraps around (desktop click behaviour).
   - Each chip is wrapped in `GestureDetector(on_long_press_start=…)`, because `Chip` has no long-press event.
   - The jump uses the procedure of §2.8 against the chapter list.
-- A labelSmall total above: "Total: N" or "Total: N (N-k chapters + k chunks)".
+- A labelSmall total above: "Total: N" or "Total: N (N-k chapters + k chunks)". Skipped rows (the special files, always listed) are not counted, as in the strip's progress bar.
 
 **Toolbar row**
 - "🔍 Search chapters…" (matches raw/translated title, filename, chunk text and QA issue strings).
-- Filter `IconButton` menu:
-  - "Show special files" (persisted `epub_details_show_special_files`, Book Details parity)
+- Filter `IconButton` menu (no "Show special files" on mobile, owner 2026-11-16: special files are always listed; a special file the run skips reads "⏭️ Special file (Skipped)", in the Skipped chip group; `epub_details_show_special_files` stays for the desktop and the Reader):
   - "Show model info" (persisted `retranslation_show_model_info`)
   - "Show raw titles" (persisted `epub_details_show_raw_titles`)
   - "Rows per page" 20 / 50 / 100 / 250 / 500 / All (persisted `epub_details_chapter_page_size`, desktop default 20). This is the append increment of the list.
@@ -1416,7 +1416,7 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 
 **Empty state.** "No chapters found yet" / "Start a translation to see chapter progress." and a **Translate…** button.
 
-**No workspace** (an "Add translation" EPUB, or an organized book whose workspace is gone): the tab lists the EPUB's own chapters from `load_book_details` (`BookDetailsModel.row_specs`, the desktop Book Details list). Header "📖 Chapters in this EPUB · N"; rows "Ch.NNN · title" / file name / desktop badge; tap opens the Reader at that chapter. Search, Show special files, Show raw titles and Rows per page apply; selection and the bulk bar are off. With no chapters either: "This book has no output workspace yet". The Progress Manager is never built for such a book, so no folder is created.
+**No workspace** (an "Add translation" EPUB, or an organized book whose workspace is gone): the tab lists the EPUB's own chapters from `load_book_details` (`BookDetailsModel.row_specs`, the desktop Book Details list). Header "📖 Chapters in this EPUB · N"; rows "Ch.NNN · title" / file name / desktop badge (special files included); tap opens the Reader at that chapter. Search, Show raw titles and Rows per page apply; selection and the bulk bar are off. With no chapters either: "This book has no output workspace yet". The Progress Manager is never built for such a book, so no folder is created.
 
 ### 3.8 Glossary tab (Glossary Progress parity; `glossary_progress_core`)
 
@@ -1439,6 +1439,8 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 - 🔗 Merged #17a2b8
 - 🔄 In Progress #f59e0b
 - ⬜ Not Completed #5a9fd4
+
+**Which files are chapters** (owner 2026-11-16). The rows follow the glossary extractor's own special-file decision, built from the user's settings (Translate special files, the special-file keyword / exact lists, "Never consider in-between files as special") through `progress_model.glossary_special_files` → `epub_special_files.glossary_special_file_settings_for_owner` → `glossary_progress_core.open_glossary_progress(special_files=…)`; never from the app process's environment, which the app does not set. So row *i* is the extractor's chapter *i* (protect-interior rule included) and its status lines up. Every file the extractor skips is listed at its spine position as "[NNN] Ch.000 · ⏭️ Special file (Skipped) · file" (status `skipped_special`, the Skipped chip group, counted by the Skipped chip, not by Total), while the extraction runs and after it; Mark as completed / Remove from progress are disabled on it (no progress entry). A Parallel EPUB pair keeps its mapped rows. With no glossary progress file yet the tab shows its empty state and, under it, the files the first extraction will skip, in the same form (`glossary_progress_core.glossary_special_preview_rows`, read from the EPUB; nothing is written). A change to any of those settings (`progress_model.GLOSSARY_SPECIAL_FILE_KEYS`, observed by the Book page) reloads the list, and every reload re-maps an open model whose settings differ (`glossary_special_files_changed` / `apply_glossary_special_files`), so the list never disagrees with the next extraction. The chat plan's chapter preview stays on the translation rule (it shows what a translation range sends; the in-between rule applies to glossary extraction only).
 
 **Row ⋯** (trailing `IconButton` → `ActionSheet`; the desktop per-row context menu):
 - 📝 Show footnote
@@ -2159,7 +2161,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `BatchPlanCard` (`chat/batch_plan.py`) | FileChip list with per-file glossary chips · Include subfolders · Start | same as PlanCard | `Card`, `Column`, `Switch` |
 | `JobCard` (`chat/cards.py`) | Plan → Queued → Running (ring, progress, line, current item, Requests, Log, issue chips, buttons) → Result (status, ExtractionReportSection, output chips, AttachmentActionsRow) | `PLAN` · `QUEUED` · `RUNNING` · `STOPPING` · `FORCE_STOPPING` · `DONE` · `STOPPED` · `FAILED` · `INTERRUPTED` | `Card`, `ProgressRing`, `ProgressBar`, `ExpansionTile`, `Chip`, `Row(wrap=True)` |
 | `RequestSheet` (`chat/cards.py`) | Full streaming content + thinking for one request | streaming · done | `BottomSheet(scrollable=True)`, `Markdown` |
-| `PlanGlossarySheet` (`chat/plan_glossary_sheet.py`) | Effective mode line · Load file… · Use book glossary · Clear ✕ · Map glossaries (batch) · Review glossary | none loaded · file loaded · auto-mapped · policy manual | `BottomSheet`, `ListTile`s, `FilePicker` |
+| `PlanGlossarySheet` (`chat/plan_glossary_sheet.py`) | Effective mode line · Load file… · Use book glossary · Clear ✕ · Map glossaries (batch) · Review glossary | none loaded · file loaded · auto-mapped · policy manual; from a chat card on the phone app a short preview on the mode tile (`drag_sheet.preview_sheet`) | `BottomSheet`, `ListTile`s, `FilePicker`, the extension's `DraggableSheet` |
 | `ManualGlossarySheet` (`chat/manual_glossary.py`) | Mono paste box · Browse… · Use glossary | empty (Use disabled) · filled | `BottomSheet`, `TextField(multiline=True)`, `FilePicker`, `FilledButton` |
 | `ChatSettingsSheet` (`chat/chat_settings.py`) | Scope SegmentedButton · sections (§2.14) · Reset chat overrides | This chat / All chats; each row inherited or overridden | `BottomSheet` or `SidePanel`; `SegmentedButton`, `ExpansionTile`, `RadioGroup`, `Switch`, `Slider` |
 | `JumpToSheet` (`chat/jump_to.py`) | Step header (Input i/n ▲▼ · Output j/m ▲▼) · tabs Inputs / Outputs · rows | — | `BottomSheet`, `Tabs` / `TabBar` / `TabBarView`, `ListView`, `IconButton` |

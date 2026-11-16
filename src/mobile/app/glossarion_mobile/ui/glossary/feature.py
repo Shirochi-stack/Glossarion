@@ -375,12 +375,13 @@ class GlossaryFeature:
     def open_plan_glossary_sheet(self, *, book: Optional[Mapping[str, Any]] = None, effective: str = "",
                                  on_changed: Optional[Callable[[], Any]] = None,
                                  inputs: Optional[Sequence[str]] = None, glossary_override_mode: str = "none",
-                                 chat_overrides: Optional[Mapping[str, Any]] = None) -> Any:
+                                 chat_overrides: Optional[Mapping[str, Any]] = None, preview: bool = False) -> Any:
         """PlanGlossarySheet for the chat Plan card / BatchPlanCard / the Library TranslateSheet glossary
         chip. ``inputs``: the run's input files; with more than one EPUB the sheet offers "Map
         glossaries…" (desktop ``load_glossary`` opens the mapping dialog for several EPUBs).
         ``glossary_override_mode`` / ``chat_overrides``: the chat's glossary policy and overrides (its own
-        glossary prompt profiles); the Library runs on the main settings."""
+        glossary prompt profiles); the Library runs on the main settings. ``preview`` (the chat cards): on the
+        phone app the sheet opens short on its title and Glossary mode tile, the rest under a swipe up."""
         from glossarion_mobile.state.chat_store_adapter import GLOSSARY_PROFILE_OVERRIDE_KEYS
         from glossarion_mobile.ui.chat.direct_text_rules import glossary_prompt_bucket
         from glossarion_mobile.ui.glossary.sheets import PlanGlossarySheet
@@ -442,7 +443,7 @@ class GlossaryFeature:
                                   on_settings=on_settings, prompt_bucket=bucket, chat_profile=chat_profile,
                                   on_profile_changed=done)
         self.sheets.append(sheet)
-        return sheet.show()
+        return sheet.show(preview=preview)
 
     def open_map_glossaries(self, epubs: Sequence[str], *, on_saved: Optional[Callable[[dict], Any]] = None) -> Any:
         """Map glossaries (desktop "Map Glossaries to EPUBs") for several EPUBs of one run."""

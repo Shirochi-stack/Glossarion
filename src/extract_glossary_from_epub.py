@@ -57,7 +57,7 @@ from glossary_refinement import (
 )
 from glossary_usage import compact_extracted_entries
 from epub_package import find_epub_opf_member, source_epub_content_fingerprint
-from epub_special_files import special_file_flags
+from epub_special_files import glossary_special_file_flags, glossary_special_file_settings
 from gender_tracking import (
     BINARY_GENDERS,
     collapse_tracked_gender_variants,
@@ -3894,52 +3894,15 @@ _GLOSSARY_EPUB_TEXT_CACHE_VERSION = 2
 
 
 def _glossary_epub_extraction_settings(*, include_special_files=False):
-    """Capture only settings applied while building glossary document records."""
-    keywords = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-    exact = os.getenv('SPECIAL_FILE_EXACT', '')
-    translate_special = include_special_files or os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-    return {
-        'parser': 'html.parser',
-        'translate_special_files': translate_special,
-        'protect_interior_special_files': not translate_special and os.getenv(
-            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1',
-        ) == '1',
-        'special_file_keywords': [] if translate_special else sorted(set(
-            [k.strip().lower() for k in keywords.split(',') if k.strip()]
-            if keywords else [
-                'title', 'toc', 'copyright', 'preface', 'nav',
-                'message', 'notice', 'colophon', 'dedication', 'epigraph',
-                'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography',
-            ]
-        )),
-        'special_file_exact': [] if translate_special else sorted(set(
-            [k.strip().lower() for k in exact.split(',') if k.strip()]
-            if exact else ['index', 'glossary', 'glossary_extension', 'glossary_unified']
-        )),
-    }
+    """Capture only settings applied while building glossary document records (from the environment;
+    ``epub_special_files.glossary_special_file_settings``, which a file list shares)."""
+    return glossary_special_file_settings(include_special_files=include_special_files)
 
 
 def _glossary_epub_special_file_flags(filenames, signature):
-    """Use the same reading-order exclusions for extraction and numbering."""
-    def is_special(filename):
-        if signature['translate_special_files']:
-            return False
-        name = os.path.splitext(os.path.basename(filename or ''))[0].lower()
-        if not name:
-            return False
-        if name in signature['special_file_exact']:
-            return True
-        keywords = signature['special_file_keywords']
-        if not any(keyword in name for keyword in keywords):
-            return False
-        # Preserve the configured matching rules for numbered variants.
-        stripped = re.sub(r'\d+$', '', name).rstrip('_- ')
-        return not re.search(r'\d', name) or any(keyword in stripped for keyword in keywords)
-
-    return special_file_flags(
-        filenames, is_special,
-        protect_interior=signature['protect_interior_special_files'],
-    )
+    """Use the same reading-order exclusions for extraction and numbering
+    (``epub_special_files.glossary_special_file_flags``)."""
+    return glossary_special_file_flags(filenames, signature)
 
 
 def _glossary_epub_documents_digest(documents):

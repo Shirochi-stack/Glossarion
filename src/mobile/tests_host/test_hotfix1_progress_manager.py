@@ -344,7 +344,7 @@ def test_run_qa_scan_queues_the_books_quick_scan_once_and_offers_the_report(real
         header = next(c for c in chapters.root.controls[0].content.controls if hasattr(c, "controls"))
         keys = [getattr(c, "key", None) for c in header.controls]
         assert keys.index("ch-qa") == keys.index("ch-run") + 1  # next to Run translation
-        assert chapters.qa_button.content == "Run QA scan" and not chapters.qa_button.disabled
+        assert chapters.qa_button.content.value == "Run QA scan" and not chapters.qa_button.disabled
         # a double tap queues one scan
         first, second = await asyncio.gather(chapters.run_qa_scan(), chapters.run_qa_scan())
         assert first == "job1" and second is None and len(jobs.submitted) == 1

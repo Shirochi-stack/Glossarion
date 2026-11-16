@@ -6089,6 +6089,8 @@ _PROGRESS_OWNER_VARS = (
     'special_file_keywords_var',
     'special_file_exact_var',
     'translate_all_numbered_html_var',
+    # the glossary extractor's protect-interior rule (epub_special_files.glossary_special_file_env)
+    'never_consider_in_between_files_as_special_var',
 )
 
 

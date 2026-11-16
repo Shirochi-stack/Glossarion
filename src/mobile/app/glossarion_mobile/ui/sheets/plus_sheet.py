@@ -249,17 +249,13 @@ class PlusSheet:
 
     def _use_draggable(self, page: Any) -> None:
         """On the phone app: open on the tiles alone, the rest under a swipe up (hotfix 5)."""
-        from glossarion_mobile.ui.components.drag_sheet import draggable_sheet_class, height_fraction
+        from glossarion_mobile.ui.components.drag_sheet import preview_sheet
 
-        sheet_cls = draggable_sheet_class(page)
-        self.native = sheet_cls is not None
-        if sheet_cls is None:
-            return
-        initial = height_fraction(page, self.tiles_height(), low=0.12, high=0.5)
-        bottom = ft.SafeArea(content=ft.Container(height=16), avoid_intrusions_top=False, key="plus-bottom")
-        self.dialog.content = sheet_cls(controls=[*self.sections, bottom], header=self.tiles_row,
-                                        initial_size=initial, min_size=round(initial / 2, 3), max_size=1.0,
-                                        key="plus-sheet")
+        body = preview_sheet(page, header=self.tiles_row, controls=list(self.sections),
+                             header_height=self.tiles_height(), key="plus-sheet", bottom_key="plus-bottom")
+        self.native = body is not None
+        if body is not None:
+            self.dialog.content = body
 
     def show(self, page: Any) -> None:
         self._page = page
