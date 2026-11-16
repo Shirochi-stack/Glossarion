@@ -41,6 +41,7 @@ from typing import Any, List, Optional
 
 from chapter_display_numbering import nonreset_chapter_display_numbers
 from epub_package import find_epub_opf_member
+from epub_special_files import glossary_special_file_flags
 from glossary_usage import (
     CHECK_PREFIX,
     WARNING_PREFIX,
@@ -734,6 +735,7 @@ def make_glossary_progress_model(
     glossary_refinement_expected_entries=None,
     refinement_type_key=None,
     current_gp_data=None,
+    special_files=None,
 ):
     """The Glossary Progress panel's data model for one source EPUB.
 
@@ -741,6 +743,13 @@ def make_glossary_progress_model(
     current progress dict (desktop: the panel's ``gp_data``, which its refresh
     rebinds); the moved closures fall back to it where they used ``gp_data``.
     Returns a namespace of the moved closures plus ``gp_data`` and ``panel_state``.
+
+    ``special_files`` (mobile; None keeps the desktop panel's rows): the glossary
+    extractor's special-file settings (``epub_special_files.glossary_special_file_settings``,
+    built from the user's settings).  The chapter rows then follow the extractor's own
+    decision, protect-interior rule included, so row ``i`` is the extractor's chapter ``i``;
+    the files it skips go to ``panel_state['special_rows']`` as ``(spine position, file)``
+    and ``glossary_rows`` lists them at their spine position as skipped special files.
     """
     _find_gp_for_file = find_gp_for_file
     _glossary_refinement_expected_entries = glossary_refinement_expected_entries
@@ -808,7 +817,8 @@ def make_glossary_progress_model(
         except (TypeError, ValueError):
             return default
 
-    gp_data = _gp_load_progress_dict(gp_path)
+    # '' (no file): the mobile list before any glossary progress file exists (``glossary_special_preview_rows``)
+    gp_data = _gp_load_progress_dict(gp_path) if gp_path else {}
 
     def _current_gp_data():
         if callable(current_gp_data):
@@ -2598,6 +2608,44 @@ def make_glossary_progress_model(
                 _write_glossary_progress_atomic(_rp, _d)
         return changed, _d, remove_minimal_pass
 
+    def _gp_special_display_for(opf_pos, fname):
+        """A skipped special file's row text, in the chapter rows' layout."""
+        ch_num = _gp_source_chapter_num(None, fname)
+        return (
+            f"[{opf_pos:03d}] Ch.{ch_num:03d} | {GLOSSARY_STATUS_ICONS['skipped_special']} "
+            f"{GLOSSARY_SPECIAL_SKIPPED_LABEL:14s} | {fname}"
+        )
+
+    def _gp_apply_special_files(settings):
+        """Mobile: re-map the chapter rows with the extractor's special-file flags (see the docstring)."""
+        full_map, _full_total, full_spine = _read_spine_map(fp, True)
+        if not full_map:
+            return False
+        order = sorted(full_map)
+        names = [full_map[index] for index in order]
+        flags = glossary_special_file_flags(names, settings)
+        cmap, spine_map, special_rows = {}, {}, []
+        for index, name, special in zip(order, names, flags):
+            position = full_spine.get(index, index + 1)
+            if special:
+                special_rows.append((position, name))
+                continue
+            ci = len(cmap)
+            cmap[ci] = name
+            spine_map[ci] = position
+        panel_state['chapter_map'] = cmap
+        panel_state['spine_index_map'] = spine_map
+        panel_state['total'] = len(cmap)
+        panel_state['translate_special'] = bool(settings.get('translate_special_files'))
+        panel_state['special_rows'] = special_rows
+        panel_state['special_file_settings'] = dict(settings)
+        _rebuild_reverse_lookups()
+        return True
+
+    # A Parallel EPUB pair's rows are the mapped raw chapters (their own source list): left as they are.
+    if special_files is not None and not glossary_progress_source_filenames:
+        _gp_apply_special_files(special_files)
+
     _namespace = dict(locals())
     _namespace.pop('self', None)
     return types.SimpleNamespace(**_namespace)
@@ -2631,10 +2679,12 @@ def glossary_refinement_expected(owner, glossary_entries, source_path=None):
 
 
 def open_glossary_progress(owner, source_path, gp_path=None, *, output_dir=None, prog=None,
-                           source_override=None, source_filenames=None):
+                           source_override=None, source_filenames=None, special_files=None):
     """Load the Glossary Progress model of a source (None when no progress file exists).
 
     ``source_filenames`` restricts and orders the chapter rows (Parallel EPUB Pair).
+    ``special_files``: the extractor's special-file settings the rows follow (mobile;
+    ``make_glossary_progress_model``); None keeps the desktop panel's rows.
     """
     locator = glossary_progress_locator(owner, source_path, source_override)
     if gp_path is None:
@@ -2652,7 +2702,31 @@ def open_glossary_progress(owner, source_path, gp_path=None, *, output_dir=None,
         find_gp_for_file=locator._find_gp_for_file,
         glossary_refinement_expected_entries=locator._glossary_refinement_expected_entries,
         refinement_type_key=locator._refinement_type_key,
+        special_files=special_files,
     )
+
+
+def glossary_special_preview_rows(owner, source_path, special_files):
+    """Mobile, before any glossary progress file exists: the rows of the files glossary extraction will skip as
+    special for ``special_files`` (the extractor's settings), at their spine position with the
+    ``skipped_special`` mark, exactly as ``glossary_rows`` lists them once a progress file exists.  Reads the
+    EPUB only; writes nothing.  ``[]`` for a source that is not an EPUB."""
+    if not special_files or not str(source_path or '').lower().endswith('.epub'):
+        return []
+    model = make_glossary_progress_model(owner, source_path, '', special_files=special_files)
+    return [row for row in glossary_rows(model, {}) if row.kind == 'special']
+
+
+def glossary_special_files_changed(model, special_files):
+    """Whether ``model`` (opened with ``special_files`` settings) was built with other settings, e.g. after the
+    user changed Translate special files or the keyword lists."""
+    state = getattr(model, 'panel_state', None) or {}
+    return 'special_file_settings' in state and state.get('special_file_settings') != special_files
+
+
+def apply_glossary_special_files(model, special_files):
+    """Re-map ``model``'s rows with new special-file settings (mobile; see ``make_glossary_progress_model``)."""
+    return model._gp_apply_special_files(special_files)
 
 
 def reload_glossary_progress(model):
@@ -2706,6 +2780,7 @@ GLOSSARY_STATUS_ICONS = {
     'skipped_empty': '📄',
     'skipped_image_only': '📸',
     'skipped_title_header_only': '🏷️',
+    'skipped_special': '⏭️',
     'failed': '❌',
     'qa_failed': '❌',
     'refine_failed': '💀',
@@ -2715,10 +2790,13 @@ GLOSSARY_STATUS_ICONS = {
     'not_refined': '✨',
     'not_completed': '⬜',
 }
-#: Legend groups of the Glossary tab chips (RG _gp_make_cycle targets 26296-26311).
+#: The status label of a file glossary extraction skips as special (``special_files`` rows; mobile).
+GLOSSARY_SPECIAL_SKIPPED_LABEL = 'Special file (Skipped)'
+#: Legend groups of the Glossary tab chips (RG _gp_make_cycle targets 26296-26311); ``skipped_special``
+#: is the mobile list's special-file row.
 GLOSSARY_STATUS_GROUPS = {
     'completed': ('completed',),
-    'skipped': ('skipped', 'skipped_empty', 'skipped_image_only', 'skipped_title_header_only'),
+    'skipped': ('skipped', 'skipped_empty', 'skipped_image_only', 'skipped_title_header_only', 'skipped_special'),
     'in_progress': ('in_progress', 'partially_in_progress'),
     'failed': ('failed', 'qa_failed'),
     'merged': ('merged',),
@@ -2754,12 +2832,25 @@ def glossary_rows(model, data=None):
                                 GLOSSARY_STATUS_ICONS.get(status, '⬜')))
     cache = model._gp_status_cache(data)
     chapter_map = model.panel_state.get('chapter_map') or {}
+    spine_index_map = model.panel_state.get('spine_index_map') or {}
+    # ``special_files`` models (mobile): the files extraction skips, each at its spine position
+    special = list(model.panel_state.get('special_rows') or ())
+
+    def add_special(before=None):
+        while special and (before is None or special[0][0] < before):
+            position, fname = special.pop(0)
+            status = 'skipped_special'
+            rows.append(GlossaryRow('special', position, model._gp_special_display_for(position, fname), status,
+                                    model._gp_color_for('skipped'), GLOSSARY_STATUS_ICONS[status], None, fname))
+
     for ci in range(model.panel_state.get('total', 0)):
         fname = chapter_map.get(ci, f'chapter {ci + 1}')
+        add_special(spine_index_map.get(ci, ci + 1))
         display, status = model._gp_display_for(ci, fname, data, cache)
         _status, issues = model._gp_status_for(ci, data, cache)
         rows.append(GlossaryRow('chapter', ci, display, status, model._gp_color_for(status),
                                 GLOSSARY_STATUS_ICONS.get(status, '⬜'), ci, fname, list(issues or [])))
+    add_special()
     for key, display, status in model._gp_refinement_rows(data):
         rows.append(GlossaryRow('refinement', key, display, status, model._gp_color_for(status),
                                 GLOSSARY_STATUS_ICONS.get(status, '⬜')))
@@ -2780,6 +2871,8 @@ def _target_specs(targets):
                 specs.append(('chapter', target.chapter_index))
             elif target.kind == 'refinement':
                 specs.append(('refinement', target.key))
+            elif target.kind == 'special':
+                continue  # a skipped special file has no progress record (``special_files`` rows)
             else:
                 specs.append(('minimal_pass', target.key))
         else:
@@ -3227,6 +3320,7 @@ def run_manual_glossary_refinement(
 
 
 __all__ = [
+    'GLOSSARY_SPECIAL_SKIPPED_LABEL',
     'GLOSSARY_STATUS_GROUPS',
     'GLOSSARY_STATUS_ICONS',
     'GlossaryIndex',

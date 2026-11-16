@@ -513,7 +513,8 @@ def test_owner_issue7_progress_manager_run_buttons(isolated, monkeypatch):
             await driver.wait(key="ch-run", timeout=10)
             await driver.wait(key="ch-qa", timeout=10)
             assert run.on_screen(chapters.run_button) and run.on_screen(chapters.qa_button)
-            assert chapters.run_button.content == "Run translation" and chapters.qa_button.content == "Run QA scan"
+            assert (chapters.run_button.content.value == "Run translation"
+                    and chapters.qa_button.content.value == "Run QA scan")
             header = chapters.run_button.parent
             assert header is chapters.qa_button.parent
             order = list(header.controls)

@@ -358,10 +358,11 @@ class PlanGlossarySheet:
                                        on_click=lambda e: self._run(on_settings), key="pg-settings"))
         self.title = "Glossary" + (f" · {book.get('name')}" if book else "")
         self.tiles = tiles
-        self.dialog = sheet(self.title, tiles, actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())],
-                            key="pg-sheet")
+        self.done_button = ft.TextButton(content="Done", on_click=lambda e: self.host.close(), key="pg-done")
+        self.dialog = sheet(self.title, tiles, actions=[self.done_button], key="pg-sheet")
         # SafeArea > Container > the measured box (components.sheet.fitted_box) > its scrolling Column
         self.body = self.dialog.content.content.content.content
+        self.native = False  # opened as the chat card's short preview (``show(preview=True)`` on the phone app)
 
     # ---- glossary prompt profile -------------------------------------------------------------------
 
@@ -472,10 +473,40 @@ class PlanGlossarySheet:
                 total += 44.0
         return total + 10.0 * (len(self.tiles) + 1)  # the column spacing
 
-    def show(self, page: Any = None) -> "PlanGlossarySheet":
+    def preview_height(self) -> float:
+        """The short preview's height (dp): the title, the "Glossary mode" tile (its subtitle line too) and a hint of
+        the row under it."""
+        return 40.0 + 10.0 + 64.0 + (28.0 if self.mode_tile.subtitle is not None else 0.0) + 20.0
+
+    def _use_preview(self, page: Any) -> bool:
+        """The chat card's sheet on the phone app (owner 2026-11-16): the ＋ sheet's layout
+        (``drag_sheet.preview_sheet``): it opens on the title and the Glossary mode tile, the rest under a swipe
+        up. False without the extension (the ordinary sheet stays)."""
+        from glossarion_mobile.ui.components.drag_sheet import preview_sheet
+
+        header = ft.Container(
+            content=ft.Column([ft.Text(self.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600),
+                               self.mode_tile], spacing=10, tight=True),
+            padding=ft.Padding.only(left=16, right=16, bottom=4), key="pg-preview-header")
+        rest = [tile for tile in self.tiles if tile is not self.mode_tile]
+        rows = ft.Container(
+            content=ft.Column([*rest, ft.Row([self.done_button], alignment=ft.MainAxisAlignment.END)], spacing=10,
+                              tight=True),
+            padding=ft.Padding.only(left=16, right=16), key="pg-preview-rows")
+        body = preview_sheet(page, header=header, controls=[rows], header_height=self.preview_height(),
+                             key="pg-preview")
+        if body is None:
+            return False
+        self.dialog.content = body
+        return True
+
+    def show(self, page: Any = None, *, preview: bool = False) -> "PlanGlossarySheet":
+        """``preview``: the chat card's opener - a short sheet the user slides up (phone app only)."""
         page = page if page is not None else getattr(self.ctx, "page", None)
-        # Owner: a scrolling body takes the whole screen height (empty space under Done); the rows fit
-        # most phones, so the body scrolls only when they would not (a small phone, the batch rows).
-        self.body.scroll = None if fits_compact(page, self.estimated_height()) else ft.ScrollMode.AUTO
+        self.native = bool(preview) and self._use_preview(page)
+        if not self.native:
+            # Owner: a scrolling body takes the whole screen height (empty space under Done); the rows fit
+            # most phones, so the body scrolls only when they would not (a small phone, the batch rows).
+            self.body.scroll = None if fits_compact(page, self.estimated_height()) else ft.ScrollMode.AUTO
         self.host.open(self.dialog)
         return self
