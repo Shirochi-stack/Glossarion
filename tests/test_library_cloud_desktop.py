@@ -21,7 +21,7 @@ for entry in (str(SRC), str(HERE)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-from PySide6.QtCore import QEventLoop, QPoint  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QPoint  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog, QMenu  # noqa: E402
 
 import drive_sync_core as dsc  # noqa: E402
@@ -60,6 +60,23 @@ def isolated(tmp_path, monkeypatch):
     if current is not None:
         current.shutdown()
     lc.uninstall_compile_hook()
+
+
+@pytest.fixture(autouse=True)
+def delete_widgets_after_test(qapp):
+    """The app opens these dialogs with WA_DeleteOnClose; the tests build them directly, so a closed
+    dialog (and its combo popups and menus) lived to the end of the session and was destroyed after
+    the QApplication. On Linux CI that crashed the interpreter at exit, after every test had passed."""
+    before = list(qapp.topLevelWidgets())
+    yield
+    for widget in qapp.topLevelWidgets():
+        if any(widget is known for known in before):
+            continue
+        widget.close()
+        widget.deleteLater()
+    for _ in range(3):
+        qapp.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 @pytest.fixture
