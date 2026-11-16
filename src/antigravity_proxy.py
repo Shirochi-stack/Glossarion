@@ -113,7 +113,7 @@ PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-09-13-serialized-account-storage-v2"
+RUNTIME_PATCH_VERSION = "2026-11-16-no-proxy-request-timeout-v1"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 # Oldest app version Google still lists Gemini 4 Argon for (2026-10-21). The proxy floors
@@ -1274,6 +1274,72 @@ def _patch_runtime_verbose_access_denied(runtime_dir: str) -> bool:
     )
 
 
+_NO_PROXY_TIMEOUT_MARKER = "Glossarion: no proxy-side request timeout"
+_PROXY_TIMEOUT_TIMER_RE = re.compile(
+    r"(?P<indent>[ \t]*)const timeoutKey = Object\.keys\(config\.models\.timeouts[^\n]*\n"
+    r"[ \t]*const timeoutMs = [^\n]*\n"
+    r"[ \t]*const controller = new AbortController\(\);\n"
+    r"[ \t]*const timeoutId = setTimeout\(\(\) => controller\.abort\(\), timeoutMs\);\n"
+)
+_PROXY_TIMEOUT_CATCH_RE = re.compile(
+    r"(?P<indent>[ \t]*)if \(e\.name === 'AbortError'\) \{\n"
+    r"[ \t]*console\.error\(`\[Timeout\] Request timed out for \$\{account\.email\} after \$\{timeoutMs\}ms`\);\n"
+)
+
+
+def _patch_runtime_no_request_timeout(runtime_dir: str) -> bool:
+    """Remove the proxy's own upstream timer (config models.timeouts).
+
+    Glossarion's timeout settings decide when a slow request ends: Glossarion
+    closes its connection to the proxy, which now aborts the upstream request
+    instead of the proxy cutting it off after models.timeouts (30 s default).
+    """
+    server_path = os.path.join(runtime_dir, "src", "server.ts")
+    if not os.path.exists(server_path):
+        return False
+
+    with open(server_path, "r", encoding="utf-8") as f:
+        server = f.read()
+
+    def _timer_replacement(match: "re.Match[str]") -> str:
+        indent = match.group("indent")
+        return (
+            f"{indent}// {_NO_PROXY_TIMEOUT_MARKER} (models.timeouts is ignored). Glossarion's\n"
+            f"{indent}// own timeout settings end a slow request by closing the connection, which aborts it here.\n"
+            f"{indent}const controller = new AbortController();\n"
+            f"{indent}req.signal?.addEventListener(\"abort\", () => controller.abort(), {{ once: true }});\n"
+            f"{indent}if (req.signal?.aborted) controller.abort();\n"
+            f"{indent}const timeoutId: ReturnType<typeof setTimeout> | undefined = undefined;\n"
+        )
+
+    def _catch_replacement(match: "re.Match[str]") -> str:
+        indent = match.group("indent")
+        return (
+            f"{indent}if (req.signal?.aborted) {{\n"
+            f"{indent}    console.log(`[Cancel] Client closed the request for ${{account.email}}; not retrying.`);\n"
+            f"{indent}    return new Response(null, {{ status: 499 }});\n"
+            f"{indent}}}\n"
+            f"{indent}if (e.name === 'AbortError') {{\n"
+            f"{indent}    console.error(`[Abort] Upstream request aborted for ${{account.email}}`);\n"
+        )
+
+    if _NO_PROXY_TIMEOUT_MARKER not in server:
+        server = _PROXY_TIMEOUT_TIMER_RE.sub(_timer_replacement, server, count=1)
+    if "[Cancel] Client closed the request" not in server:
+        server = _PROXY_TIMEOUT_CATCH_RE.sub(_catch_replacement, server, count=1)
+
+    with open(server_path, "w", encoding="utf-8") as f:
+        f.write(server)
+
+    return (
+        _NO_PROXY_TIMEOUT_MARKER in server
+        and "[Cancel] Client closed the request" in server
+        and "controller.abort(), timeoutMs" not in server
+        and "config.models.timeouts" not in server
+        and "${timeoutMs}" not in server
+    )
+
+
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
     return os.path.exists(os.path.join(runtime_dir, "src", "server.ts")) and os.path.exists(
         os.path.join(runtime_dir, "package.json")
@@ -1473,6 +1539,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive could not enable automatic account rotation")
         if not _patch_runtime_verbose_access_denied(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for verbose access-denied errors")
+        if not _patch_runtime_no_request_timeout(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched to drop its own request timeout")
         _write_runtime_metadata(archive_root, release, client_version)
 
         _copy_runtime_tree(archive_root, runtime_dir)
@@ -1597,6 +1665,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_auto_rotation_support(runtime_dir):
             return False
         if not _patch_runtime_verbose_access_denied(runtime_dir):
+            return False
+        if not _patch_runtime_no_request_timeout(runtime_dir):
             return False
         cached_metadata.update({
             "client_version": client_version,
@@ -3192,13 +3262,110 @@ def _stream_chat_with_httpx(
     }
     connect_timeout = min(30.0, float(timeout)) if timeout else 30.0
     timeout_config = httpx.Timeout(timeout, connect=connect_timeout)
-    return httpx.stream(
-        "POST",
-        url,
-        json=payload,
-        headers=stream_headers,
-        timeout=timeout_config,
-    )
+    return _CancellableHttpxStream(url, payload, stream_headers, timeout_config, cancel_generation)
+
+
+class _PendingHttpxRequest:
+    """Let Stop close an httpx request that is still waiting for response headers.
+
+    The proxy has no timer of its own, so a slow model may not answer for minutes;
+    closing the socket ends the wait here and makes the proxy abort the upstream call.
+    """
+
+    def __init__(self, client: Any):
+        self._client = client
+
+    def _transports(self) -> list:
+        # The default transport plus any proxy mounts (HTTP_PROXY, the Windows
+        # registry or macOS system proxy): a request may be pending in either.
+        transports = []
+        try:
+            transports.append(self._client._transport)
+        except Exception:
+            pass
+        try:
+            transports.extend(self._client._mounts.values())
+        except Exception:
+            pass
+        return [t for t in transports if t is not None]
+
+    @staticmethod
+    def _connection_socket(connection: Any):
+        # Direct: HTTPConnection._connection._network_stream. Proxied connections
+        # nest one more _connection level (Forward/Tunnel/Socks -> HTTPConnection).
+        current = connection
+        for _ in range(4):
+            stream = getattr(current, "_network_stream", None)
+            if stream is not None:
+                try:
+                    return stream.get_extra_info("socket")
+                except Exception:
+                    return None
+            current = getattr(current, "_connection", None)
+            if current is None:
+                return None
+        return None
+
+    def close(self) -> None:
+        import socket as _socket
+        connections = []
+        for transport in self._transports():
+            try:
+                connections.extend(list(transport._pool.connections))
+            except Exception:
+                pass
+        for connection in connections:
+            sock = self._connection_socket(connection)
+            if sock is not None:
+                try:
+                    sock.shutdown(_socket.SHUT_RDWR)
+                except Exception:
+                    pass
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
+
+class _CancellableHttpxStream:
+    """httpx.stream() equivalent whose request stays closable by cancel_stream()."""
+
+    def __init__(self, url, payload, headers, timeout_config, cancel_generation=None):
+        self._args = (url, payload, headers, timeout_config)
+        self._cancel_generation = cancel_generation
+        self._client = None
+        self._pending = None
+        self._stream = None
+
+    def __enter__(self):
+        url, payload, headers, timeout_config = self._args
+        self._client = httpx.Client(timeout=timeout_config)
+        self._pending = _PendingHttpxRequest(self._client)
+        _register_active_response(self._pending)
+        try:
+            # Stop may have arrived before the request became closable.
+            _raise_if_cancelled(self._cancel_generation)
+            self._stream = self._client.stream("POST", url, json=payload, headers=headers)
+            return self._stream.__enter__()
+        except BaseException:
+            self._cleanup()
+            raise
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if self._stream is not None:
+                return self._stream.__exit__(exc_type, exc, tb)
+            return False
+        finally:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        _unregister_active_response(self._pending)
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
 
 
 def _raise_connection_refused() -> None:
@@ -3767,6 +3934,12 @@ def send_message_stream(
     except ImportError:
         _log("Antigravity: httpx is not installed, falling back to requests streaming.")
     except Exception as exc:
+        # Stop closes a request still waiting for headers; report that as a cancel.
+        if (
+            not isinstance(exc, RuntimeError)
+            and is_cancel_generation_cancelled(request_cancel_generation)
+        ):
+            raise RuntimeError("Antigravity: stream cancelled by user") from exc
         if httpx is not None and isinstance(exc, httpx.ConnectError):
             _raise_connection_refused()
         if httpx is not None and isinstance(exc, httpx.TimeoutException):

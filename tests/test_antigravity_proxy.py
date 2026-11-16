@@ -1171,27 +1171,46 @@ def test_stream_chat_with_httpx_disables_compression(monkeypatch):
             self.timeout = timeout
             self.connect = connect
 
+    class FakeStream:
+        def __enter__(self):
+            return "response"
+
+        def __exit__(self, *exc):
+            return False
+
+    class FakeClient:
+        def __init__(self, owner, timeout):
+            self.owner = owner
+            owner.call = {"timeout": timeout}
+
+        def stream(self, method, url, **kwargs):
+            self.owner.call.update({"method": method, "url": url, **kwargs})
+            return FakeStream()
+
+        def close(self):
+            self.owner.closed = True
+
     class FakeHttpx:
         Timeout = FakeTimeout
 
         def __init__(self):
             self.call = None
+            self.closed = False
 
-        def stream(self, method, url, **kwargs):
-            self.call = {"method": method, "url": url, **kwargs}
-            return object()
+        def Client(self, timeout=None):
+            return FakeClient(self, timeout)
 
     fake_httpx = FakeHttpx()
     monkeypatch.setattr(antigravity_proxy, "httpx", fake_httpx)
 
-    result = antigravity_proxy._stream_chat_with_httpx(
+    with antigravity_proxy._stream_chat_with_httpx(
         "http://localhost:3000/v1/chat/completions",
         {"stream": True},
         {"Content-Type": "application/json"},
         300,
-    )
-
-    assert result is not None
+    ) as result:
+        assert result == "response"
+    assert fake_httpx.closed
     assert fake_httpx.call["method"] == "POST"
     assert fake_httpx.call["headers"]["Accept"] == "text/event-stream"
     assert fake_httpx.call["headers"]["Accept-Encoding"] == "identity"
@@ -1961,6 +1980,279 @@ def test_patch_runtime_verbose_access_denied_preserves_upstream_details(tmp_path
     assert "combinedErrorText" in errors
     assert "detailText" in errors
     assert "status, message" in errors
+
+
+_FORK_TIMER_SNIPPET = (
+    "          console.log(`[Request] Model: ${openaiBody.model}`);\n"
+    "\n"
+    "          const timeoutKey = Object.keys(config.models.timeouts || {}).find(k => openaiBody.model.toLowerCase().includes(k)) || 'default';\n"
+    "          const timeoutMs = (config.models.timeouts && config.models.timeouts[timeoutKey]) || 30000;\n"
+    "          const controller = new AbortController();\n"
+    "          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);\n"
+    "\n"
+    "          try {\n"
+    "            let googleRes = await fetch(GOOGLE_URL, { method: \"POST\", signal: controller.signal });\n"
+    "            clearTimeout(timeoutId);\n"
+    "            } catch (e: any) {\n"
+    "             if (e.name === 'AbortError') {\n"
+    "                 console.error(`[Timeout] Request timed out for ${account.email} after ${timeoutMs}ms`);\n"
+    "                 account.healthScore = Math.max(config.scoring.healthRange.min, account.healthScore - 5);\n"
+    "             } else {\n"
+    "                 console.error(`Proxy error for ${account.email}:`, e);\n"
+    "             }\n"
+    "             if (attempts < MAX_ATTEMPTS) continue;\n"
+)
+
+
+def test_patch_runtime_no_request_timeout_removes_proxy_timer(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    server_file.parent.mkdir(parents=True)
+    server_file.write_text(_FORK_TIMER_SNIPPET, encoding="utf-8")
+
+    assert antigravity_proxy._patch_runtime_no_request_timeout(str(tmp_path))
+    once = server_file.read_text(encoding="utf-8")
+    # Already applied: still True and unchanged.
+    assert antigravity_proxy._patch_runtime_no_request_timeout(str(tmp_path))
+    server = server_file.read_text(encoding="utf-8")
+
+    assert server == once
+    assert "config.models.timeouts" not in server
+    assert "setTimeout(() => controller.abort()" not in server
+    assert "30000" not in server
+    # Glossarion closing its connection (its timeout or Stop) aborts the upstream call...
+    assert 'req.signal?.addEventListener("abort", () => controller.abort(), { once: true });' in server
+    assert "if (req.signal?.aborted) controller.abort();" in server
+    # ...and is not retried with another account or counted against the account.
+    cancel_at = server.index("if (req.signal?.aborted) {")
+    assert cancel_at < server.index("if (e.name === 'AbortError')")
+    assert "return new Response(null, { status: 499 });" in server
+    assert "${timeoutMs}" not in server
+    assert "clearTimeout(timeoutId);" in server
+    assert "const timeoutId: ReturnType<typeof setTimeout> | undefined = undefined;" in server
+
+
+def test_patch_runtime_no_request_timeout_fails_on_unknown_layout(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    server_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        "const controller = new AbortController();\n"
+        "const timeoutId = setTimeout(() => controller.abort(), 30000);\n",
+        encoding="utf-8",
+    )
+
+    assert not antigravity_proxy._patch_runtime_no_request_timeout(str(tmp_path))
+    assert not antigravity_proxy._patch_runtime_no_request_timeout(str(tmp_path / "missing"))
+
+
+def _run_every_runtime_patch(runtime_dir):
+    results = {}
+    antigravity_proxy._patch_runtime_package_json(runtime_dir, "0.0.0-test")
+    results["_patch_runtime_antigravity_client_version"] = (
+        antigravity_proxy._patch_runtime_antigravity_client_version(runtime_dir, "2.24.0")
+    )
+    for name in sorted(dir(antigravity_proxy)):
+        if not name.startswith("_patch_runtime_") or name in results:
+            continue
+        if name in ("_patch_runtime_package_json", "_patch_runtime_antigravity_client_version"):
+            continue
+        results[name] = getattr(antigravity_proxy, name)(runtime_dir)
+    return results
+
+
+_FORK_CHECKOUT = os.environ.get(
+    "ANTIGRAVITY_PROXY_FORK_DIR", r"C:\Users\ADMIN\Projects\Antigravity Proxy"
+)
+
+
+@pytest.mark.skipif(
+    not os.path.exists(os.path.join(_FORK_CHECKOUT, "src", "server.ts")),
+    reason="local Antigravity Proxy fork checkout not available",
+)
+def test_every_runtime_patch_applies_to_current_fork_tree(tmp_path):
+    import shutil
+
+    runtime = tmp_path / "runtime"
+    shutil.copytree(
+        _FORK_CHECKOUT,
+        runtime,
+        ignore=shutil.ignore_patterns(".git", "node_modules", "config.json", "*accounts*.json"),
+    )
+
+    first = _run_every_runtime_patch(str(runtime))
+    assert "_patch_runtime_no_request_timeout" in first
+    assert first and all(first.values()), first
+    # Every patch must also report True when it is already applied.
+    second = _run_every_runtime_patch(str(runtime))
+    assert all(second.values()), second
+
+    server = (runtime / "src" / "server.ts").read_text(encoding="utf-8")
+    assert "config.models.timeouts" not in server
+    assert "setTimeout(() => controller.abort()" not in server
+
+
+@pytest.mark.parametrize(
+    "existing_config",
+    [
+        # Fresh install: the proxy wrote its DEFAULT_CONFIG (30 s default).
+        {
+            "rotation": {"strategy": "hybrid"},
+            "models": {"timeouts": {"default": 30000, "claude": 60000, "gemini-3-pro": 45000, "gemini-3.1-pro": 45000, "thinking": 120000}},
+            "features": {"jitterEnabled": True},
+        },
+        # A user's manual workaround plus unrelated settings.
+        {
+            "rotation": {"strategy": "round-robin"},
+            "models": {"timeouts": {"default": 120000, "gemini-3.8": 120000, "gemini-4": 120000}, "blacklist": ["x"]},
+            "retry": {"maxAttempts": 3},
+        },
+        # No models section at all: the proxy falls back to DEFAULT_CONFIG's 30000.
+        {"rotation": {"strategy": "sticky"}},
+    ],
+)
+def test_patched_cached_runtime_ignores_proxy_config_timeouts_and_keeps_config(
+    tmp_path, existing_config
+):
+    data_dir = tmp_path / "data"
+    runtime = data_dir / "runtime" / "main-test-ag-2.24.0"
+    (runtime / "src").mkdir(parents=True)
+    server_file = runtime / "src" / "server.ts"
+    server_file.write_text(_FORK_TIMER_SNIPPET, encoding="utf-8")
+    config_file = data_dir / "config.json"
+    config_text = json.dumps(existing_config, indent=2)
+    config_file.write_text(config_text, encoding="utf-8")
+
+    assert antigravity_proxy._patch_runtime_no_request_timeout(str(runtime))
+
+    server = server_file.read_text(encoding="utf-8")
+    # Whatever models.timeouts holds, the patched proxy no longer reads it...
+    assert "config.models.timeouts" not in server
+    assert "timeoutMs" not in server
+    # ...so the user's config.json is left exactly as it was (no settings lost).
+    assert config_file.read_text(encoding="utf-8") == config_text
+
+
+def test_cached_runtime_without_timeout_patch_needs_repatch(tmp_path):
+    runtime = tmp_path / "runtime" / "main-test-ag-2.24.0"
+    (runtime / "src" / "utils").mkdir(parents=True)
+    (runtime / "package.json").write_text("{}", encoding="utf-8")
+    (runtime / "src" / "server.ts").write_text(_FORK_TIMER_SNIPPET, encoding="utf-8")
+    (runtime / "src" / "utils" / "transform.ts").write_text(
+        "GEMINI_37_FLASH_ALIASES GEMINI_37_FLASH_WIRE_MODEL gemini-3.7-flash-high "
+        "GEMINI_31_PRO_HIGH_WIRE_MODEL GEMINI_35_FLASH_ALIASES gemini35FlashWireModel",
+        encoding="utf-8",
+    )
+    (runtime / ".glossarion-runtime.json").write_text(
+        json.dumps({"tag": "main-test", "patch_version": "2026-09-13-serialized-account-storage-v2"}),
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._cached_runtime_needs_patch(str(tmp_path))
+
+
+def test_stop_closes_stream_still_waiting_for_proxy_headers(monkeypatch):
+    _run_pre_header_stop_test(monkeypatch, via_system_proxy=False)
+
+
+def test_stop_closes_pre_header_stream_routed_through_system_proxy(monkeypatch):
+    # A system proxy (HTTP_PROXY, registry, macOS) makes httpx use a proxy mount;
+    # Stop must shut that socket down too, not only the default transport's.
+    _run_pre_header_stop_test(monkeypatch, via_system_proxy=True)
+
+
+def _run_pre_header_stop_test(monkeypatch, via_system_proxy):
+    import socket
+
+    if antigravity_proxy.httpx is None:
+        pytest.skip("httpx not installed")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    accepted = []
+    peer_closed = threading.Event()
+
+    def silent_proxy():
+        conn, _ = server.accept()
+        accepted.append(conn)
+        conn.settimeout(10)
+        try:
+            while conn.recv(65536):
+                pass
+        except OSError:
+            pass
+        peer_closed.set()
+
+    threading.Thread(target=silent_proxy, daemon=True).start()
+
+    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    if via_system_proxy:
+        # The silent server plays the system proxy; the proxy URL itself is never dialled.
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{port}")
+        monkeypatch.setattr(antigravity_proxy, "get_proxy_url", lambda: "http://127.0.0.1:9")
+    else:
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.setattr(antigravity_proxy, "get_proxy_url", lambda: f"http://127.0.0.1:{port}")
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_for_request", lambda *a, **k: None)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_log_forwarder", lambda *a, **k: None)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_account_slot_available", lambda *a, **k: None)
+
+    outcome = {}
+
+    def request():
+        try:
+            # No Glossarion timeout: only Stop may end this request.
+            antigravity_proxy.send_message_stream(
+                [{"role": "user", "content": "hi"}],
+                model="gemini-3.8-flash-high",
+                timeout=None,
+                account_id=0,
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=request, daemon=True)
+    try:
+        worker.start()
+        deadline = time.time() + 5
+        while not accepted and time.time() < deadline:
+            time.sleep(0.05)
+        assert accepted, "request never reached the fake proxy"
+        time.sleep(0.3)
+
+        pending = [
+            item for item in antigravity_proxy._active_responses.values()
+            if isinstance(item, antigravity_proxy._PendingHttpxRequest)
+        ]
+        assert len(pending) == 1
+        default_transport = pending[0]._client._transport
+        mounted_sockets = [
+            pending[0]._connection_socket(conn)
+            for transport in pending[0]._transports()
+            if transport is not default_transport
+            for conn in transport._pool.connections
+        ]
+        if via_system_proxy:
+            assert len([s for s in mounted_sockets if s is not None]) == 1
+        else:
+            assert mounted_sockets == []
+
+        antigravity_proxy.cancel_stream()
+        worker.join(5)
+
+        assert not worker.is_alive()
+        assert isinstance(outcome.get("error"), RuntimeError)
+        assert "cancelled by user" in str(outcome["error"])
+        assert peer_closed.wait(5)
+        assert not any(
+            isinstance(item, antigravity_proxy._PendingHttpxRequest)
+            for item in antigravity_proxy._active_responses.values()
+        )
+    finally:
+        for conn in accepted:
+            conn.close()
+        server.close()
 
 
 def test_account_summary_strips_tokens_and_reports_unsupported_models():
