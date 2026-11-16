@@ -61,9 +61,10 @@ STORE_FILE = "library_cloud.json"
 STORE_VERSION = 1
 #: The consent wording's word for this device.
 DEVICE = "computer"
-#: "Share via link" sites on the desktop, in menu order. transfer.it is the browser handoff
-#: (Glossarion opens transfer.it/start and shows the file's folder; the user pastes the link back).
-DESKTOP_PROVIDERS = ("transferit", "gofile", "send", "pixeldrain", "gdrive")
+#: "Share via link" sites on the desktop, in menu order (the shared ``PROVIDER_IDS``). transfer.it is
+#: the browser handoff (Glossarion opens transfer.it/start and shows the file's folder; the user pastes
+#: the link back).
+DESKTOP_PROVIDERS = ("gdrive", "litterbox", "gofile", "send", "transferit", "pixeldrain")
 #: Book outputs that may be shared by link.
 ELIGIBLE_EXTENSIONS = (".epub", ".pdf", ".txt", ".html", ".htm", ".cbz")
 MAX_LINKS = 500
@@ -120,7 +121,7 @@ def _defaults() -> dict:
             "sync_state": {},  # remembered Drive folder / file ids (no secrets)
             "last_sync": None,  # SyncResult.as_record()
         },
-        "share": {"providers": {}, "secrets": {}, "send": {}, "links": []},
+        "share": {"providers": {}, "secrets": {}, "send": {}, "litterbox": {}, "links": []},
     }
 
 
@@ -392,6 +393,20 @@ class LibraryCloudStore:
         clean_expire, clean_downloads = SendProvider.options(current)
         self.mutate(lambda data: data["share"].update(send={"expire": clean_expire, "downloads": clean_downloads}))
         return self.send_options()
+
+    def litterbox_options(self) -> dict:
+        """``{"time": "1h" | "12h" | "24h" | "72h"}`` (how long a Litterbox link lasts; 72h by default)."""
+        from share_hosting_litterbox import LitterboxProvider
+
+        return {"time": LitterboxProvider.options(self.read()["share"].get("litterbox") or {})}
+
+    def set_litterbox_options(self, *, time: Optional[str] = None) -> dict:
+        from share_hosting_litterbox import LitterboxProvider
+
+        if time is not None:
+            clean = LitterboxProvider.options({"time": time})
+            self.mutate(lambda data: data["share"].update(litterbox={"time": clean}))
+        return self.litterbox_options()
 
     # ---- link records -----------------------------------------------------------------------------------
 
@@ -679,6 +694,7 @@ class LibraryCloud:
     def providers(self) -> dict:
         if self._providers is None:
             from share_hosting_gofile import GofileProvider
+            from share_hosting_litterbox import LitterboxProvider
             from share_hosting_pixeldrain import PixeldrainProvider
             from share_hosting_send import SendProvider
 
@@ -687,7 +703,8 @@ class LibraryCloud:
                 kwargs["api_base"] = self.endpoints["api_base"]
             if self.endpoints.get("upload_base"):
                 kwargs["upload_base"] = self.endpoints["upload_base"]
-            self._providers = {"gofile": GofileProvider(self.http), "send": SendProvider(self.http),
+            self._providers = {"litterbox": LitterboxProvider(self.http), "gofile": GofileProvider(self.http),
+                               "send": SendProvider(self.http),
                                "pixeldrain": PixeldrainProvider(self.http),
                                "gdrive": gdc.GoogleDriveProvider(self.http, **kwargs)}
         return self._providers
@@ -745,7 +762,8 @@ class LibraryCloud:
             raise ShareError("too_large", f"The file is larger than {info.label} allows.")
         cancel = cancel or CancelToken()
         credentials = self._credentials(provider_id)
-        options = self.store.send_options() if provider_id == "send" else {}
+        options = (self.store.send_options() if provider_id == "send" else
+                   self.store.litterbox_options() if provider_id == "litterbox" else {})
         name = os.path.basename(path)
         mime = "application/epub+zip" if name.lower().endswith(".epub") else (
             mimetypes.guess_type(name)[0] or "application/octet-stream")

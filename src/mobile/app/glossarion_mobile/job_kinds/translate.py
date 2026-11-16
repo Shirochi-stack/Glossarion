@@ -315,7 +315,7 @@ def run_translation(ctx: Any, files: list) -> dict:
     if ctx.stop_requested():
         ctx.log("⏹️ Translation stopped before it started")
         return {"ok": None, "outputs": []}
-    from glossarion_mobile.job_kinds.glossary import filter_in_child
+    from glossarion_mobile.job_kinds.glossary import filter_in_child, setup_error
     from glossarion_mobile.job_kinds.qa import multipass_scan_turns
 
     with (
@@ -330,7 +330,9 @@ def run_translation(ctx: Any, files: list) -> dict:
     if ok is False and ctx.stop_requested():
         ok, error = None, None  # stopped: the run ends as Stopped (Resume continues it)
     elif ok is False and not error:
-        error = NOT_COMPLETED
+        # the run's own reason when a pass refused to start (no API key, no model, no credentials)
+        reason = setup_error(owner)
+        error = f"The translation could not start: {reason}" if reason else NOT_COMPLETED
     folders = list(mapping.values()) or [ctx.output_dir]
     for path in compiled_outputs(folders):
         if path not in outputs:

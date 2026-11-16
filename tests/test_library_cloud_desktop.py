@@ -218,6 +218,134 @@ def test_turning_a_site_on_asks_for_consent_first(qapp, google, tmp_path, box, m
         dialog.close()
 
 
+def _tick_overlay(checkbox):
+    """The ✓ QLabel that _create_styled_checkbox paints over the indicator."""
+    return next(label for label in checkbox.findChildren(ui.QLabel) if label.text() == "✓")
+
+
+def test_a_declined_consent_leaves_no_tick_drawn_on_the_site(qapp, google, tmp_path, box, monkeypatch):
+    """Owner: after Cancel in the consent window the site's box still showed its ✓ (refresh reset the box
+    with its signals blocked, and the overlay follows stateChanged)."""
+    cloud, store, _ = _cloud(google, tmp_path, box)
+    dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
+    labels = []
+
+    def decline(consent_dialog):
+        labels.append(consent_dialog.confirm.text())
+        return QDialog.Rejected
+
+    monkeypatch.setattr(ui.ConsentDialog, "exec", decline)
+    try:
+        for provider_id in lc.DESKTOP_PROVIDERS:
+            box_ = dialog.provider_boxes[provider_id]
+            box_.click()
+            qapp.processEvents()
+            assert not box_.isChecked() and _tick_overlay(box_).isHidden(), provider_id
+            assert not store.provider_state(provider_id).enabled
+        # Library settings only turns a site on, so its button says so (never "Open transfer.it")
+        assert labels == [ui.TURN_ON_LABEL] * len(lc.DESKTOP_PROVIDERS)
+    finally:
+        dialog.close()
+
+
+def test_the_sites_are_listed_in_the_owners_order(qapp, google, tmp_path, box):
+    # Google Drive first: a sync account, not a hosting site (owner, 2026-11-16)
+    assert lc.DESKTOP_PROVIDERS == sh.PROVIDER_IDS == ("gdrive", "litterbox", "gofile", "send", "transferit",
+                                                       "pixeldrain")
+    cloud, store, _ = _cloud(google, tmp_path, box)
+    for provider_id in lc.DESKTOP_PROVIDERS:
+        store.set_provider_enabled(provider_id, True, consent=True)
+    settings = ui.LibrarySettingsDialog(None, cloud=cloud)
+    share = ui.ShareDialog(_book(tmp_path), None, cloud=cloud)
+    try:
+        assert list(settings.provider_boxes) == list(lc.DESKTOP_PROVIDERS)
+        assert [settings.provider_boxes[p].text() for p in lc.DESKTOP_PROVIDERS] == [
+            "Google Drive", "Litterbox", "Gofile", "Send (send.vis.ee)", "transfer.it", "pixeldrain"]
+        assert [share.site_combo.itemData(i) for i in range(share.site_combo.count())] == list(lc.DESKTOP_PROVIDERS)
+    finally:
+        share.close()
+        settings.close()
+
+
+def test_litterbox_expiry_is_a_library_setting_defaulting_to_3_days(qapp, google, tmp_path, box):
+    cloud, store, _ = _cloud(google, tmp_path, box)
+    dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
+    try:
+        combo = dialog.litterbox_time
+        assert [combo.itemText(i) for i in range(combo.count())] == ["1 hour", "12 hours", "1 day", "3 days"]
+        assert combo.currentData() == "72h" and store.litterbox_options() == {"time": "72h"}
+        assert "Halgakos.ico" in combo.styleSheet()  # the house dropdown (style_combo)
+        combo.setCurrentIndex(combo.findData("12h"))
+        assert dialog.save()
+        assert store.litterbox_options() == {"time": "12h"}
+        assert store.set_litterbox_options(time="2d") == {"time": "72h"}  # not an API value
+    finally:
+        dialog.close()
+
+
+def test_the_consent_button_looks_disabled_until_the_box_is_ticked(qapp, google, tmp_path, box):
+    cloud, _store, _ = _cloud(google, tmp_path, box)
+    dialog = ui.ConsentDialog(cloud.consent_text("litterbox"), confirm_label=ui.TURN_ON_LABEL)
+    try:
+        assert dialog.confirm.text() == "Turn on"
+        assert ui.DISABLED_BUTTON_RULE.strip() in dialog.confirm.styleSheet()
+        assert not dialog.confirm.isEnabled()
+        dialog.checkbox.setChecked(True)
+        assert dialog.confirm.isEnabled()
+        dialog.checkbox.setChecked(False)
+        assert not dialog.confirm.isEnabled()
+    finally:
+        dialog.close()
+    text = " ".join(cloud.consent_text("transferit").lines)
+    assert "You pick the file there and upload it yourself" in text and "you pick there" not in text
+    plain = ui.ConsentDialog(cloud.consent_text("transferit"))
+    try:
+        assert plain.confirm.text() == "Open transfer.it"  # the text's own label when not overridden
+    finally:
+        plain.close()
+
+
+def test_turning_google_drive_on_signs_in_in_the_browser(qapp, google, tmp_path, box, monkeypatch):
+    cloud, store, _ = _cloud(google, tmp_path, box, own_client=True)
+    opened, labels = [], []
+    monkeypatch.setattr(ui.QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url.toString()) or True))
+
+    def accept(consent_dialog):
+        labels.append(consent_dialog.confirm.text())
+        return QDialog.Accepted
+
+    monkeypatch.setattr(ui.ConsentDialog, "exec", accept)
+    dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
+    try:
+        dialog.provider_boxes["gdrive"].click()
+        assert labels == [ui.TURN_ON_AND_SIGN_IN_LABEL]
+        assert store.provider_state("gdrive").enabled
+        assert len(opened) == 1 and opened[0].startswith(google.base + "/auth")
+        assert dialog.sign_in_button.text() == "Cancel sign-in"
+        # another site: only turned on, nothing opened
+        dialog.provider_boxes["transferit"].click()
+        assert labels[-1] == ui.TURN_ON_LABEL and len(opened) == 1
+        sign_in = dialog._sign_in
+    finally:
+        dialog.close()
+    assert _pump(qapp, lambda: sign_in.session.closed, 10)
+
+
+def test_open_in_browser_falls_back_and_says_so_when_nothing_opens(qapp, monkeypatch):
+    import webbrowser
+
+    calls, warnings = [], []
+    monkeypatch.setattr(ui.QDesktopServices, "openUrl", staticmethod(lambda url: calls.append(("qt", url.toString()))
+                                                                     or False))
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: calls.append(("py", url)) or True)
+    monkeypatch.setattr(ui.QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a[2])))
+    assert ui.open_in_browser("https://transfer.it/start") is True
+    assert calls == [("qt", "https://transfer.it/start"), ("py", "https://transfer.it/start")] and not warnings
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: False)
+    assert ui.open_in_browser("https://transfer.it/start") is False
+    assert warnings and "https://transfer.it/start" in warnings[0]
+
+
 def test_the_consent_text_is_the_shared_computer_wording(qapp, google, tmp_path, box):
     cloud, _store, _ = _cloud(google, tmp_path, box)
     consent = cloud.consent_text("gofile")
@@ -383,6 +511,10 @@ def test_transferit_handoff_in_the_share_dialog(qapp, google, tmp_path, box, mon
         assert dialog.upload_button.text() == "Open transfer.it"
         dialog.upload_button.click()
         assert opened == ["https://transfer.it/start"] and dialog.handoff.isVisibleTo(dialog)
+        # a failure while preparing is shown on the window, never a silent click
+        monkeypatch.setattr(cloud, "transferit_plan", lambda path: (_ for _ in ()).throw(RuntimeError("boom")))
+        dialog.upload_button.click()
+        assert dialog.status.text() == "⚠️ RuntimeError: boom" and opened == ["https://transfer.it/start"]
         assert "The Book.epub" in dialog.handoff_hint.text()
         dialog.paste.setText("https://transfer.it/t/AbCdEf12")
         dialog.save_link_button.click()

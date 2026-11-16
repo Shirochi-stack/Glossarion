@@ -192,6 +192,32 @@ def record_book_inputs(owner: Any, files: list) -> list:
     return books
 
 
+#: An extraction that ended early without a Stop and without a reason of its own.
+EXTRACTION_STOPPED = "Glossary extraction stopped (see the log)."
+
+
+def setup_error(owner: Any) -> str:
+    """Why the owner's run refused to start, in the shared code's own words (no model, a keyed model without an
+    API key, a Vertex AI model without credentials), or "". The translation worker records it when its glossary
+    pre-pass cannot start (``_run_setup_error``); otherwise the shared check answers
+    (``GlossaryPipelineMixin._glossary_setup_refusal``: what the extraction and the translation runners test
+    first, logged by them as "❌ Error: …")."""
+    reason = getattr(owner, "_run_setup_error", None)
+    if not reason:
+        check = getattr(owner, "_glossary_setup_refusal", None)
+        try:
+            reason = check() if callable(check) else None
+        except Exception:
+            reason = None
+    return str(reason or "").strip()
+
+
+def extraction_error(owner: Any) -> str:
+    """The Failed line of an extraction job: the reason it could not start when there is one."""
+    reason = setup_error(owner)
+    return f"Glossary extraction could not start: {reason}" if reason else EXTRACTION_STOPPED
+
+
 def run(ctx: Any) -> dict:
     files = resolve_workspace_collisions(ctx, check_inputs(ctx.inputs))  # the desktop selection's rename
     owner = ctx.owner
@@ -203,7 +229,7 @@ def run(ctx: Any) -> dict:
     with filter_in_child():
         result = extract(force_balanced_request_merging=bool(ctx.params.get("force_balanced_request_merging", False)))
     if result is False and not ctx.stop_requested():
-        return {"ok": False, "outputs": [], "error": "Glossary extraction stopped (see the log)."}
+        return {"ok": False, "outputs": [], "error": extraction_error(owner)}
     return {"ok": None, "outputs": glossary_outputs(owner, files)}
 
 
@@ -394,7 +420,7 @@ def run_pair(ctx: Any) -> dict:
         with filter_in_child():
             result = extract(force_balanced_request_merging=bool(params.get("force_balanced_request_merging", False)))
         if result is False and not ctx.stop_requested():
-            return {"ok": False, "outputs": [], "error": "Glossary extraction stopped (see the log)."}
+            return {"ok": False, "outputs": [], "error": extraction_error(owner)}
         return {"ok": None, "outputs": glossary_outputs(owner, [raw_path])}
     finally:
         try:

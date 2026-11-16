@@ -906,7 +906,14 @@ def test_book_page_tabs_render_progress_glossary_and_overview(real_env):
         assert ctx.navigated[-1][0] == "reader" and ctx.navigated[-1][2]["mode"] == "original"
         glossary = screen.glossary_tab
         assert glossary.view is not None and glossary.visible_rows()[0].kind == "minimal"
-        assert glossary.file_chip.visible
+        # owner 2026-11-16: no file button (⋯ › Files and ⋯'s first line cover it); ⋯ ends the buttons' row
+        assert not hasattr(glossary, "file_chip")
+        header = glossary.root.controls[0].content.controls
+        tools_row = next(c for c in header if getattr(c, "key", None) == "gp-tools")
+        assert tools_row.controls[-1] is glossary.more_menu and glossary.extract_button in tools_row.controls[0].controls
+        assert all(glossary.more_menu not in getattr(c, "controls", ()) for c in header if c is not tools_row)
+        assert [i.key for i in glossary.more_menu.items][:1] == ["gp-file-name"]
+        assert any(i.key == "gp-files" for i in glossary.more_menu.items)
         overview = screen.overview
         assert overview.title_text.value == "Raw Book" and overview.read_button.content == "\U0001f4d6  Open Reader"
         assert not overview.raw_only and not hasattr(overview, "raw_button")

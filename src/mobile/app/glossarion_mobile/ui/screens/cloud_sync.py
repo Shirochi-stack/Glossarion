@@ -19,9 +19,10 @@ Opt-in: a global switch (off by default), a per-book Default / Always / Never ov
 existing foreground notification. The texts are here (``cloud_*_notice``) so every caller words them alike.
 
 **Share file via link** (tap-only; every service off until turned on here, behind a consent sheet that says the
-file leaves the phone and whether the service can read it): the transfer.it browser hand-off (the user uploads on
-transfer.it's own page and pastes the link back; Glossarion never calls transfer.it), Gofile, Send (end-to-end
-encrypted) and pixeldrain (the user's own API key, stored encrypted by the share-link service). Links are saved
+file leaves the phone and whether the service can read it): Litterbox (expires by itself after 1 hour to 3 days),
+Gofile, Send (end-to-end encrypted), the transfer.it browser hand-off (the user uploads on transfer.it's own page and
+pastes the link back; Glossarion never calls transfer.it) and pixeldrain (the user's own API key, stored encrypted
+by the share-link service). Links are saved
 per book and listed on the Book page and the chat Result card with Copy · Share · Delete (where the service can
 delete).
 
@@ -233,6 +234,7 @@ It runs only when you tap it; nothing is shared automatically.
 - **Send** is end-to-end encrypted: the key is in the link, the service cannot read the file. The other services
   can read the file.
 - The service records your IP address and the upload time. Glossarion's developer receives nothing.
+- **Litterbox** links expire by themselves (1 hour to 3 days, set here) and cannot be deleted earlier.
 - **transfer.it** has no app integration: Glossarion opens its page, you upload there and paste the link back.
 - Only share files you have the right to share. Services remove infringing files and can block accounts.
 - Uploads use mobile data on a mobile connection.
@@ -996,6 +998,13 @@ class ShareFacade:
 
     def send_options(self) -> dict:
         fn = self._fn("send_options")
+        try:
+            return dict(fn() or {}) if fn is not None else {}
+        except Exception:
+            return {}
+
+    def litterbox_options(self) -> dict:
+        fn = self._fn("litterbox_options")
         try:
             return dict(fn() or {}) if fn is not None else {}
         except Exception:
@@ -2459,6 +2468,7 @@ class CloudSyncScreen(PageScreen):
                             "recent": [], "progress": None, "phone_folder": platform == "android"}
         self.providers: list = []
         self.send_options: dict = {}
+        self.litterbox_options: dict = {}
         self.loaded = False
         self.renders = 0
         self._unsubs: list = []
@@ -2579,8 +2589,9 @@ class CloudSyncScreen(PageScreen):
             log.debug("cloud settings refresh failed", exc_info=True)
 
     def _read(self) -> tuple:
-        """Blocking (io): the cloud state, the share providers and the Send options."""
-        return self.facade.snapshot(), self.share_facade.providers(), self.share_facade.send_options()
+        """Blocking (io): the cloud state, the share providers, the Send options and Litterbox's expiry."""
+        return (self.facade.snapshot(), self.share_facade.providers(), self.share_facade.send_options(),
+                self.share_facade.litterbox_options())
 
     async def refresh(self) -> dict:
         if self._refreshing:
@@ -2590,7 +2601,7 @@ class CloudSyncScreen(PageScreen):
         try:
             while True:
                 self._refresh_again = False
-                self.state, self.providers, self.send_options = await self.io(self._read)
+                self.state, self.providers, self.send_options, self.litterbox_options = await self.io(self._read)
                 self.loaded = True
                 self._render()
                 if not self._refresh_again:
@@ -2655,7 +2666,7 @@ class CloudSyncScreen(PageScreen):
              bool(p.get("e2ee")), str(p.get("operator")), str(p.get("retention")),
              (p.get("enabled"), p.get("consented"), p.get("signed_in")) if p["id"] == "gdrive" else ())
             for p in self.providers),
-            tuple(sorted(self.send_options.items())))
+            tuple(sorted(self.send_options.items())), tuple(sorted(self.litterbox_options.items())))
         if self._changed("providers", provider_sig):
             self.provider_switches = {}
             self.key_fields = {}
@@ -2803,6 +2814,8 @@ class CloudSyncScreen(PageScreen):
                 ], wrap=True), padding=ft.Padding.only(left=48)))
             if pid == "send" and self.send_options:
                 tiles.append(self._send_row(n))
+            if pid == "litterbox" and self.litterbox_options:
+                tiles.append(self._litterbox_row(n))
             if pid == "gofile":
                 tiles.append(ft.Container(content=ft.TextButton(
                     content="Start a new guest account", icon=ft.Icons.PERSON_OFF_OUTLINED,
@@ -2851,6 +2864,17 @@ class CloudSyncScreen(PageScreen):
         # no wrap: an expanding child inside a wrapping Row is a Flutter layout error (a grey box on release builds)
         return ft.Container(content=ft.Row([self.send_expire, self.send_downloads], spacing=8),
                             padding=ft.Padding.only(left=56, right=8, bottom=8), key=f"share-send-row-{n}")
+
+    def _litterbox_row(self, n: int) -> ft.Control:
+        from share_hosting_litterbox import DEFAULT_TIME, TIME_CHOICES
+
+        value = str(self.litterbox_options.get("time") or DEFAULT_TIME)
+        self.litterbox_time = ft.Dropdown(
+            label="Link lasts", value=value, dense=True, expand=True, key=f"share-litterbox-time-{n}",
+            options=[ft.DropdownOption(key=choice, text=label) for choice, label, _seconds in TIME_CHOICES],
+            on_select=lambda e: self.spawn(self.set_litterbox_options(time=str(e.control.value or value))))
+        return ft.Container(content=ft.Row([self.litterbox_time], spacing=8),
+                            padding=ft.Padding.only(left=56, right=8, bottom=8), key=f"share-litterbox-row-{n}")
 
     # ---- handlers ----
 
@@ -3026,5 +3050,12 @@ class CloudSyncScreen(PageScreen):
         result = await self.share_facade.call("set_send_options", expire=expire, downloads=downloads)
         if not result.get("ok"):
             self.say(str(result.get("message") or "Could not change the Send options"))
+        await self.refresh()
+        return result
+
+    async def set_litterbox_options(self, *, time: Optional[str] = None) -> dict:
+        result = await self.share_facade.call("set_litterbox_options", time=time)
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "Could not change how long Litterbox links last"))
         await self.refresh()
         return result

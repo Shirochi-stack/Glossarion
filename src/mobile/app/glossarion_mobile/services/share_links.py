@@ -3,8 +3,8 @@
 What it does, and what it never does:
 
 * Every provider (the shared ``share_hosting*`` / ``google_drive_core`` modules in src/, also used by
-  the desktop Library: the transfer.it browser handoff, Gofile, Send end-to-end
-  encrypted, pixeldrain with the user's key) is **off** until the user turns it on in Settings ›
+  the desktop Library: Litterbox (expires by itself), Gofile, Send end-to-end encrypted, the transfer.it
+  browser handoff, pixeldrain with the user's key) is **off** until the user turns it on in Settings ›
   Cloud sync & sharing and accepts its consent sheet (``consent_text``: the file leaves the phone,
   who can read it, what the service sees, how long it lasts). A new consent text (version) asks again.
 * Uploads happen only when the user taps (``upload``): never after a compile, never on launch,
@@ -514,10 +514,11 @@ class ShareLinkService:
         if self._providers is None:
             from share_hosting_gofile import GofileProvider
             from google_drive_core import GoogleDriveProvider
+            from share_hosting_litterbox import LitterboxProvider
             from share_hosting_pixeldrain import PixeldrainProvider
             from share_hosting_send import SendProvider
 
-            self._providers = {"gofile": GofileProvider(), "send": SendProvider(),
+            self._providers = {"litterbox": LitterboxProvider(), "gofile": GofileProvider(), "send": SendProvider(),
                                "pixeldrain": PixeldrainProvider(), "gdrive": GoogleDriveProvider()}
         return self._providers
 
@@ -855,6 +856,22 @@ class ShareLinkService:
         self._emit("providers")
         return self.send_options()
 
+    def litterbox_options(self) -> dict:
+        """``{"time": "1h" | "12h" | "24h" | "72h"}``: how long a Litterbox link lasts (72h by default)."""
+        from share_hosting_litterbox import LitterboxProvider
+
+        return {"time": LitterboxProvider.options(self.store.read().get("litterbox") or {})}
+
+    async def set_litterbox_options(self, *, time: Optional[str] = None) -> dict:
+        from share_hosting_litterbox import LitterboxProvider
+
+        await self.load()
+        if time is not None:
+            clean = LitterboxProvider.options({"time": time})
+            await self._io(self.store.mutate, lambda data: data.update(litterbox={"time": clean}))
+            self._emit("providers")
+        return self.litterbox_options()
+
     # ---- eligibility and preflight -----------------------------------------------------------------------
 
     def eligible(self, path: Any) -> bool:
@@ -1092,6 +1109,8 @@ class ShareLinkService:
             opts = dict(options or {})
             if provider_id == "send":
                 opts = {**self.send_options(), **opts}
+            elif provider_id == "litterbox":
+                opts = {**self.litterbox_options(), **opts}
             provider = self.providers()[provider_id]
             hold = self._hold = _UploadHold(self.native, self.platform)
             try:

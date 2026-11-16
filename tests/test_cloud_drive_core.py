@@ -25,7 +25,8 @@ import google_drive_core as gdc  # noqa: E402
 import library_cloud as lc  # noqa: E402
 import share_hosting as sh  # noqa: E402
 
-SHARED = ["share_hosting.py", "share_hosting_gofile.py", "share_hosting_pixeldrain.py", "share_hosting_send.py",
+SHARED = ["share_hosting.py", "share_hosting_gofile.py", "share_hosting_litterbox.py", "share_hosting_pixeldrain.py",
+          "share_hosting_send.py",
           "share_hosting_transferit.py", "google_drive_core.py", "drive_sync_core.py", "library_cloud.py"]
 
 
@@ -1015,6 +1016,74 @@ def test_share_upload_to_a_hosting_site_records_the_link(google, tmp_path, box):
         assert not list(Path(tempfile.gettempdir()).glob("glossarion_share_*/Book.epub"))
     finally:
         gofile.close()
+
+
+class FakeLitterbox:
+    """``POST /resources/internals/api.php`` answering the link in plain text, like litterbox.catbox.moe."""
+
+    def __init__(self, answer=b"https://litter.catbox.moe/x1y2z3.epub", status=200):
+        self.bodies = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                fake.bodies.append((self.path, dict(self.headers), body))
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/resources/internals/api.php"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_litterbox_upload_uses_the_expiry_setting_and_cannot_be_deleted(google, tmp_path, box):
+    import share_hosting_litterbox as lb
+
+    litter = FakeLitterbox()
+    try:
+        cloud, store, _ = _cloud(google, tmp_path, box,
+                                 providers={"litterbox": lb.LitterboxProvider(api_url=litter.url)})
+        epub = _write(tmp_path / "out" / "Book.epub", b"litter bytes")
+        store.set_provider_enabled("litterbox", True, consent=True)
+        before = time.time()
+        record = cloud.share_upload("litterbox", epub)
+        _path, headers, body = litter.bodies[0]
+        assert headers["Content-Type"].startswith("multipart/form-data; boundary=")
+        assert b'name="reqtype"\r\n\r\nfileupload\r\n' in body and b'name="time"\r\n\r\n72h\r\n' in body
+        assert b'name="fileToUpload"; filename="Book.epub"' in body and b"litter bytes" in body
+        assert record["url"] == "https://litter.catbox.moe/x1y2z3.epub" and not record["can_delete"]
+        assert before + 3 * 86400 - 5 <= record["expires"] <= time.time() + 3 * 86400
+        store.set_litterbox_options(time="1h")
+        cloud.share_upload("litterbox", epub)
+        assert b'name="time"\r\n\r\n1h\r\n' in litter.bodies[1][2]
+        assert cloud.delete_link(record["id"]) is False and len(store.links()) == 1  # only forgotten here
+        consent = " ".join(cloud.consent_text("litterbox", epub).lines)
+        assert "from this computer to Litterbox" in consent and "Catbox LLC (United States)" in consent
+        assert "Not end-to-end encrypted: Litterbox can read the file." in consent
+        assert "cannot be deleted earlier" in consent and cloud.consent_text("litterbox").confirm == "Use Litterbox"
+    finally:
+        litter.close()
+    refused = FakeLitterbox(answer=b"<html>File type not allowed</html>")
+    try:
+        provider = lb.LitterboxProvider(api_url=refused.url)
+        epub = _write(tmp_path / "out2" / "Book.epub", b"x")
+        with pytest.raises(sh.ShareError) as info:
+            provider.upload(epub, name="Book.epub", mime="application/epub+zip", size=1)
+        assert info.value.code == "server" and "<html>" not in info.value.message
+    finally:
+        refused.close()
+    assert lb.LitterboxProvider.options({"time": "24H"}) == "24h" and lb.LitterboxProvider.options(None) == "72h"
 
 
 def test_share_by_drive_link_and_the_consent_wording(google, tmp_path, box):

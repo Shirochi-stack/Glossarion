@@ -734,6 +734,35 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
             self.append_log(f"⚠️ Error in OPF sorting: {e}")
             return file_list
 
+    def _glossary_setup_refusal(self):
+        """Why glossary extraction of a text source cannot start, in the words
+        ``_extract_glossary_from_text_file`` logs when it refuses: no model, a Vertex AI model
+        without credentials, a keyed model without an API key. None when it can start (a
+        traditional translation API skips the extraction by itself). Reads only, logs nothing.
+
+        ``_process_text_file`` makes the same checks, so a run that fails here cannot translate
+        either.
+        """
+        model = str(getattr(self, 'model_var', '') or '').strip()
+        if not model:
+            return "No model is selected."
+        from text_jobs import is_traditional_translation_api
+        if is_traditional_translation_api(model):
+            return None
+        if '@' in model or model.startswith('vertex/'):
+            google_creds = self.config.get('google_cloud_credentials')
+            if not google_creds or not os.path.exists(google_creds):
+                return "Google Cloud credentials required for Vertex AI models."
+            return None
+        try:
+            from unified_api_client import UnifiedClient as _UC
+            model_needs_api_key = _UC._model_needs_api_key(model)
+        except Exception:
+            model_needs_api_key = bool(model)  # safe fallback
+        if model_needs_api_key and not self.api_key_entry.text():
+            return "Please enter your API key."
+        return None
+
     def run_glossary_extraction_direct(self, force_balanced_request_merging=False):
         """Run glossary extraction directly - handles multiple files and different file types"""
         try:
@@ -3981,7 +4010,25 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                     
                     self.append_log(f"📑 Running glossary extraction before translation...")
                     self.append_log(f"{'='*60}")
-                    
+
+                    # Without a key, a model or credentials the extraction refuses every file and
+                    # generates nothing; the steps below would still report it complete and ask to
+                    # accept the glossary. End the run with the reason (the translation makes the
+                    # same checks and could not start either).
+                    self._run_setup_error = self._glossary_setup_refusal() if has_text_files else None
+                    if self._run_setup_error:
+                        self.append_log(f"❌ Error: {self._run_setup_error}")
+                        self.append_log(
+                            "⏹️ Translation cancelled: glossary generation could not start"
+                        )
+                        if saved_env:
+                            for key, val in saved_env.items():
+                                if val is None:
+                                    os.environ.pop(key, None)
+                                else:
+                                    os.environ[key] = val
+                        return False
+
                     try:
                         # Reuse the exact same Extract Glossary flow
                         self._glossary_stop_was_requested = False  # Reset before extraction

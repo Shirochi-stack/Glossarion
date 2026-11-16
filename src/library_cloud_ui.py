@@ -56,6 +56,7 @@ from epub_library import (
 )
 from qt_widget_helpers import dialog_button, flash_saved, style_combo
 from share_hosting import CancelToken, ShareError, format_size, provider_info
+from share_hosting_litterbox import TIME_CHOICES as LITTERBOX_TIME_CHOICES
 
 #: The extra rules the cloud windows add to the Library's form style.
 CLOUD_STYLE = _LIBRARY_FORM_STYLE + """
@@ -92,6 +93,10 @@ DISABLED_BUTTON_RULE = (" QPushButton:disabled { background-color: #2a2a3a; colo
 #: Send (send.vis.ee) choices shown in Library settings.
 SEND_EXPIRY_LABELS = ((300, "5 minutes"), (3600, "1 hour"), (86400, "1 day"), (3 * 86400, "3 days"))
 SEND_DOWNLOAD_CHOICES = (1, 2, 3, 5, 10, 20)
+#: The consent window's button when Library settings turns a site on (nothing is opened or uploaded
+#: there; the Share window does that later). Mobile's settings switch says the same.
+TURN_ON_LABEL = "Turn on"
+TURN_ON_AND_SIGN_IN_LABEL = "Turn on and sign in"
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -230,6 +235,26 @@ def _combo() -> QComboBox:
     return combo
 
 
+def open_in_browser(url: str, parent: Any = None) -> bool:
+    """Open ``url`` in the default browser (Qt first, then Python's ``webbrowser``); says so when neither
+    could, with the address to open by hand. True when a browser was asked to open it."""
+    opened = False
+    try:
+        opened = QDesktopServices.openUrl(QUrl(url)) is not False  # Qt says False when no handler took it
+    except Exception:
+        opened = False
+    if not opened:
+        try:
+            import webbrowser
+
+            opened = bool(webbrowser.open(url))
+        except Exception:
+            opened = False
+    if not opened:
+        QMessageBox.warning(parent, "Open in browser", f"Could not open your browser. Open this address in it:\n{url}")
+    return opened
+
+
 def _small_button(text: str, tooltip: str = "") -> QPushButton:
     button = QPushButton(text)
     button.setCursor(Qt.PointingHandCursor)
@@ -248,7 +273,7 @@ class ConsentDialog(QDialog):
     """``share_hosting.consent_text`` (the mobile sheet's wording) as a dialog: the confirmation
     checkbox unlocks the confirm button."""
 
-    def __init__(self, consent: Any, parent: Any = None) -> None:
+    def __init__(self, consent: Any, parent: Any = None, *, confirm_label: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle(consent.title)
         self.setModal(True)
@@ -271,7 +296,9 @@ class ConsentDialog(QDialog):
         row.addStretch()
         cancel = dialog_button("Cancel", "close")
         cancel.clicked.connect(self.reject)
-        self.confirm = dialog_button(consent.confirm, "save")
+        self.confirm = dialog_button(confirm_label or consent.confirm, "save")
+        # greyed until the box is ticked (the button's own sheet looks enabled either way)
+        self.confirm.setStyleSheet(self.confirm.styleSheet() + DISABLED_BUTTON_RULE)
         self.confirm.setEnabled(False)
         self.confirm.clicked.connect(self.accept)
         self.checkbox.toggled.connect(self.confirm.setEnabled)
@@ -280,9 +307,12 @@ class ConsentDialog(QDialog):
         layout.addLayout(row)
 
 
-def ask_consent(parent: Any, cloud: library_cloud.LibraryCloud, provider_id: str, path: str = "") -> bool:
-    """Show the consent window; True when the user ticked and confirmed (the site is then turned on)."""
-    dialog = ConsentDialog(cloud.consent_text(provider_id, path or None), parent)
+def ask_consent(parent: Any, cloud: library_cloud.LibraryCloud, provider_id: str, path: str = "", *,
+                confirm_label: str = "") -> bool:
+    """Show the consent window; True when the user ticked and confirmed (the site is then turned on).
+    ``confirm_label``: the button when confirming only turns the site on (the consent text's own
+    "Open transfer.it" / "Use Gofile" promise the share itself)."""
+    dialog = ConsentDialog(cloud.consent_text(provider_id, path or None), parent, confirm_label=confirm_label)
     if dialog.exec() != QDialog.Accepted:
         return False
     cloud.store.set_provider_enabled(provider_id, True, consent=True)
@@ -441,8 +471,19 @@ class LibrarySettingsDialog(QDialog):
             self.provider_reasons[provider_id] = reason
             if provider_id == "transferit":
                 layout.addWidget(self._indent(_label(
-                    "Opens transfer.it in your browser; you upload the file there and paste the link back.",
+                    "Share… opens transfer.it in your browser; you upload the file there and paste the link back.",
                     "note", wrap=True)))
+            elif provider_id == "litterbox":
+                litter_row = QHBoxLayout()
+                litter_row.setSpacing(8)
+                self.litterbox_time = _combo()
+                for value, text, _seconds in LITTERBOX_TIME_CHOICES:
+                    self.litterbox_time.addItem(text, value)
+                litter_row.addWidget(_label("Expires after"))
+                litter_row.addWidget(self.litterbox_time)
+                litter_row.addWidget(_label("(cannot be deleted earlier)", "note"))
+                litter_row.addStretch()
+                layout.addWidget(self._indent(litter_row))
             elif provider_id == "pixeldrain":
                 key_row = QHBoxLayout()
                 key_row.setSpacing(8)
@@ -501,6 +542,7 @@ class LibrarySettingsDialog(QDialog):
         send = store.send_options()
         self._select_nearest(self.send_expire, send["expire"])
         self._select_nearest(self.send_downloads, send["downloads"])
+        self.litterbox_time.setCurrentIndex(max(0, self.litterbox_time.findData(store.litterbox_options()["time"])))
         self.pixeldrain_key.clear()
         self.refresh()
 
@@ -532,9 +574,9 @@ class LibrarySettingsDialog(QDialog):
         self._update_drive_enabled_state()
         for state in store.provider_states():
             box = self.provider_boxes[state.id]
-            box.blockSignals(True)
+            # No blockSignals: the box's ✓ overlay follows stateChanged (a blocked reset left the tick drawn
+            # on a site the user had just cancelled), and only ``clicked`` reaches _on_provider_clicked.
             box.setChecked(state.enabled)
-            box.blockSignals(False)
             reason = "" if not state.enabled else ("Ready" if state.ready else state.reason)
             self.provider_reasons[state.id].setText(reason)
         has_key = store.has_pixeldrain_key()
@@ -581,6 +623,7 @@ class LibrarySettingsDialog(QDialog):
                                     mode=self.mode.currentData(), folder=self.folder.text())
             store.set_send_options(expire=int(self.send_expire.currentData()),
                                    downloads=int(self.send_downloads.currentData()))
+            store.set_litterbox_options(time=str(self.litterbox_time.currentData()))
             key = self.pixeldrain_key.text().strip()
             if key:
                 store.set_pixeldrain_key(key)
@@ -605,7 +648,12 @@ class LibrarySettingsDialog(QDialog):
             elif store.provider_state(provider_id).consented:
                 store.set_provider_enabled(provider_id, True)
             else:
-                ask_consent(self, self.cloud, provider_id)
+                sign_in = (provider_id == "gdrive" and not store.drive_settings().signed_in
+                           and self._sign_in is None and self.sign_in_button.isEnabled())
+                accepted = ask_consent(self, self.cloud, provider_id,
+                                       confirm_label=TURN_ON_AND_SIGN_IN_LABEL if sign_in else TURN_ON_LABEL)
+                if accepted and sign_in:
+                    self._on_sign_in_clicked()  # opens Google's sign-in page in the browser
         except ShareError as exc:
             QMessageBox.warning(self, "Share via link", exc.message)
         self.refresh()
@@ -630,7 +678,7 @@ class LibrarySettingsDialog(QDialog):
         self._task = _Task(lambda task: self.cloud.finish_sign_in(sign_in, cancel=cancel), "drive-sign-in")
         self._task.done.connect(self._on_sign_in_done)
         self._task.start()
-        QDesktopServices.openUrl(QUrl(sign_in.auth_url))
+        open_in_browser(sign_in.auth_url, self)
         self.refresh()
 
     def _cancel_sign_in(self) -> None:
@@ -840,7 +888,7 @@ class ShareDialog(QDialog):
         self.copy_button = _small_button("📋  Copy")
         self.copy_button.clicked.connect(lambda: self._copy(self.link.text(), self.copy_button))
         open_button = _small_button("Open", "Open the link in your browser")
-        open_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.link.text())))
+        open_button.clicked.connect(lambda: open_in_browser(self.link.text(), self))
         link_layout.addWidget(self.link, 1)
         link_layout.addWidget(self.copy_button)
         link_layout.addWidget(open_button)
@@ -1088,13 +1136,13 @@ class ShareDialog(QDialog):
     def _start_handoff(self, path: str) -> None:
         try:
             self._plan = self.cloud.transferit_plan(path)
-        except ShareError as exc:
-            self.status.setText("⚠️ " + exc.message)
+        except Exception as exc:  # shown, never a silent click
+            self.status.setText("⚠️ " + (_error_text(exc) or "Could not prepare transfer.it."))
             return
         self._handoff_path = path
         self.handoff_hint.setText(self._plan.hint)
         self.handoff.show()
-        QDesktopServices.openUrl(QUrl(self._plan.url))
+        open_in_browser(self._plan.url, self)
 
     def _on_show_file(self) -> None:
         path = getattr(self, "_handoff_path", "") or self.file_combo.currentData() or ""
