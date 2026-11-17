@@ -81,23 +81,31 @@ _ID = re.compile(r"[a-zA-Z0-9_-]+")
 
 # ---- the OAuth clients ----------------------------------------------------------------------------
 
+# Glossarion's own Google Cloud project, "Glossarion" (glossarion-515006, project number 367122224200,
+# created 2026-11-17), so that Google's sign-in page names the app Glossarion. Until then the mobile
+# clients lived in the NovelDB project (957824331511-...) and the page said "NovelDB". The project holds
+# three clients: "Glossarion Android Release" (package com.glossarion.app + the release certificate's
+# SHA-1; Android names no client in code), "Glossarion iOS" and "Glossarion Desktop".
+# Moving projects means: users sign in once more, and ``drive.file`` shows the new clients none of the
+# files the old project's clients created (a new sync folder is made).
+
 #: Glossarion Mobile on iOS: the installed-app client with its custom-scheme redirect (no secret).
-IOS_CLIENT_ID = "957824331511-1445nlka8d0ea1070r36109c4bqmshb2.apps.googleusercontent.com"
+#: ``src/mobile/pyproject.toml`` registers ``CALLBACK_SCHEME`` as a URL scheme (CFBundleURLSchemes).
+IOS_CLIENT_ID = "367122224200-tutkli1r6u6cjluv373bl5tf8gnf53rd.apps.googleusercontent.com"
 CALLBACK_SCHEME = "com.googleusercontent.apps." + IOS_CLIENT_ID[: -len(".apps.googleusercontent.com")]
 REDIRECT_URI = CALLBACK_SCHEME + ":/oauth2redirect"
 
 #: The desktop app's built-in Google OAuth client: "Glossarion Desktop", type "Desktop app" (loopback
-#: redirect), registered 2026-11-17 in the same Google Cloud project as the mobile clients (project
-#: number 957824331511; its consent screen is in production). The settings window has no client
-#: fields: every desktop sign-in uses this client (``LibraryCloudStore.set_own_client`` remains for
-#: the tests' local Google server). A build with these two emptied has no desktop sign-in.
+#: redirect). The settings window has no client fields: every desktop sign-in uses this client
+#: (``LibraryCloudStore.set_own_client`` remains for the tests' local Google server). A build with
+#: these two emptied has no desktop sign-in.
 #:
 #: https://developers.google.com/identity/protocols/oauth2#installed : an installed app embeds its
 #: client ID and client secret in its source, and "in this context, the client secret is obviously
 #: not treated as a secret". It identifies the app, never a user: tokens are the user's and are
 #: stored encrypted (``library_cloud``), and PKCE protects the code exchange.
-BUILTIN_DESKTOP_CLIENT_ID = "957824331511-ro5ger6pd3hdq51gbq0pbarn2j3upqf7.apps.googleusercontent.com"
-BUILTIN_DESKTOP_CLIENT_SECRET = "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"
+BUILTIN_DESKTOP_CLIENT_ID = "367122224200-psg7gq88gnm122uccea967lf8vs491ch.apps.googleusercontent.com"
+BUILTIN_DESKTOP_CLIENT_SECRET = "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"
 #: One line for the desktop settings while no client is available.
 NO_DESKTOP_CLIENT = "Google sign-in is not set up in this build of Glossarion."
 
