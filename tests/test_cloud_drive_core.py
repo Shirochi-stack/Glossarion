@@ -553,15 +553,27 @@ def test_desktop_sign_in_refuses_a_wrong_state_and_a_denial(google):
     assert not [c for c in google.token_calls if c["grant_type"] == "authorization_code"]
 
 
-def test_desktop_sign_in_needs_a_client():
-    assert gdc.BUILTIN_DESKTOP_CLIENT_ID == "" and gdc.BUILTIN_DESKTOP_CLIENT_SECRET == ""
+def test_desktop_sign_in_needs_a_client(monkeypatch):
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", "")
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", "")
     assert gdc.desktop_client() is None
     assert gdc.desktop_client("", "s", use_own=True) is None
     own = gdc.desktop_client("my-id.apps.googleusercontent.com", " Qx7value ")
     assert own.client_id.startswith("my-id") and own.client_secret == "Qx7value" and "Qx7value" not in repr(own)
     with pytest.raises(sh.ShareError) as info:
         gdc.DesktopSignIn(None)
-    assert info.value.code == "unsupported" and "own Google OAuth client" in info.value.message
+    # the settings window has no client fields, so the message does not send the user to any
+    assert info.value.code == "unsupported" and info.value.message == gdc.NO_DESKTOP_CLIENT
+    assert "OAuth" not in gdc.NO_DESKTOP_CLIENT
+
+
+def test_the_apps_own_desktop_client_is_used_when_the_build_has_one(monkeypatch):
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", "app-id.apps.googleusercontent.com")
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", "Zk4appvalue")
+    client = gdc.desktop_client()
+    assert (client.client_id, client.client_secret) == ("app-id.apps.googleusercontent.com", "Zk4appvalue")
+    assert client.configured and "Zk4appvalue" not in repr(client)
+    assert gdc.desktop_client(auth_url="http://127.0.0.1:1/auth").auth_url == "http://127.0.0.1:1/auth"
 
 
 def test_cancelling_a_desktop_sign_in(google):

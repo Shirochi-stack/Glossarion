@@ -87,13 +87,13 @@ CALLBACK_SCHEME = "com.googleusercontent.apps." + IOS_CLIENT_ID[: -len(".apps.go
 REDIRECT_URI = CALLBACK_SCHEME + ":/oauth2redirect"
 
 #: The desktop app's built-in Google OAuth client ("Desktop app" type, loopback redirect). Empty
-#: until the project registers one; while it is empty, desktop sign-in needs the user's own client.
+#: until the project registers one; while it is empty, desktop sign-in is unavailable (the settings
+#: window has no client fields; ``LibraryCloudStore.set_own_client`` remains for tests).
 #: Google treats a Desktop client's secret as not confidential, so it may ship in the app.
 BUILTIN_DESKTOP_CLIENT_ID = ""
 BUILTIN_DESKTOP_CLIENT_SECRET = ""
 #: One line for the desktop settings while no client is available.
-NO_DESKTOP_CLIENT = ("Google sign-in needs a Desktop-type Google OAuth client: turn on "
-                     "“Use my own Google OAuth client” and enter its client ID and secret.")
+NO_DESKTOP_CLIENT = "Google sign-in is not set up in this build of Glossarion."
 
 
 @dataclass(frozen=True)
