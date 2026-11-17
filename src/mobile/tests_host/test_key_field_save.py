@@ -29,9 +29,61 @@ def _store(path: Path):
     return store
 
 
+def _icon(button: ft.IconButton):
+    """The icon a button shows (the Save button's sits in its animated switcher)."""
+    icon = button.icon
+    return icon.content.icon if isinstance(icon, ft.AnimatedSwitcher) else icon
+
+
 def _shown(field: KeyField) -> list:
-    return [control.icon for control in field.controls[0].controls
+    return [_icon(control) for control in field.controls[0].controls
             if isinstance(control, ft.IconButton) and control.visible]
+
+
+def test_the_save_button_answers_the_tap_with_a_tick_then_the_floppy_disk_again(monkeypatch):
+    """Owner 2026-11-17: "The save button lacks any animated feedback": the icon turns into a tick (an error
+    mark when the key was not saved) through the button's animated switcher, then back."""
+    monkeypatch.setattr(KeyField, "SAVE_MARK_SECONDS", 0.05)
+    problems = [None, "disk full", None]
+    field = KeyField(value="sk-old-12345678", on_save=lambda value: problems.pop(0))
+    assert isinstance(field.save_button.icon, ft.AnimatedSwitcher)
+    assert field.save_mark.transition == ft.AnimatedSwitcherTransition.SCALE
+    keys = []
+
+    async def scenario():
+        assert _icon(field.save_button) == ft.Icons.SAVE
+        await field.save()
+        keys.append(field.save_mark.content.key)
+        assert _icon(field.save_button) == ft.Icons.CHECK_CIRCLE
+        await asyncio.sleep(0.15)
+        keys.append(field.save_mark.content.key)
+        assert _icon(field.save_button) == ft.Icons.SAVE          # back by itself
+        await field.save()                                        # a save that failed
+        keys.append(field.save_mark.content.key)
+        assert _icon(field.save_button) == ft.Icons.ERROR_OUTLINE
+        assert field.save_mark.content.color == ft.Colors.ERROR
+        await asyncio.sleep(0.03)
+        await field.save()                                        # tapped again before the mark went back
+        assert _icon(field.save_button) == ft.Icons.CHECK_CIRCLE
+        await asyncio.sleep(0.03)                                 # the first tap's timer is over: not this one's
+        assert _icon(field.save_button) == ft.Icons.CHECK_CIRCLE
+        await asyncio.sleep(0.1)
+        assert _icon(field.save_button) == ft.Icons.SAVE
+
+    asyncio.run(scenario())
+    assert len(set(keys)) == 3                                    # a new key each time: the switcher animates
+
+
+def test_the_save_mark_fades_under_reduce_motion():
+    from glossarion_mobile.ui import motion
+
+    motion.set_reduce_motion(True)
+    try:
+        field = KeyField(value="sk-old-12345678", on_save=lambda value: None)
+        asyncio.run(field.save())
+        assert field.save_mark.transition == ft.AnimatedSwitcherTransition.FADE
+    finally:
+        motion.set_reduce_motion(False)
 
 
 def test_the_row_has_save_and_copy_and_no_paste_button():

@@ -2979,8 +2979,6 @@ class ChatView:
             self._spawn(self.start_chat_qa(item))
         elif action in ("read", "open_reader"):
             self._spawn(self._open_reader(item))
-        elif action == "open_output":
-            self._spawn(self._open_job_output(item))
         elif action in ("resume", "retry"):
             if item is None:
                 self._resume_last()
@@ -3283,17 +3281,6 @@ class ChatView:
         unless the turn's attachment is one)."""
         folder = self._job_workspace(item)
         return card_outputs(folder, self._turn_source(item) if self.bound else "") if folder else []
-
-    async def _open_job_output(self, item: Any = None) -> None:
-        """Job card › Open output: the turn's ``Attachments/<stem>`` workspace in Files (else the chat's
-        newest output folder)."""
-        folder = await self.env.run_io(self._job_workspace, item) if item is not None else ""
-        if not folder:
-            folder = self._last_output_folder()
-        if folder and self.env.open_output is not None:
-            self.env.open_output(folder)
-        else:
-            self.notify("No output folder for this chat yet")
 
     async def _migrate_job_to_pc(self, item: Any) -> None:
         migrate = getattr(self.env, "migrate_job", None)

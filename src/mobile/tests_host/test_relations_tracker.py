@@ -697,6 +697,69 @@ def test_diagram_opens_fitted_and_keeps_the_users_zoom(iso, tmp_path):
     asyncio.run(scenario())
 
 
+def test_diagram_fits_one_at_a_time_and_after_the_new_canvas_is_laid_out(iso, tmp_path, monkeypatch):
+    """Owner 2026-11-17: "Tapping the center jumps to the left side of the screen". On the emulator a tap on
+    the centre name left the picture too large and cut off, the name off centre: the viewer's ``pan`` and
+    ``zoom`` are held to the canvas the client has on screen, and the fit was sent before the client had laid
+    out the new, larger canvas (2). They also add to the transform the viewer has, so two fits whose steps
+    interleave would pan and zoom twice (1). Fits run one at a time, only the last one asked for, and wait
+    for the size."""
+    from glossarion_mobile.ui.glossary import relations_diagram as rd
+
+    schema = _schema()
+    store = _store(tmp_path, schema)
+
+    async def scenario():
+        conn, session = _TB._fake_session("android")
+        ctx = _ctx(session.page, store, schema)
+        diagram = rd.RelationsDiagram(ctx, str(tmp_path / "Book_glossary.csv"), tracker=_tracker(), entries=None)
+        calls: list = []
+
+        def recorder(name):
+            async def call(*args):
+                calls.append((name, *args))
+                await asyncio.sleep(0.02)  # the round trip to the client: another fit can start meanwhile
+            return call
+
+        for name in ("reset", "pan", "zoom"):
+            object.__setattr__(diagram.viewer, name, recorder(name))
+        diagram._on_viewer_size(types.SimpleNamespace(width=560.0, height=500.0))  # the first fit
+        await asyncio.sleep(0.2)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        # (1) three fits asked for while the first is on its way: its three steps finish together, then the
+        # last one runs; the one in between is dropped. Never reset, reset, pan, pan, ...
+        calls.clear()
+        diagram.fit_all()
+        await asyncio.sleep(0.03)  # the first one's reset is out
+        diagram.fit_all()
+        diagram.fit_all()
+        await asyncio.sleep(0.4)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"] * 2
+        # (2) the canvas got a new size: nothing is sent until the client reports that size
+        calls.clear()
+        diagram._on_stack_size(types.SimpleNamespace(width=diagram.width, height=diagram.height))
+        old = (diagram.width, diagram.height)
+        diagram._set_canvas(old[0] + 400.0, old[1] + 300.0)
+        diagram.fit_all()
+        await asyncio.sleep(0.15)
+        assert calls == []
+        diagram._on_stack_size(types.SimpleNamespace(width=old[0] + 400.0, height=old[1] + 300.0))
+        await asyncio.sleep(0.2)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        scale = calls[2][1]
+        assert abs(scale - diagram.fit_transform()[0]) < 1e-6  # worked out for the new canvas
+        # a client that never reports the size does not hold the fit for ever
+        calls.clear()
+        monkeypatch.setattr(rd, "CANVAS_WAIT", 0.05)
+        diagram._set_canvas(old[0], old[1])
+        diagram.fit_all()
+        await asyncio.sleep(0.3)
+        assert [c[0] for c in calls] == ["reset", "pan", "zoom"]
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
 def test_diagram_builds_from_a_tracker_and_the_slider_changes_the_edges(iso, tmp_path):
     from glossarion_mobile.ui.glossary.relations_diagram import RelationsDiagram, edge_label_text
 
