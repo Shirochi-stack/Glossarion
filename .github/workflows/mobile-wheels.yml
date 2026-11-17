@@ -13,6 +13,11 @@
 # pillow-13.0.0-1 (no AVIF / ImageCms) cannot outrank them. verify-native proves each is its
 # official original except for the build tag and that it has PIL._avif and PIL._imagingcms.
 #
+# Index wheels held at an older build (src/mobile/ci/wheels/index_holds.toml, today flet-libxslt
+# 1.1.45 build 11): `index_holds.py add` downloads them from pypi.flet.dev (sha256-checked), changes
+# only the build tag and adds them to the assembled wheelhouse in every run. That file and script
+# are not in the cache keys below, so a hold never rebuilds the compiled wheels.
+#
 # Triggers: workflow_call and workflow_dispatch only. It never publishes: no release, no index
 # upload, no secrets. Finished wheels are cached (actions/cache, exact keys over the manifest,
 # the build scripts and the recipe) and rebuilt on a key change, after 7 idle days, or with
@@ -227,6 +232,10 @@ jobs:
       - name: Assemble the wheelhouse
         run: uv run --no-project python src/mobile/ci/wheels/wheels.py assemble --platform "$PLATFORM" --cache "$WHEELCACHE" --out "$WHEELHOUSE"
 
+      # After assemble (it empties the wheelhouse) and before the checks, which expect the held wheels.
+      - name: Add the held index wheels (index_holds.toml)
+        run: uv run --no-project python src/mobile/ci/wheels/index_holds.py add --platform "$PLATFORM" --wheelhouse "$WHEELHOUSE" --downloads "$RUNNER_TEMP/held"
+
       - name: Verify the wheelhouse (structure, pins, uv.lock)
         run: uv run --no-project python src/mobile/tools/check_mobile_wheels.py --verify-wheelhouse "$WHEELHOUSE" --platform "$PLATFORM" --report "$RUNNER_TEMP/wheelhouse_check.md"
 
@@ -263,6 +272,9 @@ jobs:
         env:
           PACKAGES: ${{ steps.todo.outputs.packages }}
         run: uv run --no-project python src/mobile/ci/wheels/wheels.py provenance --platform "$PLATFORM" --wheelhouse "$WHEELHOUSE" --cache "$WHEELCACHE" --built "$PACKAGES"
+
+      - name: Record the held index wheels in the provenance
+        run: uv run --no-project python src/mobile/ci/wheels/index_holds.py provenance --platform "$PLATFORM" --wheelhouse "$WHEELHOUSE" --downloads "$RUNNER_TEMP/held"
 
       - name: Upload the wheelhouse
         uses: actions/upload-artifact@v7

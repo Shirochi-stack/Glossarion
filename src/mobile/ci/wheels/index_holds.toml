@@ -1,0 +1,39 @@
+# Index wheels held at an older build.
+#
+# pypi.flet.dev can publish a newer build of a C-library wheel (flet-lib*) before the packages
+# that link it are rebuilt. pip always takes the highest build tag of a version and no requirement
+# can name a build, so the install then fails on two "==" pins that disagree. A hold takes the
+# older build from the index (found by file name, sha256 checked against this file), changes only
+# its build tag to wheelhouse.toml's build_tag (as wheels.py retag does for iOS Pillow) and puts
+# it into the wheelhouse, where pip ranks it above the index's newer build.
+#
+# Read by:
+#   tools/check_mobile_wheels.py    every wheelhouse check treats a held wheel like a promised one
+#   ci/wheels/index_holds.py        add / provenance (.github/workflows/mobile-wheels.yml)
+#
+# This file and index_holds.py are not part of the wheel cache keys: adding or dropping a hold
+# does not rebuild the wheels we compile. Drop a hold once the index is consistent again;
+# check_mobile_wheels.py fails when nothing in the dependency tree needs the held package.
+
+schema = 1
+
+# lxml is pinned to 6.1.1, whose pypi.flet.dev wheels require flet-libxslt==1.1.45 and
+# flet-libxml2==2.15.3. On 2026-11-16 the index got flet-libxslt 1.1.45 build 12, which requires
+# flet-libxml2==2.15.4, and lxml 6.1.3 for Android only: the iOS builds of lxml 6.1.3 were never
+# made (flet-dev/mobile-forge run 43838895794: no macOS runner took the jobs). Build 11 is the
+# newest flet-libxslt 1.1.45 that requires flet-libxml2==2.15.3.
+# Drop this hold and pin lxml 6.1.3 once the index has its three iOS cp313 wheels.
+# sha256: the index's #sha256 fragments, confirmed by hashing the downloaded bytes on 2026-11-17.
+[[hold]]
+name = "flet-libxslt"
+version = "1.1.45"
+index_build = 11
+tag = "py3-none"
+requires_dist = ["flet-libxml2==2.15.3"]
+
+[hold.files]
+"arm64-v8a" = { sha256 = "d4694071cf02e587bbc3db58f15b075e25d6f35766e3b0a60abeb4044f1282cd" }
+"x86_64" = { sha256 = "278742d573c8a8a5014c21c70ee9e47d4040a657dd3e24b1c6fb2a0026d04d77" }
+"iphoneos.arm64" = { sha256 = "92a9edc00b457467b269b94ed9650b7cd81751b011317f0b2ce43b927e2c6660" }
+"iphonesimulator.arm64" = { sha256 = "56de197757c03db601665a9a51e65472b8c52d47875f782b88fdd205330d2891" }
+"iphonesimulator.x86_64" = { sha256 = "334fc282fb470871a404fa594f91a2fef6a563b18b57d277c9180ac7b864f807" }

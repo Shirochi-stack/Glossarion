@@ -2550,3 +2550,262 @@ def test_workflow_expected_packages_match_the_manifest(capsys):
     assert "--official \"$RUNNER_TEMP/official\"" in steps[names.index("Verify the wheelhouse (native binaries)")]
     assert "inputs.platform == 'android'" in steps[names.index("Restore cached Pillow wheels")]
     assert 'if [ "$PLATFORM" = android ] && [ "$HIT_PILLOW" != true ]' in steps[names.index("Packages to build")]
+
+
+# --------------------------------------------------------------------------- index wheels held at an older build
+# pypi.flet.dev's flet-libxslt 1.1.45 build 12 requires flet-libxml2==2.15.4 while its lxml 6.1.1 wheels still
+# require 2.15.3. index_holds.toml holds build 11: index_holds.py retags it with build_tag 1000 into the wheelhouse.
+_ih_spec = importlib.util.spec_from_file_location("mobile_ci_index_holds", MOBILE / "ci" / "wheels" / "index_holds.py")
+ih = importlib.util.module_from_spec(_ih_spec)
+_ih_spec.loader.exec_module(ih)
+
+XSLT_HOLD = """
+schema = 1
+
+[[hold]]
+name = "flet-libxslt"
+version = "1.1.45"
+index_build = 11
+tag = "py3-none"
+requires_dist = ["flet-libxml2==2.15.3"]
+
+[hold.files]
+"""
+ALL_TARGETS = ANDROID + IOS
+
+
+def xslt_name(target: str, build: str = "1000") -> str:
+    return f"flet_libxslt-1.1.45-{build}-py3-none-{LABEL[target]}.whl"
+
+
+def use_xslt_hold(proj, tmp_path, shas: dict | None = None) -> dict:
+    """lxml 6.1.1 pinned; the index has flet-libxslt 1.1.45 build 11 (libxml2 2.15.3) and build 12 (2.15.4),
+    and index_holds.toml holds build 11. Returns {target: the index's build 11 wheel}."""
+    index, originals = proj["index"], {}
+    for t in ALL_TARGETS:
+        lxml = make_wheel(tmp_path / "flet", "lxml", "6.1.1", f"cp313-cp313-{LABEL[t]}", build="1",
+                          requires=["flet-libxslt (==1.1.45)", "flet-libxml2 (==2.15.3)"])
+        index.add("flet", "lxml", lxml.name)
+        index.blobs[f"{cmw.FLET_INDEX}/files/{lxml.name}"] = lxml.read_bytes()
+        for build, xml2 in (("11", "2.15.3"), ("12", "2.15.4")):
+            w = make_wheel(tmp_path / "flet", "flet-libxslt", "1.1.45", f"py3-none-{LABEL[t]}", build=build,
+                           requires=[f"flet-libxml2 (=={xml2})"], files={"opt/lib/libxslt.a": b"!<arch>\n" + build.encode()})
+            index.add("flet", "flet-libxslt", w.name)
+            index.blobs[f"{cmw.FLET_INDEX}/files/{w.name}"] = w.read_bytes()
+            if build == "11":
+                originals[t] = w
+        index.add("flet", "flet-libxml2", f"flet_libxml2-2.15.3-11-py3-none-{LABEL[t]}.whl",
+                  f"flet_libxml2-2.15.4-1-py3-none-{LABEL[t]}.whl")
+    index.meta[("flet-libxml2", "2.15.3")] = index.meta[("flet-libxml2", "2.15.4")] = []
+    index.add("pypi", "lxml", "lxml-6.1.1.tar.gz", requires=[], version="6.1.1")
+    root = proj["root"]
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    (root / "pyproject.toml").write_text(text.replace('"app-pure==1.0",', '"app-pure==1.0",\n  "lxml==6.1.1",'),
+                                         encoding="utf-8")
+    rows = "".join(f'"{t}" = {{ sha256 = "{(shas or {}).get(t) or cmw.file_sha256(originals[t])}" }}\n'
+                   for t in ALL_TARGETS)
+    (root / "index_holds.toml").write_text(XSLT_HOLD + rows, encoding="utf-8")
+    return originals
+
+
+def serve_index_files(monkeypatch, source: Path) -> list:
+    """index_holds.py downloads pypi.flet.dev files from ``source`` (still sha256-checked)."""
+    real, asked = ih.wheels.download_verified, []
+
+    def fake(url, dest, sha256, attempts=4):
+        asked.append(url)
+        return real((source / url.rsplit("/", 1)[1]).resolve().as_uri(), dest, sha256, attempts=1)
+
+    monkeypatch.setattr(ih.wheels, "download_verified", fake)
+    return asked
+
+
+def hold_argv(proj, command: str, platform: str, wheelhouse: Path, downloads: Path) -> list:
+    return ["--manifest", str(proj["root"] / "wheelhouse.toml"), command, "--platform", platform,
+            "--wheelhouse", str(wheelhouse), "--downloads", str(downloads)]
+
+
+def test_index_holds_are_validated(tmp_path):
+    manifest = tmp_path / "wheelhouse.toml"
+    manifest.write_text(MANIFEST, encoding="utf-8")
+    assert cmw.load_wheelhouse_manifest(manifest).held == []          # no index_holds.toml next to it
+    good = XSLT_HOLD + "".join(f'"{t}" = {{ sha256 = "{"9" * 64}" }}\n' for t in ALL_TARGETS)
+    holds = tmp_path / "index_holds.toml"
+    holds.write_text(good, encoding="utf-8")
+    m = cmw.load_wheelhouse_manifest(manifest)
+    (xslt,) = m.held
+    assert (xslt.name, xslt.version, xslt.held_build, xslt.py_abi) == ("flet-libxslt", "1.1.45", "11", "py3-none")
+    assert xslt.built_targets == () and xslt.targets == tuple(ALL_TARGETS)
+    assert xslt.retag_source("x86_64") == ("", "9" * 64)
+    assert xslt.official_filename("iphoneos.arm64") == "flet_libxslt-1.1.45-11-py3-none-ios_13_0_arm64_iphoneos.whl"
+    assert xslt.filename("iphoneos.arm64", m.build_tag) == xslt_name("iphoneos.arm64")
+    assert xslt.requires_for("arm64-v8a") == ("flet-libxml2==2.15.3",)
+    # held wheels are known to the wheelhouse checks but are not wheels we build
+    assert m.wheel("flet-libxslt") is None and m.known("flet-libxslt") is xslt and m.known("pillow") is m.wheel("pillow")
+    assert [w.name for w in m.wheels] == ["cryptography", "pillow"]
+    assert all(w.name != "flet-libxslt" for w, _t in m.promised())
+    assert [t for _w, t in m.held_targets("ios")] == IOS
+    assert m.expected("android") == m.promised("android") + m.held_targets("android")
+    # the promised wheels keep their names
+    assert m.wheel("pillow").filename("x86_64", 1000) == "pillow-13.0.0-1000-cp313-cp313-android_24_x86_64.whl"
+    for change, message in [
+        (("schema = 1", "schema = 2"), "unsupported schema"),
+        (("index_build = 11", "index_build = 1000"), "below build_tag 1000"),
+        (("index_build = 11", 'index_build = "11"'), "index_build must be the index's build number"),
+        (('tag = "py3-none"', 'tag = "py2-none"'), "tag must be the wheel's interpreter and ABI tags"),
+        (('name = "flet-libxslt"', 'name = "cryptography"'), "cryptography is a wheel wheelhouse.toml builds"),
+        (('"x86_64" = {', '"mips" = {'), "files must be a table of target = { sha256 }"),
+        (('sha256 = "' + "9" * 64, 'sha256 = "abc'), "64 lowercase hex digits"),
+        (('tag = "py3-none"', 'tag = "py3-none"\nurl = "https://example.org/x.whl"'), "unknown keys ['url']"),
+        (('["flet-libxml2==2.15.3"]', '["flet-libxml2==2.15.3; extra == \\"x\\""]'), "installs without extras"),
+    ]:
+        text = good.replace(*change, 1)
+        assert text != good
+        holds.write_text(text, encoding="utf-8")
+        with pytest.raises(cmw.ManifestError, match=re.escape(message)):
+            cmw.load_wheelhouse_manifest(manifest)
+    holds.write_text(good + good.split("schema = 1", 1)[1], encoding="utf-8")
+    with pytest.raises(cmw.ManifestError, match="flet-libxslt is listed twice"):
+        cmw.load_wheelhouse_manifest(manifest)
+
+
+def test_a_held_build_makes_the_pins_resolve_again(proj, tmp_path):
+    use_xslt_hold(proj, tmp_path)
+    holds = proj["root"] / "index_holds.toml"
+    kept = holds.read_text(encoding="utf-8")
+    holds.unlink()
+    # without the hold pip takes build 12, whose libxml2 pin contradicts lxml's
+    rc, data = run_main(proj, "--wheelhouse-plan")
+    assert rc == 1 and "flet-libxml2" in errors_text(data)
+    holds.write_text(kept, encoding="utf-8")
+    rc, data = run_main(proj, "--wheelhouse-plan")
+    assert rc == 0, errors_text(data)
+    for t in ALL_TARGETS:
+        row = data["targets"][cmw.TARGETS[t].key]
+        assert (row["flet-libxslt"]["file"], row["flet-libxslt"]["source"]) == (xslt_name(t), "planned")
+        assert row["flet-libxml2"]["version"] == "2.15.3" and row["lxml"]["version"] == "6.1.1"
+    assert {(r["name"], r["status"]) for r in data["wheelhouse"]} >= {("flet-libxslt", "ok"), ("cryptography", "ok")}
+
+
+def test_a_hold_nothing_needs_is_an_error(proj, tmp_path):
+    use_xslt_hold(proj, tmp_path)
+    root = proj["root"]
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    (root / "pyproject.toml").write_text(text.replace('  "lxml==6.1.1",\n', ""), encoding="utf-8")
+    rc, data = run_main(proj, "--wheelhouse-plan", platform="android")
+    assert rc == 1
+    assert ("[android-arm64] flet-libxslt: not in the dependency tree of android-arm64 (nothing needs the hold in "
+            "index_holds.toml any more)") in errors_text(data)
+
+
+def test_index_holds_add_fetches_retags_lists_and_records(proj, tmp_path, monkeypatch, capsys):
+    originals = use_xslt_hold(proj, tmp_path)
+    asked = serve_index_files(monkeypatch, tmp_path / "flet")
+    whdir = full_wheelhouse(tmp_path / "wh", targets_crypto=ANDROID)
+    write_sums(whdir)
+    before = (whdir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    downloads = tmp_path / "held"
+    # the strict checks expect the held wheels: the wheelhouse is incomplete until add has run
+    assert verify(proj, whdir, "android") == 1
+    assert f"missing {xslt_name('x86_64')} (flet-libxslt 1.1.45 for x86_64)" in capsys.readouterr().out
+    assert ih.main(hold_argv(proj, "add", "android", whdir, downloads)) == 0
+    assert asked == [f"{cmw.FLET_INDEX}/files/{xslt_name(t, '11')}" for t in ANDROID]
+    for t in ANDROID:
+        held = whdir / xslt_name(t)
+        assert ih.wheels.compare_retag(originals[t], held, 1000) == []
+        ww = cmw.read_wheel(held)
+        assert ww.problems == [] and ww.wheel_build == "1000" and ww.requires_dist == ["flet-libxml2 (==2.15.3)"]
+    sums = (whdir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert set(before) < set(sums) and len(sums) == len(before) + 2
+    assert all(f"{cmw.file_sha256(whdir / xslt_name(t))}  {xslt_name(t)}" in sums for t in ANDROID)
+    assert verify(proj, whdir, "android") == 0, capsys.readouterr().out
+    # pip's view: the held build 1000 outranks the index's build 12, and libxml2 stays at 2.15.3
+    rc, data = run_main(proj, "--wheelhouse", str(whdir), platform="android")
+    assert rc == 0, errors_text(data)
+    arm = data["targets"]["android-arm64"]
+    assert (arm["flet-libxslt"]["file"], arm["flet-libxslt"]["source"]) == (xslt_name("arm64-v8a"), "wheelhouse")
+    assert arm["flet-libxml2"]["version"] == "2.15.3"
+    assert {row["name"] for row in data["wheelhouse"]} == {"cryptography", "pillow", "flet-libxslt"}
+    # provenance: wheels.py does not know the held wheels; index_holds.py records their source
+    base = ["--manifest", str(proj["root"] / "wheelhouse.toml"), "--pyproject", str(proj["root"] / "pyproject.toml")]
+    assert wh.main(base + ["provenance", "--platform", "android", "--wheelhouse", str(whdir),
+                           "--built", "cryptography pillow"]) == 0
+    assert ih.main(hold_argv(proj, "provenance", "android", whdir, downloads)) == 0
+    doc = json.loads((whdir / "provenance.json").read_text(encoding="utf-8"))
+    prov = {e["file"]: e for e in doc["wheels"]}
+    row = prov[xslt_name("arm64-v8a")]
+    assert row["origin"].startswith(f"pypi.flet.dev {xslt_name('arm64-v8a', '11')} (sha256 ")
+    assert "held at index build 11" in row["origin"] and row["package"] == "flet-libxslt"
+    assert row["retagged_in_this_run"] and not row["built_in_this_run"]
+    assert row["held"] == {"url": f"{cmw.FLET_INDEX}/files/{xslt_name('arm64-v8a', '11')}",
+                           "file": xslt_name("arm64-v8a", "11"), "sha256": cmw.file_sha256(originals["arm64-v8a"]),
+                           "index_build": 11, "build_tag": 1000}
+    assert prov["cryptography-50.0.2-1000-cp313-cp313-android_24_arm64_v8a.whl"]["origin"] == "mobile-forge build"
+    assert doc["index_holds"]["sha256"] == cmw.file_sha256(proj["root"] / "index_holds.toml")
+    assert verify(proj, whdir, "android") == 0
+    # a missing held wheel fails the strict check, and the index's build 12 then wins
+    (whdir / xslt_name("x86_64")).unlink()
+    rc, data = run_main(proj, "--wheelhouse", str(whdir), platform="android")
+    assert rc == 1 and f"missing {xslt_name('x86_64')}" in errors_text(data)
+
+
+def test_index_holds_add_refuses_a_wrong_hash_or_a_file_the_index_lost(proj, tmp_path, monkeypatch, capsys):
+    use_xslt_hold(proj, tmp_path, shas={"x86_64": "0" * 64})
+    serve_index_files(monkeypatch, tmp_path / "flet")
+    whdir = full_wheelhouse(tmp_path / "wh", targets_crypto=ANDROID)
+    write_sums(whdir)
+    sums = (whdir / "SHA256SUMS").read_text(encoding="utf-8")
+    assert ih.main(hold_argv(proj, "add", "android", whdir, tmp_path / "held")) == 1
+    assert "does not match the pinned " + "0" * 64 in capsys.readouterr().err
+    assert not (whdir / xslt_name("x86_64")).exists()
+    assert (whdir / "SHA256SUMS").read_text(encoding="utf-8") == sums       # listed only when every wheel was added
+    assert verify(proj, whdir, "android") == 1
+    capsys.readouterr()
+    # the index no longer has build 11
+    proj["index"].flet["flet-libxslt"] = [n for n in proj["index"].flet["flet-libxslt"] if "-11-" not in n]
+    assert ih.main(hold_argv(proj, "add", "ios", whdir, tmp_path / "held")) == 1
+    assert f"expected one {xslt_name('iphoneos.arm64', '11')}, found 0" in capsys.readouterr().err
+    # nothing held for a platform: nothing to do
+    (proj["root"] / "index_holds.toml").write_text("schema = 1\n", encoding="utf-8")
+    assert ih.main(hold_argv(proj, "add", "android", whdir, tmp_path / "held")) == 0
+    assert ih.main(hold_argv(proj, "provenance", "android", whdir, tmp_path / "held")) == 0
+
+
+def test_verify_installed_checks_the_held_wheel(proj, tmp_path, capsys):
+    use_xslt_hold(proj, tmp_path)
+    manifest = cmw.load_wheelhouse_manifest(proj["root"] / "wheelhouse.toml")
+
+    def site_packages(name: str, build: str) -> Path:
+        sp = tmp_path / name
+        make_site_packages(sp, ANDROID)
+        make_site_packages(sp, ANDROID, name="pillow", version="13.0.0")
+        for t in ANDROID:
+            di = sp / t / "flet_libxslt-1.1.45.dist-info"
+            di.mkdir(parents=True)
+            (di / "WHEEL").write_text(f"Wheel-Version: 1.0\nBuild: {build}\nTag: py3-none-{LABEL[t]}\n", encoding="utf-8")
+        return sp
+
+    errors, notes = cmw.verify_installed(site_packages("held", "1000"), manifest, "android")
+    assert errors == []
+    assert "x86_64: flet-libxslt 1.1.45 build 1000 py3-none-android_24_x86_64 (wheelhouse)" in notes
+    errors, _ = cmw.verify_installed(site_packages("index", "12"), manifest, "android")
+    assert errors == [f"{t}: flet-libxslt 1.1.45 was installed from an index, not the wheelhouse (WHEEL Build 12, "
+                      f"Tag py3-none-{LABEL[t]}; expected Build 1000, Tag py3-none-{LABEL[t]})" for t in ANDROID]
+
+
+def test_real_index_holds_and_the_workflow_steps():
+    manifest = cmw.load_wheelhouse_manifest(MOBILE / "ci" / "wheels" / "wheelhouse.toml")
+    project = cmw.load_project(MOBILE / "pyproject.toml")
+    built = set(project.android_archs) | set(project.ios_archs)
+    for w in manifest.held:
+        assert manifest.wheel(w.name) is None and set(w.targets) == built, w.name
+    if manifest.known("flet-libxslt") is not None:
+        # held because lxml 6.1.1's index wheels need flet-libxml2 2.15.3; drop the hold with the lxml bump
+        assert any(r.key == "lxml" and str(r.spec) == "==6.1.1" for r in project.common), \
+            "lxml moved on: drop the flet-libxslt hold from ci/wheels/index_holds.toml"
+    workflow = (MOBILE.parents[1] / ".github" / "workflows" / "mobile-wheels.yml").read_text(encoding="utf-8")
+    assemble, add = workflow.index("wheels.py assemble "), workflow.index("index_holds.py add ")
+    verify_at, prov = workflow.index("--verify-wheelhouse "), workflow.index("wheels.py provenance ")
+    assert assemble < add < verify_at < prov < workflow.index("index_holds.py provenance ")
+    # a hold must not change the cache keys of the wheels we compile
+    assert all("index_holds" not in line for line in workflow.splitlines() if line.strip().startswith("key:"))
