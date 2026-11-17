@@ -57,7 +57,7 @@ __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine
            "GpuUnavailable", "LlamaEngine", "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
-ENGINE_VERSION = "0.3.32"
+ENGINE_VERSION = "0.3.37"
 #: Qwen3.5 non-thinking sampling defaults (used when a request leaves them out).
 DEFAULT_SAMPLING = {"top_k": 20, "top_p": 0.8, "min_p": 0.0}
 DEFAULT_GPU_LAYERS = 8
@@ -451,9 +451,13 @@ class LlamaEngine(_Base):
             self.mmproj = None
             self.on_gpu = False
             self.device = None
-            if handler is not None:
+            # The projector goes before its model. llama-cpp-python 0.3.37 registers mtmd_free on the
+            # model's own exit stack, after the context and the model, so ``llm.close()`` below runs it
+            # first; up to 0.3.35 the handler had its own stack, closed here.
+            stack = getattr(handler, "_exit_stack", None) if handler is not None else None
+            if stack is not None:
                 try:
-                    handler._exit_stack.close()  # mtmd_free: the projector, before its model goes
+                    stack.close()
                 except Exception:
                     log.debug("freeing the vision projector failed", exc_info=True)
             if llm is not None:
@@ -554,7 +558,7 @@ class LlamaEngine(_Base):
             _empty_cache(llm)
         self.last_finish = "stop"
         completion = 0
-        # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every
+        # 0.3.37's create_chat_completion takes no stopping_criteria: the stream is checked every
         # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop; until the first
         # chunk (the prompt, which can take minutes on a phone) a Stop is seen between two decodes.
         cpus_done = _follow_cpus(llm, self.n_threads)
@@ -859,7 +863,7 @@ def _sliding_window(llama_cpp: Any, llm: Any) -> int:
 
 def _empty_cache(llm: Any) -> None:
     """Start the next request on an empty cache. With ``swa_full=False`` the SWA layers have already dropped
-    the tokens behind their window, but 0.3.32's prompt-prefix reuse (``Llama.generate``) only checks that
+    the tokens behind their window, but 0.3.37's prompt-prefix reuse (``Llama.generate``) only checks that
     ``seq_rm`` succeeds, and it always does: a reused prefix would attend to tokens that are gone."""
     try:
         llm.reset()

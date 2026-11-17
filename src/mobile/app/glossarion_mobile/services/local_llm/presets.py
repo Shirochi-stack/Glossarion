@@ -103,7 +103,7 @@ GPU_PRESETS: tuple = (
 #: The Custom rows (owner 2026-10-31): family -> parameter sizes. Tapping one lists the real files of the
 #: chosen size's repository (``hf.list_repo``), so nothing here names a quant. Checked 2026-10-31 on
 #: https://huggingface.co/api/models/<repo>?blobs=true: every repo exists, is not gated (no Hugging Face
-#: login) and has a Q4_0 file. llama-cpp-python 0.3.32 vendors llama.cpp b3fed31b, whose llama-arch.cpp knows
+#: login) and has a Q4_0 file. llama-cpp-python 0.3.37 vendors llama.cpp a956a852, whose llama-arch.cpp knows
 #: all four architectures (qwen35, llama, gemma3 and gemma4, lfm2) and whose libmtmd knows the Qwen3.5 and
 #: Gemma projectors. Gemma 3 4B and Gemma 4 ship an mmproj ("Reads images"); so does every Qwen 3.5 size.
 #: LFM2 is the lightweight family: 350M to 1.2B parameters, 219-696 MB at Q4_0, and it was trained for
