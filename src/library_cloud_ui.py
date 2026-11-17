@@ -394,26 +394,8 @@ class LibrarySettingsDialog(QDialog):
         self.sign_in_reason = _label("", "warn", wrap=True)
         layout.addWidget(self.sign_in_reason)
 
-        self.own_client = _create_styled_checkbox("Use my own Google OAuth client")
-        self.own_client.setToolTip("A Desktop-type OAuth client you created in the Google Cloud console.")
-        self.own_client.toggled.connect(self._update_drive_enabled_state)
-        layout.addWidget(self.own_client)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(6)
-        grid.setContentsMargins(22, 0, 0, 0)
-        self.client_id = QLineEdit()
-        self.client_id.setPlaceholderText("…apps.googleusercontent.com")
-        self.client_secret = QLineEdit()
-        self.client_secret.setEchoMode(QLineEdit.Password)
-        grid.addWidget(_label("Client ID"), 0, 0)
-        grid.addWidget(self.client_id, 0, 1)
-        grid.addWidget(_label("Client secret"), 1, 0)
-        grid.addWidget(self.client_secret, 1, 1)
-        grid.setColumnStretch(1, 1)
-        layout.addLayout(grid)
-        self.client_id.textChanged.connect(self._update_drive_enabled_state)
-        self.client_secret.textChanged.connect(self._update_drive_enabled_state)
+        # No OAuth client fields (owner 2026-11-17: "just like mobile, there should be no oauth client and
+        # secret id fields"): sign-in uses the app's own Desktop client (google_drive_core.BUILTIN_DESKTOP_*).
 
         divider = QFrame()
         divider.setFrameShape(QFrame.HLine)
@@ -529,12 +511,6 @@ class LibrarySettingsDialog(QDialog):
     def load(self) -> None:
         store = self.cloud.store
         settings = store.drive_settings()
-        own = store.own_client()
-        self.own_client.setChecked(own["use_own"])
-        self.client_id.setText(own["client_id"])
-        self.client_secret.clear()
-        self.client_secret.setPlaceholderText("Saved (leave empty to keep it)" if own["has_secret"] else
-                                              "Client secret")
         self.drive_enabled.setChecked(settings.enabled)
         self.folder.setText(settings.folder)
         index = self.mode.findData(settings.mode)
@@ -584,18 +560,9 @@ class LibrarySettingsDialog(QDialog):
                                                "pixeldrain API key")
         self.pixeldrain_clear.setVisible(has_key)
 
-    def _client_typed(self) -> bool:
-        return bool(self.own_client.isChecked() and self.client_id.text().strip() and (
-            self.client_secret.text().strip() or self.cloud.store.own_client()["has_secret"]))
-
     def _update_drive_enabled_state(self, *_args: Any) -> None:
-        own = self.own_client.isChecked()
-        self.client_id.setEnabled(own)
-        self.client_secret.setEnabled(own)
         signing_in = self._sign_in is not None
         available, reason = self.cloud.sign_in_status()
-        if not available and self._client_typed():
-            available, reason = True, ""  # applied when Sign in is clicked
         signed_in = self.cloud.store.drive_settings().signed_in
         self.sign_in_button.setVisible(not signed_in or signing_in)
         self.sign_in_button.setText("Cancel sign-in" if signing_in else "Sign in with Google")
@@ -609,16 +576,9 @@ class LibrarySettingsDialog(QDialog):
 
     # ---- saving ----------------------------------------------------------------------------------------
 
-    def _apply_client(self) -> None:
-        secret = self.client_secret.text().strip()
-        self.cloud.set_own_client(use_own=self.own_client.isChecked(), client_id=self.client_id.text().strip(),
-                                  client_secret=secret or None)
-        self.client_secret.clear()
-
     def save(self) -> bool:
         store = self.cloud.store
         try:
-            self._apply_client()
             store.set_drive_options(enabled=self.drive_enabled.isChecked(),
                                     mode=self.mode.currentData(), folder=self.folder.text())
             store.set_send_options(expire=int(self.send_expire.currentData()),
@@ -666,7 +626,6 @@ class LibrarySettingsDialog(QDialog):
             self._cancel_sign_in()
             return
         try:
-            self._apply_client()
             sign_in = self.cloud.begin_sign_in(timeout=300)
         except ShareError as exc:
             QMessageBox.warning(self, "Google Drive", exc.message)

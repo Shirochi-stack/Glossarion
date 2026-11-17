@@ -31,7 +31,7 @@ import library_cloud_ui as ui  # noqa: E402
 import library_core  # noqa: E402
 import library_covers  # noqa: E402
 import share_hosting as sh  # noqa: E402
-from test_cloud_drive_core import FakeGofile, FakeGoogle, _browser  # noqa: E402
+from test_cloud_drive_core import FakeGofile, FakeGoogle, _browser, no_builtin_google_client  # noqa: E402,F401
 
 
 @pytest.fixture(scope="module")
@@ -138,29 +138,35 @@ def _book(tmp_path, compiled=True):
 # ---------------------------------------------------------------------------------------------------
 
 
-def test_settings_start_signed_out_with_sign_in_disabled_and_save_the_drive_options(qapp, google, tmp_path, box):
+def test_settings_start_signed_out_with_sign_in_ready_and_save_the_drive_options(qapp, google, tmp_path, box,
+                                                                                 monkeypatch):
+    """Owner 2026-11-17: "just like mobile, there should be no oauth client and secret id fields": the window
+    has Sign in with Google and nothing to set up; the sign-in uses the app's own Desktop client."""
+    from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit
+
+    import google_drive_core as gdc
+
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", "built-in.apps.googleusercontent.com")
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", "built-in-secret")
     cloud, store, _ = _cloud(google, tmp_path, box)
     dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
     try:
-        # off by default; no client: Sign in is disabled with the one-line reason
+        # off by default; Sign in is ready with nothing typed, and no reason line
         assert not dialog.drive_enabled.isChecked()
         assert dialog.mode.currentData() == "compiled" and dialog.folder.text() == "Glossarion"
         assert [dialog.mode.itemText(i) for i in range(dialog.mode.count())] == [dsc.MODE_LABELS[m]
                                                                                  for m in dsc.MODES]
-        assert not dialog.sign_in_button.isEnabled()
-        import google_drive_core as gdc
-
-        assert dialog.sign_in_reason.text() == gdc.NO_DESKTOP_CLIENT
+        assert dialog.sign_in_button.isEnabled() and dialog.sign_in_button.text() == "Sign in with Google"
+        assert dialog.sign_in_reason.isHidden() and dialog.sign_in_reason.text() == ""
         assert dsc.FOLDER_NOTE in [w.text() for w in dialog.findChildren(type(dialog.sign_in_reason))]
+        # no OAuth client option or fields anywhere in the window
+        assert not any(hasattr(dialog, name) for name in ("own_client", "client_id", "client_secret"))
+        texts = [w.text() for w in dialog.findChildren(QLabel)] + [w.text() for w in dialog.findChildren(QCheckBox)]
+        assert not any("OAuth" in text or "Client ID" in text or "Client secret" in text for text in texts)
+        assert [w for w in dialog.findChildren(QLineEdit) if w.echoMode() == QLineEdit.Password] == [
+            dialog.pixeldrain_key]
         # the house dropdown: Halgakos arrow, wheel ignored
         assert "Halgakos.ico" in dialog.mode.styleSheet()
-        # typing an own client enables Sign in before it is saved (as the text changes, no Save needed)
-        dialog.own_client.setChecked(True)
-        assert not dialog.sign_in_button.isEnabled()
-        dialog.client_id.setText("my-client.apps.googleusercontent.com")
-        assert not dialog.sign_in_button.isEnabled()
-        dialog.client_secret.setText("my-secret-value")
-        assert dialog.sign_in_button.isEnabled() and dialog.sign_in_reason.isHidden()
         dialog.drive_enabled.setChecked(True)
         dialog.folder.setText(" Books / Glossarion ")
         dialog.mode.setCurrentIndex(dialog.mode.findData("full_raw"))
@@ -168,13 +174,40 @@ def test_settings_start_signed_out_with_sign_in_disabled_and_save_the_drive_opti
         settings = store.drive_settings()
         assert (settings.enabled, settings.mode, settings.folder, settings.signed_in) == (
             True, "full_raw", "Books/Glossarion", False)
-        assert store.own_client() == {"use_own": True, "client_id": "my-client.apps.googleusercontent.com",
-                                      "has_secret": True}
+        assert store.own_client() == {"use_own": False, "client_id": "", "has_secret": False}
         assert dialog.save_button.text() == "💾 Saved!"
-        raw = Path(store.path).read_text("utf-8")
-        assert "my-secret-value" not in raw
-        assert dialog.client_secret.text() == "" and "Saved" in dialog.client_secret.placeholderText()
+        assert "built-in-secret" not in Path(store.path).read_text("utf-8")  # the app's client is not stored
         assert google.requests == []
+    finally:
+        dialog.close()
+
+
+def test_the_shipped_build_offers_sign_in_with_nothing_to_set_up(qapp, google, tmp_path, box, monkeypatch):
+    import google_drive_core as gdc
+    from test_cloud_drive_core import SHIPPED_DESKTOP_CLIENT
+
+    assert all(SHIPPED_DESKTOP_CLIENT)  # this build has its own Google client
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", SHIPPED_DESKTOP_CLIENT[0])
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", SHIPPED_DESKTOP_CLIENT[1])
+    cloud, store, _ = _cloud(google, tmp_path, box)
+    dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
+    try:
+        assert cloud.sign_in_status() == (True, "")
+        assert dialog.sign_in_button.isEnabled() and dialog.sign_in_reason.isHidden()
+        assert google.requests == []  # nothing is sent until Sign in is clicked
+    finally:
+        dialog.close()
+
+
+def test_a_build_without_a_google_client_says_so(qapp, google, tmp_path, box, monkeypatch):
+    import google_drive_core as gdc
+
+    cloud, store, _ = _cloud(google, tmp_path, box)
+    dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
+    try:
+        assert not dialog.sign_in_button.isEnabled()
+        assert dialog.sign_in_reason.text() == gdc.NO_DESKTOP_CLIENT
+        assert "OAuth" not in gdc.NO_DESKTOP_CLIENT and "client" not in gdc.NO_DESKTOP_CLIENT.lower()
     finally:
         dialog.close()
 

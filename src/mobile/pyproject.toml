@@ -256,7 +256,7 @@ UIBackgroundModes = ["processing"]
 BGTaskSchedulerPermittedIdentifiers = ["com.glossarion.app.job.*"]
 CFBundleURLTypes = [
   { CFBundleURLName = "app", CFBundleURLSchemes = ["glossarion"] },
-  { CFBundleURLName = "Google Drive", CFBundleURLSchemes = ["com.googleusercontent.apps.957824331511-1445nlka8d0ea1070r36109c4bqmshb2"] },
+  { CFBundleURLName = "Google Drive", CFBundleURLSchemes = ["com.googleusercontent.apps.367122224200-tutkli1r6u6cjluv373bl5tf8gnf53rd"] },
 ]
 CFBundleDocumentTypes = [
   { CFBundleTypeName = "EPUB", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["org.idpf.epub-container", "org.idpf.epub-folder"] },
