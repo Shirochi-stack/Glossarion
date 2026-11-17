@@ -16,7 +16,7 @@
 #
 # wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
 # mobile wheels (cryptography 50.0.2, Pillow 13.0.0) and the on-device engine with vision
-# (llama-cpp-python 0.3.32 with libmtmd; src/mobile/ci/wheels/wheelhouse.toml), which
+# (llama-cpp-python 0.3.37 with libmtmd; src/mobile/ci/wheels/wheelhouse.toml), which
 # no index has; iOS Pillow is PyPI's official wheel retagged with build tag 1000 (pypi.flet.dev's
 # pillow-13.0.0-1 lacks AVIF / ImageCms). Android needs prepare + wheels-android, the iOS jobs
 # prepare + wheels-ios. Each build job hands them to flet build through .github/actions/mobile-wheelhouse

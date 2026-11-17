@@ -183,9 +183,11 @@ jni_flutter = "1.0.3"
 shared_preferences_android = "2.4.28"
 
 # llama-cpp-python (the built-in on-device engine, Model manager › On-device) is device-only too,
-# so the host `uv sync` never builds its 70 MB sdist. pypi.flet.dev ships cp313 builds for all five
-# targets (build tag 2: flet-dev/mobile-forge recipes/llama-cpp-python with the Flet 0.86 ctypes
-# loader fixes; CPU only, GGML_NATIVE=OFF, 16 KB pages on Android). It is pure ctypes over
+# so the host `uv sync` never builds its 80 MB sdist. pypi.flet.dev's cp313 builds stop at 0.3.32
+# (build tag 2: flet-dev/mobile-forge recipes/llama-cpp-python with the Flet 0.86 ctypes loader
+# fixes; CPU only, GGML_NATIVE=OFF, 16 KB pages on Android), whose llama.cpp cannot load newer GGUF
+# files (PLaMo 3: tokenizer model "plamo3"), so the 0.3.37 wheels for all five targets are our own
+# (ci/wheels/wheelhouse.toml, build 1000, with libmtmd). It is pure ctypes over
 # libggml-base/libggml-cpu/libggml/libllama; the Android build adds flet-libcpp-shared (libc++_shared.so)
 # and the pip resolve adds jinja2, markupsafe and diskcache. ENGINE_VERSION in the app equals this pin;
 # ci/wheels/wheels.py verify-site-packages checks the installed libraries after every `flet build`.
@@ -206,7 +208,7 @@ extract_packages = ["langdetect", "certifi", "cv2", "tiktoken_ext", "rapidocr_on
 dependencies = [
   "psutil==7.2.2",                             # Android only; every use is guarded
   "rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2",
-  "llama-cpp-python==0.3.32",                  # built-in engine (note above)
+  "llama-cpp-python==0.3.37",                  # built-in engine (note above)
 ]
 
 [tool.flet.android.permission]
@@ -237,7 +239,7 @@ networkSecurityConfig = "@xml/glossarion_network_security_config"
 export_method = "release-testing"   # used only when CI passes signing flags
 dependencies = [
   "rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2",   # RapidOCR, see [tool.flet.android]
-  "llama-cpp-python==0.3.32",                                            # built-in engine, see [tool.flet.android]
+  "llama-cpp-python==0.3.37",                                            # built-in engine, see [tool.flet.android]
 ]
 
 [tool.flet.ios.info]

@@ -119,7 +119,7 @@ client (no window), including an Android simulation with the real
 
 ### On-device engine (llama.cpp)
 
-Model manager › On-device runs GGUF models inside the app through **llama-cpp-python 0.3.32**
+Model manager › On-device runs GGUF models inside the app through **llama-cpp-python 0.3.37**
 (`[tool.flet.android]` / `[tool.flet.ios]` dependencies; device-only, so the host `uv sync` never
 builds its sdist). pypi.flet.dev has cp313 wheels of that version for all five targets (flet-dev/
 mobile-forge `recipes/llama-cpp-python`, build tag 2), but they are built without llava/mtmd, so no
