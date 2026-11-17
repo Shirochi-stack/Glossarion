@@ -1466,23 +1466,61 @@ def on_device_row(threads: bool = False) -> str:
         return ""
 
 
+#: how many in-flight requests the job notification shows streamed text for; the rest is one "+N more" row
+#: (owner 2026-11-17: "It should be at least 5, with a +N when there is more not shown")
+NOTIFICATION_STREAM_ROWS = 5
+#: each request's streamed text while several requests stream (about one row each on a phone)
+NOTIFICATION_MULTI_STREAM_CHARS = 44
+MORE_STREAMS_ROW = "+{n} more"
+
+
+def request_streams(segments: Any) -> list:
+    """``[(text, thinking)]``: the text each in-flight request streams, in the order of the request cards
+    (``DirectTextStream.segments``): its thinking while it thinks, then its answer. Finished requests,
+    status-only cards and requests that have streamed nothing yet give no entry."""
+    streams: list = []
+    for segment in segments or ():
+        if not isinstance(segment, Mapping) or segment.get("complete") or segment.get("status_only"):
+            continue
+        answer = str(segment.get("content") or "")
+        thought = str(segment.get("thinking") or "")
+        if thought.strip() and (segment.get("phase") == "thinking" or not answer.strip()):
+            streams.append((thought[-STREAM_TAIL_KEEP:], True))
+        elif answer.strip():
+            streams.append((answer[-STREAM_TAIL_KEEP:], False))
+    return streams
+
+
 def live_rows(snap: Optional[JobSnapshot], stream_tail: str = "", thinking: bool = False, *,
-              device: Optional[str] = None, limit: int = NOTIFICATION_STREAM_CHARS) -> list:
+              device: Optional[str] = None, limit: int = NOTIFICATION_STREAM_CHARS,
+              streams: Optional[Sequence[tuple]] = None, max_rows: int = NOTIFICATION_STREAM_ROWS) -> list:
     """Hotfix 3: rows under the job notification's book line while a request runs: the on-device model's
     prompt reading / speed (one row) and, with Streaming on, the end of the text it streams (about three
     rows). None while the job waits for an answer or is not running. ``device``: the on-device row to show
     (``JobService.device_row``: '' for a job of a multi-instance run that does not use the on-device model);
-    None reads it here."""
+    None reads it here.
+
+    ``streams`` (``request_streams``): while two or more in-flight requests stream, each gets its own short
+    row, up to ``max_rows``, and the others are counted in a last "+N more" row. One request (or none known
+    by request) keeps the single longer row of ``stream_tail``."""
     if snap is None or snap.question or not snap.is_active:
         return []
-    streamed = stream_row(stream_tail, limit)
     # hotfix 4 (owner: "why is there no visual styling for that log area"): the notification is plain text
     # (flutter_foreground_task's BigTextStyle takes a string), so the streamed text gets its own marker: 🧠 for
     # the request's thinking, ✍️ for its answer
-    mark = THINKING_ROW_MARK if thinking else STREAM_ROW_MARK
-    rows = [row for row in (on_device_row() if device is None else device, f"{mark}{streamed}" if streamed else "")
-            if row]
-    return rows
+    several = [(text, bool(thinks)) for text, thinks in (streams or ()) if stream_row(text, limit)]
+    if len(several) >= 2:
+        short = min(int(limit), NOTIFICATION_MULTI_STREAM_CHARS)
+        shown = several[:max(1, int(max_rows))]
+        stream_rows = [f"{THINKING_ROW_MARK if thinks else STREAM_ROW_MARK}{stream_row(text, short)}"
+                       for text, thinks in shown]
+        if len(several) > len(shown):
+            stream_rows.append(MORE_STREAMS_ROW.format(n=len(several) - len(shown)))
+    else:
+        streamed = stream_row(stream_tail, limit)
+        mark = THINKING_ROW_MARK if thinking else STREAM_ROW_MARK
+        stream_rows = [f"{mark}{streamed}"] if streamed else []
+    return [row for row in (on_device_row() if device is None else device, *stream_rows) if row]
 
 
 #: the streamed text each job's rows show in a multi-instance notification (one job's rows stay short)
@@ -2349,6 +2387,22 @@ class JobService:
         with self._lock:
             job = self._active if job_id is None else self._find_live(job_id)
             return bool(job.stream_thinking) if job is not None else False
+
+    def request_streams(self, job_id: Optional[str] = None) -> list:
+        """``[(text, thinking)]`` of every in-flight request of the active job (or ``job_id``) that streams
+        (``request_streams`` over the job's request cards as classified so far): the notification's rows
+        while several requests run at once. [] without a request stream."""
+        with self._lock:
+            job = self._active if job_id is None else self._find_live(job_id)
+            stream = job.stream if job is not None else None
+        segments = getattr(stream, "segments", None)
+        if not callable(segments):
+            return []
+        try:
+            return request_streams(segments(drain=False))
+        except Exception:
+            log.debug("the request streams of job %s are unavailable", job_id, exc_info=True)
+            return []
 
     def device_row(self, job_id: Optional[str] = None, *, threads: bool = False) -> str:
         """The on-device model's status row for job ``job_id`` (instance 1's job when None; ``on_device_row``)
