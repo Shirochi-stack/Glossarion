@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Google Drive privacy policy · Glossarion Help</title>
+  <meta name="description" content="What Glossarion sends to Google Drive when you turn on Google Drive sync or share a book through Drive, what it stores on your device, and how to disconnect.">
+  
+  <link rel="icon" type="image/png" href="../../assets/site/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../assets/site/site.css">
+  <script src="../../assets/site/site.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="../../"><img src="../../assets/site/halgakos-avatar.webp" alt="" width="34" height="34">Glossarion</a>
+      <nav class="nav" aria-label="Main">
+        <a href="../../#features">Features</a>
+        <a href="../../#download">Download</a>
+        <a class="nav-new" href="../../webtoons/">Webtoons<span class="new-badge">New</span></a>
+        <a href="../">Help</a>
+        <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
+        <a href="../donate/">Donate</a>
+      </nav>
+      <div class="header-actions">
+        <a class="icon-btn" href="https://github.com/Shirochi-stack/Glossarion" aria-label="Glossarion on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.4c.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a>
+        <button class="icon-btn" type="button" data-theme-toggle aria-label="Toggle dark mode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg></button>
+        <button class="icon-btn menu-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      </div>
+    </div>
+    <nav class="mobile-nav" aria-label="Mobile">
+      <a href="../../#features">Features</a>
+      <a href="../../#download">Download</a>
+      <a class="nav-new" href="../../webtoons/">Webtoons<span class="new-badge">New</span></a>
+      <a href="../">Help</a>
+      <a href="https://github.com/Shirochi-stack/Glossarion/releases">Releases</a>
+      <a href="../donate/">Donate</a>
+    </nav>
+  </header>
+
+  <main class="wrap help">
+    <aside class="help-side" aria-label="Help topics">
+      <h5>Guides</h5>
+      <ul>
+        <li><a href="../">Getting started</a></li>
+        <li><a href="../guides/">All guides &amp; docs</a></li>
+      </ul>
+      <h5>Help</h5>
+      <ul>
+        <li><a href="../faq/">FAQ</a></li>
+        <li><a href="https://discord.gg/n7WXRXn533">Discord support</a></li>
+        <li><a href="https://github.com/Shirochi-stack/Glossarion/issues">Report a bug</a></li>
+      </ul>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="../donate/">Contribute &amp; donate</a></li>
+        <li><a href="../privacy/" aria-current="page">Google Drive privacy</a></li>
+        <li><a href="https://github.com/Shirochi-stack/Glossarion/releases">Release notes</a></li>
+      </ul>
+    </aside>
+
+    <article class="prose">
+      <h1>Google Drive privacy policy</h1>
+      <p class="lead">Effective November 17, 2026. This policy covers the optional Google Drive features of Glossarion on Windows, macOS, Linux, Android and iOS: Google Drive sync and sharing a book through Drive. Glossarion works without them, and nothing is sent to Google until you sign in and turn one of them on.</p>
+
+      <h2 id="permission">Permission and use</h2>
+      <p>Google handles the sign-in and asks for your consent. Glossarion requests one permission, <code>drive.file</code>. With it Glossarion can create files and folders in your Google Drive and manage the ones it created. It cannot see or change anything else in your Drive.</p>
+      <p>Glossarion uses this permission only to do what you ask: upload your books to a Drive folder (Google Drive sync) and create a share link for a file (Share via link).</p>
+
+      <h2 id="data-sent">Data sent to Google</h2>
+      <p>When a sync or a share runs, Glossarion sends the files you chose for it, their file names and the name of the Drive folder, directly from your device to Google's Drive API over HTTPS. Depending on the setting you picked, the files are a book's compiled EPUB or PDF, its whole output folder, or the output folder together with the raw source file.</p>
+      <p>When you share a file through Drive, Glossarion also sets that file to "anyone with the link can view" so the link works. You decide which books are uploaded and who gets a link.</p>
+      <p>Google stores the files in the account you signed in with. Glossarion has no server of its own: its developers receive none of your files, your Google account details or your sign-in.</p>
+
+      <h2 id="local-storage">What is stored on your device</h2>
+      <ul>
+        <li><strong>Windows, macOS and Linux:</strong> the Google sign-in (a refresh token) is stored encrypted in <code>library_cloud.json</code> next to Glossarion's configuration file, so later uploads do not need a new sign-in.</li>
+        <li><strong>iOS:</strong> the refresh token is stored encrypted, with the key kept in the system Keychain.</li>
+        <li><strong>Android:</strong> Google Play services keeps the authorization; Glossarion keeps a note that Drive is connected.</li>
+      </ul>
+      <p>Access tokens are kept in memory only. Share links and the time of the last sync are kept on your device.</p>
+
+      <h2 id="control">Retention and control</h2>
+      <p>Sign out (desktop: Library settings; mobile: Settings › Cloud sync &amp; sharing) removes the saved sign-in from your device. On Windows, macOS, Linux and iOS it also asks Google to revoke Glossarion's access. On Android the authorization is kept by Google Play services until you remove it.</p>
+      <p>On every platform you can remove Glossarion's access yourself in your Google Account under third-party connections.</p>
+      <p>Files that were uploaded stay in your Google Drive until you delete them there. To change who can open a shared file, change its sharing in Drive.</p>
+
+      <h2 id="google-policy">Google API data policy</h2>
+      <p>Glossarion's use and transfer of information received from Google APIs follows the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Google's own handling of your account and files is described in the <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.</p>
+
+      <h2 id="contact">Contact</h2>
+      <p>Questions about this policy or about how Glossarion handles Google Drive data: open an issue on <a href="https://github.com/Shirochi-stack/Glossarion/issues">GitHub</a> or ask on <a href="https://discord.gg/n7WXRXn533">Discord</a>.</p>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-bottom" style="margin-top:0;border-top:0;padding-top:0">
+        <span>Glossarion · free and open source under AGPL-3.0</span>
+        <span><a href="https://github.com/Shirochi-stack/Glossarion">GitHub</a> · <a href="https://discord.gg/n7WXRXn533">Discord</a> · <a href="../donate/">Donate</a></span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
