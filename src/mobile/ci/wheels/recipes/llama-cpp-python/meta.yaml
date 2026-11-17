@@ -3,9 +3,11 @@
 # BSD-3-Clause, see ../LICENSE.mobile-forge). build_wheels.sh runs forge on this directory
 # in place (forge <host> <path>), so the forge checkout itself is never patched.
 #
-# Why: pypi.flet.dev's llama_cpp_python-0.3.32-2 wheels are built with the llava/mtmd build off, so they
-# ship no libmtmd and no on-device model can see images. Same version (0.3.32, the pyproject pin),
-# same CMake flags and loader patch, plus the multimodal library:
+# Why: pypi.flet.dev's llama-cpp-python wheels (0.3.32 builds 1 and 2, nothing newer) are built with the
+# llava/mtmd build off, so they ship no libmtmd and no on-device model can see images, and their
+# llama.cpp (2026-06-28) cannot load GGUF files that need a later one (PLaMo 3: tokenizer model
+# "plamo3", llama.cpp #30045 of 2026-10-06). Version 0.3.37 (the pyproject pin; llama.cpp a956a852 of
+# 2026-11-14), forge's CMake flags and loader patch, plus the multimodal library:
 #   - build number 1000 (wheelhouse.toml build_tag; outranks the index's build 2);
 #   - LLAVA_BUILD=ON: llama-cpp-python builds vendor/llama.cpp/tools/mtmd as libmtmd (clip + the
 #     vision projectors: Qwen2/2.5/3-VL and Qwen3.5, Gemma 3/4, SmolVLM, MiniCPM-V, ...), loaded by
@@ -32,7 +34,7 @@
 #       compiled on the device: no Metal toolchain at build time), libggml-metal linked into libggml.
 package:
   name: llama-cpp-python
-  version: "0.3.32"
+  version: "0.3.37"
 
 build:
   number: 1000
@@ -104,6 +106,7 @@ requirements:
     - flet-libcpp-shared >=27.2.12479018
 # {% endif %}
 
+# (0.3.32 also carried opencl-flash-attention.patch, a backport of llama.cpp 6f8895fe and f2cc7282:
+# both are in 0.3.37's llama.cpp, with the DK=512 split.)
 patches:
   - mobile.patch
-  - opencl-flash-attention.patch

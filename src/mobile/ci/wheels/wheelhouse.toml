@@ -1,8 +1,8 @@
 # The mobile wheelhouse: the security pins (cryptography==50.0.2, pillow==13.0.0) and the on-device
-# engine with vision (llama-cpp-python==0.3.32 with libmtmd).
+# engine with vision (llama-cpp-python==0.3.37 with libmtmd).
 #
 # No index had Android/iOS cp313 wheels for these versions we could ship (pypi.flet.dev's
-# llama-cpp-python 0.3.32 builds lack libmtmd: LLAVA_BUILD=OFF; its pillow-13.0.0-1 iOS builds lack
+# llama-cpp-python builds stop at 0.3.32 and lack libmtmd: LLAVA_BUILD=OFF; its pillow-13.0.0-1 iOS builds lack
 # AVIF, ImageCms, JPEG 2000 and LZMA), so .github/workflows/mobile-wheels.yml builds them with
 # flet-dev/mobile-forge, except the [wheel.retag] targets (iOS Pillow), which are PyPI's official
 # wheels retagged with build_tag. The mobile builds feed the wheelhouse to `flet build` through
@@ -127,17 +127,18 @@ requires_dist_ios = []
 "iphonesimulator.arm64" = { url = "https://files.pythonhosted.org/packages/cb/be/436dac0996876f65ef1916ffb711c5ef4af2ebc57414b6f16642e07f6b47/pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl", sha256 = "34fb3db1149c879343861831728c243c432d4a5afc8f1878ca7612ef8de2a033" }
 "iphonesimulator.x86_64" = { url = "https://files.pythonhosted.org/packages/60/16/7c1007162e4169ea0d5bec47e2e0b2174f56c50cf5b8c02a1dc23e41037e/pillow-13.0.0-cp313-cp313-ios_13_0_x86_64_iphonesimulator.whl", sha256 = "2d50500a4a3bc6469adcdb319cf05d688b08ca3bf0f22a05339f3b25b433a599" }
 
-# The built-in llama.cpp engine with the multimodal library (libmtmd) for vision models. Same
-# version as pypi.flet.dev's build 2 (the pyproject pin), built from forge's recipe with
-# LLAVA_BUILD=ON (recipes/llama-cpp-python). A device-only pin: uv.lock has no entry, so the sdist
-# URL and hash are here (PyPI JSON, checked 2026-10-17 against the downloaded bytes).
+# The built-in llama.cpp engine with the multimodal library (libmtmd) for vision models. Newer than
+# pypi.flet.dev's 0.3.32 build 2 (the pyproject pin is 0.3.37: PLaMo 3's tokenizer needs its
+# llama.cpp), built from forge's recipe with LLAVA_BUILD=ON (recipes/llama-cpp-python). A
+# device-only pin: uv.lock has no entry, so the sdist URL and hash are here (PyPI JSON, checked
+# 2026-11-17 against the downloaded bytes).
 # Requires-Dist: forge adds the Android host requirement flet-libcpp-shared (libc++_shared.so).
 [[wheel]]
 name = "llama-cpp-python"
-version = "0.3.32"
+version = "0.3.37"
 recipe = "recipes/llama-cpp-python"
-sdist_sha256 = "b06502361770f82eb08b7f1a192eb084b9ead2b88fe32cda8c397a2782eabde6"
-sdist_url = "https://files.pythonhosted.org/packages/18/c8/3eb9c10c138eaa9d6148471701476169322eafbd825fdc13ec326552b516/llama_cpp_python-0.3.32.tar.gz"
+sdist_sha256 = "bf4108fc76e933ea4969b61b1e281a2d232dd3e43361d1fdca5e2e029d62f729"
+sdist_url = "https://files.pythonhosted.org/packages/7f/9a/3ebc0b3ef42b8d9cc7d15dc9b147b3e8ce11bfdb61eb381c3eb7d9762373/llama_cpp_python-0.3.37.tar.gz"
 targets = ["arm64-v8a", "x86_64", "iphoneos.arm64", "iphonesimulator.arm64", "iphonesimulator.x86_64"]
 requires_dist = ["typing-extensions>=4.5.0", "numpy>=1.20.0", "diskcache>=5.6.1", "jinja2>=2.11.3"]
 requires_dist_android = ["typing-extensions>=4.5.0", "numpy>=1.20.0", "diskcache>=5.6.1", "jinja2>=2.11.3",

@@ -724,7 +724,7 @@ def test_real_manifest_matches_pins_lock_and_recipes():
     project = cmw.load_project(cmw.DEFAULT_PYPROJECT)
     assert cmw.check_manifest_pins(manifest, project, MOBILE / "uv.lock") == []
     assert {w.name: w.version for w in manifest.wheels} == {"cryptography": "50.0.2", "pillow": "13.0.0",
-                                                            "llama-cpp-python": "0.3.32"}
+                                                            "llama-cpp-python": "0.3.37"}
     assert manifest.build_tag > 11, "must outrank pypi.flet.dev's build tags"
     crypto = manifest.wheel("cryptography")
     assert set(crypto.targets) == set(ANDROID + IOS), "serious_python installs all three iOS slices"
@@ -760,8 +760,8 @@ def test_llama_wheel_is_device_only_with_mtmd_and_per_platform_requires():
     manifest = cmw.load_wheelhouse_manifest(cmw.DEFAULT_WHEELHOUSE_MANIFEST)
     project = cmw.load_project(cmw.DEFAULT_PYPROJECT)
     llama = manifest.wheel("llama-cpp-python")
-    assert llama.sdist_url.endswith("/llama_cpp_python-0.3.32.tar.gz")
-    assert ("llama-cpp-python", "0.3.32") not in cmw.load_uv_lock_sdists(MOBILE / "uv.lock")
+    assert llama.sdist_url.endswith("/llama_cpp_python-0.3.37.tar.gz")
+    assert ("llama-cpp-python", "0.3.37") not in cmw.load_uv_lock_sdists(MOBILE / "uv.lock")
     assert not [r for r in project.common if r.key == "llama-cpp-python"]
     assert set(llama.targets) == set(ANDROID + IOS)
     base = {"typing-extensions>=4.5.0", "numpy>=1.20.0", "diskcache>=5.6.1", "jinja2>=2.11.3"}

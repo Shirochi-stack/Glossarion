@@ -637,16 +637,33 @@ class BackgroundExecution:
             device = str(self.jobs.device_row(job_id) or "")
         except Exception:
             log.debug("the notification rows of job %s failed", job_id, exc_info=True)
+        streams = self._request_streams(job_id)
         if not self.is_android:
-            tail, device = "", ""  # the iOS continued-processing task shows one line per job
-        return live_rows(snap, tail, thinking, device=device, limit=NOTIFICATION_SUMMARY_STREAM_CHARS)
+            tail, device, streams = "", "", []  # the iOS continued-processing task shows one line per job
+        # the jobs share the notification: each shows its share of the stream rows (at least one)
+        return live_rows(snap, tail, thinking, device=device, limit=NOTIFICATION_SUMMARY_STREAM_CHARS,
+                         streams=streams, max_rows=getattr(self, "_stream_rows_per_job", 1))
+
+    def _request_streams(self, job_id: Any) -> list:
+        """``JobService.request_streams``: the text of each in-flight request that streams ([] when the jobs
+        service has none)."""
+        getter = getattr(self.jobs, "request_streams", None) if self.jobs is not None else None
+        if not callable(getter):
+            return []
+        try:
+            return list(getter(job_id) or [])
+        except Exception:
+            log.debug("the request streams of job %s failed", job_id, exc_info=True)
+            return []
 
     def _notification(self, snap: Any, running: Optional[list] = None) -> tuple:
         """(headline, book line, live rows, text) of the ongoing notification: ``snap``'s as before while it runs
         alone, else the summary of every running job (one row each, then that job's live rows)."""
-        from glossarion_mobile.services.jobs import notification_lines, notification_summary, notification_text
+        from glossarion_mobile.services.jobs import (NOTIFICATION_STREAM_ROWS, notification_lines,
+                                                     notification_summary, notification_text)
 
         running = self._running(snap) if running is None else running
+        self._stream_rows_per_job = max(1, NOTIFICATION_STREAM_ROWS // max(1, len(running)))
         if len(running) <= 1:
             rows = self._live_rows(snap)
             headline, book = notification_lines(snap)
@@ -812,7 +829,8 @@ class BackgroundExecution:
             except Exception:
                 thinking = False
         try:
-            return live_rows(snap, tail, thinking)
+            # owner 2026-11-17: up to five in-flight requests' streamed text, then "+N more"
+            return live_rows(snap, tail, thinking, streams=self._request_streams(job_id))
         except Exception:
             log.debug("the notification's live rows failed", exc_info=True)
             return []
