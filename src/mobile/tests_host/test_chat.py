@@ -2149,6 +2149,9 @@ def test_open_in_library_action_and_moved_workspace_retry(desktop_store_cls, iso
 
     assert [a[0] for a in ATTACHMENT_ACTIONS if a[0] in ("migrate", "library")] == ["library"]
     assert dict((a[0], a[1:3]) for a in ATTACHMENT_ACTIONS)["library"] == ("Open in Library", "LOCAL_LIBRARY")
+    # Owner 2026-11-17: no "Open output" on the card (redundant), and Open in Library sits beside Read
+    assert [a[0] for a in ATTACHMENT_ACTIONS] == ["read", "library", "export", "compile", "qa", "progress",
+                                                  "retry", "cloud", "share_link"]
 
     async def scenario():
         chat = _chat_view(desktop_store_cls, tmp_path, library_book=library_book,
@@ -2175,6 +2178,9 @@ def test_open_in_library_action_and_moved_workspace_retry(desktop_store_cls, iso
             result = next(c for c in _cards(view, JobCard) if c.title_text.value == "book.epub")
             button = result.action_buttons["library"]
             assert isinstance(button, ft.FilledTonalButton) and not button.disabled
+            shown = list(result.buttons.controls)  # the row as drawn: Read, then Open in Library
+            assert shown.index(button) == shown.index(result.action_buttons["read"]) + 1
+            assert "open_output" not in result.action_buttons
             assert await view.env.run_io(view._job_workspace_state, item) == (str(target), False)
             button.on_click(None)
             await _settle(calls)

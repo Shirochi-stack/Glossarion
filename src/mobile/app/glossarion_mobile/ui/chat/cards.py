@@ -14,8 +14,8 @@ rendered-card limit) and "↑ Show … earlier requests" pages back. Result grou
 persisted request cards, the desktop "Extraction report", the output chips of the turn's
 own workspace (compiled EPUB / PDF,
 ``*_translated.txt``, subtitles, SDLXLIFF, glossary; ``set_outputs``) and the "Attachment
-actions" (Read · Share/Export · Compile ▾ EPUB / PDF · QA scan · Open output · Retry failed ·
-Open in Library: a finished book's workspace moves into the Library by itself, so the card links
+actions" (Read · Open in Library · Share/Export · Compile ▾ EPUB / PDF · QA scan · Progress · Retry failed:
+a finished book's workspace moves into the Library by itself, so the card links
 to its Library book); an action that cannot run is shown disabled with a ReasonChip, nothing
 hidden (``set_action_reason`` sets a reason the chat works out on the io pool).
 
@@ -88,13 +88,14 @@ _MUTED = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
 #: (id, label, icon, milestone when it ships or None)
 ATTACHMENT_ACTIONS = (
     ("read", "Read", "AUTO_STORIES", None),
+    # beside Read: both open the finished book. (No "Open output": the Library book has the files, and the
+    # output chips above open each one.)
+    ("library", "Open in Library", "LOCAL_LIBRARY", None),
     ("export", "Share / Export", "IOS_SHARE", None),
     ("compile", "Compile ▾", "MENU_BOOK", None),
     ("qa", "QA scan", "FACT_CHECK", None),
-    ("open_output", "Open output", "FOLDER_OPEN", None),
     ("progress", "Progress", "TIMELINE", None),
     ("retry", "Retry failed", "REPLAY", None),
-    ("library", "Open in Library", "LOCAL_LIBRARY", None),
     ("cloud", "Send to cloud", "CLOUD_UPLOAD", None),
     ("share_link", SHARE_LABEL, "LINK", None),
 )

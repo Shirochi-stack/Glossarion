@@ -95,6 +95,8 @@ FIT_MAX_SCALE = 1.4
 #: seconds a new viewer size must stay before a still-fitted diagram is fitted into it (the keyboard and
 #: full screen change the size over several frames)
 REFIT_DELAY = 0.15
+#: the longest a fit waits for the client to lay out a canvas whose size just changed (``_canvas_laid_out``)
+CANVAS_WAIT = 1.0
 UNDO_LIMIT = 20
 GENDER_CHOICES = (("male", "Male"), ("female", "Female"), ("auto", "Not set (automatic)"))
 VIEW_PADDING = 12
@@ -222,7 +224,11 @@ class RelationsDiagram:
         self._refit_seq = 0  # the viewer's size changes: the last one fits a still-fitted diagram again
         self.refit_task: Any = None
         self.fit_task: Any = None
+        self._fit_seq = 0  # each fit asked for: only the last one still waiting is applied (``_apply_fit``)
+        self._fit_lock = asyncio.Lock()  # one fit's reset / pan / zoom at a time
         self.viewer_size: Optional[tuple] = None  # (width, height) of the zoom viewer, once laid out
+        self.stack_size: Optional[tuple] = None  # (width, height) of the canvas as the client last laid it out
+        self._stack_sized = asyncio.Event()
         self.all_graph = self._all_graph() if self.core is not None else {"nodes": [], "edges": []}
         self._size()
         self.view = self._build_view()
@@ -530,7 +536,8 @@ class RelationsDiagram:
         self.summary = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                key="rel-summary")
         self.canvas = cv.Canvas(shapes=[], left=0, top=0, width=self.width, height=self.height, key="rel-canvas")
-        self.stack = ft.Stack([self.canvas], width=self.width, height=self.height, key="rel-stack")
+        self.stack = ft.Stack([self.canvas], width=self.width, height=self.height,
+                              on_size_change=self._on_stack_size, key="rel-stack")
         # zooms far out: a book whose labels need long lines makes a big canvas
         self.viewer = ft.InteractiveViewer(content=self.stack, constrained=False, min_scale=0.02, max_scale=4,
                                            boundary_margin=ft.Margin.all(BOUNDARY_MARGIN),
@@ -1024,24 +1031,71 @@ class RelationsDiagram:
             return None
         self.fit_due = False
         self.auto_fit = True
-        self.fit_task = self.ctx.spawn(self._apply_fit(*fit))
+        self._fit_seq += 1
+        self.fit_task = self.ctx.spawn(self._apply_fit(self._fit_seq))
         return self.fit_task
 
-    async def _apply_fit(self, scale: float, dx: float, dy: float, margin: float) -> None:
+    def _on_stack_size(self, e: Any) -> None:
+        """The canvas as the client laid it out (Flet ``on_size_change``): a fit waits for the size it set."""
+        try:
+            size = (float(e.width), float(e.height))
+        except (TypeError, ValueError, AttributeError):
+            return
+        self.stack_size = size
+        self._stack_sized.set()
+
+    async def _canvas_laid_out(self) -> None:
+        """Wait until the client has laid out the canvas at the size it has now (at most ``CANVAS_WAIT``).
+
+        A new arrangement changes the canvas size and is fitted right away, but the viewer's ``pan`` and
+        ``zoom`` are held to the canvas the client has on screen at that moment (its rendered size plus the
+        boundary margin). Sent before the frame that lays out the new size, they are held to the old one:
+        a tap on a name (a larger canvas round the Focus) stopped zooming out too early, so the picture was
+        too large, cut off on the right and below, and the name was not in the middle (emulator, 59 names).
+        The Focus picker hid it: its keyboard closing changed the viewer's size, which fitted once more.
+        Without a size from the client yet (the first fit, host tests) there is nothing to wait for."""
+        want = (float(self.width), float(self.height))
+        loop = asyncio.get_running_loop()
+        end = loop.time() + CANVAS_WAIT
+        while (not self.closed and self.stack_size is not None
+               and (abs(self.stack_size[0] - want[0]) > 1 or abs(self.stack_size[1] - want[1]) > 1)):
+            self._stack_sized.clear()
+            left = end - loop.time()
+            if left <= 0:
+                break
+            try:
+                await asyncio.wait_for(self._stack_sized.wait(), left)
+            except asyncio.TimeoutError:
+                break
+
+    async def _apply_fit(self, seq: int) -> None:
         """InteractiveViewer (Flet 1.0.3) has no "set transform": back to the identity, move the canvas to
         where its fitted top-left goes (at scale 1 a pan is in screen dp), then ``zoom``, which scales about
         that point (``scaleByDouble`` on the current matrix). The boundary margin is widened first so neither
-        step is clamped."""
-        viewer = self.viewer
-        try:
-            if viewer.boundary_margin != ft.Margin.all(margin):
-                viewer.boundary_margin = ft.Margin.all(margin)
-                self.ctx.push(viewer)
-            await viewer.reset()
-            await viewer.pan(dx, dy)
-            await viewer.zoom(scale)
-        except Exception:  # not on a page (yet), or the screen closed meanwhile
-            log.debug("fitting the relations diagram failed", exc_info=True)
+        step is clamped.
+
+        One fit at a time, and only the last one asked for: ``pan`` and ``zoom`` add to the transform the
+        viewer has, so two fits whose steps interleave (a tap on a name fits the new picture, and a size
+        change that follows fits it again) would pan and zoom twice. And not before the client has the
+        canvas at its new size (``_canvas_laid_out``)."""
+        async with self._fit_lock:
+            if seq != self._fit_seq or self.closed:
+                return  # a later fit waits for the lock: it does the whole of it
+            await self._canvas_laid_out()
+            fit = self.fit_transform() if seq == self._fit_seq and not self.closed else None
+            if fit is None:
+                return
+            scale, dx, dy, margin = fit
+            viewer = self.viewer
+            try:
+                if viewer.boundary_margin != ft.Margin.all(margin):
+                    viewer.boundary_margin = ft.Margin.all(margin)
+                    self.ctx.push(viewer)
+                await viewer.reset()
+                await viewer.pan(dx, dy)
+                await viewer.zoom(scale)
+            except Exception:  # not on a page (yet), or the screen closed meanwhile
+                log.debug("fitting the relations diagram failed", exc_info=True)
 
     # ---- view filters (stored per book in the tracker's "view" key) --------------------------------
 

@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
-from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
 from glossarion_mobile.ui.settings.editors import FullScreenEditor
 from glossarion_mobile.ui.settings.model import mask_secret
@@ -107,6 +107,9 @@ def store_saver(put: Callable[[str], Any], store: Any) -> Callable[[str], Any]:
 class KeyField(ft.Column):
     """Masked secret field: eye · Save · Copy · Test → status chip."""
 
+    #: how long the Save button shows its tick (or error mark) before the floppy disk comes back
+    SAVE_MARK_SECONDS = 1.4
+
     def __init__(
         self,
         *,
@@ -146,7 +149,14 @@ class KeyField(ft.Column):
         # Save, where a Paste button was: the phone's keyboard and long-press already paste, and the key is stored
         # as it is typed, but nothing on the row said so. The button writes it now and shows "Saved". It is left
         # out where the form around the field has its own Save (the KeyEditor passes no ``on_save``).
-        self.save_button = ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save", on_click=self._on_save,
+        # The icon answers the tap: the floppy disk turns into a tick (a failed save: an error mark) for
+        # SAVE_MARK_SECONDS, then back (``_mark_save``; a scale, a cross-fade under reduce motion).
+        self._save_mark_seq = 0
+        self._save_mark_task: Any = None
+        self.save_mark = ft.AnimatedSwitcher(
+            content=self._save_icon("idle"), duration=motion.duration(), reverse_duration=motion.duration(),
+            transition=motion.switcher_transition(ft.AnimatedSwitcherTransition.SCALE))
+        self.save_button = ft.IconButton(icon=self.save_mark, tooltip="Save", on_click=self._on_save,
                                          size_constraints=HIT_TARGET, visible=on_save is not None)
         self.copy_button = ft.IconButton(icon=ft.Icons.CONTENT_COPY, tooltip="Copy", on_click=self._on_copy,
                                          size_constraints=HIT_TARGET, disabled=copy_text is None)
@@ -221,11 +231,43 @@ class KeyField(ft.Column):
             self.message.value = "Saved" if self.value else "Saved (no key)"
             self.message.color = semantic("success")
         self.message.visible = True
+        self._mark_save("failed" if problem else "saved")
         _push(self)
         return not problem
 
     async def _on_save(self, e: Any = None) -> None:
         await self.save()
+
+    @staticmethod
+    def _save_icon(state: str) -> ft.Icon:
+        """The Save button's icon: "idle" (floppy disk), "saved" (tick), "failed" (error mark). The key makes
+        the switcher animate from one to the next."""
+        icon, color = {
+            "saved": (ft.Icons.CHECK_CIRCLE, semantic("success")),
+            "failed": (ft.Icons.ERROR_OUTLINE, ft.Colors.ERROR),
+        }.get(state, (ft.Icons.SAVE, None))
+        return ft.Icon(icon, color=color, key=f"key-save-{state}")
+
+    def _mark_save(self, state: str) -> None:
+        """Show the result of a Save on its button, and the floppy disk again SAVE_MARK_SECONDS later (the
+        last tap's timer wins)."""
+        self._save_mark_seq += 1
+        seq = self._save_mark_seq
+        self.save_mark.transition = motion.switcher_transition(ft.AnimatedSwitcherTransition.SCALE)
+        self.save_mark.content = self._save_icon(state)
+        if state == "idle":
+            return
+
+        async def back() -> None:
+            await asyncio.sleep(self.SAVE_MARK_SECONDS)
+            if seq == self._save_mark_seq:
+                self._mark_save("idle")
+                _push(self.save_mark)
+
+        try:
+            self._save_mark_task = asyncio.ensure_future(back())
+        except RuntimeError:  # no running loop (a plain call in a test): the mark stays
+            self._save_mark_task = None
 
     async def _on_copy(self, e: Any = None) -> None:
         if self.copy_text is not None and self.value:
