@@ -25,6 +25,19 @@ import google_drive_core as gdc  # noqa: E402
 import library_cloud as lc  # noqa: E402
 import share_hosting as sh  # noqa: E402
 
+#: The app's own Google client as shipped (read before ``no_builtin_google_client`` empties it).
+SHIPPED_DESKTOP_CLIENT = (gdc.BUILTIN_DESKTOP_CLIENT_ID, gdc.BUILTIN_DESKTOP_CLIENT_SECRET)
+
+
+@pytest.fixture(autouse=True)
+def no_builtin_google_client(monkeypatch):
+    """Tests run with no built-in Google client unless they set one: a cloud made here signs in only
+    with a client the test names (``own_client=True``, or its own monkeypatch), against its local
+    Google server, and the shipped client is never sent anywhere."""
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", "")
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", "")
+
+
 SHARED = ["share_hosting.py", "share_hosting_gofile.py", "share_hosting_litterbox.py", "share_hosting_pixeldrain.py",
           "share_hosting_send.py",
           "share_hosting_transferit.py", "google_drive_core.py", "drive_sync_core.py", "library_cloud.py"]
@@ -553,9 +566,7 @@ def test_desktop_sign_in_refuses_a_wrong_state_and_a_denial(google):
     assert not [c for c in google.token_calls if c["grant_type"] == "authorization_code"]
 
 
-def test_desktop_sign_in_needs_a_client(monkeypatch):
-    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", "")
-    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", "")
+def test_desktop_sign_in_needs_a_client():
     assert gdc.desktop_client() is None
     assert gdc.desktop_client("", "s", use_own=True) is None
     own = gdc.desktop_client("my-id.apps.googleusercontent.com", " Qx7value ")
@@ -565,6 +576,21 @@ def test_desktop_sign_in_needs_a_client(monkeypatch):
     # the settings window has no client fields, so the message does not send the user to any
     assert info.value.code == "unsupported" and info.value.message == gdc.NO_DESKTOP_CLIENT
     assert "OAuth" not in gdc.NO_DESKTOP_CLIENT
+
+
+def test_this_build_has_its_own_desktop_client(monkeypatch):
+    """Owner 2026-11-17: desktop Google sign-in works with nothing to set up, as on mobile. The client is
+    "Glossarion Desktop" in the Google Cloud project that holds the mobile clients."""
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", SHIPPED_DESKTOP_CLIENT[0])
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", SHIPPED_DESKTOP_CLIENT[1])
+    client = gdc.desktop_client()
+    assert client is not None and client.configured and client.client_secret
+    assert client.client_id == gdc.BUILTIN_DESKTOP_CLIENT_ID
+    assert client.client_id.endswith(".apps.googleusercontent.com")
+    project = gdc.IOS_CLIENT_ID.split("-", 1)[0]
+    assert client.client_id.split("-", 1)[0] == project and client.client_id != gdc.IOS_CLIENT_ID
+    assert client.client_secret not in repr(client)
+    assert (client.auth_url, client.token_url, client.scope) == (gdc.AUTH_URL, gdc.TOKEN_URL, gdc.SCOPE)
 
 
 def test_the_apps_own_desktop_client_is_used_when_the_build_has_one(monkeypatch):

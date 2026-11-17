@@ -31,7 +31,7 @@ import library_cloud_ui as ui  # noqa: E402
 import library_core  # noqa: E402
 import library_covers  # noqa: E402
 import share_hosting as sh  # noqa: E402
-from test_cloud_drive_core import FakeGofile, FakeGoogle, _browser  # noqa: E402
+from test_cloud_drive_core import FakeGofile, FakeGoogle, _browser, no_builtin_google_client  # noqa: E402,F401
 
 
 @pytest.fixture(scope="module")
@@ -182,11 +182,26 @@ def test_settings_start_signed_out_with_sign_in_ready_and_save_the_drive_options
         dialog.close()
 
 
+def test_the_shipped_build_offers_sign_in_with_nothing_to_set_up(qapp, google, tmp_path, box, monkeypatch):
+    import google_drive_core as gdc
+    from test_cloud_drive_core import SHIPPED_DESKTOP_CLIENT
+
+    assert all(SHIPPED_DESKTOP_CLIENT)  # this build has its own Google client
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", SHIPPED_DESKTOP_CLIENT[0])
+    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", SHIPPED_DESKTOP_CLIENT[1])
+    cloud, store, _ = _cloud(google, tmp_path, box)
+    dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
+    try:
+        assert cloud.sign_in_status() == (True, "")
+        assert dialog.sign_in_button.isEnabled() and dialog.sign_in_reason.isHidden()
+        assert google.requests == []  # nothing is sent until Sign in is clicked
+    finally:
+        dialog.close()
+
+
 def test_a_build_without_a_google_client_says_so(qapp, google, tmp_path, box, monkeypatch):
     import google_drive_core as gdc
 
-    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_ID", "")
-    monkeypatch.setattr(gdc, "BUILTIN_DESKTOP_CLIENT_SECRET", "")
     cloud, store, _ = _cloud(google, tmp_path, box)
     dialog = ui.LibrarySettingsDialog(None, cloud=cloud)
     try:

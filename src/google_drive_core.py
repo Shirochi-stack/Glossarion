@@ -6,8 +6,8 @@
   redirect, :func:`authorization_request` / :func:`callback_code`). The desktop signs in in the
   system browser with a loopback redirect on 127.0.0.1 (:class:`DesktopSignIn`, built on
   ``oauth_session.LoopbackOAuthSession``), which Google allows only for a "Desktop app" OAuth
-  client: :data:`BUILTIN_DESKTOP_CLIENT_ID` / :data:`BUILTIN_DESKTOP_CLIENT_SECRET` (empty until the
-  project registers one) or the user's own client (:func:`desktop_client`).
+  client: the app's own, :data:`BUILTIN_DESKTOP_CLIENT_ID` / :data:`BUILTIN_DESKTOP_CLIENT_SECRET`
+  (:func:`desktop_client`).
 * :class:`DriveClient`: the Drive v3 REST calls the app needs - find / create folders, list a
   folder with md5 checksums, resumable upload of a new file or of new content for an existing
   file id (update in place), anyone-with-the-link permission, trash.
@@ -86,12 +86,18 @@ IOS_CLIENT_ID = "957824331511-1445nlka8d0ea1070r36109c4bqmshb2.apps.googleuserco
 CALLBACK_SCHEME = "com.googleusercontent.apps." + IOS_CLIENT_ID[: -len(".apps.googleusercontent.com")]
 REDIRECT_URI = CALLBACK_SCHEME + ":/oauth2redirect"
 
-#: The desktop app's built-in Google OAuth client ("Desktop app" type, loopback redirect). Empty
-#: until the project registers one; while it is empty, desktop sign-in is unavailable (the settings
-#: window has no client fields; ``LibraryCloudStore.set_own_client`` remains for tests).
-#: Google treats a Desktop client's secret as not confidential, so it may ship in the app.
-BUILTIN_DESKTOP_CLIENT_ID = ""
-BUILTIN_DESKTOP_CLIENT_SECRET = ""
+#: The desktop app's built-in Google OAuth client: "Glossarion Desktop", type "Desktop app" (loopback
+#: redirect), registered 2026-11-17 in the same Google Cloud project as the mobile clients (project
+#: number 957824331511; its consent screen is in production). The settings window has no client
+#: fields: every desktop sign-in uses this client (``LibraryCloudStore.set_own_client`` remains for
+#: the tests' local Google server). A build with these two emptied has no desktop sign-in.
+#:
+#: https://developers.google.com/identity/protocols/oauth2#installed : an installed app embeds its
+#: client ID and client secret in its source, and "in this context, the client secret is obviously
+#: not treated as a secret". It identifies the app, never a user: tokens are the user's and are
+#: stored encrypted (``library_cloud``), and PKCE protects the code exchange.
+BUILTIN_DESKTOP_CLIENT_ID = "957824331511-ro5ger6pd3hdq51gbq0pbarn2j3upqf7.apps.googleusercontent.com"
+BUILTIN_DESKTOP_CLIENT_SECRET = "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"
 #: One line for the desktop settings while no client is available.
 NO_DESKTOP_CLIENT = "Google sign-in is not set up in this build of Glossarion."
 
