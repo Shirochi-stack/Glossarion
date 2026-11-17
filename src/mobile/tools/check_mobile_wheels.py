@@ -67,6 +67,11 @@ their mobile wheels:
 A promised target can also be PyPI's official wheel retagged with the manifest's build tag
 (``[wheel.retag]``: iOS Pillow); every check above treats it like a forge-built wheel.
 
+An index wheel can be held at an older build (``ci/wheels/index_holds.toml`` next to the manifest;
+``ci/wheels/index_holds.py`` puts it into the wheelhouse under the manifest's build tag, so pip
+ranks it above the index's newer build). A held wheel is not built and needs no pin; the checks
+above treat it like a promised wheel.
+
 Exit codes: 0 ok, 1 something is not installable, 2 usage/network error.
 """
 from __future__ import annotations
@@ -1031,6 +1036,8 @@ SOURCE_LABELS = {"planned": "planned (mobile-wheels)"}
 # Besides the promised wheels a wheelhouse may hold only these (pip reads every archive in a
 # find-links directory, so anything else could be installed by flet build).
 WHEELHOUSE_EXTRA_FILES = ("SHA256SUMS", "provenance.json")
+# Index wheels held at an older build, read from this file next to the manifest (load_index_holds).
+INDEX_HOLDS_NAME = "index_holds.toml"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -1100,6 +1107,12 @@ class PromisedWheel:
     # Targets taken from PyPI's official wheel instead of a forge build ([wheel.retag]): fetched by
     # URL, checked against the sha256, then retagged with build_tag (wheels.py retag).
     retag: tuple = ()        # ((target key, url, sha256), ...)
+    # An index wheel held at an older build (index_holds.toml) instead of a wheel we build:
+    # ``held_build`` is the index's build tag of the file it is taken from ("" = a promised wheel)
+    # and ``py_abi`` its interpreter and ABI tags ("" = cp313-cp313). Every target is in ``retag``
+    # with an empty URL: index_holds.py finds the file on the index by name and checks the sha256.
+    held_build: str = ""
+    py_abi: str = ""
 
     @property
     def built_targets(self) -> tuple:
@@ -1112,20 +1125,24 @@ class PromisedWheel:
         return next(((u, s) for t, u, s in self.retag if t == target_key), None)
 
     def official_filename(self, target_key: str) -> str:
-        """PyPI's file name of the official wheel (no build tag)."""
-        return f"{self.name.replace('-', '_')}-{self.version}-{self.tag(target_key)}.whl"
+        """The source's file name: PyPI's official wheel (no build tag) or the held index build."""
+        build = f"-{self.held_build}" if self.held_build else ""
+        return f"{self.name.replace('-', '_')}-{self.version}{build}-{self.tag(target_key)}.whl"
 
     def requires_for(self, target_key: str) -> tuple:
         """The Requires-Dist (without extras) the wheel for ``target_key`` carries."""
         return dict(self.requires_by_platform).get(platform_of(target_key), self.requires_dist)
 
     def filename(self, target_key: str, build_tag: int) -> str:
+        return f"{self.name.replace('-', '_')}-{self.version}-{build_tag}-{self.tag(target_key)}.whl"
+
+    @property
+    def py_abi_text(self) -> str:
         cp = f"cp{TARGET_PYTHON[0]}{TARGET_PYTHON[1]}"
-        return f"{self.name.replace('-', '_')}-{self.version}-{build_tag}-{cp}-{cp}-{TARGETS[target_key].label}.whl"
+        return self.py_abi or f"{cp}-{cp}"
 
     def tag(self, target_key: str) -> str:
-        cp = f"cp{TARGET_PYTHON[0]}{TARGET_PYTHON[1]}"
-        return f"{cp}-{cp}-{TARGETS[target_key].label}"
+        return f"{self.py_abi_text}-{TARGETS[target_key].label}"
 
 
 @dataclass
@@ -1134,13 +1151,26 @@ class WheelhouseManifest:
     build_tag: int
     wheels: list             # [PromisedWheel]
     data: dict               # the whole TOML document (toolchain, openssl, ...)
+    held: list = field(default_factory=list)   # [PromisedWheel] index wheels held at an older build
 
     def wheel(self, name: str):
         return next((w for w in self.wheels if w.name == canonical(name)), None)
 
+    def known(self, name: str):
+        """The promised or held wheel of that name (everything a wheelhouse may contain)."""
+        return next((w for w in self.wheels + self.held if w.name == canonical(name)), None)
+
     def promised(self, platform: str = "all") -> list:
         """[(PromisedWheel, target key)] for the targets of ``platform``."""
         return [(w, t) for w in self.wheels for t in w.targets if on_platform(t, platform)]
+
+    def held_targets(self, platform: str = "all") -> list:
+        """[(held wheel, target key)] for the targets of ``platform``."""
+        return [(w, t) for w in self.held for t in w.targets if on_platform(t, platform)]
+
+    def expected(self, platform: str = "all") -> list:
+        """Everything a wheelhouse of ``platform`` must hold: the promised and the held wheels."""
+        return self.promised(platform) + self.held_targets(platform)
 
 
 def load_wheelhouse_manifest(path) -> WheelhouseManifest:
@@ -1218,7 +1248,70 @@ def load_wheelhouse_manifest(path) -> WheelhouseManifest:
                                     by_platform, sdist_url, tuple(retag)))
     if not wheels:
         raise ManifestError(f"{path}: no [[wheel]] entries")
-    return WheelhouseManifest(path, build_tag, wheels, data)
+    return WheelhouseManifest(path, build_tag, wheels, data, load_index_holds(path.parent / INDEX_HOLDS_NAME,
+                                                                               build_tag, seen))
+
+
+def load_index_holds(path, build_tag: int, promised=()) -> list:
+    """The [[hold]] entries of index_holds.toml as PromisedWheels ([] when the file is absent).
+    Raises OSError, TOMLDecodeError or ManifestError."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    if data.get("schema") != 1:
+        raise ManifestError(f"{path}: unsupported schema {data.get('schema')!r} (expected 1)")
+    held, seen = [], set()
+    for i, entry in enumerate(data.get("hold") or []):
+        where = f"{path}: [[hold]] #{i + 1}"
+        if not isinstance(entry, dict):
+            raise ManifestError(f"{where} is not a table")
+        unknown = sorted(set(entry) - {"name", "version", "index_build", "tag", "requires_dist", "files"})
+        if unknown:
+            raise ManifestError(f"{where}: unknown keys {unknown}")
+        name, version = entry.get("name"), entry.get("version")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise ManifestError(f"{where}: bad name {name!r}")
+        if canonical(name) in seen:
+            raise ManifestError(f"{where}: {name} is listed twice")
+        if canonical(name) in promised:
+            raise ManifestError(f"{where}: {name} is a wheel {DEFAULT_WHEELHOUSE_MANIFEST.name} builds")
+        if not isinstance(version, str) or parse_version(version) is None:
+            raise ManifestError(f"{where}: bad version {version!r}")
+        index_build = entry.get("index_build")
+        if not isinstance(index_build, int) or isinstance(index_build, bool) or not 1 <= index_build < build_tag:
+            raise ManifestError(f"{where}: index_build must be the index's build number, below build_tag "
+                                f"{build_tag}")
+        tag = entry.get("tag")
+        if not isinstance(tag, str) or not re.fullmatch(r"[a-z0-9]+-[a-z0-9]+", tag) or \
+                not _py_abi_ok(*tag.split("-")):
+            raise ManifestError(f"{where}: tag must be the wheel's interpreter and ABI tags, such as "
+                                f"\"py3-none\" (got {tag!r})")
+        reqs = entry.get("requires_dist", [])
+        if not isinstance(reqs, list) or not all(isinstance(r, str) for r in reqs):
+            raise ManifestError(f"{where}: requires_dist must be a list of strings")
+        for r in reqs:
+            try:
+                req = parse_requirement(r)
+            except ValueError as e:
+                raise ManifestError(f"{where}: {e}") from e
+            if has_extra_marker(req):
+                raise ManifestError(f"{where}: requires_dist lists only what installs without extras ({r!r})")
+        files = entry.get("files")
+        if not isinstance(files, dict) or not files or any(t not in TARGETS for t in files):
+            raise ManifestError(f"{where}: files must be a table of target = {{ sha256 }} with keys of "
+                                f"{sorted(TARGETS)}")
+        sources = []
+        for target, source in files.items():
+            if not isinstance(source, dict) or set(source) != {"sha256"} or \
+                    not isinstance(source["sha256"], str) or not _SHA256_RE.fullmatch(source["sha256"]):
+                raise ManifestError(f"{where}: files.{target} must be {{ sha256 }} with 64 lowercase hex digits")
+            sources.append((target, "", source["sha256"]))
+        seen.add(canonical(name))
+        held.append(PromisedWheel(canonical(name), version, "", "", tuple(files), tuple(reqs), (), "",
+                                  tuple(sources), str(index_build), tag))
+    return held
 
 
 def load_uv_lock_sdists(path: Path) -> dict:
@@ -1385,7 +1478,7 @@ def check_wheels_against_manifest(wheels: list, manifest: WheelhouseManifest, pl
         errors.extend(ww.problems)
         if ww.dist is None:
             continue
-        w = manifest.wheel(ww.project)
+        w = manifest.known(ww.project)
         if w is None:
             errors.append(f"unknown wheel {ww.filename}: {manifest.path.name} does not promise {ww.project}")
             continue
@@ -1395,7 +1488,7 @@ def check_wheels_against_manifest(wheels: list, manifest: WheelhouseManifest, pl
         target = _wheel_target(ww, w)
         if target is None:
             errors.append(f"unknown wheel {ww.filename}: its Tag is not {w.name}'s promised "
-                          f"cp313-cp313-<target> ({', '.join(TARGETS[t].label for t in w.targets)})")
+                          f"{w.py_abi_text}-<target> ({', '.join(TARGETS[t].label for t in w.targets)})")
             continue
         if ww.build_text != str(manifest.build_tag):
             errors.append(f"{ww.filename}: build tag {ww.build_text or '(none)'} is not build_tag "
@@ -1415,7 +1508,7 @@ def check_wheels_against_manifest(wheels: list, manifest: WheelhouseManifest, pl
     for (name, target), files in sorted(found.items()):
         if len(files) > 1:
             errors.append(f"{name} for {target}: {len(files)} wheels ({', '.join(files)})")
-    for w, target in manifest.promised(platform):
+    for w, target in manifest.expected(platform):
         if (w.name, target) not in found:
             errors.append(f"missing {w.filename(target, manifest.build_tag)} ({w.name} {w.version} for {target})")
     return errors
@@ -1540,11 +1633,11 @@ def verify_installed(site_packages, manifest: WheelhouseManifest, platform: str 
     errors, notes, seen_arch = [], [], False
     by_target = {}
     for ww in wheels or []:
-        w = manifest.wheel(ww.project) if ww.dist is not None else None
+        w = manifest.known(ww.project) if ww.dist is not None else None
         t = _wheel_target(ww, w) if w is not None else None
         if t is not None:
             by_target[(w.name, t)] = ww
-    for w, target in manifest.promised(platform):
+    for w, target in manifest.expected(platform):
         arch_dir = site_packages / target
         if not arch_dir.is_dir():
             notes.append(f"{target}: no {arch_dir} (not built for this arch)")
@@ -1579,7 +1672,7 @@ def verify_installed(site_packages, manifest: WheelhouseManifest, platform: str 
             notes.append(f"{target}: {w.name} {version} build {build} {', '.join(sorted(tags))} (wheelhouse)")
     if not seen_arch:
         errors.append(f"{site_packages}: no arch directory of {platform} targets "
-                      f"({', '.join(sorted({t for _, t in manifest.promised(platform)}))})")
+                      f"({', '.join(sorted({t for _, t in manifest.expected(platform)}))})")
     return errors, notes
 
 
@@ -1606,14 +1699,14 @@ class Wheelhouse:
         """canonical name -> [DistFile] offered to the resolver next to the index files."""
         out: dict[str, list] = {}
         if self.mode == "plan":
-            for w in self.manifest.wheels:
+            for w in self.manifest.wheels + self.manifest.held:
                 for t in w.targets:
                     df = parse_filename(w.filename(t, self.manifest.build_tag), w.name, "planned")
                     df.requires_dist = list(w.requires_for(t))
                     out.setdefault(w.name, []).append(df)
             return out
         for ww in self.wheels:
-            if ww.dist is not None and not ww.problems and self.manifest.wheel(ww.project) is not None:
+            if ww.dist is not None and not ww.problems and self.manifest.known(ww.project) is not None:
                 out.setdefault(ww.project, []).append(ww.dist)
         return out
 
@@ -1624,7 +1717,7 @@ def _wheelhouse_checks(project: Project, res: "CheckResult", wh: Wheelhouse, arc
         errors += wh.problems + check_wheels_against_manifest(wh.wheels, wh.manifest, platform)
         for d in wh.dirs:
             errors += check_sha256sums(d, [ww for ww in wh.wheels if ww.path.parent == d])
-    for w, arch in wh.manifest.promised(platform):
+    for w, arch in wh.manifest.expected(platform):
         if arch not in archs:
             continue
         target = TARGETS[arch]
@@ -1632,7 +1725,8 @@ def _wheelhouse_checks(project: Project, res: "CheckResult", wh: Wheelhouse, arc
         c = res.targets.get(target.key, {}).get(w.name)
         if c is None:
             status = f"not in the dependency tree of {target.key}"
-            errors.append(f"[{target.key}] {w.name}: {status}")
+            errors.append(f"[{target.key}] {w.name}: {status}"
+                          + (f" (nothing needs the hold in {INDEX_HOLDS_NAME} any more)" if w.held_build else ""))
         elif c.version is None:
             status = "not installable"
             errors.append(f"[{target.key}] {w.name}: nothing installable although the wheelhouse should provide "

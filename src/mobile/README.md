@@ -84,6 +84,13 @@ build tag 1000 (only the file name, WHEEL `Build:` and RECORD's WHEEL row change
 proves it), so pypi.flet.dev's reduced `pillow-13.0.0-1` (no AVIF, no ImageCms) cannot win.
 Do not downgrade these pins or bypass the wheel check to make a release.
 
+An index wheel can be held at an older build (`ci/wheels/index_holds.toml`, added to the
+wheelhouse by `ci/wheels/index_holds.py` under build tag 1000). Today it holds `flet-libxslt`
+1.1.45 build 11: the index's build 12 requires `flet-libxml2==2.15.4`, while the lxml 6.1.1
+wheels require 2.15.3 and lxml 6.1.3 has no iOS build yet. The wheel holds only headers and
+static libraries (lxml links libxslt statically), so nothing in the app changes. Drop the hold
+with the lxml bump; the file is not a wheel cache key.
+
 The wheel check reads a pypi.flet.dev wheel's dependencies from the wheel's own METADATA (HTTP
 range reads of the zip's tail; the index serves no PEP 658 metadata), because flet's builds can
 declare more than the PyPI release: llama-cpp-python's Android wheels add `flet-libcpp-shared`.
