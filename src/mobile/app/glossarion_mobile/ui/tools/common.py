@@ -340,7 +340,9 @@ def icon_tile_button(icon: Any, tooltip: str, on_click: Any, *, key: Optional[st
 def schema_tiles(ctx: Any, keys: Sequence[str]) -> tuple:
     """Settings tiles for schema keys (the Settings pages' own tiles): ``(controls, {key: tile})``.
 
-    Keys the schema does not know are skipped; without a SettingsContext the list is empty.
+    Keys the schema does not know are skipped, and so are settings that are not available on mobile
+    (owner 2026-11-18: no "Not available on mobile" rows; their stored values are kept untouched);
+    without a SettingsContext the list is empty.
     """
     settings = getattr(ctx, "settings", None)
     schema = getattr(settings, "schema", None) if settings is not None else None
@@ -356,7 +358,7 @@ def schema_tiles(ctx: Any, keys: Sequence[str]) -> tuple:
             spec = schema.spec(key)
         except Exception:
             spec = None
-        if spec is None:
+        if spec is None or not schema.availability(key)[0]:
             continue
         try:
             tile = make_tile(spec, settings, config=config)

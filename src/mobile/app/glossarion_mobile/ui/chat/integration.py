@@ -801,6 +801,7 @@ class ChatFeature:
             write_setting(env.store, "model", model)
             chat_view = getattr(self.app, "chat_view", None)
             if chat_view is not None:
+                getattr(chat_view, "global_model_chosen", lambda: None)()  # the empty chat under the Welcome
                 chat_view.apply_settings_changed()
 
         def save_key(key: str) -> None:
@@ -1277,8 +1278,34 @@ class ChatFeature:
     # ---- auto-migrate (UI_SPEC §2.17: finished chat books join the Library by themselves) -------
 
     def library_service(self) -> Any:
-        """The LibraryService (``app.library``; installed after the chat), or None."""
-        return getattr(self.app, "library", None)
+        """The LibraryService (``app.library``; installed after the chat), or None. The first time it is there,
+        the chat follows the workspaces it moves into its output folder (``LibraryService.workspace_moved``:
+        a stopped chat run's run-root workspace that a Library run adopted)."""
+        library = getattr(self.app, "library", None)
+        hooks = getattr(library, "workspace_moved", None) if library is not None else None
+        if isinstance(hooks, list) and self.relocate_book_blocking not in hooks:
+            hooks.append(self.relocate_book_blocking)
+        return library
+
+    def relocate_book_blocking(self, folder: str, target: str, merged: bool = False) -> None:
+        """Blocking: a book's workspace moved from ``folder`` to ``target`` outside the chat's own Migrate (the
+        startup join of a split spelling, a Library run adopting a stopped chat run's workspace): every saved
+        chat's paths, this session's chat runs, the cloud sync records and the share links follow, so the chat
+        cards' Resume / Progress open the book where it is now."""
+        self.chats.relocate_workspace(folder, target)
+        runs = getattr(self.runs, "runs", None)
+        for cid in list(runs or ()):
+            try:
+                self.runs.relocate_output(cid, folder, target)
+            except Exception:
+                log.debug("moving the chat run's folder failed", exc_info=True)
+        self._cloud_moved(folder, target, merged)
+        shares = getattr(self.app, "share_links", None)
+        if shares is not None:
+            try:
+                shares.relocate_blocking(folder, target)
+            except Exception:
+                log.exception("moving the share links of a moved workspace failed")
 
     def _hook_auto_migrate(self) -> None:
         if self._migrate_hooked:
@@ -1397,14 +1424,7 @@ class ChatFeature:
                         if not status:
                             continue
                         log.info("the book's workspace %s joined %s (%s)", folder, target, status)
-                        self.chats.relocate_workspace(folder, target)
-                        self._cloud_moved(folder, target, status == "merged")
-                        shares = getattr(self.app, "share_links", None)
-                        if shares is not None:
-                            try:
-                                shares.relocate_blocking(folder, target)
-                            except Exception:
-                                log.exception("moving the share links of a joined workspace failed")
+                        self.relocate_book_blocking(folder, target, status == "merged")
                         outcomes.append({"cid": None, "folder": folder, "status": MIGRATE_MOVED, "reason": status,
                                          "target": target, "source": raw})
             finally:

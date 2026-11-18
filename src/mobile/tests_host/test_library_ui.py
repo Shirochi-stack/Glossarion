@@ -2573,15 +2573,18 @@ def test_output_root_mismatch_uses_the_shared_shelf_and_waits_for_jobs(real_env,
 
 
 @needs_flet
-def test_confirm_output_root_asks_before_a_library_translation(tmp_path):
-    """Device fix #8: ``confirm_output_root`` (TranslateSheet Start and the chat's Library attach) is the
-    desktop _ensure_output_override_matches: no question when the roots match; "Output Folder Mismatch"
-    with the shared prompt otherwise; Yes switches the root, Cancel keeps the sheet and starts nothing."""
+def test_confirm_output_root_never_asks_before_a_library_translation(tmp_path, monkeypatch):
+    """Owner ("Auto resolve this. Don't disturb the user."): ``confirm_output_root`` (TranslateSheet Start, Resume
+    and the chat's Library attach) never asks "Output Folder Mismatch" and never points the process at the
+    book's folder; when the process root names another folder than the Library's, it goes back silently."""
     from glossarion_mobile.ui.library.translate_sheet import TranslateSheet, confirm_output_root
 
     raw = tmp_path / "Raw" / "Book.epub"
     raw.parent.mkdir(parents=True)
     raw.write_bytes(b"PK")
+    output = tmp_path / "Output"
+    output.mkdir()
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(output))
     submitted, applied, mismatch = [], [], {"info": None}
 
     class Jobs:
@@ -2593,27 +2596,27 @@ def test_confirm_output_root_asks_before_a_library_translation(tmp_path):
             return f"job{len(submitted)}"
 
     service = LibraryService(core=SharedCore({"library_core": types.ModuleType("library_core")}),
-                             prefs=FakePrefs(), jobs=Jobs(), config={"model": "authgpt/gpt-6-luna"})
+                             prefs=FakePrefs(), jobs=Jobs(), config={"model": "authgpt/gpt-6-luna"},
+                             paths=types.SimpleNamespace(output=str(output)))
     service.output_root_mismatch_blocking = lambda books: mismatch["info"]
-    service.apply_output_override_blocking = lambda root: applied.append(root) or "/other"
+    service.apply_output_override_blocking = lambda root: applied.append(root) or str(output)
     book = _book("not_started", name="Book", raw_source_path=str(raw))
 
     async def scenario():
         ctx = _ctx(None, service)
-        ctx.extras["answers"] = []
+        ctx.extras["answers"] = ["yes"]
         assert await confirm_output_root(ctx, [book]) is True and "asked" not in ctx.extras
         mismatch["info"] = {"prompt": "The selected translation is saved under a different folder …",
                             "new_override": "/other"}
-        ctx.extras["answers"] = ["cancel"]
-        assert await confirm_output_root(ctx, [book]) is False and applied == []
-        assert ctx.extras["asked"][-1] == ("Output Folder Mismatch", mismatch["info"]["prompt"])
-        ctx.extras["answers"] = ["yes"]
-        assert await confirm_output_root(ctx, [book]) is True and applied == ["/other"]
+        # the process root is the Library's: the run continues there, nothing is asked or switched
+        assert await confirm_output_root(ctx, [book]) is True and applied == [] and "asked" not in ctx.extras
+        # the process root names another folder (an earlier switch): back to the Library's folder, never "/other"
+        monkeypatch.setenv("OUTPUT_DIRECTORY", str(tmp_path / "Elsewhere"))
+        assert await confirm_output_root(ctx, [book]) is True and applied == [""] and "asked" not in ctx.extras
+        monkeypatch.setenv("OUTPUT_DIRECTORY", str(output))
         sheet = TranslateSheet(ctx, [book], [str(raw)])
-        ctx.extras["answers"] = ["cancel"]
-        assert await sheet.start() is None and submitted == [] and sheet.started_job is None
-        ctx.extras["answers"] = ["yes"]
-        assert await sheet.start() == "job1" and submitted[0].inputs == (str(raw),) and applied[-1] == "/other"
+        assert await sheet.start() == "job1" and submitted[0].inputs == (str(raw),)
+        assert "asked" not in ctx.extras and "/other" not in applied
 
         def broken(books):
             raise OSError("unreadable")

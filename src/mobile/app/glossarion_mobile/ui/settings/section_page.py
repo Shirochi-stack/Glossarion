@@ -30,8 +30,10 @@ from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.settings.banners import JobBanner
+from glossarion_mobile.ui.settings.manga_layout import MANGA_SECTION, manga_settings_layout
 from glossarion_mobile.ui.settings.model import (ANTI_DUPLICATE_BIAS_SECTION, ANTI_DUPLICATE_MASTER,
-                                                 ANTI_DUPLICATE_SECTION, WINDOW_SIZE, grouped_specs, window_bounds)
+                                                 ANTI_DUPLICATE_SECTION, WINDOW_SIZE, grouped_specs, lead_keys_first,
+                                                 window_bounds)
 from glossarion_mobile.ui.settings.schema_access import SearchHit
 from glossarion_mobile.ui.settings.search import SettingsSearch, search_sheet
 from glossarion_mobile.ui.settings.tiles import (MOBILE_READONLY_REASONS, EffectiveConfig, SettingTile, listed_setting,
@@ -202,16 +204,16 @@ class SectionPage(Screen):
             from glossarion_mobile.ui.settings.qa_layout import qa_settings_layout
 
             self.specs, self.headings, self.tab_ranges = qa_settings_layout(specs)
+        elif self.section_id == MANGA_SECTION:  # the desktop manga dialog's tabs (then Rendering · General)
+            self.specs, self.headings, self.tab_ranges = manga_settings_layout(specs)
         elif curated:  # UI_SPEC §4.15 curated section: its own sub-headings, in its order
             self.specs = list(specs)
             self.headings = {str(getattr(spec, "key", "")): curated.get(str(getattr(spec, "key", "")), "")
                              for spec in specs}
         else:
             self.specs, self.headings = grouped_specs(specs)
-        if self.section_id == "other.processing":
-            inputs = [spec for spec in self.specs if spec.key == "deep_scan"]
-            self.specs = inputs + [spec for spec in self.specs if spec.key != "deep_scan"]
-            self.headings.update({spec.key: "Input & output" for spec in inputs})
+        # Processing: Include subfolders first; Model & API: the model above its API key
+        self.specs, self.headings = lead_keys_first(self.section_id, self.specs, self.headings)
         if self.section_id == ANTI_DUPLICATE_SECTION:
             self.specs.sort(key=lambda spec: spec.section == ANTI_DUPLICATE_BIAS_SECTION)
         self.keys = [str(getattr(spec, "key", "")) for spec in self.specs]
@@ -251,7 +253,8 @@ class SectionPage(Screen):
             index = self.keys.index(self.focus_target)
             start = index if self.tab_ranges else window_bounds(index, len(self.keys), self.window_size)[0]
         if self.tab_ranges:
-            tab_key = "qa-settings" if self.section_id == "qa.settings" else "anti-duplicate-settings"
+            tab_key = {"qa.settings": "qa-settings", MANGA_SECTION: "manga-settings"}.get(
+                self.section_id, "anti-duplicate-settings")
             self.tabs = ft.Tabs(length=len(self.tab_ranges), expand=True,
                                 content=ft.Column([
                                     ft.TabBar(tabs=[ft.Tab(label=title) for title, _, _ in self.tab_ranges],

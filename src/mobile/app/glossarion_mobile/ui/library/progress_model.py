@@ -514,6 +514,12 @@ def _view(book_progress: Any, *, groups: Mapping[str, tuple], show_special: bool
     )
 
 
+def _same_folder(a: str, b: str) -> bool:
+    from glossarion_mobile.services.workspace_sync import same_dir
+
+    return same_dir(a, b)
+
+
 def load_progress_view(service: Any, book: Mapping[str, Any], *, show_special: bool = False,
                        show_model_info: bool = True, full: bool = False,
                        previous: Optional[ProgressView] = None) -> ProgressView:
@@ -527,6 +533,11 @@ def load_progress_view(service: Any, book: Mapping[str, Any], *, show_special: b
     # from, never a new Output/<raw stem> (``build_book_progress`` derives and creates one without it).
     output_dir = book_workspace(service, book)
     previous_state = previous.state if previous is not None else None
+    if previous_state is not None and output_dir and previous.output_dir and not _same_folder(previous.output_dir,
+                                                                                              output_dir):
+        # the book's workspace moved (into the Library's output folder, a joined spelling): a fresh view of the
+        # folder the next run uses, never a refresh of the old one (Retranslate would edit a folder nobody reads)
+        previous, previous_state = None, None
     try:
         if previous_state is not None and hasattr(progress_core, "refresh_book_progress"):
             previous_state.owner.config = service.config_snapshot()
@@ -708,19 +719,23 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
     action = plan.action
     try:
         if action == "remove_qa":
-            result = pa.remove_qa_marks(progress_file, output_dir, plan.targets)
-            return f"Removed failed mark from {int((result or {}).get('cleared', 0))} chapters."
+            cleared = int((pa.remove_qa_marks(progress_file, output_dir, plan.targets) or {}).get("cleared", 0))
+            return _result(f"Removed failed mark from {cleared} chapters.", cleared)
         if action == "remove_pending":
-            return pa.remove_pending_message(pa.remove_pending_marks(progress_file, output_dir, plan.targets))
+            result = pa.remove_pending_marks(progress_file, output_dir, plan.targets)
+            # skipped selections stay Pending with no reason on screen: then the text is said
+            return _result(pa.remove_pending_message(result), result.get("recovered") and not result.get("skipped"))
         if action == "remove_refinement":
-            cleared = pa.remove_refinement_status(progress_file, plan.targets)
-            return f"Removed refinement status from {int(cleared or 0)} chapter(s)."
+            cleared = int(pa.remove_refinement_status(progress_file, plan.targets) or 0)
+            return _result(f"Removed refinement status from {cleared} chapter(s).", cleared)
         if action == "restore_in_progress":
-            return pa.restore_in_progress_message(pa.restore_in_progress(progress_file, output_dir, plan.targets))
+            result = pa.restore_in_progress(progress_file, output_dir, plan.targets)
+            return _result(pa.restore_in_progress_message(result),
+                           any(result.get(k) for k in ("restored", "deleted", "failed")))
         if action == "reset_tts":
-            message = pa.reset_tts_message(pa.reset_tts(state.owner, progress_file, output_dir, plan.targets))
+            result = pa.reset_tts(state.owner, progress_file, output_dir, plan.targets)
             data["skip_cleanup"] = True  # desktop: no cleanup pass on the refreshes after a TTS reset
-            return message
+            return _result(pa.reset_tts_message(result), result.get("deleted") or result.get("status_reset"))
         if action == "delete_audio":
             pa.delete_row_audio(state.owner, data, plan.targets[0], plan.extra.get("audio_path"))
             return f"Deleted {os.path.basename(str(plan.extra.get('audio_path') or 'the audio file'))}."
@@ -746,16 +761,23 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
         if action == "do_not_skip":
             changed = pa.remove_special_keyword(state.owner, plan.extra["keyword"])
             if changed is False:
-                return "Nothing changed"
+                return TitledResult("Nothing changed")
             return f"⏭️ Do not skip: removed keyword '{plan.extra['keyword']}'"
     finally:
         service.mark_dirty()
     raise ValueError(action)
 
 
+def _result(text: str, changed: Any) -> str:
+    """A plain result when the action changed rows (the reloaded rows show it: no message), else a
+    :class:`TitledResult` the Chapters tab says ("nothing was changed" is not on screen)."""
+    return str(text) if changed else TitledResult(text)
+
+
 class TitledResult(str):
-    """An action's result text with the title of the desktop result box that shows it (``box_title``; '' when
-    the action's box has no title of its own, ``chapters_tab.ACTION_RESULT_TITLES`` then)."""
+    """An action's result text the Chapters tab shows because the reloaded rows do not (a QA repair, an image
+    insert, nothing changed), with the title of the desktop result box (``box_title``; '' when the action's box
+    has no title of its own, ``chapters_tab.ACTION_RESULT_TITLES`` then). A plain ``str`` result is not said."""
 
     box_title: str = ""
 

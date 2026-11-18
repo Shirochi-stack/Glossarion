@@ -807,6 +807,9 @@ def test_real_retranslate_plan_then_job_resets_the_workspace(real_env):
     prog = json.loads((ws / "translation_progress.json").read_text(encoding="utf-8"))
     assert prog["chapters"]["1"]["status"] == "pending"
     assert prog["chapters"]["2"]["status"] == "qa_failed"  # untouched rows keep their state
+    # the reset row carries the mobile Retranslate mark (a merge with an older copy keeps it reset); the others not
+    assert prog["chapters"]["1"]["retranslate_reset_at"] == prog["chapters"]["1"]["last_updated"]
+    assert "retranslate_reset_at" not in prog["chapters"]["2"]
     assert not (ws / "response_ch001.html").exists() and (ws / "response_ch002.html").exists()
     assert set(_tree(ws)) == set(before_tree) - {"response_ch001.html"}
     assert ctx.results["retranslate_title"] == "Success"
@@ -896,8 +899,7 @@ def test_chapters_tab_retranslate_confirms_then_queues_the_job_and_shows_the_res
             await asyncio.sleep(0.02)
         assert not (ws / "response_ch001.html").exists()
         assert chapters.view.state.data.get("skip_cleanup") is True
-        title, message = chapters.last_message
-        assert title == "Success" and message.startswith("Successfully Deleted 1 files")
+        assert chapters.last_message is None  # the reset rows are the result: no "Success" box (owner 2026-11-18)
         statuses = {r.filename: r.status for r in chapters.rows if r.kind == "chapter"}
         assert statuses[completed.filename] in ("pending", "not_translated")
         screen.dispose()
@@ -1426,7 +1428,8 @@ def test_chapters_tab_image_folder_grid_selection_and_actions(tmp_path, monkeypa
         assert confirms[-1] == ("Confirm Deletion", "This will delete 2 translated image(s).\n\nContinue?")
         assert message == "Deleted 2 file(s).\n\nThey will be retranslated on the next run."
         assert not (out / "response_001_a.html").exists() and not (out / "response_002_b.html").exists()
-        assert tab.image_selected == set() and tab.last_message[0] == "Success"
+        # the reloaded grid shows the result: no "Success" box (owner 2026-11-18)
+        assert tab.image_selected == set() and tab.last_message is None
         # a and b are listed again as untranslated (their source images), then the cover
         assert [(i.kind, i.status) for i in tab.image_view.items] == [
             ("pending", "not_translated"), ("pending", "not_translated"), ("cover", "skipped")]

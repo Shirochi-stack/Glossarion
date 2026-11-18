@@ -633,10 +633,8 @@ class BookPageScreen(Screen):
 
         def answer(accepted: bool) -> None:
             self.review_sheet = None
-            if jobs is not None:
+            if jobs is not None:  # a refusal stops the run: the strip shows it end (no pop-up, owner 2026-11-18)
                 jobs.answer(question_id, bool(accepted))
-            if not accepted:
-                self.ctx.say("Translation stopped: the glossary was not accepted")
 
         def edit(file_path: str) -> None:
             # ✏️ Edit: the Glossary editor on the generated file; the job keeps waiting and the sheet

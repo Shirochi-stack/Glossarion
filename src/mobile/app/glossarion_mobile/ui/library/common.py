@@ -214,8 +214,7 @@ class LibraryContext:
         try:
             spec = await self.io(service.compile_spec, book, "compile_pdf" if kind == "pdf" else "compile_epub", folder)
             job_id = await service.submit(spec)
-            if job_id:
-                self.say("Compiling before sharing")
+            if job_id:  # the job strip shows the compile (owner 2026-11-18: no pop-up)
                 accept(jobs.snapshot(job_id))
                 result = await finished
                 if result.state == JobState.DONE:

@@ -528,6 +528,9 @@ class LibraryService:
         #: The U10 share-link service (``services/share_links.py``), set when the app installs it: the share
         #: links of deleted books are forgotten (``execute_delete_blocking``).
         self.share_links: Any = None
+        #: ``(old folder, new folder, merged)`` callables told when :meth:`adopt_workspaces_blocking` moved a
+        #: book's workspace into the Library's output folder (the chat feature: its saved paths follow).
+        self.workspace_moved: list = []
 
     # ---- plumbing ----------------------------------------------------------------------------
 
@@ -628,12 +631,17 @@ class LibraryService:
         return os.fspath(getter()) if getter is not None else ""
 
     def output_roots(self) -> list:
+        """The Library's output folders: the app's Output folder first, then the process ``OUTPUT_DIRECTORY``
+        when it is another folder - never a chat run root (``<data>/direct_text_runs/<run root>``, what the
+        variable names while a chat job runs): that is the chat run's temporary folder, not a Library one."""
+        from glossarion_mobile.services.workspace_sync import run_root_of
+
         roots: list = []
         output = getattr(self.paths, "output", None) if self.paths is not None else None
         if output:
             roots.append(os.fspath(output))
         env_out = os.environ.get("OUTPUT_DIRECTORY")
-        if env_out and _norm(env_out) not in {_norm(r) for r in roots}:
+        if env_out and _norm(env_out) not in {_norm(r) for r in roots} and not run_root_of(env_out):
             roots.append(env_out)
         return roots
 
@@ -733,7 +741,10 @@ class LibraryService:
         """
         book = self._by_bid.get(str(bid))
         if book is not None:
-            return dict(book)
+            library = self._out_of_run_root(book)
+            if library is not book:
+                self._by_bid[str(bid)] = dict(library)
+            return dict(library)
         identity = self.identity_for_bid(bid)
         if not identity:
             return None
@@ -744,8 +755,40 @@ class LibraryService:
             moved = self.moved_workspace(identity)
             book = self._row_for_identity(moved) if moved else None
         if book is not None:
+            book = self._out_of_run_root(book)
             self._by_bid[str(bid)] = dict(book)
         return book
+
+    def _out_of_run_root(self, book: Mapping[str, Any]) -> Any:
+        """A row whose workspace lies in a chat run root (a scan made while a chat job ran, a chat card's Progress
+        of a stopped run) stands for the Library's workspace of that book once it exists
+        (``<output_roots()[0]>/<book>``) once the run-root copy is gone: moved there (it holds the progress), or the
+        whole run root was deleted. A run-root workspace still on disk keeps its row (a chat card's Progress / Resume
+        of that run; a Library run adopts it first), and so does a live chat run's workspace that does not exist yet
+        (its glossary stage). Returns ``book`` itself when nothing changes."""
+        from glossarion_mobile.services.workspace_sync import points_elsewhere, run_root_of
+
+        folder = str(book.get("output_folder") or "")
+        run_root = run_root_of(folder) if folder else ""
+        roots = self.output_roots() if run_root else []
+        if not roots:
+            return book
+        candidate = os.path.join(str(roots[0]), os.path.basename(os.path.normpath(folder)))
+        moved = not os.path.isdir(folder) and os.path.isfile(os.path.join(candidate, "translation_progress.json"))
+        if not os.path.isdir(candidate) or not (moved or not os.path.isdir(run_root)):
+            return book
+        if points_elsewhere(candidate, book.get("raw_source_path")):
+            return book  # another book of that name: never its workspace
+        for row in self._snapshot.all_books():
+            if _norm(row.get("output_folder") or "") == _norm(candidate):
+                return dict(row)
+        row = dict(book, output_folder=candidate)
+        if _norm(row.get("path") or "") == _norm(folder):
+            row["path"] = candidate
+        progress = os.path.join(candidate, "translation_progress.json")
+        if "progress_file" in row:
+            row["progress_file"] = progress if os.path.isfile(progress) else ""
+        return row
 
     def _row_for_identity(self, identity: str) -> Optional[dict]:
         """The last scan's row of this path, else one synthesised from what is on disk; None: nothing is there."""
@@ -915,10 +958,14 @@ class LibraryService:
     def workspace_for(self, book: Mapping[str, Any]) -> str:
         """The book's translation workspace: its ``output_folder`` when that is a folder, else the one
         the last scan resolved for a Library row (:meth:`resolve_workspaces_blocking`), else "".
-        Sync and cheap (no disk work beyond one ``isdir``); never creates a folder."""
+        Sync and cheap (no disk work beyond one ``isdir``; a few more for a row in a chat run root, which stands
+        for the Library's workspace of the book once that exists: :meth:`_out_of_run_root`); never creates a
+        folder."""
         folder = str(book.get("output_folder") or "")
-        if folder and os.path.isdir(folder):
-            return folder
+        if folder:
+            moved = str(self._out_of_run_root(book).get("output_folder") or "")
+            if moved and os.path.isdir(moved):
+                return moved
         return str(self._workspaces.get(book_key(book)) or "")
 
     # ---- scanning (UI loop) --------------------------------------------------------------------
@@ -1237,16 +1284,24 @@ class LibraryService:
         instead of asking "Output Folder Mismatch" and starting a second workspace. Only while no job owns
         the process (``JOB_LOCK`` taken without waiting): a running job may be writing the folder.
 
+        A workspace left in a stopped or failed chat run's run root (``<data>/direct_text_runs/<run root>/<book>``)
+        moves the same way (merged when the Library holds the book: the same raw, or a folder without a raw pointer
+        and no other translation), with its run root's glossary folder, while no job is active at all. One that
+        cannot move because of a file error is left alone, and the row continues in the Library's folder for its raw
+        file (``<root>/<raw stem>``, where the translate job writes); the reason is logged. One whose name another
+        book holds in the Library's folder is left alone with its row and listed in ``blocked``: a run there would
+        write into that other book's folder.
+
         Returns ``{"books": [rows with their new output_folder], "moved": [(old, new)], "kept": [(name,
-        reason)], "busy": bool}``."""
+        reason)], "blocked": [names], "busy": bool}``."""
         rows = [dict(b) for b in books or ()]
-        out: dict = {"books": rows, "moved": [], "kept": [], "busy": False}
+        out: dict = {"books": rows, "moved": [], "kept": [], "blocked": [], "busy": False}
         roots = self.output_roots()
         target_root = str(roots[0]) if roots else ""
         candidates = [r for r in rows if str(r.get("output_folder") or "") and os.path.isdir(str(r.get("output_folder")))]
         if not target_root or not candidates:
             return out
-        from glossarion_mobile.services.workspace_sync import adopt_workspace, same_dir
+        from glossarion_mobile.services.workspace_sync import DIFFERENT_BOOK, adopt_workspace, run_root_of, same_dir
 
         pending = [r for r in candidates if not same_dir(os.path.dirname(os.path.abspath(str(r["output_folder"]))),
                                                          target_root)]
@@ -1256,27 +1311,75 @@ class LibraryService:
         if lock is not None and not lock.acquire(blocking=False):
             out["busy"] = True
             return out
+        merged_flags: list = []
         try:
             for row in pending:
                 folder = str(row["output_folder"])
+                name = str(row.get("name") or os.path.basename(folder))
                 if os.path.basename(os.path.dirname(os.path.abspath(folder))).casefold() == "attachments":
                     # a chat's attachment workspace: the chat's own Migrate moves it (and its links)
-                    out["kept"].append((str(row.get("name") or os.path.basename(folder)), "a chat attachment"))
+                    out["kept"].append((name, "a chat attachment"))
                     continue
-                outcome = adopt_workspace(folder, target_root, self.raw_source(row))
+                source = self.raw_source(row)
+                in_run_root = bool(run_root_of(folder))
+                if in_run_root and self._active_job() is not None:
+                    outcome = {"status": "kept", "target": "", "reason": "a job is active (it may write this run root)"}
+                else:
+                    outcome = adopt_workspace(folder, target_root, source)
                 if outcome["status"] in ("moved", "merged"):
                     out["moved"].append((folder, outcome["target"]))
-                    row["output_folder"] = outcome["target"]
-                    if row.get("path") and _norm(row.get("path")) == _norm(folder):
-                        row["path"] = outcome["target"]
+                    merged_flags.append(outcome["status"] == "merged")
+                    self._point_rows(row, folder, outcome["target"])
                 elif outcome["status"] == "kept":
-                    out["kept"].append((str(row.get("name") or os.path.basename(folder)), outcome["reason"]))
+                    out["kept"].append((name, outcome["reason"]))
+                    log.warning("the workspace %s stays where it is (%s)", folder, outcome["reason"])
+                    if in_run_root and outcome["reason"] == DIFFERENT_BOOK:
+                        # the Library's folder of that name is another book's: no run may write into it
+                        out["blocked"].append(name)
+                    elif in_run_root:
+                        # not moved: the run goes on in the Library's own folder for the raw file, never in the run root
+                        stem = os.path.splitext(os.path.basename(source))[0] if source else os.path.basename(
+                            os.path.normpath(folder))
+                        self._point_rows(row, folder, os.path.join(target_root, stem))
         finally:
             if lock is not None:
                 lock.release()
             if out["moved"]:
                 self.mark_dirty()
+        for (old, new), merged in zip(out["moved"], merged_flags):
+            log.info("the workspace %s moved into the Library's output folder: %s (%s)", old, new,
+                     "merged" if merged else "moved")
+            for hook in list(self.workspace_moved):
+                try:
+                    hook(old, new, merged)
+                except Exception:
+                    log.exception("telling about the moved workspace %s failed", old)
         return out
+
+    def _point_rows(self, row: dict, folder: str, target: str) -> None:
+        """``row`` and every cached row of the old folder (the Book page / job origin of its id) now name the
+        workspace ``target`` instead of ``folder``."""
+        targets = [row] + [b for b in list(self._by_bid.values())
+                           if _norm(b.get("output_folder") or "") == _norm(folder)]
+        for book in targets:
+            book["output_folder"] = target
+            if book.get("path") and _norm(book.get("path")) == _norm(folder):
+                book["path"] = target
+            if book.get("progress_file"):
+                progress = os.path.join(target, "translation_progress.json")
+                book["progress_file"] = progress if os.path.isfile(progress) else ""
+
+    def _active_job(self) -> Any:
+        """The job service's active job (``JobService.view().active``), None when none or unknown."""
+        for owner in (self.jobs, getattr(self.jobs, "service", None)):
+            view = getattr(owner, "view", None) if owner is not None else None
+            if callable(view):
+                try:
+                    return getattr(view(), "active", None)
+                except Exception:
+                    log.debug("reading the active job failed", exc_info=True)
+                    return None
+        return None
 
     def apply_output_override_blocking(self, root: str) -> str:
         """``LibraryShelf.apply_output_override``: the process ``OUTPUT_DIRECTORY`` becomes ``root`` so the

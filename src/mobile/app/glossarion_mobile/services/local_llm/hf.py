@@ -9,8 +9,9 @@ Accepted (``parse_ref``):
   ``…/resolve/<rev>/<file>.gguf``.
 
 ``list_repo`` lists a repository's runnable GGUF files (not the ``mtp-*`` assistant heads Gemma 4 repos carry
-beside the models) and, apart, its vision projectors (``mmproj-*.gguf``); ``pick_projector`` chooses the one
-downloaded with a model (F16 first).
+beside the models, nor block drafters) and, apart, its vision projectors (every ``*mmproj*.gguf``:
+``is_projector_name``; a projector is never offered or picked as the model); ``pick_projector`` chooses the
+one downloaded with a model (F16 first).
 
 The API base is ``HF_ENDPOINT`` (env ``HF_ENDPOINT``, default ``https://huggingface.co``) so tests and
 mirrors can point it elsewhere. Downloads always use the resolved commit, so a resumed transfer fetches
@@ -26,8 +27,8 @@ from typing import Any, Iterable, Optional, Sequence
 from urllib.parse import quote, unquote, urlsplit
 
 __all__ = [
-    "HF_ENDPOINT", "HfError", "HfFile", "HfRef", "PROJECTOR_ORDER", "QUANT_ORDER", "RepoFiles", "list_files",
-    "list_repo", "parse_ref", "pick_file", "pick_projector", "repo_url", "resolve_url",
+    "HF_ENDPOINT", "HfError", "HfFile", "HfRef", "PROJECTOR_ORDER", "QUANT_ORDER", "RepoFiles", "is_projector_name",
+    "list_files", "list_repo", "parse_ref", "pick_file", "pick_projector", "repo_url", "resolve_url",
 ]
 
 HF_ENDPOINT = (os.environ.get("HF_ENDPOINT") or "https://huggingface.co").rstrip("/")
@@ -182,17 +183,32 @@ def _get_json(session: Any, url: str, repo: str) -> tuple:
         raise HfError("Hugging Face sent an unreadable answer") from exc
 
 
+def is_projector_name(path: Any) -> bool:
+    """A vision projector's GGUF file name: "mmproj" anywhere in it, any case (``mmproj-F16.gguf``, and
+    ``Ternary-Bonsai-2-9B-mmproj-Q8_0.gguf``, which named its model first). Never a model to load: llama.cpp
+    refuses it ("Failed to load model from file")."""
+    name = str(path or "").rsplit("/", 1)[-1].lower()
+    return name.endswith(".gguf") and "mmproj" in name
+
+
 def _is_projector(path: str) -> bool:
-    """A vision projector (``mmproj-*.gguf``, unsplit): the image encoder of a multimodal model."""
-    name = path.rsplit("/", 1)[-1].lower()
-    return name.endswith(".gguf") and name.startswith("mmproj") and not _SPLIT_RE.search(name)
+    """A vision projector (``is_projector_name``, unsplit): the image encoder of a multimodal model."""
+    return is_projector_name(path) and not _SPLIT_RE.search(path.rsplit("/", 1)[-1])
+
+
+#: speculative-decoding drafters that cannot answer on their own: Gemma 4's ``mtp-*`` heads and block
+#: drafters (``…-DFlash2-Q8_0.gguf``, ``…-drafter.gguf``)
+_DRAFTER_RE = re.compile(r"(?:^mtp-|(?:^|[-_.])(?:dflash\d*|drafter)(?=[-_.]))", re.IGNORECASE)
+#: a model file with a draft head built in (``…-PQ2_0-MTP-Q8_0.gguf``): runnable, but its trailing quant is
+#: the head's, so the automatic pick never takes it for that quant
+_HEAD_RE = re.compile(r"(?:^|[-_.])mtp(?=[-_.])", re.IGNORECASE)
 
 
 def _is_candidate(path: str) -> bool:
     name = path.rsplit("/", 1)[-1].lower()
     if not name.endswith(".gguf"):
         return False
-    return not (name.startswith(("mmproj", "mtp-")) or "imatrix" in name)
+    return not (is_projector_name(name) or _DRAFTER_RE.search(name) or "imatrix" in name)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -286,8 +302,11 @@ def pick_file(files: Iterable[HfFile], quant: Optional[str] = None, file: Option
     """The file to download: ``file`` exactly, else the named ``quant``, else ``QUANT_ORDER``; None when
     the user should choose (several files, none of the usual quants). ``HfError`` when the named file /
     quant is not there or the choice is a split GGUF."""
-    files = list(files)
+    files = [f for f in files if not is_projector_name(f.path)]  # never a projector, whoever listed it
     chosen: Optional[HfFile] = None
+    if file and is_projector_name(file):
+        raise HfError(f"{file.rsplit('/', 1)[-1]} is a vision projector (image support), not a model: "
+                      "choose one of the repository's model files")
     if file:
         wanted = file.strip("/").lower()
         chosen = next((f for f in files if f.path.lower() == wanted), None)
@@ -304,8 +323,10 @@ def pick_file(files: Iterable[HfFile], quant: Optional[str] = None, file: Option
         if len(files) == 1:
             chosen = files[0]
         else:
+            # unusual quants (ternary TQ1_0, PQ2_0, no tag) match none of these: the user chooses
+            plain = [f for f in files if not _HEAD_RE.search(f.name)]
             for name in QUANT_ORDER:
-                found = _matches(files, name)
+                found = _matches(plain, name)
                 if found:
                     chosen = found[0]
                     break

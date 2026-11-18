@@ -647,6 +647,9 @@ class ChatView:
                                                    "append_glossary", "append_glossary_auto_load"),
                                                  lambda key, value: env.on_ui(self._on_context_config, key)))
         self.load_chat(self.state.current_chat.value)
+        seed_empty = getattr(env.chats, "seed_empty_chat", None)
+        if callable(seed_empty) and seed_empty(self.cid):
+            self.apply_settings_changed()  # launch on an empty chat: it starts on the model of the chat used last
 
     @property
     def bound(self) -> bool:
@@ -684,6 +687,10 @@ class ChatView:
 
     def _on_context_config(self, key: Optional[str] = None) -> None:
         """Refresh card chips and options when inherited translation defaults change."""
+        remember = getattr(getattr(self.env, "chats", None), "remember_global_model", None)
+        if key == "model" and callable(remember):
+            # any writer (Welcome, Model manager, Settings…): new chats start on it unless a chat is used later
+            remember(self.env.config_get("model", ""), refresh=False)
         if self.bound and (key not in CONTEXT_CONFIG_KEYS
                            or self.chat_context_for(self.cid) != self.state.chat_context.value):
             self.apply_settings_changed()
@@ -762,10 +769,12 @@ class ChatView:
             log.debug("prompt profile listing failed", exc_info=True)
             return None
 
-    def new_chat_seed(self, last_used: dict) -> dict:
-        """What a new chat starts on (owner: the model and prompt profile used last, not the All-chats ones):
-        the remembered pick (``ChatStoreAdapter.last_used``) unless it is the All-chats value anyway, the
-        All-chats value changed after it (that later choice wins) or the profile no longer exists."""
+    def new_chat_seed(self, last_used: dict, new_cid: Any = None) -> dict:
+        """What new chat ``new_cid`` starts on (owner: the model and prompt profile used last, not the All-chats
+        ones), unless it is the All-chats value anyway: the model of the chat used last (``_last_chat_model``)
+        and the remembered profile pick (``ChatStoreAdapter.last_used``) while the All-chats profile has not
+        changed after it (that later choice wins) and the profile still exists. Without ``new_cid``
+        (``last_picked_model``: a Library run) the model a new chat would start on, the same rule."""
         from glossarion_mobile.ui.sheets.chat_settings import inherited_value
 
         env = self.env
@@ -777,6 +786,11 @@ class ChatView:
         for key, config_key in (("model", "model"), ("profile", "active_profile")):
             entry = (last_used or {}).get(key) or {}
             value = str(entry.get("value") or "")
+            if key == "model":
+                value = self._last_chat_model(last_used, str(new_cid or ""))
+                if value and value != inherited_value(env.config_get, key, listing, names):
+                    seed[key] = value
+                continue
             if not value or str(env.config_get(config_key, "") or "") != str(entry.get("global") or ""):
                 continue
             if key == "profile" and names and value not in names:
@@ -784,6 +798,37 @@ class ChatView:
             if value != inherited_value(env.config_get, key, listing, names):
                 seed[key] = value
         return seed
+
+    def _last_chat_model(self, last_used: dict, new_cid: str) -> str:
+        """The model a new chat starts on (owner: the model last used in a chat): the model of the chat open when
+        it was made, else (the empty chat or none open: launch, the Welcome) of the chat used last; "" for the
+        All-chats model: no chat yet, the chat runs on the All-chats model, or the All-chats model was chosen
+        after that chat was last used or its model picked (``GLOBAL_MODEL_KEY``; changed by a writer the view
+        did not see since the last record: recorded now, so a later chat use wins again)."""
+        from glossarion_mobile.state.chat_store_adapter import GLOBAL_MODEL_KEY
+
+        chats = self.env.chats
+        source = str(self.cid or "")
+        if not source or source == new_cid or not chats.has_content(source):
+            source = chats.recent_chat(exclude=new_cid)
+        if not source:
+            return ""
+        model = str((chats.overrides(source) or {}).get("model") or "")
+        if not model:
+            return ""
+        chosen = (last_used or {}).get(GLOBAL_MODEL_KEY) or {}
+        if chosen.get("value"):
+            current = str(self.env.config_get("model", "") or "")
+            if current and current != str(chosen["value"]):
+                chats.remember_global_model(current, refresh=False)
+                chosen = chats.last_used().get(GLOBAL_MODEL_KEY) or {}
+            try:
+                at = float(chosen.get("at") or 0.0)
+            except (TypeError, ValueError):
+                at = 0.0
+            if at > chats.last_use_time(source):
+                return ""
+        return model
 
     def load_chat(self, cid: Any) -> None:
         """Show chat ``cid``: draft, attachment, mode, header, transcript tail (``_load_chat_session``)."""
@@ -4753,8 +4798,8 @@ class ChatView:
         """The ModelSheet (UI_SPEC §2.2): catalog search, favourites, provider groups, route row.
 
         A model picked here is the open chat's own (owner U13), except with ``global_scope``: the global
-        model, i.e. the model of every new chat (the drawer's model chip, the Welcome, Chat settings ›
-        All chats); ``follow_open_chat`` (the drawer) also moves an open chat that has its own model to
+        model, which new chats start on until a chat is used again (``new_chat_seed``; the drawer's model chip,
+        the Welcome, Chat settings › All chats); ``follow_open_chat`` (the drawer) also moves an open chat that has its own model to
         it. ``on_picked(field, value)`` runs after a pick was applied (the Welcome's "Using …" line)."""
         context = self.state.chat_context.value
         if self.env is None:
@@ -4885,7 +4930,19 @@ class ChatView:
             if (field_name == "model" and follow_open_chat and self.bound
                     and (self.env.chats.overrides(self.cid) or {}).get("model")):
                 self.env.chats.set_override(self.cid, override_key, value)  # the drawer: the open chat too
+            elif field_name == "model":
+                self.global_model_chosen()  # no follow: an empty open chat drops its seeded model instead
         self.apply_settings_changed()
+
+    def global_model_chosen(self) -> None:
+        """The All-chats model was just chosen (Chat settings › All chats, the drawer, the Welcome): an empty
+        open chat drops its own model (the launch / new chat seed) and starts on it, like a chat made now."""
+        chats = getattr(self.env, "chats", None)
+        has_content = getattr(chats, "has_content", None)
+        if not self.bound or not callable(has_content) or has_content(self.cid):
+            return
+        if chats.own_overrides(self.cid).get("model") is not None:
+            chats.set_override(self.cid, "model", None)
 
     def _sheet_nav(self, route_name: str) -> None:
         if self.model_sheet is not None:

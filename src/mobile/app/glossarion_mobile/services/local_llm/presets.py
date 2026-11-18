@@ -200,8 +200,9 @@ def load_presets(prefs: Any) -> list:
     if not isinstance(saved, list):
         return _defaults()
     rows = [row for row in (_clean(r) for r in saved) if row is not None]
+    repaired = _repair_projector_rows(rows)
     migrated = False
-    renamed = False
+    renamed = repaired
     for row in rows:
         if is_sigma(row["repo"]) and row["name"] == "Sigma (Best)":
             row["name"] = "Sigma"
@@ -218,6 +219,42 @@ def load_presets(prefs: Any) -> list:
     if renamed:
         return save_presets(prefs, rows)
     return rows
+
+
+def _repair_projector_rows(rows: list) -> bool:
+    """Rows whose ``file`` is a vision projector (``hf.is_projector_name``; "Save as a preset" of Add from Hugging
+    Face saved ``…-mmproj-Q8_0.gguf`` as the model when the projector's name did not start with "mmproj") can never
+    load. Each becomes the
+    repository's file-less row again (its next Download lists the model files, or picks the usual quant), keeps
+    that projector as its image support (``mmproj``) and loses a name that was the projector's file name; a row
+    another one of the same repository already stands for is dropped. True when anything changed (in place)."""
+    changed = False
+    for row in list(rows):
+        if not hf.is_projector_name(row.get("file")):
+            continue
+        changed = True
+        projector = row["file"]
+        if any(other is not row and not other.get("file") and other["repo"].casefold() == row["repo"].casefold()
+               for other in rows):
+            rows.remove(row)
+            continue
+        for key in ("size", "sha256"):
+            row.pop(key, None)
+        row["file"] = ""
+        if not row.get("mmproj"):
+            row["mmproj"] = projector
+            row.pop("mmproj_size", None)
+            row.pop("mmproj_sha256", None)
+        if "mmproj" in row["name"].casefold():
+            base = row["repo"].split("/", 1)[-1][:56]
+            taken = {str(other.get("name") or "").casefold() for other in rows if other is not row}
+            name, n = base, 2
+            while name.casefold() in taken:
+                name, n = f"{base} {n}", n + 1
+            row["name"] = name
+    if changed:
+        log.info("on-device presets: rows that named a vision projector as their model were repaired")
+    return changed
 
 
 def save_presets(prefs: Any, presets: Sequence[dict]) -> list:
@@ -354,6 +391,9 @@ def validate_preset(row: dict, presets: Sequence[dict], index: Optional[int] = N
         file = str(row.get("file") or "").strip() or (ref.file or "")
         if file:
             file = hf._check_file(file)
+            if hf.is_projector_name(file):
+                raise hf.HfError(f"{file.rsplit('/', 1)[-1]} is a vision projector (image support), not a model: "
+                                 "name a model file, or leave File empty")
     except hf.HfError as exc:
         return None, str(exc)
     n_ctx_text = str(row.get("n_ctx") or "").strip()

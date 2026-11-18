@@ -31,7 +31,9 @@
   and stays in force for the requests that had arrived (``stop_generation``), also after the next run
   clears the client's stop flags or when a socket closed under a blocked read never tells the endpoint.
   Native code is never interrupted or freed under: a switch (``load_blocking``) right after a Stop waits
-  for that generation to end and then loads by itself; only a running job's live answer refuses it.
+  for that generation to end and then loads by itself; only a running job's live answer refuses it. The
+  answer of a job that is over (stopped, or ended, while its answer still runs: ``orphaned``) is told to end
+  at its next stop check first, so the switch waits a few tokens, not the rest of an answer nobody reads.
 * **Adaptive script ban** ("Block other scripts in translations", Prefs ``BLOCK_CJK_KEY``, on by default):
   a request that writes target-language text bans the tokens of every script the target does not use
   (English: Han / kana / Hangul, Devanagari, Thai, Arabic, Cyrillic ...; a CJK target keeps all three CJK
@@ -140,6 +142,8 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 NOT_DOWNLOADED = "Download it in Model manager › On-device"
 NO_VISION = "This on-device model has no vision support"
+#: ``load_blocking`` refused: the engine gives the live answer of a running job (a Stop lets the switch go ahead)
+BUSY_FOR_JOB = "The on-device model is answering for a running job; stop the job to switch models"
 #: seconds a forced unload / delete waits for a running generation to stop (it checks every 8 tokens)
 FORCE_UNLOAD_WAIT = 10.0
 
@@ -405,10 +409,22 @@ class LocalEngineService:
         # immediate Stops so far: a request that arrived before the latest one is stopped for good
         self._stops = 0
         self._holder_stops: Optional[int] = None  # ``_stops`` when the generation holding the gate arrived
+        self._holder_job = False  # a running job pinned this model when the generation holding the gate arrived
+        self._holder_token: Optional[object] = None  # the generation holding the gate
+        self._cut: Optional[object] = None  # ``_holder_token`` of an orphaned generation told to end (``end_orphan``)
         self._unload_when_idle = False  # the selection moved off the loaded model while it answered
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
         self._parallel = None if _parallel_child else RequestSlots(self)
         self._migrate_sigma_defaults()
+        #: ``Registry.repair_projector_models`` at start: projectors an earlier version downloaded as models
+        self.repaired: list = [] if _parallel_child else self._repair_projector_models()
+
+    def _repair_projector_models(self) -> list:
+        try:
+            return self.registry.repair_projector_models()
+        except Exception:
+            log.exception("repairing projector downloads failed")
+            return []
 
     def _migrate_sigma_defaults(self) -> None:
         if self.prefs is None or self._pref("sigma_defaults_v1"):
@@ -1011,28 +1027,67 @@ class LocalEngineService:
         holder = self._holder_stops
         return self.gate.busy and ((holder is not None and holder != self._stops) or bool(self.stop_state()))
 
+    def orphaned(self) -> bool:
+        """The generation holding the engine came from an on-device job that is over for the user: that job
+        pinned this model when the answer arrived, and no running job pins it any more (it ended, was force
+        stopped, or the next job runs a cloud model or none; a job's model is fixed, so this needs no stop flag
+        the next run clears). Nobody reads that answer (a graceful Stop's answer runs to its end, minutes on a
+        phone): an explicit switch ends it (``end_orphan``). An answer that arrived with no on-device job behind
+        it (endpoint test, self-check, a chat during a cloud job) is never orphaned."""
+        return bool(self.gate.busy and self._holder_job and self._holder_token is not None
+                    and self._pinned_stem() is None)
+
+    def end_orphan(self) -> bool:
+        """Tell an ``orphaned`` generation to end at its next stop check (only that one: the requests queued
+        behind it and the Stop counter are left alone; native code is never interrupted). True when it did."""
+        token = self._holder_token
+        if token is None or self._cut is token or not self.orphaned():
+            return False
+        self._cut = token
+        log.info("on-device model %s: ending the answer of a stopped job for a model switch", self._stem)
+        return True
+
     def load_must_wait(self) -> bool:
         """``load_blocking`` would wait for the engine: something holds it, and it is not the live answer of
         a running job on an on-device model (that one refuses)."""
         return bool(self.gate.busy or self.gate.waiting()) and (self._pinned_stem() is None or self.stopping())
 
+    def _wait_for_engine(self) -> None:
+        """Take the gate behind its holder (FIFO), ending the holder's answer as soon as it is ``orphaned``
+        (also when its job ends during the wait). Raises ``LocalLLMError`` (503) on a full queue."""
+        def keep_waiting() -> bool:
+            self.end_orphan()  # a job that ended during the wait left its answer to nobody
+            return False
+
+        self.end_orphan()
+        self.gate.acquire(keep_waiting, on_wait=self._notify)
+
     def load_blocking(self, stem: str) -> tuple:
         """Explicit Load (Model manager, Welcome): ``(True, None)`` or ``(False, message)``. Refused during
         a running job's live answer; an answer that was stopped or has no job behind it is waited for (it
-        cannot be cut off under native code), then the model loads by itself."""
+        cannot be cut off under native code), then the model loads by itself. The answer of a job that is
+        over (``orphaned``) is told to end first, so the wait is a few tokens, not the rest of that answer."""
         pool = self._parallel
-        if pool is not None and pool.secondary is not None and pool.secondary.gate.busy:
-            if not pool.secondary.stopping():
+        secondary = pool.secondary if pool is not None else None
+        if secondary is not None and secondary.gate.busy:
+            if not (secondary.stopping() or secondary.orphaned()):
                 return False, "The on-device model is busy; try again when the current answers are done"
-            pool.secondary.unload(force=True)
-            if pool.secondary.gate.busy:
-                return False, "The on-device model is still stopping"
+            secondary.stop_generation()  # a stopped answer in the extra context ends at its next stop check
+            log.info("on-device model %s: waiting for the extra context's answer to end", stem)
+            try:
+                secondary.gate.acquire(on_wait=self._notify)
+            except LocalLLMError as exc:
+                return False, exc.message
+            try:
+                secondary._unload_locked()
+            finally:
+                secondary.gate.release()
         if not self.gate.try_acquire():
             if not self.load_must_wait():
-                return False, "The on-device model is busy; try again when the current answer is done"
+                return False, BUSY_FOR_JOB
             log.info("on-device model %s: waiting for the current answer to end", stem)
             try:
-                self.gate.acquire(on_wait=self._notify)
+                self._wait_for_engine()
             except LocalLLMError as exc:
                 return False, exc.message
         try:
@@ -1086,6 +1141,7 @@ class LocalEngineService:
             log.info("on-device model %s unloaded: the selected model is now %s", loaded, text or "none")
             return "unloaded"
         self._unload_when_idle = True
+        self.end_orphan()  # a stopped job's answer nobody reads: the unload follows its next stop check
         return "deferred"
 
     def _deferred_unload(self) -> None:
@@ -1169,32 +1225,43 @@ class LocalEngineService:
             raise LocalLLMError(409, "engine_busy", f"The on-device engine is busy with {pinned} for a running job")
         stop_state = self.stop_state
         arrived = self._stops
+        under_job = bool(pinned)  # a running job pins this on-device model (any other pin was refused above)
+        token = object()
 
         def stop_waiting() -> bool:
             # a queued request gives up on any Stop (graceful lets only the answer being generated finish)
             return bool(self._stops != arrived or should_stop() or stop_state())
 
         def stop_generating() -> bool:
-            return bool(self._stops != arrived or should_stop() or stop_state() == "force")
+            # ``self._cut``: a model switch ended this answer of a job that is over (``end_orphan``)
+            return bool(self._stops != arrived or should_stop() or stop_state() == "force" or self._cut is token)
 
         if stop_waiting():
             raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)")
         if not self.gate.acquire(stop_waiting, on_wait=self._notify):
             raise LocalLLMError(499, "client_closed", "The request was cancelled while waiting")
         self._holder_stops = arrived
+        self._holder_job = under_job
+        self._holder_token = token
         released = [False]
 
         def release() -> None:
             if released[0]:
                 return
             released[0] = True
-            self.last_used = self.clock()
-            if self._gpu_attempt is not None:
-                self._clear_gpu_attempt()  # the GPU's first answer ended without taking the app down
-            if self._state == "generating":
-                self._set("ready", self._stem)
-            self._holder_stops = None
-            self.gate.release()
+            try:
+                self.last_used = self.clock()
+                if self._gpu_attempt is not None:
+                    self._clear_gpu_attempt()  # the GPU's first answer ended without taking the app down
+                if self._state == "generating":
+                    self._set("ready", self._stem)
+            finally:  # whatever failed above, the engine goes back to the next request
+                self._holder_stops = None
+                self._holder_job = False
+                self._holder_token = None
+                if self._cut is token:
+                    self._cut = None
+                self.gate.release()
             self._notify()
             if self._unload_when_idle:
                 self._deferred_unload()
@@ -1299,15 +1366,29 @@ class LocalEngineService:
             self.request_catalog_refresh()
         return state
 
-    def delete(self, stem: str) -> bool:
-        """Delete a downloaded model (unloads it first). False without deleting anything while the model
-        is loading or answering (``busy_with(stem)``): its file must not go away under native code."""
+    def delete_blocker(self, stem: str) -> Optional[str]:
+        """Why ``stem`` cannot be deleted now, else None: a running job uses it (also between two of its
+        requests), or it is loading or answering (``busy_with``). Loaded and idle is no reason: ``delete``
+        unloads it first."""
+        pinned = self._pinned_stem()
+        if pinned and pinned.casefold() == stem.casefold():
+            return f"local/{stem} is in use by a running job: stop the job, then delete it"
         if self.busy_with(stem):
+            return f"local/{stem} is loading or answering a request: delete it when that is done"
+        return None
+
+    def delete(self, stem: str) -> bool:
+        """Delete a model and everything of it on the phone: the file, its vision projector and the unfinished
+        parts of both (a paused or failed download; a running one is cancelled). Unloads it first. False
+        without deleting anything while ``delete_blocker(stem)`` names a reason: its file must not go away
+        under native code or under a running job."""
+        if self.delete_blocker(stem):
             return False
         if self._stem == stem and self.engine is not None and self.engine.loaded and not self.unload():
             return False
         removed = self.registry.remove(stem)
-        self.downloads.cancel(self.registry.projector_key(stem))  # its image support's running / paused part
+        for key in (stem, self.registry.projector_key(stem)):  # running / paused / failed parts
+            removed = self.downloads.cancel(key) or removed
         self.request_catalog_refresh()
         return removed
 

@@ -9,8 +9,10 @@ missing schema); then the grouped section list. Groups follow the spec order
 Data, About): schema sections (``settings_schema.sections()``, with the
 number of settings and how many differ from their defaults) plus the static
 Settings pages from the route table (Logs & diagnostics, Env preview, ...;
-pages of later milestones carry a ReasonChip). While a search or filter is
-active the results replace the list.
+pages of later milestones carry a ReasonChip). A section with one setting
+(``model.INLINE_SECTIONS``: Debug Controls) shows that setting's tile in its group
+instead of a row opening a one-row page. While a search or filter is active the
+results replace the list.
 
 It extends ``HubScreen`` (the U1 Settings hub), reusing its child-route list.
 
@@ -22,6 +24,7 @@ panes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Callable, Optional, Sequence
 
@@ -38,10 +41,10 @@ from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.router import ROUTES_BY_NAME, RouteError, RouteMatch, RouteSpec, build_route, parse_route
 from glossarion_mobile.ui.screens.base import HubScreen, unavailable_reason
 from glossarion_mobile.ui.settings.banners import notice
-from glossarion_mobile.ui.settings.model import ANTI_DUPLICATE_SECTION, ordered_groups
+from glossarion_mobile.ui.settings.model import ANTI_DUPLICATE_SECTION, INLINE_SECTIONS, ordered_groups
 from glossarion_mobile.ui.settings.schema_access import SearchHit, SectionInfo
 from glossarion_mobile.ui.settings.search import SettingsSearch
-from glossarion_mobile.ui.settings.tiles import listed_setting
+from glossarion_mobile.ui.settings.tiles import EffectiveConfig, SettingTile, listed_setting, make_tile
 from glossarion_mobile.ui.theme import icon_data
 
 __all__ = ["PROFILES_REASON", "ROUTE_GROUPS", "ROUTE_SECTIONS", "SettingsHome", "section_screen_for"]
@@ -140,6 +143,8 @@ class SettingsHome(HubScreen):
         self.implemented = frozenset(implemented_routes)
         self.section_tiles: dict[str, ft.ListTile] = {}
         self.route_tiles: dict[str, ft.ListTile] = {}
+        # INLINE_SECTIONS: their one setting's tile, shown in its group instead of a section row (key -> tile)
+        self.inline_tiles: dict[str, SettingTile] = {}
         self.group_titles: list[str] = []
         self.translation_tab = "Run"
         self._group_cards: Optional[list[ft.Control]] = None
@@ -177,7 +182,8 @@ class SettingsHome(HubScreen):
             control.label.size = 12
         self.notices = ft.Column(self._notice_controls(), spacing=6, tight=True)
         self.notices.visible = bool(self.notices.controls)
-        self.content = ft.ListView(expand=True, spacing=tokens.SPACING["md"],
+        # every card built (a short list): an inline setting a search opens is a scroll_to target
+        self.content = ft.ListView(expand=True, spacing=tokens.SPACING["md"], build_controls_on_demand=False,
                                    padding=ft.Padding.only(left=12, right=12, bottom=16, top=4))
         self.refresh(push=False)
         gutter = ft.Padding.symmetric(horizontal=12)
@@ -296,6 +302,21 @@ class SettingsHome(HubScreen):
                 if key != "auto_update_check" and (spec := self.ctx.schema.spec(key)) is not None
                 and listed_setting(self.ctx, spec)]
 
+    def _inline_tile(self, key: str) -> Optional[SettingTile]:
+        """The shared settings tile of an ``INLINE_SECTIONS`` setting (label, state, ⓘ as on a section page)."""
+        spec = self.ctx.schema.spec(key)
+        if spec is None:
+            return None
+        try:
+            tile = make_tile(spec, self.ctx, config=EffectiveConfig(self.ctx.store))
+        except Exception:
+            import logging
+
+            logging.getLogger("glossarion.settings").exception("building the %s tile failed", key)
+            return None
+        self.inline_tiles[key] = tile
+        return tile
+
     @staticmethod
     def _has_pools(section: SectionInfo) -> bool:
         from glossarion_mobile.ui.settings.section_page import SECTION_POOL_KEYS
@@ -311,10 +332,14 @@ class SettingsHome(HubScreen):
                 for section in sections:
                     if section.id in self.section_tiles:
                         self._section_tile(section)
+            for tile in self.inline_tiles.values():
+                tile.refresh(push=False)
             return self._group_cards
         self.section_tiles = {}
         self.route_tiles = {}
+        self.inline_tiles = {}
         groups: dict[str, list[ft.Control]] = {}
+        inline: dict[str, list[ft.Control]] = {}  # shown after the group's pages
         translation: dict[str, ft.Control] = {}
         names: list[str] = []
         section_ids = set()
@@ -323,8 +348,15 @@ class SettingsHome(HubScreen):
                 section_ids.add(section.id)
                 if section.id == "keys.pools" and "settings.keys" in self.implemented:
                     continue  # the dedicated API keys screen owns these controls
-                if not self._listed_keys(section) and not self._has_pools(section):
+                listed = self._listed_keys(section)
+                if not listed and not self._has_pools(section):
                     continue  # nothing to change here (Direct Text: edited in Chat settings): not listed
+                if section.id in INLINE_SECTIONS and len(listed) == 1 and not self._has_pools(section):
+                    tile = self._inline_tile(listed[0])
+                    if tile is not None:  # the switch itself, no one-row page (Debug Controls)
+                        inline.setdefault(group, []).append(tile.control)
+                        names.append(group)
+                        continue
                 tile = self._section_tile(section)
                 if group == "Translation":
                     translation[section.id] = tile
@@ -344,6 +376,8 @@ class SettingsHome(HubScreen):
             names.append(group)
         if translation:
             groups["Translation"] = [self._translation_tabs(translation)]
+        for group, controls in inline.items():
+            groups.setdefault(group, []).extend(controls)
         self.group_titles = ordered_groups(names)
         self._group_cards = [
             SectionCard(title=group, children=groups[group], key=f"settings-group-{group}")
@@ -439,9 +473,33 @@ class SettingsHome(HubScreen):
     def open_hit(self, hit: SearchHit) -> Optional[str]:
         if hit.key == "auto_update_check":
             return self.ctx.go("settings.updates")
+        if hit.section_id in INLINE_SECTIONS:  # the switch is on this list: leave the search, show it
+            self.search.clear()
+            if hit.key in self.inline_tiles:
+                self.ctx.spawn(self.focus_inline(hit.key))
+            return build_route("settings")
         if self._show_section(hit.section_id, hit.key):
             return build_route("settings.section", {"section": hit.section_id}, fragment=hit.key)
         return self.ctx.open_setting(hit.section_id, hit.key)
+
+    async def focus_inline(self, key: str, *, settle: float = 0.05) -> bool:
+        """Scroll the home list to the inline setting ``key`` and highlight it (as a section page does)."""
+        from glossarion_mobile.ui.settings.section_page import HIGHLIGHT_SECONDS
+
+        tile = self.inline_tiles.get(key)
+        if tile is None:
+            return False
+        await asyncio.sleep(settle)  # the client builds the group cards first
+        try:
+            await self.content.scroll_to(scroll_key=ft.ScrollKey(key), duration=300)
+        except Exception:  # not mounted (yet) / client gone
+            pass
+        tile.set_highlight(True)
+        try:
+            await asyncio.sleep(HIGHLIGHT_SECONDS)
+        finally:
+            tile.set_highlight(False)
+        return True
 
     def _show_section(self, section_id: str, key: Optional[str] = None) -> bool:
         """Wide screens: the section page in the detail pane (False: navigate instead)."""

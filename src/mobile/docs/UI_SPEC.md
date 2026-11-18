@@ -410,7 +410,7 @@ On iOS the same text goes to local notifications (action category Accept / Revie
 - **Footer:** "Manage models" → `/settings/models` · "Keys" → `/settings/keys` · "Accounts" → `/settings/accounts` · ⓘ Provider information (bundled `docs/model_providers.md`).
 - **Scope.** Selecting a model writes the global `model` key, unless "Apply to this chat only" is on.
 - **One-shot mode.** When the sheet is opened from long-press Send → "Translate once with another model…", the title reads "Use once" and the selection is only a JobSpec override.
-- **Field mode (`ModelPicker`).** The same component works as a form field in KeyEditor, Manga, Glossary and the QA AI-Hunter settings.
+- **Field mode (`ModelPicker`).** The same component works as a form field in KeyEditor, Settings › Model & API, Manga, Glossary and the QA AI-Hunter settings.
   - The field is read-only with a ▾. It opens this sheet without the Profile and Language tabs.
   - The ⋯ menu and the per-provider refresh buttons are the same as above.
 
@@ -1316,9 +1316,9 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 ### 3.7 Chapters tab (Progress Manager parity; `progress_core.build_book_progress`)
 
 **Header.**
-- **Run translation** · **Run QA scan** (hotfix 1 #7) in one row, sharing its width (no wrap on a 360-412 dp phone at normal text size): 12 dp side padding instead of M3's 16 / 24 dp for an icon button, and one-line labels that end in "…" rather than wrap when a wider system font or a larger text size does not fit. There is no folder chip and no mode badge here (owner 2026-11-16): the summary strip above the tabs names the book and its mode, and the folder opens from ⋯ › Files and Overview's 📁 icon. The Translate sheet runs with the model picked last (the one a new chat starts on), else the All-chats model. A Resume on the Jobs page of any translating job runs on the model the drawer shows; a chat's own Resume keeps that chat's model. The sheet is as tall as its content; its Model, Profile and language chips open the ModelSheet on that tab and change the All-chats value. Run QA scan queues the book's one-tap Quick Scan (the chat's scan, `qa_model.qa_spec` with `CHAT_QA_MODE`; the mobile duplicate-check sample size 0 unless one is saved) on its workspace and raw source; when it ends the rows reload, the Output tab is marked stale and a snackbar offers the report. Both buttons are disabled, with the reason as tooltip, while any translation or glossary run is active (one job at a time; also at its glossary gate) or one is queued for this book (`book_page.run_wait_reason`); Run QA scan also while this book's scan is queued or running. They follow the jobs events, so they turn back on as soon as the run ends.
+- **Run translation** · **Run QA scan** (hotfix 1 #7) in one row, sharing its width (no wrap on a 360-412 dp phone at normal text size): 12 dp side padding instead of M3's 16 / 24 dp for an icon button, and one-line labels that end in "…" rather than wrap when a wider system font or a larger text size does not fit. There is no folder chip and no mode badge here (owner 2026-11-16): the summary strip above the tabs names the book and its mode, and the folder opens from ⋯ › Files and Overview's 📁 icon. The Translate sheet runs with the model picked last (the one a new chat starts on), else the All-chats model. A Resume on the Jobs page of any translating job runs on the model the drawer shows; a chat's own Resume keeps that chat's model. The sheet is as tall as its content; its Model, Profile and language chips open the ModelSheet on that tab and change the All-chats value. Run QA scan queues the book's one-tap Quick Scan (the chat's scan, `qa_model.qa_spec` with `CHAT_QA_MODE`; the mobile duplicate-check sample size 0 unless one is saved) on its workspace and raw source; when it ends the rows reload and the Output tab is marked stale (it lists the report; no pop-up, owner 2026-11-18); a failed scan says why · **Log**. Both buttons are disabled, with the reason as tooltip, while any translation or glossary run is active (one job at a time; also at its glossary gate) or one is queued for this book (`book_page.run_wait_reason`); Run QA scan also while this book's scan is queued or running. They follow the jobs events, so they turn back on as soon as the run ends.
 - When the Progress Manager logic creates a missing output folder, a snackbar shows "📁 Created: <folder>".
-- **Feedback** (hotfix 1 #9, desktop refresh-then-message): every action (mark Completed / Failed / In progress, Restore In Progress Status, Remove QA Failed / Pending / refinement marks, Delete, Retranslate, bulk selection actions) runs the tab's progress bar while it writes; then the rows, the stats chips and the strip refresh at once and the desktop result text follows ("Successfully marked 1 as failed.", "Removed failed mark from 1 chapters."; a sheet when long). A failed write or reload says why. "Queued…" appears only when the strip already shows another job of this book.
+- **Feedback** (hotfix 1 #9, desktop refresh-then-message): every action (mark Completed / Failed / In progress, Restore In Progress Status, Remove QA Failed / Pending / refinement marks, Delete, Retranslate, bulk selection actions) runs the tab's progress bar while it writes; then the rows, the stats chips and the strip refresh at once, and that is the confirmation (no pop-up for what the rows show, owner 2026-11-18). The desktop result text still opens when the rows do not show the outcome: nothing changed ("No in-progress marks were changed."), a partial image move, Resolve QA and Insert missing image outcomes (a sheet when long). A failed write or reload says why. "Queued…" appears only when the strip already shows another job of this book.
 
 **Stats row.** A scrolling row of `StatusChip`s with leading emoji and counts. Each chip is hidden when its count is 0, except Completed and the missing/failed groups.
 
@@ -1393,7 +1393,7 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 - **Confirmations:**
   - The text comes verbatim from `plan_retranslation()`, ending "Continue?".
   - For RECYCLED TOC/header pairs, a 3-button dialog: "Delete Both Linked Files" / "Keep <counterpart>" / "Cancel".
-  - The result is a summary snackbar with the exact `ActionResult` phrases ("Deleted N files", "Total N chapters ready for translation.", …).
+  - A successful reset shows only in the reloaded rows (no pop-up, owner 2026-11-18); a warning ("Chunk HTML Not Updated") or "No changes made." opens with the exact `ActionResult` text.
 - **Row ⋯** (trailing `IconButton` → `ActionSheet`):
   - 📖 Open in reader
   - 📂 Open file (TextEditor read-only / Share)
@@ -1454,7 +1454,7 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 
 **Path-row actions:** Select All · ✨ Refinement (preview sheet: types, chunk count from `plan_refinement`; Start → job) · Files · ✏️ Open Glossary.
 
-**Feedback** (hotfix 1 #9): Mark as Completed / Remove from progress run the tab's progress bar, reload the rows at once (a forced reload, never dropped behind a poll load in flight) and confirm ("Marked 3 chapters as completed"); a failure says why.
+**Feedback** (hotfix 1 #9): Mark as Completed / Remove from progress run the tab's progress bar, reload the rows at once (a forced reload, never dropped behind a poll load in flight); the reloaded rows are the confirmation (no pop-up, owner 2026-11-18). "Nothing to mark as completed" / "Nothing was removed" and failures still say why.
 
 **Writes** go through `glossary_progress_core`, with the extractor's lock + atomic replace. The desktop's plain dumps are a recorded bug; desktop changes only in a separate, user-approved commit.
 
@@ -1935,14 +1935,14 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 
 | Group | Sections (id) |
 |---|---|
-| General | Appearance (`appearance`: theme mode, accent Halgakos Rose / Desktop Blue / Library Violet, AMOLED dark, text scale 85–130%, reduce motion, haptics; "Auto DPI / GUI scale" shown disabled with a ReasonChip) · Notifications & background (`notifications`) |
+| General | Appearance (`appearance`: theme mode, accent Halgakos Rose / Desktop Blue / Library Violet, AMOLED dark, text scale 85–130%, reduce motion, haptics; the desktop "Auto DPI / GUI scale" has no row, its values are kept) · Notifications & background (`notifications`) |
 | Translation | Defaults (`translation_defaults`: target language, **Output mode** = the global `output_mode` default for book jobs, temperature, token limits, chunk size, pacing = threading delay / API delay / preflight, batch translation, multipass + refine prompt, remove AI artifacts) · Profiles & prompts (custom) · Chat defaults (`direct_text`) · Context & memory (`context_memory`) · Response handling & retries (`response_handling`; Tor proxy, Tor rotation and "GUI Responsiveness Yield" shown disabled with ReasonChips) · Processing & extraction (`processing`) · Metadata, TOC & headers (`metadata_toc_headers`) · EPUB output (`epub_output`) · PDF (`pdf`) · Image & vision (`image_vision`: output-mode sub-settings, with a link "Default output mode → Translation defaults") · Anti-duplicate (`anti_duplicate`) |
 | Models & keys | Model Manager · Multi-Key Manager · Accounts · Endpoints (`endpoints`: includes the Ollama / LM Studio LAN host and Test connection; Gemini gRPC transport and Vertex follow the dependency rule; "AuthZA / GLM access mode" and "Load Ollama" shown disabled with ReasonChips) · Thinking & reasoning (`thinking`) · Provider options & safety (`provider_options`: API safety filters, OpenRouter options, service tier) |
 | Glossary | General · Balanced/Full · Minimal · Refinement · Unified (`glossary_*`; the same pages as the Glossaries tabs) |
 | QA | QA Scanner (`qa_scanner`) |
-| Manga | `manga_*` |
+| Manga | Manga Translator (`manga.settings`) in tabs: the desktop manga settings dialog's tabs in its order (Preprocessing · Inpainting · Replicate · Manual edit · OCR · Advanced), then the main manga panel's Rendering · General (`ui/settings/manga_layout.py`; a scrollable tab bar, the last tab kept while the page is open, a search opens the setting's tab) |
 | Reader & Library | `reader` · `library` |
-| Data | Storage · Backup & restore · Import from desktop · Logs & diagnostics |
+| Data | Storage · Backup & restore · Import from desktop · Logs & diagnostics · the **Show debug buttons** switch itself (`INLINE_SECTIONS`: the one setting of the desktop Debug Controls has no page of its own; search opens the home on it; Logs & diagnostics › Logging & dumps shows the same switch) |
 | About | Updates · About · User guide · Welcome guide · Danger zone |
 
 *Implementation (U9).* The curated sections are a mobile layer over the desktop schema sections
@@ -2243,7 +2243,8 @@ Long-press resets to default. Every tile is built on `ListTile(on_long_press=…
 | `NumberTile` (int / float) | value with unit, min/max, −/+ stepper | numeric `TextField` + `IconButton`s |
 | `SliderTile` (bounded number) | slider + value text | `Slider(divisions=…)`, `Text` |
 | `TextTile` (str / URL) | field + quick-paste chips under URL fields | `TextField`, `Chip` |
-| `SecretTile` (secret) | a `KeyField` for cookies, Replicate keys and similar | `KeyField` |
+| `SecretTile` (secret) | a `KeyField` edited in place (eye · animated Save with "Saved" / "Not saved: …" · Copy; no pop-up editor) for the main API key, cookies, Replicate keys and similar | `KeyField` |
+| `ModelTile` (`model`) | Settings › Model & API, above the API key: the searchable `ModelPicker` (ModelSheet in field mode, typed ids allowed); a pick sets the global model like the model menu | `ModelPicker` |
 | `KeyField` | masked `sk-…a1B2` · eye · Save (floppy disk; the key is stored as typed, the button writes the file now and shows "Saved", or "Not saved: reason"; its icon turns into a tick, or an error mark, for 1.4 s through an `AnimatedSwitcher`; absent in the KeyEditor, whose form has its own Save) · Copy · Test → status chip. States: empty · masked · revealed · testing · passed · failed (message) | `TextField(password=True, can_reveal_password=True)`, `IconButton`, `Chip` |
 | `PromptTile` (prompt) | 2-line preview + placeholder chips + ↺ Reset; tap → PromptEditor. States: default · modified · profile-bound | `ListTile`, `Text(max_lines=2)`, `Chip` |
 | `PromptEditor` | full-screen mono editor · token count · placeholder chips that insert at the cursor (`{split_marker_instruction}`, `{glossary_prompt}`, `{target_lang}`, `{raw_text}`, …) · role toggle (System ⇄ User, when relevant) · Save · Save as profile · Reset to default. Placeholder links (§5.5 `PlaceholderLinker`): where the prompt's request replaces placeholders (`services.prompt_placeholders.links_for_setting` by config key; the profile, prefill, chat-settings, glossary-card, review, manga and Parallel EPUB editors pass theirs), the chips are link-styled (hold: what it says now) and the header has the marked-view toggle, before Save (the footer row of count and Reset is full at 360 dp). States: clean · dirty · over-budget warning · marked | `View`, `TextField(multiline=True)` in the mono family (or `CodeEditor(PLAINTEXT)`), `Chip`, `SegmentedButton` |
@@ -2596,7 +2597,7 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 | Topic | Decision | Where |
 |---|---|---|
 | Output modes | An always-visible inline row of six toggles with an "Output: Text" label (icons only under 400 dp, text labels on tablet); tapping the active mode opens its options sheet | §2.3, §2.6 |
-| Unavailable features | Disabled with a ReasonChip, never hidden; there is no "show desktop-only" switch | §0 item 6, §4.15, §5.2 |
+| Unavailable features | Disabled with a ReasonChip; there is no "show desktop-only" switch. Settings rows that can never work on mobile ("Not available on mobile": schema `is_available`, Process priority / CPU affinity, Auto DPI) are not shown at all, nor counted or searched (owner 2026-11-18); their stored values are kept. Excluded models / providers in the model lists keep their chip | §0 item 6, §4.15, §5.2 |
 | Dependency rule | Ship when the wheels resolve; use REST equivalents otherwise; only native-impossible items stay disabled | §0 item 7 |
 | Hit targets | 48 dp | §0 item 4, §6.3 |
 | Reader | A full-screen View on every size class | §1.2, §3.11 |

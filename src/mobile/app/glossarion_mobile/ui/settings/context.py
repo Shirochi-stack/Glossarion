@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from glossarion_mobile.state.config_store import MobileConfigStore
 from glossarion_mobile.ui.router import RouteError, build_route
+from glossarion_mobile.ui.settings.model import INLINE_SECTIONS
 from glossarion_mobile.ui.settings.schema_access import SchemaAccess
 
 __all__ = ["SettingsContext"]
@@ -135,4 +136,6 @@ class SettingsContext:
                 section_id = resolve(section_id, key) or section_id
             except Exception:
                 pass
+        if section_id in INLINE_SECTIONS:  # its one switch sits on the Settings home (no page of its own)
+            return self.go("settings")
         return self.go("settings.section", {"section": section_id}, fragment=key)

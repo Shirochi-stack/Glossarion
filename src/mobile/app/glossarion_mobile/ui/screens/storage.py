@@ -294,14 +294,9 @@ class StorageScreen(PageScreen):
                                                  on_click=self._on_clear, key="storage-clear")
         return self.scaffold([
             section("Folders", rows),
-            section("Output folder", [
-                ft.Text(output_note, theme_style=ft.TextThemeStyle.BODY_SMALL),
-                ft.Row([ft.Text("Choose another folder", expand=True),
-                        ReasonChip(reason="Not on mobile", detail="Arbitrary folders (SAF) are not supported; the "
-                                   "output root is app storage or iOS Documents. The desktop output_directory value is "
-                                   "kept untouched. To keep copies of your books in a cloud folder or the phone folder, "
-                                   "use Settings › Cloud sync & sharing.")]),
-            ]),
+            # no "Choose another folder" row: arbitrary folders (SAF) are not supported on mobile and the desktop
+            # output_directory value is kept untouched (owner 2026-11-18: no "Not on mobile" rows)
+            section("Output folder", [ft.Text(output_note, theme_style=ft.TextThemeStyle.BODY_SMALL)]),
             self._phone_folder_section(),
             section("Caches", [
                 ft.Text("Reader, cover and temporary files. The bundled tokenizer data is kept.",
