@@ -2058,6 +2058,64 @@ def prepend_number_pattern_to_headers(headers, ordered_source=None, config=None)
     return result
 
 
+# Elements inside a heading that the QA scan checks were kept (links, pictures,
+# tables): replacing the heading's text must not delete them.
+_HEADING_QA_CHECKED_TAGS = frozenset((
+    'img', 'svg', 'path', 'circle', 'ellipse', 'rect', 'line', 'polygon',
+    'polyline', 'image', 'use', 'canvas', 'object', 'embed', 'picture',
+    'video', 'source', 'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr',
+    'th', 'td',
+))
+
+
+def _heading_has_qa_checked_markup(tag):
+    """True when *tag* holds a link with an href, a picture, a table or a CSS
+    background picture."""
+    for element in tag.find_all(True):
+        name = str(element.name or '').lower()
+        if name in _HEADING_QA_CHECKED_TAGS:
+            return True
+        if name == 'a' and str(element.get('href') or '').strip():
+            return True
+        if re.search(r'url\s*\(', str(element.get('style') or ''), flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def replace_heading_text_keep_markup(tag, new_text):
+    """Put *new_text* into a heading (a BeautifulSoup element) without dropping
+    a link, picture or table inside it.
+
+    A heading without such markup gets *new_text* as its whole content, as
+    before (layout markup such as <br/>, <span> or <em> goes). Otherwise the
+    text goes into the heading's first non-blank text node (the link text of
+    ``<h1><a href="...">Old</a></h1>``) and its other text nodes are removed,
+    so the elements stay. A heading whose only content is such markup (a
+    picture, no text) has no place for the text and is left as it is.
+
+    Returns "updated", "unchanged" (it already reads *new_text*) or "kept".
+    """
+    from bs4.element import CData, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction
+    if not _heading_has_qa_checked_markup(tag):
+        if len(tag.contents) == 1 and type(tag.contents[0]) is NavigableString \
+                and str(tag.contents[0]) == new_text:
+            return "unchanged"
+        tag.clear()
+        tag.string = new_text
+        return "updated"
+    not_text = (Comment, CData, ProcessingInstruction, Declaration, Doctype)
+    texts = [s for s in tag.find_all(string=True)
+             if not isinstance(s, not_text) and str(s).strip()]
+    if not texts:
+        return "kept"
+    if len(texts) == 1 and str(texts[0]) == new_text:
+        return "unchanged"
+    texts[0].replace_with(new_text)
+    for extra in texts[1:]:
+        extra.extract()
+    return "updated"
+
+
 class BatchHeaderTranslator:
     """Translate chapter headers in batches"""
     
@@ -3053,12 +3111,15 @@ class BatchHeaderTranslator:
                     from bs4 import BeautifulSoup as BS
                     temp_soup = BS(content, 'html.parser')
                     tag_updated = False
+                    heading_kept = False
                     for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
                         tag = temp_soup.find(tag_name)
                         if tag and tag.get_text().strip() == current_title:
-                            # Clear the tag and set new content
-                            tag.clear()
-                            tag.string = new_title
+                            # Change only the text: a link or picture inside the heading stays
+                            if replace_heading_text_keep_markup(tag, new_title) == "kept":
+                                heading_kept = True
+                                print(f"⚠️ Kept the <{tag_name}> of {html_file} as it is: it contains markup the new title cannot be placed in")
+                                break
                             content2 = str(temp_soup)
                             if content2 != content:
                                 updated = True
@@ -3067,7 +3128,7 @@ class BatchHeaderTranslator:
                                 break
                     
                     # Fallback to regex if BeautifulSoup didn't work
-                    if not tag_updated:
+                    if not tag_updated and not heading_kept:
                         for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
                             pattern = rf'(<{tag}[^>]*>)\s*{_re.escape(current_title)}\s*(</{tag}>)'
                             def replacement_func(match):
@@ -3099,10 +3160,13 @@ class BatchHeaderTranslator:
                         with open(html_path, 'w', encoding='utf-8') as wf:
                             wf.write(content)
                         updated_count += 1
-                        print(f"✓ Updated {html_file}: '{current_title}' → '{new_title}'")
-                    else:
+                        if heading_kept:
+                            print(f"✓ Updated the title of {html_file} (heading kept): '{current_title}' → '{new_title}'")
+                        else:
+                            print(f"✓ Updated {html_file}: '{current_title}' → '{new_title}'")
+                    elif not heading_kept:
                         print(f"⚠️ Could not find '{current_title}' in {html_file}")
-                    
+
             except Exception as e:
                 print(f"❌ Error processing {html_file}: {e}")
                 import traceback
@@ -3231,10 +3295,20 @@ class BatchHeaderTranslator:
                         content = content2
                     # Replace first h1/h2/h3
                     for tag in ['h1', 'h2', 'h3']:
-                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\s\S]*?(</{tag}>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
-                        if n > 0:
+                        m = _re.search(rf'(<{tag}[^>]*>)([\s\S]*?)(</{tag}>)', content, flags=_re.IGNORECASE)
+                        if m:
+                            new_inner = new_title
+                            if '<' in m.group(2):
+                                # Change only the text: a link or picture inside the heading stays
+                                from bs4 import BeautifulSoup as BS
+                                inner_soup = BS(m.group(2), 'html.parser')
+                                if _heading_has_qa_checked_markup(inner_soup):
+                                    if replace_heading_text_keep_markup(inner_soup, new_title) == "kept":
+                                        print(f"⚠️ Kept the <{tag}> of {html_file} as it is: it contains markup the new title cannot be placed in")
+                                        break
+                                    new_inner = str(inner_soup)
+                            content = content[:m.start()] + m.group(1) + new_inner + m.group(3) + content[m.end():]
                             updated = True
-                            content = content2
                             break
                     # Update or add meta og:title (set content=...)
                     # Replace existing

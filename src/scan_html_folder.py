@@ -2064,26 +2064,36 @@ def detect_missing_images(
         translated_html,
         chapter_num,
         original_image_info,
-        image_rename_map=None):
+        image_rename_map=None,
+        svg_picture_conversion=None):
     """
     Detect missing or extra images by comparing translated HTML with original EPUB image info.
-    
+
     Args:
         translated_html: The translated HTML content (string)
         chapter_num: The chapter number to check
         original_image_info: Dict from extract_epub_image_info()
-    
+        svg_picture_conversion: Optional ``_svg_picture_conversions()``
+            result; svg-wrapped pictures shown as ``<img>`` on the other
+            side count as the same picture.
+
     Returns:
         tuple: (has_issues, details)
     """
     try:
         from bs4 import BeautifulSoup
-        
+
         # If no original image info for this chapter, skip check
         if chapter_num not in original_image_info:
             return False, []
-        
+
         orig_info = original_image_info[chapter_num]
+        if svg_picture_conversion:
+            orig_info = _image_info_with_svg_picture_conversion(
+                orig_info,
+                svg_picture_conversion,
+                image_rename_map,
+            )
         orig_img_count = orig_info['image_count']
         
         # If no images in original, nothing to check
@@ -2136,12 +2146,7 @@ def detect_missing_images(
         # extraction's image_rename_map.json and path-only differences.
         orig_srcs = orig_info.get('image_srcs') or []
         if orig_srcs and trans_img_count == orig_img_count:
-            normalized_map = {
-                os.path.basename(str(old_name).replace('\\', '/')).casefold():
-                os.path.basename(str(new_name).replace('\\', '/')).casefold()
-                for old_name, new_name in (image_rename_map or {}).items()
-                if old_name and new_name
-            }
+            normalized_map = _normalized_image_rename_map(image_rename_map)
             source_refs = Counter(
                 ref for ref in (
                     _normalize_preserved_reference(src, normalized_map, image=True)
@@ -5296,6 +5301,111 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
     return False
 
 
+# Source-preservation findings a chunk can be charged with by comparing its own
+# recorded source with its own output block.
+_CHUNK_PRESERVATION_ISSUE_RE = re.compile(
+    r"^(?:(?P<links>missing_link_targets_|changed_link_targets_)"
+    r"|missing_table_elements_(?P<table>[a-z]+)_)(?P<count>\d+)_"
+)
+_HTML_ELEMENT_RE = re.compile(r"<[A-Za-z][^>]*>")
+
+
+def _chunk_preservation_losses(marked, chunk_entry):
+    """Per marker block, the links and table elements its recorded source has
+    and its output block lost (or, for links, gained).
+
+    Uses the document check's own profile, so hrefs are normalised the same
+    way. A loss only counts when the chunks together lost it too: a link the
+    model moved into the next chunk charges nobody. Returns None when a chunk
+    has no recorded source (older progress files) or no recorded source is
+    HTML (markdown/text sources of enhanced extraction have no <a> or table
+    to compare with); the findings then stay whole-document ones.
+    """
+    profiles = {}
+    any_html_source = False
+    for index, block in marked.items():
+        record = chunk_entry.get("entries", {}).get(str(index), {})
+        source = record.get("source") if isinstance(record, dict) else None
+        if not isinstance(source, str) or not source.strip():
+            return None
+        any_html_source = any_html_source or bool(_HTML_ELEMENT_RE.search(source))
+        profiles[index] = (
+            _html_preservation_profile(source),
+            _html_preservation_profile(block.get("content", "")),
+        )
+    if not any_html_source:
+        return None
+    totals = {"source_links": Counter(), "output_links": Counter(),
+              "source_tables": Counter(), "output_tables": Counter()}
+    for source_profile, output_profile in profiles.values():
+        totals["source_links"].update(source_profile.get("link_hrefs") or {})
+        totals["output_links"].update(output_profile.get("link_hrefs") or {})
+        totals["source_tables"].update(source_profile.get("table_counts") or {})
+        totals["output_tables"].update(output_profile.get("table_counts") or {})
+    all_lost_links = totals["source_links"] - totals["output_links"]
+    all_extra_links = totals["output_links"] - totals["source_links"]
+    all_lost_tables = totals["source_tables"] - totals["output_tables"]
+    losses = {}
+    for index, (source_profile, output_profile) in profiles.items():
+        source_links = Counter(source_profile.get("link_hrefs") or {})
+        output_links = Counter(output_profile.get("link_hrefs") or {})
+        source_tables = Counter(source_profile.get("table_counts") or {})
+        output_tables = Counter(output_profile.get("table_counts") or {})
+        lost_tables = (source_tables - output_tables) & all_lost_tables
+        losses[index] = {
+            "lost_links": list(((source_links - output_links) & all_lost_links).elements()),
+            "extra_links": list(((output_links - source_links) & all_extra_links).elements()),
+            "tables": {
+                tag_name: (source_tables[tag_name], output_tables[tag_name])
+                for tag_name in lost_tables
+            },
+            "lost_tables": dict(lost_tables),
+        }
+    return losses
+
+
+def _chunk_preservation_covers(issue, losses):
+    """True when the chunks together are charged with the whole document-level
+    count of a preservation finding. A finding the chunks only partly account
+    for (a link that no chunk's recorded source holds) stays a whole-document
+    one, so no part of it goes unnamed."""
+    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))
+    if not match or not losses:
+        return False
+    total = int(match.group("count"))
+    chunk_losses = list(losses.values())
+    if match.group("table"):
+        charged = sum(item["lost_tables"].get(match.group("table"), 0) for item in chunk_losses)
+    else:
+        charged = sum(len(item["lost_links"]) for item in chunk_losses)
+        if match.group("links").startswith("changed"):
+            charged = max(charged, sum(len(item["extra_links"]) for item in chunk_losses))
+    return charged >= total
+
+
+def _chunk_preservation_preview(issue, chunk_losses):
+    """Preview naming this chunk's own losses for a preservation finding, or
+    "" when this chunk lost none of it."""
+    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))
+    if not match or not chunk_losses:
+        return ""
+    if match.group("table"):
+        counts = chunk_losses["tables"].get(match.group("table"))
+        if not counts:
+            return ""
+        return f"<{match.group('table')}>: source={counts[0]}, output={counts[1]}"
+    lost = chunk_losses["lost_links"]
+    if match.group("links").startswith("missing"):
+        return ', '.join(lost[:5])
+    extra = chunk_losses["extra_links"]
+    parts = []
+    if lost:
+        parts.append("missing: " + ', '.join(lost[:3]))
+    if extra:
+        parts.append("unexpected: " + ', '.join(extra[:3]))
+    return "; ".join(parts)
+
+
 def _attach_chunk_results_to_scan(
     folder_path,
     results,
@@ -5384,6 +5494,15 @@ def _attach_chunk_results_to_scan(
             continue
 
         unmatched = set(range(len(all_issues)))
+        preservation_losses = None
+        localisable = set()
+        if any(_CHUNK_PRESERVATION_ISSUE_RE.match(str(issue)) for issue in all_issues):
+            preservation_losses = _chunk_preservation_losses(marked, chunk_entry)
+            localisable = {
+                issue_index
+                for issue_index, issue in enumerate(all_issues)
+                if _chunk_preservation_covers(issue, preservation_losses)
+            }
         for index, block in sorted(marked.items()):
             chunk_html = block.get("content", "")
             chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(
@@ -5395,7 +5514,14 @@ def _attach_chunk_results_to_scan(
             localized = []
             local_previews = {}
             for issue_index, issue in enumerate(all_issues):
-                if not _chunk_issue_matches(
+                local_preview = None
+                if issue_index in localisable:
+                    local_preview = _chunk_preservation_preview(
+                        issue, preservation_losses.get(index)
+                    )
+                    if not local_preview:
+                        continue
+                elif not _chunk_issue_matches(
                     issue,
                     chunk_html,
                     chunk_text,
@@ -5407,7 +5533,9 @@ def _attach_chunk_results_to_scan(
                 unmatched.discard(issue_index)
                 local_issue = _chunk_local_issue_text(issue, chunk_cache)
                 localized.append(local_issue)
-                if previews.get(str(issue)) is not None:
+                if local_preview:
+                    local_previews[local_issue] = local_preview
+                elif previews.get(str(issue)) is not None:
                     local_previews[local_issue] = previews[str(issue)]
             chunk_results.append({
                 "chunk_index": index,
@@ -7731,6 +7859,16 @@ def _normalize_preserved_reference(value, rename_map=None, *, image=False):
     return str(mapped or basename).casefold()
 
 
+def _normalized_image_rename_map(image_rename_map):
+    """Return image_rename_map.json keyed and valued by casefolded basename."""
+    return {
+        os.path.basename(str(old_name).replace('\\', '/')).casefold():
+        os.path.basename(str(new_name).replace('\\', '/')).casefold()
+        for old_name, new_name in (image_rename_map or {}).items()
+        if old_name and new_name
+    }
+
+
 def _html_preservation_profile(html_content, image_rename_map=None):
     """Return compact source/output structure used by preservation QA."""
     if not isinstance(html_content, str) or not html_content:
@@ -7789,12 +7927,7 @@ def _html_preservation_profile(html_content, image_rename_map=None):
     graphic_counts = {name: count for name, count in graphic_counts.items() if count}
 
     image_srcs = Counter()
-    normalized_map = {
-        os.path.basename(str(old_name).replace('\\', '/')).casefold():
-        os.path.basename(str(new_name).replace('\\', '/')).casefold()
-        for old_name, new_name in (image_rename_map or {}).items()
-        if old_name and new_name
-    }
+    normalized_map = _normalized_image_rename_map(image_rename_map)
     for image in soup.find_all('img'):
         src = _normalize_preserved_reference(
             image.get('src', ''),
@@ -7827,6 +7960,8 @@ def _html_preservation_profile(html_content, image_rename_map=None):
             if reference:
                 graphic_refs[f'{tag}.{attribute}:{reference}'] += 1
 
+    svg_pictures = _svg_picture_wrappers(soup, normalized_map)
+
     table_shapes = []
     for table in soup.find_all('table'):
         rows = table.find_all('tr')
@@ -7855,7 +7990,144 @@ def _html_preservation_profile(html_content, image_rename_map=None):
         'graphic_counts': graphic_counts,
         'graphic_refs': dict(graphic_refs),
         'image_srcs': dict(image_srcs),
+        'svg_pictures': svg_pictures,
     }
+
+
+# SVG children that carry no drawing of their own. An <svg> holding only
+# these plus <image> elements is the usual EPUB full-page picture wrapper.
+_SVG_PICTURE_WRAPPER_TAGS = frozenset({'image', 'desc', 'title', 'metadata', 'g'})
+
+
+def _svg_picture_wrappers(soup, normalized_map):
+    """Return the <svg> elements that only wrap <image> pictures.
+
+    Each entry is ``(refs, hrefs, graphic_ref_keys, custom_tags)``: per
+    wrapped image its canonical file identity (same normalisation as
+    ``<img src>``), its raw reference and the tuple of ``graphic_refs`` keys
+    it produced, plus the number of non-standard tag occurrences (an SVG
+    ``<desc>``) inside the wrapper, which leave with it when it becomes
+    ``<img>``.
+    """
+    pictures = []
+    for svg in soup.find_all('svg'):
+        children = svg.find_all(True)
+        if not children or any(
+                str(child.name or '').lower() not in _SVG_PICTURE_WRAPPER_TAGS
+                for child in children):
+            continue
+        refs, hrefs, keys = [], [], []
+        for image in svg.find_all('image'):
+            image_ref = ''
+            image_keys = []
+            for attribute in ('href', 'xlink:href'):
+                raw_value = image.get(attribute, '')
+                reference = _normalize_preserved_reference(
+                    raw_value,
+                    normalized_map,
+                    image=True,
+                )
+                if reference:
+                    image_keys.append(f'image.{attribute}:{reference}')
+                    if not image_ref:
+                        image_ref = reference
+                        hrefs.append(raw_value)
+            if not image_ref:
+                refs = []
+                break
+            refs.append(image_ref)
+            keys.append(tuple(image_keys))
+        if refs:
+            pictures.append((
+                tuple(refs),
+                tuple(hrefs),
+                tuple(keys),
+                _count_custom_tag_occurrences(str(svg)),
+            ))
+    return pictures
+
+
+def _svg_picture_conversions(source_profile, output_profile):
+    """Pair svg-wrapped pictures with ``<img>`` tags naming the same file.
+
+    Glossarion's own extraction may turn an EPUB ``<svg><image/></svg>``
+    wrapper into ``<img>`` (and the reverse can happen). Such a picture is
+    not lost. Wrappers kept as svg on both sides pair first; the rest pair
+    with ``<img>`` references the other side does not already account for.
+    A wrapper of several images of which only some became ``<img>`` is
+    credited with those images only, so the others stay reported as lost.
+    Each credited entry has the shape of a ``_svg_picture_wrappers`` entry.
+    """
+    result = {
+        'source_to_img': [],   # source svg wrappers now shown as <img>
+        'output_from_img': [],  # output svg wrappers that were source <img>
+    }
+    if not isinstance(source_profile, dict) or not isinstance(output_profile, dict):
+        return result
+    source_wrappers = list(source_profile.get('svg_pictures') or [])
+    output_wrappers = list(output_profile.get('svg_pictures') or [])
+    if not source_wrappers and not output_wrappers:
+        return result
+
+    kept = Counter(tuple(sorted(wrapper[0])) for wrapper in output_wrappers)
+    unmatched_source = []
+    for wrapper in source_wrappers:
+        signature = tuple(sorted(wrapper[0]))
+        if kept[signature] > 0:
+            kept[signature] -= 1
+        else:
+            unmatched_source.append(wrapper)
+    kept = Counter(tuple(sorted(wrapper[0])) for wrapper in source_wrappers)
+    unmatched_output = []
+    for wrapper in output_wrappers:
+        signature = tuple(sorted(wrapper[0]))
+        if kept[signature] > 0:
+            kept[signature] -= 1
+        else:
+            unmatched_output.append(wrapper)
+
+    source_imgs = Counter(source_profile.get('image_srcs') or {})
+    output_imgs = Counter(output_profile.get('image_srcs') or {})
+    for wrappers, spare, bucket in (
+            (unmatched_source, output_imgs - source_imgs, 'source_to_img'),
+            (unmatched_output, source_imgs - output_imgs, 'output_from_img')):
+        for refs, hrefs, keys, custom_tags in wrappers:
+            found = []
+            for index, ref in enumerate(refs):
+                if spare[ref] > 0:
+                    spare[ref] -= 1
+                    found.append(index)
+            if found:
+                result[bucket].append((
+                    tuple(refs[index] for index in found),
+                    tuple(hrefs[index] for index in found),
+                    tuple(keys[index] for index in found),
+                    custom_tags,
+                ))
+    return result
+
+
+def _image_info_with_svg_picture_conversion(orig_info, conversion, image_rename_map=None):
+    """Return source ``<img>`` info as seen after svg/img picture pairing."""
+    source_to_img = (conversion or {}).get('source_to_img') or []
+    output_from_img = (conversion or {}).get('output_from_img') or []
+    if not source_to_img and not output_from_img:
+        return orig_info
+    normalized_map = _normalized_image_rename_map(image_rename_map)
+    now_svg = Counter(ref for wrapper in output_from_img for ref in wrapper[0])
+    srcs = []
+    for src in orig_info.get('image_srcs') or []:
+        ref = _normalize_preserved_reference(src, normalized_map, image=True)
+        if ref and now_svg[ref] > 0:
+            now_svg[ref] -= 1
+            continue
+        srcs.append(src)
+    removed = len(orig_info.get('image_srcs') or []) - len(srcs)
+    added = [href for wrapper in source_to_img for href in wrapper[1]]
+    adjusted = dict(orig_info)
+    adjusted['image_srcs'] = srcs + added
+    adjusted['image_count'] = max(0, int(orig_info.get('image_count', 0) or 0) - removed) + len(added)
+    return adjusted
 
 
 def _build_source_preservation_info(original_html_content, image_rename_map=None):
@@ -7933,9 +8205,30 @@ def _preservation_count_issues(source_profile, output_profile):
             ', '.join(list(unexpected_links.elements())[:5]),
         ))
 
+    # An svg-wrapped picture on one side and an <img> of the same file on the
+    # other is one picture: credit it to the side that shows it as <img>.
+    adjusted_graphic_counts = {
+        'source': Counter(source_profile.get('graphic_counts') or {}),
+        'output': Counter(output_profile.get('graphic_counts') or {}),
+    }
+    adjusted_graphic_refs = {
+        'source': Counter(source_profile.get('graphic_refs') or {}),
+        'output': Counter(output_profile.get('graphic_refs') or {}),
+    }
+    picture_conversions = _svg_picture_conversions(source_profile, output_profile)
+    for bucket, credited_side in (('source_to_img', 'output'), ('output_from_img', 'source')):
+        for refs, _hrefs, keys, _custom_tags in picture_conversions[bucket]:
+            adjusted_graphic_counts[credited_side]['svg'] += 1
+            adjusted_graphic_counts[credited_side]['image'] += len(refs)
+            for image_keys in keys:
+                adjusted_graphic_refs[credited_side].update(image_keys)
+
     for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):
         source_counts = source_profile.get(family) or {}
         output_counts = output_profile.get(family) or {}
+        if family == 'graphic_counts':
+            source_counts = adjusted_graphic_counts['source']
+            output_counts = adjusted_graphic_counts['output']
         for tag_name in sorted(set(source_counts) | set(output_counts)):
             source_count = int(source_counts.get(tag_name, 0) or 0)
             output_count = int(output_counts.get(tag_name, 0) or 0)
@@ -7964,8 +8257,8 @@ def _preservation_count_issues(source_profile, output_profile):
             'table row/cell/span structure differs from source',
         ))
 
-    source_graphic_refs = Counter(source_profile.get('graphic_refs') or {})
-    output_graphic_refs = Counter(output_profile.get('graphic_refs') or {})
+    source_graphic_refs = adjusted_graphic_refs['source']
+    output_graphic_refs = adjusted_graphic_refs['output']
     missing_graphic_refs = source_graphic_refs - output_graphic_refs
     unexpected_graphic_refs = output_graphic_refs - source_graphic_refs
     if missing_graphic_refs or unexpected_graphic_refs:
@@ -9580,7 +9873,11 @@ def process_html_file_batch(args, should_stop=None):
                 has_missing_imgs = False
                 img_issues = []
                 matched_key = None
-                
+                svg_picture_conversion = _svg_picture_conversions(
+                    source_preservation_profile,
+                    output_preservation_profile,
+                )
+
                 # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices
                 if text_file_mode:
                     # Direct filename match or basename match
@@ -9601,6 +9898,7 @@ def process_html_file_batch(args, should_stop=None):
                             matched_key,
                             original_image_info,
                             image_rename_map=image_rename_map,
+                            svg_picture_conversion=svg_picture_conversion,
                         )
                         # print(f"[IMAGE DEBUG] Matched {filename} to original chunk '{matched_key}'")
                     else:
@@ -9620,6 +9918,7 @@ def process_html_file_batch(args, should_stop=None):
                                 spine_idx,
                                 original_image_info,
                                 image_rename_map=image_rename_map,
+                                svg_picture_conversion=svg_picture_conversion,
                             )
                             matched_key = spine_idx
                             # print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
@@ -10103,7 +10402,20 @@ def process_html_file_batch(args, should_stop=None):
                     trans_entity_count = 0
                 trans_any_count = trans_angle_count + trans_entity_count
 
-                missing_count = source_count - trans_any_count
+                # An svg picture wrapper shown as <img> on the other side
+                # takes its SVG <desc> along; that is not a lost story tag.
+                picture_conversions = _svg_picture_conversions(
+                    source_preservation_profile,
+                    output_preservation_profile,
+                )
+                compared_source_count = max(0, source_count - sum(
+                    wrapper[3] for wrapper in picture_conversions['source_to_img']
+                ))
+                compared_trans_count = max(0, trans_any_count - sum(
+                    wrapper[3] for wrapper in picture_conversions['output_from_img']
+                ))
+
+                missing_count = compared_source_count - compared_trans_count
                 if missing_count > 0:
                     # Include a preview of the source tag names so the user
                     # can see *what* is missing, not just how many.
