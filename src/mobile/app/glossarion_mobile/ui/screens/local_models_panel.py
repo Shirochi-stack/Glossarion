@@ -27,7 +27,9 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   file; Add preset sits in the card's header, Restore defaults closes the card.
 * **Add from Hugging Face**: any repo, repo:quant or huggingface.co link. A repo (or repo link) lists
   every GGUF file of the repository with its size (``FileChooser``, the usual quant preselected); a
-  quant or file reference goes straight to the download question. Optionally saved as a preset.
+  quant or file reference goes straight to the download question. Optionally saved as a preset. Once the
+  download's row is on the page (Other downloads, below the card) the page scrolls to it, once; so does a
+  Custom pick to its new preset row.
 * **Downloaded models**: files no preset covers, and paused downloads (Resume / Cancel).
 
 Models are ``local/<stem>`` (the GGUF file name), routed by the shared ``local/`` route to the in-app
@@ -53,6 +55,8 @@ from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
+from glossarion_mobile.ui.components.keyboard_dismiss import dismiss_keyboard
+from glossarion_mobile.ui.components.scroll_anchor import scroll_anchor
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.components.sheet import (bottom_sheet, fits_compact, page_width, scroll_column, sheet_frame,
@@ -81,6 +85,10 @@ GPU_FRIENDLY_TEXT = "GPU-friendly"
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
 #: config.json key of "Whitelist source text", shown under it
 WHITELIST_SOURCE_KEY = "script_ban_whitelist_source"
+#: seconds the client gets to build a just-shown download row before the page scrolls to it (like SectionPage)
+REVEAL_SETTLE = 0.05
+#: the scroll animation to a just-started download's row (ms; the settings search uses the same)
+REVEAL_MS = 300
 
 
 def usage_color(used: int, total: int) -> Any:
@@ -727,6 +735,8 @@ class OnDeviceFlow:
             body += "\n\nYou can pause or cancel it while it downloads."
             if not await self.ask(title, body, "Download"):
                 return None
+        if not existing or need_projector:
+            self.download_starting(stem)
         self.render()
         if not existing:
             state = await self.service.download(self.service.spec_for(ref.repo, listing.commit, file))
@@ -826,6 +836,10 @@ class OnDeviceFlow:
         finally:
             self.busy.discard(key)
             self.render()
+
+    def download_starting(self, stem: str) -> None:
+        """``fetch`` is about to download ``stem`` (the model or its vision projector); a screen showing its
+        progress row may bring it into view (``LocalModelsPanel``)."""
 
     def context_changed(self, stem: Optional[str]) -> None:
         """The Context default changed (a model was chosen); a screen showing a ``ContextControl`` updates it."""
@@ -1111,6 +1125,17 @@ class LocalModelsPanel(OnDeviceFlow):
 
     #: the Settings context of the shared config tiles (None: the app's, ``sheet_env().ctx``)
     settings_ctx: Any = None
+    #: the progress row of a download this panel starts may be off-screen: an Add from Hugging Face download
+    #: lands in Other downloads below the card, a Custom pick appends a preset row. ``_reveal_wanted`` is set
+    #: for the length of such a tap's flow, ``_reveal`` names the stem ``fetch`` started, and the first render
+    #: that shows its row scrolls the page to it, once (later progress ticks never scroll; owner 2026-11-18:
+    #: "Download doesn't scroll to the bottom"). A Download / Retry tapped on a preset row needs none: its
+    #: progress shows in the row that was just tapped.
+    _reveal_wanted: bool = False
+    _reveal: Optional[str] = None
+    #: download stem (model or projector) -> scroll anchor key of the row showing its progress (last render)
+    _anchors: Optional[dict] = None
+    _hf_focused: bool = False
 
     # ---- build ------------------------------------------------------------------------------------
 
@@ -1167,7 +1192,8 @@ class LocalModelsPanel(OnDeviceFlow):
         ])
         self.hf_field = ft.TextField(label="Hugging Face model or link", hint_text=HF_HINT, dense=True,
                                      key="local-download-field", border_radius=tokens.RADII["field"],
-                                     on_submit=lambda e: self.spawn(self.download_typed()))
+                                     on_submit=lambda e: self.spawn(self.download_typed()),
+                                     on_focus=lambda e: self._hf_focus(True), on_blur=lambda e: self._hf_focus(False))
         self.save_as_preset = ft.Checkbox(label="Save as a preset", value=True, key="local-save-preset")
         self.hf_status = _small("", visible=False, key="local-hf-status", selectable=True)
         hf_card = SectionCard(title="Add from Hugging Face", key="local-hf", children=[
@@ -1180,8 +1206,10 @@ class LocalModelsPanel(OnDeviceFlow):
         self.other_column = ft.Column([], spacing=6, tight=True, key="local-other")
         self.other_card = SectionCard(title="Other downloads", key="local-downloaded",
                                       subtitle="Models no preset names, and paused downloads", children=[self.other_column])
+        # every card built (not on demand): scroll_to(scroll_key=) only reaches built rows, and Other downloads
+        # sits below the fold when a download starts from Add from Hugging Face
         self.control = ft.ListView(controls=[engine_card, presets_card, hf_card, self.other_card], expand=True,
-                                   spacing=tokens.SPACING["sm"], key="local-panel",
+                                   spacing=tokens.SPACING["sm"], key="local-panel", build_controls_on_demand=False,
                                    padding=ft.Padding.symmetric(horizontal=tokens.SPACING["md"],
                                                                 vertical=tokens.SPACING["sm"]))
         self._subscribe()
@@ -1441,7 +1469,49 @@ class LocalModelsPanel(OnDeviceFlow):
             return
         self.render()
 
+    def _hf_focus(self, focused: bool) -> None:
+        self._hf_focused = focused
+
+    def _start_reveal(self) -> None:
+        self._reveal_wanted, self._reveal = True, None
+
+    def _end_reveal(self) -> None:
+        self._reveal_wanted, self._reveal = False, None
+
+    def download_starting(self, stem: str) -> None:
+        if self._reveal_wanted:
+            self._reveal = stem
+
+    async def _scroll_to_progress(self, key: str) -> None:
+        """Bring the row of anchor ``key`` into view, once the client has built it."""
+        await asyncio.sleep(REVEAL_SETTLE)
+        if self.control is None:
+            return
+        try:
+            await self.control.scroll_to(scroll_key=ft.ScrollKey(key), duration=REVEAL_MS)
+        except Exception as exc:  # not mounted (tests) / client gone
+            log.debug("scroll_to(%s) failed: %s", key, exc)
+
+    async def get_custom(self, row: dict) -> Optional[str]:
+        """A Custom pick: its preset row is appended to the list, maybe below the fold; the page scrolls to
+        its progress once the download starts."""
+        self._start_reveal()
+        try:
+            return await super().get_custom(row)
+        finally:
+            self._end_reveal()
+
     async def download_typed(self) -> Optional[str]:
+        if self._hf_focused:  # the progress row must not end up behind the keyboard
+            dismiss_keyboard()
+            self._hf_focused = False
+        self._start_reveal()
+        try:
+            return await self._download_typed()
+        finally:
+            self._end_reveal()
+
+    async def _download_typed(self) -> Optional[str]:
         text = (self.hf_field.value or "").strip()
         try:
             ref = hf.parse_ref(text)
@@ -1512,6 +1582,7 @@ class LocalModelsPanel(OnDeviceFlow):
             return
         if self._sampling_profile != self.service.uses_normal_settings(self.selected_stem()):
             self.render_engine(self.service.snapshot(), push=push)
+        self._anchors = {}
         rows: list = []
         preset_rows = self.presets()
         if not preset_rows:
@@ -1527,14 +1598,36 @@ class LocalModelsPanel(OnDeviceFlow):
         self.other_card.visible = bool(others)
         if push:
             _push(self.preset_column, self.other_card)
+            self._reveal_progress()
+
+    def _reveal_progress(self) -> None:
+        """The download a tap of this panel started is on the page now: scroll to its row, once."""
+        anchor = self._anchors.get(self._reveal) if self._reveal else None
+        if anchor is None:
+            return
+        self._reveal_wanted, self._reveal = False, None
+        self.spawn(self._scroll_to_progress(anchor))
+
+    def _progress_anchor(self, key: str, *stems: Optional[str]) -> ft.Control:
+        """The zero-size ``scroll_anchor`` at the top of a row that shows the progress of ``stems``."""
+        if self._anchors is None:
+            self._anchors = {}
+        for stem in stems:
+            if stem:
+                self._anchors.setdefault(stem, key)
+        return scroll_anchor(key)
 
     def _preset_row(self, index: int, preset: dict, stem: Optional[str]) -> ft.Control:
         state, status = self.row_state(preset, stem)
+        download = self.active_download(stem)
+        progress = state in ("downloading", "paused") and download is not None
         if state == "download":
             _verdict, mark, words = self.ram_hint(preset)
             if mark:
                 status += f" · {mark} {RAM_HINTS[_verdict][1]}"
         lines: list = [
+            # the scroll target while the row shows a download (in the spacing-0 column: no gap)
+            *([self._progress_anchor(f"local-preset-anchor-{index}", stem, download.stem)] if progress else []),
             ft.Text(preset["name"], weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             ft.Text(_preset_ref(preset), theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1,
                     overflow=ft.TextOverflow.ELLIPSIS),
@@ -1550,8 +1643,7 @@ class LocalModelsPanel(OnDeviceFlow):
             status_text.color = semantic("success")
         lines.append(status_text)
         body: list = [ft.Row([ft.Column(lines, spacing=0, tight=True, expand=True)], spacing=0)]
-        download = self.active_download(stem)
-        if state in ("downloading", "paused") and download is not None:
+        if progress:
             body.append(ft.ProgressBar(value=download.fraction, border_radius=4, key=f"local-preset-progress-{index}"))
         target = download.stem if download else stem
         trailing: list = [self._action(index, state, stem, target)]
@@ -1663,7 +1755,9 @@ class LocalModelsPanel(OnDeviceFlow):
             key=f"local-dl-{stem}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
             content=ft.Column([
-                ft.Text(f"local/{_owner(stem)}", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Column([self._progress_anchor(f"local-dl-anchor-{stem}", stem, _owner(stem)),
+                           ft.Text(f"local/{_owner(stem)}", weight=ft.FontWeight.W_600, max_lines=2,
+                                   overflow=ft.TextOverflow.ELLIPSIS)], spacing=0, tight=True),
                 _small(_download_status(state), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.ProgressBar(value=state.fraction, border_radius=4),
                 ft.Row(buttons, spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
