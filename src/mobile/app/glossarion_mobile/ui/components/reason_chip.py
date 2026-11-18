@@ -1,8 +1,9 @@
 """ReasonChip (UI_SPEC §5.2): why a visible feature is unavailable.
 
 Small outlined chip ("Not on mobile", "Needs flet-camera", "Arrives in U3").
-Tapping it opens an InfoSheet with the full reason. Nothing is ever hidden
-(§0 item 6): unavailable features stay visible, disabled, with this chip.
+Tapping it opens an InfoSheet with the full reason. Features unavailable in this session or build
+stay visible, disabled, with this chip (§0 item 6); settings that can never work on mobile have no
+row at all (owner 2026-11-18: "Not available on mobile" rows waste space).
 """
 
 from __future__ import annotations

@@ -555,7 +555,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 41 | Application Updates: Check for Updates + Check on startup | About › Updates | (U9) Install excluded |
 | 42 | Config Backup: Create Backup / Restore Backup | Data › Backup & restore |  |
 | 43 | Default Output Folder Override | Data › Storage › Output folder | Adapted: app storage / iOS Documents (+ Android phone folder Downloads/Glossarion: books through Cloud sync & sharing, overwritten in place; other outputs copied once) |
-| 44 | Auto DPI Scale / GUI Scale Factor / GUI Font Scale | Settings › Appearance › "Auto DPI / GUI scale" (disabled row + ReasonChip); Appearance › Text scale replaces it | **Excluded**: DPI scaling (the OS handles it); value preserved |
+| 44 | Auto DPI Scale / GUI Scale Factor / GUI Font Scale | Settings › Appearance › Text scale replaces it (no "Auto DPI / GUI scale" row on mobile) | **Excluded**: DPI scaling (the OS handles it); value preserved |
 | 45 | Enable streaming responses (OpenAI-compatible) | Settings › Response handling › Streaming (one switch) |  |
 | 46 | Stream thinking/reasoning logs | Settings › Response handling › Streaming (one switch) |  |
 | 47 | Allow streaming logs during batch mode | Settings › Response handling › Streaming (one switch) |  |
@@ -1151,7 +1151,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 50 | Enhanced text extraction (html2text) | Settings › Processing › Extraction |  |
 | 51 | Markdown/TXT sidecar outputs and enhanced-text-to-HTML conversion | Settings › EPUB output |  |
 | 52 | Remote image localization during extraction | Settings › EPUB output |  |
-| 53 | Process priority / CPU affinity / child-process cleanup | Data › Logs & diagnostics: "Process priority / CPU affinity" rows (disabled row + ReasonChip) | **Excluded**: desktop process management |
+| 53 | Process priority / CPU affinity / child-process cleanup | Data › Logs & diagnostics › Developer options (no Process priority / CPU affinity rows: mobile apps cannot change them) | **Excluded**: desktop process management |
 | 54 | DPI/font scaling | Appearance › Text scale | **Excluded**: DPI scaling (OS-managed) |
 | 55 | Stop / graceful stop / wait-for-chunks | State machine; Settings › Stop logic |  |
 

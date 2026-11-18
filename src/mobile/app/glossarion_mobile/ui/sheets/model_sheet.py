@@ -2144,9 +2144,16 @@ class ModelPicker(ft.Container):
         self.field = ft.TextField(value=value, label=label, read_only=True, dense=True,
                                   suffix=ft.Icon(ft.Icons.ARROW_DROP_DOWN), on_click=self.open,
                                   border_radius=tokens.RADII["field"], disabled=disabled)
-        self.reason = ReasonChip(reason="Not available on mobile", detail=excluded_detail(value)) \
-            if excluded_route(value) else None
-        self.content = ft.Column([c for c in (self.field, self.reason) if c is not None], spacing=4, tight=True)
+        self.reason: Optional[ReasonChip] = None
+        self.content = ft.Column([self.field], spacing=4, tight=True)
+        self.refresh_reason()
+
+    def refresh_reason(self) -> None:
+        """The excluded-route chip follows the current value (shown, rebuilt or dropped on every change)."""
+        self.reason = ReasonChip(reason="Not available on mobile", detail=excluded_detail(self.value)) \
+            if excluded_route(self.value) else None
+        self.content.controls = [c for c in (self.field, self.reason) if c is not None]
+        _push(self.content)
 
     def open(self, e: Any = None) -> ModelSheet:
         sheet = ModelSheet(current_model=self.value, env=self.picker_env, field_mode=True,
@@ -2166,6 +2173,7 @@ class ModelPicker(ft.Container):
         self.value = value
         self.field.value = value
         _push(self.field)
+        self.refresh_reason()
         if self.on_change_value is not None:
             call_handler(self.on_change_value, value)
 

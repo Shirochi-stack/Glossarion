@@ -3,9 +3,8 @@
 Theme System / Light / Dark / AMOLED, accent (Halgakos Rose · Desktop Blue ·
 Library Violet), text scale 50–130 % (default 85 %), reduce motion and haptics. These are
 mobile-only, so they live in ``mobile_state.json`` (``Prefs`` key ``appearance``),
-never in the shared config.json. The desktop "Auto DPI / GUI scale" settings are
-listed disabled with a ReasonChip (the OS scales the UI); their config values
-round-trip untouched.
+never in the shared config.json. The desktop "Auto DPI / GUI scale" settings have
+no row (the OS scales the UI); their config values round-trip untouched.
 
 ``apply_appearance`` re-themes the page (``theme.apply_theme``), sets the app text
 scale signal (layout uses it) and the haptics switch; the app calls it at start
@@ -19,7 +18,6 @@ from typing import Any, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.ui import motion, tokens
-from glossarion_mobile.ui.components.reason_chip import unavailable_tile
 from glossarion_mobile.ui.screens.page_base import PageScreen, section
 from glossarion_mobile.ui.theme import Appearance, apply_theme, toggle
 
@@ -137,17 +135,13 @@ class AppearanceScreen(PageScreen):
                                        on_change=lambda e: self.set_value("reduce_motion", bool(e.control.value)))
         self.haptics_switch = toggle(label="Haptic feedback", value=values["haptics"],
                                         on_change=lambda e: self.set_value("haptics", bool(e.control.value)))
-        dpi = unavailable_tile(  # an enabled row: a disabled ListTile would disable its ReasonChip too
-            "Auto DPI / GUI scale",
-            subtitle="The phone scales the interface; Text size above replaces the desktop GUI scale.",
-            reason="Not on mobile", detail="DPI scaling is handled by Android / iOS. The desktop "
-            "auto_dpi_scale, gui_scale_factor and gui_font_scale values are kept untouched.",
-            dense=False, key="appearance-dpi",
-        )
+        # The desktop "Auto DPI / GUI scale" (DESKTOP_SCALING_KEYS) has no row: the phone scales the interface,
+        # Text size replaces it, and its config.json values are kept untouched (owner 2026-11-18: no
+        # "Not available on mobile" rows).
         return self.scaffold([
             section("Theme", [self.theme_buttons], key="appearance-theme-card"),
             section("Accent", [ft.Row(list(self.accent_chips.values()), wrap=True, spacing=6)]),
-            section("Text", [self.scale_label, self.scale_slider, dpi]),
+            section("Text", [self.scale_label, self.scale_slider]),
             section("Motion & feedback", [self.motion_switch, self.haptics_switch]),
         ])
 

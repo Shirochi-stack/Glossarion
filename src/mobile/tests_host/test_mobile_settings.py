@@ -948,10 +948,13 @@ def test_tiles_edit_validate_reset_and_show_reasons(tmp_path):
         editor = t["system_prompt"].activate()
         editor._on_reset()
         assert editor.field.value == LONG_PROMPT and editor.save() and store.get("system_prompt") == LONG_PROMPT
-        secret = t["replicate_api_key"].activate()
+        # a secret is edited in place (owner 2026-11-18: no pop-up editor): the shared KeyField
+        assert t["replicate_api_key"].activate() is None
+        secret = t["replicate_api_key"].key_field
         assert secret.field.password and secret.field.can_reveal_password
         secret.field.value = "r8_abcdefghijklmnopqrstuvwxyz"
-        assert secret.save() and t["replicate_api_key"].value_text.value == "r8_…wxyz"
+        assert await secret.save() and secret.message.value == "Saved"
+        assert t["replicate_api_key"].value_text.value == "r8_…wxyz"
         path_editor = t["epub_css_override_path"].activate()
         path_editor.field.value = "/data/imports/book.css"
         assert path_editor.save() and store.get("epub_css_override_path") == "/data/imports/book.css"

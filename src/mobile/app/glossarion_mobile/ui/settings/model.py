@@ -32,7 +32,9 @@ __all__ = [
     "GROUP_ORDER",
     "GROUP_TITLES",
     "HEADING_OVERRIDES",
+    "INLINE_SECTIONS",
     "SECTION_GROUPS",
+    "SECTION_LEAD_KEYS",
     "SECTION_ORDER",
     "SECTION_TITLES",
     "TILE_KINDS",
@@ -50,6 +52,7 @@ __all__ = [
     "is_prompt",
     "is_secret",
     "label_for",
+    "lead_keys_first",
     "mask_secret",
     "ordered_groups",
     "plain_text",
@@ -118,6 +121,9 @@ SECTION_GROUPS = {
     "other.danger": "About",
     "other.stored": "Advanced",
 }
+#: Sections whose one setting the Settings home shows directly in its group, with no page of their own
+#: (owner 2026-11-18: Debug Controls held only "Show debug buttons"). Search opens the home on that switch.
+INLINE_SECTIONS = frozenset({"other.debug"})
 
 ANTI_DUPLICATE_SECTION = "other.anti_duplicate.core"
 ANTI_DUPLICATE_BIAS_SECTION = "other.anti_duplicate.logit_bias"
@@ -713,6 +719,28 @@ def sub_heading(spec: Any) -> str:
     if spec_attr(spec, "parent", None) and len(parts) > 2:
         return " › ".join(humanize_key(part) for part in parts[1:-1])
     return ""
+
+
+#: Settings a section page shows first, under their own heading: section id -> (heading, keys in order).
+#: Model & API: the model above its API key (owner 2026-11-18: like the desktop main window and the Welcome).
+SECTION_LEAD_KEYS = {
+    "other.processing": ("Input & output", ("deep_scan",)),
+    "main.model": ("Model & API key", ("model", "api_key")),
+}
+
+
+def lead_keys_first(section_id: str, specs: Sequence[Any], headings: dict) -> tuple[list, dict]:
+    """``(specs, headings)`` with the section's ``SECTION_LEAD_KEYS`` (those it has) moved to the top under
+    their heading; the rest keep their order and headings. Sections without lead keys are returned as given."""
+    heading, keys = SECTION_LEAD_KEYS.get(section_id, ("", ()))
+    by_key = {str(spec_attr(spec, "key", "")): spec for spec in specs}
+    lead = [by_key[key] for key in keys if key in by_key]
+    if not lead:
+        return list(specs), dict(headings)
+    rest = [spec for spec in specs if str(spec_attr(spec, "key", "")) not in keys]
+    out_headings = dict(headings)
+    out_headings.update({str(spec_attr(spec, "key", "")): heading for spec in lead})
+    return lead + rest, out_headings
 
 
 def grouped_specs(specs: Sequence[Any]) -> tuple[list, dict]:
