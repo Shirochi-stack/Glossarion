@@ -766,6 +766,7 @@ class GlossarionApp:
                 config_snapshot=(store.snapshot if store is not None else None),
                 navigate=self.navigate_to,
                 notify=self.notify,
+                settings_ctx=getattr(getattr(self, "settings", None), "ctx", None),
             )
         if match.name in _HUB_INTROS:
             return HubScreen(match, navigate=self.navigate_to, intro=_HUB_INTROS[match.name])

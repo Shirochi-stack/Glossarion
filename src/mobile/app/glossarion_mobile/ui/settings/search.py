@@ -131,6 +131,16 @@ class SettingsSearch:
         self.query = (query or "").strip()
         self.refresh()
 
+    def clear(self) -> None:
+        """Empty the field and drop the filters (the Settings home shows its groups again)."""
+        self.field.value = ""
+        self.filters.clear()
+        for chip in self.filter_chips.values():
+            chip.selected = False
+        self.query = ""
+        self.refresh()
+        self.ctx.push(self.field)
+
     def toggle_filter(self, name: str, on: Optional[bool] = None) -> None:
         enable = (name not in self.filters) if on is None else bool(on)
         if enable:
