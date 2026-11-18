@@ -328,12 +328,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, LocalLLMError(500, "engine_error", f"The on-device engine failed: {exc}",
                                           "server_error").body())
             return
-        created = int(time.time())
-        rid = "chatcmpl-" + uuid.uuid4().hex[:24]
-        model_id = f"local/{run.stem}"
-        thinking = wants_thinking(body)
-        strip = None if thinking else ThinkStripper()
-        with run:
+        with run:  # from here on every path gives the engine back
+            created = int(time.time())
+            rid = "chatcmpl-" + uuid.uuid4().hex[:24]
+            model_id = f"local/{run.stem}"
+            thinking = wants_thinking(body)
+            strip = None if thinking else ThinkStripper()
             if not stream:
                 parts: list = []
                 try:
