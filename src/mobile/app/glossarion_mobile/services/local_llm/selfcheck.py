@@ -4,6 +4,10 @@
   ``ENGINE_VERSION``, ``llama_print_system_info()`` loads the native libraries and libmtmd (vision)
   loads; ``gpu_backend_check()``: the build ships the GPU backend the app offers (Metal on iOS, OpenCL
   on Android arm64, none on x86_64) and nothing registered it while the GPU is off.
+* ``npu_backend_check()`` (in ``engine_check``): the wheel's NPU functions and whether it ships the backend;
+  ``npu_lines(service, speeds)``: the NPU block of the device checks (check steps, arch, device, the last load,
+  ``npu_speed_check``'s timing of the suite prompt on NPU, GPU and CPU, the fallbacks, the "ggml-hex:" log), or one
+  "NPU: not available (step: reason)" line. Their services share the app's NPU markers (``SHARED_PREF_KEYS``).
 * ``fake_route_check(root)`` (e2e ``local_route_fake_engine``): ``LocalLLMServer`` + ``FakeEngine`` +
   ``UnifiedClient`` with ``local/fake-echo``, offline, plain and streaming.
 * ``llama_suite()`` (suite ``llama``, ``glossarion://app/__selftest__?suite=llama``): downloads the
@@ -39,17 +43,54 @@ MARKER_LLAMA_VISION = "GLOSSARION_LLAMA_VISION"
 PRESET_ENV = "GLOSSARION_LLAMA_SUITE_PRESET"
 SUITE_CTX = 2048
 SUITE_TOKENS = 16
+#: the llama suite's prompt; the NPU block of the device checks times the same one on NPU, GPU and CPU
+SUITE_MESSAGES = (
+    {"role": "system", "content": "You translate Korean to English. Reply with the translation only."},
+    {"role": "user", "content": "안녕하세요, 만나서 반갑습니다."},
+)
+
+
+#: the Prefs keys a check's own service shares with the app's (the NPU crash markers, fallbacks and check): the
+#: backend aborts the process on DSP failures, so a self-check that dies on the NPU is recorded like the app's own
+SHARED_PREF_KEYS = (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.NPU_FALLBACK_KEY, svc.NPU_CHECK_KEY,
+                    svc.NPU_CHECK_ATTEMPT_KEY, svc.NPU_KEY, svc.NPU_POWER_KEY)
 
 
 class _DictPrefs:
-    def __init__(self, data: Optional[dict] = None) -> None:
+    """A check's own settings; ``SHARED_PREF_KEYS`` read and write ``shared`` (the app's Prefs) when given."""
+
+    def __init__(self, data: Optional[dict] = None, shared: Any = None) -> None:
         self.data = dict(data or {})
+        self.shared = shared
 
     def get(self, key: str, default: Any = None) -> Any:
+        if self.shared is not None and key in SHARED_PREF_KEYS:
+            try:
+                return self.shared.get(key, default)
+            except Exception:
+                return default
         return self.data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        if self.shared is not None and key in SHARED_PREF_KEYS:
+            try:
+                self.shared.set(key, value)
+                return
+            except Exception:
+                pass
         self.data[key] = value
+
+    def flush(self) -> None:
+        """The shared markers on disk now (``LocalEngineService._set_pref(durable=True)``)."""
+        flush = getattr(self.shared, "flush", None)
+        if callable(flush):
+            flush()
+
+
+def _app_prefs() -> Any:
+    """The app's Prefs (through its running engine service), None outside the app."""
+    service = svc.default_service()
+    return getattr(service, "prefs", None) if service is not None else None
 
 
 @contextlib.contextmanager
@@ -81,7 +122,7 @@ def engine_check() -> dict:
     if not vision:
         raise AssertionError(reason or eng.NO_MTMD)
     return {"version": version, "system_info": info[:300], "cpu_variant": eng.cpu_variant(), "vision": vision,
-            "gpu": gpu_backend_check()}
+            "gpu": gpu_backend_check(), "npu": npu_backend_check()}
 
 
 def gpu_backend_check() -> dict:
@@ -227,10 +268,10 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
     row = _preset(os.environ.get(PRESET_ENV, "").strip() or "Garbage")
     registry = dl.Registry()
     stem, sha_ok, downloaded = _ensure_model(row, registry, say)
-    prefs = _DictPrefs({svc.SETTINGS_KEY: {"n_ctx": SUITE_CTX}, presets.PREF_KEY: [row]})
+    prefs = _DictPrefs({svc.SETTINGS_KEY: {"n_ctx": SUITE_CTX}, presets.PREF_KEY: [row]}, shared=_app_prefs())
     payload: dict = {"model": f"local/{stem}", "sha256_ok": sha_ok, "downloaded": downloaded}
     with _isolated_route():
-        service = svc.LocalEngineService(prefs=prefs, registry=registry, watch=False)
+        service = svc.LocalEngineService(prefs=prefs, registry=registry, watch=False, recover_npu=False)
         service.start()
         try:
             ok, error = service.load_blocking(stem)
@@ -241,10 +282,11 @@ def llama_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dic
             assert 1 <= payload["limits"]["threads"] <= payload["limits"]["cpu_cores"]
             assert payload["limits"]["gpu_layers"] is not None and payload["limits"]["gpu_layers"] > 1
             payload["load_s"] = service.log[-1][1] if service.log else None
+            payload["backend"] = (service.last_load or {}).get("backend")
+            payload["npu"] = npu_summary(service)
             started = time.monotonic()
-            text, finish = _client_send(f"local/{stem}", [
-                {"role": "system", "content": "You translate Korean to English. Reply with the translation only."},
-                {"role": "user", "content": "안녕하세요, 만나서 반갑습니다."}], stream=False, max_tokens=SUITE_TOKENS)
+            text, finish = _client_send(f"local/{stem}", [dict(m) for m in SUITE_MESSAGES], stream=False,
+                                        max_tokens=SUITE_TOKENS)
             seconds = time.monotonic() - started
             usage = getattr(service.engine, "last_usage", {}) or {}
             tokens = int(usage.get("completion_tokens") or 0)
@@ -333,6 +375,128 @@ def parallel_generation_check(service: svc.LocalEngineService, stem: str) -> dic
         service.save_parallel_requests(old)
 
 
+def npu_backend_check() -> dict:
+    """The NPU backend as this build has it, without registering anything: whether the wheel has the NPU
+    functions and ships the backend (``npu_backend_shipped``), and whether this platform could use it."""
+    ext = importlib.import_module("llama_cpp._ctypes_extensions")
+    shipped = getattr(ext, "npu_backend_shipped", None)
+    try:
+        carried = bool(shipped()) if shipped is not None else None
+    except Exception as exc:
+        carried = f"{type(exc).__name__}: {exc}"
+    return {"functions": shipped is not None and getattr(ext, "register_npu_backend", None) is not None,
+            "shipped": carried, "platform": eng.npu_platform(), "device_index": getattr(ext, "device_index", None) is not None}
+
+
+def npu_summary(service: Any) -> dict:
+    """What the diagnostics and the llama suite report about the NPU (no native call)."""
+    failure = service.npu_failure()
+    fallbacks = {stem: fb["reason"] for stem in service._npu_fallbacks() if (fb := service.npu_fallback(stem))}
+    return {"offered": service.npu_offered(), "failure": list(failure) if failure else None,
+            "state": service.npu_state(), "use_npu": service.use_npu(), "power": service.npu_power(),
+            "last_load": service.last_load, "fallbacks": fallbacks, "hung": service.npu_hung}
+
+
+def npu_speed_check(service: Any, stem: str, *, backends: tuple = ("npu", "gpu", "cpu"),
+                    tokens: int = SUITE_TOKENS) -> dict:
+    """The llama suite's prompt (``SUITE_MESSAGES``, at most ``tokens`` tokens) on each backend in turn, through the
+    service (the NPU crash markers apply): ``{backend: {"backend", "tokens", "seconds", "tok_s", "load_s"}}``, or
+    ``{"skipped": why}`` / ``{"error": why}``. The model is unloaded afterwards: its next request loads it on its usual
+    backend. Refused while a job runs."""
+    if service.job_active():
+        return {"error": "a job is running: try again when it is done"}
+    results: dict = {}
+    previous = service.backend_override
+    try:
+        for backend in backends:
+            if backend == "npu" and not service.npu_offered():
+                failure = service.npu_failure() or ("check", "not available")
+                results[backend] = {"skipped": f"NPU not available ({failure[0]}: {failure[1]})"}
+                continue
+            if backend == "gpu" and not service.gpu_backend:
+                results[backend] = {"skipped": "this build has no GPU backend"}
+                continue
+            service.backend_override = backend
+            ok, error = service.load_blocking(stem)
+            if not ok:
+                results[backend] = {"error": error or "the model did not load"}
+                continue
+            ran = service._engine_backend() or "CPU"
+            started = time.monotonic()
+            try:
+                run = service.chat(stem, {"messages": [dict(m) for m in SUITE_MESSAGES], "max_tokens": int(tokens),
+                                          "temperature": 0.2}, lambda: False)
+                with run:
+                    "".join(run.deltas)
+                    usage = run.usage or {}
+            except Exception as exc:
+                results[backend] = {"backend": ran, "error": f"{type(exc).__name__}: {exc}"}
+                continue
+            seconds = max(time.monotonic() - started, 1e-6)
+            count = int(usage.get("completion_tokens") or 0)
+            ran = service._engine_backend() or ran  # an NPU answer that failed was answered elsewhere
+            results[backend] = {"backend": ran, "tokens": count, "seconds": round(seconds, 2),
+                                "tok_s": round(count / seconds, 2), "load_s": service._load_seconds}
+    finally:
+        service.backend_override = previous
+        service.unload()
+    return results
+
+
+def _speed_text(result: Optional[dict]) -> str:
+    if not result:
+        return "not run"
+    if "tok_s" in result:
+        ran = result.get("backend")
+        return f"{result['tok_s']:.1f} tok/s" + (f" (ran on {ran})" if ran else "")
+    return str(result.get("skipped") or result.get("error") or "not run")
+
+
+def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str] = None) -> list:
+    """The NPU block of Logs & diagnostics › device checks (selectable text: copy it from there). Without the NPU,
+    one line: "NPU: not available (step: reason)"."""
+    if service is None:
+        return ["NPU: not available (engine: the on-device engine is not running)"]
+    failure = service.npu_failure()
+    if failure is not None:
+        hang = service.npu_hang_note() if getattr(service, "npu_hung", False) else None
+        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else [])
+    state = service.npu_state() or {}
+    soc = eng.soc_label() if soc is None else soc
+    lines = ["NPU: available"]
+    if soc:
+        lines.append(f"SoC: {soc}")
+    for step in state.get("steps") or []:
+        detail = str(step.get("detail") or "")
+        lines.append(f"{'✓' if step.get('ok') else '✕'} {step.get('name')}" + (f": {detail}" if detail else ""))
+    lines.append(f"Arch: v{state.get('arch')}")
+    lines.append(f"Device: {state.get('device') or '?'}")
+    lines.append(f"Use NPU: {'on' if service.use_npu() else 'off'} · power mode: {service.npu_power()}"
+                 + (" (applies after a restart)" if service.npu_power_pending() else ""))
+    last = service.last_load
+    if last:
+        lines.append(f"Last load: {last['stem']} on {last['backend']} ({last['device']}) in {last['seconds']:.1f} s")
+    else:
+        lines.append("Last load: none since the app started")
+    if speeds is not None:
+        if "error" in speeds and not any(k in speeds for k in ("npu", "gpu", "cpu")):
+            lines.append(f"Speed ({SUITE_TOKENS} tokens): {speeds['error']}")
+        else:
+            lines.append(f"Speed ({SUITE_TOKENS} tokens): " + " · ".join(
+                f"{name.upper()} {_speed_text(speeds.get(name))}" for name in ("npu", "gpu", "cpu")))
+    fallbacks = npu_summary(service)["fallbacks"]
+    if fallbacks:
+        lines.extend(f"Fallback: {stem}: {reason}" for stem, reason in sorted(fallbacks.items()))
+    else:
+        lines.append("Fallback: none")
+    if service.npu_hung:
+        lines.append(service.npu_hang_note() or "")
+    hex_lines = eng.hex_log_lines()
+    lines.append("ggml-hex log:" if hex_lines else "ggml-hex log: none captured")
+    lines.extend(f"  {line}" for line in hex_lines)
+    return lines
+
+
 def sample_image_png(size: int = 96) -> bytes:
     """A tiny test picture: a red disc on white (what the vision check asks the model to describe)."""
     import io
@@ -385,12 +549,12 @@ def llama_vision_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None)
         raise AssertionError(reason or eng.NO_MTMD)
     registry = dl.Registry()
     stem, sha_ok, downloaded = _ensure_model(row, registry, say, projector=True)
-    prefs = _DictPrefs({svc.SETTINGS_KEY: {"n_ctx": SUITE_CTX}, presets.PREF_KEY: [row]})
+    prefs = _DictPrefs({svc.SETTINGS_KEY: {"n_ctx": SUITE_CTX}, presets.PREF_KEY: [row]}, shared=_app_prefs())
     payload: dict = {"model": f"local/{stem}", "sha256_ok": sha_ok, "downloaded": downloaded,
                      "projector": row.get("mmproj")}
     png = sample_image_png()
     with _isolated_route():
-        service = svc.LocalEngineService(prefs=prefs, registry=registry, watch=False)
+        service = svc.LocalEngineService(prefs=prefs, registry=registry, watch=False, recover_npu=False)
         service.start()
         try:
             if not service.is_vision(stem):

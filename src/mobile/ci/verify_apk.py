@@ -14,6 +14,9 @@ APK checks (Android SDK build-tools: ``apksigner`` + ``aapt2``):
   * every ``[tool.flet.android.manifest_application]`` attribute of pyproject.toml on the merged
     ``<application>`` (U5: ``networkSecurityConfig``, the Reader WebView's loopback cleartext);
   * native libraries only for the allowed ABIs, and a split APK holds exactly its own ABI;
+  * the on-device engine's optional accelerators: with libggml-opencl the vendor libOpenCL.so, with
+    libggml-hexagon the vendor libcdsprpc.so declared ``<uses-native-library required="false">`` and never
+    bundled; the HTP skeletons in the packaged site-packages (llama_cpp/htp/*.so.dsp), never in jniLibs;
   * a size warning above ``--max-size-mb``.
 
 AAB checks (zip level + ``jarsigner``): manifest present, ABIs allowed, signature verifies; with
@@ -25,6 +28,7 @@ Exit status 1 when any check fails. Findings are also written as GitHub annotati
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import re
 import shutil
@@ -60,6 +64,7 @@ BASELINE_FORBIDDEN = (
 FGS_TYPE_DATA_SYNC = 0x1  # android:foregroundServiceType="dataSync"
 DEBUG_CERT_MARKER = "CN=Android Debug"
 LIB_RE = re.compile(r"^(?:base/)?lib/([^/]+)/[^/]+\.so$")
+HTP_SKELETON_RE = re.compile(r"(?:^|/)llama_cpp/htp/libggml-htp-v\d+\.so\.dsp$")
 
 
 @dataclass
@@ -290,6 +295,48 @@ def gpu_problems(tree: XmlElement, apk_names: list[str]) -> list[str]:
     return problems
 
 
+def packaged_python_names(apk: zipfile.ZipFile) -> list[str]:
+    """Member names inside the APK's embedded site-packages zip(s) (``assets/**/sitepackages*.zip``)."""
+    names: list[str] = []
+    for member in apk.namelist():
+        base = member.rsplit("/", 1)[-1]
+        if member.startswith("assets/") and base.startswith("sitepackages") and base.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(apk.read(member))) as inner:
+                    names += [n for n in inner.namelist() if not n.endswith("/")]
+            except zipfile.BadZipFile:
+                continue
+    return names
+
+
+def npu_problems(tree: XmlElement, apk_names: list[str], packaged: list[str]) -> list[str]:
+    """The on-device engine's optional NPU backend (arm64 libggml-hexagon.so, wheelhouse.toml [hexagon]): the
+    vendor libcdsprpc.so (FastRPC) must be declared optional in the merged manifest and never ship in the APK,
+    and the HTP skeletons (Hexagon DSP files) must sit in the packaged site-packages as
+    llama_cpp/htp/libggml-htp-vNN.so.dsp, never in jniLibs. ``packaged``: packaged_python_names()."""
+    problems: list[str] = []
+    if not any(n.startswith("lib/arm64-v8a/libggml-hexagon.so") for n in apk_names):
+        return problems
+    declared = optional_native_libraries(tree)
+    if "libcdsprpc.so" not in declared:
+        problems.append("lib/arm64-v8a/libggml-hexagon.so ships but the merged manifest has no "
+                        "<uses-native-library android:name=\"libcdsprpc.so\"> (Android 12+ hides the vendor library)")
+    elif declared["libcdsprpc.so"]:
+        problems.append("<uses-native-library libcdsprpc.so> is required=\"true\": phones without a Hexagon DSP "
+                        "could not install the app")
+    bundled = [n for n in apk_names if re.match(r"^lib/[^/]+/libcdsprpc", n)]
+    if bundled:
+        problems.append(f"the APK bundles {bundled}: the NPU backend must use the phone's own libcdsprpc.so")
+    diverted = [n for n in apk_names if re.match(r"^lib/[^/]+/libggml-htp-", n)]
+    if diverted:
+        problems.append(f"HTP skeletons in jniLibs {diverted}: they are Hexagon DSP files and must ship as "
+                        f"llama_cpp/htp/libggml-htp-vNN.so.dsp in the packaged site-packages")
+    if not [n for n in packaged if HTP_SKELETON_RE.search(n)]:
+        problems.append("lib/arm64-v8a/libggml-hexagon.so ships but the packaged site-packages has no "
+                        "llama_cpp/htp/libggml-htp-vNN.so.dsp (the NPU backend cannot start without them)")
+    return problems
+
+
 def manifest_flag(tree: XmlElement, element: str, attribute: str) -> str | None:
     for node in tree.iter(element):
         if attribute in node.attrs:
@@ -465,10 +512,15 @@ def check_apk(report: Report, args, build_tools: Path | None, required: set[str]
                          + ", ".join(missing) + " (the Reader WebView needs networkSecurityConfig for 127.0.0.1)")
         with zipfile.ZipFile(apk) as archive:
             names = archive.namelist()
-        for problem in gpu_problems(tree, names):
+            npu = any(n.startswith("lib/arm64-v8a/libggml-hexagon.so") for n in names)
+            packaged = packaged_python_names(archive) if npu else []
+        for problem in gpu_problems(tree, names) + npu_problems(tree, names, packaged):
             report.error(problem)
         if any(n.startswith("lib/arm64-v8a/libggml-opencl.so") for n in names):
             report.facts["GPU backend"] = "OpenCL (libOpenCL.so optional)"
+        if npu:
+            skeletons = sorted(n.rsplit("/", 1)[-1] for n in packaged if HTP_SKELETON_RE.search(n))
+            report.facts["NPU backend"] = f"Hexagon (libcdsprpc.so optional; skeletons {', '.join(skeletons) or 'none'})"
         debuggable = manifest_flag(tree, "application", "debuggable")
         if debuggable and debuggable.lower() in ("true", "0xffffffff", "-1"):
             report.warn("application is debuggable")

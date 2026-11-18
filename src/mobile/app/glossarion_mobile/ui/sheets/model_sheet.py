@@ -938,10 +938,13 @@ class ModelSheet:
                 content=ft.Text(reason or "The on-device engine is not available in this build.", color=ft.Colors.ERROR,
                                 theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
                 padding=ft.Padding.only(left=12, right=12, top=4), key="ondevice-unavailable"))
-        from glossarion_mobile.services.local_llm.presets import CUSTOM_FAMILIES
+        from glossarion_mobile.services.local_llm.presets import CUSTOM_FAMILIES, NPU_FAMILY
 
         preset_rows = flow.presets()
-        rows.append(self._section_header("Presets", count=len(preset_rows) + len(CUSTOM_FAMILIES)))
+        # the NPU rows only where the phone's NPU check passed
+        npu_rows = flow.npu_presets() if flow.npu_offered() else []
+        npu_count = len(npu_rows) + 1 if flow.npu_offered() else 0
+        rows.append(self._section_header("Presets", count=len(preset_rows) + npu_count + len(CUSTOM_FAMILIES)))
         if not preset_rows:
             rows.append(ft.Container(content=ft.Text("No presets. Add one in Model manager › On-device.",
                                                      color=ft.Colors.ON_SURFACE_VARIANT,
@@ -949,6 +952,9 @@ class ModelSheet:
                                      padding=ft.Padding.only(left=12, top=4), key="ondevice-presets-empty"))
         for index, preset in enumerate(preset_rows):
             rows.append(self._ondevice_preset_row(flow, index, preset))
+        if npu_count:
+            rows.extend(self._ondevice_npu_row(flow, index, preset) for index, preset in npu_rows)
+            rows.append(self._ondevice_custom_row(flow, NPU_FAMILY))
         rows.extend(self._ondevice_custom_row(flow, family) for family in CUSTOM_FAMILIES)
         downloaded, pending = flow.other_models(preset_rows)
         if downloaded or pending:
@@ -1067,6 +1073,25 @@ class ModelSheet:
         return self._ondevice_card(key, str(preset.get("name") or stem or "Model"), lines, buttons,
                                    selected=state == "in_use", on_click=on_click, progress=progress,
                                    progress_key=f"{key}-progress" if state in ("downloading", "paused") else None)
+
+    def _ondevice_npu_row(self, flow: Any, index: int, preset: dict) -> ft.Control:
+        """A built-in NPU row: size and RAM hint; Download saves it and runs the one-tap flow."""
+        from glossarion_mobile.services.local_llm import downloads as dl
+        from glossarion_mobile.services.local_llm import presets as lp
+        from glossarion_mobile.ui.screens.local_models_panel import _vision_line
+
+        key = f"ondevice-npu-{index}"
+        verdict = flow.ram_hint(preset)[0]
+        size = lp.download_size(preset)
+        facts = " · ".join(x for x in (dl.format_bytes(size) if size else "", self._ram_text(verdict)) if x)
+        lines: list = [ft.Text(facts, theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1, key=f"{key}-facts",
+                               overflow=ft.TextOverflow.ELLIPSIS,
+                               color=ft.Colors.ERROR if verdict == "refuse" else ft.Colors.ON_SURFACE_VARIANT)]
+        if preset.get("mmproj"):
+            lines.append(_vision_line(f"{key}-vision"))
+        get = lambda e, i=index: self._spawn(flow.get_npu_preset(i))  # noqa: E731
+        buttons = [ft.FilledTonalButton(content="Download", key=f"{key}-action", on_click=get)]
+        return self._ondevice_card(key, str(preset.get("name") or "NPU"), lines, buttons)
 
     def _ondevice_custom_row(self, flow: Any, family: dict) -> ft.Control:
         """A Custom row: its button opens the family's menu of sizes and quants (``CustomModelSheet``)."""

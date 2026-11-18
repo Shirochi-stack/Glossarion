@@ -19,6 +19,9 @@ Used by ``build_wheels.sh`` and ``.github/workflows/mobile-wheels.yml``:
                      link line) and rebuild forge's openssl dependency wheel (forge's make_dep_wheels)
     stage-opencl     Android: the Khronos OpenCL headers and a link-time libOpenCL.so (ICD loader
                      built with the NDK) into the NDK sysroot, for the engine's optional OpenCL backend
+    stage-hexagon    Android: the Hexagon SDK (sha256-checked, extracted once) and the CMake initial
+                     cache the llama-cpp-python arm64 recipe loads (-C): GGML_HEXAGON=ON with the SDK
+                     paths, or OFF when wheelhouse.toml [hexagon] enabled = false (the NPU backend)
     collect          copy only the promised wheels from forge's dist/ into <cache>/<package>/
     retag            the manifest's [wheel.retag] targets (iOS Pillow): download PyPI's official
                      wheel (url + sha256 from the manifest), rewrite only its file name, the WHEEL
@@ -345,8 +348,9 @@ def download_verified(url: str, dest: Path, sha256: str, attempts: int = 4) -> N
     log(f"ok {dest.name} sha256 {got}")
 
 
-def fetch_plan(ctx: Ctx, packages, dest: Path) -> list:
-    """[(url, path, sha256)] for the support tarball, OpenSSL (when a recipe needs it) and the sdists."""
+def fetch_plan(ctx: Ctx, packages, dest: Path, hexagon_dest: Path | None = None) -> list:
+    """[(url, path, sha256)] for the support tarball, OpenSSL (when a recipe needs it), the OpenCL sources and
+    the Hexagon SDK (the Android engine; the SDK into ``hexagon_dest``, default ``dest``) and the sdists."""
     tc = ctx.toolchain
     tarball = f"python-{ctx.platform}-mobile-forge-{ctx.py_full}.tar.gz"
     support_sha = (tc.get("support_sha256") or {}).get(ctx.platform)
@@ -364,6 +368,9 @@ def fetch_plan(ctx: Ctx, packages, dest: Path) -> list:
     if needs_opencl(ctx, packages):
         for source in opencl_sources(ctx).values():
             items.append((source["url"], dest / source["file"], source["sha256"]))
+    if needs_hexagon_sdk(ctx, packages):
+        sdk = hexagon_spec(ctx.data, ctx.manifest_path.name)["sdk"]
+        items.append((sdk["url"], Path(hexagon_dest or dest) / sdk["file"], sdk["sha256"]))
     lock_path = ctx.pyproject.parent / "uv.lock"
     lock = cmw.load_uv_lock_sdists(lock_path)
     for w in ctx.wheels(packages):
@@ -624,6 +631,139 @@ def cmd_stage_opencl(ctx: Ctx, args) -> None:
         dest = sysroot / "usr" / "lib" / NDK_TRIPLE[target] / OPENCL_SONAME
         shutil.copy2(built[0], dest)
         log(f"ok {dest} (Khronos ICD loader, SONAME {OPENCL_SONAME}, link-time only)")
+
+
+# ============================================================================ Hexagon SDK staging (Android)
+#: The package whose Android arm64 build carries the optional NPU backend (libggml-hexagon + HTP skeletons).
+HEXAGON_PACKAGE = "llama-cpp-python"
+#: The only ABI the recipe builds it for (the arm64 branch of recipes/llama-cpp-python/meta.yaml).
+HEXAGON_ABIS = ("arm64-v8a",)
+#: The CMake initial cache stage-hexagon writes under the NDK and the arm64 recipe loads with
+#: -C{NDK_ROOT}/<this>: GGML_HEXAGON ON + the SDK paths, or OFF (wheelhouse.toml [hexagon] enabled = false).
+HEXAGON_INIT_CACHE = "glossarion/hexagon-init.cmake"
+#: The HTP skeletons: package data llama_cpp/htp/libggml-htp-vNN.so.dsp (mobile.patch 10.), Hexagon DSP ELF
+#: files (EM_QDSP6), never ARM libraries; no ".so" ending, so serious_python leaves them in sitepackages.zip.
+HTP_DIR = "llama_cpp/htp"
+HTP_FILE = re.compile(r"^libggml-htp-(v\d+)\.so\.dsp$")
+HTP_ANY = re.compile(r"^libggml-htp-")
+EM_QDSP6 = 164
+
+
+def hexagon_spec(data: dict, where: str = "wheelhouse.toml") -> dict | None:
+    """[hexagon] of the manifest when enabled ({abis, version, tools, htp_archs, sdk: {url, sha256, file}}),
+    None when it is switched off (enabled = false, or no table). Raises WheelsError on a bad table."""
+    spec = data.get("hexagon")
+    if spec is None:
+        return None
+    if not isinstance(spec, dict) or not isinstance(spec.get("enabled"), bool):
+        raise WheelsError(f"{where}: [hexagon] needs enabled = true or false")
+    if not spec["enabled"]:
+        return None
+    abis = spec.get("abis")
+    if not isinstance(abis, list) or tuple(abis) != HEXAGON_ABIS:
+        raise WheelsError(f"{where}: [hexagon] abis must be {list(HEXAGON_ABIS)} (only the recipe's arm64 branch "
+                          f"loads the Hexagon initial cache), got {abis!r}")
+    archs = spec.get("htp_archs")
+    if not isinstance(archs, list) or not archs or len(set(archs)) != len(archs) or \
+            not all(isinstance(a, str) and re.fullmatch(r"v\d+", a) for a in archs):
+        raise WheelsError(f"{where}: [hexagon] htp_archs must be distinct HTP arch names like \"v79\", got {archs!r}")
+    for key in ("version", "tools"):
+        if not isinstance(spec.get(key), str) or not re.fullmatch(r"[0-9][0-9.]*", spec[key]):
+            raise WheelsError(f"{where}: [hexagon] {key} must be a version string, got {spec.get(key)!r}")
+    sdk = spec.get("sdk")
+    if not isinstance(sdk, dict) or not all(isinstance(sdk.get(k), str) and sdk[k] for k in ("url", "sha256", "file")):
+        raise WheelsError(f"{where}: [hexagon] needs sdk = {{url, sha256, file}}")
+    if not re.fullmatch(r"[0-9a-f]{64}", sdk["sha256"]) or not sdk["url"].startswith("https://") or \
+            "/" in sdk["file"] or not sdk["file"].endswith(".tar.xz"):
+        raise WheelsError(f"{where}: [hexagon] sdk: an https url, 64 lowercase hex digits and a .tar.xz file name")
+    return {"abis": tuple(abis), "version": spec["version"], "tools": spec["tools"], "htp_archs": tuple(archs),
+            "sdk": dict(sdk)}
+
+
+def hexagon_targets(ctx: Ctx) -> dict:
+    """{target: HTP archs} of the targets whose llama-cpp-python wheel carries the NPU backend ({} when off)."""
+    spec = hexagon_spec(ctx.data, ctx.manifest_path.name)
+    if spec is None:
+        return {}
+    built = {t for w in ctx.manifest.wheels if w.name == HEXAGON_PACKAGE for t in w.built_targets}
+    return {t: spec["htp_archs"] for t in spec["abis"] if t in built}
+
+
+def builds_hexagon_recipe(ctx: Ctx, packages=None) -> bool:
+    """This Android run builds the llama-cpp-python arm64 wheel, whose recipe loads the Hexagon initial cache
+    (written whether the backend is on or off)."""
+    if ctx.platform != "android" or HEXAGON_PACKAGE not in {w.name for w in ctx.wheels(packages)}:
+        return False
+    return any("arm64-v8a" in w.built_targets for w in ctx.wheels(packages) if w.name == HEXAGON_PACKAGE)
+
+
+def needs_hexagon_sdk(ctx: Ctx, packages=None) -> bool:
+    return builds_hexagon_recipe(ctx, packages) and hexagon_spec(ctx.data, ctx.manifest_path.name) is not None
+
+
+def hexagon_init_cache(spec: dict | None, sdk_root: Path | None = None, tools_root: Path | None = None) -> str:
+    """The CMake initial cache (cmake -C) of the arm64 llama-cpp-python build: what ggml-hexagon's CMakeLists
+    and llama.cpp's snapdragon preset (docs/backend/snapdragon/CMakeUserPresets.json) set, or GGML_HEXAGON OFF."""
+    head = "# Written by src/mobile/ci/wheels/wheels.py stage-hexagon (wheelhouse.toml [hexagon]); loaded with -C\n"
+    if spec is None:
+        return head + 'set(GGML_HEXAGON OFF CACHE BOOL "" FORCE)\n'
+    return (head + 'set(GGML_HEXAGON ON CACHE BOOL "" FORCE)\n'
+            f'set(HEXAGON_SDK_ROOT "{Path(sdk_root).as_posix()}" CACHE PATH "" FORCE)\n'
+            f'set(HEXAGON_TOOLS_ROOT "{Path(tools_root).as_posix()}" CACHE PATH "" FORCE)\n'
+            'set(PREBUILT_LIB_DIR "android_aarch64" CACHE STRING "" FORCE)\n')
+
+
+def extract_hexagon_sdk(tarball: Path, dest: Path, sha256: str) -> Path:
+    """Unpack the SDK tarball into ``dest`` once per tarball (a marker holds its sha256); returns the SDK root
+    (the single top-level directory, else ``dest``). Links are allowed only inside the tree (tarfile's data
+    filter), so a crafted archive cannot write outside ``dest``."""
+    marker = dest / ".glossarion-sdk-sha256"
+    if not (marker.is_file() and marker.read_text(encoding="utf-8").strip() == sha256):
+        if not hasattr(tarfile, "data_filter"):
+            raise WheelsError("this Python's tarfile has no data filter (need 3.11.4+ / 3.12+) to unpack the SDK safely")
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True)
+        try:
+            with tarfile.open(tarball, "r:xz") as tf:
+                for m in tf.getmembers():
+                    if cmw.unsafe_member_name(_tar_rel(m.name)):
+                        raise WheelsError(f"{tarball.name}: unsafe member {m.name}")
+                tf.extractall(dest, filter="data")
+        except tarfile.TarError as e:  # the data filter's refusals (links out of the tree, ...) and bad archives
+            raise WheelsError(f"{tarball.name}: {type(e).__name__}: {e}") from e
+        marker.write_text(sha256 + "\n", encoding="utf-8")
+    tops = [p for p in dest.iterdir() if not p.name.startswith(".glossarion")]
+    return tops[0] if len(tops) == 1 and tops[0].is_dir() else dest
+
+
+def cmd_stage_hexagon(ctx: Ctx, args) -> None:
+    """Write the arm64 llama-cpp-python build's CMake initial cache under the NDK (--ndk): with [hexagon]
+    enabled, after checking and unpacking the SDK tarball (--downloads, fetched by `fetch`) into --work;
+    switched off, GGML_HEXAGON OFF without downloading anything."""
+    if not builds_hexagon_recipe(ctx, args.packages):
+        log("no Android arm64 llama-cpp-python build in these packages; nothing to stage")
+        return
+    spec = hexagon_spec(ctx.data, ctx.manifest_path.name)
+    init = Path(args.ndk) / HEXAGON_INIT_CACHE
+    init.parent.mkdir(parents=True, exist_ok=True)
+    if spec is None:
+        init.write_text(hexagon_init_cache(None), encoding="utf-8")
+        log(f"[hexagon] is switched off: {init} sets GGML_HEXAGON OFF (no SDK, no NPU backend)")
+        return
+    sdk = spec["sdk"]
+    tarball = Path(args.downloads) / sdk["file"]
+    if not tarball.is_file() or file_sha256(tarball) != sdk["sha256"]:
+        raise WheelsError(f"{tarball}: missing or its sha256 differs from the manifest (run fetch)")
+    root = extract_hexagon_sdk(tarball, Path(args.work) / f"hexagon-sdk-{spec['version']}", sdk["sha256"])
+    tools = root / "tools" / "HEXAGON_Tools" / spec["tools"]
+    for need in (root / "build" / "cmake" / "hexagon_fun.cmake", tools):
+        if not need.exists():
+            raise WheelsError(f"{tarball.name}: no {need.relative_to(root.parent).as_posix()} after extraction "
+                              f"(is it Hexagon SDK {spec['version']} with tools {spec['tools']}?)")
+    init.write_text(hexagon_init_cache(spec, root, tools), encoding="utf-8")
+    log(f"ok Hexagon SDK {spec['version']} in {root} (tools {spec['tools']}); {init}: GGML_HEXAGON ON, "
+        f"HTP skeletons {' '.join(spec['htp_archs'])}")
 
 
 # ============================================================================ collect / assemble / provenance
@@ -1426,10 +1566,12 @@ def check_ios_binary(name: str, data: bytes, target: str, package: str, openssl:
     return errors
 
 
-def verify_native_wheel(path: Path, package: str, target: str, openssl: str, minos: tuple, stubs=None) -> tuple:
-    """(errors, notes) for one wheel. ``stubs``: NdkStubs for the Android import checks."""
+def verify_native_wheel(path: Path, package: str, target: str, openssl: str, minos: tuple, stubs=None,
+                        hexagon=None) -> tuple:
+    """(errors, notes) for one wheel. ``stubs``: NdkStubs for the Android import checks; ``hexagon``:
+    hexagon_targets() (the NPU backend expected in the llama-cpp-python wheel of those targets)."""
     if package in SITE_PROFILES:
-        return verify_profile_wheel(path, package, target, minos, stubs)
+        return verify_profile_wheel(path, package, target, minos, stubs, hexagon)
     errors, notes = [], []
     with zipfile.ZipFile(path) as zf:
         sos = sorted(n for n in zf.namelist() if n.endswith(".so"))
@@ -1481,12 +1623,16 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
         stubs = NdkStubs(ndk)
         print(f"NDK for the import checks: {ndk or 'none (pass --ndk, or set NDK_HOME or ANDROID_HOME)'}")
     errors, notes = [], []
+    hexagon = hexagon_targets(ctx) if ctx.platform == "android" else {}
+    if ctx.platform == "android":
+        print(f"NPU backend (wheelhouse.toml [hexagon]): "
+              f"{', '.join(f'{t} {list(a)}' for t, a in hexagon.items()) or 'switched off (none expected)'}")
     for w, target in ctx.manifest.promised(ctx.platform):
         matches = find_wheel(wheelhouse, w.filename(target, ctx.manifest.build_tag))
         if len(matches) != 1:
             errors.append(f"{wheelhouse}: expected one {w.filename(target, ctx.manifest.build_tag)}")
             continue
-        errs, ns = verify_native_wheel(matches[0], w.name, target, openssl, minos, stubs)
+        errs, ns = verify_native_wheel(matches[0], w.name, target, openssl, minos, stubs, hexagon)
         if w.retag_source(target):
             retag_errs = verify_retagged(matches[0], w, target, args.official, ctx.manifest.build_tag)
             errs += retag_errs
@@ -1534,6 +1680,13 @@ SITE_PROFILES = {
         # GPU backend itself, so a phone without OpenCL loads everything else. Its cl* imports
         # resolve against that library (``imports``) and are not checked against the NDK.
         "android_optional": {"libggml-opencl": {"needed": "libOpenCL.so", "imports": r"^cl[A-Z]\w*$"}},
+        # The optional NPU backend (mobile.patch 10.), on the targets wheelhouse.toml [hexagon] names
+        # (hexagon_targets; none when it is switched off): libggml-hexagon next to libggml-opencl, an
+        # ordinary arm64 library that dlopens the vendor's libcdsprpc.so itself (so it NEEDs only its
+        # siblings and bionic, and nothing may need it), plus the HTP skeletons in ``dir``: exactly
+        # libggml-htp-<arch>.so.dsp per expected arch, each a Hexagon DSP ELF (EM_QDSP6). No other
+        # libggml-htp-* file may exist anywhere (a ".so" one would be diverted into jniLibs).
+        "hexagon": {"lib": "libggml-hexagon", "dir": HTP_DIR},
         # System frameworks an iOS library may link besides /usr/lib (Metal is in every iOS 13+).
         "ios_frameworks": {"libggml-metal": ("Foundation", "Metal", "MetalKit", "CoreFoundation", "CoreGraphics")},
         # The optional AArch64 instructions each arm64 library may use (aarch64_code_features); every
@@ -1552,9 +1705,73 @@ SITE_PROFILES = {
 }
 
 
-def profile_libs(profile: dict, target: str) -> tuple:
-    """The library stems a SITE_PROFILES entry expects for ``target``."""
-    return tuple(profile.get("target_libs", {}).get(target, profile["libs"]))
+def profile_libs(profile: dict, target: str, hexagon=None) -> tuple:
+    """The library stems a SITE_PROFILES entry expects for ``target``; ``hexagon``: hexagon_targets() (the NPU
+    backend's library on the targets it names)."""
+    libs = tuple(profile.get("target_libs", {}).get(target, profile["libs"]))
+    if (hexagon or {}).get(target) and "hexagon" in profile:
+        libs += (profile["hexagon"]["lib"],)
+    return libs
+
+
+def elf_machine(data: bytes) -> int:
+    """e_machine of an ELF file of either class and byte order (raises ValueError when it is not one)."""
+    if data[:4] != b"\x7fELF" or len(data) < 20 or data[5] not in (1, 2):
+        raise ValueError("not an ELF file")
+    return struct.unpack_from("<H" if data[5] == 1 else ">H", data, 18)[0]
+
+
+def check_htp_skeletons(label: str, files: dict, archs) -> tuple:
+    """(errors, notes) of the HTP skeleton directory (``files``: {file name: bytes}): exactly
+    libggml-htp-<arch>.so.dsp for each expected arch (``archs``; none expected when empty), each a Hexagon DSP
+    ELF (EM_QDSP6, not code for the app's CPU)."""
+    errors, notes = [], []
+    expected = sorted(f"libggml-htp-{a}.so.dsp" for a in archs or ())
+    if sorted(files) != expected:
+        errors.append(f"{label}: {HTP_DIR} holds {sorted(files)}, expected exactly {expected}"
+                      + ("" if expected else " ([hexagon] is switched off)"))
+    for name in sorted(set(files) & set(expected)):
+        try:
+            machine = elf_machine(files[name])
+        except ValueError as e:
+            errors.append(f"{label}: {HTP_DIR}/{name}: {e}")
+            continue
+        if machine != EM_QDSP6:
+            errors.append(f"{label}: {HTP_DIR}/{name}: ELF machine {machine}, not Hexagon (EM_QDSP6 {EM_QDSP6})")
+        else:
+            notes.append(f"{label}: {HTP_DIR}/{name} Hexagon DSP ELF; {len(files[name]) / 1e6:.2f} MB")
+    return errors, notes
+
+
+def stray_htp_files(names) -> list:
+    """Paths (``names``: relative POSIX paths) of libggml-htp-* files outside HTP_DIR/<HTP_FILE>: a skeleton
+    shipped as a library (llama_cpp/lib/libggml-htp-v79.so) would be diverted into the APK's jniLibs."""
+    out = []
+    for name in names:
+        base = name.rsplit("/", 1)[-1]
+        if HTP_ANY.match(base) and not (name == f"{HTP_DIR}/{base}" and HTP_FILE.match(base)):
+            out.append(name)
+    return sorted(out)
+
+
+def _check_htp_members(label: str, names, read, archs) -> tuple:
+    """check_htp_skeletons + stray_htp_files over the package's files (``names``: relative POSIX paths,
+    ``read``: name -> bytes)."""
+    names = list(names)
+    htp = {n[len(HTP_DIR) + 1:]: n for n in names if n.startswith(HTP_DIR + "/") and "/" not in n[len(HTP_DIR) + 1:]}
+    errors, notes = check_htp_skeletons(label, {base: read(n) for base, n in htp.items()}, archs)
+    stray = stray_htp_files(n for n in names if n not in htp.values())
+    if stray:
+        errors.append(f"{label}: HTP skeleton files outside {HTP_DIR}/libggml-htp-<arch>.so.dsp: {stray}")
+    return errors, notes
+
+
+def _check_site_htp(target: str, arch_dir: Path, profile: dict, archs) -> tuple:
+    """The installed package's HTP skeletons (verify-site-packages)."""
+    package_dir = arch_dir / profile["hexagon"]["dir"].split("/")[0]
+    names = [p.relative_to(arch_dir).as_posix() for p in sorted(package_dir.rglob("*")) if p.is_file()] \
+        if package_dir.is_dir() else []
+    return _check_htp_members(target, names, lambda n: (arch_dir / n).read_bytes(), archs)
 
 
 def _any_ndk(ctx: Ctx) -> Path | None:
@@ -1599,7 +1816,9 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
             errors.append(f"{target}: {cxx[0].name}: cannot read the dynamic symbols ({e})")
     imports = {}
     optional = profile.get("android_optional", {})
-    gpu_backends = {f"{stem}.so" for stem in optional}
+    # the backends only loaded on demand (GPU, NPU): nothing may NEED them
+    gpu_backends = {f"{stem}.so" for stem in optional} | (
+        {f"{profile['hexagon']['lib']}.so"} if "hexagon" in profile else set())
     for stem, path in libs.items():
         name = f"{path.parent.name}/{path.name}"
         data = path.read_bytes()
@@ -1619,7 +1838,7 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
         if extra:
             loads_gpu = sorted(set(extra) & gpu_backends)
             errors.append(f"{target}: {name}: NEEDED {extra} beyond {sorted(own_allowed)}"
-                          + (f" ({', '.join(loads_gpu)} is the optional GPU backend: only loaded on demand, "
+                          + (f" ({', '.join(loads_gpu)} is an optional GPU / NPU backend: only loaded on demand, "
                              f"never NEEDED)" if loads_gpu else ""))
         if device_lib and device_lib not in elf["needed"]:
             errors.append(f"{target}: {name}: does not need {device_lib} (was the GPU backend built?)")
@@ -1700,10 +1919,11 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None)
     return errors, notes
 
 
-def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, stubs=None) -> tuple:
+def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, stubs=None, hexagon=None) -> tuple:
     """verify-native for a ctypes package with a SITE_PROFILES entry (llama-cpp-python): the wheel holds
-    exactly the profile's libraries, checked like verify-site-packages checks the installed copy (on
-    Android against the NDK's libc++_shared.so, which flet-libcpp-shared ships on the device)."""
+    exactly the profile's libraries (``hexagon``: hexagon_targets(), the NPU backend's library and HTP
+    skeletons), checked like verify-site-packages checks the installed copy (on Android against the NDK's
+    libc++_shared.so, which flet-libcpp-shared ships on the device)."""
     import tempfile
 
     profile = SITE_PROFILES[package]
@@ -1713,15 +1933,20 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
         root = Path(tmp)
         prefix = profile["lib_dir"].rstrip("/") + "/"
         with zipfile.ZipFile(path) as zf:
-            members = [n for n in zf.namelist() if n.startswith(prefix) and "/" not in n[len(prefix):]
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            members = [n for n in names if n.startswith(prefix) and "/" not in n[len(prefix):]
                        and n.endswith(".so" if platform == "android" else ".dylib")]
             for name in members:
                 dest = root / name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(zf.read(name))
+            if "hexagon" in profile:
+                errs, ns = _check_htp_members(path.name, names, zf.read, (hexagon or {}).get(target))
+                errors += errs
+                notes += ns
         lib_dir = root / profile["lib_dir"]
         libs = _shared_libs(lib_dir, platform) if lib_dir.is_dir() else {}
-        expected = profile_libs(profile, target)
+        expected = profile_libs(profile, target, hexagon)
         if sorted(libs) != sorted(expected):
             errors.append(f"{path.name}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
                           f"{sorted(expected)}")
@@ -1739,9 +1964,10 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
 
 
 def verify_site_packages(site_packages, platform: str, package: str, version: str, stubs=None,
-                         minos: tuple = (13, 0), targets=None) -> tuple:
+                         minos: tuple = (13, 0), targets=None, hexagon=None) -> tuple:
     """(errors, notes): the index-installed native ``package`` in each arch directory of a flet build's
-    site-packages (build/site-packages/<target>) is the pinned build with the expected libraries."""
+    site-packages (build/site-packages/<target>) is the pinned build with the expected libraries
+    (``hexagon``: hexagon_targets(), the NPU backend's library and HTP skeletons per target)."""
     name = cmw.canonical(package)
     profile = SITE_PROFILES.get(name)
     if profile is None:
@@ -1779,13 +2005,17 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
             errors.append(f"{target}: no {profile['lib_dir']}/ in {arch_dir}")
             continue
         libs = _shared_libs(lib_dir, platform)
-        expected = profile_libs(profile, target)
+        expected = profile_libs(profile, target, hexagon)
         if sorted(libs) != sorted(expected):
             others = sorted(p.name for p in lib_dir.iterdir())
             errors.append(f"{target}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
                           f"{sorted(expected)} (directory: {others})")
             libs = {k: v for k, v in libs.items() if k in expected}
         notes.append(f"{target}: {name} {installed} build {build} {', '.join(tags)}")
+        if "hexagon" in profile:
+            errs, ns = _check_site_htp(target, arch_dir, profile, (hexagon or {}).get(target))
+            errors += errs
+            notes += ns
         if platform == "android":
             errs, ns = _check_android_site_libs(target, arch_dir, libs, profile, stubs)
         else:
@@ -1808,7 +2038,8 @@ def cmd_verify_site_packages(ctx: Ctx, args) -> int:
         print(f"NDK for the import checks: {ndk or 'none (pass --ndk, or set NDK_HOME or ANDROID_HOME)'}")
     project = cmw.load_project(ctx.pyproject)
     errors, notes = verify_site_packages(args.site_packages, ctx.platform, args.package, version, stubs,
-                                         ctx.ios_deployment_target, project.android_archs + project.ios_archs)
+                                         ctx.ios_deployment_target, project.android_archs + project.ios_archs,
+                                         hexagon_targets(ctx))
     for n in notes:
         print(f"ok      {n}")
     for e in errors:
@@ -1977,6 +2208,10 @@ def cmd_env(ctx: Ctx, args) -> None:
     if ctx.platform == "android":
         values["ANDROID_ABIS"] = " ".join(targets)
         values["ANDROID_NDK_VERSION"] = str(tc["android_ndk"])
+        # the NPU backend's SDK download (the workflow caches it under this sha256); empty when switched off
+        spec = hexagon_spec(ctx.data, ctx.manifest_path.name)
+        values["HEXAGON_SDK_FILE"] = spec["sdk"]["file"] if spec else ""
+        values["HEXAGON_SDK_SHA256"] = spec["sdk"]["sha256"] if spec else ""
     # No IPHONEOS_DEPLOYMENT_TARGET / OPENSSL_STATIC here: forge's compile_env() never passes the
     # outer environment to the build, so those live in the recipes' script_env (checked below).
     for w in ctx.wheels():
@@ -1996,7 +2231,8 @@ def cmd_env(ctx: Ctx, args) -> None:
 
 
 def cmd_fetch(ctx: Ctx, args) -> None:
-    for url, path, sha in fetch_plan(ctx, args.packages, Path(args.dest)):
+    hexagon_dest = Path(args.hexagon_dest) if getattr(args, "hexagon_dest", None) else None
+    for url, path, sha in fetch_plan(ctx, args.packages, Path(args.dest), hexagon_dest):
         download_verified(url, path, sha)
 
 
@@ -2023,6 +2259,7 @@ def main(argv=None) -> int:
     p.add_argument("--constraints-out", help="write the pip constraints file here and export PIP_CONSTRAINT")
     p = add("fetch", "download and sha256-check the build inputs", packages=True)
     p.add_argument("--dest", required=True, help="forge's downloads/ directory")
+    p.add_argument("--hexagon-dest", help="where the Hexagon SDK tarball goes (default: --dest; CI caches it)")
     p = add("stage-openssl", "swap in the static BeeWare OpenSSL", packages=True)
     p.add_argument("--downloads", required=True)
     p.add_argument("--forge", required=True, help="the mobile-forge checkout (cwd of setup.sh)")
@@ -2031,6 +2268,11 @@ def main(argv=None) -> int:
     p.add_argument("--downloads", required=True)
     p.add_argument("--ndk", required=True, help="the NDK forge builds with ($NDK_HOME)")
     p.add_argument("--work", required=True, help="scratch directory for the sources and the loader build")
+    p = add("stage-hexagon", "Android: the Hexagon SDK + the arm64 llama-cpp-python build's CMake initial cache",
+            packages=True)
+    p.add_argument("--downloads", required=True, help="where fetch put the SDK tarball (fetch --hexagon-dest)")
+    p.add_argument("--ndk", required=True, help="the NDK forge builds with ($NDK_HOME): the initial cache goes there")
+    p.add_argument("--work", required=True, help="where the SDK is unpacked (reused while its sha256 matches)")
     p = add("collect", "copy the promised wheels from forge's dist/ into the wheel cache", packages=True)
     p.add_argument("--dist", required=True)
     p.add_argument("--cache", required=True)
@@ -2079,6 +2321,8 @@ def main(argv=None) -> int:
             cmd_stage_openssl(ctx, args)
         elif args.cmd == "stage-opencl":
             cmd_stage_opencl(ctx, args)
+        elif args.cmd == "stage-hexagon":
+            cmd_stage_hexagon(ctx, args)
         elif args.cmd == "collect":
             cmd_collect(ctx, args)
         elif args.cmd == "retag":

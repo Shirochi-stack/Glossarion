@@ -28,6 +28,17 @@ load uses ``split_mode`` NONE with ``main_gpu`` -1: no offload device at all, ev
 was registered earlier in the process. ``device`` names what runs the model. The vision projector
 always stays on the CPU.
 
+NPU (Qualcomm Hexagon, ``load(..., npu=True)``; the service decides, per model): Android arm64 builds whose
+llama-cpp-python wheel carries libggml-hexagon (``npu_backend_shipped``). ``npu_state(skel_dir, options)`` calls
+the wheel's ``register_npu_backend`` (idempotent: it copies the HTP skeletons, sets the GGML_HEXAGON_* options,
+loads the backend by soname and opens and closes a real session) and keeps its answer; ``npu_passed`` says
+whether every step passed. A wheel without these functions (older builds, iOS, x86_64) gives a clean "not
+shipped" state and the NPU is simply not offered. The device is chosen with ``main_gpu`` =
+``device_index("HTP")``; a GPU load uses ``device_index`` of its own backend too, so a GPU load never lands on
+the NPU or the reverse (a wheel without ``device_index`` keeps ``main_gpu`` 0 for the GPU). An NPU load runs
+the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailable`` on any failure. The
+"ggml-hex:" lines of the native log are kept (``hex_log_lines``) for the diagnostics.
+
 Script ban (``params["ban_scripts"]``, the ``script_ban.SCRIPTS`` names decided by the service): ``LlamaEngine``
 passes a logits processor that sets the token ids of those scripts (Han / kana / Hangul, Devanagari,
 Thai, Arabic, Cyrillic ...) to -inf. The vocabulary is decoded once, on the first such request after a
@@ -39,6 +50,7 @@ request's user messages.
 
 from __future__ import annotations
 
+import collections
 import importlib
 import importlib.util
 import logging
@@ -54,7 +66,9 @@ log = logging.getLogger("glossarion.local_llm")
 progress_log = logging.getLogger("glossarion.local_llm.progress")
 
 __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
-           "GpuUnavailable", "LlamaEngine", "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
+           "GpuUnavailable", "LlamaEngine", "NpuUnavailable", "cpu_variant", "default_threads", "device_index",
+           "engine_status", "gpu_offer", "gpu_state", "hex_log_lines", "npu_failure", "npu_passed", "npu_platform",
+           "npu_state", "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
 ENGINE_VERSION = "0.3.37"
@@ -87,8 +101,216 @@ class GpuUnavailable(RuntimeError):
     failed); the message says why. The engine holds no model afterwards."""
 
 
+class NpuUnavailable(RuntimeError):
+    """The NPU path failed (backend not registered, the model did not load on it, or its first token failed);
+    the message says why. The engine holds no model afterwards."""
+
+
 #: llama.cpp's LLAMA_SPLIT_MODE_NONE: the whole model on ``main_gpu`` (-1: on no device = the CPU).
 SPLIT_MODE_NONE = 0
+#: the registry name of llama.cpp's Hexagon backend (ggml-hexagon at the pinned commit)
+NPU_BACKEND = "HTP"
+#: the oldest HTP arch the backend has skeletons for; a lower or unknown arch is never offered (upstream would
+#: silently assume v73 when its own query fails)
+NPU_MIN_ARCH = 73
+#: the steps of ``register_npu_backend``, in order
+NPU_STEPS = ("shipped", "libcdsprpc", "arch", "skeletons", "registry", "session")
+#: GGML_HEXAGON_POWER_MODE and the modes ggml-hexagon.cpp documents at the pin (its default: burst)
+NPU_POWER_ENV = "GGML_HEXAGON_POWER_MODE"
+NPU_POWER_MODES = ("low_power_saver", "power_saver", "high_power_saver", "low_balanced", "balanced",
+                   "high_performance", "sustained_high_performance", "burst")
+NPU_DEFAULT_POWER = "burst"
+NO_NPU = "this engine build has no NPU support"
+#: how many "ggml-hex:" log lines the diagnostics keep
+HEX_LOG_LINES = 20
+_HEX_LOG: collections.deque = collections.deque(maxlen=HEX_LOG_LINES)
+_HEX_PENDING: list = [""]
+_HEX_HOOK: list = []  # the installed log callback (kept alive: ctypes calls it from native code)
+_NPU_STATE: dict = {}  # the last ``npu_state`` answer of this process
+
+
+def npu_platform(platform: Optional[str] = None, machine: Optional[str] = None) -> bool:
+    """Android arm64: the only builds that can carry the Hexagon backend (nothing is imported)."""
+    name = (platform or os.environ.get("GLOSSARION_PLATFORM") or "").strip().lower()
+    if name != "android":
+        return False
+    import platform as _platform
+
+    arch = (machine if machine is not None else _platform.machine()).strip().lower()
+    return arch in ("aarch64", "arm64", "arm64-v8a")
+
+
+def _extensions() -> Any:
+    try:
+        return importlib.import_module("llama_cpp._ctypes_extensions")
+    except Exception:
+        return None
+
+
+def _npu_missing(step: str, detail: str) -> dict:
+    return {"backend": None, "device": "", "arch": None, "error": detail,
+            "steps": [{"name": step, "ok": False, "detail": detail}]}
+
+
+def npu_state(skel_dir: str, options: Optional[dict] = None) -> dict:
+    """``register_npu_backend(skel_dir, options)`` of our llama-cpp-python build (idempotent; it never raises):
+    ``{"backend": "HTP", "device", "arch", "error", "steps": [{"name", "ok", "detail"}]}``. A build without the
+    function, or one that does not ship the backend, answers a failed "shipped" step."""
+    ext = _extensions()
+    if ext is None:
+        return _npu_missing("shipped", UNAVAILABLE)
+    shipped = getattr(ext, "npu_backend_shipped", None)
+    register = getattr(ext, "register_npu_backend", None)
+    if shipped is None or register is None:
+        return _npu_missing("shipped", NO_NPU)
+    try:
+        if not shipped():
+            return _npu_missing("shipped", "this engine build does not carry the NPU backend")
+    except Exception as exc:
+        return _npu_missing("shipped", f"{type(exc).__name__}: {exc}")
+    capture_hex_log()
+    try:
+        raw = register(str(skel_dir), dict(options or {}))
+        state = dict(raw) if isinstance(raw, dict) else {}
+    except Exception as exc:  # pragma: no cover - the loader never raises
+        state = {"error": f"{type(exc).__name__}: {exc}"}
+    steps = [{"name": str(s.get("name") or "?"), "ok": bool(s.get("ok")), "detail": str(s.get("detail") or "")}
+             for s in (state.get("steps") or []) if isinstance(s, dict)]
+    arch = state.get("arch")
+    try:
+        arch = int(arch) if arch is not None else None
+    except (TypeError, ValueError):
+        arch = None
+    out = {"backend": state.get("backend"), "device": str(state.get("device") or ""), "arch": arch,
+           "error": str(state.get("error") or ""), "steps": steps}
+    _NPU_STATE.clear()
+    _NPU_STATE.update(out)
+    return out
+
+
+def npu_failure(state: Optional[dict]) -> Optional[tuple]:
+    """``(step, reason)`` of the first thing that keeps the NPU from being offered, else None (it passed)."""
+    state = state or {}
+    steps = list(state.get("steps") or [])
+    for step in steps:
+        if not step.get("ok"):
+            return str(step.get("name") or "?"), str(step.get("detail") or state.get("error") or "failed")
+    names = {step.get("name") for step in steps}
+    for name in NPU_STEPS:
+        if name not in names:
+            return name, str(state.get("error") or "not checked")
+    arch = state.get("arch")
+    if not isinstance(arch, int) or arch < NPU_MIN_ARCH:
+        return "arch", f"unsupported HTP arch {arch!r}" if arch is not None else "the HTP arch is unknown"
+    if state.get("error"):
+        return "session", str(state["error"])
+    if not state.get("device"):
+        return "registry", "no NPU device"
+    return None
+
+
+def npu_passed(state: Optional[dict]) -> bool:
+    """Every step of ``register_npu_backend`` passed, with a known arch the backend supports."""
+    return bool(state) and npu_failure(state) is None
+
+
+def npu_label(state: Optional[dict] = None) -> str:
+    """"Hexagon v81 (HTP0)" of the registered NPU."""
+    state = state if state is not None else _NPU_STATE
+    arch = state.get("arch")
+    device = str(state.get("device") or "") or NPU_BACKEND
+    return f"Hexagon v{arch} ({device})" if arch else f"Hexagon ({device})"
+
+
+def soc_label() -> str:
+    """``ro.soc.manufacturer`` + ``ro.soc.model`` (Android 12+; a label for the diagnostics only), '' elsewhere."""
+    if not npu_platform():
+        return ""
+    import subprocess
+
+    parts = []
+    for prop in ("ro.soc.manufacturer", "ro.soc.model"):
+        try:
+            done = subprocess.run(["getprop", prop], capture_output=True, text=True, timeout=3)
+            value = (done.stdout or "").strip()
+        except Exception:
+            value = ""
+        if value:
+            parts.append(value)
+    return " ".join(parts)
+
+
+def device_index(name: str, missing: int = -1) -> int:
+    """``device_index(name)`` of our build: the ``main_gpu`` of the registered backend called ``name``
+    ("HTP", "OpenCL"), following llama.cpp's own device order; -1 when it is not registered, ``missing`` on a
+    build without the function."""
+    ext = _extensions()
+    function = getattr(ext, "device_index", None) if ext is not None else None
+    if function is None:
+        return missing
+    try:
+        return int(function(str(name)))
+    except Exception:
+        log.debug("device_index(%s) failed", name, exc_info=True)
+        return -1
+
+
+def _remember_hex(text: str) -> None:
+    pending = _HEX_PENDING[0] + text
+    *lines, rest = pending.split("\n")
+    _HEX_PENDING[0] = rest[-2000:]
+    for line in lines:
+        line = line.strip()
+        if line.startswith("ggml-hex:"):
+            _HEX_LOG.append(line[:400])
+
+
+def hex_log_lines() -> list:
+    """The last ``HEX_LOG_LINES`` "ggml-hex:" lines of the native log (since ``capture_hex_log``)."""
+    lines = list(_HEX_LOG)
+    if _HEX_PENDING[0].strip().startswith("ggml-hex:"):
+        lines = (lines + [_HEX_PENDING[0].strip()[:400]])[-HEX_LOG_LINES:]
+    return lines
+
+
+def capture_hex_log() -> bool:
+    """Wrap llama-cpp-python's log callback (``llama_cpp._logger``): every line still goes where it went (the
+    original callback prints by the "llama-cpp-python" logger's level); the "ggml-hex:" lines are kept as well.
+    Once per process; False when this build has no log hook."""
+    if _HEX_HOOK:
+        return True
+    try:
+        llama_cpp = importlib.import_module("llama_cpp")
+        logger_module = importlib.import_module("llama_cpp._logger")
+    except Exception:
+        return False
+    callback_type = getattr(llama_cpp, "llama_log_callback", None)
+    setter = getattr(llama_cpp, "llama_log_set", None)
+    if callback_type is None or setter is None:
+        return False
+    original = getattr(logger_module, "llama_log_callback", None)
+
+    def hook(level: int, text: Any, user_data: Any) -> None:
+        try:
+            _remember_hex(text.decode("utf-8", "replace") if isinstance(text, bytes) else str(text or ""))
+        except Exception:
+            pass
+        if original is not None:
+            try:
+                original(level, text, user_data)
+            except Exception:
+                pass
+
+    try:
+        import ctypes
+
+        callback = callback_type(hook)
+        setter(callback, ctypes.c_void_p(0))
+    except Exception:
+        log.debug("installing the native log hook failed", exc_info=True)
+        return False
+    _HEX_HOOK.append(callback)
+    return True
 #: what the GPU check evaluates (a batch, then one more token)
 GPU_CHECK_PROMPT = ("The lighthouse keeper climbed the stairs every evening, counted each step and wrote the "
                     "weather into a book that nobody had read for forty years.")
@@ -236,7 +458,15 @@ class _Base:
         self.last_usage: dict = {}
         self.last_finish = "stop"
         self.on_gpu = False  # the loaded model runs on the GPU
-        self.device: Optional[str] = None  # what runs the loaded model ("GPU: … (OpenCL)", "CPU …")
+        self.on_npu = False  # the loaded model runs on the NPU
+        self.device: Optional[str] = None  # what runs the loaded model ("GPU: … (OpenCL)", "NPU: …", "CPU …")
+
+    @property
+    def backend(self) -> Optional[str]:
+        """"NPU", "GPU" or "CPU" of the loaded model, None without one."""
+        if self.path is None:
+            return None
+        return "NPU" if self.on_npu else "GPU" if self.on_gpu else "CPU"
 
     @property
     def loaded(self) -> bool:
@@ -265,7 +495,9 @@ class FakeEngine(_Base):
 
     def __init__(self, *, delay: float = 0.0, think: bool = False, load_delay: float = 0.0,
                  reply: Optional[Callable[[list], str]] = None, gpu_device: str = "Fake GPU (Test)",
-                 gpu_error: Optional[str] = None, gpu_chat_error: Optional[str] = None) -> None:
+                 gpu_error: Optional[str] = None, gpu_chat_error: Optional[str] = None,
+                 npu_device: str = "Hexagon v81 (HTP0)", npu_error: Optional[str] = None,
+                 npu_chat_error: Optional[str] = None, npu_load_delay: float = 0.0) -> None:
         super().__init__()
         self.delay = delay
         self.think = think
@@ -274,8 +506,14 @@ class FakeEngine(_Base):
         self.gpu_device = gpu_device
         self.gpu_error = gpu_error  # a GPU load raises GpuUnavailable(gpu_error)
         self.gpu_chat_error = gpu_chat_error  # a chat on the GPU raises RuntimeError(gpu_chat_error)
+        self.npu_device = npu_device
+        self.npu_error = npu_error  # an NPU load raises NpuUnavailable(npu_error)
+        self.npu_chat_error = npu_chat_error  # a chat on the NPU raises RuntimeError(npu_chat_error)
+        self.npu_load_delay = npu_load_delay  # an NPU load takes this long (the watchdog tests)
         self.loads: list = []
         self.gpu_loads: list = []  # the gpu flag of every load attempt
+        self.backends: list = []  # "npu" / "gpu" / "cpu" of every load attempt
+        self.npu_layers: list = []  # the layer count of every NPU load attempt
         self.unloads = 0
         self.generated = 0  # tokens produced since the last chat started
         self.calls: list = []
@@ -283,12 +521,21 @@ class FakeEngine(_Base):
         self._projector = False
 
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS) -> None:
-        gpu = bool(gpu and n_gpu_layers != 0)
-        self.n_gpu_layers = int(n_gpu_layers) if gpu else 0
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False) -> None:
+        npu = bool(npu)
+        gpu = bool(gpu and n_gpu_layers != 0) and not npu
+        self.n_gpu_layers = int(n_gpu_layers) if gpu or npu else 0
         if self.load_delay:
             time.sleep(self.load_delay)
         self.gpu_loads.append(bool(gpu))
+        self.backends.append("npu" if npu else "gpu" if gpu else "cpu")
+        if npu:
+            self.npu_layers.append(int(n_gpu_layers))
+            if self.npu_load_delay:
+                time.sleep(self.npu_load_delay)
+            if self.npu_error:
+                self.unload()
+                raise NpuUnavailable(self.npu_error)
         if gpu and self.gpu_error:
             self.unload()
             raise GpuUnavailable(self.gpu_error)
@@ -296,7 +543,8 @@ class FakeEngine(_Base):
         self.mmproj = mmproj
         self._projector = False
         self.on_gpu = bool(gpu)
-        self.device = f"GPU: {self.gpu_device}" if gpu else "CPU"
+        self.on_npu = npu
+        self.device = f"NPU: {self.npu_device}" if npu else f"GPU: {self.gpu_device}" if gpu else "CPU"
         self.loads.append((path, int(n_ctx), int(n_threads)))
 
     def unload(self) -> None:
@@ -306,6 +554,7 @@ class FakeEngine(_Base):
         self.mmproj = None
         self._projector = False
         self.on_gpu = False
+        self.on_npu = False
         self.device = None
 
     @property
@@ -316,10 +565,12 @@ class FakeEngine(_Base):
         return sum(len(_text_of(m.get("content")).split()) + 4 for m in messages) + self._image_tokens(messages)
 
     def chat(self, messages: Sequence[dict], params: dict, should_stop: Callable[[], bool]) -> Iterator[str]:
-        self.calls.append({"messages": list(messages), "params": dict(params), "gpu": self.on_gpu})
+        self.calls.append({"messages": list(messages), "params": dict(params), "gpu": self.on_gpu, "npu": self.on_npu})
         self.generated = 0
         if self.on_gpu and self.gpu_chat_error:
             raise RuntimeError(self.gpu_chat_error)
+        if self.on_npu and self.npu_chat_error:
+            raise RuntimeError(self.npu_chat_error)
         images = image_count(messages)
         if images:
             if not self.mmproj:
@@ -378,19 +629,36 @@ class LlamaEngine(_Base):
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS) -> None:
-        gpu = bool(gpu and n_gpu_layers != 0)
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False) -> None:
+        npu = bool(npu)
+        gpu = bool(gpu and n_gpu_layers != 0) and not npu
         llama_cpp = self._module()
         with self._lock, _NATIVE_LOAD_LOCK:
             self.unload()
             device = None
-            if gpu:
+            if npu:
+                # registered by the service's NPU check (``npu_state``) before any NPU load
+                index = device_index(NPU_BACKEND)
+                if index < 0:
+                    raise NpuUnavailable(_NPU_STATE.get("error") or "the NPU backend is not registered")
+                device = f"NPU: {npu_label()}"
+                placement = {"n_gpu_layers": int(n_gpu_layers or -1), "split_mode": SPLIT_MODE_NONE,
+                             "main_gpu": index}
+            elif gpu:
                 state = gpu_state()
                 if not state.get("device"):
                     raise GpuUnavailable(state.get("error") or "no GPU device")
                 device = f"GPU: {state['device']} ({state.get('backend')})"
+                # the GPU backend's own device: never the NPU, whatever else is registered (a build without
+                # ``device_index`` has the GPU as its only device: 0)
+                backend = str(state.get("backend") or "")
+                index = device_index(backend, missing=0)
+                if index < 0:
+                    if backend == "OpenCL":
+                        raise GpuUnavailable("the OpenCL backend is not in llama.cpp's device list")
+                    index = 0
                 # The UI chooses the count; -1 offloads all layers only when explicitly selected.
-                placement = {"n_gpu_layers": int(n_gpu_layers), "split_mode": SPLIT_MODE_NONE, "main_gpu": 0}
+                placement = {"n_gpu_layers": int(n_gpu_layers), "split_mode": SPLIT_MODE_NONE, "main_gpu": index}
             else:
                 placement = {"n_gpu_layers": 0, "split_mode": SPLIT_MODE_NONE, "main_gpu": -1}
             try:
@@ -403,14 +671,18 @@ class LlamaEngine(_Base):
                                       use_mlock=False, verbose=False, swa_full=False, flash_attn=True,
                                       **placement)
             except Exception as exc:
+                if npu:
+                    raise NpuUnavailable(f"the model did not load on the NPU ({exc})") from exc
                 if gpu:
                     raise GpuUnavailable(f"the model did not load on the GPU ({exc})") from exc
                 raise
-            if gpu:
+            if gpu or npu:
                 try:
                     _gpu_check(llm)
                 except Exception as exc:
                     _close(llm)
+                    if npu:
+                        raise NpuUnavailable(f"the first token on the NPU failed ({exc})") from exc
                     raise GpuUnavailable(f"the first token on the GPU failed ({exc})") from exc
             self.formatter = _make_formatter(llm)
             if self.formatter is not None:
@@ -420,6 +692,7 @@ class LlamaEngine(_Base):
             self.path, self.n_ctx, self.n_threads = str(path), int(n_ctx), int(n_threads)
             self.mmproj = str(mmproj) if mmproj else None
             self.on_gpu = bool(gpu)
+            self.on_npu = npu
             if device is None:
                 variant = cpu_variant()
                 device = f"CPU ({variant})" if variant and variant not in ("builtin", "none") else "CPU"
@@ -450,6 +723,7 @@ class LlamaEngine(_Base):
             self.path = None
             self.mmproj = None
             self.on_gpu = False
+            self.on_npu = False
             self.device = None
             # The projector goes before its model. llama-cpp-python 0.3.37 registers mtmd_free on the
             # model's own exit stack, after the context and the model, so ``llm.close()`` below runs it
@@ -880,7 +1154,7 @@ def _close(llm: Any) -> None:
 
 
 def _gpu_check(llm: Any) -> None:
-    """The GPU's first tokens: evaluate ``GPU_CHECK_PROMPT`` (a batch) and one more token; the last
+    """The GPU's or the NPU's first tokens: evaluate ``GPU_CHECK_PROMPT`` (a batch) and one more token; the last
     logits must be finite and not all equal (a broken kernel gives NaN / inf / zeros). Leaves the
     model reset."""
     import math

@@ -283,7 +283,18 @@ class WelcomeScreen(Screen):
                                          notify=self._ondevice_note, on_change=self.render_ondevice)
             self.ondevice.custom_used = self._ondevice_used
             self._ondevice_unsub = service.downloads.subscribe(lambda state: self.render_ondevice())
+            self._npu_shown = self.ondevice.npu_offered()
+            subscribe = getattr(service, "subscribe", None)
+            if callable(subscribe):  # the NPU check finishes in the background: its rows appear then
+                self._npu_unsub = subscribe(lambda _snap: self._npu_changed())
         return self.ondevice
+
+    def _npu_changed(self) -> None:
+        flow = self.ondevice
+        offered = bool(flow is not None and flow.npu_offered())
+        if offered != getattr(self, "_npu_shown", False):
+            self._npu_shown = offered
+            self.render_ondevice()
 
     def _ondevice_section(self) -> ft.Control:
         self.ondevice_box.content = self._ondevice_content()
@@ -300,6 +311,11 @@ class WelcomeScreen(Screen):
 
         cells = [self._ondevice_cell(flow, index, preset, preset.get("name") == suggested)
                  for index, preset in enumerate(rows)]
+        if flow.npu_offered():  # the NPU rows only where the phone's NPU check passed
+            from glossarion_mobile.services.local_llm.presets import NPU_FAMILY
+
+            cells.extend(self._npu_cell(flow, index, preset) for index, preset in flow.npu_presets())
+            cells.append(self._custom_cell(flow, NPU_FAMILY))
         cells.extend(self._custom_cell(flow, family) for family in CUSTOM_FAMILIES)
         lines: list[ft.Control] = [ft.ResponsiveRow(cells, spacing=6, run_spacing=4, key="welcome-ondevice")]
         if flow._gpu_backend():
@@ -398,6 +414,43 @@ class WelcomeScreen(Screen):
             col={"xs": 12 // ONDEVICE_CELLS},
         )
 
+    def _npu_cell(self, flow: Any, index: int, preset: dict) -> ft.Control:
+        """A built-in NPU row as a cell: its name over its size and RAM mark; a tap saves it and runs the one-tap
+        flow (``OnDeviceFlow.get_npu_preset``)."""
+        from glossarion_mobile.services.local_llm import downloads as dl
+        from glossarion_mobile.services.local_llm import presets as lp
+
+        verdict, mark, words = flow.ram_hint(preset)
+        detail = " ".join(x for x in (dl.format_bytes(lp.download_size(preset)), mark) if x)
+        color = {"refuse": ft.Colors.ERROR, "confirm": ft.Colors.TERTIARY}.get(verdict)
+        return ft.Container(
+            content=ft.Column([
+                ft.Text(str(preset.get("name") or ""), theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS, size=ONDEVICE_GPU_NAME_SIZE),
+                ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                        color=color or ft.Colors.ON_SURFACE_VARIANT),
+            ], spacing=0, tight=True),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+            border_radius=10,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            tooltip=" · ".join(x for x in (str(preset.get("note") or ""), words) if x) or None,
+            on_click=lambda e, i=index: call_handler(self.use_npu_preset, i),
+            key=f"welcome-ondevice-npu-{index}",
+            col={"xs": 12 // ONDEVICE_CELLS},
+        )
+
+    async def use_npu_preset(self, index: int) -> Optional[str]:
+        """A built-in NPU cell's tap: download, load and select its model (like ``use_ondevice``)."""
+        flow = self.ondevice_flow()
+        if flow is None:
+            return None
+        self.model_notes.pop("local", None)
+        self._find_flow_page(flow)
+        model = await flow.get_npu_preset(index)
+        if model:
+            self._ondevice_used(model)
+        return model
+
     def _open_custom(self, family_id: str, e: Any = None) -> Any:
         flow = self.ondevice_flow()
         if flow is None:
@@ -472,6 +525,9 @@ class WelcomeScreen(Screen):
         if self._ondevice_unsub is not None:
             self._ondevice_unsub()
             self._ondevice_unsub = None
+        npu_unsub, self._npu_unsub = getattr(self, "_npu_unsub", None), None
+        if callable(npu_unsub):
+            npu_unsub()
         super().dispose()
 
     def _local_control(self) -> ft.Control:

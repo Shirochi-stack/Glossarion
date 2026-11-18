@@ -9,6 +9,12 @@ empty (the auto-pick of ``hf.pick_file`` applies), ``quant`` may name one (``Q5_
 means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a saved list (even an empty
 one) wins. ``CUSTOM_FAMILIES`` are the fixed Custom rows beside the saved list: a family's parameter sizes,
 whose quants come from the repository's own files; a quant the user chooses becomes an ordinary saved row.
+
+NPU (Snapdragon Hexagon): a row may name its ``backend`` ("npu", "gpu" or "cpu"; none = "auto": the NPU when
+the phone's NPU check passed, "Use NPU" is on and the quant is one the backend accepts, else the GPU / CPU rule)
+and its ``npu_layers`` (none = all). ``NPU_PRESETS`` (the Q4_0 files of ``GPU_PRESETS``, backend "npu") and
+``NPU_FAMILY`` (every Custom size, quants marked by ``npu_quant_kind``) are fixed rows like ``CUSTOM_FAMILIES``,
+shown only where the NPU check passed and saved only when tapped.
 """
 
 from __future__ import annotations
@@ -23,10 +29,10 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "CUSTOM_FAMILIES", "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "NO_QUANT", "PREF_KEY", "add_row", "custom_family",
-    "custom_row", "custom_size_for", "download_size", "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row",
-    "load_presets", "quant_label", "remove_row", "restore_defaults", "retire_old_gpu_rows", "save_presets",
-    "validate_preset",
+    "BACKENDS", "CUSTOM_FAMILIES", "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "NO_QUANT", "NPU_FAMILY",
+    "NPU_PRESETS", "PREF_KEY", "add_row", "backend_of", "custom_family", "custom_row", "custom_size_for",
+    "download_size", "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row", "load_presets", "npu_quant_kind",
+    "quant_label", "remove_row", "restore_defaults", "retire_old_gpu_rows", "save_presets", "validate_preset",
 ]
 
 PREF_KEY = "local_model_presets"
@@ -137,6 +143,72 @@ CUSTOM_FAMILIES: tuple = (
 #: The unquantized GGUF kinds: what "No quant" in the Custom menu stands for
 NO_QUANT = ("F16", "BF16", "F32")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+#: a row's ``backend``: "auto" (also an empty or missing value) or one device
+BACKENDS = ("auto", "npu", "gpu", "cpu")
+BACKEND_LABELS = {"auto": "Auto", "npu": "NPU", "gpu": "GPU", "cpu": "CPU"}
+#: one NPU session maps about 3.5 GB (llama.cpp docs/backend/snapdragon at the pin); bigger files are slower
+NPU_SESSION_BYTES = 3_500_000_000
+NPU_OVER_SESSION = "over the NPU's 3.5 GB: slower"
+
+
+def _npu_row(gpu_row: dict, name: str, note: str) -> dict:
+    """An NPU preset from a ``GPU_PRESETS`` row: the same verified Q4_0 file, size, sha256 and projector."""
+    row = copy.deepcopy(gpu_row)
+    row.update(name=name, note=note, backend="npu")
+    return row
+
+
+#: The built-in NPU rows (owner 2026-11-18): the Q4_0 files of the GPU table (Q4_0 is the Hexagon backend's best
+#: weight type at the pin), backend "npu". Shown beside the saved list where the NPU check passed; a tap saves the
+#: row (``OnDeviceFlow.get_npu_preset``), which is then edited like any other. The 9B file is over one NPU session's
+#: 3.5 GB: it is only in the Custom · NPU list.
+NPU_PRESETS: tuple = (
+    _npu_row(GPU_PRESETS[0], "Garbage · NPU", "Qwen3.5 0.8B · Q4_0 on the NPU · ~1 GB RAM"),
+    _npu_row(GPU_PRESETS[1], "Light · NPU", "Qwen3.5 2B · Q4_0 on the NPU · ~2 GB RAM"),
+    _npu_row(GPU_PRESETS[2], "Medium · NPU", "Qwen3.5 4B · Q4_0 on the NPU · needs ~4 GB free RAM"),
+)
+
+
+def _npu_family() -> dict:
+    sizes = []
+    for family in CUSTOM_FAMILIES:
+        for size in family["sizes"]:
+            entry = dict(size)
+            entry.setdefault("group", family["name"])
+            if size["repo"].casefold() == "unsloth/qwen3.5-9b-gguf":
+                entry["npu_note"] = NPU_OVER_SESSION
+            sizes.append(entry)
+    return {"id": "npu", "name": "NPU", "backend": "npu", "sizes": tuple(sizes)}
+
+
+#: "Custom · NPU": every Custom size in one menu (grouped by family), its quants marked for the NPU
+NPU_FAMILY: dict = _npu_family()
+#: weight types MUL_MAT accepts on the Hexagon backend at the pin (ggml-hexagon htp-kparams.cpp); IQ4_XS and the
+#: IQ3 types are not among them
+_NPU_TYPES = {"Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL", "IQ2_XXS", "Q1_0", "Q2_0", "F16", "BF16", "F32",
+              "MXFP4", "NVFP4"}
+_K_QUANT = re.compile(r"^Q[2-6]_K(?:_[A-Z]+)?$")
+
+
+def npu_quant_kind(file: Any) -> str:
+    """How a GGUF suits the NPU: "best" (Q4_0), "ok" (another weight type the backend accepts: Q4_1, Q5_x, Q8_0,
+    the K-quants Q2_K-Q6_K with their size suffixes, IQ4_NL, IQ2_XXS, MXFP4, NVFP4, F16, BF16, F32) or "cpu" (not
+    accepted or not recognisable: IQ4_XS, IQ3_*, ...; those layers would run on the CPU, so Auto skips the NPU)."""
+    quant = file_quant(file)
+    if quant == "Q4_0":
+        return "best"
+    if quant in _NPU_TYPES or _K_QUANT.match(quant):
+        return "ok"
+    name = str(file or "").upper()
+    if not quant and ("MXFP4" in name or "NVFP4" in name):
+        return "ok"
+    return "cpu"
+
+
+def backend_of(row: Optional[dict]) -> str:
+    """The row's backend choice: "npu" / "gpu" / "cpu", else "auto"."""
+    value = str((row or {}).get("backend") or "").strip().lower()
+    return value if value in BACKENDS else "auto"
 
 
 def _int(value: Any, low: int, high: int) -> int:
@@ -163,6 +235,12 @@ def _clean(row: Any) -> Optional[dict]:
         out["size"] = size
     if _SHA_RE.match(sha):
         out["sha256"] = sha
+    backend = backend_of(row)
+    if backend != "auto":
+        out["backend"] = backend
+    npu_layers = _int(row.get("npu_layers"), 1, 10_000)
+    if npu_layers:
+        out["npu_layers"] = npu_layers
     mmproj = str(row.get("mmproj") or "").strip()
     if mmproj:
         try:
@@ -312,7 +390,9 @@ def quant_label(file: Any) -> str:
 
 
 def custom_family(family_id: Any) -> Optional[dict]:
-    """The ``CUSTOM_FAMILIES`` entry called ``family_id``, else None."""
+    """The ``CUSTOM_FAMILIES`` entry called ``family_id`` (``NPU_FAMILY`` for "npu"), else None."""
+    if family_id == NPU_FAMILY["id"]:
+        return NPU_FAMILY
     return next((family for family in CUSTOM_FAMILIES if family["id"] == family_id), None)
 
 
@@ -326,11 +406,20 @@ def custom_size_for(repo: Any) -> Optional[tuple]:
     return None
 
 
-def custom_row(size: dict, file: Any, projector: Any = None) -> dict:
-    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile``."""
+def custom_row(size: dict, file: Any, projector: Any = None, backend: str = "") -> dict:
+    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile``;
+    ``backend`` "npu" (Custom · NPU) names the row's device."""
     label = quant_label(file.path)
-    row = {"name": f"{size['name']} · {label}", "repo": size["repo"], "file": file.path, "quant": "",
-           "note": f"Custom · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0)}
+    backend = backend_of({"backend": backend})
+    if backend == "npu":
+        row = {"name": f"{size['name']} · {label} · NPU", "repo": size["repo"], "file": file.path, "quant": "",
+               "note": f"Custom · NPU · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0),
+               "backend": "npu"}
+    else:
+        row = {"name": f"{size['name']} · {label}", "repo": size["repo"], "file": file.path, "quant": "",
+               "note": f"Custom · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0)}
+        if backend != "auto":
+            row["backend"] = backend
     if file.sha256:
         row["sha256"] = file.sha256
     if projector is not None:
@@ -407,8 +496,29 @@ def validate_preset(row: dict, presets: Sequence[dict], index: Optional[int] = N
             return None, f"Context must be between 512 and {MAX_CTX:,} tokens"
     clean = {"name": name, "repo": ref.repo, "file": file, "quant": "" if file else (ref.quant or ""),
              "note": str(row.get("note") or "").strip()[:200], "n_ctx": n_ctx}
-    if index is not None and 0 <= index < len(presets):
-        old = presets[index]
+    old = presets[index] if index is not None and 0 <= index < len(presets) else {}
+    # Backend and NPU layers: the editor shows them only where the NPU check passed; elsewhere the row keeps its own
+    if "backend" in row:
+        backend = str(row.get("backend") or "").strip().lower() or "auto"
+        if backend not in BACKENDS:
+            return None, "Backend must be Auto, NPU, GPU or CPU"
+    else:
+        backend = backend_of(old)
+    if backend != "auto":
+        clean["backend"] = backend
+    if "npu_layers" in row:
+        layers_text = str(row.get("npu_layers") or "").strip().lower()
+        if layers_text and layers_text not in ("0", "all", "-1"):
+            try:
+                layers = int(layers_text)
+            except ValueError:
+                return None, "NPU layers must be a whole number (or empty for all)"
+            if not 1 <= layers <= 10_000:
+                return None, "NPU layers must be between 1 and 10,000 (or empty for all)"
+            clean["npu_layers"] = layers
+    elif old.get("npu_layers"):
+        clean["npu_layers"] = old["npu_layers"]
+    if old:
         if old.get("repo") == clean["repo"] and old.get("file") == clean["file"] and clean["file"]:
             for key in ("size", "sha256"):
                 if old.get(key):

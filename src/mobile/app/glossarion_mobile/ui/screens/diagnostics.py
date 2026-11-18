@@ -165,7 +165,7 @@ class DiagnosticsScreen(Screen):
                 title="Device checks",
                 icon="DEVELOPER_MODE",
                 subtitle="SecureStorage, foreground service, notifications, Open-with, OAuth loopback, thread stacks, "
-                "iOS background tasks",
+                "iOS background tasks, NPU",
                 children=[self.device_button],
                 key="diag-device",
             ),

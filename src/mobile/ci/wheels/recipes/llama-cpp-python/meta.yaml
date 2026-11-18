@@ -32,6 +32,14 @@
 #       x86_64: no GPU backend.
 #       iOS: GGML_METAL=ON + GGML_METAL_EMBED_LIBRARY=ON (the shader source is embedded and
 #       compiled on the device: no Metal toolchain at build time), libggml-metal linked into libggml.
+#   - the optional NPU backend (Android arm64 only, registered on demand by the patched loader,
+#     patches/mobile.patch 10.): -C{NDK_ROOT}/glossarion/hexagon-init.cmake, the CMake initial cache
+#     wheels.py stage-hexagon writes from wheelhouse.toml [hexagon]: GGML_HEXAGON=ON with
+#     HEXAGON_SDK_ROOT / HEXAGON_TOOLS_ROOT of the staged Hexagon SDK and PREBUILT_LIB_DIR=android_aarch64
+#     (llama.cpp's snapdragon preset), or GGML_HEXAGON=OFF when [hexagon] enabled = false. One manifest
+#     switch, because forge renders this file with sdk/arch only and passes no outer environment.
+#     libggml-hexagon is a GGML_BACKEND_DL module next to libggml-opencl; the HTP skeletons install as
+#     llama_cpp/htp/libggml-htp-vNN.so.dsp (Hexagon DSP files, kept out of jniLibs). x86_64 and iOS: none.
 package:
   name: llama-cpp-python
   version: "0.3.37"
@@ -60,7 +68,7 @@ build:
       -DGGML_CUDA=OFF
       -DGGML_HIP=OFF
       -DGGML_VULKAN=OFF
-      -DGGML_RPC=OFF{% if arch == 'arm64-v8a' %} -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib -DGGML_OPENCL=ON -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON{% else %} -DGGML_OPENCL=OFF{% endif %}
+      -DGGML_RPC=OFF{% if arch == 'arm64-v8a' %} -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib -DGGML_OPENCL=ON -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON -C{NDK_ROOT}/glossarion/hexagon-init.cmake{% else %} -DGGML_OPENCL=OFF{% endif %}
 # {% else %}
     # The `ninja` pip package crashes importing on the iOS crossenv python
     # (sysconfig.get_preferred_scheme('user') -> 'posix_user' invalid on iOS),

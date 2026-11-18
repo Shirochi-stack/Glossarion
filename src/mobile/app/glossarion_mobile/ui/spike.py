@@ -430,6 +430,14 @@ class SpikeApp:
                     ("Continued processing", self.cp_start),
                 ],
             ),
+            CheckCard(
+                "npu",
+                "NPU (Snapdragon)",
+                "The on-device engine's NPU check: each step, arch, device, the backend of the last load, the "
+                "fallbacks and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU "
+                "with the loaded or selected on-device model. Long-press the text to copy it.",
+                [("Refresh", self.npu_refresh), ("Time NPU, GPU and CPU", self.npu_time)],
+            ),
             CheckCard("routes", "Routes seen", "Every page.route change and whether it was whitelisted.", []),
             CheckCard("lifecycle", "Lifecycle", "App lifecycle states (logs are flushed on INACTIVE/HIDE/PAUSE).", []),
         ]
@@ -489,12 +497,52 @@ class SpikeApp:
         except Exception as exc:
             log.warning("platform info failed: %s", exc)
         await self.reread_shared()
+        await self.npu_refresh()
         try:
             launch = await self.native.launch_notification()
             if launch:
                 self._card("notify").set("pass", f"app launched from a notification: {_json(launch, 400)}")
         except Exception as exc:
             log.warning("launch notification failed: %s", exc)
+
+    # ---- NPU (the on-device engine) ---------------------------------------------------
+
+    @staticmethod
+    def _engine_service() -> Any:
+        from glossarion_mobile.services.local_llm.service import default_service
+
+        return default_service()
+
+    async def _npu_render(self, speeds: Optional[dict] = None) -> None:
+        from glossarion_mobile.services.local_llm import selfcheck
+
+        service = self._engine_service()
+        try:
+            # the SoC label runs getprop: off the loop
+            lines = await self._in_thread(selfcheck.npu_lines, service, speeds, name="gl-spike-npu")
+        except Exception as exc:
+            self._card("npu").set("fail", f"NPU block failed: {type(exc).__name__}: {exc}")
+            return
+        offered = bool(service is not None and service.npu_offered())
+        self._card("npu").set("pass" if offered else "n/a", "\n".join(lines))
+
+    async def npu_refresh(self, e: Any = None) -> None:
+        await self._npu_render()
+
+    async def npu_time(self, e: Any = None) -> None:
+        from glossarion_mobile.services.local_llm import selfcheck
+
+        service = self._engine_service()
+        stem = (service.loaded_stem or next(iter(sorted(service.registry.load())), None)) if service is not None else None
+        if not stem:
+            await self._npu_render({"error": "download an on-device model first"} if service is not None else None)
+            return
+        self._card("npu").set("running", f"Timing local/{stem} on NPU, GPU and CPU…")
+        try:
+            speeds = await self._in_thread(selfcheck.npu_speed_check, service, stem, name="gl-spike-npu-time")
+        except Exception as exc:
+            speeds = {"error": f"{type(exc).__name__}: {exc}"}
+        await self._npu_render(speeds)
 
     # ---- routes -----------------------------------------------------------------
 

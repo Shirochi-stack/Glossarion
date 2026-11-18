@@ -9,7 +9,8 @@
 # PIP_FIND_LINKS (.github/actions/mobile-wheelhouse). Nothing here is uploaded to an index or a release.
 #
 # Read by:
-#   ci/wheels/wheels.py             env / fetch / stage-openssl / collect / retag / verify-native / assert-selftest
+#   ci/wheels/wheels.py             env / fetch / stage-openssl / stage-opencl / stage-hexagon / collect / retag /
+#                                   verify-native / verify-site-packages / assert-selftest
 #   tools/check_mobile_wheels.py    --wheelhouse / --wheelhouse-plan / --verify-wheelhouse / --verify-installed
 #
 # Every sha256 below was checked on 2026-10-07 against the GitHub release asset digest
@@ -90,6 +91,34 @@ build = "1"
 abis = ["arm64-v8a"]
 headers = { url = "https://github.com/KhronosGroup/OpenCL-Headers/archive/refs/tags/v2026.05.29.tar.gz", sha256 = "d9e6c48357de5002da11ce45de600e0c3ffe6ab4f628a3b9fe2b38603161658a", file = "OpenCL-Headers-2026.05.29.tar.gz" }
 icd_loader = { url = "https://github.com/KhronosGroup/OpenCL-ICD-Loader/archive/refs/tags/v2026.05.29.tar.gz", sha256 = "48fd0c5181db7cd046f4f731d5955694892e10998d49d09ee0d997e7e04fd939", file = "OpenCL-ICD-Loader-2026.05.29.tar.gz" }
+
+# The optional NPU backend (Qualcomm Hexagon HTP; llama.cpp's ggml-hexagon, in 0.3.37's llama.cpp a956a852):
+# the Android arm64 llama-cpp-python build adds libggml-hexagon.so (an arm64 library next to libggml-opencl,
+# it dlopens the phone's libcdsprpc.so itself) and the HTP skeletons, Hexagon DSP code the cDSP loads
+# through FastRPC, shipped as package data llama_cpp/htp/libggml-htp-<arch>.so.dsp (recipe patch, 10.).
+#
+# THE SWITCH: enabled = false builds the engine exactly without it: no SDK download, GGML_HEXAGON OFF
+# (stage-hexagon still writes the initial cache the arm64 recipe loads), and verify-native /
+# verify-site-packages then expect no libggml-hexagon and no skeletons. x86_64 and iOS never build it.
+#
+# LICENCE: the skeletons link the Hexagon SDK's runtime (QuRT, the Hexagon tools' C library) statically.
+# No release may ship them until the owner has confirmed that the Hexagon SDK licence allows it (and the
+# CI use of this repackaged SDK tarball); see src/mobile/README.md "NPU (Snapdragon)".
+#
+# sdk: the Hexagon SDK 6.7.0.0 as llama.cpp's own Android toolchain image (snapdragon-toolchain/docker,
+# HEXAGON_SDK_ROOT=/opt/hexagon/6.7.0.0, HEXAGON_TOOLS_ROOT=$HEXAGON_SDK_ROOT/tools/HEXAGON_Tools/21.0.04)
+# installs it: github.com/snapdragon-toolchain/hexagon-sdk release v6.7.0.0 (2026-10-19), no account
+# needed; 741,882,016 bytes; sha256 = the GitHub release asset digest, read on 2026-11-18 (not yet
+# confirmed by hashing the downloaded bytes: the download is checked against it in every build).
+# htp_archs: the skeletons ggml-hexagon's CMakeLists builds (v73 v75 v79 v81 v85; the backend clamps the
+# arch the cDSP reports to v73..v85) and verify-native expects; editing it does not change what CMake builds.
+[hexagon]
+enabled = true
+abis = ["arm64-v8a"]
+version = "6.7.0.0"
+tools = "21.0.04"
+htp_archs = ["v73", "v75", "v79", "v81", "v85"]
+sdk = { url = "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.7.0.0/hexagon-sdk-v6.7.0.0-amd64-lnx.tar.xz", sha256 = "00725fc449916d7b9af2c2a3c6b54d61f3c872d5dbc1d3ca3fd2f839b1d5dc70", file = "hexagon-sdk-v6.7.0.0-amd64-lnx.tar.xz" }
 
 # The wheels we promise. version must equal the pyproject pin, sdist_sha256 the uv.lock sdist
 # hash, and requires_dist the wheel METADATA's Requires-Dist entries that carry no extra marker.

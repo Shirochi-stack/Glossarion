@@ -37,6 +37,13 @@
 # loader removed after the build) and with pocl's CPU-only OpenCL (no Adreno GPU). Both times the
 # backend must load only on demand, report why there is no GPU, and the app's engine must fall back
 # to the CPU and generate. Real Adreno execution needs a phone.
+#
+# NPU (Android arm64, wheelhouse.toml [hexagon], on by default on this branch): build_wheels.sh fetches the
+# Hexagon SDK 6.7.0.0 (742 MB, a public GitHub release; no Qualcomm account) into $RUNNER_TEMP/hexagon-sdk,
+# cached under its sha256 (mobile-hexagon-sdk-<sha256>), and wheels.py stage-hexagon unpacks it; the
+# llama-cpp-python arm64 wheel then also carries libggml-hexagon and the HTP skeletons, which verify-native
+# checks. [hexagon] enabled = false: no download, no backend. The skeletons contain Qualcomm SDK runtime
+# code: see src/mobile/README.md "NPU (Snapdragon)" before shipping a release.
 
 name: Mobile wheels (cryptography, Pillow, llama-cpp-python)
 
@@ -177,11 +184,24 @@ jobs:
             echo "All wheels for $PLATFORM come from the cache." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # The NPU backend's Hexagon SDK (wheelhouse.toml [hexagon]): a 742 MB tarball, unpacked under
+      # $RUNNER_TEMP/hexagon by stage-hexagon. The download is cached under its sha256 (a new SDK pin is a
+      # new key); nothing is restored when [hexagon] is switched off (empty sha) or no engine is built.
+      - name: Restore the cached Hexagon SDK download
+        id: cache-hexagon-sdk
+        if: inputs.platform == 'android' && contains(steps.todo.outputs.packages, 'llama-cpp-python') && steps.pins.outputs.hexagon_sdk_sha256 != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/hexagon-sdk
+          key: mobile-hexagon-sdk-${{ steps.pins.outputs.hexagon_sdk_sha256 }}
+
       - name: Free disk space (Android)
         if: inputs.platform == 'android' && steps.todo.outputs.packages != ''
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
-          df -h /
+          # the Hexagon SDK (NPU backend) needs a few GB more: tarball + unpacked tree
+          sudo rm -rf /usr/local/share/powershell /usr/share/swift /usr/local/julia* || true
+          df -h / "$RUNNER_TEMP"
 
       - name: Android toolchain (apt packages, Rust)
         if: inputs.platform == 'android' && steps.todo.outputs.packages != ''
@@ -220,9 +240,18 @@ jobs:
         if: steps.todo.outputs.packages != ''
         env:
           PACKAGES: ${{ steps.todo.outputs.packages }}
+          HEXAGON_SDK_DOWNLOADS: ${{ runner.temp }}/hexagon-sdk
         run: |
           read -r -a packages <<< "$PACKAGES"
           bash src/mobile/ci/wheels/build_wheels.sh "$PLATFORM" "${packages[@]}"
+
+      # build_wheels.sh fetched it (sha256-checked) on a cache miss; keep it for the next cold build.
+      - name: Save the Hexagon SDK download to the cache
+        if: success() && steps.cache-hexagon-sdk.outcome == 'success' && steps.cache-hexagon-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/hexagon-sdk
+          key: mobile-hexagon-sdk-${{ steps.pins.outputs.hexagon_sdk_sha256 }}
 
       # After the forge build (its collect empties the cache directory of each package it builds).
       - name: Fetch and retag PyPI's official wheels (iOS Pillow)

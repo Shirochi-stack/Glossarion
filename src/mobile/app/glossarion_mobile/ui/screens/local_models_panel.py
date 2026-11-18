@@ -19,6 +19,13 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   then a quant out of the real files of that repository (size and RAM hint; "No quant" is its unquantized
   file). The quant Android's GPU is fast for is marked with the uncropped Halgakos and "GPU-friendly". A chosen
   quant becomes an ordinary preset row through the one-tap flow (``OnDeviceFlow.get_custom``).
+* **NPU** (only where the phone's NPU check passed: ``service.npu_offered``; nothing at all elsewhere): the engine
+  card's "Use NPU" (on by default), the power mode and the NPU status line (``_npu_section``); the built-in NPU rows
+  (``presets.NPU_PRESETS``: a tap saves the row and runs the one-tap flow) and "Custom · NPU" (the Custom sheet with
+  ``backend="npu"``: every size, the quants the NPU runs first, marked "NPU-friendly" / "Partly CPU on NPU"), also on
+  the Welcome page and in the model picker. The preset editor gains Backend (Auto / NPU / GPU / CPU) and NPU layers;
+  a row says which backend runs its loaded model ("Runs on NPU · Hexagon v81") or why the NPU was not used, with
+  "Try the NPU again" in its menu.
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -90,6 +97,10 @@ CONTEXT_RAM_COLORS = {"confirm": ft.Colors.AMBER, "refuse": ft.Colors.ERROR}
 #: The mark of a GPU-friendly quant in the Custom menu: the whole chibi (never the head crop), big enough to read
 CUSTOM_GPU_ART = 40
 GPU_FRIENDLY_TEXT = "GPU-friendly"
+#: the Custom · NPU marks: a weight type the NPU runs (Q4_0 best), and one whose layers fall back to the CPU
+NPU_FRIENDLY_TEXT = "NPU-friendly"
+NPU_PARTLY_CPU_TEXT = "Partly CPU on NPU"
+NPU_SECTION_TEXT = "NPU (Snapdragon): runs on the phone's AI chip."
 #: config.json key of "Allow emoticons and symbols from other scripts (kaomoji)", shown under the script ban
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
 #: config.json key of "Whitelist source text", shown under it
@@ -197,11 +208,14 @@ def _preset_ref(preset: dict) -> str:
 
 
 class LocalPresetEditor:
-    """Add / edit one preset (name · Hugging Face model · file · note · context)."""
+    """Add / edit one preset (name · Hugging Face model · file · note · context; where the NPU check passed
+    (``npu``) also Backend: Auto / NPU / GPU / CPU and NPU layers, empty for all)."""
 
-    def __init__(self, *, preset: Optional[dict] = None, on_save: Callable[[dict], Optional[str]]) -> None:
+    def __init__(self, *, preset: Optional[dict] = None, on_save: Callable[[dict], Optional[str]],
+                 npu: bool = False) -> None:
         preset = dict(preset or {})
         self.on_save = on_save
+        self.npu = bool(npu)
         self.saved = False
         self._page: Any = None
         repo = str(preset.get("repo", ""))
@@ -218,12 +232,22 @@ class LocalPresetEditor:
         self.n_ctx = ft.TextField(value=str(preset.get("n_ctx") or ""), label="Context (tokens, optional)",
                                   hint_text=str(DEFAULT_CONTEXT_SMALL), dense=True, keyboard_type=ft.KeyboardType.NUMBER,
                                   key="local-preset-ctx")
+        self.backend = ft.Dropdown(label="Backend", value=presets.backend_of(preset), dense=True,
+                                   options=[ft.DropdownOption(key=key, text=presets.BACKEND_LABELS[key])
+                                            for key in presets.BACKENDS],
+                                   visible=self.npu, key="local-preset-backend")
+        self.npu_layers = ft.TextField(value=str(preset.get("npu_layers") or ""), label="NPU layers (optional)",
+                                       hint_text="all", dense=True, keyboard_type=ft.KeyboardType.NUMBER,
+                                       visible=self.npu, key="local-preset-npu-layers")
+        self.backend_note = _small("Auto uses the NPU when the quant suits it, else the GPU or CPU.",
+                                   visible=self.npu, key="local-preset-backend-note")
         self.error = ft.Text("", color=ft.Colors.ERROR, visible=False, selectable=True)
         self.dialog = ft.BottomSheet(
             content=ft.Container(padding=ft.Padding.only(left=16, right=16, bottom=16), content=ft.Column([
                 ft.Text("Edit preset" if preset else "New preset", theme_style=ft.TextThemeStyle.TITLE_LARGE,
                         weight=ft.FontWeight.W_600),
-                self.name, self.repo, self.file, self.note, self.n_ctx, self.error,
+                self.name, self.repo, self.file, self.note, self.n_ctx,
+                self.backend, self.backend_note, self.npu_layers, self.error,
                 ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.close()),
                         ft.FilledButton(content="Save", key="local-preset-save", on_click=lambda e: self.save())],
                        alignment=ft.MainAxisAlignment.END, wrap=True),
@@ -232,9 +256,13 @@ class LocalPresetEditor:
         )
 
     def row(self) -> dict:
-        return {"name": (self.name.value or "").strip(), "repo": (self.repo.value or "").strip(),
-                "file": (self.file.value or "").strip(), "note": (self.note.value or "").strip(),
-                "n_ctx": (self.n_ctx.value or "").strip()}
+        row = {"name": (self.name.value or "").strip(), "repo": (self.repo.value or "").strip(),
+               "file": (self.file.value or "").strip(), "note": (self.note.value or "").strip(),
+               "n_ctx": (self.n_ctx.value or "").strip()}
+        if self.npu:  # hidden fields leave the row's own backend and layers as they are
+            row["backend"] = str(self.backend.value or "auto")
+            row["npu_layers"] = (self.npu_layers.value or "").strip()
+        return row
 
     def save(self) -> Optional[str]:
         if self.saved:  # a second tap while the sheet closes
@@ -333,11 +361,13 @@ class CustomModelSheet:
     the sheet and runs ``OnDeviceFlow.get_custom`` (the download question, download, load, use)."""
 
     def __init__(self, flow: "OnDeviceFlow", family: dict, *, size: Optional[dict] = None, highlight_gpu: bool = False,
-                 on_used: Optional[Callable[[str], Any]] = None) -> None:
+                 on_used: Optional[Callable[[str], Any]] = None, backend: str = "") -> None:
         self.flow = flow
         self.family = family
         self.size = size
         self.highlight_gpu = highlight_gpu
+        #: "npu" (Custom · NPU): the quants are marked for the NPU, the accepted ones first, and a pick is an NPU row
+        self.backend = presets.backend_of({"backend": backend or family.get("backend")})
         self.on_used = on_used
         self.listings: dict = {}  # repo -> RepoFiles of this sheet (another size tapped and back: no new request)
         self.loading = False
@@ -413,12 +443,16 @@ class CustomModelSheet:
         listing = self.listing()
         runnable = sorted((f for f in (listing.files if listing else ()) if not f.split),
                           key=lambda f: (f.size or 0, f.name.lower()))
+        if self.backend == "npu":  # Q4_0, then the other quants the NPU accepts, then the rest (each smallest first)
+            rank = {"best": 0, "ok": 1, "cpu": 2}
+            runnable.sort(key=lambda f: rank[presets.npu_quant_kind(f.name)])
         labels = [presets.quant_label(f.name) for f in runnable]
         return [(f, label if labels.count(label) == 1 else f.name) for f, label in zip(runnable, labels)]
 
     def pick(self, file: hf.HfFile) -> None:
         listing = self.listing()
-        row = presets.custom_row(self.size, file, hf.pick_projector(listing.projectors) if listing else None)
+        row = presets.custom_row(self.size, file, hf.pick_projector(listing.projectors) if listing else None,
+                                 backend="npu" if self.backend == "npu" else "")
         self.close()
         self.flow.spawn(self._use(row))
 
@@ -473,6 +507,9 @@ class CustomModelSheet:
         if not files:
             return [_small(f"{self.size['repo']} has no single-file GGUF model now.", key="custom-empty"), self._retry()]
         controls: list = []
+        if self.backend == "npu" and self.size.get("npu_note"):
+            controls.append(_small(f"{self.size['name']}: {self.size['npu_note']}", color=semantic("warning"),
+                                   key="custom-npu-size-note"))
         if hf.pick_projector(listing.projectors) is not None:
             controls.append(_vision_line("custom-vision"))
         controls.extend(self._quant_row(i, file, label) for i, (file, label) in enumerate(files))
@@ -493,15 +530,24 @@ class CustomModelSheet:
             lines.append(_small("Not quantized: full precision, the largest file"))
         if stem:
             lines.append(_small("On this device", color=semantic("success"), key=f"custom-quant-here-{index}"))
-        gpu = presets.is_gpu_quant(file.name) and flow._gpu_backend() == "OpenCL"
         row: list = []
-        if gpu:  # Android's Adreno kernels; iOS (Metal) runs every quant alike
-            lines.append(_small(GPU_FRIENDLY_TEXT, weight=ft.FontWeight.W_600, color=ft.Colors.PRIMARY,
-                                key=f"custom-quant-gpu-{index}"))
+        if self.backend == "npu":
+            kind = presets.npu_quant_kind(file.name)
+            gpu = kind == "best"  # Q4_0: the art and the highlight, as the GPU-friendly quant has them
+            lines.append(_small(NPU_FRIENDLY_TEXT if kind != "cpu" else NPU_PARTLY_CPU_TEXT,
+                                weight=ft.FontWeight.W_600 if kind != "cpu" else None,
+                                color=ft.Colors.PRIMARY if kind != "cpu" else semantic("warning"),
+                                key=f"custom-quant-npu-{index}"))
+        else:
+            gpu = presets.is_gpu_quant(file.name) and flow._gpu_backend() == "OpenCL"
+            if gpu:  # Android's Adreno kernels; iOS (Metal) runs every quant alike
+                lines.append(_small(GPU_FRIENDLY_TEXT, weight=ft.FontWeight.W_600, color=ft.Colors.PRIMARY,
+                                    key=f"custom-quant-gpu-{index}"))
+        if gpu:
             row.append(ft.Image(src=HALGAKOS_ASSET, width=CUSTOM_GPU_ART, height=CUSTOM_GPU_ART, fit=ft.BoxFit.CONTAIN,
                                 semantics_label="Halgakos", key=f"custom-quant-art-{index}"))
         row.append(ft.Column(lines, spacing=0, tight=True, expand=True))
-        marked = self.highlight_gpu and gpu
+        marked = (self.highlight_gpu or self.backend == "npu") and gpu
         return ft.Container(
             content=ft.Row(row, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.Padding.symmetric(horizontal=12, vertical=8), border_radius=12,
@@ -903,19 +949,75 @@ class OnDeviceFlow:
             self.render()
 
     def open_custom(self, family_id: str, *, size: Optional[dict] = None, highlight_gpu: bool = False,
-                    page: Any = None) -> Optional[CustomModelSheet]:
-        """A Custom row's tap: its menu, at ``size`` (listing it at once) when the caller knows one."""
+                    page: Any = None, backend: str = "") -> Optional[CustomModelSheet]:
+        """A Custom row's tap: its menu, at ``size`` (listing it at once) when the caller knows one; ``backend``
+        "npu" marks its quants for the NPU and saves the pick as an NPU row."""
         family = presets.custom_family(family_id)
         if family is None:
             return None
         self.page = page or self.page  # the download question later needs it too
-        sheet = CustomModelSheet(self, family, size=size, highlight_gpu=highlight_gpu, on_used=self.custom_used)
+        sheet = CustomModelSheet(self, family, size=size, highlight_gpu=highlight_gpu, on_used=self.custom_used,
+                                 backend=backend)
         self.last_dialog = sheet
         if self.page is not None:
             sheet.show(self.page)
         if size is not None:
             self.spawn(sheet.load())
         return sheet
+
+    # ---- NPU ------------------------------------------------------------------------------------------
+
+    def npu_offered(self) -> bool:
+        """The phone's NPU check passed: the NPU rows and settings show (nothing at all on other phones)."""
+        try:
+            return bool(getattr(self.service, "npu_offered", lambda: False)())
+        except Exception:
+            return False
+
+    def npu_presets(self) -> list:
+        """``[(index in presets.NPU_PRESETS, row)]`` to show: none without the NPU; a built-in NPU row whose file a
+        saved row already has is that row (it shows once)."""
+        if not self.npu_offered():
+            return []
+        saved = self.presets()
+        return [(index, dict(row)) for index, row in enumerate(presets.NPU_PRESETS)
+                if not any(presets._same_file(row, other) for other in saved)]
+
+    async def get_npu_preset(self, index: int) -> Optional[str]:
+        """A built-in NPU row's tap: it joins the saved presets (``get_custom``: download, load, use)."""
+        if not 0 <= index < len(presets.NPU_PRESETS):
+            return None
+        return await self.get_custom(dict(presets.NPU_PRESETS[index]))
+
+    def open_npu_custom(self, page: Any = None) -> Optional[CustomModelSheet]:
+        """"Custom · NPU": every Custom size, its quants marked for the NPU."""
+        return self.open_custom(presets.NPU_FAMILY["id"], page=page, backend="npu")
+
+    def backend_line(self, stem: Optional[str]) -> Optional[tuple]:
+        """``(text, warning)`` of a model row: which backend runs the loaded model ("Runs on NPU · Hexagon v81",
+        "Runs on GPU", "Runs on CPU"), else the NPU fallback with its reason; None without either."""
+        service = self.service
+        if not stem:
+            return None
+        note = getattr(service, "npu_note", None)
+        fallback = getattr(service, "npu_fallback", None)
+        if callable(fallback) and fallback(stem):
+            return (note(stem) if callable(note) else None) or f"NPU unavailable: {fallback(stem)['reason']}", True
+        if service.loaded_stem != stem or not self.npu_offered():
+            return None
+        engine = getattr(service, "engine", None)
+        device = str(getattr(engine, "device", "") or "")
+        if getattr(engine, "on_npu", False):
+            return f"Runs on NPU · {device.split(':', 1)[-1].strip().split(' (')[0]}", False
+        if getattr(engine, "on_gpu", False):
+            return "Runs on GPU", False
+        return "Runs on CPU", False
+
+    def retry_npu(self, stem: str) -> bool:
+        """"Try the NPU again": the model's NPU fallback goes; the next load tries the NPU."""
+        done = bool(getattr(self.service, "retry_npu", lambda s: False)(stem))
+        self.render()
+        return done
 
     async def get_custom(self, row: dict) -> Optional[str]:
         """A quant chosen in the Custom menu: it joins the presets as an ordinary row and runs the one-tap flow.
@@ -1042,6 +1144,60 @@ class OnDeviceFlow:
                                       key=f"{key_prefix}-gpu-swap")
         self._render_gpu_swap(push=False)
         return [self.gpu_switch, self.gpu_layers_box, self.gpu_note, self.gpu_status, self.gpu_swap_box]
+
+    def _npu_section(self, key_prefix: str = "local") -> list:
+        """"Use NPU" (on by default), the power mode and the NPU status line: shown only where the phone's NPU
+        check passed (``render_npu`` follows a check that finishes later)."""
+        from glossarion_mobile.services.local_llm import engine as eng
+
+        offered = self.npu_offered()
+        service = self.service
+        self.npu_switch = toggle(label="Use NPU", value=bool(getattr(service, "use_npu", lambda: True)()),
+                                 key=f"{key_prefix}-npu", on_change=lambda e: self.save_npu())
+        self.npu_power = ft.Dropdown(label="NPU power mode", value=getattr(service, "npu_power", lambda: eng.NPU_DEFAULT_POWER)(),
+                                     dense=True, key=f"{key_prefix}-npu-power",
+                                     options=[ft.DropdownOption(key=mode, text=mode.replace("_", " "))
+                                              for mode in eng.NPU_POWER_MODES],
+                                     on_select=lambda e: self.save_npu_power())
+        self.npu_power_note = _small("", key=f"{key_prefix}-npu-power-note")
+        self.npu_status = ft.Text("", color=semantic("warning"), visible=False, key=f"{key_prefix}-npu-status",
+                                  theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True)
+        self.npu_box = ft.Column([
+            _small(NPU_SECTION_TEXT, key=f"{key_prefix}-npu-note"),
+            self.npu_switch,
+            _small("Auto models use the NPU when their quant suits it. A failure, or a quant the NPU cannot run, "
+                   "uses the GPU or CPU instead.", key=f"{key_prefix}-npu-switch-note"),
+            self.npu_power, self.npu_power_note, self.npu_status,
+        ], spacing=4, tight=True, visible=offered, key=f"{key_prefix}-npu-box")
+        self.render_npu(push=False)
+        return [self.npu_box]
+
+    def render_npu(self, snap: Any = None, push: bool = True) -> None:
+        box = getattr(self, "npu_box", None)
+        if box is None:
+            return
+        service = self.service
+        box.visible = self.npu_offered()
+        note = getattr(snap, "npu_note", None) if snap is not None else getattr(service, "npu_note", lambda: None)()
+        self.npu_status.value = note or ""
+        self.npu_status.visible = bool(note)
+        pending = bool(getattr(service, "npu_power_pending", lambda: False)())
+        self.npu_power_note.value = ("Applies after restarting Glossarion." if pending else
+                                     "Burst is the fastest and may slow down when the phone gets hot.")
+        if push:
+            _push(box)
+
+    def save_npu(self) -> bool:
+        value = bool(self.service.save_use_npu(self.npu_switch.value))
+        self.npu_switch.value = value
+        _push(self.npu_switch)
+        return value
+
+    def save_npu_power(self) -> str:
+        value = str(self.service.save_npu_power(self.npu_power.value))
+        self.npu_power.value = value
+        self.render_npu()
+        return value
 
     def _refresh_gpu_limits(self) -> None:
         if not hasattr(self, "gpu_layers_slider"):
@@ -1193,6 +1349,7 @@ class LocalModelsPanel(OnDeviceFlow):
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.settings_error,
             *self._gpu_section(),
+            *self._npu_section(),
             self.parallel_switch,
             _small("Off by default. When enabled, up to two requests can run at once, using extra memory. "
                    "Batch and extraction-worker settings control how many requests a job submits. "
@@ -1295,6 +1452,7 @@ class LocalModelsPanel(OnDeviceFlow):
         self.gpu_status.value = note or ""
         self.gpu_status.visible = bool(note)
         self._render_gpu_swap(push=False)  # a model was loaded / switched
+        self.render_npu(snap, push=push)  # the NPU check may have finished since the card was built
         self._refresh_gpu_limits()
         self._threads_changed()
         normal = self.service.uses_normal_settings(self.selected_stem())
@@ -1681,6 +1839,10 @@ class LocalModelsPanel(OnDeviceFlow):
             rows.append(_small("No presets. Add one, or restore the defaults.", key="local-presets-empty"))
         for index, preset in enumerate(preset_rows):
             rows.append(self._preset_row(index, preset, self.stem_of_preset(preset)))
+        if self.npu_offered():  # nothing at all on a phone without the NPU
+            rows.append(_small(NPU_SECTION_TEXT, key="local-npu-section"))
+            rows.extend(self._npu_preset_row(index, row) for index, row in self.npu_presets())
+            rows.append(self._custom_row(presets.NPU_FAMILY))
         rows.extend(self._custom_row(family) for family in presets.CUSTOM_FAMILIES)
         self.preset_column.controls = rows
         downloaded, pending = self.other_models(preset_rows)
@@ -1734,6 +1896,11 @@ class LocalModelsPanel(OnDeviceFlow):
         elif state in ("use", "in_use"):
             status_text.color = semantic("success")
         lines.append(status_text)
+        backend_line = self.backend_line(stem)
+        if backend_line is not None:
+            text, warning = backend_line
+            lines.append(_small(text, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS, selectable=True,
+                                color=semantic("warning") if warning else None, key=f"local-preset-backend-{index}"))
         note = self.delete_notes.get(stem) if stem else None
         if note:
             lines.append(_delete_note(note, f"local-preset-delete-note-{index}"))
@@ -1754,6 +1921,9 @@ class LocalModelsPanel(OnDeviceFlow):
             ft.PopupMenuItem(content="Remove preset", icon=ft.Icons.PLAYLIST_REMOVE,
                              on_click=lambda e, i=index: self.confirm_remove(i)),
         ]
+        if backend_line is not None and backend_line[1] and stem:
+            items.append(ft.PopupMenuItem(content="Try the NPU again", icon=ft.Icons.MEMORY,
+                                          on_click=lambda e, s=stem: self.retry_npu(s)))
         if state in ("use", "in_use") and stem and not self.service.is_vision(stem):
             items.append(ft.PopupMenuItem(content="Add image support", icon=ft.Icons.IMAGE_OUTLINED,
                                           on_click=lambda e, i=index: self.spawn(self.add_vision(i))))
@@ -1767,6 +1937,34 @@ class LocalModelsPanel(OnDeviceFlow):
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
             content=ft.Column([*body, ft.Row(trailing, spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END)],
                               spacing=2, tight=True),
+        )
+
+    def _npu_preset_row(self, index: int, preset: dict) -> ft.Control:
+        """A built-in NPU row (``presets.NPU_PRESETS``): like a preset's; its one button saves it and runs the
+        one-tap flow (download, load, use)."""
+        size = presets.download_size(preset)
+        status = f"Not downloaded · {dl.format_bytes(size)}" if size else "Not downloaded"
+        verdict, mark, _words = self.ram_hint(preset)
+        if mark:
+            status += f" · {mark} {RAM_HINTS[verdict][1]}"
+        lines: list = [
+            ft.Text(preset["name"], weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(_preset_ref(preset), theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS),
+            _small(preset.get("note") or "", max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+        ]
+        if preset.get("mmproj"):
+            lines.append(_vision_line(f"local-npu-vision-{index}"))
+        lines.append(_small(status, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, key=f"local-npu-status-{index}"))
+        return ft.Container(
+            key=f"local-npu-preset-{index}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
+            padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
+            content=ft.Column([
+                ft.Column(lines, spacing=0, tight=True),
+                ft.Row([ft.FilledTonalButton(content="Download", icon=ft.Icons.DOWNLOAD, key=f"local-npu-action-{index}",
+                                             on_click=lambda e, i=index: self.spawn(self.get_npu_preset(i)))],
+                       spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
+            ], spacing=2, tight=True),
         )
 
     def _custom_row(self, family: dict) -> ft.Control:
@@ -1874,7 +2072,8 @@ class LocalModelsPanel(OnDeviceFlow):
     def open_editor(self, index: Optional[int]) -> LocalPresetEditor:
         rows = self.presets()
         current = rows[index] if index is not None and 0 <= index < len(rows) else None
-        editor = LocalPresetEditor(preset=current, on_save=lambda row: self.save_preset(index, row))
+        editor = LocalPresetEditor(preset=current, on_save=lambda row: self.save_preset(index, row),
+                                   npu=self.npu_offered())
         self.editor = editor
         if self.page is not None:
             editor.show(self.page)
@@ -1958,6 +2157,8 @@ def size_groups(family: dict) -> list:
 
 def custom_note(family: dict) -> str:
     """The text of a Custom row: what its menu offers ("Gemma 3 270M · 1B · 4B · Gemma 4 E2B · E4B")."""
+    if family.get("backend") == "npu":
+        return "Any Custom size and quant for the NPU: the quants it runs come first"
     parts = [" · ".join((f"{group} " if group and i == 0 else "") + size["label"] for i, (_n, size) in enumerate(sizes))
              for group, sizes in size_groups(family)]
     return "Choose a size and a quant: " + " · ".join(parts)
