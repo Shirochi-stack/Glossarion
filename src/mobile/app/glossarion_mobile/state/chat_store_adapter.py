@@ -410,6 +410,12 @@ OVERRIDE_KEYS = (
 #: starts on them): ``{key: {"value": picked, "global": the All-chats value when it was picked}}``.
 LAST_USED_KEY = "last_used"
 LAST_USED_FIELDS = ("model", "profile")
+#: ``last_used`` entry of the All-chats model as last chosen: ``{"value", "at"}`` (a new chat starts on the model of
+#: the chat used last unless the All-chats model was chosen after that chat was used, ``ChatView.new_chat_seed``).
+GLOBAL_MODEL_KEY = "global_model"
+#: Chat sidecar meta key: when the user last used the chat (a turn sent or its own model picked), for new chats; not
+#: ``updated_at``, which a job's progress, a finished run or a rename also moves.
+USED_AT_META = "used_at"
 
 
 class MobileChatSidecar:
@@ -608,9 +614,10 @@ class ChatStoreAdapter:
         #: (the chat's series defaults). ``overrides`` puts them beneath the chat's own overrides;
         #: ``own_overrides`` is the sidecar value alone (Chat settings' "custom" badge and ↺).
         self.override_layers: list[Callable[[Any], Optional[dict]]] = []
-        #: ``last_used -> {override key: value}``: what a new chat starts on (the chat feature resolves the
-        #: remembered model / profile against the All-chats values and the profiles that still exist).
-        self.new_chat_seed: Optional[Callable[[dict], Optional[dict]]] = None
+        #: ``(last_used, new_cid) -> {override key: value}``: what new chat ``new_cid`` starts on (the chat feature
+        #: resolves the model of the chat used last and the remembered profile against the All-chats values and
+        #: the profiles that still exist); ``last_picked_model`` calls it with ``last_used`` alone.
+        self.new_chat_seed: Optional[Callable[..., Optional[dict]]] = None
 
     # ---- lifecycle --------------------------------------------------------------------------
 
@@ -995,26 +1002,77 @@ class ChatStoreAdapter:
         self._changed(cid)
         return cid
 
-    def _seed_new_chat(self, cid: str) -> None:
-        """A new (or the reused empty) chat starts on the model / prompt profile used last: they become its
-        own overrides when they differ from the All-chats values (a value the empty chat already has stays)."""
+    def _seed_new_chat(self, cid: str) -> bool:
+        """A new (or the reused empty) chat starts on the model of the chat used last and the prompt profile
+        picked last (``new_chat_seed``): they become its own overrides when they differ from the All-chats values
+        (a value the empty chat already has stays). True when one was set."""
         seed = self.new_chat_seed
         if seed is None or self.sidecar is None:
-            return
+            return False
         try:
-            values = seed(self.last_used()) or {}
+            values = seed(self.last_used(), cid) or {}
         except Exception:
             log.exception("seeding the new chat failed")
-            return
+            return False
         own = self.own_overrides(cid)
+        seeded = False
         for key in LAST_USED_FIELDS:
             if values.get(key) and own.get(key) is None:
                 self.set_override(cid, key, values[key])
+                seeded = True
+        return seeded
+
+    def seed_empty_chat(self, cid: Any) -> bool:
+        """The chat shown at launch is seeded like a new chat while it is still empty (owner: the Welcome
+        shows the model of the chat used last); a chat with content is never changed. True when seeded."""
+        session = self.session(cid) if cid is not None else None
+        if session is None or self._has_content(session):
+            return False
+        return self._seed_new_chat(str(cid))
+
+    def has_content(self, cid: Any) -> bool:
+        """The chat has messages, a draft or an attachment (an empty one is reused by ``new_chat``)."""
+        return self._has_content(self.session(cid))
+
+    def last_use_time(self, cid: Any) -> float:
+        """When the user used the chat last (``USED_AT_META``: a turn sent or its own model picked); a chat from
+        before that stamp existed falls back to its last change (``updated_at``)."""
+        try:
+            used = float(self.meta(cid).get(USED_AT_META) or 0.0)
+        except (TypeError, ValueError):
+            used = 0.0
+        if used:
+            return used
+        if is_scratch_cid(cid):
+            with self._lock:
+                entry = self._scratch.get(str(cid))
+            return float(entry.created) if entry is not None else 0.0
+        session = self.session(cid)
+        return self._updated_at(session) if session is not None else 0.0
+
+    def recent_chat(self, exclude: Any = None) -> Optional[str]:
+        """The saved chat with content used last (``last_use_time``), other than ``exclude``; None without one."""
+        with self._lock:
+            ids = [str(s.get("id")) for s in self.sessions if self._has_content(s)]
+        ids = [cid for cid in ids if cid != str(exclude)]
+        return max(ids, key=self.last_use_time) if ids else None
+
+    def remember_global_model(self, value: Any, refresh: bool = True) -> None:
+        """The All-chats model became ``value`` now (``GLOBAL_MODEL_KEY``); ``refresh`` False keeps the time of
+        an entry that already has this value (a settings notification, not a pick)."""
+        if not value or self.sidecar is None:
+            return
+        with self._lock:
+            last_used = self.sidecar.data.setdefault(LAST_USED_KEY, {})
+            if not refresh and (last_used.get(GLOBAL_MODEL_KEY) or {}).get("value") == str(value):
+                return
+            last_used[GLOBAL_MODEL_KEY] = {"value": str(value), "at": self._clock()}
+        self._save_sidecar()
 
     def last_picked_model(self) -> str:
-        """The model picked last when it is not the All-chats one (what a new chat starts on, ``new_chat_seed``);
-        "" when the All-chats model stands. A Library translation run uses it: the drawer shows it, not the
-        All-chats model."""
+        """The model picked last when it is not the All-chats one (``new_chat_seed`` without a new chat: the
+        remembered pick, not the model of the chat used last); "" when the All-chats model stands. A Library
+        translation run uses it: the drawer shows it, not the All-chats model."""
         seed = self.new_chat_seed
         if seed is None or self.sidecar is None:
             return ""
@@ -1035,6 +1093,8 @@ class ChatStoreAdapter:
         All-chats value at that moment (a later All-chats change wins over this pick for new chats)."""
         if key not in LAST_USED_FIELDS or not value or self.sidecar is None:
             return
+        if key == "model" and str(value) == str(global_value or ""):
+            self.remember_global_model(value)  # an All-chats pick: new chats start on it from now on
         entry = {"value": str(value), "global": str(global_value or "")}
         with self._lock:
             last_used = self.sidecar.data.setdefault(LAST_USED_KEY, {})
@@ -1167,6 +1227,9 @@ class ChatStoreAdapter:
             session["draft"] = ""
             session["attachment"] = None
             index = len(messages) - 1
+            entry = self._meta_entry(cid, create=True)
+            if entry is not None:
+                entry[USED_AT_META] = self._clock()  # last_use_time: the user used this chat
         self._changed(cid)
         return index
 
@@ -1419,6 +1482,8 @@ class ChatStoreAdapter:
                 overrides.pop(key, None)
             else:
                 overrides[key] = value
+                if key == "model":
+                    entry[USED_AT_META] = self._clock()  # last_use_time: a model pick counts as using the chat
             if overrides:
                 entry["overrides"] = overrides
             else:

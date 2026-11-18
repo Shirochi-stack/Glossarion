@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import itertools
 import json
 import os
 import sys
@@ -1626,24 +1627,32 @@ def test_resume_runs_with_the_chats_model_now(desktop_store_cls, tmp_path):
 
 
 def test_last_picked_model_follows_the_new_chat_rule(desktop_store_cls, tmp_path):
-    """``ChatStoreAdapter.last_picked_model``: what a new chat would start on, through the real ``new_chat_seed``. A pick
-    in a chat counts while the All-chats model is what it was at the pick; a later All-chats change wins."""
+    """``ChatStoreAdapter.last_picked_model`` (a Library translation): what a new chat would start on, through the real
+    ``new_chat_seed``: the model of the chat used last unless the All-chats model was chosen after it. An All-chats
+    change the view never saw (config written behind its back) counts from when it is noticed, so using the chat again
+    brings its model back instead of the All-chats model winning for good."""
     from glossarion_mobile.ui.chat.chat_view import ChatView
 
     jobs = FakeJobService()
     adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
+    _ticking(adapter)
     config = {"model": "authnan/GLM-4.6-Derestricted-v5"}
     env = types.SimpleNamespace(config_get=lambda key, default="": config.get(key, default), chats=adapter)
-    view = types.SimpleNamespace(env=env, _profile_listing=lambda: None, _profiles=lambda: [])
+    view = types.SimpleNamespace(env=env, cid="2", _profile_listing=lambda: None, _profiles=lambda: [])
+    view._last_chat_model = lambda last_used, new_cid: ChatView._last_chat_model(view, last_used, new_cid)
     assert adapter.last_picked_model() == ""  # no seed installed yet
-    adapter.new_chat_seed = lambda last_used: ChatView.new_chat_seed(view, last_used)
-    assert adapter.last_picked_model() == ""  # nothing picked
-    adapter.remember_last_used("model", "authnan/z-ai/glm-5.3", config["model"])
+    adapter.new_chat_seed = lambda last_used, new_cid=None: ChatView.new_chat_seed(view, last_used, new_cid)
+    assert adapter.last_picked_model() == ""  # no chat has a model of its own
+    adapter.remember_last_used("model", config["model"], config["model"])  # an All-chats pick, recorded
+    adapter.set_override("2", "model", "authnan/z-ai/glm-5.3")  # then chat 2's own model
     assert adapter.last_picked_model() == "authnan/z-ai/glm-5.3"
     config["model"] = "authnan/z-ai/glm-5.3"
-    assert adapter.last_picked_model() == ""  # the All-chats model is the pick: nothing to add
-    config["model"] = "authgpt/gpt-6-luna"
-    assert adapter.last_picked_model() == ""  # a later All-chats change wins, no stale pick comes back
+    assert adapter.last_picked_model() == ""  # the All-chats model is that model: nothing to add
+    config["model"] = "authgpt/gpt-6-luna"  # written by something the view never observed
+    assert adapter.last_picked_model() == ""  # a later All-chats change wins
+    assert adapter.last_used()["global_model"]["value"] == "authgpt/gpt-6-luna"  # recorded when noticed
+    adapter.record_user_turn("2", ("user", "next chapter"), "next chapter")
+    assert adapter.last_picked_model() == "authnan/z-ai/glm-5.3"  # the chat used after it wins again
     runs.detach()
     adapter.close()
 
@@ -1891,12 +1900,12 @@ def isolated_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _config_store(tmp_path):
+def _config_store(tmp_path, config=None):
     from glossarion_mobile.state.config_store import MobileConfigStore
     from glossarion_mobile.ui.settings.schema_access import SchemaAccess
 
     path = tmp_path / "config.json"
-    path.write_text("{}", encoding="utf-8")
+    path.write_text(json.dumps(config or {}), encoding="utf-8")
     schema = SchemaAccess()
     store = MobileConfigStore(path, debounce=10, defaults=schema.effective_default,
                               reader=lambda p, decrypt=True: json.loads(Path(p).read_text(encoding="utf-8")),
@@ -1906,16 +1915,21 @@ def _config_store(tmp_path):
     return store, schema
 
 
-def _chat_view(desktop_store_cls, tmp_path, *, cid="2", prefs=None, jobs=None, **env_fields):
-    """A real ChatView (call inside a running loop) on ``_desktop_history``; ``calls`` records
-    navigation, snackbars, sheets and the spawned tasks (``_settle`` waits for them)."""
+def _chat_view(desktop_store_cls, tmp_path, *, cid="2", prefs=None, jobs=None, adapter=None, config=None,
+               **env_fields):
+    """A real ChatView (call inside a running loop) on ``_desktop_history`` (or on ``adapter``, a reloaded one, with
+    the saved ``config``); ``calls`` records navigation, snackbars, sheets and the spawned tasks (``_settle`` waits)."""
     from glossarion_mobile.state.app_state import AppState
     from glossarion_mobile.ui.chat.chat_view import ChatView
     from glossarion_mobile.ui.chat.context import ChatEnv
 
     jobs = jobs or FakeJobService()
-    adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
-    store, schema = _config_store(tmp_path)
+    if adapter is None:
+        adapter, runs = _runs(desktop_store_cls, tmp_path, jobs)
+    else:
+        runs = ChatRuns(adapter, JobsAdapter(jobs), temp_dir=str(tmp_path))
+        runs.attach()
+    store, schema = _config_store(tmp_path, config)
     calls = types.SimpleNamespace(nav=[], notes=[], dialogs=[], tasks=[])
     page = types.SimpleNamespace(width=412, height=900, show_dialog=calls.dialogs.append, update=lambda *a: None)
     env = ChatEnv(page=page, store=store, schema=schema, prefs=prefs, chats=adapter, runs=runs,
@@ -2304,6 +2318,188 @@ def test_new_chat_starts_on_the_last_used_model_and_profile(desktop_store_cls, t
         assert reloaded.data["last_used"]["model"] == {"value": "gpt-mine", "global": "gpt-7"}
 
     asyncio.run(scenario())
+
+
+def _ticking(adapter, start=2_000_000_000.0):
+    """The adapter's clock as a counter past the history's own dates (``last_use_time`` orders chats by it)."""
+    tick = itertools.count()
+    adapter._clock = lambda: start + next(tick)
+
+
+def _new_chat(view):
+    """The drawer's "New chat", then the chat shown (the app's navigation loads it)."""
+    view._on_new_chat()
+    cid = view.env.chats.current_cid()
+    if view.cid != cid:
+        view.load_chat(cid)
+    return cid
+
+
+def test_new_chat_starts_on_the_model_of_the_chat_used_last(desktop_store_cls, tmp_path):
+    """Owner: "Creating a new chat did not reuse the same model as the last chat. It stayed using the welcome screen
+    default." A new chat starts on the model of the chat open when it was made (its Welcome / composer chip show it and
+    the first send uses it), not the All-chats model; an All-chats choice made after that chat was used wins (the
+    drawer's chip also moves the open chat, Chat settings › All chats does not), and a model picked in a chat after
+    that wins again."""
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, cid="2")
+        view, adapter, store, jobs, calls = chat.view, chat.adapter, chat.store, chat.jobs, chat.calls
+        _ticking(adapter)
+        try:
+            await _settle(calls)
+            store.set_many({"model": "gpt-6"})
+            view.open_model_sheet("model").select("model", "gpt-x")  # chat A's own model, the global stays
+            assert store.get("model") == "gpt-6" and adapter.own_overrides("2")["model"] == "gpt-x"
+            # a model picked later in another chat is not the open chat's (the old rule took the last pick)
+            view.load_chat("5")
+            view.open_model_sheet("model").select("model", "gpt-b")
+            view.load_chat("2")
+            # the All-chats model written by another writer (the Welcome's model check…), then chat A used again:
+            # the chat is the later one (the old rule dropped the pick for any later All-chats write)
+            store.set_many({"model": "gpt-6b"})
+            adapter.record_user_turn("2", ("user", "more"), "more")
+            _new_chat(view)
+            new = adapter.current_cid()
+            assert new != "2" and view.cid == new
+            assert adapter.own_overrides(new).get("model") == "gpt-x"
+            assert view.state.chat_context.value.model == "gpt-x"  # the Welcome's / composer's model chip
+            view.composer.set_text("안녕")
+            submitted = len(jobs.submitted)
+            view.begin_send()
+            for _ in range(500):  # the run's task lives on until the job ends: wait for the submit alone
+                if len(jobs.submitted) > submitted:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(jobs.submitted) == submitted + 1
+            spec = jobs.submitted[-1]
+            assert spec.params["chat_id"] == int(new) and spec.params["config_overrides"]["model"] == "gpt-x"
+            # the drawer's chip afterwards: the global model, the open chat follows, so new chats start on it
+            view.open_model_sheet("model", global_scope=True, follow_open_chat=True).select("model", "gpt-7")
+            assert store.get("model") == "gpt-7" and adapter.overrides(new)["model"] == "gpt-7"
+            _new_chat(view)
+            second = adapter.current_cid()
+            assert second not in ("2", new) and "model" not in adapter.own_overrides(second)
+            assert view.state.chat_context.value.model == "gpt-7"
+            # back in chat A (used before that choice): the All-chats choice is the later one
+            view.load_chat("2")
+            assert adapter.overrides("2")["model"] == "gpt-x"  # existing chats keep their model (U13)
+            third = _new_chat(view)
+            assert third not in ("2", new, second) and "model" not in adapter.own_overrides(third)
+            assert view.state.chat_context.value.model == "gpt-7"
+            # a model picked in chat A after it: the next new chat starts on it again
+            view.load_chat("2")
+            view.open_model_sheet("model").select("model", "gpt-y")
+            fourth = _new_chat(view)
+            assert fourth not in ("2", third) and adapter.own_overrides(fourth)["model"] == "gpt-y"
+            assert view.state.chat_context.value.model == "gpt-y"
+            # Chat settings › All chats (no follow) while chat A is open: the later choice wins as well
+            view.load_chat("2")
+            view.open_model_sheet("model", global_scope=True).select("model", "gpt-8")
+            assert adapter.overrides("2")["model"] == "gpt-y"
+            fifth = _new_chat(view)
+            assert fifth not in ("2", fourth) and "model" not in adapter.own_overrides(fifth)
+            assert view.state.chat_context.value.model == "gpt-8"
+            # another writer (Model manager, the Welcome…) changing the All-chats model also counts as later
+            view.load_chat("2")
+            view.open_model_sheet("model").select("model", "gpt-z")
+            store.set_many({"model": "gpt-9"})
+            sixth = _new_chat(view)
+            assert sixth not in ("2", fifth) and "model" not in adapter.own_overrides(sixth)
+            assert view.state.chat_context.value.model == "gpt-9"
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+def test_new_chat_model_without_chats_and_after_a_restart(desktop_store_cls, tmp_path):
+    """No chat with content yet: a new chat starts on the All-chats model. After a restart (store reloaded) the empty
+    chat shown at launch, and the next new chat, start on the model of the chat used last; an All-chats choice after
+    that wins until a chat is used again."""
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, cid="2")
+        view, adapter, store, calls = chat.view, chat.adapter, chat.store, chat.calls
+        _ticking(adapter)
+        try:
+            await _settle(calls)
+            store.set_many({"model": "gpt-6"})
+            view.load_chat("5")
+            view.open_model_sheet("model").select("model", "gpt-old")  # chat 5, used first
+            view.load_chat("2")
+            view.open_model_sheet("model").select("model", "gpt-x")  # chat 2, used last
+            _new_chat(view)
+            empty = adapter.current_cid()
+            adapter.set_override(empty, "model", None)  # an empty chat an older build made: no model of its own
+            history = adapter.history_path
+        finally:
+            _close(chat)
+        # restart: the history and the sidecar are read again; launch on the empty chat
+        restarted = ChatStoreAdapter(ChatStoreBinding(desktop_store_cls(history, str(tmp_path / "Output")),
+                                                      history_path=history), history_path=history, save_delay=0.01)
+        assert restarted.load(), restarted.load_error
+        _ticking(restarted, start=2_100_000_000.0)
+        assert restarted.current_cid() == empty and "model" not in restarted.own_overrides(empty)
+        chat = _chat_view(desktop_store_cls, tmp_path, cid=empty, adapter=restarted, config={"model": "gpt-6"})
+        view, store, calls = chat.view, chat.store, chat.calls
+        try:
+            await _settle(calls)
+            assert restarted.own_overrides(empty).get("model") == "gpt-x"  # seeded at launch: the Welcome shows it
+            assert restarted.recent_chat(exclude=empty) == "2"
+            assert view.state.chat_context.value.model == "gpt-x"
+            # a Library translation (Translate sheet, Jobs › Resume) runs on what the drawer shows: the same model
+            assert restarted.last_picked_model() == view.state.chat_context.value.model  # ChatFeature._shown_model
+            # the All-chats model chosen after that (Chat settings › All chats or the Welcome, no follow): the empty
+            # launch chat drops its seeded model, and new chats start on it
+            view.open_model_sheet("model", global_scope=True).select("model", "gpt-9")
+            assert restarted.last_used()["global_model"]["value"] == "gpt-9"  # GLOBAL_MODEL_KEY
+            assert "model" not in restarted.own_overrides(empty)
+            assert view.state.chat_context.value.model == "gpt-9"
+            assert restarted.last_picked_model() == ""
+            _new_chat(view)
+            assert restarted.current_cid() == empty and "model" not in restarted.own_overrides(empty)
+            assert view.state.chat_context.value.model == "gpt-9"
+            # a run's progress landing in chat 2, a finished reply and a rename are not the user using it
+            restarted.append_messages("2", [("assistant", "progress")])
+            restarted.replace_message("2", 0, ("user", "edited by a run"))
+            restarted.rename("2", "Renamed")
+            _new_chat(view)
+            assert "model" not in restarted.own_overrides(empty)
+            # chat 2 used again (a turn sent): it is the chat used last, after that choice
+            restarted.record_user_turn("2", ("user", "again"), "again")
+            _new_chat(view)
+            assert restarted.own_overrides(empty)["model"] == "gpt-x"
+            assert restarted.last_picked_model() == "gpt-x"
+        finally:
+            _close(chat)
+
+    asyncio.run(scenario())
+
+
+def test_new_chat_without_any_chat_starts_on_the_global_model(desktop_store_cls, tmp_path):
+    """Nothing to inherit (only the empty chat): the All-chats model; a model left on a chat that no longer has content
+    is not a chat "used last"."""
+    from glossarion_mobile.ui.chat.chat_view import ChatView
+
+    history = tmp_path / "direct_text_chats.json"
+    history.write_text(json.dumps({"version": 2, "current_chat_id": 1,
+                                   "sessions": [{"id": 1, "title": "New chat", "messages": []}]}), encoding="utf-8")
+    adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
+    _ticking(adapter)
+    config = {"model": "gpt-6"}
+    env = types.SimpleNamespace(config_get=lambda key, default="": config.get(key, default), chats=adapter)
+    view = types.SimpleNamespace(env=env, cid="1", _profile_listing=lambda: None, _profiles=lambda: [])
+    view._last_chat_model = lambda last_used, new_cid: ChatView._last_chat_model(view, last_used, new_cid)
+    adapter.new_chat_seed = lambda last_used, new_cid=None: ChatView.new_chat_seed(view, last_used, new_cid)
+    try:
+        assert adapter.recent_chat() is None
+        assert adapter.new_chat() == "1" and adapter.own_overrides("1") == {}
+        assert not adapter.seed_empty_chat("1")
+        adapter.remember_last_used("model", "gpt-x", "gpt-6")  # a pick alone is no chat used last
+        assert adapter.new_chat() == "1" and adapter.own_overrides("1") == {}
+    finally:
+        adapter.close()
 
 
 def _library_book(tmp_path, name="Novel"):

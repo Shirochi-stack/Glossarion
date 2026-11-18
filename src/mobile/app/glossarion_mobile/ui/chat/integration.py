@@ -801,6 +801,7 @@ class ChatFeature:
             write_setting(env.store, "model", model)
             chat_view = getattr(self.app, "chat_view", None)
             if chat_view is not None:
+                getattr(chat_view, "global_model_chosen", lambda: None)()  # the empty chat under the Welcome
                 chat_view.apply_settings_changed()
 
         def save_key(key: str) -> None:
