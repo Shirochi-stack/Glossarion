@@ -30,6 +30,8 @@ from qa_scan_runtime import (
 )
 from scan_html_folder import (
     _format_ai_truncation_last_p_preview,
+    _collect_custom_tag_names,
+    _count_custom_tag_occurrences,
     _count_quotation_marks,
     _html_preservation_profile,
     _missing_ending_quotation_paragraphs,
@@ -399,6 +401,232 @@ def test_svg_graphic_reference_check_honors_image_rename_map():
             output_profile,
         )
     )
+
+
+_SVG_PICTURE_RENAME_MAP = {"0010.jpg": "ch_img_1.jpg", "0011.jpg": "ch_img_2.jpg"}
+
+
+def _svg_picture(href, attribute="xlink:href", extra=""):
+    return (
+        '<div class="pic"><svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 433 580">'
+        f'<image {attribute}="{href}" width="433" height="580"/>'
+        f'<desc>pic</desc>{extra}</svg></div>'
+    )
+
+
+def _picture_issues(source_body, output_body, rename_map=_SVG_PICTURE_RENAME_MAP):
+    source_profile = _html_preservation_profile(
+        f"<html><body>{source_body}</body></html>", rename_map
+    )
+    output_profile = _html_preservation_profile(
+        f"<html><body>{output_body}</body></html>", rename_map
+    )
+    return [
+        issue for issue, _preview in _preservation_count_issues(
+            source_profile, output_profile
+        )
+    ]
+
+
+def test_svg_wrapped_picture_turned_into_renamed_img_is_not_lost():
+    source = _svg_picture("../Images/0010.jpg") + _svg_picture("../Images/0011.jpg")
+    output = (
+        '<p><img height="580" src="../Images/ch_img_1.jpg" width="433"/></p>'
+        '<p><img height="580" src="../Images/ch_img_2.jpg" width="433"/></p>'
+    )
+
+    assert _picture_issues(source, output) == []
+    # Reverse direction: a source <img> shown as an svg-wrapped picture.
+    assert _picture_issues(output, source) == []
+
+
+def test_svg_wrapped_picture_mixed_forms_and_path_only_changes():
+    source = (
+        _svg_picture("../Images/0010.jpg")
+        + '<p><img src="images/0011.jpg"/></p>'
+    )
+    output = (
+        '<p><img src="ch_img_1.jpg"/></p>'
+        + _svg_picture("../other/dir/ch_img_2.jpg", attribute="href")
+    )
+
+    assert _picture_issues(source, output) == []
+
+
+def test_svg_wrapped_picture_kept_as_svg_is_not_reported():
+    source = _svg_picture("../Images/0010.jpg")
+    output = _svg_picture("images/ch_img_1.jpg")
+
+    assert _picture_issues(source, output) == []
+
+
+def test_svg_wrapped_picture_really_missing_is_still_reported():
+    source = _svg_picture("../Images/0010.jpg") + _svg_picture("../Images/0011.jpg")
+    output = '<p><img src="../Images/ch_img_1.jpg"/></p>'
+
+    issues = _picture_issues(source, output)
+
+    assert "missing_graphics_svg_1_lost_(1/2)" in issues
+    assert "missing_graphics_image_1_lost_(1/2)" in issues
+    assert "changed_graphic_references_1_found" in issues
+
+
+def test_svg_wrapped_picture_replaced_by_other_file_is_still_reported():
+    source = _svg_picture("../Images/0010.jpg")
+    output = '<p><img src="../Images/unrelated.jpg"/></p>'
+
+    issues = _picture_issues(source, output)
+
+    assert "missing_graphics_svg_1_lost_(0/1)" in issues
+    assert "missing_graphics_image_1_lost_(0/1)" in issues
+    assert "changed_graphic_references_1_found" in issues
+
+
+def test_svg_with_drawing_content_lost_is_still_reported():
+    source = _svg_picture("../Images/0010.jpg", extra='<path d="M0 0"/>')
+    output = '<p><img src="../Images/ch_img_1.jpg"/></p>'
+
+    issues = _picture_issues(source, output)
+
+    assert "missing_graphics_svg_1_lost_(0/1)" in issues
+    assert "missing_graphics_path_1_lost_(0/1)" in issues
+
+
+def test_svg_wrapping_several_pictures_partly_kept_reports_only_lost_one():
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<image xlink:href="../Images/0010.jpg"/>'
+        '<image xlink:href="../Images/0011.jpg"/></svg>'
+    )
+    output = '<p><img src="../Images/ch_img_1.jpg"/></p>'
+
+    source_profile = _html_preservation_profile(
+        f"<html><body>{source}</body></html>", _SVG_PICTURE_RENAME_MAP
+    )
+    output_profile = _html_preservation_profile(
+        f"<html><body>{output}</body></html>", _SVG_PICTURE_RENAME_MAP
+    )
+    results = dict(_preservation_count_issues(source_profile, output_profile))
+
+    assert "missing_graphics_image_1_lost_(1/2)" in results
+    assert not any(issue.startswith("missing_graphics_svg") for issue in results)
+    preview = results["changed_graphic_references_1_found"]
+    assert "ch_img_2.jpg" in preview
+    assert "ch_img_1.jpg" not in preview
+
+
+def _custom_tag_scan(tmp_path, source_body, output_body):
+    source_html = f"<html><body><p>Text.</p>{source_body}</body></html>"
+    output_html = f"<html><body><p>Text.</p>{output_body}</body></html>"
+    (tmp_path / "0035_.xhtml").write_text(output_html, encoding="utf-8")
+    preservation_info = {
+        1: dict(
+            _html_preservation_profile(source_html, _SVG_PICTURE_RENAME_MAP),
+            filename="0035_.xhtml",
+        )
+    }
+    word_counts = {
+        1: {
+            "word_count": 5,
+            "filename": "0035_.xhtml",
+            "spine_index": 1,
+            "custom_tags_count": _count_custom_tag_occurrences(source_html),
+            "custom_tag_names": _collect_custom_tag_names(source_html),
+        }
+    }
+    results = process_html_file_batch((
+        [(0, "0035_.xhtml")], str(tmp_path),
+        {"check_invalid_tag_mismatch": True, "check_missing_images": True},
+        "quick-scan", word_counts, {}, False, {}, {}, {},
+        preservation_info, _SVG_PICTURE_RENAME_MAP,
+    ))
+    return [
+        issue for issue in results[0]["issues"]
+        if issue.startswith("source_custom_tags_missing")
+    ]
+
+
+def test_svg_desc_leaving_with_picture_turned_into_img_is_not_a_lost_tag(tmp_path):
+    source = _svg_picture("../Images/0010.jpg") + _svg_picture("../Images/0011.jpg")
+    output = (
+        '<p><img src="../Images/ch_img_1.jpg"/></p>'
+        '<p><img src="../Images/ch_img_2.jpg"/></p>'
+    )
+
+    assert _custom_tag_scan(tmp_path, source, output) == []
+    # A real story tag next to the converted picture is still reported.
+    lost = _custom_tag_scan(tmp_path, source + "<p><concept>x</concept></p>", output)
+    assert len(lost) == 1 and lost[0].startswith("source_custom_tags_missing_2_of_6")
+    # The picture really gone: its <desc> stays counted as before.
+    lost = _custom_tag_scan(tmp_path, source, '<p><img src="../Images/ch_img_1.jpg"/></p>')
+    assert len(lost) == 1 and lost[0].startswith("source_custom_tags_missing_2_of_4")
+
+
+def test_same_svg_picture_twice_in_source_once_in_output_reports_one():
+    source = _svg_picture("../Images/0010.jpg") + _svg_picture("../Images/0010.jpg")
+    output = '<p><img src="../Images/ch_img_1.jpg"/></p>'
+
+    issues = _picture_issues(source, output)
+
+    assert "missing_graphics_svg_1_lost_(1/2)" in issues
+    assert "missing_graphics_image_1_lost_(1/2)" in issues
+
+
+def test_missing_image_check_counts_svg_pictures_shown_as_img(tmp_path):
+    # Source chapter: one <img> plus one svg-wrapped picture. The output shows
+    # both as <img>; neither extra_images nor a graphics loss may be reported.
+    source_html = (
+        "<html><body><p>Text.</p><p><img src=\"../Images/0011.jpg\"/></p>"
+        + _svg_picture("../Images/0010.jpg")
+        + "</body></html>"
+    )
+    output_html = (
+        "<html><body><p>Text.</p><p><img src=\"../Images/ch_img_2.jpg\"/></p>"
+        "<p><img src=\"../Images/ch_img_1.jpg\"/></p></body></html>"
+    )
+    (tmp_path / "0035_.xhtml").write_text(output_html, encoding="utf-8")
+    preservation_info = {
+        1: dict(
+            _html_preservation_profile(source_html, _SVG_PICTURE_RENAME_MAP),
+            filename="0035_.xhtml",
+        )
+    }
+    image_info = {
+        1: {
+            "image_count": 1,
+            "image_srcs": ["../Images/0011.jpg"],
+            "filename": "0035_.xhtml",
+            "spine_index": 1,
+        }
+    }
+
+    def scan(output_text):
+        (tmp_path / "0035_.xhtml").write_text(output_text, encoding="utf-8")
+        results = process_html_file_batch((
+            [(0, "0035_.xhtml")], str(tmp_path), {"check_missing_images": True},
+            "quick-scan", {}, {}, False, image_info, {}, {},
+            preservation_info, _SVG_PICTURE_RENAME_MAP,
+        ))
+        return [
+            issue for issue in results[0]["issues"]
+            if "image" in issue or "graphic" in issue
+        ]
+
+    assert scan(output_html) == []
+    # Forms swapped: the source <img> became an svg picture and vice versa.
+    assert scan(
+        "<html><body><p>Text.</p>" + _svg_picture("../Images/ch_img_2.jpg")
+        + "<p><img src=\"../Images/ch_img_1.jpg\"/></p></body></html>"
+    ) == []
+    # The svg picture really missing: still reported, once.
+    lost = scan(
+        "<html><body><p>Text.</p><p><img src=\"../Images/ch_img_2.jpg\"/></p>"
+        "</body></html>"
+    )
+    assert "missing_graphics_svg_1_lost_(0/1)" in lost
+    assert not any(issue.startswith(("missing_images", "extra_images")) for issue in lost)
 
 
 def test_pdf_bookmark_qa_preserves_structure_without_exact_sdlxliff_name(tmp_path):

@@ -4559,6 +4559,401 @@ _GEMINI_CHUNKING_REMOVED_ROWS = {
 def _removed_rows(rows):
     return [("\n" + row + "\n", "\n") for row in rows]
 
+# 2026-11-18 QA: an EPUB <svg> that only wraps an <image> is the same picture as an <img> of that file
+# (image_rename_map.json / basename) on the other side (the real diff of scan_html_folder.py)
+_SVG_PICTURE_SCANNER = [
+ (
+  (
+   '        original_image_info,\n'
+   '        image_rename_map=None):\n'
+   '    """\n'
+   '    Detect missing or extra images by comparing translated HTML with original EPUB image info.\n'
+   '    \n'
+   '    Args:\n'
+   '        translated_html: The translated HTML content (string)\n'
+   '        chapter_num: The chapter number to check\n'
+   '        original_image_info: Dict from extract_epub_image_info()\n'
+   '    \n'
+   '    Returns:\n'
+   '        tuple: (has_issues, details)\n'
+   '    """\n'
+   '    try:\n'
+   '        from bs4 import BeautifulSoup\n'
+   '        \n'
+   '        # If no original image info for this chapter, skip check\n'
+   '        if chapter_num not in original_image_info:\n'
+   '            return False, []\n'
+   '        \n'
+   '        orig_info = original_image_info[chapter_num]\n'
+   "        orig_img_count = orig_info['image_count']\n"
+  ),
+  (
+   '        original_image_info,\n'
+   '        image_rename_map=None,\n'
+   '        svg_picture_conversion=None):\n'
+   '    """\n'
+   '    Detect missing or extra images by comparing translated HTML with original EPUB image info.\n'
+   '\n'
+   '    Args:\n'
+   '        translated_html: The translated HTML content (string)\n'
+   '        chapter_num: The chapter number to check\n'
+   '        original_image_info: Dict from extract_epub_image_info()\n'
+   '        svg_picture_conversion: Optional ``_svg_picture_conversions()``\n'
+   '            result; svg-wrapped pictures shown as ``<img>`` on the other\n'
+   '            side count as the same picture.\n'
+   '\n'
+   '    Returns:\n'
+   '        tuple: (has_issues, details)\n'
+   '    """\n'
+   '    try:\n'
+   '        from bs4 import BeautifulSoup\n'
+   '\n'
+   '        # If no original image info for this chapter, skip check\n'
+   '        if chapter_num not in original_image_info:\n'
+   '            return False, []\n'
+   '\n'
+   '        orig_info = original_image_info[chapter_num]\n'
+   '        if svg_picture_conversion:\n'
+   '            orig_info = _image_info_with_svg_picture_conversion(\n'
+   '                orig_info,\n'
+   '                svg_picture_conversion,\n'
+   '                image_rename_map,\n'
+   '            )\n'
+   "        orig_img_count = orig_info['image_count']\n"
+  ),
+ ),
+ (
+  (
+   '        if orig_srcs and trans_img_count == orig_img_count:\n'
+   '            normalized_map = {\n'
+   "                os.path.basename(str(old_name).replace('\\\\', '/')).casefold():\n"
+   "                os.path.basename(str(new_name).replace('\\\\', '/')).casefold()\n"
+   '                for old_name, new_name in (image_rename_map or {}).items()\n'
+   '                if old_name and new_name\n'
+   '            }\n'
+   '            source_refs = Counter(\n'
+  ),
+  (
+   '        if orig_srcs and trans_img_count == orig_img_count:\n'
+   '            normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   '            source_refs = Counter(\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   'def _html_preservation_profile(html_content, image_rename_map=None):\n'
+  ),
+  (
+   '\n'
+   'def _normalized_image_rename_map(image_rename_map):\n'
+   '    """Return image_rename_map.json keyed and valued by casefolded basename."""\n'
+   '    return {\n'
+   "        os.path.basename(str(old_name).replace('\\\\', '/')).casefold():\n"
+   "        os.path.basename(str(new_name).replace('\\\\', '/')).casefold()\n"
+   '        for old_name, new_name in (image_rename_map or {}).items()\n'
+   '        if old_name and new_name\n'
+   '    }\n'
+   '\n'
+   '\n'
+   'def _html_preservation_profile(html_content, image_rename_map=None):\n'
+  ),
+ ),
+ (
+  (
+   '    image_srcs = Counter()\n'
+   '    normalized_map = {\n'
+   "        os.path.basename(str(old_name).replace('\\\\', '/')).casefold():\n"
+   "        os.path.basename(str(new_name).replace('\\\\', '/')).casefold()\n"
+   '        for old_name, new_name in (image_rename_map or {}).items()\n'
+   '        if old_name and new_name\n'
+   '    }\n'
+   "    for image in soup.find_all('img'):\n"
+  ),
+  (
+   '    image_srcs = Counter()\n'
+   '    normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   "    for image in soup.find_all('img'):\n"
+  ),
+ ),
+ (
+  (
+   '\n'
+   '    table_shapes = []\n'
+  ),
+  (
+   '\n'
+   '    svg_pictures = _svg_picture_wrappers(soup, normalized_map)\n'
+   '\n'
+   '    table_shapes = []\n'
+  ),
+ ),
+ (
+  (
+   "        'image_srcs': dict(image_srcs),\n"
+   '    }\n'
+   '\n'
+  ),
+  (
+   "        'image_srcs': dict(image_srcs),\n"
+   "        'svg_pictures': svg_pictures,\n"
+   '    }\n'
+   '\n'
+   '\n'
+   '# SVG children that carry no drawing of their own. An <svg> holding only\n'
+   '# these plus <image> elements is the usual EPUB full-page picture wrapper.\n'
+   "_SVG_PICTURE_WRAPPER_TAGS = frozenset({'image', 'desc', 'title', 'metadata', 'g'})\n"
+   '\n'
+   '\n'
+   'def _svg_picture_wrappers(soup, normalized_map):\n'
+   '    """Return the <svg> elements that only wrap <image> pictures.\n'
+   '\n'
+   '    Each entry is ``(refs, hrefs, graphic_ref_keys, custom_tags)``: per\n'
+   '    wrapped image its canonical file identity (same normalisation as\n'
+   '    ``<img src>``), its raw reference and the tuple of ``graphic_refs`` keys\n'
+   '    it produced, plus the number of non-standard tag occurrences (an SVG\n'
+   '    ``<desc>``) inside the wrapper, which leave with it when it becomes\n'
+   '    ``<img>``.\n'
+   '    """\n'
+   '    pictures = []\n'
+   "    for svg in soup.find_all('svg'):\n"
+   '        children = svg.find_all(True)\n'
+   '        if not children or any(\n'
+   "                str(child.name or '').lower() not in _SVG_PICTURE_WRAPPER_TAGS\n"
+   '                for child in children):\n'
+   '            continue\n'
+   '        refs, hrefs, keys = [], [], []\n'
+   "        for image in svg.find_all('image'):\n"
+   "            image_ref = ''\n"
+   '            image_keys = []\n'
+   "            for attribute in ('href', 'xlink:href'):\n"
+   "                raw_value = image.get(attribute, '')\n"
+   '                reference = _normalize_preserved_reference(\n'
+   '                    raw_value,\n'
+   '                    normalized_map,\n'
+   '                    image=True,\n'
+   '                )\n'
+   '                if reference:\n'
+   "                    image_keys.append(f'image.{attribute}:{reference}')\n"
+   '                    if not image_ref:\n'
+   '                        image_ref = reference\n'
+   '                        hrefs.append(raw_value)\n'
+   '            if not image_ref:\n'
+   '                refs = []\n'
+   '                break\n'
+   '            refs.append(image_ref)\n'
+   '            keys.append(tuple(image_keys))\n'
+   '        if refs:\n'
+   '            pictures.append((\n'
+   '                tuple(refs),\n'
+   '                tuple(hrefs),\n'
+   '                tuple(keys),\n'
+   '                _count_custom_tag_occurrences(str(svg)),\n'
+   '            ))\n'
+   '    return pictures\n'
+   '\n'
+   '\n'
+   'def _svg_picture_conversions(source_profile, output_profile):\n'
+   '    """Pair svg-wrapped pictures with ``<img>`` tags naming the same file.\n'
+   '\n'
+   "    Glossarion's own extraction may turn an EPUB ``<svg><image/></svg>``\n"
+   '    wrapper into ``<img>`` (and the reverse can happen). Such a picture is\n'
+   '    not lost. Wrappers kept as svg on both sides pair first; the rest pair\n'
+   '    with ``<img>`` references the other side does not already account for.\n'
+   '    A wrapper of several images of which only some became ``<img>`` is\n'
+   '    credited with those images only, so the others stay reported as lost.\n'
+   '    Each credited entry has the shape of a ``_svg_picture_wrappers`` entry.\n'
+   '    """\n'
+   '    result = {\n'
+   "        'source_to_img': [],   # source svg wrappers now shown as <img>\n"
+   "        'output_from_img': [],  # output svg wrappers that were source <img>\n"
+   '    }\n'
+   '    if not isinstance(source_profile, dict) or not isinstance(output_profile, dict):\n'
+   '        return result\n'
+   "    source_wrappers = list(source_profile.get('svg_pictures') or [])\n"
+   "    output_wrappers = list(output_profile.get('svg_pictures') or [])\n"
+   '    if not source_wrappers and not output_wrappers:\n'
+   '        return result\n'
+   '\n'
+   '    kept = Counter(tuple(sorted(wrapper[0])) for wrapper in output_wrappers)\n'
+   '    unmatched_source = []\n'
+   '    for wrapper in source_wrappers:\n'
+   '        signature = tuple(sorted(wrapper[0]))\n'
+   '        if kept[signature] > 0:\n'
+   '            kept[signature] -= 1\n'
+   '        else:\n'
+   '            unmatched_source.append(wrapper)\n'
+   '    kept = Counter(tuple(sorted(wrapper[0])) for wrapper in source_wrappers)\n'
+   '    unmatched_output = []\n'
+   '    for wrapper in output_wrappers:\n'
+   '        signature = tuple(sorted(wrapper[0]))\n'
+   '        if kept[signature] > 0:\n'
+   '            kept[signature] -= 1\n'
+   '        else:\n'
+   '            unmatched_output.append(wrapper)\n'
+   '\n'
+   "    source_imgs = Counter(source_profile.get('image_srcs') or {})\n"
+   "    output_imgs = Counter(output_profile.get('image_srcs') or {})\n"
+   '    for wrappers, spare, bucket in (\n'
+   "            (unmatched_source, output_imgs - source_imgs, 'source_to_img'),\n"
+   "            (unmatched_output, source_imgs - output_imgs, 'output_from_img')):\n"
+   '        for refs, hrefs, keys, custom_tags in wrappers:\n'
+   '            found = []\n'
+   '            for index, ref in enumerate(refs):\n'
+   '                if spare[ref] > 0:\n'
+   '                    spare[ref] -= 1\n'
+   '                    found.append(index)\n'
+   '            if found:\n'
+   '                result[bucket].append((\n'
+   '                    tuple(refs[index] for index in found),\n'
+   '                    tuple(hrefs[index] for index in found),\n'
+   '                    tuple(keys[index] for index in found),\n'
+   '                    custom_tags,\n'
+   '                ))\n'
+   '    return result\n'
+   '\n'
+   '\n'
+   'def _image_info_with_svg_picture_conversion(orig_info, conversion, image_rename_map=None):\n'
+   '    """Return source ``<img>`` info as seen after svg/img picture pairing."""\n'
+   "    source_to_img = (conversion or {}).get('source_to_img') or []\n"
+   "    output_from_img = (conversion or {}).get('output_from_img') or []\n"
+   '    if not source_to_img and not output_from_img:\n'
+   '        return orig_info\n'
+   '    normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   '    now_svg = Counter(ref for wrapper in output_from_img for ref in wrapper[0])\n'
+   '    srcs = []\n'
+   "    for src in orig_info.get('image_srcs') or []:\n"
+   '        ref = _normalize_preserved_reference(src, normalized_map, image=True)\n'
+   '        if ref and now_svg[ref] > 0:\n'
+   '            now_svg[ref] -= 1\n'
+   '            continue\n'
+   '        srcs.append(src)\n'
+   "    removed = len(orig_info.get('image_srcs') or []) - len(srcs)\n"
+   '    added = [href for wrapper in source_to_img for href in wrapper[1]]\n'
+   '    adjusted = dict(orig_info)\n'
+   "    adjusted['image_srcs'] = srcs + added\n"
+   "    adjusted['image_count'] = max(0, int(orig_info.get('image_count', 0) or 0) - removed) + len(added)\n"
+   '    return adjusted\n'
+   '\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   "    for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):\n"
+   '        source_counts = source_profile.get(family) or {}\n'
+   '        output_counts = output_profile.get(family) or {}\n'
+   '        for tag_name in sorted(set(source_counts) | set(output_counts)):\n'
+  ),
+  (
+   '\n'
+   '    # An svg-wrapped picture on one side and an <img> of the same file on the\n'
+   '    # other is one picture: credit it to the side that shows it as <img>.\n'
+   '    adjusted_graphic_counts = {\n'
+   "        'source': Counter(source_profile.get('graphic_counts') or {}),\n"
+   "        'output': Counter(output_profile.get('graphic_counts') or {}),\n"
+   '    }\n'
+   '    adjusted_graphic_refs = {\n'
+   "        'source': Counter(source_profile.get('graphic_refs') or {}),\n"
+   "        'output': Counter(output_profile.get('graphic_refs') or {}),\n"
+   '    }\n'
+   '    picture_conversions = _svg_picture_conversions(source_profile, output_profile)\n'
+   "    for bucket, credited_side in (('source_to_img', 'output'), ('output_from_img', 'source')):\n"
+   '        for refs, _hrefs, keys, _custom_tags in picture_conversions[bucket]:\n'
+   "            adjusted_graphic_counts[credited_side]['svg'] += 1\n"
+   "            adjusted_graphic_counts[credited_side]['image'] += len(refs)\n"
+   '            for image_keys in keys:\n'
+   '                adjusted_graphic_refs[credited_side].update(image_keys)\n'
+   '\n'
+   "    for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):\n"
+   '        source_counts = source_profile.get(family) or {}\n'
+   '        output_counts = output_profile.get(family) or {}\n'
+   "        if family == 'graphic_counts':\n"
+   "            source_counts = adjusted_graphic_counts['source']\n"
+   "            output_counts = adjusted_graphic_counts['output']\n"
+   '        for tag_name in sorted(set(source_counts) | set(output_counts)):\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   "    source_graphic_refs = Counter(source_profile.get('graphic_refs') or {})\n"
+   "    output_graphic_refs = Counter(output_profile.get('graphic_refs') or {})\n"
+   '    missing_graphic_refs = source_graphic_refs - output_graphic_refs\n'
+  ),
+  (
+   '\n'
+   "    source_graphic_refs = adjusted_graphic_refs['source']\n"
+   "    output_graphic_refs = adjusted_graphic_refs['output']\n"
+   '    missing_graphic_refs = source_graphic_refs - output_graphic_refs\n'
+  ),
+ ),
+ (
+  (
+   '                matched_key = None\n'
+   '                \n'
+   '                # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices\n'
+  ),
+  (
+   '                matched_key = None\n'
+   '                svg_picture_conversion = _svg_picture_conversions(\n'
+   '                    source_preservation_profile,\n'
+   '                    output_preservation_profile,\n'
+   '                )\n'
+   '\n'
+   '                # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices\n'
+  ),
+ ),
+ (
+  (
+   '                            image_rename_map=image_rename_map,\n'
+   '                        )\n'
+  ),
+  (
+   '                            image_rename_map=image_rename_map,\n'
+   '                            svg_picture_conversion=svg_picture_conversion,\n'
+   '                        )\n'
+  ),
+ ),
+ (
+  (
+   '                                image_rename_map=image_rename_map,\n'
+   '                            )\n'
+  ),
+  (
+   '                                image_rename_map=image_rename_map,\n'
+   '                                svg_picture_conversion=svg_picture_conversion,\n'
+   '                            )\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   '                missing_count = source_count - trans_any_count\n'
+   '                if missing_count > 0:\n'
+  ),
+  (
+   '\n'
+   '                # An svg picture wrapper shown as <img> on the other side\n'
+   '                # takes its SVG <desc> along; that is not a lost story tag.\n'
+   '                picture_conversions = _svg_picture_conversions(\n'
+   '                    source_preservation_profile,\n'
+   '                    output_preservation_profile,\n'
+   '                )\n'
+   '                compared_source_count = max(0, source_count - sum(\n'
+   "                    wrapper[3] for wrapper in picture_conversions['source_to_img']\n"
+   '                ))\n'
+   '                compared_trans_count = max(0, trans_any_count - sum(\n'
+   "                    wrapper[3] for wrapper in picture_conversions['output_from_img']\n"
+   '                ))\n'
+   '\n'
+   '                missing_count = compared_source_count - compared_trans_count\n'
+   '                if missing_count > 0:\n'
+  ),
+ ),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -6191,6 +6586,17 @@ APPROVED = (
                 "\n",
             ),
         ]},
+        "values": {},
+    },
+    {
+        "date": "2026-11-18",
+        "what": "QA source preservation: an EPUB <svg> that only wraps <image> (plus desc/title/metadata/g) and an "
+                "<img> naming the same file after image_rename_map.json / basename normalisation are one picture, "
+                "in either direction; it is no longer reported as missing svg/image graphics, changed graphic "
+                "references or extra/missing images, and the SVG <desc> that leaves with it is not a lost custom "
+                "tag. A wrapper of several images partly kept is credited with the kept ones only. Pictures "
+                "really gone and svg drawings are still reported",
+        "source": {"src/scan_html_folder.py": _SVG_PICTURE_SCANNER},
         "values": {},
     },
 )
