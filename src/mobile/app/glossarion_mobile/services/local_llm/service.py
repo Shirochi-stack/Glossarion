@@ -994,8 +994,8 @@ class LocalEngineService:
         return None
 
     def npu_offered(self) -> bool:
-        """The phone's NPU check passed (this process's, or until it has run, this app version's last one): the
-        NPU rows, "Use NPU" and the power mode show. Never on a build without the NPU functions."""
+        """The phone's NPU check passed (this process's, or until it has run, this app version's last one): "Use
+        NPU", the power mode and the Custom / Sigma quants' NPU marks show. Never on a build without the NPU functions."""
         if not self.npu_possible():
             return False
         return eng.npu_passed(self.npu_state())

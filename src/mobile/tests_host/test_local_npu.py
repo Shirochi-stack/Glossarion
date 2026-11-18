@@ -3,7 +3,8 @@
 fallback matrix, the two crash markers (the attempt marker from an NPU load to its first answer's end, the in-flight
 marker around every NPU answer) and their recovery at start, "Try the NPU again", the watchdog, ``device_index`` for
 the GPU and the NPU, the wheel's NPU functions through ``engine.npu_state`` (and a wheel without them), the presets'
-backend fields, a model added from Hugging Face running on the NPU under Auto, the diagnostics block and the
+backend fields, the default slots and a model added from Hugging Face running on the NPU under Auto (no separate
+NPU rows), an old saved "· NPU" row still loading on the NPU, the diagnostics block and the
 self-check's shared markers. Fakes only: FakeEngine, FakePrefs, a fake ``register_npu_backend``; no native NPU.
 """
 
@@ -103,21 +104,20 @@ def test_npu_quant_kind(file, kind):
     assert presets.npu_quant_kind(file) == kind
 
 
-def test_npu_presets_reuse_the_verified_q4_0_rows():
-    assert [row["name"] for row in presets.NPU_PRESETS] == ["Garbage · NPU", "Light · NPU", "Medium · NPU"]
-    for npu_row, gpu_row in zip(presets.NPU_PRESETS, presets.GPU_PRESETS):
-        for key in ("repo", "file", "size", "sha256", "mmproj", "mmproj_size", "mmproj_sha256"):
-            assert npu_row[key] == gpu_row[key]
-        assert npu_row["backend"] == "npu" and presets.npu_quant_kind(npu_row["file"]) == "best"
-        assert presets._clean(npu_row)["backend"] == "npu"
-    assert all(row["size"] < presets.NPU_SESSION_BYTES for row in presets.NPU_PRESETS)  # 9B is Custom only
-    family = presets.custom_family("npu")
-    assert family is presets.NPU_FAMILY and family["backend"] == "npu"
-    repos = [s["repo"] for f in presets.CUSTOM_FAMILIES for s in f["sizes"]]
-    assert [s["repo"] for s in family["sizes"]] == repos
-    nine = next(s for s in family["sizes"] if s["repo"] == "unsloth/Qwen3.5-9B-GGUF")
-    assert nine["npu_note"] == "over the NPU's 3.5 GB: slower" and nine["group"] == "Qwen 3.5"
-    assert all("npu_note" not in s for f in presets.CUSTOM_FAMILIES for s in f["sizes"])  # the table is unchanged
+def test_no_separate_npu_rows_the_existing_slots_are_auto():
+    # owner 2026-11-18: no "· NPU" presets and no "Custom · NPU" family; the existing slots use the NPU under Auto
+    for name in ("NPU_PRESETS", "NPU_FAMILY", "_npu_row", "_npu_family"):
+        assert not hasattr(presets, name)
+    assert presets.custom_family("npu") is None
+    assert all(presets.backend_of(row) == "auto" for row in presets.DEFAULT_PRESETS)
+    for row in presets.DEFAULT_PRESETS[:3]:                                    # Garbage, Light, Medium: UD-Q4_K_XL
+        assert presets.npu_quant_kind(row["file"]) == "ok"
+    sizes = [s for f in presets.CUSTOM_FAMILIES for s in f["sizes"]]
+    assert all("npu_note" not in s for s in sizes)                             # the table is unchanged
+    assert [s["name"] for s in sizes if presets.npu_size_note(s)] == ["Qwen 3.5 9B"]
+    assert presets.npu_size_note(sizes[-1]) == "" and presets.npu_size_note(None) == ""
+    nine = presets.custom_size_for("unsloth/Qwen3.5-9B-GGUF")[1]
+    assert presets.npu_size_note(nine) == "over the NPU's 3.5 GB: slower"
 
 
 def test_rows_carry_backend_and_npu_layers_and_auto_is_not_stored():
@@ -130,9 +130,8 @@ def test_rows_carry_backend_and_npu_layers_and_auto_is_not_stored():
     assert presets._clean({**base, "npu_layers": 0}).get("npu_layers") is None
     hf_file = types.SimpleNamespace(path="Qwen3.5-2B-Q4_0.gguf", size=10, sha256=None)
     size = presets.CUSTOM_FAMILIES[0]["sizes"][1]
-    row = presets.custom_row(size, hf_file, backend="npu")
-    assert row["backend"] == "npu" and row["name"] == "Qwen 3.5 2B · Q4_0 · NPU" and "NPU" in row["note"]
-    assert "backend" not in presets.custom_row(size, hf_file)
+    row = presets.custom_row(size, hf_file)                                    # a Custom pick is an Auto row
+    assert "backend" not in row and row["name"] == "Qwen 3.5 2B · Q4_0" and "NPU" not in row["note"]
 
 
 def test_validate_preset_backend_and_layers():
@@ -361,6 +360,59 @@ def test_a_model_added_from_hugging_face_runs_on_the_npu_under_auto(tmp_path):
     service.unload()
     chat(service, entry_stem)
     assert engine.backends == ["npu", "npu"]
+
+
+def _register(service, repo, file):
+    """A downloaded model (as the one-tap flow leaves it): its file and registry entry; the stem."""
+    import os
+
+    stem = file[:-len(".gguf")]
+    os.makedirs(service.registry.root, exist_ok=True)
+    with open(service.registry.file_path(stem), "wb") as handle:
+        handle.write(b"GGUF")
+    service.registry.add(stem, {"repo": repo, "file": file, "revision": "r", "sha256": "0" * 64, "size": 4,
+                                "downloaded_at": 1})
+    return stem
+
+
+@pytest.mark.parametrize("passed,use_npu,use_gpu,expected", [
+    (True, True, False, "npu"), (True, True, True, "npu"),
+    (True, False, True, "gpu"), (True, False, False, "cpu"),
+    (False, True, True, "gpu"), (False, True, False, "cpu"),
+])
+def test_the_default_slots_use_the_npu_under_auto(tmp_path, passed, use_npu, use_gpu, expected):
+    # Garbage / Light / Medium (UD-Q4_K_XL, saved list untouched: the defaults) and a Hugging Face ID download of a
+    # K-quant: no backend on the row, so Auto puts them on the NPU where the check passed and "Use NPU" is on
+    prefs = fakes.FakePrefs({svc.GPU_KEY: use_gpu, svc.NPU_KEY: use_npu})
+    probe = Probe(passing_state() if passed else failing_state("session", "unsigned PD denied"))
+    service, engine, _probe = npu_service(tmp_path, stems=(), probe=probe, prefs=prefs)
+    service.run_npu_check()
+    stems = [_register(service, row["repo"], row["file"]) for row in presets.DEFAULT_PRESETS[:3]]
+    stems.append(_register(service, "someone/Other-GGUF", "Other-7B-Q4_K_M.gguf"))  # no preset row at all
+    assert [row["name"] for row in presets.load_presets(service.prefs)][:3] == ["Garbage", "Light", "Medium"]
+    for stem in stems:
+        assert service.backend_choice(stem) == "auto"
+        assert service._placement(stem)[0] == expected
+    chat(service, stems[1])
+    assert engine.backends == [expected]
+
+
+def test_an_old_saved_npu_row_still_loads_on_the_npu(tmp_path):
+    # a row saved from the earlier test build's "Light · NPU" / Custom · NPU: an ordinary editable row, kept as is
+    service, engine, _probe = npu_service(tmp_path, stems=(), prefs=fakes.FakePrefs({svc.NPU_KEY: False}))
+    stem = _register(service, "unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-Q4_0.gguf")
+    old = [{"name": "Light · NPU", "repo": "unsloth/Qwen3.5-2B-GGUF", "file": "Qwen3.5-2B-Q4_0.gguf", "quant": "",
+            "note": "Qwen3.5 2B · Q4_0 on the NPU · ~2 GB RAM", "n_ctx": 0, "backend": "npu"},
+           {"name": "Qwen 3.5 4B · Q8_0 · NPU", "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-Q8_0.gguf",
+            "quant": "", "note": "Custom · NPU · Qwen 3.5 4B · Q8_0", "n_ctx": 0, "backend": "npu"}]
+    presets.save_presets(service.prefs, old)
+    rows = presets.load_presets(service.prefs)
+    assert [(r["name"], r["backend"]) for r in rows] == [("Light · NPU", "npu"), ("Qwen 3.5 4B · Q8_0 · NPU", "npu")]
+    assert service.backend_choice(stem) == "npu"
+    chat(service, stem)                                                        # "npu" even with "Use NPU" off
+    assert engine.backends == ["npu"]
+    clean, error = presets.validate_preset({**rows[0], "name": "Light (mine)"}, rows, 0)  # still editable
+    assert error is None and clean["backend"] == "npu" and clean["name"] == "Light (mine)"
 
 
 # ---- the fallback matrix ------------------------------------------------------------------------------------------

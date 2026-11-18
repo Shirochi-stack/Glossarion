@@ -12,9 +12,8 @@ whose quants come from the repository's own files; a quant the user chooses beco
 
 NPU (Snapdragon Hexagon): a row may name its ``backend`` ("npu", "gpu" or "cpu"; none = "auto": the NPU when
 the phone's NPU check passed, "Use NPU" is on and the quant is one the backend accepts, else the GPU / CPU rule)
-and its ``npu_layers`` (none = all). ``NPU_PRESETS`` (the Q4_0 files of ``GPU_PRESETS``, backend "npu") and
-``NPU_FAMILY`` (every Custom size, quants marked by ``npu_quant_kind``) are fixed rows like ``CUSTOM_FAMILIES``,
-shown only where the NPU check passed and saved only when tapped.
+and its ``npu_layers`` (none = all). There are no separate NPU rows (owner 2026-11-18): the default and Custom
+rows are "auto", so they run on the NPU where it is offered; ``npu_quant_kind`` marks the Custom and Sigma quants.
 """
 
 from __future__ import annotations
@@ -29,9 +28,9 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "BACKENDS", "CUSTOM_FAMILIES", "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "NO_QUANT", "NPU_FAMILY",
-    "NPU_PRESETS", "PREF_KEY", "add_row", "backend_of", "custom_family", "custom_row", "custom_size_for",
-    "download_size", "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row", "load_presets", "npu_quant_kind",
+    "BACKENDS", "CUSTOM_FAMILIES", "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "NO_QUANT", "NPU_OVER_SESSION",
+    "PREF_KEY", "add_row", "backend_of", "custom_family", "custom_row", "custom_size_for", "download_size",
+    "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row", "load_presets", "npu_quant_kind", "npu_size_note",
     "quant_label", "remove_row", "restore_defaults", "retire_old_gpu_rows", "save_presets", "validate_preset",
 ]
 
@@ -147,42 +146,16 @@ _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 BACKENDS = ("auto", "npu", "gpu", "cpu")
 BACKEND_LABELS = {"auto": "Auto", "npu": "NPU", "gpu": "GPU", "cpu": "CPU"}
 #: one NPU session maps about 3.5 GB (llama.cpp docs/backend/snapdragon at the pin); bigger files are slower
-NPU_SESSION_BYTES = 3_500_000_000
 NPU_OVER_SESSION = "over the NPU's 3.5 GB: slower"
+#: the Custom sizes whose files are all over one NPU session (the Custom sheet notes it where the NPU is offered)
+_NPU_OVER_SESSION_REPOS = {"unsloth/qwen3.5-9b-gguf"}
 
 
-def _npu_row(gpu_row: dict, name: str, note: str) -> dict:
-    """An NPU preset from a ``GPU_PRESETS`` row: the same verified Q4_0 file, size, sha256 and projector."""
-    row = copy.deepcopy(gpu_row)
-    row.update(name=name, note=note, backend="npu")
-    return row
+def npu_size_note(size: Optional[dict]) -> str:
+    """The NPU note of a Custom size (``NPU_OVER_SESSION`` for Qwen 3.5 9B), else ""."""
+    return NPU_OVER_SESSION if str((size or {}).get("repo") or "").casefold() in _NPU_OVER_SESSION_REPOS else ""
 
 
-#: The built-in NPU rows (owner 2026-11-18): the Q4_0 files of the GPU table (Q4_0 is the Hexagon backend's best
-#: weight type at the pin), backend "npu". Shown beside the saved list where the NPU check passed; a tap saves the
-#: row (``OnDeviceFlow.get_npu_preset``), which is then edited like any other. The 9B file is over one NPU session's
-#: 3.5 GB: it is only in the Custom · NPU list.
-NPU_PRESETS: tuple = (
-    _npu_row(GPU_PRESETS[0], "Garbage · NPU", "Qwen3.5 0.8B · Q4_0 on the NPU · ~1 GB RAM"),
-    _npu_row(GPU_PRESETS[1], "Light · NPU", "Qwen3.5 2B · Q4_0 on the NPU · ~2 GB RAM"),
-    _npu_row(GPU_PRESETS[2], "Medium · NPU", "Qwen3.5 4B · Q4_0 on the NPU · needs ~4 GB free RAM"),
-)
-
-
-def _npu_family() -> dict:
-    sizes = []
-    for family in CUSTOM_FAMILIES:
-        for size in family["sizes"]:
-            entry = dict(size)
-            entry.setdefault("group", family["name"])
-            if size["repo"].casefold() == "unsloth/qwen3.5-9b-gguf":
-                entry["npu_note"] = NPU_OVER_SESSION
-            sizes.append(entry)
-    return {"id": "npu", "name": "NPU", "backend": "npu", "sizes": tuple(sizes)}
-
-
-#: "Custom · NPU": every Custom size in one menu (grouped by family), its quants marked for the NPU
-NPU_FAMILY: dict = _npu_family()
 #: weight types MUL_MAT accepts on the Hexagon backend at the pin (ggml-hexagon htp-kparams.cpp); IQ4_XS and the
 #: IQ3 types are not among them
 _NPU_TYPES = {"Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL", "IQ2_XXS", "Q1_0", "Q2_0", "F16", "BF16", "F32",
@@ -390,9 +363,7 @@ def quant_label(file: Any) -> str:
 
 
 def custom_family(family_id: Any) -> Optional[dict]:
-    """The ``CUSTOM_FAMILIES`` entry called ``family_id`` (``NPU_FAMILY`` for "npu"), else None."""
-    if family_id == NPU_FAMILY["id"]:
-        return NPU_FAMILY
+    """The ``CUSTOM_FAMILIES`` entry called ``family_id``, else None."""
     return next((family for family in CUSTOM_FAMILIES if family["id"] == family_id), None)
 
 
@@ -406,20 +377,11 @@ def custom_size_for(repo: Any) -> Optional[tuple]:
     return None
 
 
-def custom_row(size: dict, file: Any, projector: Any = None, backend: str = "") -> dict:
-    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile``;
-    ``backend`` "npu" (Custom · NPU) names the row's device."""
+def custom_row(size: dict, file: Any, projector: Any = None) -> dict:
+    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile``."""
     label = quant_label(file.path)
-    backend = backend_of({"backend": backend})
-    if backend == "npu":
-        row = {"name": f"{size['name']} · {label} · NPU", "repo": size["repo"], "file": file.path, "quant": "",
-               "note": f"Custom · NPU · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0),
-               "backend": "npu"}
-    else:
-        row = {"name": f"{size['name']} · {label}", "repo": size["repo"], "file": file.path, "quant": "",
-               "note": f"Custom · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0)}
-        if backend != "auto":
-            row["backend"] = backend
+    row = {"name": f"{size['name']} · {label}", "repo": size["repo"], "file": file.path, "quant": "",
+           "note": f"Custom · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0)}
     if file.sha256:
         row["sha256"] = file.sha256
     if projector is not None:
