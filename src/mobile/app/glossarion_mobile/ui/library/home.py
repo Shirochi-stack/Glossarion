@@ -1000,8 +1000,6 @@ class LibraryScreen(Screen):
             return []
         if not imported:
             return []
-        count = len(imported)
-        self.ctx.say(f"Imported {count} file{'s' if count != 1 else ''}")
-        self.service.mark_dirty()
+        self.service.mark_dirty()  # the refreshed list shows the new books (owner 2026-11-18: no pop-up)
         await self.service.refresh(reason="import")
         return imported

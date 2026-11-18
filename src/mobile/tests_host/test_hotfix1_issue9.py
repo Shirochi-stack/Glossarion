@@ -13,15 +13,15 @@ What the owner must see after every Progress Manager action:
 
 * while the action writes, the list's progress bar runs (the write is held inside the shared per-file progress
   lock, so the screen is looked at mid-write, never with a sleep);
-* the rows, the stats chips and the summary strip refresh at once - already on screen (and sent to the client)
-  when the confirmation snackbar shows, with no poll tick (the Book page poller is not running);
-* a snackbar confirms each action with the desktop result text (a long, multi-line desktop result box opens as
-  the result sheet instead: Retranslate's "Success");
+* the rows, the stats chips and the summary strip refresh at once - on screen (and sent to the client) when the
+  action's UI task ends, with no poll tick (the Book page poller is not running);
+* that refresh is the confirmation: no pop-up repeats what the rows show (owner 2026-11-18, which replaced the
+  earlier confirmation snackbar / Retranslate's "Success" result sheet);
 * a refused or failing action says why in a snackbar, the bar stops and the rows keep the truth.
 
 Covered: Restore In Progress Status from the row menu (an In progress entry -> Failed / Not Translated), Remove
 Pending Mark / Remove QA Failed Mark (-> Completed), the bulk Retranslate (a queued job that says it is queued,
-then the reset row and the result box), row ⋯ › Retranslate this chapter (the entry goes back to Pending / In
+then the reset row), row ⋯ › Retranslate this chapter (the entry goes back to Pending / In
 progress while its single-chapter job runs: the row must not keep showing Completed), the bulk selection bar
 (Remove QA mark, More › Restore In Progress Status), the Glossary Progress tab (Mark as completed, Remove from
 progress, bulk), and the refusal / corrupt-file / failed-save error paths.
@@ -535,17 +535,21 @@ def _assert_snackbar_shown(phone, note, kind="snackbar"):
     assert _client_got_text(phone.conn, note.at, note.sent_to, note.message), f"the {kind} never reached the client"
 
 
-def _assert_refreshed_before(phone, note, start, key, status_text, chip_texts=()):
-    """At the moment the snackbar showed, the row and the chips on screen were already the new ones, and the
-    client had been sent them (no later poll did it)."""
-    assert note.screen["rows"].get(key) == status_text, (key, note.screen["rows"])
+async def _assert_refreshed(phone, start, key, status_text, chip_texts=()):
+    """The action's own refresh is its confirmation (no pop-up for what the screen shows, owner 2026-11-18): once
+    its UI task ends, the row and the chips on screen are the new ones and the client was sent them (the Book
+    page poller does not run: no later poll did it)."""
+    assert await _until(lambda: phone.row_status(key) == status_text), (key, phone.row_status(key))
+    await phone.settle()
+    screen = phone.snapshot()
+    assert screen["rows"].get(key) == status_text, (key, screen["rows"])
     for chip in chip_texts:
-        assert chip in note.screen["chips"], (chip, note.screen["chips"])
-    assert not note.screen["busy"], "the progress bar was still running when the result showed"
-    assert _client_got_row(phone, start, note.at, key, status_text), \
-        f"the refreshed row {key} ({status_text}) was not sent before the snackbar"
+        assert chip in screen["chips"], (chip, screen["chips"])
+    assert not screen["busy"], "the progress bar is still running"
+    assert _client_got_row(phone, start, None, key, status_text), f"the refreshed row {key} ({status_text}) was not sent"
     for chip in chip_texts:
-        assert _client_got_text(phone.conn, start, note.at, chip), f"chip {chip!r} was not sent before the snackbar"
+        assert _client_got_text(phone.conn, start, None, chip), f"chip {chip!r} was not sent"
+    return screen
 
 
 # ==========================================================================
@@ -554,7 +558,7 @@ def _assert_refreshed_before(phone, note, start, key, status_text, chip_texts=()
 
 
 @needs_flet
-def test_restore_in_progress_from_the_row_menu_shows_work_then_refreshed_row_counts_and_a_snackbar(real_env):
+def test_restore_in_progress_from_the_row_menu_shows_work_then_refreshed_row_and_counts(real_env):
     _needs_cores()
     _set_status(real_env, "1", "in_progress")
 
@@ -580,16 +584,12 @@ def test_restore_in_progress_from_the_row_menu_shows_work_then_refreshed_row_cou
                 assert phone.notes == [] and phone.row_status(row.key) == "\U0001f504 In Progress"
                 assert _read_progress(real_env)["chapters"]["1"]["status"] == "in_progress"
                 hold.release()
-                note = await phone.note(1)
-            await phone.settle()
-            assert note.message == "Successfully marked 1 as failed."
-            _assert_snackbar_shown(phone, note)
-            _assert_refreshed_before(phone, note, start, row.key, "❌ Failed", chip_texts=(failed_after,))
-            assert not any(t.startswith("\U0001f504 In Progress") for t in note.screen["chips"]), note.screen["chips"]
+                shown = await _assert_refreshed(phone, start, row.key, "❌ Failed", chip_texts=(failed_after,))
+            assert not any(t.startswith("\U0001f504 In Progress") for t in shown["chips"]), shown["chips"]
             assert not ch.loading.visible
             assert _client_got_prop(phone.conn, start, None, ch.loading, "visible", False)
             assert _read_progress(real_env)["chapters"]["1"]["status"] == "failed"
-            assert len(phone.notes) == 1, [n.message for n in phone.notes]  # one confirmation per action
+            assert phone.notes == [], [n.message for n in phone.notes]  # the refreshed row is the confirmation
         finally:
             await phone.close()
 
@@ -602,7 +602,7 @@ def test_restore_in_progress_from_the_row_menu_shows_work_then_refreshed_row_cou
 
 
 @needs_flet
-def test_remove_pending_and_remove_qa_mark_complete_rows_with_refreshed_counts_strip_and_snackbars(real_env):
+def test_remove_pending_and_remove_qa_mark_complete_rows_with_refreshed_counts_and_strip(real_env):
     _needs_cores()
     # chapter 1 is Pending while its saved HTML exists, so Remove Pending Mark restores it (HTML is authoritative)
     _set_status(real_env, "1", "pending")
@@ -619,14 +619,10 @@ def test_remove_pending_and_remove_qa_mark_complete_rows_with_refreshed_counts_s
             sheet = await phone.open_row_menu(pending.key)
             start = len(phone.conn.messages)
             await phone.tap(phone.sheet_row(sheet, "row-remove-pending"))
-            note = await phone.note(1)
-            await phone.settle()
-            assert note.message.startswith("Restored 1 pending entries."), note.message
-            _assert_snackbar_shown(phone, note)
-            _assert_refreshed_before(phone, note, start, pending.key, "✅ Completed")
-            assert _count(note.screen["chips"], "✅ Completed") > completed_before, note.screen["chips"]
-            assert _client_got_text(phone.conn, start, note.at, phone.chip("completed"))
-            assert note.screen["strip"] > strip_before, (strip_before, note.screen["strip"])
+            first = await _assert_refreshed(phone, start, pending.key, "✅ Completed")
+            assert _count(first["chips"], "✅ Completed") > completed_before, first["chips"]
+            assert _client_got_text(phone.conn, start, None, phone.chip("completed"))
+            assert first["strip"] > strip_before, (strip_before, first["strip"])
             # Remove QA Failed Mark: the desktop confirmation, then QA Failed -> Completed
             qa = phone.row("qa_failed")
             expected = (phone.chip("completed", +1), phone.chip("failed", -1))
@@ -635,12 +631,9 @@ def test_remove_pending_and_remove_qa_mark_complete_rows_with_refreshed_counts_s
             await phone.tap(phone.sheet_row(sheet, "row-remove-qa"))
             body = await phone.confirm("Confirm Remove Failed Mark")
             assert body == ["Remove failed mark from 1 chapters?"]
-            note = await phone.note(2)
-            await phone.settle()
-            assert note.message == "Removed failed mark from 1 chapters."
-            _assert_snackbar_shown(phone, note)
-            _assert_refreshed_before(phone, note, start, qa.key, "✅ Completed", chip_texts=expected)
-            assert note.screen["strip"] > phone.notes[0].screen["strip"]
+            second = await _assert_refreshed(phone, start, qa.key, "✅ Completed", chip_texts=expected)
+            assert second["strip"] > first["strip"]
+            assert phone.notes == [], [n.message for n in phone.notes]  # no pop-up for what the rows show
             prog = _read_progress(real_env)["chapters"]
             assert prog["1"]["status"] == "completed" and prog["2"]["status"] == "completed", prog
             assert not ch.loading.visible
@@ -687,7 +680,7 @@ class _Backend:
 
 
 @needs_flet
-def test_retranslate_queued_behind_a_job_says_so_then_resets_the_row_with_the_result_box(real_env, tmp_path):
+def test_retranslate_queued_behind_a_job_says_so_then_resets_the_row(real_env, tmp_path):
     _needs_cores()
     from glossarion_mobile import job_kinds
     from glossarion_mobile.services.jobs import JobService, JobSpec
@@ -740,18 +733,14 @@ def test_retranslate_queued_behind_a_job_says_so_then_resets_the_row_with_the_re
             assert phone.row_status(done.key) == "✅ Completed"
             start = len(phone.conn.messages)
             release.set()
-            # the reset ran: the desktop result box (long: the result sheet) after the rows refreshed
-            note = await phone.note(2)
-            assert note.title == "Success", (note.kind, note.title, note.message)
-            assert note.message.startswith("Successfully deleted 1 files") or note.message.startswith(
-                "Successfully Deleted 1 files"), note.message
-            _assert_snackbar_shown(phone, note, kind="sheet")
-            assert "reset 1 chapter statuses to pending" in note.message, note.message
-            _assert_refreshed_before(phone, note, start, done.key, "❓ Pending", chip_texts=expected)
+            # the reset ran: the refreshed rows are the result (the desktop "Success" box is not shown, owner
+            # 2026-11-18: no pop-up for what the screen shows)
+            await _assert_refreshed(phone, start, done.key, "❓ Pending", chip_texts=expected)
             assert _read_progress(real_env)["chapters"]["1"]["status"] == "pending"
             assert not (real_env["ws"] / "response_ch001.html").exists()
             assert await _until(lambda: screen.job is None and not screen.strip_job.visible)
             await phone.settle()
+            assert len(phone.notes) == 1 and ch.last_message is None, [(n.kind, n.message) for n in phone.notes]
         finally:
             release.set()
             await phone.close()
@@ -782,13 +771,9 @@ def test_bulk_bar_remove_qa_mark_and_more_restore_in_progress_refresh_every_sele
             start = len(phone.conn.messages)
             await phone.bulk(ch, "remove_qa")
             assert await phone.confirm("Confirm Remove Failed Mark") == ["Remove failed mark from 1 chapters?"]
-            note = await phone.note(1)
-            await phone.settle()
-            assert note.message == "Removed failed mark from 1 chapters."
-            _assert_snackbar_shown(phone, note)
-            _assert_refreshed_before(phone, note, start, qa.key, "✅ Completed", chip_texts=expected)
-            assert note.screen["rows"][first.key] == "\U0001f504 In Progress"
-            assert not note.screen["selecting"] and not ch.bulk_bar.control.visible  # the selection ended
+            shown = await _assert_refreshed(phone, start, qa.key, "✅ Completed", chip_texts=expected)
+            assert shown["rows"][first.key] == "\U0001f504 In Progress"
+            assert not shown["selecting"] and not ch.bulk_bar.control.visible  # the selection ended
             # more rows In progress (written by a translation meanwhile; chapter 3 never saved its HTML); bulk
             # More › Restore In Progress Status
             _set_status(real_env, "2", "in_progress")
@@ -806,15 +791,12 @@ def test_bulk_bar_remove_qa_mark_and_more_restore_in_progress_refresh_every_sele
             sheet = ch.bulk_bar.more_sheet
             assert sheet is not None and sheet.dialog.open
             await phone.tap(phone.sheet_row(sheet.dialog, "bulk-restore_in_progress"))
-            note = await phone.note(2)
-            await phone.settle()
-            assert note.message == "Successfully removed 1 not-translated placeholder(s), marked 2 as failed."
-            _assert_snackbar_shown(phone, note)
             for key in (first.key, second.key):
-                _assert_refreshed_before(phone, note, start, key, "❌ Failed", chip_texts=(failed_after,))
-            _assert_refreshed_before(phone, note, start, third.key, "⬜ Not Translated", chip_texts=(not_translated,))
-            assert not any(t.startswith("\U0001f504 In Progress") for t in note.screen["chips"])
+                await _assert_refreshed(phone, start, key, "❌ Failed", chip_texts=(failed_after,))
+            shown = await _assert_refreshed(phone, start, third.key, "⬜ Not Translated", chip_texts=(not_translated,))
+            assert not any(t.startswith("\U0001f504 In Progress") for t in shown["chips"])
             assert not ch.selecting
+            assert phone.notes == [], [n.message for n in phone.notes]  # no pop-up for what the rows show
         finally:
             await phone.close()
 
@@ -941,8 +923,16 @@ def _gp_row(tab, key):
     return next(r for r in tab.view.rows if r.key == key)
 
 
+async def _gp_refreshed(phone, tab, key, done):
+    """A Glossary Progress action's refresh is its confirmation (no pop-up, owner 2026-11-18): the screen once
+    the row ``key`` reached the new status (``done(status)``) and the action's UI task ended."""
+    assert await _until(lambda: done(_gp_row(tab, key).status)), (key, _gp_row(tab, key).status)
+    await phone.settle()
+    return phone.snapshot()
+
+
 @needs_flet
-def test_glossary_progress_mark_completed_remove_and_bulk_refresh_rows_counts_with_a_snackbar(real_env, monkeypatch):
+def test_glossary_progress_mark_completed_remove_and_bulk_refresh_rows_and_counts(real_env, monkeypatch):
     gpc = _TLU._core("glossary_progress_core", "open_glossary_progress", "mark_glossary_completed",
                      "remove_glossary_progress")
     if gpc is None:
@@ -965,15 +955,12 @@ def test_glossary_progress_mark_completed_remove_and_bulk_refresh_rows_counts_wi
             sheet = await phone.open_row_menu("chapter:1", tab=tab)
             start = len(phone.conn.messages)
             await phone.tap(phone.sheet_row(sheet, "✅ Mark as completed"))
-            note = await phone.note(1)
-            await phone.settle()
-            assert note.message == "Marked 1 chapter as completed"
-            _assert_snackbar_shown(phone, note)
-            assert note.screen["gp_rows"]["chapter:1"] == "completed" and not note.screen["gp_busy"]
-            assert "✅ Completed" in note.screen["gp_screen"]["chapter:1"], note.screen["gp_screen"]["chapter:1"]
-            assert all(chip in note.screen["gp_chips"] for chip in expected), (expected, note.screen["gp_chips"])
-            assert _client_got_row(phone, start, note.at, "chapter:1", "✅ Completed")
-            assert all(_client_got_text(phone.conn, start, note.at, chip) for chip in expected)
+            shown = await _gp_refreshed(phone, tab, "chapter:1", lambda status: status == "completed")
+            assert not shown["gp_busy"]
+            assert "✅ Completed" in shown["gp_screen"]["chapter:1"], shown["gp_screen"]["chapter:1"]
+            assert all(chip in shown["gp_chips"] for chip in expected), (expected, shown["gp_chips"])
+            assert _client_got_row(phone, start, None, "chapter:1", "✅ Completed")
+            assert all(_client_got_text(phone.conn, start, None, chip) for chip in expected)
             # row ⋯ › Remove from progress (confirmation) on a completed chapter
             completed_now = phone.chip("completed", -1, tab=tab)
             sheet = await phone.open_row_menu("chapter:0", tab=tab)
@@ -981,15 +968,10 @@ def test_glossary_progress_mark_completed_remove_and_bulk_refresh_rows_counts_wi
             start = len(phone.conn.messages)
             await phone.tap(phone.sheet_row(sheet, label))
             await phone.confirm("Remove from progress", "Remove")
-            note = await phone.note(2)
-            await phone.settle()
-            assert note.message.startswith("Removed ") and note.message.endswith(" from progress"), note.message
-            _assert_snackbar_shown(phone, note)
-            removed = note.screen["gp_rows"]["chapter:0"]
-            assert removed != "completed", removed
-            assert "✅ Completed" not in note.screen["gp_screen"]["chapter:0"], note.screen["gp_screen"]["chapter:0"]
-            assert completed_now in note.screen["gp_chips"], note.screen["gp_chips"]
-            assert _client_got_text(phone.conn, start, note.at, completed_now)
+            shown = await _gp_refreshed(phone, tab, "chapter:0", lambda status: status != "completed")
+            assert "✅ Completed" not in shown["gp_screen"]["chapter:0"], shown["gp_screen"]["chapter:0"]
+            assert completed_now in shown["gp_chips"], shown["gp_chips"]
+            assert _client_got_text(phone.conn, start, None, completed_now)
             # bulk: select the two chapters not completed, Mark as Completed
             todo = [r.key for r in tab.view.rows if r.kind == "chapter" and r.status != "completed"
                     and r.status != "failed"]
@@ -1000,14 +982,12 @@ def test_glossary_progress_mark_completed_remove_and_bulk_refresh_rows_counts_wi
             completed_now = phone.chip("completed", +2, tab=tab)
             start = len(phone.conn.messages)
             await phone.bulk(tab, "mark_completed")
-            note = await phone.note(3)
-            await phone.settle()
-            assert note.message == "Marked 2 chapters as completed"
-            _assert_snackbar_shown(phone, note)
-            assert all(note.screen["gp_rows"][k] == "completed" for k in todo)
-            assert all("✅ Completed" in note.screen["gp_screen"][k] for k in todo)
+            shown = await _gp_refreshed(phone, tab, todo[1], lambda status: status == "completed")
+            assert all(shown["gp_rows"][k] == "completed" for k in todo)
+            assert all("✅ Completed" in shown["gp_screen"][k] for k in todo)
             assert not tab.selecting and not tab.bulk_bar.control.visible
-            assert _client_got_text(phone.conn, start, note.at, completed_now)
+            assert _client_got_text(phone.conn, start, None, completed_now)
+            assert phone.notes == [], [n.message for n in phone.notes]  # the refreshed rows are the confirmation
             # a failing write says why (the shared core cannot save the glossary progress) and nothing changes
             target = next(r for r in tab.view.rows if r.kind == "chapter" and r.status == "failed")
             before = real_env["gp"].read_bytes()
@@ -1019,7 +999,7 @@ def test_glossary_progress_mark_completed_remove_and_bulk_refresh_rows_counts_wi
             sheet = await phone.open_row_menu(target.key, tab=tab)
             start = len(phone.conn.messages)
             await phone.tap(phone.sheet_row(sheet, "✅ Mark as completed"))
-            note = await phone.note(4)
+            note = await phone.note(1)
             await phone.settle()
             assert note.message == "Could not update the glossary progress: [Errno 28] No space left on device"
             _assert_snackbar_shown(phone, note)

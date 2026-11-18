@@ -44,7 +44,7 @@ from glossarion_mobile.ui.library.common import BusyBar, stat_chip, status_avata
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
 
-__all__ = ["DELETED_BANNER", "EMPTY_BODY", "GlossaryTab", "action_done_text", "empty_title",
+__all__ = ["DELETED_BANNER", "EMPTY_BODY", "GlossaryTab", "empty_title",
            "glossary_file_summary", "summary_line"]
 
 log = logging.getLogger("glossarion.library.ui")
@@ -96,21 +96,6 @@ def glossary_file_summary(path: str) -> dict:
     out["entries"] = len(entries)
     out["types"] = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     return out
-
-
-def action_done_text(action: str, rows: Sequence[Any]) -> str:
-    """What a Glossary Progress action did (hotfix 1 issue 9): "Marked 3 chapters as completed",
-    "Removed Ch.4 from progress" (the row's name as the confirmation names it)."""
-    count = len(rows)
-    chapters = bool(rows) and all(getattr(r, "kind", "") == "chapter" for r in rows)
-    noun = ("chapter" if count == 1 else "chapters") if chapters else ("row" if count == 1 else "rows")
-    if action == "mark_completed":
-        return f"Marked {count} {noun} as completed"
-    if action == "remove":
-        if count == 1:
-            return f"Removed {str(getattr(rows[0], 'title', '') or '').split(' · ')[0] or '1 row'} from progress"
-        return f"Removed {count} {noun} from progress"
-    return "Done"
 
 
 def summary_line(summary: dict) -> str:
@@ -608,10 +593,8 @@ class GlossaryTab:
                 log.exception("reloading the glossary progress after %s failed", action)
                 self.ctx.say(f"Could not refresh the glossary progress: {exc}")
                 return result
-        if not changed:
+        if not changed:  # a change shows in the reloaded rows (owner 2026-11-18: no pop-up for it)
             self.ctx.say("Nothing to mark as completed" if action == "mark_completed" else "Nothing was removed")
-        else:
-            self.ctx.say(action_done_text(action, rows))
         return result
 
     async def show_footnotes(self, rows: Sequence[pm.GlossaryRowVM]) -> Any:
@@ -733,9 +716,7 @@ class GlossaryTab:
             return None
         spec = JobSpec(kind="extract_glossary", title=str(self.page.book.get("name") or os.path.basename(source)),
                        inputs=(source,), origin=service.origin_for(self.page.book))
-        job_id = await service.submit(spec)
-        self.ctx.say("Extracting the glossary…", "Jobs", lambda: self.ctx.go("jobs"))
-        return job_id
+        return await service.submit(spec)  # the Book page strip shows the run (owner 2026-11-18: no pop-up)
 
 
 class _MarkdownSheet:

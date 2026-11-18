@@ -12,8 +12,8 @@ mode (the chat's ``effective_glossary_label``, the desktop rule) - plus:
   for several EPUBs), "Run options" (``plan_card.RunOptionsPanel``: "Only for this run" values
   become the job's ``config_overrides``) and, for one book, "Choose chapters" (range + Spine order
   + the desktop 🔍 preview);
-* **Start**: :func:`confirm_output_root` first (the desktop "Output Folder Mismatch"
-  question of Load for translation), then ``LibraryService.translate_spec`` ->
+* **Start**: :func:`confirm_output_root` first (the book's workspace joins the Library's output
+  folder; no question), then ``LibraryService.translate_spec`` ->
   ``JobsFeature.submit`` (origin = book, so the Book page strip, the JobStrip and Jobs
   show it);
 * multi-instance translation (design §6, ``instance_plan``): when several books are loaded and the
@@ -49,64 +49,76 @@ from glossarion_mobile.ui.components.sheet import fitted_column, sheet_frame
 from glossarion_mobile.ui.components.switch_row import switch_row
 from glossarion_mobile.ui.library.models import size_text
 
-__all__ = ["OUTPUT_MISMATCH_TITLE", "TranslateSheet", "confirm_output_root", "open_translate_sheet",
+__all__ = ["TranslateSheet", "confirm_output_root", "open_translate_sheet",
            "resume_translation", "review_gate_supported", "submit_instances", "submit_translation"]
 
 log = logging.getLogger("glossarion.library.ui")
 
 MISSING_RAW_REASON = "The raw source file can't be found (see “Scan for raw”)"
-OUTPUT_MISMATCH_TITLE = "Output Folder Mismatch"  # desktop _ensure_output_override_matches
+#: confirm_output_root refuses: the stopped chat run's workspace cannot join the Library's output folder.
+NAME_TAKEN = "Can't continue “{name}” in the Library: another book there has the same name"
 
 
 async def confirm_output_root(ctx: Any, books: Sequence[Mapping[str, Any]]) -> bool:
-    """Desktop ``_ensure_output_override_matches`` (Library "Load for translation"): when a book's
-    workspace sits under another output root than the current one, ask "Output Folder Mismatch"
-    (the shared prompt text; Cancel / Yes) and, on Yes, switch the root so the run resumes in that
-    workspace instead of starting a second one. True when loading can go on (no mismatch, or Yes).
+    """Library "Load for translation" / Resume: every book continues in the Library's own output folder
+    (``output_roots()[0]``) from the progress it already has, without a question (owner: "Auto resolve
+    this. Don't disturb the user." - the desktop asks "Output Folder Mismatch" here and, on Yes, points the
+    whole process at the book's folder, which on mobile was a chat's temporary run root).
 
-    ``ctx``: a ``LibraryContext`` (``LibraryFeature.context()``): its service's
-    ``output_root_mismatch_blocking`` / ``apply_output_override_blocking`` run on the io pool. A
-    service without them, or a check that fails, never blocks the run."""
+    A workspace found under another folder moves (or merges) into the Library's folder with its glossary
+    (``adopt_workspaces_blocking``; what cannot move is logged and the run goes on in the Library's folder).
+    When the process ``OUTPUT_DIRECTORY`` still names another folder (an earlier switch), it goes back to the
+    Library's folder silently; it is never pointed anywhere else. True, except when a stopped chat run's workspace
+    cannot join because another book holds its name in the Library's folder (``blocked``): the run would write
+    into that book's folder, so it does not start and a short message says why (the callers: the TranslateSheet's
+    Start, ``resume_translation`` and the chat's Library plan).
+
+    ``ctx``: a ``LibraryContext`` (``LibraryFeature.context()``): its service's blocking calls run on the io
+    pool. A service without them, or a call that fails, never blocks the run."""
     service = ctx.service
-    check = getattr(service, "output_root_mismatch_blocking", None)
-    if not callable(check):
-        return True
     rows = [dict(book) for book in books or ()]
     adopt = getattr(service, "adopt_workspaces_blocking", None)
     if callable(adopt):
-        # Issue 18: a workspace outside the Library's output folder moves (or merges) into it with its
-        # glossary, so the run continues there; the question below is left for what could not move
         try:
             adopted = await ctx.io(adopt, rows)
             rows = list(adopted.get("books") or rows)
+            for name, reason in adopted.get("kept") or ():
+                log.info("the workspace of %s was not moved into the output folder: %s", name, reason)
+            blocked = list(adopted.get("blocked") or ())
+            if blocked:
+                # the Library's folder of that name holds another book: a run would write into it
+                say = getattr(ctx, "say", None)
+                if callable(say):
+                    say(NAME_TAKEN.format(name=blocked[0]))
+                return False
+            if adopted.get("busy"):
+                log.info("a job is running: the workspaces move into the output folder at the next start")
         except Exception:
-            log.debug("moving the workspaces into the output folder failed", exc_info=True)
+            log.warning("moving the workspaces into the output folder failed", exc_info=True)
+    check = getattr(service, "output_root_mismatch_blocking", None)
+    reset = getattr(service, "apply_output_override_blocking", None)
+    if not callable(check) or not callable(reset):
+        return True
     try:
         info = await ctx.io(check, rows)
     except Exception:
-        log.debug("output root check failed", exc_info=True)
+        log.warning("output root check failed", exc_info=True)
         return True
     if not info:
         return True
-    if not str(info.get("new_override") or "") and callable(getattr(service, "apply_output_override_blocking", None)):
-        # the books are in the Library's own output folder and only the process root points elsewhere
-        # (an earlier switch): back to the Library's folder without asking
-        try:
-            await ctx.io(service.apply_output_override_blocking, "")
-            return True
-        except Exception:
-            log.debug("switching back to the Library's output folder failed", exc_info=True)
-    from glossarion_mobile.ui.tools.common import ask
+    roots = service.output_roots() if callable(getattr(service, "output_roots", None)) else []
+    library_root = str(roots[0]) if roots else ""
+    current = os.environ.get("OUTPUT_DIRECTORY", "")
+    from glossarion_mobile.services.workspace_sync import same_dir
 
-    answer = await ask(ctx, OUTPUT_MISMATCH_TITLE, str(info.get("prompt") or ""),
-                       [("cancel", "Cancel", "text"), ("yes", "Yes", "filled")], key="lib-output-root")
-    if answer != "yes":
-        return False
-    try:
-        await ctx.io(service.apply_output_override_blocking, str(info.get("new_override") or ""))
-    except Exception as exc:
-        ctx.say(f"Could not switch the output folder: {exc}")
-        return False
+    if library_root and same_dir(current, library_root):
+        log.info("a book's workspace lies outside the output folder (%s); the run continues in %s",
+                 info.get("new_override") or "", library_root)
+        return True
+    try:  # the process root points elsewhere (an earlier switch): back to the Library's folder
+        await ctx.io(reset, "")
+    except Exception:
+        log.warning("switching back to the Library's output folder failed", exc_info=True)
     return True
 
 
@@ -354,7 +366,7 @@ class TranslateSheet:
         if self.start_reason is not None:
             return None
         if not await confirm_output_root(self.ctx, self.ready_books):
-            return None  # Cancel on "Output Folder Mismatch": the sheet stays open
+            return None
         # The sources were resolved on the io pool when the sheet opened: never re-run the
         # registry reads / directory scans of raw_source() on the UI loop.
         if self.run_panel is not None:
@@ -482,10 +494,9 @@ async def resume_translation(ctx: Any, book: Mapping[str, Any],
     settings handed over (``config_overrides``: the chat's model / profile / language and the card's Run
     options), and the pipeline continues from the workspace's progress file, like the desktop's resume. No
     sheet: what would block the run is said in one short message instead (no raw source, no job service, a
-    model excluded on mobile, Cancel on "Output Folder Mismatch"); the sheet stays for a fresh Translate."""
+    model excluded on mobile); the sheet stays for a fresh Translate."""
     service = ctx.service
     book = dict(book)
-    name = str(book.get("name") or "this book")
     if service.jobs is None or not service.has_job_kind("translate"):
         ctx.say("The job service is not running")
         return None
@@ -514,7 +525,6 @@ async def resume_translation(ctx: Any, book: Mapping[str, Any],
         return None
     if job_id:
         ctx.haptic("medium_impact")
-        ctx.say(f"Resuming “{name}”")
     return job_id
 
 

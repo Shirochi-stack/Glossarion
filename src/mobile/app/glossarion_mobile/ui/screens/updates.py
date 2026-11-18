@@ -286,8 +286,8 @@ class UpdatesScreen(PageScreen):
 
         result = await NativeDocs(self.installer.native, platform="ios").pick_save_location(
             os.path.basename(path), "application/octet-stream", path)
-        if result is not None:
-            self.say("Saved to Files" if result.get("ok") else result.get("message") or "Could not save the IPA")
+        if result is not None and not result.get("ok"):  # the Files picker itself shows a save (no pop-up)
+            self.say(result.get("message") or "Could not save the IPA")
 
     def _progress_text(self) -> str:
         installer = self.installer

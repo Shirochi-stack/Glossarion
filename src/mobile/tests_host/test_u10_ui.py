@@ -1332,7 +1332,7 @@ def test_transfer_it_handoff_keeps_the_pasted_link(tmp_path):
         assert not (await parts["save"]())["ok"] and parts["error"].visible
         parts["field"].value = "https://transfer.it/t/abcdef12"
         assert (await parts["save"]())["ok"]
-        assert "transfer.it upload link saved" in env.said
+        assert not any("link saved" in str(s) for s in env.said)  # the Output tab lists it (no pop-up)
         await tab.refresh_cloud()
         assert any(t == "Remove" for t in texts(tab.cloud_column))  # transfer.it links cannot be deleted from the app
         await parts["open"]()

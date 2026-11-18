@@ -16,7 +16,10 @@ memory (``stash``) and this job applies it - the worker half of the desktop
 * ``progress_actions.retranslation_result_message(result)`` is the desktop result dialog
   ``(kind, title, message)``; it is logged and recorded on the job result
   (``retranslate_kind`` / ``retranslate_title`` / ``retranslate_message``) for the
-  Chapters tab's snackbar or sheet.
+  Chapters tab's snackbar or sheet;
+* then each chapter row the reset turned to ``pending`` gets the mobile Retranslate mark
+  (``workspace_sync.mark_reset_rows``: ``retranslate_reset_at`` + ``last_updated``), so a merge with an
+  older copy of the book (a chat's workspace, a stopped run's run root) keeps the reset.
 
 The job is not resumable: the plan is the confirmation the user saw (with the progress
 baseline its three-way merge starts from), so a plan lost with the process is never
@@ -28,9 +31,14 @@ None), ``count`` (rows, for the title), ``output_dir`` (display only).
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
+import time
 import uuid
 from typing import Any, Optional
+
+log = logging.getLogger("glossarion.jobs.retranslate")
 
 __all__ = ["KINDS", "PLAN_GONE", "discard", "pending_tokens", "run", "stash", "take"]
 
@@ -82,6 +90,56 @@ def _progress_actions() -> Any:
     return progress_actions
 
 
+def _progress_file(book: Any) -> str:
+    """The progress file the plan's book writes (``BookProgress.progress_file`` / ``data["progress_file"]``)."""
+    path = str(getattr(book, "progress_file", "") or "")
+    data = getattr(book, "data", None)
+    if not path and isinstance(data, dict):
+        path = str(data.get("progress_file") or "")
+    return path
+
+
+def _read_json(path: str) -> Optional[dict]:
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as stream:
+            loaded = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _plan_rows(plan: Any) -> tuple:
+    """``(chapter rows, chunk parents)``: the progress keys the plan resets as a whole, and the rows only some of
+    whose chunks it resets (``selected_chapters``' ``progress_key`` / ``parent_progress_key``)."""
+    rows, parents = set(), set()
+    for info in getattr(plan, "selected_chapters", None) or ():
+        if not isinstance(info, dict):
+            continue
+        if info.get("is_chunk_progress"):
+            if info.get("parent_progress_key"):
+                parents.add(str(info["parent_progress_key"]))
+        elif info.get("progress_key"):
+            rows.add(str(info["progress_key"]))
+    return rows, parents
+
+
+def _mark_resets(progress_file: str, before: Optional[dict], plan: Any = None, since: Optional[float] = None) -> None:
+    """The rows the reset took (the plan's, and any other it turned to pending) carry the Retranslate mark
+    (``workspace_sync.mark_reset_rows``), so a later merge with another copy of the book (a chat's, a stopped
+    run's) keeps them reset."""
+    if not progress_file or before is None:
+        return
+    try:
+        from glossarion_mobile.services.workspace_sync import mark_reset_rows
+
+        rows, parents = _plan_rows(plan)
+        mark_reset_rows(progress_file, before, rows=rows, partial=parents, since=since)
+    except Exception:
+        log.warning("marking the retranslated rows of %s failed", progress_file, exc_info=True)
+
+
 def run(ctx: Any) -> dict:
     from glossarion_mobile.services.jobs import JobError
 
@@ -94,7 +152,11 @@ def run(ctx: Any) -> dict:
     count = int(getattr(plan, "count", 0) or params.get("count") or 0)
     ctx.phase("Resetting")
     ctx.log(f"🔁 Retranslate Selected: {count} row(s)")
+    progress_file = _progress_file(book)
+    before = _read_json(progress_file)
+    started = time.time()
     result = pa.apply_retranslation(book, plan, params.get("linked_choice"))
+    _mark_resets(progress_file, before, plan, started)
     message_fn = getattr(pa, "retranslation_result_message", None)
     kind, title, message = (message_fn(result) if callable(message_fn)
                             else ("info", "Success", "Retranslation reset finished."))

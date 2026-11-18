@@ -231,7 +231,13 @@ class JobDetailScreen(Screen):
         self._unsubs: list[Callable[[], None]] = []
         self._last_requests = 0.0
         self._log_buffer: Optional[LogBuffer] = None
+        self._lines_unsub: Optional[Callable[[], None]] = None  # ``_on_lines`` on the shown buffer (``did_show``)
         self._device_task: Any = None  # the on-device status loop (``_follow_device_status``)
+        # the run that already carried this job on when the page was opened: a page opened by id on such an entry
+        # shows that entry; only a run that takes over later is followed (``_follow_newer_run``)
+        carried_into = getattr(service, "carried_into", None)
+        self._bound_carrier: Optional[str] = carried_into(self.job_id) if callable(carried_into) and self.job_id \
+            else None
         known = service.snapshot(self.job_id) if self.job_id else None
         self.title = (known.title if known is not None else "") or "Job"  # the app bar is built first
 
@@ -573,20 +579,92 @@ class JobDetailScreen(Screen):
 
     def did_show(self) -> None:
         refresh = getattr(self.service, "refresh_finished_progress", None)
+        self._follow_newer_run()  # a run that took over while the page was not listening
         if callable(refresh) and self.snap is not None and self.snap.is_terminal:
             self._spawn(self._io(refresh, self.job_id))  # marks changed since it ended: "N QA failed" follows
         if self._unsubs or self.snap is None:
             return
         self._unsubs.append(self.service.subscribe(self._on_view))
-        if self.dispatcher is not None and self._log_buffer is not None and hasattr(self.dispatcher, "subscribe_log"):
-            self._unsubs.append(self.dispatcher.subscribe_log(self._log_buffer, self._on_lines))
+        self._subscribe_lines()
         if not self.snap.is_terminal:
             self._device_task = self._spawn(self._follow_device_status(), remember=False)
+
+    def _subscribe_lines(self) -> None:
+        """``_on_lines`` on the shown log buffer (its requests refresh with every new line)."""
+        if self.dispatcher is not None and self._log_buffer is not None and hasattr(self.dispatcher, "subscribe_log"):
+            self._lines_unsub = self.dispatcher.subscribe_log(self._log_buffer, self._on_lines)
+
+    def _follow_newer_run(self) -> bool:
+        """Owner: after Stop and a new run of the same book, Back to this page still showed the stopped run (its
+        log ending in "Stopped", its requests) while the job bar showed the new one. The page of a run that did not
+        finish (stopped, failed, interrupted) that is open when a newer run takes this job over
+        (``JobService.carried_into``: a run of the book that does its work, or its Resume, followed to the newest)
+        shows that run from then on: its snapshot, title, requests, ETA and live log. A page opened by id on an
+        entry that was carried on already shows that entry. True when it moved to another run (already applied)."""
+        carried_into = getattr(self.service, "carried_into", None)
+        if not callable(carried_into) or not self.job_id or getattr(self, "state_chip", None) is None:
+            return False
+        if self.snap is not None and self.snap.state is JobState.DONE:
+            return False  # a finished run's page stays on it (its "N QA failed" follows the new run's work)
+        newer = carried_into(self.job_id)
+        if not newer or newer == self.job_id or newer == self._bound_carrier:
+            return False
+        snap = self.service.snapshot(newer)
+        if snap is None:
+            return False
+        log.info("job page %s follows job %s, which carries it on", self.job_id, newer)
+        self.job_id = newer
+        self._bound_carrier = carried_into(newer)
+        # what was kept per job
+        self.eta = EtaEstimator()
+        self._files_key = self._files_target = None
+        self._library_key = self._library_found = self._library_task = None
+        self._chat_book = None
+        self._last_requests = 0.0
+        # the header
+        self.title = snap.title or "Job"
+        self.title_text.value = snap.title
+        from glossarion_mobile.ui.screens.jobs import is_instance_job
+
+        self.instance_chip.label = ft.Text(instance_label(snap))
+        self.instance_chip.visible = is_instance_job(snap)
+        if self.app_bar_title is not None:
+            self.app_bar_title.value = self.title
+            self._update_control(self.app_bar_title)
+        # the live log: the new run's buffer only (the console drops the old lines and subscriptions)
+        self._show_buffer(self._buffer())
+        self._apply(snap)
+        self.requests_box.height = None  # the new run's cards decide whether they need the box
+        self._refresh_requests(force=True)
+        task = self._device_task
+        if self._unsubs and not snap.is_terminal and (task is None or task.done()):
+            self._device_task = self._spawn(self._follow_device_status(), remember=False)
+        self._mark_dirty()
+        return True
+
+    def _show_buffer(self, buffer: LogBuffer) -> None:
+        """The console and ``_on_lines`` on ``buffer`` instead of the shown one."""
+        self._log_buffer = buffer
+        lines_unsub, self._lines_unsub = self._lines_unsub, None
+        if lines_unsub is not None:
+            lines_unsub()
+        self.console.set_buffer(buffer)
+        if lines_unsub is not None:
+            self._subscribe_lines()
+
+    def _follow_live_buffer(self) -> None:
+        """A queued job has no log buffer yet (the page showed its empty log file): its own once it starts."""
+        live = self.service.log_buffer(self.job_id)
+        if live is not None and live is not self._log_buffer and getattr(self, "console", None) is not None:
+            self._show_buffer(live)
 
     def dispose(self) -> None:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        lines_unsub, self._lines_unsub = self._lines_unsub, None
+        if lines_unsub is not None:
+            lines_unsub()
         task, self._device_task = self._device_task, None
         if task is not None:
             task.cancel()
@@ -621,7 +699,11 @@ class JobDetailScreen(Screen):
 
     def _update_device_status(self) -> None:
         """Send only the status (not the page: a whole-page refresh every second would re-pin its end)."""
-        control, dispatcher = self.device_status, self.dispatcher
+        self._update_control(self.device_status)
+
+    def _update_control(self, control: Any) -> None:
+        """Send ``control`` alone (batched on the loop when the dispatcher is bound)."""
+        dispatcher = self.dispatcher
         try:
             if dispatcher is not None and getattr(dispatcher, "bound", False) and hasattr(dispatcher, "mark_dirty"):
                 dispatcher.mark_dirty(control)
@@ -631,9 +713,12 @@ class JobDetailScreen(Screen):
             pass
 
     def _on_view(self, view: Any) -> None:
+        if self._follow_newer_run():  # also while hidden under another page: Back shows the new run
+            return
         snap = view.find(self.job_id)
         if snap is None:
             return
+        self._follow_live_buffer()
         self._apply(snap)
         self._refresh_requests(force=snap.is_terminal)
         self._mark_dirty()
@@ -695,10 +780,8 @@ class JobDetailScreen(Screen):
         path = str((question.get("data") or {}).get("path") or "")
         question_id = str(question.get("id") or "")
 
-        def answer(accepted: bool) -> None:
+        def answer(accepted: bool) -> None:  # a refusal stops the job: its state line shows it (no pop-up)
             self.service.answer(question_id, bool(accepted))
-            if not accepted:
-                self._notify("Translation stopped: the glossary was not accepted")
 
         def edit(file_path: str) -> None:
             if self.review_sheet is not None:

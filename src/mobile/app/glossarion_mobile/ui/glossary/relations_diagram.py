@@ -1881,8 +1881,7 @@ class RelationsDiagram:
             self._apply_state(gender=result["tracker"])
         else:
             self.stamps = (result.get("stamp"), self.stamps[1], self.stamps[2])
-            self._apply_state(tracker=result["tracker"])
-        self.ctx.say("Undone")
+            self._apply_state(tracker=result["tracker"])  # the redrawn diagram shows it (no pop-up)
         return True
 
     def close(self) -> None:

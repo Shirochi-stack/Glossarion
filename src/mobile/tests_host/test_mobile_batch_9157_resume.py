@@ -90,7 +90,7 @@ def test_resume_starts_the_library_run_without_the_translate_sheet(tmp_path):
     (spec,) = submitted
     assert spec.kind == "translate" and spec.inputs == (str(raw),)
     assert spec.params == {"config_overrides": overrides} and spec.origin["bid"] == "bid7"
-    assert said == ["Resuming “Book”"]  # at most a toast
+    assert said == []  # the job strip shows the resumed run: no pop-up (owner 2026-11-18)
 
 
 def test_resume_guards_are_short_messages_not_the_sheet(tmp_path):

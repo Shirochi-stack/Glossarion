@@ -29,6 +29,11 @@ Progress manager of ``<root>/X`` showed one translation while every run of it we
 :func:`split_workspaces` finds such folders and :func:`join_workspace` makes them one; a merge keeps the
 chapters both folders finished (:func:`merge_progress`).
 
+A Retranslate is a decision, not an older state: the mobile retranslate job marks each chapter row it reset
+(:func:`mark_reset_rows`, ``retranslate_reset_at``), and every merge keeps that reset over a copy of the row
+that is not newer than it (the old completed row, its chapter file and its chunk results do not come back).
+Rows an interrupted run left still lose to a finished copy.
+
 All functions are blocking file work: call them off the UI loop, while no job writes the folders.
 """
 
@@ -43,6 +48,10 @@ from typing import Any, Optional
 log = logging.getLogger("glossarion.workspace_sync")
 
 __all__ = [
+    "DIFFERENT_BOOK",
+    "RESET_MARK",
+    "RESET_PARTIAL",
+    "RUN_ROOTS_DIR",
     "STASH_DIR",
     "adopt_workspace",
     "book_glossary_dir",
@@ -51,11 +60,15 @@ __all__ = [
     "chat_spelling",
     "join_workspace",
     "keep_book_state",
+    "mark_reset_rows",
     "merge_progress",
     "merge_tree",
     "named_after",
+    "points_elsewhere",
     "prepare_merge",
     "read_progress",
+    "reset_outputs",
+    "run_root_of",
     "same_book",
     "same_chapters",
     "same_dir",
@@ -69,12 +82,44 @@ METADATA_FILE = "metadata.json"
 #: The workspace's own glossary folder (``glossary_progress_core`` searches ``<root>/<book>/Glossary``).
 STASH_DIR = "Glossary"
 
+#: The folder (under the app's data folder) that holds the chat runs' run roots
+#: (``ChatFeature``: ``<data>/direct_text_runs/glossarion_input_output_XXXX``).
+RUN_ROOTS_DIR = "direct_text_runs"
+
+#: A chapter row's Retranslate time (the mobile retranslate job, :func:`mark_reset_rows`).
+RESET_MARK = "retranslate_reset_at"
+
+#: On a row whose Retranslate reset only some of its chunks: the time that reset started. Its chapter file still
+#: holds the other chunks (the reset rewrote it then), so only a copy older than that is the old text.
+RESET_PARTIAL = "retranslate_reset_partial_since"
+
+#: :func:`adopt_workspace`'s reason when ``<target root>/<book>`` belongs to another book.
+DIFFERENT_BOOK = "a different book has this name"
+
 
 def _norm(path: Any) -> str:
     try:
         return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
     except Exception:
         return str(path or "")
+
+
+def run_root_of(path: Any) -> str:
+    """The chat run root ``path`` lies in (``<data>/direct_text_runs/<run root>``, the run root itself
+    included), '' when it lies in none. A run root is a chat run's temporary output folder, never a Library one."""
+    if not path:
+        return ""
+    try:
+        current = os.path.normpath(os.path.abspath(str(path)))
+    except Exception:
+        return ""
+    while True:
+        parent = os.path.dirname(current)
+        if not parent or parent == current:
+            return ""
+        if os.path.basename(parent).casefold() == RUN_ROOTS_DIR:
+            return current
+        current = parent
 
 
 def same_dir(a: Any, b: Any) -> bool:
@@ -136,11 +181,13 @@ def stash_run_glossary(run_root: str, book: str, workspace: str) -> str:
     return stash
 
 
-def carry_glossary(workspace: str, target_root: str, old_root: str = "") -> str:
+def carry_glossary(workspace: str, target_root: str, old_root: str = "", *, keep_existing: bool = False) -> str:
     """The workspace now lives under ``target_root``: its glossary - the stash ``<workspace>/Glossary/`` and
     the old root's ``<old root>/Glossary/<book>/`` - joins ``<target root>/Glossary/<book>/`` (newer files
-    win), where the next run of the book reads and continues it. The stash is removed once copied; the old
-    root's folder is left in place. Returns the glossary folder ('' when there was nothing to carry)."""
+    win; ``keep_existing``: a file the target folder already holds stays, as when the workspace merged into a
+    book the Library already had), where the next run of the book reads and continues it. The stash is removed
+    once copied; the old root's folder is left in place. Returns the glossary folder ('' when there was nothing
+    to carry)."""
     if not workspace or not target_root:
         return ""
     book = os.path.basename(os.path.normpath(str(workspace)))
@@ -149,11 +196,11 @@ def carry_glossary(workspace: str, target_root: str, old_root: str = "") -> str:
     if old_root and not same_dir(old_root, target_root):
         old = book_glossary_dir(old_root, book)
         if os.path.isdir(old) and not same_dir(old, target):
-            merge_tree(old, target)
+            merge_tree(old, target, keep_existing=keep_existing)
             carried = True
     stash = os.path.join(str(workspace), STASH_DIR)
     if os.path.isdir(stash) and not same_dir(stash, target):
-        merge_tree(stash, target)
+        merge_tree(stash, target, keep_existing=keep_existing)
         shutil.rmtree(stash, ignore_errors=True)
         carried = True
     return target if carried else ""
@@ -207,6 +254,50 @@ def same_book(target: str, folder: str, source: str = "") -> bool:
         if _norm(raw) == _norm(pointed) or (same_content is not None and same_content(raw, pointed)):
             return same_chapters(folder, target)
     return False
+
+
+def points_elsewhere(target: Any, raw: Any) -> bool:
+    """The folder ``target``'s ``source_epub.txt`` names a raw file other than ``raw`` (not the same path, not
+    the same content): ``target`` is another book's workspace. False when either is unknown."""
+    if not target or not raw:
+        return False
+    try:
+        import library_core  # shared (U5)
+    except Exception:
+        return False
+    read_pointer = getattr(library_core, "_read_source_epub_pointer", None)
+    same_content = getattr(library_core, "_same_file_content", None)
+    if read_pointer is None or not os.path.isfile(os.path.join(str(target), "source_epub.txt")):
+        return False
+    pointed = read_pointer(str(target))
+    if not pointed or _norm(pointed) == _norm(raw):
+        return False
+    if same_content is not None and os.path.isfile(str(raw)) and os.path.isfile(str(pointed)):
+        try:
+            return not same_content(str(raw), str(pointed))
+        except Exception:
+            return True
+    return True
+
+
+def _same_book_unpointed(target: str, folder: str, source: str = "") -> bool:
+    """:func:`same_book` for a ``target`` without a ``source_epub.txt`` (the pipeline writes it only when its
+    translation stage creates the folder: a run stopped in the glossary stage leaves none): ``target`` holds no
+    translation yet, or it is named after the raw file's stem and its translation is of the same chapters.
+    A ``target`` with a pointer is left to :func:`same_book`."""
+    try:
+        import library_core  # shared (U5)
+
+        read_pointer = getattr(library_core, "_read_source_epub_pointer", None)
+    except Exception:
+        read_pointer = None
+    if os.path.isfile(os.path.join(target, "source_epub.txt")) and read_pointer is not None and read_pointer(target):
+        return False
+    if not os.path.isfile(os.path.join(target, PROGRESS_FILE)):
+        return True
+    raw = source or (read_pointer(folder) if read_pointer is not None else "") or ""
+    stem = os.path.splitext(os.path.basename(str(raw)))[0] if raw else ""
+    return bool(stem) and named_after(os.path.basename(os.path.normpath(target)), stem) and same_chapters(folder, target)
 
 
 def chat_spelling(stem: Any) -> str:
@@ -277,10 +368,122 @@ def _compiled_documents(folder: str) -> list:
             and not (raw and _norm(os.path.join(folder, name)) == _norm(raw))]
 
 
+def _stamp(entry: Any, key: str) -> float:
+    try:
+        return float(entry.get(key) or 0) if isinstance(entry, dict) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _reset_wins(row: Any, rival: Any) -> bool:
+    """``row`` carries a Retranslate mark (:data:`RESET_MARK`) no older than ``rival``'s last change (None: no
+    rival): the user's reset stands over that copy of the chapter."""
+    mark = _stamp(row, RESET_MARK)
+    return bool(mark) and (rival is None or _stamp(rival, "last_updated") <= mark)
+
+
+def _live_reset(entry: Any) -> bool:
+    """A row the Retranslate reset that nothing has translated since (marked, not changed after the mark)."""
+    mark = _stamp(entry, RESET_MARK)
+    return bool(mark) and not _row_rank(entry) and _stamp(entry, "last_updated") <= mark
+
+
+def _reset_file_kept(entry: Any, path: str) -> bool:
+    """``path`` is what a chunk-level Retranslate left of the row ``entry``'s chapter (the other chunks' text,
+    rewritten by that reset or later: not older than :data:`RESET_PARTIAL`, with a little slack for coarse file
+    times), not an older copy of the whole old chapter."""
+    since = _stamp(entry, RESET_PARTIAL)
+    if not since or not path:
+        return False
+    try:
+        return os.path.getmtime(path) >= since - 2.0
+    except OSError:
+        return False
+
+
+def reset_outputs(progress: Any, folder: str = "") -> list:
+    """The chapter files of the rows in ``progress`` the Retranslate reset and nothing translated since: the old
+    translation, which must not sit beside the reset row (the pipeline would take it for the chapter's text).
+    A row whose reset took only some of its chunks keeps the file that reset left (the other chunks); an older
+    copy of the chapter in ``folder`` is old text (no ``folder``: such a file is kept)."""
+    chapters = (progress.get("chapters") if isinstance(progress, dict) else None) or {}
+    files = {True: set(), False: set()}
+    for entry in chapters.values():
+        name = str(entry.get("output_file") or "") if isinstance(entry, dict) else ""
+        if name and not os.path.isabs(name):
+            drop = _live_reset(entry)
+            if drop and entry.get(RESET_PARTIAL) and (not folder or _reset_file_kept(entry, os.path.join(folder, name))):
+                drop = False
+            files[drop].add(name)
+    return sorted(files[True] - files[False])
+
+
+def _drop_reset_outputs(folder: str, progress: Any) -> None:
+    for name in reset_outputs(progress, folder):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                log.warning("removing the old text of the retranslated chapter %s failed", path, exc_info=True)
+
+
+def mark_reset_rows(progress_file: str, before: Any, when: Optional[float] = None, *, rows: Any = (),
+                    partial: Any = (), since: Optional[float] = None) -> int:
+    """The mobile retranslate job reset chapters of ``progress_file`` (``before``: the file as it was): each row it
+    reset - the plan's chapter rows (``rows``: progress keys) and chunk parents (``partial``), else each row it
+    turned to ``pending`` - carries :data:`RESET_MARK` (and ``last_updated``) = ``when``, so a merge with an older
+    copy of the book keeps the reset. A row only some of whose chunks were reset (in ``partial``, not in ``rows``)
+    also carries :data:`RESET_PARTIAL` = ``since`` (when the reset started): its file still holds the other
+    chunks. Returns the number of rows marked."""
+    import time
+
+    if not progress_file:
+        return 0
+    try:
+        with open(str(progress_file), encoding="utf-8") as stream:
+            progress = json.load(stream)
+    except (OSError, ValueError):
+        return 0
+    chapters = progress.get("chapters") if isinstance(progress, dict) else None
+    if not isinstance(chapters, dict):
+        return 0
+    old_rows = ((before.get("chapters") if isinstance(before, dict) else None) or {})
+    stamp = float(when if when is not None else time.time())
+    whole = {str(key) for key in rows or ()}
+    chunked = {str(key) for key in partial or ()} - whole
+    marked = 0
+    for key, entry in chapters.items():
+        if not isinstance(entry, dict) or str(entry.get("status") or "") != "pending":
+            continue
+        previous = old_rows.get(key)
+        if (str(key) not in whole and str(key) not in chunked and isinstance(previous, dict)
+                and str(previous.get("status") or "") == "pending"):
+            continue  # pending before and not in the plan (an interrupted run's row): not this reset's row
+        entry[RESET_MARK] = stamp
+        entry["last_updated"] = stamp
+        if str(key) in chunked:
+            # still reset by an earlier chunk reset (pending since): its file dates from then
+            earlier = _stamp(previous, RESET_PARTIAL) if _live_reset(previous) else 0.0
+            entry[RESET_PARTIAL] = earlier or float(since if since is not None else stamp)
+        else:
+            entry.pop(RESET_PARTIAL, None)
+        marked += 1
+    if marked:
+        path = str(progress_file)
+        temp = path + ".merge"
+        with open(temp, "w", encoding="utf-8") as stream:
+            json.dump(progress, stream, ensure_ascii=False, indent=2)
+        os.replace(temp, path)
+    return marked
+
+
 def merge_progress(own: Any, other: Any) -> tuple:
     """Two progress files of one book as one: ``(merged, rows taken from other)``. ``own`` stays as it is, but
     for the chapters ``other`` got further with (a row is matched by its source file, its key otherwise, since
-    the key holds a content hash). A row of ``other`` that only started is dropped: nothing is running it."""
+    the key holds a content hash). A row of ``other`` that only started is dropped: nothing is running it.
+    A Retranslate reset (:data:`RESET_MARK`) wins over a copy of the row that is not newer than it, on either
+    side: its chunk results come with it, the old ones are dropped."""
     merged = dict(own) if isinstance(own, dict) else {}
     other = other if isinstance(other, dict) else {}
     chapters = dict(merged.get("chapters") or {})
@@ -293,14 +496,16 @@ def merge_progress(own: Any, other: Any) -> tuple:
     rows = {chapter_of(key, entry): key for key, entry in chapters.items()}
     taken: list = []
     for key, entry in (other.get("chapters") or {}).items():
-        rank = _row_rank(entry)
-        if not rank:
-            continue
         chapter = chapter_of(key, entry)
         found = rows.get(chapter)
-        if found is not None:
-            if _row_rank(chapters[found]) >= rank:
+        mine = chapters.get(found) if found is not None else None
+        if mine is not None and _reset_wins(mine, entry):
+            continue  # own's Retranslate is newer than other's copy of the chapter
+        if not _reset_wins(entry, mine):
+            rank = _row_rank(entry)
+            if not rank or (mine is not None and _row_rank(mine) >= rank):
                 continue
+        if found is not None:
             replaced = chapters.pop(found)
             if isinstance(replaced, dict):
                 chunks.pop(str(replaced.get("content_hash") or found), None)
@@ -339,7 +544,8 @@ def prepare_merge(folder: str, target: str) -> dict:
 def keep_book_state(folder: str, state: Any) -> None:
     """The Migrate merged a chat's workspace into the Library folder ``folder``. The book keeps its title and
     the chapters only its old progress file knew, whose files are all still there (``state``:
-    :func:`prepare_merge`); nothing to do without one."""
+    :func:`prepare_merge`); nothing to do without one. A chapter the Library book had reset for retranslation
+    stays reset: the chat's older text the Migrate copied in for it is removed."""
     if not isinstance(state, dict):
         return
     try:
@@ -350,6 +556,7 @@ def keep_book_state(folder: str, state: Any) -> None:
             merged, taken = merge_progress(read_progress(folder), state["progress"])
             if taken:
                 _write_progress(folder, merged)
+            _drop_reset_outputs(folder, merged)
     except OSError:
         log.exception("restoring the Library book's state in %s failed", folder)
 
@@ -357,8 +564,9 @@ def keep_book_state(folder: str, state: Any) -> None:
 def join_workspace(folder: str, target: str) -> str:
     """The folder ``folder`` is the book's workspace under another name: make ``target`` hold it. No ``target``
     yet: ``folder`` is renamed. Otherwise what ``target`` lacks comes over (:func:`merge_progress`) and
-    ``folder`` is removed. Returns "moved", "merged" or "" (nothing changed: a progress file cannot be read,
-    so nothing could be kept for sure, or a file operation failed)."""
+    ``folder`` is removed. A chapter either folder reset for retranslation (and nothing translated since) stays
+    reset, without its old text. Returns "moved", "merged" or "" (nothing changed: a progress file cannot be
+    read, so nothing could be kept for sure, or a file operation failed)."""
     try:
         if not os.path.exists(target):
             os.rename(folder, target)
@@ -368,8 +576,11 @@ def join_workspace(folder: str, target: str) -> str:
         if (os.path.exists(theirs) and own is None) or (os.path.exists(mine) and other is None):
             log.warning("not joining %s and %s: a progress file cannot be read", folder, target)
             return ""
-        # what stays behind: an unfinished row's text (its row is dropped) and the outputs built from this folder
-        for name in _partial_outputs(other) + _compiled_documents(folder):
+        # what stays behind: an unfinished row's text (its row is dropped) and the outputs built from this folder;
+        # not what a chunk-level Retranslate left of a chapter (its other chunks: the merge decides on it below)
+        chunk_resets = {str(entry.get("output_file") or "") for entry in ((other or {}).get("chapters") or {}).values()
+                        if isinstance(entry, dict) and entry.get(RESET_PARTIAL) and _live_reset(entry)}
+        for name in [n for n in _partial_outputs(other) if n not in chunk_resets] + _compiled_documents(folder):
             path = os.path.join(folder, name)
             if os.path.isfile(path):
                 os.remove(path)
@@ -379,9 +590,20 @@ def join_workspace(folder: str, target: str) -> str:
             for entry in taken:  # the chapter's text goes with its row, over what an unfinished row left there
                 name = str(entry.get("output_file") or "")
                 path = os.path.join(folder, name)
-                if name and not os.path.isabs(name) and os.path.isfile(path):
+                if not name or os.path.isabs(name):
+                    continue
+                if _live_reset(entry):
+                    # a reset row: only what a chunk-level reset left of the chapter comes along; target's older
+                    # copy of the whole chapter is old text
+                    kept = _reset_file_kept(entry, path)
+                    if kept:
+                        shutil.copy2(path, os.path.join(target, name))
+                    elif entry.get(RESET_PARTIAL) and os.path.isfile(os.path.join(target, name)):
+                        os.remove(os.path.join(target, name))
+                elif os.path.isfile(path):
                     shutil.copy2(path, os.path.join(target, name))
             _write_progress(target, merged)
+        _drop_reset_outputs(target, read_progress(target))
         shutil.rmtree(folder)
     except OSError as exc:
         log.warning("joining the workspace %s to %s failed: %s", folder, target, exc)
@@ -430,9 +652,11 @@ def adopt_workspace(folder: str, target_root: str, source: str = "") -> dict:
     """Move the workspace ``folder`` (and its glossary) into ``target_root`` - the Library's output root.
 
     Returns ``{"status", "target", "reason"}``: ``"same"`` (already there, maybe under another spelling of
-    the path), ``"moved"``, ``"merged"`` (``<target root>/<book>`` existed and is the same book: newer files
-    win, then ``folder`` is removed) or ``"kept"`` (nothing moved: ``reason`` says why - another book has the
-    name, the folder is gone, the move failed)."""
+    the path), ``"moved"``, ``"merged"`` (``<target root>/<book>`` existed and is the same book - its
+    ``source_epub.txt`` names the same raw (:func:`same_book`), or it has none and holds no other translation
+    - : the two progress files become one (:func:`join_workspace`: the chapters either finished, a Retranslate
+    reset kept), then ``folder`` is removed) or ``"kept"`` (nothing moved: ``reason`` says why - another book
+    has the name, the folder is gone, the move failed)."""
     folder = os.path.abspath(str(folder or ""))
     if not folder or not os.path.isdir(folder):
         return {"status": "kept", "target": "", "reason": "the workspace folder is missing"}
@@ -451,11 +675,14 @@ def adopt_workspace(folder: str, target_root: str, source: str = "") -> dict:
     try:
         os.makedirs(target_root, exist_ok=True)
         if os.path.exists(target):
-            if not os.path.isdir(target) or not same_book(target, folder, source):
-                return {"status": "kept", "target": target, "reason": "a different book has this name"}
-            merge_tree(folder, target)
-            shutil.rmtree(folder, ignore_errors=True)
-            status = "merged"
+            if not os.path.isdir(target) or not (same_book(target, folder, source)
+                                                 or _same_book_unpointed(target, folder, source)):
+                return {"status": "kept", "target": target, "reason": DIFFERENT_BOOK}
+            status = join_workspace(folder, target)
+            if not status:
+                return {"status": "kept", "target": target,
+                        "reason": "the two copies could not be joined (a progress file cannot be read, or a file "
+                                  "operation failed)"}
         else:
             shutil.move(folder, target)
             status = "moved"
@@ -463,7 +690,9 @@ def adopt_workspace(folder: str, target_root: str, source: str = "") -> dict:
         log.warning("moving the workspace %s into %s failed: %s", folder, target_root, exc)
         return {"status": "kept", "target": target, "reason": str(exc)}
     try:
-        carry_glossary(target, target_root, old_root)
+        # merged into a book the Library already had: its glossary stays, the run's only adds what it lacks (a
+        # newer but shorter glossary of a stopped run must not replace a finished one)
+        carry_glossary(target, target_root, old_root, keep_existing=status == "merged")
     except Exception:
         log.exception("moving the glossary of %s failed", target)
     return {"status": status, "target": target, "reason": ""}
