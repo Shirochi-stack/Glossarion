@@ -14,6 +14,12 @@ APK checks (Android SDK build-tools: ``apksigner`` + ``aapt2``):
   * every ``[tool.flet.android.manifest_application]`` attribute of pyproject.toml on the merged
     ``<application>`` (U5: ``networkSecurityConfig``, the Reader WebView's loopback cleartext);
   * native libraries only for the allowed ABIs, and a split APK holds exactly its own ABI;
+  * the on-device engine's optional accelerators: with libggml-opencl the vendor libOpenCL.so, with
+    libggml-hexagon the vendor libcdsprpc.so declared ``<uses-native-library required="false">`` and never
+    bundled. ``src/mobile/ci/wheels/wheelhouse.toml`` [hexagon] (``--wheelhouse``) decides whether an arm64
+    APK must carry lib/arm64-v8a/libggml-hexagon.so (enabled) or must not (switched off). No HTP skeleton
+    (libggml-htp*, *.so.dsp, a Hexagon DSP ELF) may be in the APK or its packaged site-packages: the app
+    downloads them;
   * a size warning above ``--max-size-mb``.
 
 AAB checks (zip level + ``jarsigner``): manifest present, ABIs allowed, signature verifies; with
@@ -25,6 +31,7 @@ Exit status 1 when any check fails. Findings are also written as GitHub annotati
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import re
 import shutil
@@ -60,6 +67,8 @@ BASELINE_FORBIDDEN = (
 FGS_TYPE_DATA_SYNC = 0x1  # android:foregroundServiceType="dataSync"
 DEBUG_CERT_MARKER = "CN=Android Debug"
 LIB_RE = re.compile(r"^(?:base/)?lib/([^/]+)/[^/]+\.so$")
+DEFAULT_WHEELHOUSE = Path(__file__).resolve().parent / "wheels" / "wheelhouse.toml"
+NPU_LIBRARY = "lib/arm64-v8a/libggml-hexagon.so"
 
 
 @dataclass
@@ -290,6 +299,92 @@ def gpu_problems(tree: XmlElement, apk_names: list[str]) -> list[str]:
     return problems
 
 
+_WHEELS: list = []
+
+
+def _wheels():
+    """ci/wheels/wheels.py (stdlib only), for its HTP skeleton test shared with verify-native; loaded once."""
+    if not _WHEELS:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("glossarion_mobile_wheels", DEFAULT_WHEELHOUSE.parent / "wheels.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _WHEELS.append(module)
+    return _WHEELS[0]
+
+
+def hexagon_enabled(wheelhouse: Path | None) -> bool:
+    """wheelhouse.toml [hexagon] enabled = true: the arm64 engine carries the NPU backend."""
+    if wheelhouse is None or tomllib is None or not wheelhouse.is_file():
+        return False
+    data = tomllib.loads(wheelhouse.read_text(encoding="utf-8"))
+    return (data.get("hexagon") or {}).get("enabled") is True
+
+
+def skeleton_files(apk: zipfile.ZipFile) -> list[str]:
+    """HTP skeletons in the APK (or AAB) and in its embedded site-packages zip(s) (``assets/**/sitepackages*.zip``,
+    in a bundle ``<module>/assets/**``; reported as ``<zip>!<member>``): libggml-htp* or *.so.dsp names and
+    Hexagon DSP ELF files."""
+    find = _wheels().npu_skeleton_files
+
+    def head(archive: zipfile.ZipFile):
+        def read(name: str) -> bytes:
+            with archive.open(name) as stream:
+                return stream.read(20)
+        return read
+
+    names = [n for n in apk.namelist() if not n.endswith("/")]
+    found = find(names, head(apk))
+    for member in names:
+        base = member.rsplit("/", 1)[-1]
+        in_assets = member.startswith("assets/") or "/assets/" in member
+        if in_assets and base.startswith("sitepackages") and base.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(apk.read(member))) as inner:
+                    found += [f"{member}!{n}" for n in find([n for n in inner.namelist() if not n.endswith("/")],
+                                                            head(inner))]
+            except zipfile.BadZipFile:
+                continue
+    return sorted(set(found))
+
+
+def skeleton_problems(skeletons: list[str], what: str = "APK") -> list[str]:
+    """No HTP skeleton may ship in an APK or a bundle (``skeletons``: skeleton_files())."""
+    if not skeletons:
+        return []
+    return [f"the {what} carries HTP skeleton files {skeletons}: they may not ship (Hexagon SDK licence); "
+            f"the app downloads them from llama.cpp's release"]
+
+
+def npu_problems(tree: XmlElement, apk_names: list[str], skeletons: list[str], enabled: bool) -> list[str]:
+    """The on-device engine's optional NPU backend (arm64 libggml-hexagon.so): no HTP skeleton may ship
+    (``skeletons``: skeleton_files(); the app downloads them). With wheelhouse.toml [hexagon] enabled an arm64
+    APK must carry the backend, the vendor libcdsprpc.so (FastRPC) must be declared optional in the merged
+    manifest and never ship in the APK; switched off, the backend must not ship."""
+    problems = skeleton_problems(skeletons)
+    shipped = any(n.startswith(NPU_LIBRARY) for n in apk_names)
+    if not enabled:
+        if shipped:
+            problems.append(f"{NPU_LIBRARY} ships but wheelhouse.toml [hexagon] is switched off")
+        return problems
+    if not shipped:
+        if any(n.startswith("lib/arm64-v8a/") for n in apk_names):
+            problems.append(f"{NPU_LIBRARY} is missing although wheelhouse.toml [hexagon] is enabled")
+        return problems
+    declared = optional_native_libraries(tree)
+    if "libcdsprpc.so" not in declared:
+        problems.append("lib/arm64-v8a/libggml-hexagon.so ships but the merged manifest has no "
+                        "<uses-native-library android:name=\"libcdsprpc.so\"> (Android 12+ hides the vendor library)")
+    elif declared["libcdsprpc.so"]:
+        problems.append("<uses-native-library libcdsprpc.so> is required=\"true\": phones without a Hexagon DSP "
+                        "could not install the app")
+    bundled = [n for n in apk_names if re.match(r"^lib/[^/]+/libcdsprpc", n)]
+    if bundled:
+        problems.append(f"the APK bundles {bundled}: the NPU backend must use the phone's own libcdsprpc.so")
+    return problems
+
+
 def manifest_flag(tree: XmlElement, element: str, attribute: str) -> str | None:
     for node in tree.iter(element):
         if attribute in node.attrs:
@@ -465,10 +560,15 @@ def check_apk(report: Report, args, build_tools: Path | None, required: set[str]
                          + ", ".join(missing) + " (the Reader WebView needs networkSecurityConfig for 127.0.0.1)")
         with zipfile.ZipFile(apk) as archive:
             names = archive.namelist()
-        for problem in gpu_problems(tree, names):
+            skeletons = skeleton_files(archive)
+        enabled = hexagon_enabled(args.wheelhouse)
+        for problem in gpu_problems(tree, names) + npu_problems(tree, names, skeletons, enabled):
             report.error(problem)
         if any(n.startswith("lib/arm64-v8a/libggml-opencl.so") for n in names):
             report.facts["GPU backend"] = "OpenCL (libOpenCL.so optional)"
+        if any(n.startswith(NPU_LIBRARY) for n in names):
+            report.facts["NPU backend"] = ("Hexagon (libcdsprpc.so optional; HTP skeletons: "
+                                           f"{'none in the APK, the app downloads them' if not skeletons else skeletons})")
         debuggable = manifest_flag(tree, "application", "debuggable")
         if debuggable and debuggable.lower() in ("true", "0xffffffff", "-1"):
             report.warn("application is debuggable")
@@ -480,6 +580,9 @@ def check_aab(report: Report, args) -> None:
     aab = report.path
     with zipfile.ZipFile(aab) as archive:
         names = set(archive.namelist())
+        skeletons = skeleton_files(archive)
+    for problem in skeleton_problems(skeletons, "bundle"):
+        report.error(problem)
     if "base/manifest/AndroidManifest.xml" not in names:
         report.error("base/manifest/AndroidManifest.xml missing (not an Android App Bundle?)")
     abis = abis_in_zip(aab)
@@ -562,6 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expect-release", action="store_true", help="fail when signed with the debug certificate")
     parser.add_argument("--max-size-mb", type=float, default=350.0, help="warn above this size")
     parser.add_argument("--build-tools", help="Android SDK build-tools directory (default: newest under ANDROID_HOME)")
+    parser.add_argument("--wheelhouse", type=Path, default=DEFAULT_WHEELHOUSE,
+                        help="wheelhouse.toml whose [hexagon] says whether the NPU backend ships (default: %(default)s)")
     args = parser.parse_args(argv)
 
     required, forbidden, notes, config_errors = permission_expectations(args.pyproject)

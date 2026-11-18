@@ -24,6 +24,10 @@
     On-device) loads the phone's own OpenCL driver. Android 12+ (targetSdk 31+)
     hides vendor libraries from apps that do not declare them; required="false"
     keeps the app installable everywhere (no OpenCL: the GPU falls back to the CPU).
+  * <uses-native-library libcdsprpc.so required="false">: the same for the optional
+    NPU backend (libggml-hexagon.so, Qualcomm Hexagon), which loads the phone's own
+    FastRPC library to reach the cDSP. Phones without it still install the app; the
+    NPU is then not offered. (The vendor must also list it in public.libraries.txt.)
   * In-app updates (About > Updates, AppUpdates.kt): REQUEST_INSTALL_PACKAGES lets the
     app open the system installer for its own downloaded APK (the user still confirms,
     and allows "Install unknown apps" for Glossarion once). GlossarionUpdateFileProvider
@@ -47,6 +51,10 @@
 
         <uses-native-library
             android:name="libOpenCL.so"
+            android:required="false" />
+
+        <uses-native-library
+            android:name="libcdsprpc.so"
             android:required="false" />
 
         <service

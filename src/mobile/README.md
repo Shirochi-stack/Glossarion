@@ -214,6 +214,66 @@ libmtmd (the image encoder of vision models).
     OpenCL driver and with pocl (OpenCL, no Adreno): the backend loads only on demand, reports why, and
     the app's engine falls back to the CPU and generates. Real GPU execution is only tested on a phone.
 
+#### NPU (Snapdragon)
+
+Experimental, Android arm64 only: llama.cpp's Hexagon backend (`ggml-hexagon`, registry name `HTP`) runs
+the model on the phone's Qualcomm Hexagon NPU (the cDSP's HTP), reached through the vendor's FastRPC
+library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
+
+* What the APK carries: `libggml-hexagon.so`, an ordinary arm64 `GGML_BACKEND_DL` module next to
+  `libggml-opencl.so` (`llama_cpp/lib`, the APK's jniLibs), and the small marker file
+  `llama_cpp/npu-backend.txt`. It never NEEDs `libcdsprpc.so` (it dlopens it), so phones without it lose
+  nothing. The native extension's manifest declares
+  `<uses-native-library android:name="libcdsprpc.so" android:required="false"/>`.
+* What the APK does not carry: the HTP skeletons `libggml-htp-v73/v75/v79/v81/v85.so`. They are Hexagon
+  DSP files that contain Hexagon SDK runtime code, and the SDK licence does not allow us to ship them.
+  `patches/mobile.patch` (10.) does not build them at all.
+* What the app downloads, and when: at the first NPU use, the one skeleton for the phone's HTP arch.
+  It comes from llama.cpp's own GitHub release `b12387`, which is built from the same llama.cpp commit
+  (`a956a852`) that llama-cpp-python 0.3.37 vendors: the archive
+  `llama-b12387-bin-linux-arm64-snapdragon.tar.gz`, member `llama-b12387/lib/libggml-htp-vNN.so`. The
+  pins below give the app the size and sha256 of the archive and of each file to check the download.
+* The checksum pins: `ci/wheels/wheelhouse.toml` `[hexagon]` holds `skeleton_release`,
+  `skeleton_commit`, `skeleton_archive` (url, size, sha256) and `[hexagon.skeleton_files]` (per arch:
+  member, size, sha256). The patched loader carries the same values (`npu_skeleton_source()`), and
+  `tests_host/test_engine_npu_build.py` fails when the two differ. They belong to the vendored llama.cpp
+  commit. To bump llama-cpp-python: find the llama.cpp release whose tag points at the new vendored
+  commit, download its `bin-linux-arm64-snapdragon` archive, hash the archive and the five members, and
+  update both places in the same change.
+* At run time (the patched loader, only when the app asks): `npu_precheck()` runs the cheap steps
+  (shipped, libcdsprpc, arch) and says which arch to download; it loads no backend.
+  `register_npu_backend(skel_dir, options)` repeats them, checks that `skel_dir` holds the downloaded
+  `libggml-htp-v<arch>.so` with the pinned size ("NPU files not downloaded" otherwise; nothing is
+  registered then, so a later call can succeed), sets `GGML_HEXAGON_ARCH`, the app's `GGML_HEXAGON_*`
+  options and `GGML_HEXAGON_LIBHTP_DIR` before the only load (the backend reads them once), loads
+  `libggml-hexagon.so` by soname (never through `ggml_backend_load_all()`) and opens a real session
+  through `glossarion_hexagon_session_check()`. It reports each step: shipped, libcdsprpc, arch,
+  skeletons, registry, session. `device_index("HTP")` / `device_index("OpenCL")` give the `main_gpu` of
+  each registered backend in llama.cpp's own device order.
+* What CI still builds with the Hexagon SDK: the ARM side. `ggml-hexagon` compiles against the SDK's
+  headers and its qaic stub generator (`htp_iface`). `[hexagon]` pins the Hexagon SDK 6.7.0.0 (the
+  tarball llama.cpp's own Android toolchain image installs, a public GitHub release of
+  `snapdragon-toolchain/hexagon-sdk`, sha256-checked; no Qualcomm account). `wheels.py fetch` downloads
+  it, and `wheels.py stage-hexagon` unpacks it once and writes the CMake initial cache
+  `<NDK>/glossarion/hexagon-init.cmake` that the arm64 branch of `recipes/llama-cpp-python/meta.yaml`
+  loads with `-C` (`GGML_HEXAGON=ON`, the SDK paths, tools 21.0.04, `PREBUILT_LIB_DIR=android_aarch64`).
+  The SDK download (742 MB) is cached under its sha256 (`mobile-hexagon-sdk-<sha256>`).
+* Checks: `wheels.py verify-native` / `verify-site-packages` expect `libggml-hexagon` in the arm64 set
+  (no library may need it) and the marker. They fail on any `libggml-htp*` file, any `*.so.dsp` file and
+  any Hexagon ELF (e_machine 164) in the wheel or the installed site-packages. `ci/verify_apk.py` reads
+  `[hexagon]`: when it is on, an arm64 APK must carry `lib/arm64-v8a/libggml-hexagon.so` and the
+  `libcdsprpc.so` manifest entry (required="false"), and must not bundle `libcdsprpc`. On or off, it fails
+  when the APK or its packaged `sitepackages.zip` holds a skeleton file.
+* Licence: llama.cpp (ggml-hexagon included) is MIT. With no Qualcomm DSP file in the APK, the earlier
+  rule "test builds only, delete the CI artifacts" no longer applies to the APK. The app fetches the
+  skeletons from llama.cpp's public release on the phone itself.
+* The switch: `[hexagon] enabled = false` builds the engine without the backend: no SDK download,
+  `GGML_HEXAGON=OFF`, no `libggml-hexagon`, no marker, and the verify rules expect none (the app then
+  does not offer the NPU). It is on on this branch. It stays off on main until a phone test has passed.
+* Changing `wheelhouse.toml`, `wheels.py`, `build_wheels.sh` or anything under
+  `recipes/llama-cpp-python/` (the patch included) rebuilds the engine wheel once: the wheel cache keys
+  hash them.
+
 * Size: about 4 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
   of Python, resolved by pip). Android also installs `flet-libcpp-shared` (`libc++_shared.so`,
   which must exist exactly once in the APK: Gradle merges jniLibs).

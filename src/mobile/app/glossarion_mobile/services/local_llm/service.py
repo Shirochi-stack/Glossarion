@@ -55,6 +55,35 @@
   A GPU load leaves a marker (``GPU_ATTEMPT_KEY``) until the model's first answer ends: when the app
   died in between (a driver crash aborts the process), the next start records the fallback instead of
   crashing again. The RAM gate adds ``gpu_extra`` (GPU memory is shared with the CPU on phones).
+* **NPU (Snapdragon Hexagon):** a third backend, chosen per model at load time (``_placement``). Two stages on
+  Android arm64. Stage 1 (``run_npu_check``: ``engine.npu_precheck``, cheap: the build carries the backend,
+  libcdsprpc opens, the cDSP reports its arch) runs once per app version, in the background from ``start`` on the
+  version's first start (``NPU_CHECK_KEY`` keeps its answer for later starts). Stage 2 (``_npu_session``: the
+  wheel's ``register_npu_backend`` through ``engine.npu_state``, which opens a real DSP session) runs at most once
+  per process, on the loading thread before the first NPU load, and only once the phone's HTP skeleton is on disk:
+  the APK carries none (the Hexagon SDK licence), so that load first downloads ``engine.npu_skeleton_source()``'s
+  llama.cpp release archive (``downloads.fetch_blocking``: one plain GET, https redirects only, no retries) and
+  takes only its pinned skeletons (``downloads.extract_pinned``) into ``npu_skel_dir(<release>)``; folders of
+  other releases go once it is complete. A failed download is not a model fallback: that load runs on the GPU /
+  CPU, the NPU line says why, and it is tried again at the next start or "Try the NPU again". A Stop (or the
+  service stopping) during the download ends that load instead (nothing loads, nothing is recorded); the next NPU
+  load resumes the part. Either
+  stage still running after ``NPU_WATCHDOG_SECONDS``, or one the app died in (marker ``NPU_CHECK_ATTEMPT_KEY``
+  with its stage), and a failing stage 2 (``NPU_SESSION_KEY``) keep the NPU off until the app version changes.
+  The NPU is offered (``npu_offered``) when stage 1 passed and stage 2 has not failed. A model's ``backend`` (its
+  preset row; "auto" for every other model, Add from Hugging Face included): "auto" runs on the NPU when it is
+  offered, "Use NPU" (``NPU_KEY``, on when unset) is on, the model has no NPU fallback and its quant is one
+  the backend accepts (``presets.npu_quant_kind`` not "cpu"), else today's GPU / CPU rule; "npu" / "gpu" / "cpu"
+  name the device. An NPU load that fails (or its first token), a failing NPU answer, a first NPU load still
+  running after ``NPU_WATCHDOG_SECONDS`` (the restart message; native code is never killed) or a marker still set
+  at the next start (``NPU_ATTEMPT_KEY`` around an NPU load and its first token, ``NPU_INFLIGHT_KEY`` around
+  every NPU answer while the app is in the foreground: the backend aborts the process on DSP failures; both are
+  written to disk before the native call) records an NPU fallback for that model
+  (``NPU_FALLBACK_KEY``): it runs on the GPU / CPU until its file, its backend choice or the app version changes,
+  or "Try the NPU again" (``retry_npu``). No retry loop. The second parallel context and the vision projector
+  never use the NPU. Power mode: ``NPU_POWER_KEY`` (upstream's modes, default burst), applied when the backend
+  registers (a change applies after a restart). The screens only read this state (``npu_progress``,
+  ``npu_status_line``): no stage, download or NPU lock runs on the UI thread.
 """
 
 from __future__ import annotations
@@ -64,6 +93,7 @@ import collections
 import dataclasses
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -134,6 +164,39 @@ GPU_FALLBACK_KEY = "local_llm_gpu_fallback"
 #: Prefs key of a GPU load whose first answer has not ended yet: ``{"stem"}`` (crash detection)
 GPU_ATTEMPT_KEY = "local_llm_gpu_attempt"
 CRASH_REASON = "Glossarion closed while the GPU was starting this model"
+#: Prefs key of "Use NPU" (a bool, on when unset; shown only where the NPU check passed)
+NPU_KEY = "local_llm_npu"
+#: Prefs key of the NPU power mode (``engine.NPU_POWER_MODES``; unset: upstream's default)
+NPU_POWER_KEY = "local_llm_npu_power"
+#: Prefs key of the NPU fallbacks: ``{stem: {"reason", "file", "backend", "version", "at"}}``
+NPU_FALLBACK_KEY = "local_llm_npu_fallback"
+#: Prefs key of an NPU load running now (its first token included): ``{"stem", "at"}``
+NPU_ATTEMPT_KEY = "local_llm_npu_attempt"
+#: Prefs key of an NPU answer running now: ``{"stem", "at", "background"}`` (set before every NPU answer, cleared
+#: after; ``background``: the app is in the background, where an ordinary kill ends it too, so it records nothing)
+NPU_INFLIGHT_KEY = "local_llm_npu_inflight"
+#: Prefs key of the last NPU check (stage 1, ``engine.npu_precheck``): ``{"version", "state", "blocked", "seconds",
+#: "source"}`` (blocked: it hung or the app died in it; source: ``engine.npu_skeleton_source()``)
+NPU_CHECK_KEY = "local_llm_npu_check"
+#: Prefs key of the last NPU start (stage 2, ``register_npu_backend``): ``{"version", "state", "blocked", "seconds"}``
+NPU_SESSION_KEY = "local_llm_npu_session"
+#: Prefs key of an NPU stage running now: ``{"version", "at", "stage"}`` (stage 1 or 2)
+NPU_CHECK_ATTEMPT_KEY = "local_llm_npu_check_attempt"
+NPU_CRASH_REASON = "Glossarion closed while the NPU was running this model"
+NPU_CHECK_CRASH_REASON = "Glossarion closed while the NPU check was running"
+NPU_START_CRASH_REASON = "Glossarion closed while the NPU was starting"
+#: seconds to connect for the NPU files' download (an offline phone falls through to the GPU / CPU quickly)
+NPU_FETCH_TIMEOUT = (10.0, 30.0)
+NPU_CHECKING_TEXT = "Checking the NPU…"
+NPU_STARTING_TEXT = "Starting the NPU…"
+NPU_FILES_ERROR_TEXT = "NPU files not downloaded: {reason}"
+NPU_HANG_REASON = "the NPU did not answer within 120 s"
+NPU_CHECK_HANG_NOTE = "The NPU check did not answer. The NPU stays off until the next app update."
+#: seconds the NPU check and a first NPU load get before the NPU counts as not answering
+NPU_WATCHDOG_SECONDS = 120.0
+#: seconds stage 1 runs before the screens show "Checking the NPU…": a build without the backend and a phone
+#: without a Hexagon DSP answer at once and never show it (they look as they did before the NPU)
+NPU_CHECK_QUIET_SECONDS = 0.5
 MAX_WAITERS = 8
 IDLE_UNLOAD = 600.0
 BACKGROUND_UNLOAD = 60.0
@@ -250,6 +313,106 @@ def _platform() -> str:
     return (os.environ.get("GLOSSARION_PLATFORM") or "desktop").strip().lower()
 
 
+def current_app_version() -> str:
+    """This app build and its engine (``runtime_bootstrap``'s version and bundle, ``ENGINE_VERSION``): an NPU
+    fallback or a blocked NPU check lasts until it changes."""
+    version: dict = {}
+    try:
+        from glossarion_mobile import runtime_bootstrap as rb
+
+        state = rb.get_state()
+        version = dict(state.version or {}) if state is not None else {}
+    except Exception:
+        version = {}
+    app = "+".join(str(part) for part in (version.get("version") or "dev", version.get("bundle")) if part)
+    return f"{app}/llama-{eng.ENGINE_VERSION}"
+
+
+def npu_htp_root() -> str:
+    """``<app data>/htp``: the HTP skeleton folders (the app's private files directory on Android; FastRPC
+    cannot read them from inside the APK)."""
+    base = ""
+    try:
+        from glossarion_mobile import runtime_bootstrap as rb
+
+        paths = rb.get_paths()
+        base = str(paths.data) if paths is not None else ""
+    except Exception:
+        base = ""
+    base = base or os.environ.get("GLOSSARION_DATA_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".glossarion")
+    return os.path.join(base, "htp")
+
+
+def npu_skel_dir(release: str, root: Optional[str] = None) -> str:
+    """Where the downloaded HTP skeletons live: ``<root>/<skeleton release>`` (``npu_skeleton_source()["release"]``,
+    not the app version: an app update with the same engine keeps them)."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(release or "dev")).strip("_.") or "dev"
+    return os.path.join(root or npu_htp_root(), name)
+
+
+def _npu_blocked_state(reason: str) -> dict:
+    return {"backend": None, "device": "", "arch": None, "error": reason,
+            "steps": [{"name": "session", "ok": False, "detail": reason}]}
+
+
+#: one NPU files' download at a time in the process (the self-check's services share the folder)
+_NPU_FETCH_LOCK = threading.Lock()
+#: ``_fetch_npu_files``' answer when a Stop or the service stopping ended the download
+NPU_FETCH_CANCELLED = "cancelled"
+#: the release archive's name in the skeleton folder while it downloads (``.part``) and until it is extracted
+NPU_ARCHIVE_NAME = "skeletons.tar.gz"
+
+
+def _npu_bytes_text(done: int, total: int) -> str:
+    """"Getting NPU files · 12 / 26 MB"."""
+    if total:
+        return f"Getting NPU files · {done / 1e6:.0f} / {total / 1e6:.0f} MB"
+    return f"Getting NPU files · {done / 1e6:.0f} MB"
+
+
+def _anonymous_session() -> Any:
+    """A ``requests`` session that sends nothing of the phone's: no netrc credentials, no environment proxies or
+    cookies (``trust_env`` off)."""
+    import requests
+
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
+def _remove_other_npu_folders(current: str) -> None:
+    """Once ``current`` holds the phone's skeleton: every other folder in its parent goes (other skeleton releases,
+    and the per-app-version folders of the earlier test build)."""
+    import shutil
+
+    root = os.path.dirname(os.path.abspath(current))
+    keep = os.path.basename(os.path.abspath(current))
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(root, name)
+        if name == keep or os.path.islink(path) or not os.path.isdir(path):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        log.info("on-device NPU: removed the old NPU files folder %s", name)
+
+
+def _tidy_npu_folder(current: str) -> None:
+    """Once ``current`` holds the phone's skeleton: what a download the app died in left there goes (the archive,
+    its part and sidecar, unfinished ``.tmp`` skeletons). Under the fetch lock: never under a running extraction."""
+    with _NPU_FETCH_LOCK:
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return
+        for name in names:
+            if name.startswith(NPU_ARCHIVE_NAME) or name.endswith(".tmp"):
+                dl._remove(os.path.join(current, name))
+                log.info("on-device NPU: removed the leftover %s", name)
+
+
 def memory_info() -> tuple:
     """``(total, available)`` bytes (``available`` None when unknown)."""
     if _platform() == "ios":
@@ -362,6 +525,10 @@ class EngineSnapshot:
     vision: bool = False  # the loaded model has a vision projector
     device: Optional[str] = None  # what runs the loaded model ("GPU: Adreno (TM) 830 (OpenCL)", "CPU (…)")
     gpu_note: Optional[str] = None  # "GPU unavailable: <reason> — using CPU"
+    backend: Optional[str] = None  # "NPU" / "GPU" / "CPU": what the loaded model actually runs on
+    npu_note: Optional[str] = None  # "NPU unavailable for <model>: <reason>. Using CPU." / the restart message
+    #: what a load is doing before the model itself loads ("Getting NPU files · 12 / 26 MB", "Starting the NPU…")
+    phase: Optional[str] = None
 
 
 class LocalEngineService:
@@ -372,8 +539,15 @@ class LocalEngineService:
                  clock: Callable[[], float] = time.monotonic, memory: Optional[Callable[[], tuple]] = None,
                  watch: bool = True, downloads: Optional[dl.DownloadManager] = None,
                  stop_state: Callable[[], Optional[str]] = process_stop_state,
-                 gpu_backend: Optional[str] = None, _parallel_child: bool = False) -> None:
+                 gpu_backend: Optional[str] = None, npu_probe: Optional[Callable[[str, dict], dict]] = None,
+                 app_version: Optional[str] = None, recover_npu: bool = True,
+                 npu_precheck: Optional[Callable[[], dict]] = None,
+                 npu_source: Optional[Callable[[], Optional[dict]]] = None, npu_root: Optional[str] = None,
+                 npu_session: Any = None, _parallel_child: bool = False) -> None:
         self.prefs = prefs
+        #: ``start`` turns NPU markers left by a dead process into fallbacks (the self-check's own services do
+        #: not: they share the app's markers while the app's own answers may be running)
+        self._recover_npu_at_start = recover_npu
         self.stop_state = stop_state
         self.registry = registry or dl.Registry()
         self.downloads = downloads or dl.DownloadManager(registry=self.registry, run_io=run_io)
@@ -390,6 +564,46 @@ class LocalEngineService:
         self._loaded_gpu_layers = 0
         self._gpu_attempt_key = GPU_ATTEMPT_KEY + ("_parallel" if _parallel_child else "")
         self._gpu_attempt: Optional[str] = None  # stem of a GPU load whose first answer has not ended
+        # NPU, on Android arm64 (tests pass fakes): stage 1 ``npu_precheck()`` (``engine.npu_precheck``), the
+        # skeleton archive ``npu_source()`` (``engine.npu_skeleton_source``), stage 2 ``npu_probe(skel_dir,
+        # options)`` (``engine.npu_state``); ``npu_root`` the skeleton folders' parent, ``npu_session`` the HTTP
+        # client of the files' download (``requests``). The second parallel context never uses the NPU.
+        self._is_child = bool(_parallel_child)
+        platform_npu = eng.npu_platform(self.platform)
+        self._npu_probe = npu_probe if npu_probe is not None else (eng.npu_state if platform_npu else None)
+        self._npu_precheck = npu_precheck if npu_precheck is not None else (
+            eng.npu_precheck if platform_npu else None)
+        self._npu_source_fn = npu_source if npu_source is not None else eng.npu_skeleton_source
+        if self._is_child or self._npu_precheck is None:
+            self._npu_probe = None
+        self._npu_root = npu_root
+        self._npu_http = npu_session
+        self.app_version = app_version or current_app_version()
+        self._npu_state: Optional[dict] = None  # this process's stage-1 answer (None: not run yet)
+        self._npu_session_state: Optional[dict] = None  # this process's stage-2 answer (None: not run yet)
+        self._npu_source: Optional[dict] = None  # ``npu_skeleton_source()`` as stage 1 read it
+        self._npu_lock = threading.Lock()  # stage 1 (never taken on the UI thread)
+        self._npu_prepare_lock = threading.Lock()  # the files and stage 2 (loading threads only)
+        self._npu_checking = False  # stage 1 has run longer than ``npu_quiet_seconds`` (the screens show it)
+        self._npu_phase: Optional[str] = None  # "downloading" | "starting" while a load prepares the NPU
+        self._npu_bytes = (0, 0)  # the files' download: (done, total)
+        self._npu_fetch_tried = False  # this app start downloaded (or tried to download) the NPU files
+        self.npu_download_error: Optional[str] = None  # why the last download failed (this process)
+        self._npu_files_present: Optional[bool] = None  # the phone's skeleton is on disk (cached stat)
+        self._npu_cancel = threading.Event()  # the service stops: a running download ends
+        self.npu_hung = False  # the check or a first NPU load did not answer in time
+        self._npu_hung_stem: Optional[str] = None  # the model whose first NPU load hung (its restart message)
+        self._npu_inflight: Optional[str] = None  # stem of the NPU answer running now (its in-flight marker)
+        self._npu_marker_lock = threading.Lock()
+        self.npu_watchdog_seconds = NPU_WATCHDOG_SECONDS
+        self.npu_quiet_seconds = NPU_CHECK_QUIET_SECONDS
+        self._npu_loaded_once = False  # a first NPU load returned in this process (the watchdog is for the first)
+        self._npu_attempt: Optional[str] = None  # stem of an NPU load whose first answer has not ended
+        self._loaded_npu = False
+        #: what ran the last load (diagnostics): ``{"stem", "backend", "device", "seconds"}``
+        self.last_load: Optional[dict] = None
+        #: a backend the self-check forces for its timing runs ("npu" / "gpu" / "cpu"; None: the usual choice)
+        self.backend_override: Optional[str] = None
         self.clock = clock
         self.memory = memory or memory_info
         self.server = LocalLLMServer(self)
@@ -506,7 +720,9 @@ class LocalEngineService:
                               self.gate.waiting(), self._error, self._system_info, available, reason,
                               self._load_seconds, self.server.running,
                               bool(loaded and getattr(self.engine, "vision", False)),
-                              getattr(self.engine, "device", None) if loaded else None, self.gpu_note())
+                              getattr(self.engine, "device", None) if loaded else None, self.gpu_note(),
+                              self._engine_backend() if loaded else None, self.npu_note(),
+                              self._npu_load_phase() if self._state == "loading" else None)
         pool = self._parallel
         if pool is not None:
             secondary = pool.secondary
@@ -529,6 +745,10 @@ class LocalEngineService:
             size = int((self.registry.load().get(stem) or {}).get("size") or 0) if stem else 0
             out["target"] = {"stem": stem, "size": size,
                              "loaded": bool(stem and snap.model == stem and snap.state != "loading")}
+            if out["target"]["loaded"] and snap.backend and (self.npu_offered() or snap.npu_note):
+                out["backend"] = snap.backend  # the job log's "loaded … · runs on NPU" (phones with the NPU)
+                if snap.npu_note:
+                    out["npu_note"] = snap.npu_note
         return out
 
     def subscribe(self, listener: Callable[[EngineSnapshot], Any]) -> Callable[[], None]:
@@ -567,6 +787,11 @@ class LocalEngineService:
         os.environ[URL_ENV] = self.server.base_url
         set_default_service(self)
         self._recover_gpu_attempt()
+        if self._npu_probe is not None:
+            self._npu_cancel.clear()
+            if self._recover_npu_at_start:
+                self._recover_npu()
+            self._start_npu_check()
         self.downloads.scan()
         if self._watch and self._watcher is None:
             self._stop_watch.clear()
@@ -578,6 +803,7 @@ class LocalEngineService:
 
     def stop(self) -> None:
         self._stop_watch.set()
+        self._npu_cancel.set()  # a running NPU files' download ends (its part stays for the next start)
         self._watcher = None
         self.unload(force=True)
         url = self.server.base_url if self.server.running else None
@@ -746,11 +972,16 @@ class LocalEngineService:
         except Exception:
             return None
 
-    def _set_pref(self, key: str, value: Any) -> None:
+    def _set_pref(self, key: str, value: Any, *, durable: bool = False) -> None:
+        """``durable``: on disk before this returns (``Prefs.set`` only schedules a debounced save), for the NPU
+        crash markers set right before native code that may take the process down."""
         if self.prefs is None:
             return
         try:
             self.prefs.set(key, value)
+            flush = getattr(self.prefs, "flush", None) if durable else None
+            if callable(flush):
+                flush()
         except Exception:
             log.debug("saving %s failed", key, exc_info=True)
 
@@ -813,7 +1044,7 @@ class LocalEngineService:
         self._set_pref(GPU_KEY, value)
         self._set_pref(GPU_FALLBACK_KEY, None)
         self._clear_gpu_attempt()
-        if self.loaded_stem is not None and self._loaded_gpu != value:
+        if self.loaded_stem is not None and self._loaded_gpu != value and not self._loaded_npu:
             self.unload()
         self._notify()
         return value
@@ -852,6 +1083,634 @@ class LocalEngineService:
         if self.use_gpu():
             self._gpu_failed(stem, CRASH_REASON)
         return stem
+
+    # ---- NPU -------------------------------------------------------------------------------------------
+
+    def _engine_backend(self) -> Optional[str]:
+        engine = self.engine
+        if engine is None or not engine.loaded:
+            return None
+        return "NPU" if getattr(engine, "on_npu", False) else "GPU" if getattr(engine, "on_gpu", False) else "CPU"
+
+    def npu_possible(self) -> bool:
+        """This build could have an NPU (Android arm64, or a test's fakes): the check runs here."""
+        return self._npu_probe is not None
+
+    def _saved_npu(self, key: str) -> Optional[dict]:
+        """This app version's saved stage answer (``NPU_CHECK_KEY`` / ``NPU_SESSION_KEY``), else None."""
+        saved = self._pref(key)
+        if isinstance(saved, dict) and saved.get("version") == self.app_version and isinstance(saved.get("state"), dict):
+            return saved
+        return None
+
+    def _stage1(self) -> Optional[dict]:
+        """Stage 1's answer: this process's, else this app version's saved one (None: never checked)."""
+        if self._npu_state is not None:
+            return self._npu_state
+        saved = self._saved_npu(NPU_CHECK_KEY)
+        return saved["state"] if saved else None
+
+    def _stage2(self) -> Optional[dict]:
+        """Stage 2's answer: this process's, else this app version's saved one (None: not run for this version)."""
+        if self._npu_session_state is not None:
+            return self._npu_session_state
+        saved = self._saved_npu(NPU_SESSION_KEY)
+        return saved["state"] if saved else None
+
+    def npu_state(self) -> Optional[dict]:
+        """The NPU's latest answer: stage 2 (``register_npu_backend``) once it ran for this app version, else stage 1
+        (None: never checked)."""
+        return self._stage2() or self._stage1()
+
+    def npu_offered(self) -> bool:
+        """Stage 1 passed and stage 2 has not failed for this app version (this process's answers, or the saved
+        ones until they have run): "Use NPU", the power mode and the Custom / Sigma quants' NPU marks show. Never on
+        a build without the NPU functions. Reads saved state only (the screens call it)."""
+        return self.npu_possible() and self.npu_failure() is None
+
+    def npu_failure(self) -> Optional[tuple]:
+        """``(step, reason)`` of why the NPU is not offered (the diagnostics line), None when it is."""
+        if not self.npu_possible():
+            return "shipped", "this build has no NPU (Android arm64 only)"
+        state = self._stage1()
+        if state is None:
+            return "check", "not run yet"
+        failure = eng.npu_precheck_failure(state)
+        if failure is not None:
+            return failure
+        session = self._stage2()
+        return eng.npu_failure(session) if session is not None else None
+
+    def npu_options(self) -> dict:
+        """The GGML_HEXAGON_* options ``register_npu_backend`` sets before the backend loads."""
+        return {eng.NPU_POWER_ENV: self.npu_power()}
+
+    def npu_skel_dir(self) -> Optional[str]:
+        """This engine's skeleton folder (``npu_skel_dir(<release>)``), None before stage 1 read the release."""
+        source = self.npu_source()
+        return npu_skel_dir(source["release"], self._npu_root) if source else None
+
+    def npu_source(self) -> Optional[dict]:
+        """``engine.npu_skeleton_source()`` as stage 1 read it (saved with its answer; no native call here)."""
+        if self._npu_source is not None:
+            return self._npu_source
+        saved = self._saved_npu(NPU_CHECK_KEY)
+        source = saved.get("source") if saved else None
+        return source if isinstance(source, dict) and source.get("files") else None
+
+    def npu_skeleton(self) -> Optional[dict]:
+        """The ``files`` entry of the phone's skeleton (its arch from stage 1), None when unknown."""
+        state = self._stage1() or {}
+        return eng.npu_skeleton_file(self.npu_source(), state.get("arch"))
+
+    def npu_files_ready(self, refresh: bool = False) -> bool:
+        """The phone's skeleton is in its folder: a regular file of the pinned size (a cached stat; ``refresh``
+        looks again)."""
+        if self._npu_files_present is None or refresh:
+            folder, spec = self.npu_skel_dir(), self.npu_skeleton()
+            present = False
+            if folder and spec:
+                path = os.path.join(folder, spec["name"])
+                try:
+                    present = os.path.isfile(path) and not os.path.islink(path) \
+                        and os.path.getsize(path) == int(spec["size"])
+                except OSError:
+                    present = False
+            if not (folder and spec) and not refresh:
+                return False  # stage 1 has not named it yet: ask again later
+            self._npu_files_present = present
+        return bool(self._npu_files_present)
+
+    def npu_seconds(self) -> dict:
+        """``{"check": s, "start": s}`` of the stages that ran (this process's, else this version's saved ones)."""
+        out = {}
+        for name, key in (("check", NPU_CHECK_KEY), ("start", NPU_SESSION_KEY)):
+            saved = self._saved_npu(key)
+            if saved and isinstance(saved.get("seconds"), (int, float)):
+                out[name] = float(saved["seconds"])
+        return out
+
+    def _mark_npu_stage(self, stage: int) -> None:
+        self._set_pref(NPU_CHECK_ATTEMPT_KEY, {"version": self.app_version, "at": int(time.time()), "stage": stage},
+                       durable=True)
+
+    def _watched(self, name: str, call: Callable[[], dict], slow: Optional[Callable[[], None]] = None) -> tuple:
+        """``(state, blocked, seconds)`` of ``call()`` on its own thread, given ``npu_watchdog_seconds``: a call
+        still running then counts as failed (the restart message; native code cannot be stopped). ``slow`` runs
+        once the call is still running after ``npu_quiet_seconds``."""
+        answer: list = []
+
+        def run() -> None:
+            try:
+                answer.append(dict(call() or {}))
+            except Exception as exc:  # the loader never raises; a fake may
+                answer.append(_npu_blocked_state(f"{type(exc).__name__}: {exc}"))
+
+        started = time.monotonic()
+        worker = threading.Thread(target=run, name=name, daemon=True)
+        worker.start()
+        if slow is not None:
+            worker.join(min(self.npu_quiet_seconds, self.npu_watchdog_seconds))
+            if not answer:
+                slow()
+        worker.join(max(0.0, self.npu_watchdog_seconds - (time.monotonic() - started)))
+        seconds = round(time.monotonic() - started, 1)
+        if not answer:
+            self.npu_hung = True
+            log.warning("on-device NPU %s did not answer within %.0f s: NPU off until the app version changes",
+                        "check" if name.endswith("check") else "start", self.npu_watchdog_seconds)
+            return _npu_blocked_state(NPU_HANG_REASON), True, seconds
+        return answer[0], False, seconds
+
+    def run_npu_check(self) -> dict:
+        """Stage 1 (``engine.npu_precheck``: the build carries the backend, libcdsprpc opens, the cDSP reports its
+        arch), once per app version: a saved answer of this version is used as it is (later calls answer the
+        same). It also reads the skeleton archive the engine names. One that does not answer within
+        ``npu_watchdog_seconds`` counts as failed. Background thread or a loading thread, never the UI."""
+        with self._npu_lock:
+            if self._npu_state is not None:
+                return self._npu_state
+            precheck = self._npu_precheck if self._npu_probe is not None else None
+            if precheck is None:
+                self._npu_state = {"backend": None, "device": "", "arch": None, "error": eng.NO_NPU,
+                                   "steps": [{"name": "shipped", "ok": False, "detail": eng.NO_NPU}]}
+                return self._npu_state
+            saved = self._saved_npu(NPU_CHECK_KEY)
+            if saved is not None:
+                self._npu_state = saved["state"]
+                return self._npu_state
+            def slow() -> None:
+                self._npu_checking = True
+                self._notify()  # the screens show "Checking the NPU…"
+
+            self._mark_npu_stage(1)
+            state, blocked, seconds = self._watched("gl-llm-npu-check", precheck, slow)
+            if not blocked:
+                state = eng.npu_precheck_state(state)
+            source = None
+            if not blocked and eng.npu_precheck_failure(state) is None:
+                try:
+                    source = self._npu_source_fn()
+                except Exception:
+                    log.exception("npu_skeleton_source failed")
+                if not source or not eng.npu_skeleton_file(source, state.get("arch")):
+                    state = dict(state, error="this engine build names no NPU files for this phone")
+                    state["steps"] = [*state.get("steps", []),
+                                      {"name": "arch", "ok": False, "detail": state["error"]}]
+                    source = None
+            failure = eng.npu_precheck_failure(state)
+            log.info("on-device NPU check in %.1f s: %s", seconds,
+                     f"Hexagon v{state.get('arch')}, NPU files from llama.cpp {source['release']}" if failure is None
+                     else f"not used ({failure[0]}: {failure[1]})")
+            self._set_pref(NPU_CHECK_KEY, {"version": self.app_version, "state": state, "blocked": blocked,
+                                           "seconds": seconds, "source": source})
+            self._set_pref(NPU_CHECK_ATTEMPT_KEY, None, durable=True)
+            self._npu_source = source
+            self._npu_files_present = None
+            self._npu_state = state
+            self._npu_checking = False
+        self._notify()
+        return state
+
+    def _start_npu_check(self) -> None:
+        """The first start of an app version runs stage 1 in the background (the rows need its answer; the NPU
+        section shows its progress once it takes longer than ``npu_quiet_seconds``); later starts show the saved
+        answer. Stage 2 only runs before an NPU load."""
+        if self._npu_probe is None or self._stage1() is not None:
+            return
+        threading.Thread(target=self._npu_check_quietly, name="gl-llm-npu-start", daemon=True).start()
+
+    def _npu_check_quietly(self) -> None:
+        try:
+            self.run_npu_check()
+        except Exception:
+            log.exception("the NPU check failed")
+
+    def npu_progress(self) -> Optional[dict]:
+        """``{"phase", "text", "fraction"}`` while stage 1 ("checking", once it has run ``npu_quiet_seconds``),
+        the NPU files' download ("downloading", a fraction) or stage 2 ("starting") runs, else None. Attributes
+        only: the screens call it."""
+        phase = self._npu_phase
+        if phase is None and self._npu_checking and self.npu_possible():
+            phase = "checking"
+        if phase == "checking":
+            return {"phase": phase, "text": NPU_CHECKING_TEXT, "fraction": None}
+        if phase == "downloading":
+            done, total = self._npu_bytes
+            return {"phase": phase, "text": _npu_bytes_text(done, total),
+                    "fraction": max(0.0, min(1.0, done / total)) if total else None}
+        if phase == "starting":
+            return {"phase": phase, "text": NPU_STARTING_TEXT, "fraction": None}
+        return None
+
+    def _npu_load_phase(self) -> Optional[str]:
+        """The loading model's extra phase (``EngineSnapshot.phase``) while it fetches the files or starts the NPU."""
+        progress = self.npu_progress() if self._npu_phase is not None else None
+        return progress["text"] if progress else None
+
+    def npu_status_line(self) -> Optional[str]:
+        """The NPU section's one line (where the NPU is offered): why the files are not on the phone, that they
+        download at the first model load, or the ready NPU ("Hexagon v81 (HTP0) ready"); the progress text while
+        something runs. Saved state and a cached stat only."""
+        progress = self.npu_progress()
+        if progress is not None:
+            return progress["text"]
+        if not self.npu_offered():
+            return None
+        if self.npu_download_error:
+            return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
+        if not self.npu_files_ready():
+            source = self.npu_source() or {}
+            size = f" ({float(source['size']) / 1e6:.0f} MB)" if source.get("size") else ""
+            return f"NPU files{size} download from llama.cpp's release at the first model load."
+        return f"{eng.npu_label(self.npu_state() or {})} ready"
+
+    def npu_files_note(self, stem: Optional[str]) -> Optional[str]:
+        """The model row's warning while this start's NPU files download failed and ``stem`` would run on the NPU."""
+        if not stem or not self.npu_download_error or not self.npu_offered():
+            return None
+        if not self._npu_choice_wants(stem, self.backend_choice(stem)):
+            return None
+        return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
+
+    def _recover_npu(self) -> Optional[str]:
+        """At start: an NPU stage the app died in (this version) keeps the NPU off; an NPU load or answer the app
+        died in records that model's NPU fallback. Returns the stem of that model, else None."""
+        attempt = self._pref(NPU_CHECK_ATTEMPT_KEY)
+        if isinstance(attempt, dict):
+            self._set_pref(NPU_CHECK_ATTEMPT_KEY, None)
+            if attempt.get("version") == self.app_version:
+                start = attempt.get("stage") == 2
+                reason = NPU_START_CRASH_REASON if start else NPU_CHECK_CRASH_REASON
+                saved = self._saved_npu(NPU_CHECK_KEY) or {}
+                entry = {"version": self.app_version, "state": _npu_blocked_state(reason), "blocked": True}
+                if start:
+                    self._set_pref(NPU_SESSION_KEY, entry)
+                else:
+                    self._set_pref(NPU_CHECK_KEY, {**entry, "source": saved.get("source")})
+                log.warning("on-device NPU: %s; the NPU stays off until the app version changes", reason)
+        inflight = self._pref(NPU_INFLIGHT_KEY)
+        if isinstance(inflight, dict) and inflight.get("background"):
+            # the app was in the background during that answer: Android's memory killer or a swipe from recents
+            # ends a process there too, and nothing tells those apart from a DSP crash, so it records nothing
+            log.info("on-device NPU: the app closed in the background during an answer of %s; no NPU fallback",
+                     inflight.get("stem"))
+            inflight = None
+        raw = inflight or self._pref(NPU_ATTEMPT_KEY)
+        self._set_pref(NPU_ATTEMPT_KEY, None)
+        if not isinstance(raw, dict) or not raw.get("stem"):
+            self._set_pref(NPU_INFLIGHT_KEY, None, durable=True)
+            return None
+        self._set_pref(NPU_INFLIGHT_KEY, None)
+        stem = str(raw["stem"])
+        self._npu_failed(stem, NPU_CRASH_REASON)  # saved together with the cleared markers
+        return stem
+
+    # ---- NPU: the files and stage 2 (a loading thread, holding the gate) -------------------------------------
+
+    def _prepare_npu(self) -> Optional[str]:
+        """Before an NPU load: the phone's skeleton (downloaded once per app start when it is missing), then stage 2
+        (once per process). None when the NPU is registered, else why this load does not use it (no fallback is
+        recorded for the model). A Stop during the download raises ``LocalLLMError`` (499): the load ends, and
+        nothing counts as a failed download (the next NPU load resumes the part)."""
+        with self._npu_prepare_lock:
+            session = self._npu_session_state
+            if session is not None:
+                failure = eng.npu_failure(session)
+                return None if failure is None else f"{failure[0]}: {failure[1]}"
+            failure = self.npu_failure()
+            if failure is not None:
+                return f"{failure[0]}: {failure[1]}"
+            folder, spec, source = self.npu_skel_dir(), self.npu_skeleton(), self.npu_source()
+            if not (folder and spec and source):
+                return "this engine build names no NPU files for this phone"
+            if not self.npu_files_ready(refresh=True):
+                if self._npu_fetch_tried:
+                    return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error or "not tried again yet")
+                self._npu_fetch_tried = True
+                error = self._fetch_npu_files(source, folder)
+                if error == NPU_FETCH_CANCELLED:
+                    self._npu_fetch_tried = False  # a Stop is not a refusal of the NPU
+                    raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)")
+                if error is not None or not self.npu_files_ready(refresh=True):
+                    self.npu_download_error = error or "the phone's file is missing from the download"
+                    log.warning("on-device NPU: %s; this load uses the GPU / CPU",
+                                NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error))
+                    self._notify()
+                    return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
+            self.npu_download_error = None
+            _remove_other_npu_folders(folder)
+            _tidy_npu_folder(folder)
+            state = self._npu_session(folder)
+            failure = eng.npu_failure(state)
+            return None if failure is None else f"{failure[0]}: {failure[1]}"
+
+    def _fetch_npu_files(self, source: dict, folder: str) -> Optional[str]:
+        """Download ``source``'s archive (``downloads.fetch_blocking``: resumable part in ``folder``, size and
+        sha256 checked, one plain anonymous GET, https redirects only, no retries) and take only its pinned
+        skeletons (``downloads.extract_pinned``); the archive is deleted afterwards. An archive already in place (it
+        is only renamed there once verified: the app died before extracting it) is extracted without a download.
+        None when done, else why."""
+        archive = os.path.join(folder, NPU_ARCHIVE_NAME)
+        stops = self._stops
+        self._npu_bytes = (0, int(source.get("size") or 0))
+        self._npu_phase = "downloading"
+        self._notify()
+        last = [0.0]
+
+        def progress(update: dict) -> None:
+            if update.get("phase") != "downloading":
+                return
+            self._npu_bytes = (int(update.get("bytes_done") or 0), int(update.get("bytes_total") or 0))
+            now = time.monotonic()
+            if now - last[0] >= 0.5:
+                last[0] = now
+                self._notify()
+
+        def should_stop() -> Optional[str]:
+            return "cancel" if self._npu_cancel.is_set() or self._stops != stops else None
+
+        meta = {"url": source["url"], "file": source["url"], "repo": "", "size": source["size"],
+                "sha256": source["sha256"], "release": source["release"]}
+        started = time.monotonic()
+        fetched = False
+        try:
+            with _NPU_FETCH_LOCK:  # the self-check's services share the folder
+                if self.npu_files_ready(refresh=True):
+                    return None
+                if not (os.path.isfile(archive) and dl._size(archive) == int(source["size"])):
+                    session = self._npu_http if self._npu_http is not None else _anonymous_session()
+                    dl.fetch_blocking(source["url"], archive, size=int(source["size"]), sha256=source["sha256"],
+                                      meta=meta, progress=progress, should_stop=should_stop, session=session,
+                                      backoff=(), timeout=NPU_FETCH_TIMEOUT, host="GitHub", https_only=True)
+                fetched = True
+                dl.extract_pinned(archive, source["files"], folder)
+                dl._remove(archive)
+            log.info("on-device NPU: files of llama.cpp %s downloaded in %.1f s", source["release"],
+                     time.monotonic() - started)
+            return None
+        except dl.DownloadCancelled:
+            return NPU_FETCH_CANCELLED  # the part stays: the next try resumes it
+        except dl.DownloadError as exc:
+            if fetched:
+                dl._remove(archive)  # verified but without the pinned files: never kept
+            return str(exc) or type(exc).__name__
+        except Exception as exc:
+            log.exception("the NPU files' download failed")
+            return f"{type(exc).__name__}: {exc}"
+        finally:
+            self._npu_phase = None
+            self._npu_files_present = None
+            self._notify()
+
+    def _npu_session(self, folder: str) -> dict:
+        """Stage 2 (``register_npu_backend`` with the skeleton folder and options), watched and marked like stage 1;
+        its answer is saved for this app version (a failure keeps the NPU off until the version changes)."""
+        probe = self._npu_probe
+        options = self.npu_options()
+        self._npu_power_started = options.get(eng.NPU_POWER_ENV)
+        self._npu_phase = "starting"
+        self._notify()
+        try:
+            self._mark_npu_stage(2)
+            state, blocked, seconds = self._watched("gl-llm-npu-session", lambda: probe(folder, options))
+            failure = eng.npu_failure(state)
+            log.info("on-device NPU start in %.1f s: %s", seconds,
+                     f"{eng.npu_label(state)} ready" if failure is None else f"not used ({failure[0]}: {failure[1]})")
+            if failure is not None and failure[0] == "skeletons" and eng.NPU_FILES_MISSING in failure[1]:
+                # nothing was registered: the files, not the NPU (a later start downloads them again)
+                self.npu_download_error = failure[1]
+                self._npu_files_present = False
+            else:
+                self._set_pref(NPU_SESSION_KEY, {"version": self.app_version, "state": state, "blocked": blocked,
+                                                 "seconds": seconds})
+                self._npu_session_state = state
+            self._set_pref(NPU_CHECK_ATTEMPT_KEY, None, durable=True)
+            return state
+        finally:
+            self._npu_phase = None
+            self._notify()
+
+    def use_npu(self) -> bool:
+        """"Use NPU": on unless switched off (it only matters where the NPU check passed)."""
+        raw = self._pref(NPU_KEY)
+        return raw is None or bool(raw)
+
+    def save_use_npu(self, enabled: Any) -> bool:
+        """Switch the NPU on or off for "Auto" models; an idle loaded model that would now run elsewhere is
+        freed, so the next request loads it on the new device."""
+        value = bool(enabled)
+        changed = value != self.use_npu()
+        self._set_pref(NPU_KEY, value)
+        stem = self.loaded_stem
+        if changed and stem is not None and (self._loaded_npu or self.npu_offered()) \
+                and self.backend_choice(stem) == "auto":
+            self.unload()  # busy: the next load after the answer uses the new choice
+        self._notify()
+        return value
+
+    def npu_power(self) -> str:
+        raw = str(self._pref(NPU_POWER_KEY) or "").strip()
+        return raw if raw in eng.NPU_POWER_MODES else eng.NPU_DEFAULT_POWER
+
+    def save_npu_power(self, mode: Any) -> str:
+        """The power mode for the next time the backend registers (after a restart when it already has)."""
+        value = str(mode or "").strip()
+        if value not in eng.NPU_POWER_MODES:
+            return self.npu_power()
+        self._set_pref(NPU_POWER_KEY, value)
+        self._notify()
+        return value
+
+    def npu_power_pending(self) -> bool:
+        """The saved power mode differs from the one the registered backend started with (needs a restart)."""
+        if self._npu_session_state is None or not eng.npu_passed(self._npu_session_state):
+            return False
+        return getattr(self, "_npu_power_started", self.npu_power()) != self.npu_power()
+
+    def backend_choice(self, stem: str) -> str:
+        """The model's backend: its preset row's, "auto" for every other model."""
+        return presets.backend_of(self.preset_for(stem))
+
+    def npu_layers(self, stem: str) -> int:
+        """The preset row's NPU layers, -1 (all) by default."""
+        try:
+            value = int((self.preset_for(stem) or {}).get("npu_layers") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        return value if value > 0 else -1
+
+    def _npu_fallbacks(self) -> dict:
+        raw = self._pref(NPU_FALLBACK_KEY)
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def npu_fallback(self, stem: Optional[str]) -> Optional[dict]:
+        """``{"stem", "reason"}`` while ``stem`` stays off the NPU: until its file, its backend choice or the app
+        version changes, or "Try the NPU again"."""
+        if not stem:
+            return None
+        entry = self._npu_fallbacks().get(stem)
+        if not isinstance(entry, dict):
+            return None
+        file = (self.registry.load().get(stem) or {}).get("file")
+        if entry.get("file") != file or entry.get("backend") != self.backend_choice(stem) \
+                or entry.get("version") != self.app_version:
+            return None
+        return {"stem": stem, "reason": str(entry.get("reason") or "unknown reason")}
+
+    def _npu_failed(self, stem: str, reason: str) -> None:
+        """Keep ``stem`` off the NPU (see ``npu_fallback``) and say why."""
+        reason = " ".join(str(reason or "unknown reason").split())[:300]
+        log.warning("on-device NPU unavailable for %s: %s; using the %s", stem, reason,
+                    "GPU" if self._gpu_wanted(stem) else "CPU")
+        fallbacks = self._npu_fallbacks()
+        fallbacks[stem] = {"reason": reason, "file": (self.registry.load().get(stem) or {}).get("file"),
+                           "backend": self.backend_choice(stem), "version": self.app_version, "at": int(time.time())}
+        self._set_pref(NPU_FALLBACK_KEY, fallbacks, durable=True)
+        self._clear_npu_attempt()
+
+    def retry_npu(self, stem: str) -> bool:
+        """"Try the NPU again": forget the model's NPU fallback, and a failed NPU files download of this start (the
+        next NPU load downloads once more); an idle loaded model reloads on its next request."""
+        fallbacks = self._npu_fallbacks()
+        files = bool(self.npu_files_note(stem))
+        if files:
+            self._npu_fetch_tried = False
+            self.npu_download_error = None
+        if fallbacks.pop(stem, None) is None and not files:
+            return False
+        self._set_pref(NPU_FALLBACK_KEY, fallbacks)
+        if self._npu_hung_stem == stem:
+            self.npu_hung = False
+            self._npu_hung_stem = None
+        if self.loaded_stem == stem and not self._loaded_npu:
+            self.unload()
+        self._notify()
+        return True
+
+    def npu_note(self, stem: Optional[str] = None) -> Optional[str]:
+        """The NPU line of the engine card and the model's row: the restart message for the model whose first
+        NPU load hung in this process, else why ``stem`` (default: the loaded or loading model) runs elsewhere."""
+        stem = stem or self._stem
+        fallback = self.npu_fallback(stem) if stem else None
+        target = "GPU" if stem and self._gpu_wanted(stem) else "CPU"
+        if self.npu_hung and stem and stem == self._npu_hung_stem:
+            return f"The NPU did not answer. Restart Glossarion; this model will use the {target}."
+        if fallback is None:
+            return None
+        return f"NPU unavailable for {stem}: {fallback['reason']}. Using {target}."
+
+    def _write_npu_inflight(self, stem: Any = "") -> None:
+        """Set (a stem) or clear (None) the in-flight marker of the NPU answer running now, or rewrite it ("",
+        ``on_lifecycle``), on disk before returning; ``background``: the app is in the background now."""
+        with self._npu_marker_lock:
+            if stem != "":
+                self._npu_inflight = stem
+            elif self._npu_inflight is None:
+                return
+            current = self._npu_inflight
+            self._set_pref(NPU_INFLIGHT_KEY, None if current is None else {
+                "stem": current, "at": int(time.time()), "background": self.background_since is not None},
+                durable=True)
+
+    def npu_hang_note(self) -> Optional[str]:
+        """The diagnostics line after a hang in this process: the hung model's restart message, or for a hung
+        check that the NPU stays off until the app version changes (a restart does not run the check again)."""
+        if not self.npu_hung:
+            return None
+        if self._npu_hung_stem:
+            return self.npu_note(self._npu_hung_stem)
+        return NPU_CHECK_HANG_NOTE
+
+    def _mark_npu_attempt(self, stem: str) -> None:
+        self._npu_attempt = stem
+        self._set_pref(NPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time())}, durable=True)
+
+    def _clear_npu_attempt(self) -> None:
+        # only this service's own marker: the parallel secondary and the self-check services share the key
+        if self._npu_attempt is not None:
+            self._npu_attempt = None
+            self._set_pref(NPU_ATTEMPT_KEY, None, durable=True)
+
+    def _npu_choice_wants(self, stem: str, choice: str) -> bool:
+        """``stem``'s own rule asks for the NPU: its choice is "npu", or "auto" with "Use NPU" on and a quant the
+        backend accepts, and the model has no NPU fallback (prefs only)."""
+        if self._is_child or self._npu_probe is None or choice not in ("auto", "npu"):
+            return False
+        if choice == "auto":
+            if not self.use_npu():
+                return False
+            if presets.npu_quant_kind((self.registry.load().get(stem) or {}).get("file")) == "cpu":
+                return False
+        return not self.npu_fallback(stem)
+
+    def _npu_wanted(self, stem: str, choice: str) -> bool:
+        """The NPU for ``stem`` now: its own rule asks for it, the NPU is offered (stage 1 runs here first when the
+        start's background check has not answered yet) and this start's NPU files download has not failed."""
+        if not self._npu_choice_wants(stem, choice):
+            return False
+        if self._stage1() is None:
+            self.run_npu_check()  # a load that comes before the start's background check waits for it
+        return self.npu_offered() and not (self._npu_fetch_tried and self.npu_download_error)
+
+    def _placement(self, stem: str) -> tuple:
+        """``(backend, layers)`` of the next load of ``stem``: ("npu", NPU layers), ("gpu", GPU layers) or
+        ("cpu", 0)."""
+        choice = self.backend_override or self.backend_choice(stem)
+        if choice == "cpu":
+            return "cpu", 0
+        if self._npu_wanted(stem, choice):
+            return "npu", self.npu_layers(stem)
+        if choice == "gpu":
+            fallback = self.gpu_fallback()
+            layers = self.gpu_layers(stem)
+            if self.gpu_backend and layers != 0 and not (fallback and fallback["stem"] == stem):
+                return "gpu", layers
+            return "cpu", 0
+        if self._gpu_wanted(stem):
+            return "gpu", self.gpu_layers(stem)
+        return "cpu", 0
+
+    def _load_on_npu(self, engine: Any, stem: str, path: str, n_ctx: int, mmproj: Optional[str], layers: int) -> bool:
+        """One NPU load (watched by the attempt marker until it returns); True when the model runs on the NPU.
+        Any failure, or a first load still running after ``npu_watchdog_seconds``, records the NPU fallback."""
+        self._mark_npu_attempt(stem)
+        fired = threading.Event()
+        timer = None
+        if not self._npu_loaded_once:
+            def hang() -> None:
+                fired.set()
+                self.npu_hung = True
+                self._npu_hung_stem = stem
+                self._npu_failed(stem, NPU_HANG_REASON)
+                self._notify()
+
+            timer = threading.Timer(self.npu_watchdog_seconds, hang)
+            timer.daemon = True
+            timer.start()
+        try:
+            engine.load(path, n_ctx, self.threads(), mmproj=mmproj, npu=True, n_gpu_layers=layers)
+            if fired.is_set():
+                raise eng.NpuUnavailable(NPU_HANG_REASON)
+            if not getattr(engine, "on_npu", False):
+                raise eng.NpuUnavailable("the engine did not load the model on the NPU")
+            self._npu_loaded_once = True
+            # the load ran its first token on the DSP (``engine.load``'s check); from here every NPU answer has
+            # its own in-flight marker, so an idle loaded model leaves no marker behind
+            self._clear_npu_attempt()
+            return True
+        except Exception as exc:  # NpuUnavailable, or anything else the NPU path raised
+            if timer is not None:
+                timer.cancel()
+            if engine.loaded:
+                engine.unload()
+            if not fired.is_set():
+                self._npu_failed(stem, str(exc) or type(exc).__name__)
+            self._clear_npu_attempt()
+            return False
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     def preset_for(self, stem: str) -> Optional[dict]:
         """The preset that brought ``stem`` (same repo and file; else a file-less preset of that repo)."""
@@ -942,11 +1801,15 @@ class LocalEngineService:
         fallback = self.gpu_fallback()
         if fallback and fallback["stem"] != stem:
             self._set_pref(GPU_FALLBACK_KEY, None)  # another model: the GPU gets a new try
-        gpu = self._gpu_wanted(stem)
-        gpu_layers = self.gpu_layers(stem) if gpu else 0
-        # a changed Context (Model manager or Welcome slider) or GPU setting reloads the model on the next request
+        backend, layers = self._placement(stem)
+        npu = backend == "npu"
+        gpu = backend == "gpu"
+        gpu_layers = layers if gpu or npu else 0
+        # a changed Context (Model manager or Welcome slider), GPU / NPU setting or backend reloads the model on the
+        # next request
         if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
-                and self._loaded_gpu == gpu and self._loaded_gpu_layers == gpu_layers and engine.n_threads == self.threads():
+                and self._loaded_gpu == gpu and self._loaded_npu == npu and self._loaded_gpu_layers == gpu_layers \
+                and engine.n_threads == self.threads():
             if vision and not engine.vision_loaded:  # the projector loads with the first image
                 self._gate_ram(stem, engine.n_ctx or self.context_for(stem), vision=True,
                                gpu=bool(getattr(engine, "on_gpu", False)))
@@ -964,11 +1827,35 @@ class LocalEngineService:
         self._set("loading", stem)
         size = int((self.registry.load().get(stem) or {}).get("size") or 0)
         log.info("loading on-device model %s (%s, n_ctx %d%s)", stem, _gb(size) if size else "size unknown", n_ctx,
-                 f", GPU {self.gpu_backend}" if gpu else "")
+                 ", NPU" if npu else f", GPU {self.gpu_backend}" if gpu else "")
         started = time.monotonic()
         mmproj = self.registry.projector_path(stem)
+        if npu:
+            # the NPU files (downloaded at the first NPU load) and stage 2; while they run the loading state says so
+            # (``EngineSnapshot.phase``). Neither keeps the model from loading: today's GPU / CPU rule, no fallback;
+            # only a Stop during the download ends the load.
+            try:
+                reason = self._prepare_npu()
+            except LocalLLMError:
+                self._set("idle", None)
+                raise
+            except Exception as exc:  # pragma: no cover - the stages never raise
+                log.exception("preparing the NPU failed")
+                reason = f"{type(exc).__name__}: {exc}"
+            if reason is not None:
+                log.info("on-device model %s: not on the NPU this time (%s)", stem, reason)
+                npu = False
+                gpu = self._gpu_wanted(stem)
+                gpu_layers = self.gpu_layers(stem) if gpu else 0
         try:
-            if gpu:
+            if npu and not self._load_on_npu(engine, stem, path, n_ctx, mmproj, gpu_layers):
+                # the NPU fallback is recorded: today's GPU / CPU rule for this load
+                npu = False
+                gpu = self._gpu_wanted(stem)
+                gpu_layers = self.gpu_layers(stem) if gpu else 0
+            if npu:
+                pass  # loaded on the NPU
+            elif gpu:
                 self._mark_gpu_attempt(stem)
                 try:
                     engine.load(path, n_ctx, self.threads(), mmproj=mmproj, gpu=True, n_gpu_layers=gpu_layers)
@@ -979,14 +1866,19 @@ class LocalEngineService:
                 engine.load(path, n_ctx, self.threads(), mmproj=mmproj)
         except Exception as exc:
             self._clear_gpu_attempt()
+            self._clear_npu_attempt()
             self._loaded_gpu = False
+            self._loaded_npu = False
             self._set("idle", None, f"Could not load {stem}: {exc}")
             log.exception("loading %s failed", stem)
             raise LocalLLMError(500, "load_failed", f"Could not load local/{stem}: {exc}", "server_error") from exc
         self._loaded_gpu = bool(getattr(engine, "on_gpu", False))  # record what loaded, not a setting changed during load
-        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu else 0
+        self._loaded_npu = bool(getattr(engine, "on_npu", False))
+        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu or self._loaded_npu else 0
         self._load_seconds = round(time.monotonic() - started, 2)
         self.log.append((stem, self._load_seconds))
+        self.last_load = {"stem": stem, "backend": self._engine_backend() or "CPU",
+                          "device": getattr(engine, "device", None) or "CPU", "seconds": self._load_seconds}
         log.info("on-device model %s loaded in %.1f s (n_ctx %d, %d threads, %s)", stem, self._load_seconds, n_ctx,
                  self.threads(), getattr(engine, "device", None) or "CPU")
         if self._system_info is None and not isinstance(engine, eng.FakeEngine):
@@ -1010,7 +1902,9 @@ class LocalEngineService:
             engine.unload()
             log.info("on-device model %s unloaded", stem)
         self._loaded_gpu = False
+        self._loaded_npu = False
         self._clear_gpu_attempt()  # unloaded normally: the GPU did not take the app down
+        self._clear_npu_attempt()  # nor the NPU
         self._set("idle", None)
 
     def stop_generation(self) -> None:
@@ -1244,6 +2138,12 @@ class LocalEngineService:
         self._holder_job = under_job
         self._holder_token = token
         released = [False]
+        inflight = [False]  # this answer set the NPU in-flight marker (cleared in ``release``)
+
+        def mark_inflight(engine: Any) -> None:
+            if getattr(engine, "on_npu", False) and not inflight[0]:
+                inflight[0] = True
+                self._write_npu_inflight(stem)
 
         def release() -> None:
             if released[0]:
@@ -1251,8 +2151,13 @@ class LocalEngineService:
             released[0] = True
             try:
                 self.last_used = self.clock()
+                if inflight[0]:
+                    inflight[0] = False
+                    self._write_npu_inflight(None)  # the NPU answer ended without taking the app down
                 if self._gpu_attempt is not None:
                     self._clear_gpu_attempt()  # the GPU's first answer ended without taking the app down
+                if self._npu_attempt is not None:
+                    self._clear_npu_attempt()
                 if self._state == "generating":
                     self._set("ready", self._stem)
             finally:  # whatever failed above, the engine goes back to the next request
@@ -1279,15 +2184,20 @@ class LocalEngineService:
                                     f"resulted in {prompt_tokens} tokens. Please reduce the length of the messages.")
             params = self._params(body, n_ctx - prompt_tokens, stem=stem)
             self._set("generating", stem)
+            mark_inflight(engine)
             try:
                 deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)
             except (LocalLLMError, KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
-                if not getattr(engine, "on_gpu", False):
+                if getattr(engine, "on_npu", False):
+                    # the NPU failed on this prompt: the same request again on the GPU / CPU (once)
+                    self._npu_failed(stem, f"the NPU failed while answering ({exc})")
+                elif getattr(engine, "on_gpu", False):
+                    # the GPU failed on this prompt: the same request again on the CPU
+                    self._gpu_failed(stem, f"the GPU failed while answering ({exc})")
+                else:
                     raise
-                # the GPU failed on this prompt: the same request again on the CPU
-                self._gpu_failed(stem, f"the GPU failed while answering ({exc})")
                 self._ensure_loaded(stem, vision=bool(images))
                 engine = self.engine
                 self._set("generating", stem)
@@ -1427,11 +2337,14 @@ class LocalEngineService:
                 return None
             if self.background_since is None:
                 self.background_since = self.clock()
+                self._write_npu_inflight()  # a kill from here on is not counted as an NPU crash
             if self.platform == "ios" and not self.job_active():
                 return "unloaded" if self.unload() else None
             return None
         if name in ("show", "resume", "restart"):
-            self.background_since = None
+            if self.background_since is not None:
+                self.background_since = None
+                self._write_npu_inflight()
             return None
         if name == "detach":
             # Android destroys the activity (Back, or memory pressure in the background) while the process

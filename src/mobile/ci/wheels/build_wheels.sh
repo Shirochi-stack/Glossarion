@@ -12,8 +12,10 @@
 #   2. clone mobile-forge at the pinned commit and pin its crossenv dependency to a commit;
 #   3. wheels.py fetch: the support tarball, BeeWare OpenSSL 3.5.9 and the sdists (from uv.lock),
 #      sha256-checked and stored under the names forge expects, so forge downloads nothing itself;
-#   4. Android: the pinned NDK (forge's .ci/install_ndk.sh, a no-op when installed) -> NDK_HOME, and
-#      wheels.py stage-opencl: OpenCL headers + a link-time libOpenCL.so in its sysroot (llama-cpp-python);
+#   4. Android: the pinned NDK (forge's .ci/install_ndk.sh, a no-op when installed) -> NDK_HOME,
+#      wheels.py stage-opencl: OpenCL headers + a link-time libOpenCL.so in its sysroot (llama-cpp-python),
+#      and wheels.py stage-hexagon: the Hexagon SDK (the engine's optional NPU backend) and the CMake
+#      initial cache the arm64 recipe loads (GGML_HEXAGON OFF without a download when [hexagon] is off);
 #   5. source forge's setup.sh: support tree, uv venv on CPython 3.13.15, dependency wheels;
 #   6. wheels.py stage-openssl: static OpenSSL 3.5.9 replaces the support tree's 3.0.x, and every
 #      other libcrypto.a/libssl.a in the support tree is deleted (see "Link order" below);
@@ -22,7 +24,9 @@
 #   8. forge <host> <recipe directory> for each package (src/mobile/ci/wheels/recipes/<package>);
 #   9. wheels.py collect: only the promised wheels go to $WHEELCACHE/<package>/.
 #
-# Environment: FORGE_DIR (default $RUNNER_TEMP/forge), WHEELCACHE (default $RUNNER_TEMP/wheelcache).
+# Environment: FORGE_DIR (default $RUNNER_TEMP/forge), WHEELCACHE (default $RUNNER_TEMP/wheelcache),
+# HEXAGON_SDK_DOWNLOADS (default $FORGE_DIR/downloads: where the 742 MB Hexagon SDK tarball is fetched,
+# sha256-checked and reused; the workflow caches that directory under the tarball's sha256).
 # Needs git, uv (a Python 3.11+ for wheels.py) and, on Android, ANDROID_HOME with sdkmanager.
 #
 # What reaches the compile: forge's compile_env() builds the environment of the `python -m build`
@@ -119,8 +123,11 @@ grep -q -F "\"crossenv @ git+${CROSSENV_REPO}@${CROSSENV_REV}\"" pyproject.toml 
   || die "could not pin crossenv in mobile-forge's pyproject.toml"
 echo "::endgroup::"
 
+HEXAGON_SDK_DOWNLOADS="${HEXAGON_SDK_DOWNLOADS:-$FORGE_DIR/downloads}"
+
 echo "::group::Fetch and verify the build inputs"
-host_py "$wheels_py" fetch --platform "$platform" --dest "$FORGE_DIR/downloads" "${packages[@]}"
+host_py "$wheels_py" fetch --platform "$platform" --dest "$FORGE_DIR/downloads" \
+  --hexagon-dest "$HEXAGON_SDK_DOWNLOADS" "${packages[@]}"
 echo "::endgroup::"
 
 if [ "$platform" = android ]; then
@@ -135,6 +142,12 @@ if [ "$platform" = android ]; then
   # A no-op unless llama-cpp-python is built; the loader never ships (the device's libOpenCL.so is used).
   host_py "$wheels_py" stage-opencl --platform android --downloads "$FORGE_DIR/downloads" --ndk "$NDK_HOME" \
     --work "$tmp_root/opencl" "${packages[@]}"
+  echo "::endgroup::"
+  echo "::group::Hexagon SDK + the arm64 engine's CMake initial cache (the optional NPU backend)"
+  # A no-op unless llama-cpp-python is built; with [hexagon] enabled = false it only writes GGML_HEXAGON OFF.
+  host_py "$wheels_py" stage-hexagon --platform android --downloads "$HEXAGON_SDK_DOWNLOADS" --ndk "$NDK_HOME" \
+    --work "$tmp_root/hexagon" "${packages[@]}"
+  df -h "$tmp_root" || true
   echo "::endgroup::"
 fi
 

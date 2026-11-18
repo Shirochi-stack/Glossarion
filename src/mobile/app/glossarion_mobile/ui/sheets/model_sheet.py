@@ -70,6 +70,7 @@ from glossarion_mobile.ui import motion, tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui.components.empty_state import HALGAKOS_AVATAR
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.poll_border import PollBorder
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
@@ -303,6 +304,8 @@ REQUEST_QUEUE_KEY = "request_queue_schedule"
 #: the On-device tab's segment label and the link under its rows
 ONDEVICE_TAB_LABEL = "On-device"
 ONDEVICE_MANAGER_LABEL = "Model manager › On-device"
+#: the diameter of the Halgakos avatar leading that row (the 24 px of a ListTile's leading icon)
+ONDEVICE_MANAGER_AVATAR = 24
 
 
 class ModelSheet:
@@ -940,6 +943,9 @@ class ModelSheet:
                 padding=ft.Padding.only(left=12, right=12, top=4), key="ondevice-unavailable"))
         from glossarion_mobile.services.local_llm.presets import CUSTOM_FAMILIES
 
+        busy = flow.npu_progress_row("ondevice")  # the NPU check / files / start: a bar, never a wait
+        if busy is not None:
+            rows.append(ft.Container(content=busy, padding=ft.Padding.symmetric(horizontal=12, vertical=4)))
         preset_rows = flow.presets()
         rows.append(self._section_header("Presets", count=len(preset_rows) + len(CUSTOM_FAMILIES)))
         if not preset_rows:
@@ -963,7 +969,11 @@ class ModelSheet:
                            subtitle=ft.Text("Add from Hugging Face, edit presets, engine settings",
                                             theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
                                             overflow=ft.TextOverflow.ELLIPSIS),
-                           leading=ft.Icon(ft.Icons.TUNE), dense=True, min_height=48,
+                           # the Halgakos avatar (the drawer's), sized like the other rows' 24 px icons: it
+                           # stands out among the presets
+                           leading=ft.CircleAvatar(foreground_image_src=HALGAKOS_AVATAR, radius=ONDEVICE_MANAGER_AVATAR / 2,
+                                                   key="ondevice-manager-avatar"),
+                           dense=True, min_height=48,
                            on_click=lambda e: self.open_ondevice_manager(), key="ondevice-manager")
 
     def open_ondevice_manager(self) -> None:

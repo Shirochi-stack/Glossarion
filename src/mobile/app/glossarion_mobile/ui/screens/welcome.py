@@ -282,8 +282,21 @@ class WelcomeScreen(Screen):
                                          use_model=self._use_local_model, current_model=self.current_model,
                                          notify=self._ondevice_note, on_change=self.render_ondevice)
             self.ondevice.custom_used = self._ondevice_used
-            self._ondevice_unsub = service.downloads.subscribe(lambda state: self.render_ondevice())
+            unsubs = [service.downloads.subscribe(lambda state: self.render_ondevice())]
+            subscribe = getattr(service, "subscribe", None)
+            if subscribe is not None:  # the NPU check / files / start: only when their bar changes
+                unsubs.append(subscribe(lambda snap: self._npu_changed()))
+            self._ondevice_unsub = lambda: [unsub() for unsub in unsubs]
         return self.ondevice
+
+    def _npu_changed(self) -> None:
+        """An engine notice: re-render the on-device row only when the NPU progress line changed."""
+        flow = self.ondevice
+        progress = flow.npu_progress() if flow is not None else None
+        shown = (progress or {}).get("text")
+        if shown != getattr(self, "_npu_shown", None):
+            self._npu_shown = shown
+            self.render_ondevice()
 
     def _ondevice_section(self) -> ft.Control:
         self.ondevice_box.content = self._ondevice_content()
@@ -308,6 +321,11 @@ class WelcomeScreen(Screen):
             lines.extend(control for control in flow._gpu_section(key_prefix="welcome")
                          if control is not flow.gpu_note and control is not flow.gpu_status
                          and control is not flow.gpu_layers_box)
+        # what this render shows, read first: ``_npu_changed`` re-renders when a later notice differs from it
+        self._npu_shown = (flow.npu_progress() or {}).get("text")
+        busy = flow.npu_progress_row("welcome")  # the NPU check / files / start: a bar, never a wait
+        if busy is not None:
+            lines.append(busy)
         note = self.model_notes.get("local")
         if note:
             lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,

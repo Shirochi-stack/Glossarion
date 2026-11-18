@@ -1183,10 +1183,13 @@ def test_build_script_runs_end_to_end_with_stubbed_tools(tmp_path, platform, pac
         ["git", "-C", f, "fetch", "-q", "--depth", "1", "origin", tc["mobile_forge"]["rev"]],
         ["git", "-C", f, "checkout", "-q", "--detach", "FETCH_HEAD"],
         ["git", "-C", f, "rev-parse", "HEAD"],
-        ["uv-python", w, "fetch", "--platform", platform, "--dest", _arg(str(forge / "downloads")), *packages],
+        ["uv-python", w, "fetch", "--platform", platform, "--dest", _arg(str(forge / "downloads")),
+         "--hexagon-dest", _arg(str(forge / "downloads")), *packages],
         *([["install_ndk.sh", tc["android_ndk"]],
            ["uv-python", w, "stage-opencl", "--platform", "android", "--downloads", _arg(str(forge / "downloads")),
-            "--ndk", _arg(str(sdk / "ndk" / tc["android_ndk"])), "--work", _arg(str(tmp / "opencl")), *packages]]
+            "--ndk", _arg(str(sdk / "ndk" / tc["android_ndk"])), "--work", _arg(str(tmp / "opencl")), *packages],
+           ["uv-python", w, "stage-hexagon", "--platform", "android", "--downloads", _arg(str(forge / "downloads")),
+            "--ndk", _arg(str(sdk / "ndk" / tc["android_ndk"])), "--work", _arg(str(tmp / "hexagon")), *packages]]
           if platform == "android" else []),
         ["setup.sh", tc["python_version"], host],
         ["python", w, "stage-openssl", "--platform", platform, "--downloads", _arg(str(forge / "downloads")),
