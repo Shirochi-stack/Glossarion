@@ -5301,6 +5301,111 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
     return False
 
 
+# Source-preservation findings a chunk can be charged with by comparing its own
+# recorded source with its own output block.
+_CHUNK_PRESERVATION_ISSUE_RE = re.compile(
+    r"^(?:(?P<links>missing_link_targets_|changed_link_targets_)"
+    r"|missing_table_elements_(?P<table>[a-z]+)_)(?P<count>\d+)_"
+)
+_HTML_ELEMENT_RE = re.compile(r"<[A-Za-z][^>]*>")
+
+
+def _chunk_preservation_losses(marked, chunk_entry):
+    """Per marker block, the links and table elements its recorded source has
+    and its output block lost (or, for links, gained).
+
+    Uses the document check's own profile, so hrefs are normalised the same
+    way. A loss only counts when the chunks together lost it too: a link the
+    model moved into the next chunk charges nobody. Returns None when a chunk
+    has no recorded source (older progress files) or no recorded source is
+    HTML (markdown/text sources of enhanced extraction have no <a> or table
+    to compare with); the findings then stay whole-document ones.
+    """
+    profiles = {}
+    any_html_source = False
+    for index, block in marked.items():
+        record = chunk_entry.get("entries", {}).get(str(index), {})
+        source = record.get("source") if isinstance(record, dict) else None
+        if not isinstance(source, str) or not source.strip():
+            return None
+        any_html_source = any_html_source or bool(_HTML_ELEMENT_RE.search(source))
+        profiles[index] = (
+            _html_preservation_profile(source),
+            _html_preservation_profile(block.get("content", "")),
+        )
+    if not any_html_source:
+        return None
+    totals = {"source_links": Counter(), "output_links": Counter(),
+              "source_tables": Counter(), "output_tables": Counter()}
+    for source_profile, output_profile in profiles.values():
+        totals["source_links"].update(source_profile.get("link_hrefs") or {})
+        totals["output_links"].update(output_profile.get("link_hrefs") or {})
+        totals["source_tables"].update(source_profile.get("table_counts") or {})
+        totals["output_tables"].update(output_profile.get("table_counts") or {})
+    all_lost_links = totals["source_links"] - totals["output_links"]
+    all_extra_links = totals["output_links"] - totals["source_links"]
+    all_lost_tables = totals["source_tables"] - totals["output_tables"]
+    losses = {}
+    for index, (source_profile, output_profile) in profiles.items():
+        source_links = Counter(source_profile.get("link_hrefs") or {})
+        output_links = Counter(output_profile.get("link_hrefs") or {})
+        source_tables = Counter(source_profile.get("table_counts") or {})
+        output_tables = Counter(output_profile.get("table_counts") or {})
+        lost_tables = (source_tables - output_tables) & all_lost_tables
+        losses[index] = {
+            "lost_links": list(((source_links - output_links) & all_lost_links).elements()),
+            "extra_links": list(((output_links - source_links) & all_extra_links).elements()),
+            "tables": {
+                tag_name: (source_tables[tag_name], output_tables[tag_name])
+                for tag_name in lost_tables
+            },
+            "lost_tables": dict(lost_tables),
+        }
+    return losses
+
+
+def _chunk_preservation_covers(issue, losses):
+    """True when the chunks together are charged with the whole document-level
+    count of a preservation finding. A finding the chunks only partly account
+    for (a link that no chunk's recorded source holds) stays a whole-document
+    one, so no part of it goes unnamed."""
+    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))
+    if not match or not losses:
+        return False
+    total = int(match.group("count"))
+    chunk_losses = list(losses.values())
+    if match.group("table"):
+        charged = sum(item["lost_tables"].get(match.group("table"), 0) for item in chunk_losses)
+    else:
+        charged = sum(len(item["lost_links"]) for item in chunk_losses)
+        if match.group("links").startswith("changed"):
+            charged = max(charged, sum(len(item["extra_links"]) for item in chunk_losses))
+    return charged >= total
+
+
+def _chunk_preservation_preview(issue, chunk_losses):
+    """Preview naming this chunk's own losses for a preservation finding, or
+    "" when this chunk lost none of it."""
+    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))
+    if not match or not chunk_losses:
+        return ""
+    if match.group("table"):
+        counts = chunk_losses["tables"].get(match.group("table"))
+        if not counts:
+            return ""
+        return f"<{match.group('table')}>: source={counts[0]}, output={counts[1]}"
+    lost = chunk_losses["lost_links"]
+    if match.group("links").startswith("missing"):
+        return ', '.join(lost[:5])
+    extra = chunk_losses["extra_links"]
+    parts = []
+    if lost:
+        parts.append("missing: " + ', '.join(lost[:3]))
+    if extra:
+        parts.append("unexpected: " + ', '.join(extra[:3]))
+    return "; ".join(parts)
+
+
 def _attach_chunk_results_to_scan(
     folder_path,
     results,
@@ -5389,6 +5494,15 @@ def _attach_chunk_results_to_scan(
             continue
 
         unmatched = set(range(len(all_issues)))
+        preservation_losses = None
+        localisable = set()
+        if any(_CHUNK_PRESERVATION_ISSUE_RE.match(str(issue)) for issue in all_issues):
+            preservation_losses = _chunk_preservation_losses(marked, chunk_entry)
+            localisable = {
+                issue_index
+                for issue_index, issue in enumerate(all_issues)
+                if _chunk_preservation_covers(issue, preservation_losses)
+            }
         for index, block in sorted(marked.items()):
             chunk_html = block.get("content", "")
             chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(
@@ -5400,7 +5514,14 @@ def _attach_chunk_results_to_scan(
             localized = []
             local_previews = {}
             for issue_index, issue in enumerate(all_issues):
-                if not _chunk_issue_matches(
+                local_preview = None
+                if issue_index in localisable:
+                    local_preview = _chunk_preservation_preview(
+                        issue, preservation_losses.get(index)
+                    )
+                    if not local_preview:
+                        continue
+                elif not _chunk_issue_matches(
                     issue,
                     chunk_html,
                     chunk_text,
@@ -5412,7 +5533,9 @@ def _attach_chunk_results_to_scan(
                 unmatched.discard(issue_index)
                 local_issue = _chunk_local_issue_text(issue, chunk_cache)
                 localized.append(local_issue)
-                if previews.get(str(issue)) is not None:
+                if local_preview:
+                    local_previews[local_issue] = local_preview
+                elif previews.get(str(issue)) is not None:
                     local_previews[local_issue] = previews[str(issue)]
             chunk_results.append({
                 "chunk_index": index,

@@ -2496,6 +2496,213 @@ def test_cached_header_translation_can_update_untouched_source_heading(
     assert "<p>BODY</p>" in updated
 
 
+_AO3_WORK_LINK = "https://archiveofourown.org/works/1/chapters/2"
+_AO3_CHAPTER_HTML = (
+    "<html><head><title>Old Title</title></head><body>"
+    '<div class="chapter preface group">'
+    f'<h1 class="title"><a href="{_AO3_WORK_LINK}">Old Title</a></h1>'
+    '<p>(See the end of the chapter for <a href="#chapter_1_endnotes">more notes</a>.)</p>'
+    "</div><p>BODY</p></body></html>"
+)
+
+
+def _header_update(tmp_path, html, new_title, current_title, *, exact=True):
+    filename = "response_1_chapter.html"
+    path = tmp_path / filename
+    path.write_text(html, encoding="utf-8")
+    translator = BatchHeaderTranslator(None, {})
+    if exact:
+        translator._update_html_headers_exact(
+            str(tmp_path),
+            {1: new_title},
+            {1: {"title": current_title, "filename": filename}},
+        )
+    else:
+        translator._update_html_headers(str(tmp_path), {1: new_title})
+    return path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_header_update_keeps_the_link_inside_the_heading(tmp_path, monkeypatch, exact):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    updated = _header_update(tmp_path, _AO3_CHAPTER_HTML, "New Title", "Old Title", exact=exact)
+
+    assert f'<h1 class="title"><a href="{_AO3_WORK_LINK}">New Title</a></h1>' in updated
+    assert "<title>New Title</title>" in updated
+    assert _preservation_count_issues(
+        _html_preservation_profile(_AO3_CHAPTER_HTML),
+        _html_preservation_profile(updated),
+    ) == []
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_header_update_still_replaces_a_plain_heading(tmp_path, monkeypatch, exact):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    html = "<html><head><title>Old</title></head><body><h1>Old</h1><p>BODY</p></body></html>"
+
+    updated = _header_update(tmp_path, html, "New & Better", "Old", exact=exact)
+
+    # the BeautifulSoup path escapes the text, the regex path writes it as given
+    expected = "<h1>New &amp; Better</h1>" if exact else "<h1>New & Better</h1>"
+    assert expected in updated
+    assert "<p>BODY</p>" in updated
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_header_update_of_a_mixed_heading_keeps_its_link_and_picture(
+    tmp_path, monkeypatch, capsys, exact
+):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    heading = (
+        f'<h1 class="title"><a href="{_AO3_WORK_LINK}">Chapter 1</a>: Old Name'
+        '<img src="../Images/deco.png"/></h1>'
+    )
+    html = (
+        "<html><head><title>Chapter 1: Old Name</title></head><body>"
+        f"{heading}<p>Chapter 1: Old Name</p></body></html>"
+    )
+
+    updated = _header_update(tmp_path, html, "New Name", "Chapter 1: Old Name", exact=exact)
+
+    # the whole translated title replaces the heading text; the link and the
+    # picture stay
+    assert (
+        f'<h1 class="title"><a href="{_AO3_WORK_LINK}">New Name</a>'
+        '<img src="../Images/deco.png"/></h1>'
+    ) in updated
+    assert "<title>New Name</title>" in updated
+    assert "<p>Chapter 1: Old Name</p>" in updated
+    assert "cannot be placed in" not in capsys.readouterr().out
+    assert _preservation_count_issues(
+        _html_preservation_profile(html), _html_preservation_profile(updated)
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "<h1>Chapter 1<br/>Old Title</h1>",
+        '<h1><span class="num">1</span> Old Title</h1>',
+        "<h1>The <em>Old</em> Title</h1>",
+        "<h1><span>Old</span> <strong>Title</strong></h1>",
+        "<h1><ruby>旧<rt>kyu</rt></ruby>題</h1>",
+    ],
+)
+@pytest.mark.parametrize("exact", [True, False])
+def test_header_update_still_replaces_a_heading_with_only_layout_markup(
+    tmp_path, monkeypatch, capsys, heading, exact
+):
+    from bs4 import BeautifulSoup
+
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    current = BeautifulSoup(heading, "html.parser").get_text().strip()
+    html = f"<html><head><title>{current}</title></head><body>{heading}<p>BODY</p></body></html>"
+
+    updated = _header_update(tmp_path, html, "New Title", current, exact=exact)
+
+    # nothing in these headings is checked by QA: the heading gets the new
+    # title as its whole content, as before
+    assert "<h1>New Title</h1>" in updated
+    assert "<title>New Title</title>" in updated
+    out = capsys.readouterr().out
+    assert "Kept the" not in out and "Could not find" not in out
+    assert "Updated 1 HTML files" in out
+
+
+def test_header_update_log_says_only_the_title_changed_when_the_heading_is_kept(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    html = (
+        "<html><head><title></title></head><body>"
+        '<h1><img src="../Images/title.png"/></h1><p>BODY</p></body></html>'
+    )
+
+    updated = _header_update(tmp_path, html, "New Title", "")
+
+    assert '<h1><img src="../Images/title.png"/></h1>' in updated
+    assert "<title>New Title</title>" in updated
+    out = capsys.readouterr().out
+    assert "Kept the <h1>" in out
+    assert "Updated the title of response_1_chapter.html (heading kept)" in out
+    assert "Could not find" not in out
+
+
+def test_header_update_skips_an_equal_title(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    updated = _header_update(tmp_path, _AO3_CHAPTER_HTML, "Old Title ", "Old Title")
+
+    assert updated == _AO3_CHAPTER_HTML
+    assert "1 file(s) already up-to-date" in capsys.readouterr().out
+
+
+def test_heading_text_replacement_keeps_child_markup():
+    from bs4 import BeautifulSoup
+    from metadata_batch_translator import replace_heading_text_keep_markup
+
+    soup = BeautifulSoup(
+        '<h1><span class="x"><a href="a.html">Old</a></span><img src="p.png"/></h1>'
+        '<h2>Plain</h2><h3><ruby>漢<rt>kan</rt></ruby>字</h3><h4><img src="q.png"/></h4>',
+        "html.parser",
+    )
+    h1, h2, h3, h4 = soup.find_all(["h1", "h2", "h3", "h4"])
+
+    assert replace_heading_text_keep_markup(h1, "New") == "updated"
+    assert str(h1) == '<h1><span class="x"><a href="a.html">New</a></span><img src="p.png"/></h1>'
+    assert replace_heading_text_keep_markup(h1, "New") == "unchanged"
+    assert replace_heading_text_keep_markup(h2, "Other") == "updated"
+    assert str(h2) == "<h2>Other</h2>"
+    assert replace_heading_text_keep_markup(h2, "Other") == "unchanged"
+    # ruby is layout only: the heading is replaced as a whole
+    assert replace_heading_text_keep_markup(h3, "Kanji") == "updated"
+    assert str(h3) == "<h3>Kanji</h3>"
+    # a picture with no text: there is no place for the text
+    assert replace_heading_text_keep_markup(h4, "Picture") == "kept"
+    assert str(h4) == '<h4><img src="q.png"/></h4>'
+
+    mixed = BeautifulSoup(
+        '<h1><a href="#n">Chapter 4</a>: Name<span style="background:url(x.png)"> </span>'
+        '<em>more</em></h1>',
+        "html.parser",
+    ).h1
+    assert replace_heading_text_keep_markup(mixed, "Chapter 4: Translated") == "updated"
+    assert str(mixed) == (
+        '<h1><a href="#n">Chapter 4: Translated</a>'
+        '<span style="background:url(x.png)"> </span><em></em></h1>'
+    )
+
+
+def test_image_only_chapter_header_translation_keeps_heading_links():
+    # TransateKRtoEN's image-only chapter path puts the translated header text
+    # into the body's headings with the same helper.
+    from bs4 import BeautifulSoup
+    from metadata_batch_translator import replace_heading_text_keep_markup
+
+    source = Path(__file__).resolve().parents[1] / "src" / "TransateKRtoEN.py"
+    text = source.read_text(encoding="utf-8")
+    assert "orig.string = trans.get_text(strip=True)" not in text
+    assert "replace_heading_text_keep_markup(orig, trans.get_text(strip=True))" in text
+
+    soup_body = BeautifulSoup(
+        f'<h1 class="title"><a href="{_AO3_WORK_LINK}">원래 제목</a></h1>'
+        '<p><img src="../Images/page1.jpg"/></p>',
+        "html.parser",
+    )
+    soup_headers = BeautifulSoup("<h1>Translated Title</h1>", "html.parser")
+    for orig, trans in zip(soup_body.find_all(["h1"]), soup_headers.find_all(["h1"])):
+        replace_heading_text_keep_markup(orig, trans.get_text(strip=True))
+
+    assert f'<h1 class="title"><a href="{_AO3_WORK_LINK}">Translated Title</a></h1>' in str(soup_body)
+
+    # a source heading in several pieces with no link still gets the
+    # translated header (it used to stay in the source language)
+    soup_body = BeautifulSoup("<h1>제1화<br/>시작</h1><p><img src='p.jpg'/></p>", "html.parser")
+    soup_headers = BeautifulSoup("<h1>Episode 1<br/>Start</h1>", "html.parser")
+    for orig, trans in zip(soup_body.find_all(["h1"]), soup_headers.find_all(["h1"])):
+        assert replace_heading_text_keep_markup(orig, trans.get_text(strip=True)) == "updated"
+    assert str(soup_body.h1) == "<h1>Episode 1Start</h1>"
+
+
 def test_missing_header_html_mappings_are_logged_once(tmp_path, capsys):
     translator = BatchHeaderTranslator(None, {})
 

@@ -4954,6 +4954,390 @@ _SVG_PICTURE_SCANNER = [
 ]
 
 
+# 2026-11-18 Header update keeps a heading's link (<h1><a href>Title</a></h1>) and the QA scan charges a lost link
+# or table cell only to the chunk whose recorded source held it (the real diffs, applied after the
+# entries above, _SVG_PICTURE_SCANNER included)
+_HEADING_LINK_SCANNER = [
+ (
+  (
+   '\n'
+   'def _attach_chunk_results_to_scan(\n'
+  ),
+  (
+   '\n'
+   '# Source-preservation findings a chunk can be charged with by comparing its own\n'
+   '# recorded source with its own output block.\n'
+   '_CHUNK_PRESERVATION_ISSUE_RE = re.compile(\n'
+   '    r"^(?:(?P<links>missing_link_targets_|changed_link_targets_)"\n'
+   '    r"|missing_table_elements_(?P<table>[a-z]+)_)(?P<count>\\d+)_"\n'
+   ')\n'
+   '_HTML_ELEMENT_RE = re.compile(r"<[A-Za-z][^>]*>")\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_losses(marked, chunk_entry):\n'
+   '    """Per marker block, the links and table elements its recorded source has\n'
+   '    and its output block lost (or, for links, gained).\n'
+   '\n'
+   "    Uses the document check's own profile, so hrefs are normalised the same\n"
+   '    way. A loss only counts when the chunks together lost it too: a link the\n'
+   '    model moved into the next chunk charges nobody. Returns None when a chunk\n'
+   '    has no recorded source (older progress files) or no recorded source is\n'
+   '    HTML (markdown/text sources of enhanced extraction have no <a> or table\n'
+   '    to compare with); the findings then stay whole-document ones.\n'
+   '    """\n'
+   '    profiles = {}\n'
+   '    any_html_source = False\n'
+   '    for index, block in marked.items():\n'
+   '        record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '        source = record.get("source") if isinstance(record, dict) else None\n'
+   '        if not isinstance(source, str) or not source.strip():\n'
+   '            return None\n'
+   '        any_html_source = any_html_source or bool(_HTML_ELEMENT_RE.search(source))\n'
+   '        profiles[index] = (\n'
+   '            _html_preservation_profile(source),\n'
+   '            _html_preservation_profile(block.get("content", "")),\n'
+   '        )\n'
+   '    if not any_html_source:\n'
+   '        return None\n'
+   '    totals = {"source_links": Counter(), "output_links": Counter(),\n'
+   '              "source_tables": Counter(), "output_tables": Counter()}\n'
+   '    for source_profile, output_profile in profiles.values():\n'
+   '        totals["source_links"].update(source_profile.get("link_hrefs") or {})\n'
+   '        totals["output_links"].update(output_profile.get("link_hrefs") or {})\n'
+   '        totals["source_tables"].update(source_profile.get("table_counts") or {})\n'
+   '        totals["output_tables"].update(output_profile.get("table_counts") or {})\n'
+   '    all_lost_links = totals["source_links"] - totals["output_links"]\n'
+   '    all_extra_links = totals["output_links"] - totals["source_links"]\n'
+   '    all_lost_tables = totals["source_tables"] - totals["output_tables"]\n'
+   '    losses = {}\n'
+   '    for index, (source_profile, output_profile) in profiles.items():\n'
+   '        source_links = Counter(source_profile.get("link_hrefs") or {})\n'
+   '        output_links = Counter(output_profile.get("link_hrefs") or {})\n'
+   '        source_tables = Counter(source_profile.get("table_counts") or {})\n'
+   '        output_tables = Counter(output_profile.get("table_counts") or {})\n'
+   '        lost_tables = (source_tables - output_tables) & all_lost_tables\n'
+   '        losses[index] = {\n'
+   '            "lost_links": list(((source_links - output_links) & all_lost_links).elements()),\n'
+   '            "extra_links": list(((output_links - source_links) & all_extra_links).elements()),\n'
+   '            "tables": {\n'
+   '                tag_name: (source_tables[tag_name], output_tables[tag_name])\n'
+   '                for tag_name in lost_tables\n'
+   '            },\n'
+   '            "lost_tables": dict(lost_tables),\n'
+   '        }\n'
+   '    return losses\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_covers(issue, losses):\n'
+   '    """True when the chunks together are charged with the whole document-level\n'
+   '    count of a preservation finding. A finding the chunks only partly account\n'
+   "    for (a link that no chunk's recorded source holds) stays a whole-document\n"
+   '    one, so no part of it goes unnamed."""\n'
+   '    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))\n'
+   '    if not match or not losses:\n'
+   '        return False\n'
+   '    total = int(match.group("count"))\n'
+   '    chunk_losses = list(losses.values())\n'
+   '    if match.group("table"):\n'
+   '        charged = sum(item["lost_tables"].get(match.group("table"), 0) for item in chunk_losses)\n'
+   '    else:\n'
+   '        charged = sum(len(item["lost_links"]) for item in chunk_losses)\n'
+   '        if match.group("links").startswith("changed"):\n'
+   '            charged = max(charged, sum(len(item["extra_links"]) for item in chunk_losses))\n'
+   '    return charged >= total\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_preview(issue, chunk_losses):\n'
+   '    """Preview naming this chunk\'s own losses for a preservation finding, or\n'
+   '    "" when this chunk lost none of it."""\n'
+   '    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))\n'
+   '    if not match or not chunk_losses:\n'
+   '        return ""\n'
+   '    if match.group("table"):\n'
+   '        counts = chunk_losses["tables"].get(match.group("table"))\n'
+   '        if not counts:\n'
+   '            return ""\n'
+   '        return f"<{match.group(\'table\')}>: source={counts[0]}, output={counts[1]}"\n'
+   '    lost = chunk_losses["lost_links"]\n'
+   '    if match.group("links").startswith("missing"):\n'
+   "        return ', '.join(lost[:5])\n"
+   '    extra = chunk_losses["extra_links"]\n'
+   '    parts = []\n'
+   '    if lost:\n'
+   '        parts.append("missing: " + \', \'.join(lost[:3]))\n'
+   '    if extra:\n'
+   '        parts.append("unexpected: " + \', \'.join(extra[:3]))\n'
+   '    return "; ".join(parts)\n'
+   '\n'
+   '\n'
+   'def _attach_chunk_results_to_scan(\n'
+  ),
+ ),
+ (
+  (
+   '        unmatched = set(range(len(all_issues)))\n'
+   '        for index, block in sorted(marked.items()):\n'
+   '            chunk_html = block.get("content", "")\n'
+   '            chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(\n'
+   '                " ", strip=True\n'
+   '            )\n'
+   '            record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '            source_text = record.get("source") if isinstance(record, dict) else None\n'
+   '            chunk_cache = {}\n'
+   '            localized = []\n'
+   '            local_previews = {}\n'
+   '            for issue_index, issue in enumerate(all_issues):\n'
+   '                if not _chunk_issue_matches(\n'
+   '                    issue,\n'
+   '                    chunk_html,\n'
+   '                    chunk_text,\n'
+   '                    source_text,\n'
+   '                    qa_settings,\n'
+   '                    chunk_cache,\n'
+   '                ):\n'
+   '                    continue\n'
+   '                unmatched.discard(issue_index)\n'
+   '                local_issue = _chunk_local_issue_text(issue, chunk_cache)\n'
+   '                localized.append(local_issue)\n'
+   '                if previews.get(str(issue)) is not None:\n'
+   '                    local_previews[local_issue] = previews[str(issue)]\n'
+  ),
+  (
+   '        unmatched = set(range(len(all_issues)))\n'
+   '        preservation_losses = None\n'
+   '        localisable = set()\n'
+   '        if any(_CHUNK_PRESERVATION_ISSUE_RE.match(str(issue)) for issue in all_issues):\n'
+   '            preservation_losses = _chunk_preservation_losses(marked, chunk_entry)\n'
+   '            localisable = {\n'
+   '                issue_index\n'
+   '                for issue_index, issue in enumerate(all_issues)\n'
+   '                if _chunk_preservation_covers(issue, preservation_losses)\n'
+   '            }\n'
+   '        for index, block in sorted(marked.items()):\n'
+   '            chunk_html = block.get("content", "")\n'
+   '            chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(\n'
+   '                " ", strip=True\n'
+   '            )\n'
+   '            record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '            source_text = record.get("source") if isinstance(record, dict) else None\n'
+   '            chunk_cache = {}\n'
+   '            localized = []\n'
+   '            local_previews = {}\n'
+   '            for issue_index, issue in enumerate(all_issues):\n'
+   '                local_preview = None\n'
+   '                if issue_index in localisable:\n'
+   '                    local_preview = _chunk_preservation_preview(\n'
+   '                        issue, preservation_losses.get(index)\n'
+   '                    )\n'
+   '                    if not local_preview:\n'
+   '                        continue\n'
+   '                elif not _chunk_issue_matches(\n'
+   '                    issue,\n'
+   '                    chunk_html,\n'
+   '                    chunk_text,\n'
+   '                    source_text,\n'
+   '                    qa_settings,\n'
+   '                    chunk_cache,\n'
+   '                ):\n'
+   '                    continue\n'
+   '                unmatched.discard(issue_index)\n'
+   '                local_issue = _chunk_local_issue_text(issue, chunk_cache)\n'
+   '                localized.append(local_issue)\n'
+   '                if local_preview:\n'
+   '                    local_previews[local_issue] = local_preview\n'
+   '                elif previews.get(str(issue)) is not None:\n'
+   '                    local_previews[local_issue] = previews[str(issue)]\n'
+  ),
+ ),
+]
+
+_HEADING_LINK_HEADERS = [
+ (
+  (
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+  (
+   '\n'
+   '# Elements inside a heading that the QA scan checks were kept (links, pictures,\n'
+   "# tables): replacing the heading's text must not delete them.\n"
+   '_HEADING_QA_CHECKED_TAGS = frozenset((\n'
+   "    'img', 'svg', 'path', 'circle', 'ellipse', 'rect', 'line', 'polygon',\n"
+   "    'polyline', 'image', 'use', 'canvas', 'object', 'embed', 'picture',\n"
+   "    'video', 'source', 'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr',\n"
+   "    'th', 'td',\n"
+   '))\n'
+   '\n'
+   '\n'
+   'def _heading_has_qa_checked_markup(tag):\n'
+   '    """True when *tag* holds a link with an href, a picture, a table or a CSS\n'
+   '    background picture."""\n'
+   '    for element in tag.find_all(True):\n'
+   "        name = str(element.name or '').lower()\n"
+   '        if name in _HEADING_QA_CHECKED_TAGS:\n'
+   '            return True\n'
+   "        if name == 'a' and str(element.get('href') or '').strip():\n"
+   '            return True\n'
+   "        if re.search(r'url\\s*\\(', str(element.get('style') or ''), flags=re.IGNORECASE):\n"
+   '            return True\n'
+   '    return False\n'
+   '\n'
+   '\n'
+   'def replace_heading_text_keep_markup(tag, new_text):\n'
+   '    """Put *new_text* into a heading (a BeautifulSoup element) without dropping\n'
+   '    a link, picture or table inside it.\n'
+   '\n'
+   '    A heading without such markup gets *new_text* as its whole content, as\n'
+   '    before (layout markup such as <br/>, <span> or <em> goes). Otherwise the\n'
+   "    text goes into the heading's first non-blank text node (the link text of\n"
+   '    ``<h1><a href="...">Old</a></h1>``) and its other text nodes are removed,\n'
+   '    so the elements stay. A heading whose only content is such markup (a\n'
+   '    picture, no text) has no place for the text and is left as it is.\n'
+   '\n'
+   '    Returns "updated", "unchanged" (it already reads *new_text*) or "kept".\n'
+   '    """\n'
+   '    from bs4.element import CData, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction\n'
+   '    if not _heading_has_qa_checked_markup(tag):\n'
+   '        if len(tag.contents) == 1 and type(tag.contents[0]) is NavigableString \\\n'
+   '                and str(tag.contents[0]) == new_text:\n'
+   '            return "unchanged"\n'
+   '        tag.clear()\n'
+   '        tag.string = new_text\n'
+   '        return "updated"\n'
+   '    not_text = (Comment, CData, ProcessingInstruction, Declaration, Doctype)\n'
+   '    texts = [s for s in tag.find_all(string=True)\n'
+   '             if not isinstance(s, not_text) and str(s).strip()]\n'
+   '    if not texts:\n'
+   '        return "kept"\n'
+   '    if len(texts) == 1 and str(texts[0]) == new_text:\n'
+   '        return "unchanged"\n'
+   '    texts[0].replace_with(new_text)\n'
+   '    for extra in texts[1:]:\n'
+   '        extra.extract()\n'
+   '    return "updated"\n'
+   '\n'
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+ ),
+ (
+  (
+   '                    tag_updated = False\n'
+   "                    for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+   '                        tag = temp_soup.find(tag_name)\n'
+   '                        if tag and tag.get_text().strip() == current_title:\n'
+   '                            # Clear the tag and set new content\n'
+   '                            tag.clear()\n'
+   '                            tag.string = new_title\n'
+   '                            content2 = str(temp_soup)\n'
+   '                            if content2 != content:\n'
+   '                                updated = True\n'
+   '                                content = content2\n'
+   '                                tag_updated = True\n'
+   '                                break\n'
+   '                    \n'
+   "                    # Fallback to regex if BeautifulSoup didn't work\n"
+   '                    if not tag_updated:\n'
+   "                        for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+  ),
+  (
+   '                    tag_updated = False\n'
+   '                    heading_kept = False\n'
+   "                    for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+   '                        tag = temp_soup.find(tag_name)\n'
+   '                        if tag and tag.get_text().strip() == current_title:\n'
+   '                            # Change only the text: a link or picture inside the heading stays\n'
+   '                            if replace_heading_text_keep_markup(tag, new_title) == "kept":\n'
+   '                                heading_kept = True\n'
+   '                                print(f"⚠️ Kept the <{tag_name}> of {html_file} as it is: it contains markup the new title cannot be placed in")\n'
+   '                                break\n'
+   '                            content2 = str(temp_soup)\n'
+   '                            if content2 != content:\n'
+   '                                updated = True\n'
+   '                                content = content2\n'
+   '                                tag_updated = True\n'
+   '                                break\n'
+   '                    \n'
+   "                    # Fallback to regex if BeautifulSoup didn't work\n"
+   '                    if not tag_updated and not heading_kept:\n'
+   "                        for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+  ),
+ ),
+ (
+  (
+   '                        updated_count += 1\n'
+   '                        print(f"✓ Updated {html_file}: \'{current_title}\' → \'{new_title}\'")\n'
+   '                    else:\n'
+   '                        print(f"⚠️ Could not find \'{current_title}\' in {html_file}")\n'
+   '                    \n'
+   '            except Exception as e:\n'
+  ),
+  (
+   '                        updated_count += 1\n'
+   '                        if heading_kept:\n'
+   '                            print(f"✓ Updated the title of {html_file} (heading kept): \'{current_title}\' → \'{new_title}\'")\n'
+   '                        else:\n'
+   '                            print(f"✓ Updated {html_file}: \'{current_title}\' → \'{new_title}\'")\n'
+   '                    elif not heading_kept:\n'
+   '                        print(f"⚠️ Could not find \'{current_title}\' in {html_file}")\n'
+   '\n'
+   '            except Exception as e:\n'
+  ),
+ ),
+ (
+  (
+   "                    for tag in ['h1', 'h2', 'h3']:\n"
+   "                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\\s\\S]*?(</{tag}>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)\n"
+   '                        if n > 0:\n'
+   '                            updated = True\n'
+   '                            content = content2\n'
+   '                            break\n'
+  ),
+  (
+   "                    for tag in ['h1', 'h2', 'h3']:\n"
+   "                        m = _re.search(rf'(<{tag}[^>]*>)([\\s\\S]*?)(</{tag}>)', content, flags=_re.IGNORECASE)\n"
+   '                        if m:\n'
+   '                            new_inner = new_title\n'
+   "                            if '<' in m.group(2):\n"
+   '                                # Change only the text: a link or picture inside the heading stays\n'
+   '                                from bs4 import BeautifulSoup as BS\n'
+   "                                inner_soup = BS(m.group(2), 'html.parser')\n"
+   '                                if _heading_has_qa_checked_markup(inner_soup):\n'
+   '                                    if replace_heading_text_keep_markup(inner_soup, new_title) == "kept":\n'
+   '                                        print(f"⚠️ Kept the <{tag}> of {html_file} as it is: it contains markup the new title cannot be placed in")\n'
+   '                                        break\n'
+   '                                    new_inner = str(inner_soup)\n'
+   '                            content = content[:m.start()] + m.group(1) + new_inner + m.group(3) + content[m.end():]\n'
+   '                            updated = True\n'
+   '                            break\n'
+  ),
+ ),
+]
+
+_HEADING_LINK_WORKER = [
+ (
+  (
+   '                            \n'
+   '                            # Match and replace headers\n'
+   '                            for orig, trans in zip(original_headers, translated_headers):\n'
+   '                                if trans and trans.get_text(strip=True):\n'
+   '                                    orig.string = trans.get_text(strip=True)\n'
+   '                            \n'
+  ),
+  (
+   '                            \n'
+   '                            # Match and replace headers (only their text: a link or picture inside stays)\n'
+   '                            from metadata_batch_translator import replace_heading_text_keep_markup\n'
+   '                            for orig, trans in zip(original_headers, translated_headers):\n'
+   '                                if trans and trans.get_text(strip=True):\n'
+   '                                    if replace_heading_text_keep_markup(orig, trans.get_text(strip=True)) == "kept":\n'
+   '                                        print(f"⚠️ Kept the <{orig.name}> as it is: it contains markup the translated header cannot be placed in")\n'
+   '                            \n'
+  ),
+ ),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -6597,6 +6981,23 @@ APPROVED = (
                 "tag. A wrapper of several images partly kept is credited with the kept ones only. Pictures "
                 "really gone and svg drawings are still reported",
         "source": {"src/scan_html_folder.py": _SVG_PICTURE_SCANNER},
+        "values": {},
+    },
+    {
+        "date": "2026-11-18",
+        "what": "Header update keeps the markup inside a heading: the batch header update (exact and regex "
+                "paths) and the image-only chapter header path keep a link, picture or table inside a heading "
+                "(the new text goes into its first text node); a heading with only layout markup is replaced as "
+                "a whole as before, a picture-only heading is kept (the <title> still updates, logged as such). "
+                "QA chunk localisation: missing/changed link targets and missing table elements fail only the "
+                "chunk whose recorded source has them and whose output lost them (same href normalisation as "
+                "the document check); without recorded HTML sources, or when the chunks account for less than "
+                "the document-level count, they stay whole-document findings on every chunk as before",
+        "source": {
+            "src/scan_html_folder.py": _HEADING_LINK_SCANNER,
+            "src/metadata_batch_translator.py": _HEADING_LINK_HEADERS,
+            "src/TransateKRtoEN.py": _HEADING_LINK_WORKER,
+        },
         "values": {},
     },
 )

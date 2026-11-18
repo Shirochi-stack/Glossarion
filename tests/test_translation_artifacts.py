@@ -2189,6 +2189,220 @@ def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):
     assert entry["entries"]["2"]["status"] == "pending"
 
 
+_LINKED_CHUNK_SOURCES = (
+    '<h1 class="title"><a href="https://archiveofourown.org/works/1/chapters/2">Title</a></h1>'
+    '<p>See the <a href="#chapter_1_endnotes">notes</a>.</p><p>One.</p>',
+    '<p>Two with a <a href="https://example.org/a?x=1&amp;y=2">link</a>.</p>',
+    "<p>Three.</p><table><tr><td>a</td><td>b</td></tr></table>",
+)
+
+
+def _scan_three_chunk_chapter(
+    tmp_path, outputs, *, keep_sources=True, extra_issues=(),
+    recorded_sources=_LINKED_CHUNK_SOURCES, document_source=None,
+):
+    """Scan a 3-chunk chapter whose chunk outputs are *outputs* the way the
+    QA scanner does: document-level preservation issues, then localization."""
+    from scan_html_folder import _html_preservation_profile, _preservation_count_issues
+
+    progress = ProgressManager(str(tmp_path))
+    budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+    progress.prog["chapters"]["1"] = {
+        "actual_num": 1,
+        "content_hash": "chapter-hash",
+        "output_file": "chapter.html",
+        "status": "completed",
+    }
+    progress.prepare_chapter_chunk_progress("chapter-hash", 3, budget, enabled=True)
+    for index, (source, output) in enumerate(zip(recorded_sources, outputs), 1):
+        progress.record_chapter_chunk(
+            "chapter-hash", index, 3, output, budget,
+            source_text=source if keep_sources else None,
+        )
+    progress.mark_chapter_chunk_progress_status("chapter-hash", "completed")
+    if not keep_sources:
+        for record in progress.prog["chapter_chunks"]["chapter-hash"]["entries"].values():
+            record.pop("source", None)
+    output_path = tmp_path / "chapter.html"
+    output_path.write_text(
+        "\n".join(
+            wrap_chunk_html("chapter-hash", index, 3, output)
+            for index, output in enumerate(outputs, 1)
+        ),
+        encoding="utf-8",
+    )
+    progress.save()
+    issues = list(extra_issues)
+    previews = {}
+    for issue, preview in _preservation_count_issues(
+        _html_preservation_profile(document_source or "".join(_LINKED_CHUNK_SOURCES)),
+        _html_preservation_profile(output_path.read_text(encoding="utf-8")),
+    ):
+        issues.append(issue)
+        previews[issue] = preview
+    result = {
+        "filename": "chapter.html",
+        "filepath": str(output_path),
+        "file_index": 0,
+        "chapter_num": 1,
+        "issues": issues,
+        "qa_issue_previews": previews,
+        "duplicate_confidence": 0,
+    }
+    logs = []
+    assert _attach_chunk_results_to_scan(
+        str(tmp_path), [result], {}, logs.append, progress_path=progress.PROGRESS_FILE
+    ) == 1
+    update_new_format_progress(progress.prog, [result], [], logs.append, str(tmp_path))
+    return progress, result
+
+
+def _chunk_statuses(progress):
+    entries = progress.prog["chapter_chunks"]["chapter-hash"]["entries"]
+    return {int(index): record["status"] for index, record in entries.items()}
+
+
+def test_lost_heading_link_fails_only_the_chunk_that_held_it(tmp_path):
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    outputs[0] = outputs[0].replace(
+        '<a href="https://archiveofourown.org/works/1/chapters/2">Title</a>', "Title"
+    )
+    progress, result = _scan_three_chunk_chapter(tmp_path, outputs)
+
+    assert result["issues"] == ["missing_link_targets_1_lost_(2/3)"]
+    by_chunk = {item["chunk_index"]: item for item in result["chunk_results"]}
+    assert by_chunk[1]["issues"] == ["missing_link_targets_1_lost_(2/3)"]
+    assert by_chunk[1]["qa_issue_previews"] == {
+        "missing_link_targets_1_lost_(2/3)": "https://archiveofourown.org/works/1/chapters/2"
+    }
+    assert by_chunk[2]["issues"] == [] and by_chunk[3]["issues"] == []
+    assert _chunk_statuses(progress) == {1: "qa_failed", 2: "completed", 3: "completed"}
+    chapter = progress.prog["chapters"]["1"]
+    assert chapter["status"] == "completed"
+    assert chapter["has_chunk_qa_failures"] is True
+
+
+def test_link_lost_in_the_second_chunk_fails_only_that_chunk(tmp_path):
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    # an href that differs only by what the document check normalises away is kept
+    outputs[0] = outputs[0].replace("#chapter_1_endnotes", "#chapter_1_endnotes ")
+    outputs[1] = "<p>Two with a link.</p>"
+    progress, result = _scan_three_chunk_chapter(tmp_path, outputs)
+
+    by_chunk = {item["chunk_index"]: item["issues"] for item in result["chunk_results"]}
+    assert by_chunk == {1: [], 2: ["missing_link_targets_1_lost_(2/3)"], 3: []}
+    preview = result["chunk_results"][1]["qa_issue_previews"]
+    assert preview == {"missing_link_targets_1_lost_(2/3)": "https://example.org/a?x=1&y=2"}
+    assert _chunk_statuses(progress) == {1: "completed", 2: "qa_failed", 3: "completed"}
+
+
+def test_lost_table_cell_fails_only_its_chunk(tmp_path):
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    outputs[2] = "<p>Three.</p><table><tr><td>a b</td></tr></table>"
+    progress, result = _scan_three_chunk_chapter(tmp_path, outputs)
+
+    by_chunk = {item["chunk_index"]: item["issues"] for item in result["chunk_results"]}
+    # the table-shape finding has no chunk rule and stays a whole-document one
+    shape = "changed_table_structure_found"
+    assert by_chunk == {
+        1: [shape], 2: [shape], 3: ["missing_table_elements_td_1_lost_(1/2)", shape],
+    }
+    assert result["chunk_results"][2]["qa_issue_previews"][
+        "missing_table_elements_td_1_lost_(1/2)"
+    ] == "<td>: source=2, output=1"
+
+
+def test_lost_link_without_recorded_chunk_sources_stays_on_every_chunk(tmp_path):
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    outputs[1] = "<p>Two with a link.</p>"
+    progress, result = _scan_three_chunk_chapter(tmp_path, outputs, keep_sources=False)
+
+    by_chunk = {item["chunk_index"]: item["issues"] for item in result["chunk_results"]}
+    issue = "missing_link_targets_1_lost_(2/3)"
+    assert by_chunk == {1: [issue], 2: [issue], 3: [issue]}
+    assert all(
+        item["qa_issue_previews"] == {issue: "https://example.org/a?x=1&y=2"}
+        for item in result["chunk_results"]
+    )
+    assert _chunk_statuses(progress) == {1: "qa_failed", 2: "qa_failed", 3: "qa_failed"}
+    assert progress.prog["chapters"]["1"]["status"] == "completed"
+
+
+def test_changed_link_with_markdown_chunk_sources_stays_on_every_chunk(tmp_path):
+    # enhanced extraction records markdown chunk sources: they have no <a> to
+    # compare with, so no chunk may be charged with its own kept links
+    markdown_sources = (
+        "# [Title](https://archiveofourown.org/works/1/chapters/2)\n\n"
+        "See the [notes](#chapter_1_endnotes).\n\nOne.",
+        "Two with a [link](https://example.org/a?x=1&y=2).",
+        "Three.\n\n| a | b |",
+    )
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    outputs[1] = outputs[1].replace("https://example.org/a?x=1&amp;y=2", "https://example.org/b")
+    progress, result = _scan_three_chunk_chapter(
+        tmp_path, outputs, recorded_sources=markdown_sources
+    )
+
+    issue = "changed_link_targets_1_found"
+    assert result["issues"] == [issue]
+    by_chunk = {item["chunk_index"]: item for item in result["chunk_results"]}
+    assert {index: item["issues"] for index, item in by_chunk.items()} == {
+        1: [issue], 2: [issue], 3: [issue],
+    }
+    expected_preview = "missing: https://example.org/a?x=1&y=2; unexpected: https://example.org/b"
+    assert all(
+        item["qa_issue_previews"] == {issue: expected_preview} for item in by_chunk.values()
+    )
+    assert "unexpected: https://archiveofourown.org" not in str(result["chunk_results"])
+
+
+def test_link_loss_no_chunk_source_accounts_for_stays_a_whole_document_finding(tmp_path):
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    outputs[0] = outputs[0].replace(
+        '<a href="https://archiveofourown.org/works/1/chapters/2">Title</a>', "Title"
+    )
+    progress, result = _scan_three_chunk_chapter(
+        tmp_path,
+        outputs,
+        document_source="".join(_LINKED_CHUNK_SOURCES)
+        + '<p><a href="https://example.org/outside">o</a></p>',
+    )
+
+    issue = "missing_link_targets_2_lost_(2/4)"
+    assert result["issues"] == [issue]
+    # only one of the two lost links is in a chunk's recorded source: the
+    # finding stays on every chunk with the preview naming both
+    for item in result["chunk_results"]:
+        assert item["issues"] == [issue]
+        preview = item["qa_issue_previews"][issue]
+        assert "https://archiveofourown.org/works/1/chapters/2" in preview
+        assert "https://example.org/outside" in preview
+    assert _chunk_statuses(progress) == {1: "qa_failed", 2: "qa_failed", 3: "qa_failed"}
+
+
+def test_whole_document_issue_still_goes_to_every_chunk_next_to_a_localized_link(tmp_path):
+    outputs = list(_LINKED_CHUNK_SOURCES)
+    outputs[1] = "<p>Two with a link.</p>"
+    progress, result = _scan_three_chunk_chapter(
+        tmp_path, outputs, extra_issues=("duplicate_content_detected",)
+    )
+
+    by_chunk = {item["chunk_index"]: item["issues"] for item in result["chunk_results"]}
+    assert by_chunk == {
+        1: ["duplicate_content_detected"],
+        2: ["missing_link_targets_1_lost_(2/3)", "duplicate_content_detected"],
+        3: ["duplicate_content_detected"],
+    }
+
+
 @pytest.mark.parametrize(
     ("finish_reason", "save_partial", "save_prohibited"),
     [
