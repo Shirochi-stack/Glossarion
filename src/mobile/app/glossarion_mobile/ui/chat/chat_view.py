@@ -4927,11 +4927,11 @@ class ChatView:
 
             write_setting(self.env.store, key, value)
             remember_pick(self.env, field_name, value, global_scope=True)
-            if field_name == "model":
-                self.global_model_chosen()
             if (field_name == "model" and follow_open_chat and self.bound
                     and (self.env.chats.overrides(self.cid) or {}).get("model")):
                 self.env.chats.set_override(self.cid, override_key, value)  # the drawer: the open chat too
+            elif field_name == "model":
+                self.global_model_chosen()  # no follow: an empty open chat drops its seeded model instead
         self.apply_settings_changed()
 
     def global_model_chosen(self) -> None:
