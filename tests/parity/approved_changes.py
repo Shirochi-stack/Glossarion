@@ -4559,6 +4559,785 @@ _GEMINI_CHUNKING_REMOVED_ROWS = {
 def _removed_rows(rows):
     return [("\n" + row + "\n", "\n") for row in rows]
 
+# 2026-11-18 QA: an EPUB <svg> that only wraps an <image> is the same picture as an <img> of that file
+# (image_rename_map.json / basename) on the other side (the real diff of scan_html_folder.py)
+_SVG_PICTURE_SCANNER = [
+ (
+  (
+   '        original_image_info,\n'
+   '        image_rename_map=None):\n'
+   '    """\n'
+   '    Detect missing or extra images by comparing translated HTML with original EPUB image info.\n'
+   '    \n'
+   '    Args:\n'
+   '        translated_html: The translated HTML content (string)\n'
+   '        chapter_num: The chapter number to check\n'
+   '        original_image_info: Dict from extract_epub_image_info()\n'
+   '    \n'
+   '    Returns:\n'
+   '        tuple: (has_issues, details)\n'
+   '    """\n'
+   '    try:\n'
+   '        from bs4 import BeautifulSoup\n'
+   '        \n'
+   '        # If no original image info for this chapter, skip check\n'
+   '        if chapter_num not in original_image_info:\n'
+   '            return False, []\n'
+   '        \n'
+   '        orig_info = original_image_info[chapter_num]\n'
+   "        orig_img_count = orig_info['image_count']\n"
+  ),
+  (
+   '        original_image_info,\n'
+   '        image_rename_map=None,\n'
+   '        svg_picture_conversion=None):\n'
+   '    """\n'
+   '    Detect missing or extra images by comparing translated HTML with original EPUB image info.\n'
+   '\n'
+   '    Args:\n'
+   '        translated_html: The translated HTML content (string)\n'
+   '        chapter_num: The chapter number to check\n'
+   '        original_image_info: Dict from extract_epub_image_info()\n'
+   '        svg_picture_conversion: Optional ``_svg_picture_conversions()``\n'
+   '            result; svg-wrapped pictures shown as ``<img>`` on the other\n'
+   '            side count as the same picture.\n'
+   '\n'
+   '    Returns:\n'
+   '        tuple: (has_issues, details)\n'
+   '    """\n'
+   '    try:\n'
+   '        from bs4 import BeautifulSoup\n'
+   '\n'
+   '        # If no original image info for this chapter, skip check\n'
+   '        if chapter_num not in original_image_info:\n'
+   '            return False, []\n'
+   '\n'
+   '        orig_info = original_image_info[chapter_num]\n'
+   '        if svg_picture_conversion:\n'
+   '            orig_info = _image_info_with_svg_picture_conversion(\n'
+   '                orig_info,\n'
+   '                svg_picture_conversion,\n'
+   '                image_rename_map,\n'
+   '            )\n'
+   "        orig_img_count = orig_info['image_count']\n"
+  ),
+ ),
+ (
+  (
+   '        if orig_srcs and trans_img_count == orig_img_count:\n'
+   '            normalized_map = {\n'
+   "                os.path.basename(str(old_name).replace('\\\\', '/')).casefold():\n"
+   "                os.path.basename(str(new_name).replace('\\\\', '/')).casefold()\n"
+   '                for old_name, new_name in (image_rename_map or {}).items()\n'
+   '                if old_name and new_name\n'
+   '            }\n'
+   '            source_refs = Counter(\n'
+  ),
+  (
+   '        if orig_srcs and trans_img_count == orig_img_count:\n'
+   '            normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   '            source_refs = Counter(\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   'def _html_preservation_profile(html_content, image_rename_map=None):\n'
+  ),
+  (
+   '\n'
+   'def _normalized_image_rename_map(image_rename_map):\n'
+   '    """Return image_rename_map.json keyed and valued by casefolded basename."""\n'
+   '    return {\n'
+   "        os.path.basename(str(old_name).replace('\\\\', '/')).casefold():\n"
+   "        os.path.basename(str(new_name).replace('\\\\', '/')).casefold()\n"
+   '        for old_name, new_name in (image_rename_map or {}).items()\n'
+   '        if old_name and new_name\n'
+   '    }\n'
+   '\n'
+   '\n'
+   'def _html_preservation_profile(html_content, image_rename_map=None):\n'
+  ),
+ ),
+ (
+  (
+   '    image_srcs = Counter()\n'
+   '    normalized_map = {\n'
+   "        os.path.basename(str(old_name).replace('\\\\', '/')).casefold():\n"
+   "        os.path.basename(str(new_name).replace('\\\\', '/')).casefold()\n"
+   '        for old_name, new_name in (image_rename_map or {}).items()\n'
+   '        if old_name and new_name\n'
+   '    }\n'
+   "    for image in soup.find_all('img'):\n"
+  ),
+  (
+   '    image_srcs = Counter()\n'
+   '    normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   "    for image in soup.find_all('img'):\n"
+  ),
+ ),
+ (
+  (
+   '\n'
+   '    table_shapes = []\n'
+  ),
+  (
+   '\n'
+   '    svg_pictures = _svg_picture_wrappers(soup, normalized_map)\n'
+   '\n'
+   '    table_shapes = []\n'
+  ),
+ ),
+ (
+  (
+   "        'image_srcs': dict(image_srcs),\n"
+   '    }\n'
+   '\n'
+  ),
+  (
+   "        'image_srcs': dict(image_srcs),\n"
+   "        'svg_pictures': svg_pictures,\n"
+   '    }\n'
+   '\n'
+   '\n'
+   '# SVG children that carry no drawing of their own. An <svg> holding only\n'
+   '# these plus <image> elements is the usual EPUB full-page picture wrapper.\n'
+   "_SVG_PICTURE_WRAPPER_TAGS = frozenset({'image', 'desc', 'title', 'metadata', 'g'})\n"
+   '\n'
+   '\n'
+   'def _svg_picture_wrappers(soup, normalized_map):\n'
+   '    """Return the <svg> elements that only wrap <image> pictures.\n'
+   '\n'
+   '    Each entry is ``(refs, hrefs, graphic_ref_keys, custom_tags)``: per\n'
+   '    wrapped image its canonical file identity (same normalisation as\n'
+   '    ``<img src>``), its raw reference and the tuple of ``graphic_refs`` keys\n'
+   '    it produced, plus the number of non-standard tag occurrences (an SVG\n'
+   '    ``<desc>``) inside the wrapper, which leave with it when it becomes\n'
+   '    ``<img>``.\n'
+   '    """\n'
+   '    pictures = []\n'
+   "    for svg in soup.find_all('svg'):\n"
+   '        children = svg.find_all(True)\n'
+   '        if not children or any(\n'
+   "                str(child.name or '').lower() not in _SVG_PICTURE_WRAPPER_TAGS\n"
+   '                for child in children):\n'
+   '            continue\n'
+   '        refs, hrefs, keys = [], [], []\n'
+   "        for image in svg.find_all('image'):\n"
+   "            image_ref = ''\n"
+   '            image_keys = []\n'
+   "            for attribute in ('href', 'xlink:href'):\n"
+   "                raw_value = image.get(attribute, '')\n"
+   '                reference = _normalize_preserved_reference(\n'
+   '                    raw_value,\n'
+   '                    normalized_map,\n'
+   '                    image=True,\n'
+   '                )\n'
+   '                if reference:\n'
+   "                    image_keys.append(f'image.{attribute}:{reference}')\n"
+   '                    if not image_ref:\n'
+   '                        image_ref = reference\n'
+   '                        hrefs.append(raw_value)\n'
+   '            if not image_ref:\n'
+   '                refs = []\n'
+   '                break\n'
+   '            refs.append(image_ref)\n'
+   '            keys.append(tuple(image_keys))\n'
+   '        if refs:\n'
+   '            pictures.append((\n'
+   '                tuple(refs),\n'
+   '                tuple(hrefs),\n'
+   '                tuple(keys),\n'
+   '                _count_custom_tag_occurrences(str(svg)),\n'
+   '            ))\n'
+   '    return pictures\n'
+   '\n'
+   '\n'
+   'def _svg_picture_conversions(source_profile, output_profile):\n'
+   '    """Pair svg-wrapped pictures with ``<img>`` tags naming the same file.\n'
+   '\n'
+   "    Glossarion's own extraction may turn an EPUB ``<svg><image/></svg>``\n"
+   '    wrapper into ``<img>`` (and the reverse can happen). Such a picture is\n'
+   '    not lost. Wrappers kept as svg on both sides pair first; the rest pair\n'
+   '    with ``<img>`` references the other side does not already account for.\n'
+   '    A wrapper of several images of which only some became ``<img>`` is\n'
+   '    credited with those images only, so the others stay reported as lost.\n'
+   '    Each credited entry has the shape of a ``_svg_picture_wrappers`` entry.\n'
+   '    """\n'
+   '    result = {\n'
+   "        'source_to_img': [],   # source svg wrappers now shown as <img>\n"
+   "        'output_from_img': [],  # output svg wrappers that were source <img>\n"
+   '    }\n'
+   '    if not isinstance(source_profile, dict) or not isinstance(output_profile, dict):\n'
+   '        return result\n'
+   "    source_wrappers = list(source_profile.get('svg_pictures') or [])\n"
+   "    output_wrappers = list(output_profile.get('svg_pictures') or [])\n"
+   '    if not source_wrappers and not output_wrappers:\n'
+   '        return result\n'
+   '\n'
+   '    kept = Counter(tuple(sorted(wrapper[0])) for wrapper in output_wrappers)\n'
+   '    unmatched_source = []\n'
+   '    for wrapper in source_wrappers:\n'
+   '        signature = tuple(sorted(wrapper[0]))\n'
+   '        if kept[signature] > 0:\n'
+   '            kept[signature] -= 1\n'
+   '        else:\n'
+   '            unmatched_source.append(wrapper)\n'
+   '    kept = Counter(tuple(sorted(wrapper[0])) for wrapper in source_wrappers)\n'
+   '    unmatched_output = []\n'
+   '    for wrapper in output_wrappers:\n'
+   '        signature = tuple(sorted(wrapper[0]))\n'
+   '        if kept[signature] > 0:\n'
+   '            kept[signature] -= 1\n'
+   '        else:\n'
+   '            unmatched_output.append(wrapper)\n'
+   '\n'
+   "    source_imgs = Counter(source_profile.get('image_srcs') or {})\n"
+   "    output_imgs = Counter(output_profile.get('image_srcs') or {})\n"
+   '    for wrappers, spare, bucket in (\n'
+   "            (unmatched_source, output_imgs - source_imgs, 'source_to_img'),\n"
+   "            (unmatched_output, source_imgs - output_imgs, 'output_from_img')):\n"
+   '        for refs, hrefs, keys, custom_tags in wrappers:\n'
+   '            found = []\n'
+   '            for index, ref in enumerate(refs):\n'
+   '                if spare[ref] > 0:\n'
+   '                    spare[ref] -= 1\n'
+   '                    found.append(index)\n'
+   '            if found:\n'
+   '                result[bucket].append((\n'
+   '                    tuple(refs[index] for index in found),\n'
+   '                    tuple(hrefs[index] for index in found),\n'
+   '                    tuple(keys[index] for index in found),\n'
+   '                    custom_tags,\n'
+   '                ))\n'
+   '    return result\n'
+   '\n'
+   '\n'
+   'def _image_info_with_svg_picture_conversion(orig_info, conversion, image_rename_map=None):\n'
+   '    """Return source ``<img>`` info as seen after svg/img picture pairing."""\n'
+   "    source_to_img = (conversion or {}).get('source_to_img') or []\n"
+   "    output_from_img = (conversion or {}).get('output_from_img') or []\n"
+   '    if not source_to_img and not output_from_img:\n'
+   '        return orig_info\n'
+   '    normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   '    now_svg = Counter(ref for wrapper in output_from_img for ref in wrapper[0])\n'
+   '    srcs = []\n'
+   "    for src in orig_info.get('image_srcs') or []:\n"
+   '        ref = _normalize_preserved_reference(src, normalized_map, image=True)\n'
+   '        if ref and now_svg[ref] > 0:\n'
+   '            now_svg[ref] -= 1\n'
+   '            continue\n'
+   '        srcs.append(src)\n'
+   "    removed = len(orig_info.get('image_srcs') or []) - len(srcs)\n"
+   '    added = [href for wrapper in source_to_img for href in wrapper[1]]\n'
+   '    adjusted = dict(orig_info)\n'
+   "    adjusted['image_srcs'] = srcs + added\n"
+   "    adjusted['image_count'] = max(0, int(orig_info.get('image_count', 0) or 0) - removed) + len(added)\n"
+   '    return adjusted\n'
+   '\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   "    for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):\n"
+   '        source_counts = source_profile.get(family) or {}\n'
+   '        output_counts = output_profile.get(family) or {}\n'
+   '        for tag_name in sorted(set(source_counts) | set(output_counts)):\n'
+  ),
+  (
+   '\n'
+   '    # An svg-wrapped picture on one side and an <img> of the same file on the\n'
+   '    # other is one picture: credit it to the side that shows it as <img>.\n'
+   '    adjusted_graphic_counts = {\n'
+   "        'source': Counter(source_profile.get('graphic_counts') or {}),\n"
+   "        'output': Counter(output_profile.get('graphic_counts') or {}),\n"
+   '    }\n'
+   '    adjusted_graphic_refs = {\n'
+   "        'source': Counter(source_profile.get('graphic_refs') or {}),\n"
+   "        'output': Counter(output_profile.get('graphic_refs') or {}),\n"
+   '    }\n'
+   '    picture_conversions = _svg_picture_conversions(source_profile, output_profile)\n'
+   "    for bucket, credited_side in (('source_to_img', 'output'), ('output_from_img', 'source')):\n"
+   '        for refs, _hrefs, keys, _custom_tags in picture_conversions[bucket]:\n'
+   "            adjusted_graphic_counts[credited_side]['svg'] += 1\n"
+   "            adjusted_graphic_counts[credited_side]['image'] += len(refs)\n"
+   '            for image_keys in keys:\n'
+   '                adjusted_graphic_refs[credited_side].update(image_keys)\n'
+   '\n'
+   "    for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):\n"
+   '        source_counts = source_profile.get(family) or {}\n'
+   '        output_counts = output_profile.get(family) or {}\n'
+   "        if family == 'graphic_counts':\n"
+   "            source_counts = adjusted_graphic_counts['source']\n"
+   "            output_counts = adjusted_graphic_counts['output']\n"
+   '        for tag_name in sorted(set(source_counts) | set(output_counts)):\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   "    source_graphic_refs = Counter(source_profile.get('graphic_refs') or {})\n"
+   "    output_graphic_refs = Counter(output_profile.get('graphic_refs') or {})\n"
+   '    missing_graphic_refs = source_graphic_refs - output_graphic_refs\n'
+  ),
+  (
+   '\n'
+   "    source_graphic_refs = adjusted_graphic_refs['source']\n"
+   "    output_graphic_refs = adjusted_graphic_refs['output']\n"
+   '    missing_graphic_refs = source_graphic_refs - output_graphic_refs\n'
+  ),
+ ),
+ (
+  (
+   '                matched_key = None\n'
+   '                \n'
+   '                # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices\n'
+  ),
+  (
+   '                matched_key = None\n'
+   '                svg_picture_conversion = _svg_picture_conversions(\n'
+   '                    source_preservation_profile,\n'
+   '                    output_preservation_profile,\n'
+   '                )\n'
+   '\n'
+   '                # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices\n'
+  ),
+ ),
+ (
+  (
+   '                            image_rename_map=image_rename_map,\n'
+   '                        )\n'
+  ),
+  (
+   '                            image_rename_map=image_rename_map,\n'
+   '                            svg_picture_conversion=svg_picture_conversion,\n'
+   '                        )\n'
+  ),
+ ),
+ (
+  (
+   '                                image_rename_map=image_rename_map,\n'
+   '                            )\n'
+  ),
+  (
+   '                                image_rename_map=image_rename_map,\n'
+   '                                svg_picture_conversion=svg_picture_conversion,\n'
+   '                            )\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   '                missing_count = source_count - trans_any_count\n'
+   '                if missing_count > 0:\n'
+  ),
+  (
+   '\n'
+   '                # An svg picture wrapper shown as <img> on the other side\n'
+   '                # takes its SVG <desc> along; that is not a lost story tag.\n'
+   '                picture_conversions = _svg_picture_conversions(\n'
+   '                    source_preservation_profile,\n'
+   '                    output_preservation_profile,\n'
+   '                )\n'
+   '                compared_source_count = max(0, source_count - sum(\n'
+   "                    wrapper[3] for wrapper in picture_conversions['source_to_img']\n"
+   '                ))\n'
+   '                compared_trans_count = max(0, trans_any_count - sum(\n'
+   "                    wrapper[3] for wrapper in picture_conversions['output_from_img']\n"
+   '                ))\n'
+   '\n'
+   '                missing_count = compared_source_count - compared_trans_count\n'
+   '                if missing_count > 0:\n'
+  ),
+ ),
+]
+
+
+# 2026-11-18 Header update keeps a heading's link (<h1><a href>Title</a></h1>) and the QA scan charges a lost link
+# or table cell only to the chunk whose recorded source held it (the real diffs, applied after the
+# entries above, _SVG_PICTURE_SCANNER included)
+_HEADING_LINK_SCANNER = [
+ (
+  (
+   '\n'
+   'def _attach_chunk_results_to_scan(\n'
+  ),
+  (
+   '\n'
+   '# Source-preservation findings a chunk can be charged with by comparing its own\n'
+   '# recorded source with its own output block.\n'
+   '_CHUNK_PRESERVATION_ISSUE_RE = re.compile(\n'
+   '    r"^(?:(?P<links>missing_link_targets_|changed_link_targets_)"\n'
+   '    r"|missing_table_elements_(?P<table>[a-z]+)_)(?P<count>\\d+)_"\n'
+   ')\n'
+   '_HTML_ELEMENT_RE = re.compile(r"<[A-Za-z][^>]*>")\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_losses(marked, chunk_entry):\n'
+   '    """Per marker block, the links and table elements its recorded source has\n'
+   '    and its output block lost (or, for links, gained).\n'
+   '\n'
+   "    Uses the document check's own profile, so hrefs are normalised the same\n"
+   '    way. A loss only counts when the chunks together lost it too: a link the\n'
+   '    model moved into the next chunk charges nobody. Returns None when a chunk\n'
+   '    has no recorded source (older progress files) or no recorded source is\n'
+   '    HTML (markdown/text sources of enhanced extraction have no <a> or table\n'
+   '    to compare with); the findings then stay whole-document ones.\n'
+   '    """\n'
+   '    profiles = {}\n'
+   '    any_html_source = False\n'
+   '    for index, block in marked.items():\n'
+   '        record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '        source = record.get("source") if isinstance(record, dict) else None\n'
+   '        if not isinstance(source, str) or not source.strip():\n'
+   '            return None\n'
+   '        any_html_source = any_html_source or bool(_HTML_ELEMENT_RE.search(source))\n'
+   '        profiles[index] = (\n'
+   '            _html_preservation_profile(source),\n'
+   '            _html_preservation_profile(block.get("content", "")),\n'
+   '        )\n'
+   '    if not any_html_source:\n'
+   '        return None\n'
+   '    totals = {"source_links": Counter(), "output_links": Counter(),\n'
+   '              "source_tables": Counter(), "output_tables": Counter()}\n'
+   '    for source_profile, output_profile in profiles.values():\n'
+   '        totals["source_links"].update(source_profile.get("link_hrefs") or {})\n'
+   '        totals["output_links"].update(output_profile.get("link_hrefs") or {})\n'
+   '        totals["source_tables"].update(source_profile.get("table_counts") or {})\n'
+   '        totals["output_tables"].update(output_profile.get("table_counts") or {})\n'
+   '    all_lost_links = totals["source_links"] - totals["output_links"]\n'
+   '    all_extra_links = totals["output_links"] - totals["source_links"]\n'
+   '    all_lost_tables = totals["source_tables"] - totals["output_tables"]\n'
+   '    losses = {}\n'
+   '    for index, (source_profile, output_profile) in profiles.items():\n'
+   '        source_links = Counter(source_profile.get("link_hrefs") or {})\n'
+   '        output_links = Counter(output_profile.get("link_hrefs") or {})\n'
+   '        source_tables = Counter(source_profile.get("table_counts") or {})\n'
+   '        output_tables = Counter(output_profile.get("table_counts") or {})\n'
+   '        lost_tables = (source_tables - output_tables) & all_lost_tables\n'
+   '        losses[index] = {\n'
+   '            "lost_links": list(((source_links - output_links) & all_lost_links).elements()),\n'
+   '            "extra_links": list(((output_links - source_links) & all_extra_links).elements()),\n'
+   '            "tables": {\n'
+   '                tag_name: (source_tables[tag_name], output_tables[tag_name])\n'
+   '                for tag_name in lost_tables\n'
+   '            },\n'
+   '            "lost_tables": dict(lost_tables),\n'
+   '        }\n'
+   '    return losses\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_covers(issue, losses):\n'
+   '    """True when the chunks together are charged with the whole document-level\n'
+   '    count of a preservation finding. A finding the chunks only partly account\n'
+   "    for (a link that no chunk's recorded source holds) stays a whole-document\n"
+   '    one, so no part of it goes unnamed."""\n'
+   '    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))\n'
+   '    if not match or not losses:\n'
+   '        return False\n'
+   '    total = int(match.group("count"))\n'
+   '    chunk_losses = list(losses.values())\n'
+   '    if match.group("table"):\n'
+   '        charged = sum(item["lost_tables"].get(match.group("table"), 0) for item in chunk_losses)\n'
+   '    else:\n'
+   '        charged = sum(len(item["lost_links"]) for item in chunk_losses)\n'
+   '        if match.group("links").startswith("changed"):\n'
+   '            charged = max(charged, sum(len(item["extra_links"]) for item in chunk_losses))\n'
+   '    return charged >= total\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_preview(issue, chunk_losses):\n'
+   '    """Preview naming this chunk\'s own losses for a preservation finding, or\n'
+   '    "" when this chunk lost none of it."""\n'
+   '    match = _CHUNK_PRESERVATION_ISSUE_RE.match(str(issue or ""))\n'
+   '    if not match or not chunk_losses:\n'
+   '        return ""\n'
+   '    if match.group("table"):\n'
+   '        counts = chunk_losses["tables"].get(match.group("table"))\n'
+   '        if not counts:\n'
+   '            return ""\n'
+   '        return f"<{match.group(\'table\')}>: source={counts[0]}, output={counts[1]}"\n'
+   '    lost = chunk_losses["lost_links"]\n'
+   '    if match.group("links").startswith("missing"):\n'
+   "        return ', '.join(lost[:5])\n"
+   '    extra = chunk_losses["extra_links"]\n'
+   '    parts = []\n'
+   '    if lost:\n'
+   '        parts.append("missing: " + \', \'.join(lost[:3]))\n'
+   '    if extra:\n'
+   '        parts.append("unexpected: " + \', \'.join(extra[:3]))\n'
+   '    return "; ".join(parts)\n'
+   '\n'
+   '\n'
+   'def _attach_chunk_results_to_scan(\n'
+  ),
+ ),
+ (
+  (
+   '        unmatched = set(range(len(all_issues)))\n'
+   '        for index, block in sorted(marked.items()):\n'
+   '            chunk_html = block.get("content", "")\n'
+   '            chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(\n'
+   '                " ", strip=True\n'
+   '            )\n'
+   '            record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '            source_text = record.get("source") if isinstance(record, dict) else None\n'
+   '            chunk_cache = {}\n'
+   '            localized = []\n'
+   '            local_previews = {}\n'
+   '            for issue_index, issue in enumerate(all_issues):\n'
+   '                if not _chunk_issue_matches(\n'
+   '                    issue,\n'
+   '                    chunk_html,\n'
+   '                    chunk_text,\n'
+   '                    source_text,\n'
+   '                    qa_settings,\n'
+   '                    chunk_cache,\n'
+   '                ):\n'
+   '                    continue\n'
+   '                unmatched.discard(issue_index)\n'
+   '                local_issue = _chunk_local_issue_text(issue, chunk_cache)\n'
+   '                localized.append(local_issue)\n'
+   '                if previews.get(str(issue)) is not None:\n'
+   '                    local_previews[local_issue] = previews[str(issue)]\n'
+  ),
+  (
+   '        unmatched = set(range(len(all_issues)))\n'
+   '        preservation_losses = None\n'
+   '        localisable = set()\n'
+   '        if any(_CHUNK_PRESERVATION_ISSUE_RE.match(str(issue)) for issue in all_issues):\n'
+   '            preservation_losses = _chunk_preservation_losses(marked, chunk_entry)\n'
+   '            localisable = {\n'
+   '                issue_index\n'
+   '                for issue_index, issue in enumerate(all_issues)\n'
+   '                if _chunk_preservation_covers(issue, preservation_losses)\n'
+   '            }\n'
+   '        for index, block in sorted(marked.items()):\n'
+   '            chunk_html = block.get("content", "")\n'
+   '            chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(\n'
+   '                " ", strip=True\n'
+   '            )\n'
+   '            record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '            source_text = record.get("source") if isinstance(record, dict) else None\n'
+   '            chunk_cache = {}\n'
+   '            localized = []\n'
+   '            local_previews = {}\n'
+   '            for issue_index, issue in enumerate(all_issues):\n'
+   '                local_preview = None\n'
+   '                if issue_index in localisable:\n'
+   '                    local_preview = _chunk_preservation_preview(\n'
+   '                        issue, preservation_losses.get(index)\n'
+   '                    )\n'
+   '                    if not local_preview:\n'
+   '                        continue\n'
+   '                elif not _chunk_issue_matches(\n'
+   '                    issue,\n'
+   '                    chunk_html,\n'
+   '                    chunk_text,\n'
+   '                    source_text,\n'
+   '                    qa_settings,\n'
+   '                    chunk_cache,\n'
+   '                ):\n'
+   '                    continue\n'
+   '                unmatched.discard(issue_index)\n'
+   '                local_issue = _chunk_local_issue_text(issue, chunk_cache)\n'
+   '                localized.append(local_issue)\n'
+   '                if local_preview:\n'
+   '                    local_previews[local_issue] = local_preview\n'
+   '                elif previews.get(str(issue)) is not None:\n'
+   '                    local_previews[local_issue] = previews[str(issue)]\n'
+  ),
+ ),
+]
+
+_HEADING_LINK_HEADERS = [
+ (
+  (
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+  (
+   '\n'
+   '# Elements inside a heading that the QA scan checks were kept (links, pictures,\n'
+   "# tables): replacing the heading's text must not delete them.\n"
+   '_HEADING_QA_CHECKED_TAGS = frozenset((\n'
+   "    'img', 'svg', 'path', 'circle', 'ellipse', 'rect', 'line', 'polygon',\n"
+   "    'polyline', 'image', 'use', 'canvas', 'object', 'embed', 'picture',\n"
+   "    'video', 'source', 'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr',\n"
+   "    'th', 'td',\n"
+   '))\n'
+   '\n'
+   '\n'
+   'def _heading_has_qa_checked_markup(tag):\n'
+   '    """True when *tag* holds a link with an href, a picture, a table or a CSS\n'
+   '    background picture."""\n'
+   '    for element in tag.find_all(True):\n'
+   "        name = str(element.name or '').lower()\n"
+   '        if name in _HEADING_QA_CHECKED_TAGS:\n'
+   '            return True\n'
+   "        if name == 'a' and str(element.get('href') or '').strip():\n"
+   '            return True\n'
+   "        if re.search(r'url\\s*\\(', str(element.get('style') or ''), flags=re.IGNORECASE):\n"
+   '            return True\n'
+   '    return False\n'
+   '\n'
+   '\n'
+   'def replace_heading_text_keep_markup(tag, new_text):\n'
+   '    """Put *new_text* into a heading (a BeautifulSoup element) without dropping\n'
+   '    a link, picture or table inside it.\n'
+   '\n'
+   '    A heading without such markup gets *new_text* as its whole content, as\n'
+   '    before (layout markup such as <br/>, <span> or <em> goes). Otherwise the\n'
+   "    text goes into the heading's first non-blank text node (the link text of\n"
+   '    ``<h1><a href="...">Old</a></h1>``) and its other text nodes are removed,\n'
+   '    so the elements stay. A heading whose only content is such markup (a\n'
+   '    picture, no text) has no place for the text and is left as it is.\n'
+   '\n'
+   '    Returns "updated", "unchanged" (it already reads *new_text*) or "kept".\n'
+   '    """\n'
+   '    from bs4.element import CData, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction\n'
+   '    if not _heading_has_qa_checked_markup(tag):\n'
+   '        if len(tag.contents) == 1 and type(tag.contents[0]) is NavigableString \\\n'
+   '                and str(tag.contents[0]) == new_text:\n'
+   '            return "unchanged"\n'
+   '        tag.clear()\n'
+   '        tag.string = new_text\n'
+   '        return "updated"\n'
+   '    not_text = (Comment, CData, ProcessingInstruction, Declaration, Doctype)\n'
+   '    texts = [s for s in tag.find_all(string=True)\n'
+   '             if not isinstance(s, not_text) and str(s).strip()]\n'
+   '    if not texts:\n'
+   '        return "kept"\n'
+   '    if len(texts) == 1 and str(texts[0]) == new_text:\n'
+   '        return "unchanged"\n'
+   '    texts[0].replace_with(new_text)\n'
+   '    for extra in texts[1:]:\n'
+   '        extra.extract()\n'
+   '    return "updated"\n'
+   '\n'
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+ ),
+ (
+  (
+   '                    tag_updated = False\n'
+   "                    for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+   '                        tag = temp_soup.find(tag_name)\n'
+   '                        if tag and tag.get_text().strip() == current_title:\n'
+   '                            # Clear the tag and set new content\n'
+   '                            tag.clear()\n'
+   '                            tag.string = new_title\n'
+   '                            content2 = str(temp_soup)\n'
+   '                            if content2 != content:\n'
+   '                                updated = True\n'
+   '                                content = content2\n'
+   '                                tag_updated = True\n'
+   '                                break\n'
+   '                    \n'
+   "                    # Fallback to regex if BeautifulSoup didn't work\n"
+   '                    if not tag_updated:\n'
+   "                        for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+  ),
+  (
+   '                    tag_updated = False\n'
+   '                    heading_kept = False\n'
+   "                    for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+   '                        tag = temp_soup.find(tag_name)\n'
+   '                        if tag and tag.get_text().strip() == current_title:\n'
+   '                            # Change only the text: a link or picture inside the heading stays\n'
+   '                            if replace_heading_text_keep_markup(tag, new_title) == "kept":\n'
+   '                                heading_kept = True\n'
+   '                                print(f"⚠️ Kept the <{tag_name}> of {html_file} as it is: it contains markup the new title cannot be placed in")\n'
+   '                                break\n'
+   '                            content2 = str(temp_soup)\n'
+   '                            if content2 != content:\n'
+   '                                updated = True\n'
+   '                                content = content2\n'
+   '                                tag_updated = True\n'
+   '                                break\n'
+   '                    \n'
+   "                    # Fallback to regex if BeautifulSoup didn't work\n"
+   '                    if not tag_updated and not heading_kept:\n'
+   "                        for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:\n"
+  ),
+ ),
+ (
+  (
+   '                        updated_count += 1\n'
+   '                        print(f"✓ Updated {html_file}: \'{current_title}\' → \'{new_title}\'")\n'
+   '                    else:\n'
+   '                        print(f"⚠️ Could not find \'{current_title}\' in {html_file}")\n'
+   '                    \n'
+   '            except Exception as e:\n'
+  ),
+  (
+   '                        updated_count += 1\n'
+   '                        if heading_kept:\n'
+   '                            print(f"✓ Updated the title of {html_file} (heading kept): \'{current_title}\' → \'{new_title}\'")\n'
+   '                        else:\n'
+   '                            print(f"✓ Updated {html_file}: \'{current_title}\' → \'{new_title}\'")\n'
+   '                    elif not heading_kept:\n'
+   '                        print(f"⚠️ Could not find \'{current_title}\' in {html_file}")\n'
+   '\n'
+   '            except Exception as e:\n'
+  ),
+ ),
+ (
+  (
+   "                    for tag in ['h1', 'h2', 'h3']:\n"
+   "                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\\s\\S]*?(</{tag}>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)\n"
+   '                        if n > 0:\n'
+   '                            updated = True\n'
+   '                            content = content2\n'
+   '                            break\n'
+  ),
+  (
+   "                    for tag in ['h1', 'h2', 'h3']:\n"
+   "                        m = _re.search(rf'(<{tag}[^>]*>)([\\s\\S]*?)(</{tag}>)', content, flags=_re.IGNORECASE)\n"
+   '                        if m:\n'
+   '                            new_inner = new_title\n'
+   "                            if '<' in m.group(2):\n"
+   '                                # Change only the text: a link or picture inside the heading stays\n'
+   '                                from bs4 import BeautifulSoup as BS\n'
+   "                                inner_soup = BS(m.group(2), 'html.parser')\n"
+   '                                if _heading_has_qa_checked_markup(inner_soup):\n'
+   '                                    if replace_heading_text_keep_markup(inner_soup, new_title) == "kept":\n'
+   '                                        print(f"⚠️ Kept the <{tag}> of {html_file} as it is: it contains markup the new title cannot be placed in")\n'
+   '                                        break\n'
+   '                                    new_inner = str(inner_soup)\n'
+   '                            content = content[:m.start()] + m.group(1) + new_inner + m.group(3) + content[m.end():]\n'
+   '                            updated = True\n'
+   '                            break\n'
+  ),
+ ),
+]
+
+_HEADING_LINK_WORKER = [
+ (
+  (
+   '                            \n'
+   '                            # Match and replace headers\n'
+   '                            for orig, trans in zip(original_headers, translated_headers):\n'
+   '                                if trans and trans.get_text(strip=True):\n'
+   '                                    orig.string = trans.get_text(strip=True)\n'
+   '                            \n'
+  ),
+  (
+   '                            \n'
+   '                            # Match and replace headers (only their text: a link or picture inside stays)\n'
+   '                            from metadata_batch_translator import replace_heading_text_keep_markup\n'
+   '                            for orig, trans in zip(original_headers, translated_headers):\n'
+   '                                if trans and trans.get_text(strip=True):\n'
+   '                                    if replace_heading_text_keep_markup(orig, trans.get_text(strip=True)) == "kept":\n'
+   '                                        print(f"⚠️ Kept the <{orig.name}> as it is: it contains markup the translated header cannot be placed in")\n'
+   '                            \n'
+  ),
+ ),
+]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -6191,6 +6970,34 @@ APPROVED = (
                 "\n",
             ),
         ]},
+        "values": {},
+    },
+    {
+        "date": "2026-11-18",
+        "what": "QA source preservation: an EPUB <svg> that only wraps <image> (plus desc/title/metadata/g) and an "
+                "<img> naming the same file after image_rename_map.json / basename normalisation are one picture, "
+                "in either direction; it is no longer reported as missing svg/image graphics, changed graphic "
+                "references or extra/missing images, and the SVG <desc> that leaves with it is not a lost custom "
+                "tag. A wrapper of several images partly kept is credited with the kept ones only. Pictures "
+                "really gone and svg drawings are still reported",
+        "source": {"src/scan_html_folder.py": _SVG_PICTURE_SCANNER},
+        "values": {},
+    },
+    {
+        "date": "2026-11-18",
+        "what": "Header update keeps the markup inside a heading: the batch header update (exact and regex "
+                "paths) and the image-only chapter header path keep a link, picture or table inside a heading "
+                "(the new text goes into its first text node); a heading with only layout markup is replaced as "
+                "a whole as before, a picture-only heading is kept (the <title> still updates, logged as such). "
+                "QA chunk localisation: missing/changed link targets and missing table elements fail only the "
+                "chunk whose recorded source has them and whose output lost them (same href normalisation as "
+                "the document check); without recorded HTML sources, or when the chunks account for less than "
+                "the document-level count, they stay whole-document findings on every chunk as before",
+        "source": {
+            "src/scan_html_folder.py": _HEADING_LINK_SCANNER,
+            "src/metadata_batch_translator.py": _HEADING_LINK_HEADERS,
+            "src/TransateKRtoEN.py": _HEADING_LINK_WORKER,
+        },
         "values": {},
     },
 )

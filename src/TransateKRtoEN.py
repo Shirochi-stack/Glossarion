@@ -31514,10 +31514,12 @@ def main(log_callback=None, stop_callback=None):
                             translated_headers = soup_headers.find_all(header_names)
                             original_headers = soup_body.find_all(header_names)
                             
-                            # Match and replace headers
+                            # Match and replace headers (only their text: a link or picture inside stays)
+                            from metadata_batch_translator import replace_heading_text_keep_markup
                             for orig, trans in zip(original_headers, translated_headers):
                                 if trans and trans.get_text(strip=True):
-                                    orig.string = trans.get_text(strip=True)
+                                    if replace_heading_text_keep_markup(orig, trans.get_text(strip=True)) == "kept":
+                                        print(f"⚠️ Kept the <{orig.name}> as it is: it contains markup the translated header cannot be placed in")
                             
                             translated_html = str(soup_body)
                             print(f"✅ Headers translated successfully")
