@@ -3940,7 +3940,12 @@ class UnifiedClient:
             return
         seconds = health.get('load_seconds')
         took = f" in {float(seconds):.1f} s" if isinstance(seconds, (int, float)) else ''
-        print(f"✓ On-device model {target.get('stem') or model} loaded{took}")
+        # mobile only: the engine names its backend on phones whose NPU check passed
+        backend = health.get('backend')
+        runs = f" · runs on {backend}" if backend else ''
+        print(f"✓ On-device model {target.get('stem') or model} loaded{took}{runs}")
+        if health.get('npu_note'):
+            print(f"⚠ {health['npu_note']}")
 
     @classmethod
     def _local_permanent_error(cls, provider: str, http_status: Optional[int], err: Exception) -> Optional[str]:
