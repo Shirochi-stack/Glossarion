@@ -21,6 +21,9 @@ first so the final sha256 covers every byte, and checks the size and Hugging Fac
 the file is renamed into place. Downloads run outside JobService: a 5 GB model must not queue behind
 a translation, and a killed transfer is cheap to resume.
 
+The transfer itself is ``fetch_blocking`` (any pinned URL to any file); the on-device engine's NPU files use it too
+(one try, https redirects only) with ``extract_pinned``, which takes only the pinned regular members of a tar archive.
+
 ``DownloadManager`` keeps the plumbing of the Ollama ``PullManager`` it replaces: one worker thread per
 model (``run_io``), progress marshalled to the event loop with ``call_soon_threadsafe`` and throttled,
 ``subscribe`` / unsubscribe.
@@ -45,7 +48,7 @@ log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
     "DownloadCancelled", "DownloadError", "DownloadManager", "DownloadSpec", "DownloadState", "Registry",
-    "format_bytes", "models_dir",
+    "extract_pinned", "fetch_blocking", "format_bytes", "models_dir",
 ]
 
 MODELS_ENV = "GLOSSARION_MODELS_DIR"
@@ -57,6 +60,7 @@ CHUNK = 1024 * 1024
 CONNECT_TIMEOUT = 30.0
 READ_TIMEOUT = 60.0
 BACKOFF = (2, 4, 8, 16, 30)
+MAX_REDIRECTS = 5  # ``fetch_blocking(https_only=True)``: github.com -> its release asset host
 SPARE_BYTES = 256 * 1024 * 1024
 CONFIRM_BYTES = 1_000_000_000  # "Download 5.7 GB from Hugging Face?"
 #: ``shutil.disk_usage`` (tests replace it)
@@ -371,20 +375,64 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
     """Download ``spec`` into ``registry``'s folder (blocking; worker thread). ``should_stop()`` returns
     "pause" / "cancel" / None; ``sleep(seconds)`` returns True when interrupted. Returns the registry
     entry; raises ``DownloadCancelled`` / ``DownloadError``."""
-    import requests
-
-    root = registry.root
-    os.makedirs(root, exist_ok=True)
-    final = registry.file_path(spec.stem)
-    part = final + PART_SUFFIX
-    sidecar = part + ".json"
     meta = {"url": spec.url, "repo": spec.repo, "file": spec.file, "revision": spec.revision,
             "size": spec.size, "sha256": spec.sha256, "stem": spec.stem, "kind": spec.kind, "owner": spec.owner}
+    digest, have = fetch_blocking(spec.url, registry.file_path(spec.stem), size=spec.size, sha256=spec.sha256,
+                                  meta=meta, progress=progress, should_stop=should_stop, session=session,
+                                  sleep=sleep, status_error=lambda status: str(hf._http_error(status, spec.repo)))
+    entry = {"repo": spec.repo, "file": spec.file, "revision": spec.revision, "sha256": digest, "size": have,
+             "downloaded_at": int(time.time())}
+    if spec.kind == "mmproj":
+        if not registry.attach_projector(spec.owner, entry):
+            raise DownloadError(f"local/{spec.owner} was deleted while its vision part downloaded")
+    else:
+        registry.add(spec.stem, entry)
+    return entry
+
+
+def _open(client: Any, url: str, headers: dict, timeout: tuple, https_only: bool) -> Any:
+    """``client.get`` of ``url`` (streamed). ``https_only``: redirects are followed by hand and only to https."""
+    if not https_only:
+        return client.get(url, headers=headers, stream=True, timeout=timeout, allow_redirects=True)
+    from urllib.parse import urljoin
+
+    for _hop in range(MAX_REDIRECTS + 1):
+        if not str(url).startswith("https://"):
+            raise DownloadError("the download was redirected to an address that is not https")
+        response = client.get(url, headers=headers, stream=True, timeout=timeout, allow_redirects=False)
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("Location") or ""
+        try:
+            response.close()
+        except Exception:
+            pass
+        if not location:
+            raise DownloadError(f"HTTP {response.status_code} without a Location")
+        url = urljoin(url, location)
+    raise DownloadError("too many redirects")
+
+
+def fetch_blocking(url: str, final: str, *, size: int, sha256: Optional[str], meta: dict,
+                   progress: Callable[[dict], None], should_stop: Callable[[], Optional[str]], session: Any = None,
+                   sleep: Optional[Callable[[float], bool]] = None, backoff: tuple = BACKOFF,
+                   timeout: tuple = (CONNECT_TIMEOUT, READ_TIMEOUT), host: str = "Hugging Face",
+                   status_error: Optional[Callable[[int], str]] = None, https_only: bool = False) -> tuple:
+    """The transfer under :func:`download_blocking` (and the NPU files' archive): ``url`` into ``final`` through
+    ``<final>.part`` and its sidecar (``meta``; a part whose sidecar names another file, size or checksum starts
+    over), resumed with ``Range``, transient errors retried after each ``backoff`` delay (none: one try), the size
+    and ``sha256`` checked before ``os.replace``. Returns ``(sha256, size)``; raises ``DownloadCancelled`` /
+    ``DownloadError`` (a checksum mismatch deletes the part)."""
+    import requests
+
+    root = os.path.dirname(os.path.abspath(final))
+    os.makedirs(root, exist_ok=True)
+    part = final + PART_SUFFIX
+    sidecar = part + ".json"
     try:
         with open(sidecar, encoding="utf-8") as handle:
             old = json.load(handle)
-        if not isinstance(old, dict) or old.get("sha256") != spec.sha256 or old.get("size") != spec.size \
-                or old.get("file") != spec.file or old.get("repo") != spec.repo:
+        if not isinstance(old, dict) or any(old.get(key) != meta.get(key) for key in ("sha256", "size", "file", "repo")):
             _remove(part)
     except (OSError, ValueError):
         _remove(part)  # a part without its sidecar is of unknown origin
@@ -396,12 +444,12 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
             raise DownloadCancelled(mode)
 
     have = _size(part)
-    if spec.size and have > spec.size:
+    if size and have > size:
         _remove(part)
         have = 0
     free = int(disk_usage(root).free)
-    needed = max(0, int(spec.size) - have) + SPARE_BYTES
-    if spec.size and free < needed:
+    needed = max(0, int(size) - have) + SPARE_BYTES
+    if size and free < needed:
         raise DownloadError(f"Not enough storage: {format_bytes(needed)} needed, {format_bytes(free)} free")
 
     hasher = hashlib.sha256()
@@ -418,7 +466,7 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
                 hasher.update(block)
                 done += len(block)
                 progress({"phase": "checking", "bytes_done": done, "bytes_total": have})
-    total = int(spec.size or 0)
+    total = int(size or 0)
     attempt = 0
     wait = sleep or (lambda seconds: (time.sleep(seconds), False)[1])
     client = session or requests
@@ -430,8 +478,7 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
         if have:
             headers["Range"] = f"bytes={have}-"
         try:
-            response = client.get(spec.url, headers=headers, stream=True, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-                                  allow_redirects=True)
+            response = _open(client, url, headers, timeout, https_only)
             try:
                 status = response.status_code
                 if status == 416 and total and have >= total:
@@ -444,7 +491,7 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
                 elif status == 206:
                     start = _content_range_start(response.headers.get("Content-Range"))
                     if start is not None and start != have:
-                        raise DownloadError(f"Hugging Face resumed at byte {start}, not {have}")
+                        raise DownloadError(f"{host} resumed at byte {start}, not {have}")
                 elif status != 200:
                     raise _HttpStatus(status)
                 if not total:
@@ -457,6 +504,8 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
                         out.write(block)
                         hasher.update(block)
                         have += len(block)
+                        if size and have > size:
+                            break  # more than the pinned size: the check below fails it
                         now = time.monotonic()
                         if now - last >= 0.1:
                             last = now
@@ -480,18 +529,20 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
         except DownloadError:
             raise
         except _HttpStatus as exc:
-            if exc.status in (401, 403, 404):
-                raise DownloadError(str(hf._http_error(exc.status, spec.repo))) from None
+            if exc.status in (401, 403, 404) and status_error is not None:
+                raise DownloadError(status_error(exc.status)) from None
             if exc.status != 429 and exc.status < 500:
-                raise DownloadError(f"Hugging Face answered HTTP {exc.status}") from None
+                raise DownloadError(f"{host} answered HTTP {exc.status}") from None
             reason = f"HTTP {exc.status}"
         except Exception as exc:
             if not _transient(exc):
                 raise DownloadError(f"Download failed: {exc}") from exc
             reason = type(exc).__name__
-        if attempt >= len(BACKOFF):
+        if not backoff:
+            raise DownloadError(f"Download failed ({reason})")
+        if attempt >= len(backoff):
             raise DownloadError(f"Download failed after {attempt + 1} tries ({reason})")
-        delay = BACKOFF[attempt]
+        delay = backoff[attempt]
         attempt += 1
         have = _size(part)
         progress({"phase": "downloading", "status": f"Connection problem ({reason}); retrying in {delay} s…",
@@ -507,20 +558,83 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
 
     progress({"phase": "verifying", "status": "Verifying…", "bytes_done": have, "bytes_total": total or have})
     digest = hasher.hexdigest()
-    if (spec.size and have != spec.size) or (spec.sha256 and digest != spec.sha256.lower()):
+    if (size and have != size) or (sha256 and digest != sha256.lower()):
         _remove(part)
         _remove(sidecar)
         raise DownloadError("checksum mismatch")
     os.replace(part, final)
     _remove(sidecar)
-    entry = {"repo": spec.repo, "file": spec.file, "revision": spec.revision, "sha256": digest, "size": have,
-             "downloaded_at": int(time.time())}
-    if spec.kind == "mmproj":
-        if not registry.attach_projector(spec.owner, entry):
-            raise DownloadError(f"local/{spec.owner} was deleted while its vision part downloaded")
-    else:
-        registry.add(spec.stem, entry)
-    return entry
+    return digest, have
+
+
+def extract_pinned(archive: str, files: dict, dest: str) -> list:
+    """Take only the pinned members of the tar(.gz) ``archive`` (``files``: ``{key: {"name", "member", "size",
+    "sha256"}}``) into ``dest`` as ``<name>``: read as a stream (``r|*``), exact member names, regular files only (a
+    pinned name that is a link or a device fails it), never more than the pinned size, each one's size and sha256
+    checked and written atomically (temp name + ``os.replace``); nothing else is extracted. Returns the paths
+    written; raises ``DownloadError`` after deleting every file it wrote."""
+    import tarfile
+
+    wanted: dict = {}
+    for spec in files.values():
+        name = str(spec.get("name") or "")
+        if not name or os.path.basename(name) != name or name in (".", ".."):
+            raise DownloadError(f"unsafe file name {name!r}")
+        wanted[str(spec.get("member") or "")] = spec
+    os.makedirs(dest, exist_ok=True)
+    written: list = []
+    temp = ""
+    try:
+        with tarfile.open(archive, mode="r|*") as tar:
+            for member in tar:
+                spec = wanted.get(member.name)
+                if spec is None:
+                    continue
+                name, limit = str(spec["name"]), int(spec["size"])
+                if not member.isreg():
+                    raise DownloadError(f"{member.name} is not a regular file")
+                if member.size != limit:
+                    raise DownloadError(f"{name}: {member.size} bytes, expected {limit}")
+                source = tar.extractfile(member)
+                if source is None:
+                    raise DownloadError(f"{member.name} could not be read")
+                temp = os.path.join(dest, f"{name}.tmp")
+                hasher = hashlib.sha256()
+                count = 0
+                with open(temp, "wb") as out:
+                    while count <= limit:
+                        block = source.read(min(CHUNK, limit - count + 1))
+                        if not block:
+                            break
+                        count += len(block)
+                        if count > limit:
+                            break
+                        out.write(block)
+                        hasher.update(block)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if count != limit or hasher.hexdigest() != str(spec.get("sha256") or "").lower():
+                    raise DownloadError(f"{name}: checksum mismatch")
+                final = os.path.join(dest, name)
+                os.replace(temp, final)
+                temp = ""
+                written.append(final)
+                wanted.pop(member.name)
+                if not wanted:
+                    break
+        if wanted:
+            raise DownloadError(f"the archive lacks {', '.join(sorted(os.path.basename(m) for m in wanted))}")
+    except DownloadError:
+        for path in [*written, temp]:
+            if path:
+                _remove(path)
+        raise
+    except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+        for path in [*written, temp]:
+            if path:
+                _remove(path)
+        raise DownloadError(f"the archive could not be read ({type(exc).__name__}: {exc})") from exc
+    return written
 
 
 def _content_range_start(value: Any) -> Optional[int]:

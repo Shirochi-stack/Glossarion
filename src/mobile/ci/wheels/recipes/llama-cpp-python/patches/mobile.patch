@@ -42,21 +42,26 @@ backend:
     (its NPU check; meta.yaml builds Android arm64 with GGML_HEXAGON=ON when wheelhouse.toml
     [hexagon] enabled = true, through the CMake initial cache wheels.py stage-hexagon writes):
     - ggml/src/ggml-hexagon/CMakeLists.txt: the HTP skeletons (Hexagon DSP ELF files, one per arch
-      v73/v75/v79/v81/v85) install as package data llama_cpp/htp/libggml-htp-vNN.so.dsp instead of
-      into llama_cpp/lib (no ".so" ending: they stay in sitepackages.zip, out of jniLibs and Gradle's
-      strip step). libggml-hexagon.so itself is a GGML_BACKEND_DL module next to libggml-opencl.
-      Each skeleton sub-build starts from empty base compiler/linker flags, so forge's Android
-      CFLAGS/LDFLAGS never reach hexagon-clang.
+      v73/v75/v79/v81/v85) are neither built nor installed: the Hexagon SDK licence does not allow
+      shipping them, so no build_htp_skel() ExternalProject runs and upstream's
+      install(FILES ${HTP_SKELS} TYPE LIB) is gone. The SDK still provides the ARM side's headers and
+      qaic stub (htp_iface). libggml-hexagon.so is a GGML_BACKEND_DL module next to libggml-opencl, and
+      the package data file llama_cpp/npu-backend.txt marks a build that has it.
     - ggml/src/ggml-hexagon/ggml-hexagon.cpp: glossarion_hexagon_session_check(), an exported C
       function that opens a device's real session through ggml_backend_dev_init() and returns the
       C++ exception text instead of letting it cross the C ABI (sessions open lazily; a cDSP that
       refuses the unsigned PD only shows there).
-    - _ctypes_extensions.py: npu_backend_shipped() (the skeletons are in the package, loads
-      nothing); register_npu_backend(skel_dir, options) (once per process, never raises): loads
-      libcdsprpc.so, asks the cDSP's arch itself (DSPRPC_GET_DSP_INFO, as htp-drv.cpp does, so
-      upstream's silent v73 fallback never decides), copies the skeletons to skel_dir as
-      libggml-htp-vNN.so, sets GGML_HEXAGON_ARCH, the caller's GGML_HEXAGON_* options and
-      GGML_HEXAGON_LIBHTP_DIR before the only ggml_backend_load("libggml-hexagon.so"), then runs
+    - _ctypes_extensions.py: npu_skeleton_source() (a constant: llama.cpp's own release b12387 of the
+      vendored commit a956a852, the archive's url / size / sha256 and each arch's member, size and
+      sha256; the app downloads the phone's skeleton from it; the same pins are in wheelhouse.toml
+      [hexagon]); npu_backend_shipped() (the marker and the library, loads nothing); npu_precheck()
+      (the cheap steps shipped, libcdsprpc, arch; loads no backend, sets no environment);
+      register_npu_backend(skel_dir, options) (never raises): loads libcdsprpc.so, asks the cDSP's arch
+      itself (DSPRPC_GET_DSP_INFO, as htp-drv.cpp does, so upstream's silent v73 fallback never decides),
+      checks that skel_dir holds the downloaded libggml-htp-v<arch>.so with the pinned size ("NPU files
+      not downloaded" otherwise: nothing is registered or remembered, a later call can succeed), sets
+      GGML_HEXAGON_ARCH, the caller's GGML_HEXAGON_* options and GGML_HEXAGON_LIBHTP_DIR before the only
+      ggml_backend_load("libggml-hexagon.so") (from then on its result stays for the process), then runs
       the session check; it reports each step (shipped, libcdsprpc, arch, skeletons, registry,
       session). device_index(name) is the main_gpu of a registered backend ("HTP", "OpenCL") in
       llama.cpp's own device order (llama_prepare_model_devices). The GPU path shares the backend
@@ -126,7 +131,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 index 02cee8a..81cf4a2 100644
 --- a/llama_cpp/_ctypes_extensions.py
 +++ b/llama_cpp/_ctypes_extensions.py
-@@ -21,39 +21,589 @@ from typing_extensions import TypeAlias
+@@ -21,39 +21,627 @@ from typing_extensions import TypeAlias
  
  _EMSCRIPTEN_SIDE_MODULE_SUFFIX = ".cpython-00-wasm32-emscripten.so"
  
@@ -379,22 +384,49 @@ index 02cee8a..81cf4a2 100644
 +# Glossarion: optional NPU backend (Qualcomm Hexagon HTP, ggml-hexagon), registered on demand only (the
 +# app's NPU check), the third backend next to the CPU variants and the GPU above:
 +#   * Android arm64: libggml-hexagon.so, a GGML_BACKEND_DL module in the APK's jniLibs. It dlopens the
-+#     vendor's libcdsprpc.so itself (never NEEDED), so a phone without FastRPC just gets an error.
-+#   * The HTP skeletons (libggml-htp-vNN.so: Hexagon DSP code the cDSP loads through FastRPC, one per
-+#     HTP arch) ship as package data llama_cpp/htp/libggml-htp-vNN.so.dsp, inside the APK's
-+#     sitepackages.zip; FastRPC needs a real directory, so register_npu_backend() copies them out.
++#     vendor's libcdsprpc.so itself (never NEEDED), so a phone without FastRPC just gets an error. A build
++#     with it also installs the package data file llama_cpp/npu-backend.txt (npu_backend_shipped()).
++#   * The HTP skeletons (libggml-htp-vNN.so: Hexagon DSP code the cDSP loads through FastRPC, one per HTP
++#     arch) are not part of this build: the Hexagon SDK licence does not allow shipping them. The app
++#     downloads the phone's one from llama.cpp's own release of the vendored commit (npu_skeleton_source())
++#     into skel_dir; register_npu_backend() only checks that it is there.
 +#   * ggml-hexagon reads GGML_HEXAGON_* once, when its registry starts (htpdrv_init() then answers
 +#     "Driver already loaded"), so the environment is set before the only load, which happens here and
-+#     never through ggml_backend_load_all() (that one would load "hexagon" too).
++#     never through ggml_backend_load_all() (that one would load "hexagon" too). Until every check before
++#     that load has passed nothing is loaded or remembered, so a call after the download can still succeed.
 +#   * Its arch query falls back to v73 without a word when it fails; ours runs first and decides, and
 +#     GGML_HEXAGON_ARCH carries the answer.
-+#: {"backend", "device", "arch", "error", "steps"} after register_npu_backend(); {} before.
++#: {"backend", "device", "arch", "error", "steps"} once register_npu_backend() has loaded the backend; {} before.
 +NPU_STATE: dict = {}
 +NPU_BACKEND = "HTP"  # ggml-hexagon's registry name
 +NPU_LIBRARY = "libggml-hexagon.so"
++NPU_MARKER = "npu-backend.txt"  # package data of a build with libggml-hexagon (ggml-hexagon/CMakeLists.txt)
 +NPU_STEPS = ("shipped", "libcdsprpc", "arch", "skeletons", "registry", "session")
-+HTP_PREFIX, HTP_SUFFIX = "libggml-htp-v", ".so.dsp"
-+_HTP_SOURCE = None  # the directory standing in for llama_cpp/htp (tests); None: the package's own
++NPU_PRECHECK_STEPS = NPU_STEPS[:3]  # the steps before the skeletons are needed (npu_precheck)
++_NPU_MARKER_SOURCE = None  # the file standing in for llama_cpp/npu-backend.txt (tests); None: the package's own
++# The HTP skeletons of llama.cpp's own release of the commit this package vendors (vendor/llama.cpp), built by
++# upstream's CI from the same ggml-hexagon sources (its htp_iface matches this libggml-hexagon). The same values
++# are pinned in src/mobile/ci/wheels/wheelhouse.toml [hexagon] (a host test compares them); they move together
++# with any llama-cpp-python bump.
++_NPU_SKELETONS = {
++    "release": "b12387",
++    "commit": "a956a852c9c8bc1fb07206364838ddef299178c0",
++    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12387/llama-b12387-bin-linux-arm64-snapdragon.tar.gz",
++    "size": 26027402,
++    "sha256": "0fca14a6c6427f9baab799dc4324a06423fbc7de8944cc829eeb93d897924d1a",
++    "files": {
++        "v73": {"name": "libggml-htp-v73.so", "member": "llama-b12387/lib/libggml-htp-v73.so", "size": 1009416,
++                "sha256": "7f1d429176aa3d2683df8d984f5645c818a6468aa3cc362c71420b71b60609ee"},
++        "v75": {"name": "libggml-htp-v75.so", "member": "llama-b12387/lib/libggml-htp-v75.so", "size": 1013512,
++                "sha256": "f977cf79cdb6edf564a74c5e6aabf707fb1ea871b707ab907a0e839d8a1a660e"},
++        "v79": {"name": "libggml-htp-v79.so", "member": "llama-b12387/lib/libggml-htp-v79.so", "size": 1034088,
++                "sha256": "d92f8f270d799184ba22893568fa574335e06e1bc3aa60384d27b1a8d554b01b"},
++        "v81": {"name": "libggml-htp-v81.so", "member": "llama-b12387/lib/libggml-htp-v81.so", "size": 1046408,
++                "sha256": "f635668d342ff7cb7c088795d549bc8a94ba11a4c8afa2384e610ad61c925526"},
++        "v85": {"name": "libggml-htp-v85.so", "member": "llama-b12387/lib/libggml-htp-v85.so", "size": 1046408,
++                "sha256": "35cb77a2447b98451b2c5919bdf1feba5d0b1b32e9786341c10cb1e27488201d"},
++    },
++}
 +# FastRPC (remote.h of the Hexagon SDK; the same values in github.com/quic/fastrpc inc/remote.h), as
 +# htp-drv.cpp's htpdrv_get_arch() asks: remote_handle_control(DSPRPC_GET_DSP_INFO, remote_dsp_capability)
 +_DSPRPC_GET_DSP_INFO = 2  # enum handle_control_req_id
@@ -402,39 +434,30 @@ index 02cee8a..81cf4a2 100644
 +_UNSIGNED_PD_SUPPORT, _ARCH_VER = 1, 6  # enum remote_dsp_attributes
 +
 +
-+def _htp_source():
-+    """llama_cpp/htp as a directory or importlib.resources Traversable (sitepackages.zip on Android)."""
-+    if _HTP_SOURCE is not None:
-+        return _HTP_SOURCE
-+    try:
-+        import importlib.resources
++def npu_skeleton_source() -> dict:
++    """Where this engine build's HTP skeletons come from (a constant, returned as a copy): llama.cpp's release
++    tag, the commit it is built from (the one this package vendors), the archive's url / size / sha256 and, per
++    HTP arch ("v73" ... "v85"), the file name, the archive member, its size and sha256."""
++    return {**_NPU_SKELETONS, "files": {arch: dict(f) for arch, f in _NPU_SKELETONS["files"].items()}}
 +
-+        return importlib.resources.files(globals().get("__package__") or "llama_cpp") / "htp"
++
++def _npu_marker() -> bool:
++    """llama_cpp/npu-backend.txt is in the package (a directory, or sitepackages.zip on Android)."""
++    try:
++        source = _NPU_MARKER_SOURCE
++        if source is None:
++            import importlib.resources
++
++            source = importlib.resources.files(globals().get("__package__") or "llama_cpp") / NPU_MARKER
++        return bool(source.is_file())
 +    except Exception:
-+        return None
-+
-+
-+def _packaged_skeletons() -> dict:
-+    """{arch: packaged file} of llama_cpp/htp/libggml-htp-vNN.so.dsp."""
-+    source = _htp_source()
-+    out = {}
-+    try:
-+        entries = list(source.iterdir()) if source is not None and source.is_dir() else []
-+    except (OSError, ValueError):
-+        entries = []
-+    for entry in entries:
-+        name = entry.name
-+        digits = name[len(HTP_PREFIX):-len(HTP_SUFFIX)] if name.startswith(HTP_PREFIX) and name.endswith(HTP_SUFFIX) \
-+            else ""
-+        if digits.isdigit():
-+            out[int(digits)] = entry
-+    return out
++        return False
 +
 +
 +def npu_backend_shipped() -> bool:
-+    """This wheel carries the NPU backend: the HTP skeletons in the package and libggml-hexagon (next to
-+    libggml, or in the APK's jniLibs on Android arm64). Loads nothing."""
-+    return bool(_packaged_skeletons()) and (_beside_libggml(NPU_LIBRARY) or _android_arm64())
++    """This build carries libggml-hexagon: its marker in the package, and the library next to libggml (or in the
++    APK's jniLibs on Android arm64). Loads nothing."""
++    return _npu_marker() and (_beside_libggml(NPU_LIBRARY) or _android_arm64())
 +
 +
 +def _npu_step(state: dict, name: str, ok: bool, detail: str) -> bool:
@@ -442,6 +465,17 @@ index 02cee8a..81cf4a2 100644
 +    if not ok and not state["error"]:
 +        state["error"] = str(detail)
 +    return bool(ok)
++
++
++def _npu_fill(state: dict, names, exc=None) -> None:
++    """An exception becomes the failure of the first step not run yet; the steps after the first failure are
++    "not checked"."""
++    done = [s["name"] for s in state["steps"]]
++    if exc is not None:
++        _npu_step(state, next((n for n in names if n not in done), names[-1]), False, f"{type(exc).__name__}: {exc}")
++        done = [s["name"] for s in state["steps"]]
++    state["steps"] += [{"name": n, "ok": False, "detail": "not checked (an earlier step failed)"}
++                       for n in names if n not in done]
 +
 +
 +def _dsp_info(remote_handle_control, attribute: int):
@@ -460,64 +494,75 @@ index 02cee8a..81cf4a2 100644
 +    return int(cap.capability), None
 +
 +
-+def _copy_skeletons(skeletons: dict, skel_dir) -> tuple:
-+    """Copy each packaged libggml-htp-vNN.so.dsp to skel_dir/libggml-htp-vNN.so when missing or different:
-+    (copied, unchanged)."""
-+    target = pathlib.Path(skel_dir)
-+    target.mkdir(parents=True, exist_ok=True)
-+    copied = unchanged = 0
-+    for arch in sorted(skeletons):
-+        data = skeletons[arch].read_bytes()
-+        dest = target / f"{HTP_PREFIX}{arch}.so"
-+        try:
-+            same = dest.is_file() and dest.stat().st_size == len(data) and dest.read_bytes() == data
-+        except OSError:
-+            same = False
-+        if same:
-+            unchanged += 1
-+            continue
-+        part = target / f".{dest.name}.part"
-+        part.write_bytes(data)
-+        os.replace(part, dest)
-+        copied += 1
-+    return copied, unchanged
-+
-+
-+def _register_npu(state: dict, skel_dir, options: dict) -> None:
-+    skeletons = _packaged_skeletons()
-+    archs = ", ".join(f"v{a}" for a in sorted(skeletons))
-+    if not _npu_step(state, "shipped", bool(skeletons) and npu_backend_shipped(),
-+                     f"libggml-hexagon + HTP skeletons {archs}" if skeletons
-+                     else "this build carries no HTP skeletons (llama_cpp/htp)"):
-+        return
++def _npu_prechecks(state: dict):
++    """NPU_PRECHECK_STEPS: this build has the backend, the phone's libcdsprpc.so opens, the cDSP reports an
++    arch llama.cpp's release has a skeleton for. The arch (an int), or None after the first failure. Loads no
++    backend and sets no environment."""
++    shipped = npu_backend_shipped()
++    if not _npu_step(state, "shipped", shipped, NPU_LIBRARY if shipped
++                     else "this build carries no NPU backend (libggml-hexagon)"):
++        return None
 +    try:
 +        rpc = ctypes.CDLL("libcdsprpc.so", mode=getattr(ctypes, "RTLD_LOCAL", 0))
 +    except OSError as exc:
 +        _npu_step(state, "libcdsprpc", False, f"no FastRPC driver ({str(exc).strip() or 'libcdsprpc.so did not load'})")
-+        return
++        return None
 +    _npu_step(state, "libcdsprpc", True, "libcdsprpc.so loaded")
 +    control = getattr(rpc, "remote_handle_control", None)
 +    if control is None:
 +        _npu_step(state, "arch", False, "libcdsprpc.so has no remote_handle_control")
-+        return
++        return None
 +    value, why = _dsp_info(control, _ARCH_VER)
 +    if value is None:
 +        _npu_step(state, "arch", False, why)
-+        return
++        return None
 +    value &= 0xFF  # htp-drv.cpp: arch = (val >> 4) * 10 + (val & 0x0f)
 +    arch = (value >> 4) * 10 + (value & 0x0F)
 +    unsigned, _why = _dsp_info(control, _UNSIGNED_PD_SUPPORT)
 +    pd = "unknown" if unsigned is None else ("supported" if unsigned else "not supported")
-+    if not _npu_step(state, "arch", arch > 0, f"Hexagon v{arch}; unsigned PD {pd}" if arch > 0
-+                     else f"the cDSP reported arch value {value:#x}"):
++    files = _NPU_SKELETONS["files"]
++    if arch <= 0:
++        detail = f"the cDSP reported arch value {value:#x}"
++    elif f"v{arch}" not in files:
++        detail = f"Hexagon v{arch}: llama.cpp {_NPU_SKELETONS['release']} has NPU files for {', '.join(files)} only"
++    else:
++        detail = f"Hexagon v{arch}; unsigned PD {pd}"
++    return arch if _npu_step(state, "arch", arch > 0 and f"v{arch}" in files, detail) else None
++
++
++def npu_precheck() -> dict:
++    """The cheap NPU checks, before the skeletons are needed (NPU_PRECHECK_STEPS: shipped, libcdsprpc, arch):
++    {"arch": "v81" or None, "error": None or why, "steps": [{"name", "ok", "detail"}]}, one entry per step, the
++    steps after the first failure "not checked". Loads no backend, sets no GGML_HEXAGON_* variable, never
++    raises; any number of calls."""
++    state = {"arch": None, "error": None, "steps": []}
++    try:
++        arch = _npu_prechecks(state)
++        state["arch"] = f"v{arch}" if arch is not None else None
++        _npu_fill(state, NPU_PRECHECK_STEPS)
++    except Exception as exc:  # a missing symbol, a bad handle: report, never raise into the app
++        _npu_fill(state, NPU_PRECHECK_STEPS, exc)
++    return state
++
++
++def _register_npu(state: dict, skel_dir, options: dict) -> None:
++    arch = _npu_prechecks(state)
++    if arch is None:
 +        return
 +    state["arch"] = arch
-+    copied, unchanged = _copy_skeletons(skeletons, skel_dir)
-+    if not _npu_step(state, "skeletons", arch in skeletons,
-+                     f"{HTP_PREFIX}{arch}.so in {skel_dir} ({copied} copied, {unchanged} up to date)"
-+                     if arch in skeletons else f"no HTP skeleton for v{arch} (this build has {archs})"):
++    want = _NPU_SKELETONS["files"][f"v{arch}"]
++    path = pathlib.Path(skel_dir) / want["name"]
++    try:
++        ready = path.is_file() and not path.is_symlink() and path.stat().st_size == want["size"]
++    except OSError:
++        ready = False
++    if not _npu_step(state, "skeletons", ready, f"{want['name']} in {skel_dir} (llama.cpp {_NPU_SKELETONS['release']})"
++                     if ready else "NPU files not downloaded"):
 +        return
-+    # the environment, before the only load: our arch, the caller's options, our skeleton directory
++    if _LIBGGML is None:
++        _npu_step(state, "registry", False, "the engine's libraries are not loaded")
++        return
++    # the environment, before the only load: our arch, the caller's options, the skeleton directory
 +    os.environ["GGML_HEXAGON_ARCH"] = str(arch)
 +    ignored = []
 +    for key, setting in (options or {}).items():
@@ -526,10 +571,8 @@ index 02cee8a..81cf4a2 100644
 +        else:
 +            ignored.append(str(key))
 +    os.environ["GGML_HEXAGON_LIBHTP_DIR"] = str(skel_dir)
-+    if _LIBGGML is None:
-+        _npu_step(state, "registry", False, "the engine's libraries are not loaded")
-+        return
-+    reg, path, why = _load_backend(NPU_LIBRARY)
++    state["_loaded"] = True  # from here on ggml-hexagon may have read the environment: remember the answer
++    reg, lib_path, why = _load_backend(NPU_LIBRARY)
 +    if not reg:
 +        _npu_step(state, "registry", False, f"the Hexagon backend did not load ({why})" if why
 +                  else "the Hexagon backend did not start (ggml_backend_init returned NULL: see the ggml-hex log)")
@@ -545,7 +588,7 @@ index 02cee8a..81cf4a2 100644
 +        return
 +    state["device"] = name
 +    try:
-+        check = getattr(ctypes.CDLL(path, mode=getattr(ctypes, "RTLD_LOCAL", 0)), "glossarion_hexagon_session_check")
++        check = getattr(ctypes.CDLL(lib_path, mode=getattr(ctypes, "RTLD_LOCAL", 0)), "glossarion_hexagon_session_check")
 +    except (OSError, AttributeError):
 +        _npu_step(state, "session", False, "not checked: this build has no session check")
 +        return
@@ -560,25 +603,25 @@ index 02cee8a..81cf4a2 100644
 +
 +
 +def register_npu_backend(skel_dir, options=None) -> dict:
-+    """Register the Hexagon NPU backend with ggml (once per process; later calls return the first result,
-+    because ggml-hexagon reads its environment only once). Never raises. ``skel_dir``: a writable
-+    directory the HTP skeletons are copied to; ``options``: {GGML_HEXAGON_* name: value} set before the
-+    load. Returns {"backend": "HTP", "device": "HTP0" or "", "arch": int or None, "error": "" or why,
++    """Register the Hexagon NPU backend with ggml. Never raises. ``skel_dir``: the directory that holds the
++    phone's downloaded libggml-htp-v<arch>.so (npu_skeleton_source()); ``options``: {GGML_HEXAGON_* name:
++    value} set before the load. Once a call has loaded the backend, later calls return its result (ggml-hexagon
++    reads its environment only once); a call that stops before the load (no backend, no FastRPC, an arch
++    without NPU files, the skeleton not in skel_dir yet: "NPU files not downloaded") registers and remembers
++    nothing. Returns {"backend": "HTP", "device": "HTP0" or "", "arch": int or None, "error": "" or why,
 +    "steps": [{"name", "ok", "detail"}]} with one entry per NPU_STEPS name, in order; the steps after the
 +    first failure are "not checked"."""
-+    if not NPU_STATE:
-+        state = {"backend": NPU_BACKEND, "device": "", "arch": None, "error": "", "steps": []}
-+        try:
-+            _register_npu(state, skel_dir, dict(options or {}))
-+        except Exception as exc:  # a missing symbol, an unwritable directory: report, never raise into the app
-+            done = [s["name"] for s in state["steps"]]
-+            _npu_step(state, next((n for n in NPU_STEPS if n not in done), NPU_STEPS[-1]), False,
-+                      f"{type(exc).__name__}: {exc}")
-+        done = {s["name"] for s in state["steps"]}
-+        state["steps"] += [{"name": n, "ok": False, "detail": "not checked (an earlier step failed)"}
-+                           for n in NPU_STEPS if n not in done]
++    if NPU_STATE:
++        return {**NPU_STATE, "steps": [dict(s) for s in NPU_STATE["steps"]]}
++    state = {"backend": NPU_BACKEND, "device": "", "arch": None, "error": "", "steps": []}
++    try:
++        _register_npu(state, skel_dir, dict(options or {}))
++        _npu_fill(state, NPU_STEPS)
++    except Exception as exc:  # a missing symbol, a bad handle: report, never raise into the app
++        _npu_fill(state, NPU_STEPS, exc)
++    if state.pop("_loaded", False):
 +        NPU_STATE.update(state)
-+    return {**NPU_STATE, "steps": [dict(s) for s in NPU_STATE["steps"]]}
++    return {**state, "steps": [dict(s) for s in state["steps"]]}
 +
 +
 +def _device_props_type():
@@ -742,7 +785,7 @@ index 02cee8a..81cf4a2 100644
      if sys.platform == "win32":
          os.add_dll_directory(str(base_path))
          os.environ["PATH"] = str(base_path) + os.pathsep + os.environ["PATH"]
-@@ -67,9 +617,14 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
+@@ -67,9 +655,14 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "lib"))
          cdll_args["winmode"] = ctypes.RTLD_GLOBAL
@@ -758,7 +801,7 @@ index 02cee8a..81cf4a2 100644
          lib_dir = str(base_path)
          ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
          if lib_dir not in ld_library_path.split(os.pathsep):
-@@ -79,43 +634,70 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
+@@ -79,43 +672,70 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
                  else f"{lib_dir}{os.pathsep}{ld_library_path}"
              )
  
@@ -993,39 +1036,27 @@ diff --git a/vendor/llama.cpp/ggml/src/ggml-hexagon/CMakeLists.txt b/vendor/llam
 index fea5770..d91440a 100644
 --- a/vendor/llama.cpp/ggml/src/ggml-hexagon/CMakeLists.txt
 +++ b/vendor/llama.cpp/ggml/src/ggml-hexagon/CMakeLists.txt
-@@ -90,7 +90,17 @@ function(build_htp_skel V)
-             -DHEXAGON_HTP_DEBUG=${GGML_HEXAGON_HTP_DEBUG}
-             -DDSP_VERSION=${V}
-             -DPython3_EXECUTABLE=${Python3_EXECUTABLE}
--            -DPREBUILT_LIB_DIR="toolv21_${V}")
-+            -DPREBUILT_LIB_DIR="toolv21_${V}"
-+            # Glossarion: forge exports the app's Android CFLAGS/LDFLAGS (bionic includes, Python's warning
-+            # flags, NDK library dirs) and CMake would seed this DSP sub-build's base flags from them. The
-+            # toolchain file sets only the per-config flags and builds with -Werror, so the skels start from
-+            # empty base flags, as in upstream's toolchain image where CFLAGS/LDFLAGS are unset.
-+            -DCMAKE_C_FLAGS=
-+            -DCMAKE_CXX_FLAGS=
-+            -DCMAKE_ASM_FLAGS=
-+            -DCMAKE_SHARED_LINKER_FLAGS=
-+            -DCMAKE_MODULE_LINKER_FLAGS=
-+            -DCMAKE_EXE_LINKER_FLAGS=)
-     list(APPEND HTP_SKELS ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp-${V}.so)
-     list(APPEND HTP_PROJECTS htp-${V})
-     set(HTP_SKELS ${HTP_SKELS} PARENT_SCOPE)
-@@ -104,7 +114,15 @@ build_htp_skel(v81)
- build_htp_skel(v85)
+@@ -97,14 +97,15 @@ function(build_htp_skel V)
+     set(HTP_PROJECTS ${HTP_PROJECTS} PARENT_SCOPE)
+ endfunction()
  
- # Install Hexagon skels required at runtime
+-build_htp_skel(v73)
+-build_htp_skel(v75)
+-build_htp_skel(v79)
+-build_htp_skel(v81)
+-build_htp_skel(v85)
+-
+-# Install Hexagon skels required at runtime
 -install(FILES ${HTP_SKELS} TYPE LIB)
-+# Glossarion: the skels are Hexagon DSP ELF files (EM_QDSP6), not libraries for the app's CPU. Installed
-+# into llama_cpp/lib they would end up in the APK's jniLibs, where Gradle may strip them and FastRPC
-+# cannot find them (no directory on disk). They ship as package data llama_cpp/htp/libggml-htp-vNN.so.dsp
-+# instead (no ".so" ending: they stay in sitepackages.zip); the patched loader copies them to a real
-+# directory as libggml-htp-vNN.so and points GGML_HEXAGON_LIBHTP_DIR at it.
-+foreach(skel ${HTP_SKELS})
-+    get_filename_component(skel_name ${skel} NAME)
-+    install(FILES ${skel} DESTINATION llama_cpp/htp RENAME ${skel_name}.dsp)
-+endforeach()
++# Glossarion: no HTP skels are built or installed (so none can reach the wheel or the APK). They are Hexagon
++# DSP files that link the Hexagon SDK's runtime, which its licence does not allow us to ship; the app
++# downloads the phone's one at first NPU use from llama.cpp's own release of this commit
++# (llama_cpp._ctypes_extensions.npu_skeleton_source). The SDK is still needed for the ARM side above: its
++# headers and the qaic stub generator (build_idl) of htp_iface. Nothing else uses build_htp_skel, HTP_SKELS or
++# HTP_PROJECTS outside the Windows signing block below. The marker file tells the loader that this build
++# carries libggml-hexagon (npu_backend_shipped), without loading it.
++file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/npu-backend.txt "libggml-hexagon.so\n")
++install(FILES ${CMAKE_CURRENT_BINARY_DIR}/npu-backend.txt DESTINATION llama_cpp)
  
  if (CMAKE_SYSTEM_NAME MATCHES Windows AND GGML_HEXAGON_HTP_CERT)
      file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/arm64"      WINSDK_BIN0_ARM64)

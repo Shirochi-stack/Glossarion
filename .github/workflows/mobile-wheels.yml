@@ -41,9 +41,10 @@
 # NPU (Android arm64, wheelhouse.toml [hexagon], on by default on this branch): build_wheels.sh fetches the
 # Hexagon SDK 6.7.0.0 (742 MB, a public GitHub release; no Qualcomm account) into $RUNNER_TEMP/hexagon-sdk,
 # cached under its sha256 (mobile-hexagon-sdk-<sha256>), and wheels.py stage-hexagon unpacks it; the
-# llama-cpp-python arm64 wheel then also carries libggml-hexagon and the HTP skeletons, which verify-native
-# checks. [hexagon] enabled = false: no download, no backend. The skeletons contain Qualcomm SDK runtime
-# code: see src/mobile/README.md "NPU (Snapdragon)" before shipping a release.
+# llama-cpp-python arm64 wheel then also carries libggml-hexagon (the SDK is needed for its headers and stub
+# generator). The HTP skeletons are neither built nor shipped: the app downloads them from llama.cpp's own
+# release at first NPU use, and verify-native fails a wheel that carries one. [hexagon] enabled = false: no
+# download, no backend. See src/mobile/README.md "NPU (Snapdragon)".
 
 name: Mobile wheels (cryptography, Pillow, llama-cpp-python)
 

@@ -94,24 +94,39 @@ icd_loader = { url = "https://github.com/KhronosGroup/OpenCL-ICD-Loader/archive/
 
 # The optional NPU backend (Qualcomm Hexagon HTP; llama.cpp's ggml-hexagon, in 0.3.37's llama.cpp a956a852):
 # the Android arm64 llama-cpp-python build adds libggml-hexagon.so (an arm64 library next to libggml-opencl,
-# it dlopens the phone's libcdsprpc.so itself) and the HTP skeletons, Hexagon DSP code the cDSP loads
-# through FastRPC, shipped as package data llama_cpp/htp/libggml-htp-<arch>.so.dsp (recipe patch, 10.).
+# it dlopens the phone's libcdsprpc.so itself) and the marker llama_cpp/npu-backend.txt (recipe patch, 10.).
 #
 # THE SWITCH: enabled = false builds the engine exactly without it: no SDK download, GGML_HEXAGON OFF
 # (stage-hexagon still writes the initial cache the arm64 recipe loads), and verify-native /
-# verify-site-packages then expect no libggml-hexagon and no skeletons. x86_64 and iOS never build it.
+# verify-site-packages then expect no libggml-hexagon and no marker. x86_64 and iOS never build it.
 #
-# LICENCE: the skeletons link the Hexagon SDK's runtime (QuRT, the Hexagon tools' C library) statically.
-# No release may ship them until the owner has confirmed that the Hexagon SDK licence allows it (and the
-# CI use of this repackaged SDK tarball); see src/mobile/README.md "NPU (Snapdragon)".
+# LICENCE: the HTP skeletons (libggml-htp-v73..v85.so, Hexagon DSP code the cDSP loads through FastRPC)
+# link the Hexagon SDK's runtime statically, and the SDK licence does not allow shipping them. The build
+# does not compile them, and verify-native / verify-site-packages / ci/verify_apk.py fail on any
+# libggml-htp* file, *.so.dsp file or Hexagon ELF (e_machine 164) in the wheel, the site-packages or the
+# APK. The app downloads the phone's skeleton at first NPU use from llama.cpp's own GitHub release of the
+# llama.cpp commit llama-cpp-python 0.3.37 vendors (skeleton_* below). The SDK is still needed here: the
+# ARM side compiles against its headers and its qaic stub generator. See src/mobile/README.md
+# "NPU (Snapdragon)".
 #
 # sdk: the Hexagon SDK 6.7.0.0 as llama.cpp's own Android toolchain image (snapdragon-toolchain/docker,
 # HEXAGON_SDK_ROOT=/opt/hexagon/6.7.0.0, HEXAGON_TOOLS_ROOT=$HEXAGON_SDK_ROOT/tools/HEXAGON_Tools/21.0.04)
 # installs it: github.com/snapdragon-toolchain/hexagon-sdk release v6.7.0.0 (2026-10-19), no account
 # needed; 741,882,016 bytes; sha256 = the GitHub release asset digest, read on 2026-11-18 (not yet
 # confirmed by hashing the downloaded bytes: the download is checked against it in every build).
-# htp_archs: the skeletons ggml-hexagon's CMakeLists builds (v73 v75 v79 v81 v85; the backend clamps the
-# arch the cDSP reports to v73..v85) and verify-native expects; editing it does not change what CMake builds.
+# htp_archs: the HTP archs ggml-hexagon supports at this commit (v73 v75 v79 v81 v85; the backend clamps the
+# arch the cDSP reports to v73..v85): the keys of [hexagon.skeleton_files].
+#
+# The skeleton pins BELONG TO THE VENDORED llama.cpp COMMIT (llama-cpp-python 0.3.37 vendors llama.cpp
+# a956a852, see recipes/llama-cpp-python/meta.yaml) and MUST MOVE TOGETHER with any llama-cpp-python bump:
+# libggml-hexagon talks to the skeleton through htp_iface, so both must come from the same commit.
+# skeleton_release: llama.cpp's release tag built from skeleton_commit; skeleton_archive: its
+# llama-<tag>-bin-linux-arm64-snapdragon.tar.gz (checked 2026-11-18: the android-arm64-snapdragon archive of
+# the same release holds byte-identical skeletons); skeleton_files: per arch the archive member (a regular
+# file; the archive's symlinks and other files are ignored), its size and sha256. The patched loader carries
+# the same values (npu_skeleton_source(), mobile.patch 10.); tests_host/test_engine_npu_build.py fails when
+# the two differ. To bump: take the release whose tag points at the new vendored commit, hash the archive and
+# each member, update both places.
 [hexagon]
 enabled = true
 abis = ["arm64-v8a"]
@@ -119,6 +134,16 @@ version = "6.7.0.0"
 tools = "21.0.04"
 htp_archs = ["v73", "v75", "v79", "v81", "v85"]
 sdk = { url = "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.7.0.0/hexagon-sdk-v6.7.0.0-amd64-lnx.tar.xz", sha256 = "00725fc449916d7b9af2c2a3c6b54d61f3c872d5dbc1d3ca3fd2f839b1d5dc70", file = "hexagon-sdk-v6.7.0.0-amd64-lnx.tar.xz" }
+skeleton_release = "b12387"
+skeleton_commit = "a956a852c9c8bc1fb07206364838ddef299178c0"
+skeleton_archive = { url = "https://github.com/ggml-org/llama.cpp/releases/download/b12387/llama-b12387-bin-linux-arm64-snapdragon.tar.gz", size = 26027402, sha256 = "0fca14a6c6427f9baab799dc4324a06423fbc7de8944cc829eeb93d897924d1a" }
+
+[hexagon.skeleton_files]
+v73 = { name = "libggml-htp-v73.so", member = "llama-b12387/lib/libggml-htp-v73.so", size = 1009416, sha256 = "7f1d429176aa3d2683df8d984f5645c818a6468aa3cc362c71420b71b60609ee" }
+v75 = { name = "libggml-htp-v75.so", member = "llama-b12387/lib/libggml-htp-v75.so", size = 1013512, sha256 = "f977cf79cdb6edf564a74c5e6aabf707fb1ea871b707ab907a0e839d8a1a660e" }
+v79 = { name = "libggml-htp-v79.so", member = "llama-b12387/lib/libggml-htp-v79.so", size = 1034088, sha256 = "d92f8f270d799184ba22893568fa574335e06e1bc3aa60384d27b1a8d554b01b" }
+v81 = { name = "libggml-htp-v81.so", member = "llama-b12387/lib/libggml-htp-v81.so", size = 1046408, sha256 = "f635668d342ff7cb7c088795d549bc8a94ba11a4c8afa2384e610ad61c925526" }
+v85 = { name = "libggml-htp-v85.so", member = "llama-b12387/lib/libggml-htp-v85.so", size = 1046408, sha256 = "35cb77a2447b98451b2c5919bdf1feba5d0b1b32e9786341c10cb1e27488201d" }
 
 # The wheels we promise. version must equal the pyproject pin, sdist_sha256 the uv.lock sdist
 # hash, and requires_dist the wheel METADATA's Requires-Dist entries that carry no extra marker.

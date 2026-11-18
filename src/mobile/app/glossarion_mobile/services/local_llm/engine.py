@@ -29,11 +29,15 @@ was registered earlier in the process. ``device`` names what runs the model. The
 always stays on the CPU.
 
 NPU (Qualcomm Hexagon, ``load(..., npu=True)``; the service decides, per model): Android arm64 builds whose
-llama-cpp-python wheel carries libggml-hexagon (``npu_backend_shipped``). ``npu_state(skel_dir, options)`` calls
-the wheel's ``register_npu_backend`` (idempotent: it copies the HTP skeletons, sets the GGML_HEXAGON_* options,
+llama-cpp-python wheel carries libggml-hexagon (``npu_backend_shipped``). Two stages: ``npu_precheck()`` (stage 1,
+cheap: the build carries the backend, the phone's libcdsprpc.so opens, the cDSP reports its HTP arch; nothing is
+loaded or registered) and ``npu_state(skel_dir, options)`` (stage 2: the wheel's ``register_npu_backend``, which
+needs the phone's HTP skeleton ``libggml-htp-v<arch>.so`` already in ``skel_dir``, sets the GGML_HEXAGON_* options,
 loads the backend by soname and opens and closes a real session) and keeps its answer; ``npu_passed`` says
-whether every step passed. A wheel without these functions (older builds, iOS, x86_64) gives a clean "not
-shipped" state and the NPU is simply not offered. The device is chosen with ``main_gpu`` =
+whether every step passed. The APK carries no skeletons (the Hexagon SDK licence): ``npu_skeleton_source()`` names
+the llama.cpp release archive of the same commit that holds them, which the service downloads at the first NPU
+load. A wheel without these functions (older builds, iOS, x86_64) gives a clean "not shipped" state and the NPU
+is simply not offered. The device is chosen with ``main_gpu`` =
 ``device_index("HTP")``; a GPU load uses ``device_index`` of its own backend too, so a GPU load never lands on
 the NPU or the reverse (a wheel without ``device_index`` keeps ``main_gpu`` 0 for the GPU). An NPU load runs
 the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailable`` on any failure. The
@@ -68,7 +72,8 @@ progress_log = logging.getLogger("glossarion.local_llm.progress")
 __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
            "GpuUnavailable", "LlamaEngine", "NpuUnavailable", "cpu_variant", "default_threads", "device_index",
            "engine_status", "gpu_offer", "gpu_state", "hex_log_lines", "npu_failure", "npu_passed", "npu_platform",
-           "npu_state", "system_info", "vision_status"]
+           "npu_precheck", "npu_precheck_failure", "npu_skeleton_file", "npu_skeleton_source", "npu_state",
+           "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
 ENGINE_VERSION = "0.3.37"
@@ -115,6 +120,10 @@ NPU_BACKEND = "HTP"
 NPU_MIN_ARCH = 73
 #: the steps of ``register_npu_backend``, in order
 NPU_STEPS = ("shipped", "libcdsprpc", "arch", "skeletons", "registry", "session")
+#: the steps of ``npu_precheck`` (stage 1), the cheap ones before the backend needs its skeleton
+NPU_PRECHECK_STEPS = NPU_STEPS[:3]
+#: ``register_npu_backend``'s "skeletons" detail when the phone's skeleton is not in its folder
+NPU_FILES_MISSING = "NPU files not downloaded"
 #: GGML_HEXAGON_POWER_MODE and the modes ggml-hexagon.cpp documents at the pin (its default: burst)
 NPU_POWER_ENV = "GGML_HEXAGON_POWER_MODE"
 NPU_POWER_MODES = ("low_power_saver", "power_saver", "high_power_saver", "low_balanced", "balanced",
@@ -152,17 +161,114 @@ def _npu_missing(step: str, detail: str) -> dict:
             "steps": [{"name": step, "ok": False, "detail": detail}]}
 
 
-def npu_state(skel_dir: str, options: Optional[dict] = None) -> dict:
-    """``register_npu_backend(skel_dir, options)`` of our llama-cpp-python build (idempotent; it never raises):
-    ``{"backend": "HTP", "device", "arch", "error", "steps": [{"name", "ok", "detail"}]}``. A build without the
-    function, or one that does not ship the backend, answers a failed "shipped" step."""
+def _arch_number(value: Any) -> Optional[int]:
+    """81 of an HTP arch given as 81, "81" or "v81"; None when unknown."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().lower().removeprefix("v")
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _steps(raw: Any) -> list:
+    return [{"name": str(s.get("name") or "?"), "ok": bool(s.get("ok")), "detail": str(s.get("detail") or "")}
+            for s in (raw or []) if isinstance(s, dict)]
+
+
+def _npu_functions(*names: str) -> tuple:
+    """``(functions, None)`` of the wheel's NPU functions, or ``(None, failed state)``."""
     ext = _extensions()
     if ext is None:
-        return _npu_missing("shipped", UNAVAILABLE)
-    shipped = getattr(ext, "npu_backend_shipped", None)
-    register = getattr(ext, "register_npu_backend", None)
-    if shipped is None or register is None:
-        return _npu_missing("shipped", NO_NPU)
+        return None, _npu_missing("shipped", UNAVAILABLE)
+    functions = [getattr(ext, name, None) for name in names]
+    if any(function is None for function in functions):
+        return None, _npu_missing("shipped", NO_NPU)
+    return functions, None
+
+
+def npu_precheck() -> dict:
+    """Stage 1, ``npu_precheck()`` of our build (cheap, repeatable, never raises; nothing is loaded or registered):
+    ``{"backend": None, "device": "", "arch": 81 | None, "error", "steps": [shipped, libcdsprpc, arch]}``. A build
+    without the function answers a failed "shipped" step."""
+    functions, missing = _npu_functions("npu_precheck")
+    if missing is not None:
+        return missing
+    try:
+        raw = functions[0]()
+    except Exception as exc:  # pragma: no cover - the wheel's function never raises
+        return _npu_missing("shipped", f"{type(exc).__name__}: {exc}")
+    return npu_precheck_state(raw)
+
+
+def npu_precheck_state(raw: Any) -> dict:
+    """``npu_precheck``'s answer in the service's shape (arch 81 for "v81")."""
+    state = dict(raw) if isinstance(raw, dict) else {}
+    return {"backend": None, "device": "", "arch": _arch_number(state.get("arch")),
+            "error": str(state.get("error") or ""), "steps": _steps(state.get("steps"))}
+
+
+def npu_precheck_failure(state: Optional[dict]) -> Optional[tuple]:
+    """``(step, reason)`` of the first stage-1 step that keeps the NPU from being offered, else None."""
+    state = state or {}
+    steps = list(state.get("steps") or [])
+    for step in steps:  # a blocked check (it hung, or the app died in it) fails its own step
+        if not step.get("ok"):
+            return str(step.get("name") or "?"), str(step.get("detail") or state.get("error") or "failed")
+    names = {step.get("name") for step in steps}
+    for name in NPU_PRECHECK_STEPS:
+        if name not in names:
+            return name, str(state.get("error") or "not checked")
+    arch = state.get("arch")
+    if not isinstance(arch, int) or arch < NPU_MIN_ARCH:
+        return "arch", f"unsupported HTP arch {arch!r}" if arch is not None else "the HTP arch is unknown"
+    return None
+
+
+def npu_skeleton_source() -> Optional[dict]:
+    """``npu_skeleton_source()`` of our build: the llama.cpp release archive that holds the HTP skeletons of this
+    engine's commit (``{"release", "commit", "url", "size", "sha256", "files": {"v81": {"name", "member", "size",
+    "sha256"}, ...}}``), None on a build without it or with an answer that is not a pinned https archive."""
+    functions, missing = _npu_functions("npu_skeleton_source")
+    if missing is not None:
+        return None
+    try:
+        raw = functions[0]()
+    except Exception:
+        log.debug("npu_skeleton_source failed", exc_info=True)
+        return None
+    if not isinstance(raw, dict) or not str(raw.get("url") or "").startswith("https://") \
+            or not raw.get("sha256") or not isinstance(raw.get("files"), dict) or not raw.get("release"):
+        return None
+    files = {}
+    for key, spec in raw["files"].items():
+        if not isinstance(spec, dict) or not all(spec.get(k) for k in ("name", "member", "size", "sha256")):
+            return None
+        files[str(key)] = {"name": str(spec["name"]), "member": str(spec["member"]), "size": int(spec["size"]),
+                           "sha256": str(spec["sha256"]).lower()}
+    return {"release": str(raw["release"]), "commit": str(raw.get("commit") or ""), "url": str(raw["url"]),
+            "size": int(raw.get("size") or 0), "sha256": str(raw["sha256"]).lower(), "files": files}
+
+
+def npu_skeleton_file(source: Optional[dict], arch: Optional[int]) -> Optional[dict]:
+    """The ``files`` entry of ``source`` for HTP arch ``arch`` (81 -> "v81"), None when it has none."""
+    if not source or not isinstance(arch, int):
+        return None
+    spec = (source.get("files") or {}).get(f"v{arch}")
+    return spec if isinstance(spec, dict) else None
+
+
+def npu_state(skel_dir: str, options: Optional[dict] = None) -> dict:
+    """Stage 2, ``register_npu_backend(skel_dir, options)`` of our llama-cpp-python build (idempotent; it never
+    raises): ``{"backend": "HTP", "device", "arch", "error", "steps": [{"name", "ok", "detail"}]}``. It copies
+    nothing: its "skeletons" step fails ("NPU files not downloaded") unless ``skel_dir`` already holds the phone's
+    skeleton, and then nothing is registered. A build without the function, or one that does not ship the
+    backend, answers a failed "shipped" step."""
+    functions, missing = _npu_functions("npu_backend_shipped", "register_npu_backend")
+    if missing is not None:
+        return missing
+    shipped, register = functions
     try:
         if not shipped():
             return _npu_missing("shipped", "this engine build does not carry the NPU backend")
@@ -174,15 +280,9 @@ def npu_state(skel_dir: str, options: Optional[dict] = None) -> dict:
         state = dict(raw) if isinstance(raw, dict) else {}
     except Exception as exc:  # pragma: no cover - the loader never raises
         state = {"error": f"{type(exc).__name__}: {exc}"}
-    steps = [{"name": str(s.get("name") or "?"), "ok": bool(s.get("ok")), "detail": str(s.get("detail") or "")}
-             for s in (state.get("steps") or []) if isinstance(s, dict)]
-    arch = state.get("arch")
-    try:
-        arch = int(arch) if arch is not None else None
-    except (TypeError, ValueError):
-        arch = None
-    out = {"backend": state.get("backend"), "device": str(state.get("device") or ""), "arch": arch,
-           "error": str(state.get("error") or ""), "steps": steps}
+    out = {"backend": state.get("backend"), "device": str(state.get("device") or ""),
+           "arch": _arch_number(state.get("arch")), "error": str(state.get("error") or ""),
+           "steps": _steps(state.get("steps"))}
     _NPU_STATE.clear()
     _NPU_STATE.update(out)
     return out

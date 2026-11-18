@@ -433,8 +433,9 @@ class SpikeApp:
             CheckCard(
                 "npu",
                 "NPU (Snapdragon)",
-                "The on-device engine's NPU check: each step, arch, device, the backend of the last load, the "
-                "fallbacks and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU "
+                "The on-device engine's NPU check: each step, how long the check and the NPU's start took, the "
+                "NPU files (llama.cpp release, on the phone or not, the last download error), arch, device, the "
+                "backend of the last load, the fallbacks and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU "
                 "with the loaded or selected on-device model. Long-press the text to copy it.",
                 [("Refresh", self.npu_refresh), ("Time NPU, GPU and CPU", self.npu_time)],
             ),

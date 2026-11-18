@@ -634,23 +634,24 @@ def cmd_stage_opencl(ctx: Ctx, args) -> None:
 
 
 # ============================================================================ Hexagon SDK staging (Android)
-#: The package whose Android arm64 build carries the optional NPU backend (libggml-hexagon + HTP skeletons).
+#: The package whose Android arm64 build carries the optional NPU backend (libggml-hexagon).
 HEXAGON_PACKAGE = "llama-cpp-python"
 #: The only ABI the recipe builds it for (the arm64 branch of recipes/llama-cpp-python/meta.yaml).
 HEXAGON_ABIS = ("arm64-v8a",)
 #: The CMake initial cache stage-hexagon writes under the NDK and the arm64 recipe loads with
 #: -C{NDK_ROOT}/<this>: GGML_HEXAGON ON + the SDK paths, or OFF (wheelhouse.toml [hexagon] enabled = false).
 HEXAGON_INIT_CACHE = "glossarion/hexagon-init.cmake"
-#: The HTP skeletons: package data llama_cpp/htp/libggml-htp-vNN.so.dsp (mobile.patch 10.), Hexagon DSP ELF
-#: files (EM_QDSP6), never ARM libraries; no ".so" ending, so serious_python leaves them in sitepackages.zip.
-HTP_DIR = "llama_cpp/htp"
-HTP_FILE = re.compile(r"^libggml-htp-(v\d+)\.so\.dsp$")
-HTP_ANY = re.compile(r"^libggml-htp-")
+#: The package data file a build with libggml-hexagon installs (mobile.patch 10.; npu_backend_shipped() reads it).
+NPU_MARKER = "llama_cpp/npu-backend.txt"
+#: The HTP skeletons (Hexagon DSP ELF files, EM_QDSP6) may not ship (the Hexagon SDK licence): the app downloads
+#: them from llama.cpp's release ([hexagon] skeleton_*). Any file that looks like one fails the checks.
+HTP_NAME = re.compile(r"^libggml-htp|\.so\.dsp$")
 EM_QDSP6 = 164
 
 
 def hexagon_spec(data: dict, where: str = "wheelhouse.toml") -> dict | None:
-    """[hexagon] of the manifest when enabled ({abis, version, tools, htp_archs, sdk: {url, sha256, file}}),
+    """[hexagon] of the manifest when enabled ({abis, version, tools, htp_archs, sdk: {url, sha256, file},
+    skeletons: hexagon_skeleton_pins()}),
     None when it is switched off (enabled = false, or no table). Raises WheelsError on a bad table."""
     spec = data.get("hexagon")
     if spec is None:
@@ -677,7 +678,43 @@ def hexagon_spec(data: dict, where: str = "wheelhouse.toml") -> dict | None:
             "/" in sdk["file"] or not sdk["file"].endswith(".tar.xz"):
         raise WheelsError(f"{where}: [hexagon] sdk: an https url, 64 lowercase hex digits and a .tar.xz file name")
     return {"abis": tuple(abis), "version": spec["version"], "tools": spec["tools"], "htp_archs": tuple(archs),
-            "sdk": dict(sdk)}
+            "sdk": dict(sdk), "skeletons": hexagon_skeleton_pins(data, where)}
+
+
+def hexagon_skeleton_pins(data: dict, where: str = "wheelhouse.toml") -> dict:
+    """[hexagon]'s pins of the HTP skeletons the app downloads (read whether or not the backend is enabled), in
+    the shape of the patched loader's npu_skeleton_source(): {release, commit, url, size, sha256, files: {arch:
+    {name, member, size, sha256}}} with one file per htp_archs entry. Raises WheelsError on a bad table."""
+    spec = data.get("hexagon") or {}
+    archive, files = spec.get("skeleton_archive"), spec.get("skeleton_files")
+    sha = re.compile(r"[0-9a-f]{64}")
+
+    def sized(entry) -> bool:
+        return isinstance(entry.get("size"), int) and not isinstance(entry["size"], bool) and entry["size"] > 0 \
+            and isinstance(entry.get("sha256"), str) and bool(sha.fullmatch(entry["sha256"]))
+
+    release, commit = spec.get("skeleton_release"), spec.get("skeleton_commit")
+    if not (isinstance(release, str) and re.fullmatch(r"b\d+", release)) or \
+            not (isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)):
+        raise WheelsError(f"{where}: [hexagon] needs skeleton_release (a llama.cpp tag like \"b12387\") and "
+                          f"skeleton_commit (its 40-digit commit)")
+    if not isinstance(archive, dict) or not sized(archive) or not isinstance(archive.get("url"), str) or \
+            not archive["url"].startswith(f"https://github.com/ggml-org/llama.cpp/releases/download/{release}/"):
+        raise WheelsError(f"{where}: [hexagon] skeleton_archive needs a url of llama.cpp's {release} release, "
+                          f"a size and a sha256")
+    if not isinstance(files, dict) or sorted(files) != sorted(spec.get("htp_archs") or ()):
+        raise WheelsError(f"{where}: [hexagon.skeleton_files] must name exactly the htp_archs "
+                          f"{spec.get('htp_archs')}, got {sorted(files) if isinstance(files, dict) else files!r}")
+    out = {}
+    for arch, entry in sorted(files.items()):
+        name = f"libggml-htp-{arch}.so"
+        if not isinstance(entry, dict) or entry.get("name") != name or not sized(entry) or \
+                not (isinstance(entry.get("member"), str) and entry["member"].endswith(f"/lib/{name}")):
+            raise WheelsError(f"{where}: [hexagon.skeleton_files] {arch} needs name = \"{name}\", a member "
+                              f"ending in /lib/{name}, a size and a sha256")
+        out[arch] = {k: entry[k] for k in ("name", "member", "size", "sha256")}
+    return {"release": release, "commit": commit, "url": archive["url"], "size": archive["size"],
+            "sha256": archive["sha256"], "files": out}
 
 
 def hexagon_targets(ctx: Ctx) -> dict:
@@ -762,8 +799,8 @@ def cmd_stage_hexagon(ctx: Ctx, args) -> None:
             raise WheelsError(f"{tarball.name}: no {need.relative_to(root.parent).as_posix()} after extraction "
                               f"(is it Hexagon SDK {spec['version']} with tools {spec['tools']}?)")
     init.write_text(hexagon_init_cache(spec, root, tools), encoding="utf-8")
-    log(f"ok Hexagon SDK {spec['version']} in {root} (tools {spec['tools']}); {init}: GGML_HEXAGON ON, "
-        f"HTP skeletons {' '.join(spec['htp_archs'])}")
+    log(f"ok Hexagon SDK {spec['version']} in {root} (tools {spec['tools']}); {init}: GGML_HEXAGON ON "
+        f"(no HTP skeletons are built; the app downloads llama.cpp {spec['skeletons']['release']}'s)")
 
 
 # ============================================================================ collect / assemble / provenance
@@ -1683,10 +1720,9 @@ SITE_PROFILES = {
         # The optional NPU backend (mobile.patch 10.), on the targets wheelhouse.toml [hexagon] names
         # (hexagon_targets; none when it is switched off): libggml-hexagon next to libggml-opencl, an
         # ordinary arm64 library that dlopens the vendor's libcdsprpc.so itself (so it NEEDs only its
-        # siblings and bionic, and nothing may need it), plus the HTP skeletons in ``dir``: exactly
-        # libggml-htp-<arch>.so.dsp per expected arch, each a Hexagon DSP ELF (EM_QDSP6). No other
-        # libggml-htp-* file may exist anywhere (a ".so" one would be diverted into jniLibs).
-        "hexagon": {"lib": "libggml-hexagon", "dir": HTP_DIR},
+        # siblings and bionic, and nothing may need it), plus its ``marker`` file. No HTP skeleton may ship
+        # (npu_skeleton_files), whether the backend is on or off.
+        "hexagon": {"lib": "libggml-hexagon", "marker": NPU_MARKER},
         # System frameworks an iOS library may link besides /usr/lib (Metal is in every iOS 13+).
         "ios_frameworks": {"libggml-metal": ("Foundation", "Metal", "MetalKit", "CoreFoundation", "CoreGraphics")},
         # The optional AArch64 instructions each arm64 library may use (aarch64_code_features); every
@@ -1721,57 +1757,49 @@ def elf_machine(data: bytes) -> int:
     return struct.unpack_from("<H" if data[5] == 1 else ">H", data, 18)[0]
 
 
-def check_htp_skeletons(label: str, files: dict, archs) -> tuple:
-    """(errors, notes) of the HTP skeleton directory (``files``: {file name: bytes}): exactly
-    libggml-htp-<arch>.so.dsp for each expected arch (``archs``; none expected when empty), each a Hexagon DSP
-    ELF (EM_QDSP6, not code for the app's CPU)."""
-    errors, notes = [], []
-    expected = sorted(f"libggml-htp-{a}.so.dsp" for a in archs or ())
-    if sorted(files) != expected:
-        errors.append(f"{label}: {HTP_DIR} holds {sorted(files)}, expected exactly {expected}"
-                      + ("" if expected else " ([hexagon] is switched off)"))
-    for name in sorted(set(files) & set(expected)):
-        try:
-            machine = elf_machine(files[name])
-        except ValueError as e:
-            errors.append(f"{label}: {HTP_DIR}/{name}: {e}")
-            continue
-        if machine != EM_QDSP6:
-            errors.append(f"{label}: {HTP_DIR}/{name}: ELF machine {machine}, not Hexagon (EM_QDSP6 {EM_QDSP6})")
-        else:
-            notes.append(f"{label}: {HTP_DIR}/{name} Hexagon DSP ELF; {len(files[name]) / 1e6:.2f} MB")
-    return errors, notes
-
-
-def stray_htp_files(names) -> list:
-    """Paths (``names``: relative POSIX paths) of libggml-htp-* files outside HTP_DIR/<HTP_FILE>: a skeleton
-    shipped as a library (llama_cpp/lib/libggml-htp-v79.so) would be diverted into the APK's jniLibs."""
+def npu_skeleton_files(names, head) -> list:
+    """The paths among ``names`` (relative POSIX paths) that are HTP skeletons, which may not ship: a
+    libggml-htp* or *.so.dsp file name, or an ELF file for the Hexagon DSP (e_machine EM_QDSP6), whatever its
+    name. ``head``: path -> the file's first bytes (20 are enough), or None when it cannot be read."""
     out = []
     for name in names:
-        base = name.rsplit("/", 1)[-1]
-        if HTP_ANY.match(base) and not (name == f"{HTP_DIR}/{base}" and HTP_FILE.match(base)):
+        if HTP_NAME.search(name.rsplit("/", 1)[-1]):
             out.append(name)
+            continue
+        data = head(name)
+        try:
+            if data and elf_machine(data) == EM_QDSP6:
+                out.append(name)
+        except ValueError:
+            pass
     return sorted(out)
 
 
-def _check_htp_members(label: str, names, read, archs) -> tuple:
-    """check_htp_skeletons + stray_htp_files over the package's files (``names``: relative POSIX paths,
-    ``read``: name -> bytes)."""
+def check_npu_files(label: str, names, head, enabled: bool) -> tuple:
+    """(errors, notes) of the NPU backend's package data (``names``: every file of the wheel / site-packages,
+    relative POSIX paths; ``head``: see npu_skeleton_files): no HTP skeleton anywhere, and the marker
+    NPU_MARKER exactly when the backend is expected (``enabled``)."""
     names = list(names)
-    htp = {n[len(HTP_DIR) + 1:]: n for n in names if n.startswith(HTP_DIR + "/") and "/" not in n[len(HTP_DIR) + 1:]}
-    errors, notes = check_htp_skeletons(label, {base: read(n) for base, n in htp.items()}, archs)
-    stray = stray_htp_files(n for n in names if n not in htp.values())
-    if stray:
-        errors.append(f"{label}: HTP skeleton files outside {HTP_DIR}/libggml-htp-<arch>.so.dsp: {stray}")
+    errors, notes = [], []
+    skeletons = npu_skeleton_files(names, head)
+    if skeletons:
+        errors.append(f"{label}: HTP skeleton files {skeletons}: they may not ship (Hexagon SDK licence); the app "
+                      f"downloads them from llama.cpp's release (wheelhouse.toml [hexagon] skeleton_*)")
+    if enabled and NPU_MARKER not in names:
+        errors.append(f"{label}: no {NPU_MARKER} (the NPU backend's marker, mobile.patch 10.)")
+    elif not enabled and NPU_MARKER in names:
+        errors.append(f"{label}: {NPU_MARKER} is there, but no NPU backend is expected ([hexagon] is switched off)")
+    elif enabled and not skeletons:
+        notes.append(f"{label}: {NPU_MARKER} marks the NPU backend; no HTP skeleton ships")
     return errors, notes
 
 
-def _check_site_htp(target: str, arch_dir: Path, profile: dict, archs) -> tuple:
-    """The installed package's HTP skeletons (verify-site-packages)."""
-    package_dir = arch_dir / profile["hexagon"]["dir"].split("/")[0]
-    names = [p.relative_to(arch_dir).as_posix() for p in sorted(package_dir.rglob("*")) if p.is_file()] \
-        if package_dir.is_dir() else []
-    return _check_htp_members(target, names, lambda n: (arch_dir / n).read_bytes(), archs)
+def _file_head(path: Path, size: int = 20) -> bytes | None:
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(size)
+    except OSError:
+        return None
 
 
 def _any_ndk(ctx: Ctx) -> Path | None:
@@ -1921,8 +1949,8 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None)
 
 def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, stubs=None, hexagon=None) -> tuple:
     """verify-native for a ctypes package with a SITE_PROFILES entry (llama-cpp-python): the wheel holds
-    exactly the profile's libraries (``hexagon``: hexagon_targets(), the NPU backend's library and HTP
-    skeletons), checked like verify-site-packages checks the installed copy (on Android against the NDK's
+    exactly the profile's libraries (``hexagon``: hexagon_targets(), the NPU backend's library and marker; no
+    HTP skeleton ever), checked like verify-site-packages checks the installed copy (on Android against the NDK's
     libc++_shared.so, which flet-libcpp-shared ships on the device)."""
     import tempfile
 
@@ -1941,7 +1969,11 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(zf.read(name))
             if "hexagon" in profile:
-                errs, ns = _check_htp_members(path.name, names, zf.read, (hexagon or {}).get(target))
+                def head(name):
+                    with zf.open(name) as stream:
+                        return stream.read(20)
+
+                errs, ns = check_npu_files(path.name, names, head, bool((hexagon or {}).get(target)))
                 errors += errs
                 notes += ns
         lib_dir = root / profile["lib_dir"]
@@ -1967,7 +1999,7 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
                          minos: tuple = (13, 0), targets=None, hexagon=None) -> tuple:
     """(errors, notes): the index-installed native ``package`` in each arch directory of a flet build's
     site-packages (build/site-packages/<target>) is the pinned build with the expected libraries
-    (``hexagon``: hexagon_targets(), the NPU backend's library and HTP skeletons per target)."""
+    (``hexagon``: hexagon_targets(), the NPU backend's library and marker per target; no HTP skeleton ever)."""
     name = cmw.canonical(package)
     profile = SITE_PROFILES.get(name)
     if profile is None:
@@ -2013,7 +2045,10 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
             libs = {k: v for k, v in libs.items() if k in expected}
         notes.append(f"{target}: {name} {installed} build {build} {', '.join(tags)}")
         if "hexagon" in profile:
-            errs, ns = _check_site_htp(target, arch_dir, profile, (hexagon or {}).get(target))
+            # the whole site-packages of this arch: a skeleton may not ship in any package
+            names = [p.relative_to(arch_dir).as_posix() for p in sorted(arch_dir.rglob("*")) if p.is_file()]
+            errs, ns = check_npu_files(target, names, lambda n: _file_head(arch_dir / n),
+                                       bool((hexagon or {}).get(target)))
             errors += errs
             notes += ns
         if platform == "android":

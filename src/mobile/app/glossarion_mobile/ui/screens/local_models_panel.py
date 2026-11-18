@@ -20,7 +20,11 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   file). The quant Android's GPU is fast for is marked with the uncropped Halgakos and "GPU-friendly". A chosen
   quant becomes an ordinary preset row through the one-tap flow (``OnDeviceFlow.get_custom``).
 * **NPU** (only where the phone's NPU check passed: ``service.npu_offered``; nothing at all elsewhere): the engine
-  card's "Use NPU" (on by default), the power mode and the NPU status line (``_npu_section``). There are no extra NPU
+  card's "Use NPU" (on by default), the power mode and the NPU status line (``_npu_section``: that the NPU files
+  download from llama.cpp's release at the first model load, why they did not, or the ready NPU). While the check,
+  the files' download or the NPU's start runs, the section shows a progress bar and one line ("Checking the NPU…",
+  "Getting NPU files · 12 / 26 MB", "Starting the NPU…"; the Welcome page and the picker show the same bar,
+  ``npu_progress_row``); nothing here waits for them. There are no extra NPU
   rows: the default and Custom rows are "auto" and run on the NPU when their quant suits it; the Custom sheets and
   the Sigma quant sheet mark each file "NPU-friendly" / "Partly CPU on NPU" (and Qwen 3.5 9B is over the NPU's
   3.5 GB). The preset editor gains Backend (Auto / NPU / GPU / CPU) and NPU layers;
@@ -988,6 +992,10 @@ class OnDeviceFlow:
         fallback = getattr(service, "npu_fallback", None)
         if callable(fallback) and fallback(stem):
             return (note(stem) if callable(note) else None) or f"NPU unavailable: {fallback(stem)['reason']}", True
+        files = getattr(service, "npu_files_note", None)
+        files = files(stem) if callable(files) else None
+        if files:  # this start's NPU files download failed: "Try the NPU again" downloads once more
+            return files, True
         if service.loaded_stem != stem or not self.npu_offered():
             return None
         engine = getattr(service, "engine", None)
@@ -1131,11 +1139,11 @@ class OnDeviceFlow:
         return [self.gpu_switch, self.gpu_layers_box, self.gpu_note, self.gpu_status, self.gpu_swap_box]
 
     def _npu_section(self, key_prefix: str = "local") -> list:
-        """"Use NPU" (on by default), the power mode and the NPU status line: shown only where the phone's NPU
-        check passed (``render_npu`` follows a check that finishes later)."""
+        """"Use NPU" (on by default), the power mode and the NPU status line: shown where the phone's NPU is offered,
+        and with a progress bar while its check, its files' download or its start runs (``render_npu`` follows them;
+        nothing here waits for them)."""
         from glossarion_mobile.services.local_llm import engine as eng
 
-        offered = self.npu_offered()
         service = self.service
         self.npu_switch = toggle(label="Use NPU", value=bool(getattr(service, "use_npu", lambda: True)()),
                                  key=f"{key_prefix}-npu", on_change=lambda e: self.save_npu())
@@ -1147,25 +1155,60 @@ class OnDeviceFlow:
         self.npu_power_note = _small("", key=f"{key_prefix}-npu-power-note")
         self.npu_status = ft.Text("", color=semantic("warning"), visible=False, key=f"{key_prefix}-npu-status",
                                   theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True)
+        self.npu_bar = ft.ProgressBar(value=None, bar_height=3, border_radius=2, visible=False,
+                                      key=f"{key_prefix}-npu-progress")
+        self.npu_line = _small("", visible=False, key=f"{key_prefix}-npu-line", selectable=True)
+        self.npu_switch_note = _small("Auto models use the NPU when their quant suits it. A failure, or a quant the "
+                                      "NPU cannot run, uses the GPU or CPU instead.", key=f"{key_prefix}-npu-switch-note")
+        self.npu_settings = [self.npu_switch, self.npu_switch_note, self.npu_power, self.npu_power_note]
         self.npu_box = ft.Column([
             _small(NPU_SECTION_TEXT, key=f"{key_prefix}-npu-note"),
-            self.npu_switch,
-            _small("Auto models use the NPU when their quant suits it. A failure, or a quant the NPU cannot run, "
-                   "uses the GPU or CPU instead.", key=f"{key_prefix}-npu-switch-note"),
-            self.npu_power, self.npu_power_note, self.npu_status,
-        ], spacing=4, tight=True, visible=offered, key=f"{key_prefix}-npu-box")
+            self.npu_bar, self.npu_line,
+            *self.npu_settings, self.npu_status,
+        ], spacing=4, tight=True, visible=False, key=f"{key_prefix}-npu-box")
         self.render_npu(push=False)
         return [self.npu_box]
+
+    def npu_progress(self) -> Optional[dict]:
+        """The service's ``npu_progress`` (``{"phase", "text", "fraction"}`` while the NPU check, its files' download
+        or its start runs), None otherwise or without one. Reads state only: never waits for the NPU."""
+        try:
+            return getattr(self.service, "npu_progress", lambda: None)()
+        except Exception:
+            return None
+
+    def npu_progress_row(self, key_prefix: str) -> Optional[ft.Control]:
+        """A thin bar over one short line while the NPU check, its files' download or its start runs (the Welcome
+        page and the model picker), else None."""
+        progress = self.npu_progress()
+        if progress is None:
+            return None
+        return ft.Column([ft.ProgressBar(value=progress["fraction"], bar_height=3, border_radius=2,
+                                         key=f"{key_prefix}-npu-progress"),
+                          _small(progress["text"], key=f"{key_prefix}-npu-line")],
+                         spacing=2, tight=True, key=f"{key_prefix}-npu-busy")
 
     def render_npu(self, snap: Any = None, push: bool = True) -> None:
         box = getattr(self, "npu_box", None)
         if box is None:
             return
         service = self.service
-        box.visible = self.npu_offered()
+        offered = self.npu_offered()
+        progress = self.npu_progress()
+        box.visible = offered or progress is not None
+        for control in self.npu_settings:
+            control.visible = offered
+        self.npu_bar.visible = progress is not None
+        self.npu_bar.value = progress["fraction"] if progress is not None else None
+        line = progress["text"] if progress is not None else (
+            getattr(service, "npu_status_line", lambda: None)() if offered else None)
+        self.npu_line.value = line or ""
+        self.npu_line.visible = bool(line)
+        error = bool(progress is None and getattr(service, "npu_download_error", None))
+        self.npu_line.color = semantic("warning") if error else None
         note = getattr(snap, "npu_note", None) if snap is not None else getattr(service, "npu_note", lambda: None)()
         self.npu_status.value = note or ""
-        self.npu_status.visible = bool(note)
+        self.npu_status.visible = bool(note) and offered
         pending = bool(getattr(service, "npu_power_pending", lambda: False)())
         self.npu_power_note.value = ("Applies after restarting Glossarion." if pending else
                                      "Burst is the fastest and may slow down when the phone gets hot.")
@@ -1414,6 +1457,8 @@ class LocalModelsPanel(OnDeviceFlow):
             text = f"{text} · {snap.model}"
             if getattr(snap, "vision", False):
                 text += " · reads images"
+            if snap.state == "loading" and getattr(snap, "phase", None):
+                text += f" · {snap.phase}"  # "Getting NPU files · 12 / 26 MB" / "Starting the NPU…" before the model
         if snap.queue:
             text += f" · {snap.queue} waiting"
         self.engine_state.value = text

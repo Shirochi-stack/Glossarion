@@ -38,8 +38,10 @@
 #     HEXAGON_SDK_ROOT / HEXAGON_TOOLS_ROOT of the staged Hexagon SDK and PREBUILT_LIB_DIR=android_aarch64
 #     (llama.cpp's snapdragon preset), or GGML_HEXAGON=OFF when [hexagon] enabled = false. One manifest
 #     switch, because forge renders this file with sdk/arch only and passes no outer environment.
-#     libggml-hexagon is a GGML_BACKEND_DL module next to libggml-opencl; the HTP skeletons install as
-#     llama_cpp/htp/libggml-htp-vNN.so.dsp (Hexagon DSP files, kept out of jniLibs). x86_64 and iOS: none.
+#     libggml-hexagon is a GGML_BACKEND_DL module next to libggml-opencl (plus the marker file
+#     llama_cpp/npu-backend.txt). The HTP skeletons (Hexagon DSP files) are not built and not shipped: the
+#     app downloads them from llama.cpp's own release of the vendored commit (wheelhouse.toml [hexagon]).
+#     x86_64 and iOS: none.
 package:
   name: llama-cpp-python
   version: "0.3.37"

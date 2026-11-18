@@ -5,7 +5,11 @@ marker around every NPU answer) and their recovery at start, "Try the NPU again"
 the GPU and the NPU, the wheel's NPU functions through ``engine.npu_state`` (and a wheel without them), the presets'
 backend fields, the default slots and a model added from Hugging Face running on the NPU under Auto (no separate
 NPU rows), an old saved "· NPU" row still loading on the NPU, the diagnostics block and the
-self-check's shared markers. Fakes only: FakeEngine, FakePrefs, a fake ``register_npu_backend``; no native NPU.
+self-check's shared markers; the two stages (``npu_precheck`` once per app version, ``register_npu_backend`` once per
+process before the first NPU load) and the first-use download of the HTP skeletons from llama.cpp's release (one GET,
+https redirects only, only the pinned members, checksums, a symlink member, an offline phone, cancel and resume, the
+release-keyed folder). Fakes only: FakeEngine, FakePrefs, fakes of the three wheel functions, tiny tar.gz archives
+and a fake HTTP client; no native NPU, no network.
 """
 
 from __future__ import annotations
@@ -46,29 +50,179 @@ def failing_state(step: str, detail: str = "nope") -> dict:
     return state
 
 
-class Probe:
-    """A fake ``register_npu_backend`` (``engine.npu_state``'s place): records its calls."""
+# ---- the fake skeleton release (``npu_skeleton_source``) and its archive --------------------------------------------
 
-    def __init__(self, state=None, delay=0.0, error=None):
+RELEASE = "b12387"
+URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{RELEASE}/llama-{RELEASE}-bin-linux-arm64-snapdragon.tar.gz"
+ASSET = "https://release-assets.githubusercontent.com/github-production-release-asset/1/llama.tar.gz"
+ARCHS = ("v73", "v75", "v79", "v81", "v85")
+SKELETONS = {arch: (f"htp-{arch} ".encode() * 64) for arch in ARCHS}
+MEMBER = "llama-{release}/lib/libggml-htp-{arch}.so"
+
+
+def build_archive(contents=None, *, links=(("llama-b12387/lib/libggml.so", "libggml.so.0"),),
+                  extra=(("llama-b12387/bin/llama-cli", b"\x7fELF"),)) -> bytes:
+    """A tiny tar.gz like the release's: the five skeletons (``contents``), other files, and symlink members
+    ``links`` = ((name, target), ...)."""
+    import io
+    import tarfile
+
+    contents = SKELETONS if contents is None else contents
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        for name, data in extra:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for name, target in links:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            tar.addfile(info)
+        for arch, data in contents.items():
+            info = tarfile.TarInfo(MEMBER.format(release=RELEASE, arch=arch))
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return out.getvalue()
+
+
+def make_source(archive: bytes, *, skeletons=None, url=URL) -> dict:
+    """``npu_skeleton_source()`` of the INTERFACE for ``archive`` (``skeletons``: the pinned contents)."""
+    import hashlib
+
+    skeletons = SKELETONS if skeletons is None else skeletons
+    return {"release": RELEASE, "commit": "a956a852c9c8bc1fb07206364838ddef299178c0", "url": url,
+            "size": len(archive), "sha256": hashlib.sha256(archive).hexdigest(),
+            "files": {arch: {"name": f"libggml-htp-{arch}.so", "member": MEMBER.format(release=RELEASE, arch=arch),
+                             "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                      for arch, data in skeletons.items()}}
+
+
+ARCHIVE = build_archive()
+SOURCE = make_source(ARCHIVE)
+
+
+class FakeResponse:
+    def __init__(self, status, body=b"", headers=None, chunk_delay=0.0):
+        self.status_code = status
+        self.body = body
+        self.headers = dict(headers or {})
+        self.headers.setdefault("Content-Length", str(len(body)))
+        self.chunk_delay = chunk_delay
+        self.closed = False
+
+    def iter_content(self, chunk_size=1):
+        step = max(1, len(self.body) // 8)
+        for start in range(0, len(self.body), step):
+            if self.chunk_delay:
+                time.sleep(self.chunk_delay)
+            yield self.body[start:start + step]
+
+    def close(self):
+        self.closed = True
+
+
+class FakeHTTP:
+    """The download's HTTP client: github.com answers 302 to the asset host, which serves ``body``. Records every
+    request (URL, headers, redirects, timeout)."""
+
+    def __init__(self, body=ARCHIVE, *, redirect=ASSET, error=None, chunk_delay=0.0):
+        self.body = body
+        self.redirect = redirect
+        self.error = error
+        self.chunk_delay = chunk_delay
+        self.calls: list = []
+
+    def get(self, url, headers=None, stream=False, timeout=None, allow_redirects=True):
+        self.calls.append({"url": url, "headers": dict(headers or {}), "stream": stream, "timeout": timeout,
+                           "allow_redirects": allow_redirects})
+        if self.error is not None:
+            raise self.error
+        if url == URL and self.redirect:
+            return FakeResponse(302, headers={"Location": self.redirect})
+        start = int(str((headers or {}).get("Range", "bytes=0-"))[6:].split("-")[0] or 0)
+        if start:
+            return FakeResponse(206, self.body[start:], {"Content-Range": f"bytes {start}-{len(self.body) - 1}/{len(self.body)}"},
+                                chunk_delay=self.chunk_delay)
+        return FakeResponse(200, self.body, chunk_delay=self.chunk_delay)
+
+
+class Pre:
+    """A fake ``npu_precheck`` (stage 1): the first three steps of ``state`` (a ``Probe``'s), arch as "v81"."""
+
+    def __init__(self, state=None, delay=0.0):
+        self.state = state if state is not None else passing_state()
+        self.delay = delay
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.delay:
+            time.sleep(self.delay)
+        steps = [dict(s) for s in self.state["steps"] if s["name"] in eng.NPU_PRECHECK_STEPS]
+        arch = self.state.get("arch")
+        failing = next((s for s in steps if not s["ok"]), None)
+        return {"arch": f"v{arch}" if arch is not None else None, "error": failing["detail"] if failing else None,
+                "steps": steps}
+
+
+class Probe:
+    """A fake ``register_npu_backend`` (``engine.npu_state``'s place), as the INTERFACE says: its "skeletons" step
+    passes only when ``skel_dir`` holds the phone's file of the pinned size (else "NPU files not downloaded" and
+    nothing registered); records its calls."""
+
+    def __init__(self, state=None, delay=0.0, error=None, source=None):
         self.state = state if state is not None else passing_state()
         self.delay = delay
         self.error = error
+        self.source = source or SOURCE
         self.calls: list = []
 
     def __call__(self, skel_dir, options):
+        import os
+
         self.calls.append((skel_dir, dict(options)))
         if self.delay:
             time.sleep(self.delay)
         if self.error:
             raise RuntimeError(self.error)
-        return dict(self.state)
+        state = {**self.state, "steps": [dict(s) for s in self.state["steps"]]}
+        spec = self.source["files"].get(f"v{state.get('arch')}")
+        path = os.path.join(skel_dir, spec["name"]) if spec else ""
+        if not spec or not os.path.isfile(path) or os.path.getsize(path) != spec["size"]:
+            for step in state["steps"]:
+                if step["name"] == "skeletons":
+                    step.update(ok=False, detail=eng.NPU_FILES_MISSING)
+            state.update(error=eng.NPU_FILES_MISSING, device="")
+        return state
+
+
+def place_skeleton(root, arch="v81") -> str:
+    """The phone's skeleton already on disk (an earlier start downloaded it)."""
+    import os
+
+    folder = svc.npu_skel_dir(RELEASE, str(root))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"libggml-htp-{arch}.so")
+    with open(path, "wb") as handle:
+        handle.write(SKELETONS[arch])
+    return path
 
 
 def npu_service(tmp_path, *, stems=(Q40,), probe=None, prefs=None, gpu=False, engine=None, version=VERSION,
-                **kwargs):
+                precheck=None, source=None, http=None, files=True, **kwargs):
+    """A service on a phone with the NPU (fakes for both stages, the skeleton release and its HTTP host);
+    ``files``: the phone's skeleton is already on disk (else the first NPU load downloads it from ``http``)."""
     prefs = prefs if prefs is not None else fakes.FakePrefs({svc.GPU_KEY: True} if gpu else {})
     probe = probe if probe is not None else Probe()
+    precheck = precheck if precheck is not None else Pre(probe.state)
+    root = tmp_path / "htp"
+    if files and probe.state.get("arch") in (73, 75, 79, 81, 85):
+        place_skeleton(root, f"v{probe.state['arch']}")
     service, engine = make_service(tmp_path, stems=stems, prefs=prefs, engine=engine, npu_probe=probe,
+                                   npu_precheck=precheck, npu_source=lambda: source or SOURCE,
+                                   npu_root=str(root), npu_session=http if http is not None else FakeHTTP(),
                                    app_version=version, gpu_backend="OpenCL", **kwargs)
     return service, engine, probe
 
@@ -287,7 +441,7 @@ def _expected(choice, passed, use_npu, kind, fallback, use_gpu):
 def test_backend_choice_matrix(tmp_path, choice, passed, use_npu, kind, fallback, use_gpu):
     stem = {"best": Q40, "ok": QK, "cpu": IQ}[kind]
     prefs = fakes.FakePrefs({svc.GPU_KEY: use_gpu, svc.NPU_KEY: use_npu})
-    probe = Probe(passing_state() if passed else failing_state("session", "unsigned PD denied"))
+    probe = Probe(passing_state() if passed else failing_state("libcdsprpc", "unsigned PD denied"))
     service, _engine, _probe = npu_service(tmp_path, stems=(stem,), probe=probe, prefs=prefs)
     set_backend(service, stem, choice)
     if fallback:
@@ -305,7 +459,7 @@ def test_the_choice_reaches_the_engine_and_the_device_line(tmp_path):
     assert service.last_load["backend"] == "NPU" and service.last_load["stem"] == Q40
     assert service.health(f"local/{Q40}")["backend"] == "NPU"
     assert len(probe.calls) == 1 and probe.calls[0][1] == {eng.NPU_POWER_ENV: "burst"}
-    assert probe.calls[0][0].replace("\\", "/").endswith("htp/9.16.0_abc_llama-0.3.37")
+    assert probe.calls[0][0].replace("\\", "/").endswith(f"htp/{RELEASE}")           # keyed on the release, not the app
     chat(service, text="again")
     assert engine.backends == ["npu"]                                          # no reload
     chat(service, IQ)                                                          # IQ4_XS: Auto skips the NPU
@@ -384,7 +538,7 @@ def test_the_default_slots_use_the_npu_under_auto(tmp_path, passed, use_npu, use
     # Garbage / Light / Medium (UD-Q4_K_XL, saved list untouched: the defaults) and a Hugging Face ID download of a
     # K-quant: no backend on the row, so Auto puts them on the NPU where the check passed and "Use NPU" is on
     prefs = fakes.FakePrefs({svc.GPU_KEY: use_gpu, svc.NPU_KEY: use_npu})
-    probe = Probe(passing_state() if passed else failing_state("session", "unsigned PD denied"))
+    probe = Probe(passing_state() if passed else failing_state("libcdsprpc", "unsigned PD denied"))
     service, engine, _probe = npu_service(tmp_path, stems=(), probe=probe, prefs=prefs)
     service.run_npu_check()
     stems = [_register(service, row["repo"], row["file"]) for row in presets.DEFAULT_PRESETS[:3]]
@@ -419,11 +573,18 @@ def test_an_old_saved_npu_row_still_loads_on_the_npu(tmp_path):
 
 @pytest.mark.parametrize("step", ["libcdsprpc", "arch", "skeletons", "registry", "session"])
 def test_a_failing_check_hides_the_npu(tmp_path, step):
+    # stage 1 (libcdsprpc, arch) hides it at once; stage 2 (skeletons, registry, session) runs before the first NPU
+    # load: that load goes to the GPU and the NPU is not offered for this app version afterwards (A6)
     service, engine, _probe = npu_service(tmp_path, probe=Probe(failing_state(step, f"{step} failed")), gpu=True)
     service.run_npu_check()
-    assert not service.npu_offered() and service.npu_failure() == (step, f"{step} failed")
+    assert service.npu_offered() is (step not in eng.NPU_PRECHECK_STEPS)
     chat(service)
-    assert engine.backends == ["gpu"] and service.snapshot().npu_note is None
+    assert not service.npu_offered() and service.npu_failure() == (step, f"{step} failed")
+    assert engine.backends == ["gpu"] and service.snapshot().npu_note is None and service.npu_fallback(Q40) is None
+    if step not in eng.NPU_PRECHECK_STEPS:
+        assert service.prefs.get(svc.NPU_SESSION_KEY)["state"]["error"] == f"{step} failed"
+        again, _e, probe2 = npu_service(tmp_path / "again", prefs=service.prefs)  # the next start: still off
+        assert not again.npu_offered() and again._placement(Q40)[0] == "gpu" and probe2.calls == []
 
 
 def test_no_npu_build_offers_nothing_and_changes_nothing(tmp_path, monkeypatch):
@@ -668,40 +829,91 @@ def test_a_check_the_app_died_in_keeps_the_npu_off_until_the_version_changes(tmp
     finally:
         service.stop()
         svc.set_default_service(None)
-    newer, _e, probe2 = npu_service(tmp_path / "n", prefs=prefs, version="9.16.1/llama-0.3.37")
-    assert newer.npu_offered() is False and newer.run_npu_check() and probe2.calls and newer.npu_offered()
+    pre = Pre()
+    newer, _e, probe2 = npu_service(tmp_path / "n", prefs=prefs, version="9.16.1/llama-0.3.37", precheck=pre)
+    assert newer.npu_offered() is False and newer.run_npu_check() and pre.calls == 1 and newer.npu_offered()
+    assert probe2.calls == []                                                  # stage 2 waits for an NPU load
+
+
+def test_a_start_the_app_died_in_keeps_the_npu_off_until_the_version_changes(tmp_path):
+    prefs = fakes.FakePrefs({svc.NPU_CHECK_ATTEMPT_KEY: {"version": VERSION, "at": 1, "stage": 2}, svc.GPU_KEY: True})
+    service, engine, probe = npu_service(tmp_path, prefs=prefs)
+    service.start()
+    try:
+        service.run_npu_check()
+        assert not service.npu_offered() and service.npu_failure() == ("session", svc.NPU_START_CRASH_REASON)
+        chat(service)
+        assert engine.backends == ["gpu"] and probe.calls == []
+    finally:
+        service.stop()
+        svc.set_default_service(None)
 
 
 def test_the_check_runs_in_the_background_at_start_and_marks_itself(tmp_path):
     marks = []
     holder = {}
 
-    class Watching(Probe):
-        def __call__(self, skel_dir, options):
+    class Watching(Pre):
+        def __call__(self):
             marks.append(holder["prefs"].get(svc.NPU_CHECK_ATTEMPT_KEY))
-            return super().__call__(skel_dir, options)
+            return super().__call__()
 
     prefs = fakes.FakePrefs()
     holder["prefs"] = prefs
-    service, _engine, probe = npu_service(tmp_path, prefs=prefs, probe=Watching())
+    service, _engine, probe = npu_service(tmp_path, prefs=prefs, precheck=Watching())
     service.start()
     try:
         deadline = time.monotonic() + 5
         while service._npu_state is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert service.npu_offered() and marks[0]["version"] == VERSION
-        assert prefs.get(svc.NPU_CHECK_ATTEMPT_KEY) is None
-        assert prefs.get(svc.NPU_CHECK_KEY)["blocked"] is False
+        assert service.npu_offered() and marks[0]["version"] == VERSION and marks[0]["stage"] == 1
+        assert prefs.get(svc.NPU_CHECK_ATTEMPT_KEY) is None and probe.calls == []  # stage 2 waits for a load
+        saved = prefs.get(svc.NPU_CHECK_KEY)
+        assert saved["blocked"] is False and saved["source"]["release"] == RELEASE
     finally:
         service.stop()
         svc.set_default_service(None)
-    # the next start shows the rows from the saved check before its own has run
-    later, _e, _p = npu_service(tmp_path / "l", prefs=prefs, probe=Probe(delay=5))
-    assert later._npu_state is None and later.npu_offered()
+    # the next start shows the rows from the saved check, and never runs stage 1 again for this version
+    pre = Pre(delay=5)
+    later, _e, _p = npu_service(tmp_path / "l", prefs=prefs, precheck=pre)
+    later.start()
+    try:
+        assert later._npu_state is None and later.npu_offered() and later.npu_progress() is None
+        assert later.run_npu_check() and pre.calls == 0
+    finally:
+        later.stop()
+        svc.set_default_service(None)
+
+
+@pytest.mark.parametrize("pre", ["no backend", "no dsp", "passing"])
+def test_a_quick_check_never_shows_checking(tmp_path, pre):
+    # a build without the backend and a phone without a Hexagon DSP answer at once: the screens never see a bar
+    state = {"no backend": failing_state("shipped", eng.NO_NPU), "no dsp": failing_state("libcdsprpc", "dlopen failed"),
+             "passing": passing_state()}[pre]
+    service, _engine, _probe = npu_service(tmp_path, stems=(), precheck=Pre(state))
+    seen: list = []
+    service.subscribe(lambda snap: seen.append(service.npu_progress()))
+    service.start()
+    try:
+        deadline = time.monotonic() + 5
+        while service._npu_state is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service._npu_state is not None and service.npu_progress() is None
+        assert not [p for p in seen if p is not None]
+    finally:
+        service.stop()
+        svc.set_default_service(None)
+    # a slow one shows it once it has run npu_quiet_seconds
+    slow, _e, _p = npu_service(tmp_path / "s", stems=(), precheck=Pre(delay=0.4))
+    slow.npu_quiet_seconds = 0.05
+    shown: list = []
+    slow.subscribe(lambda snap: shown.append((slow.npu_progress() or {}).get("phase")))
+    slow.run_npu_check()
+    assert "checking" in shown and slow.npu_progress() is None
 
 
 def test_the_watchdog_on_a_hanging_check(tmp_path):
-    service, _engine, _probe = npu_service(tmp_path, probe=Probe(delay=0.5))
+    service, _engine, _probe = npu_service(tmp_path, precheck=Pre(delay=0.5))
     service.npu_watchdog_seconds = 0.05
     state = service.run_npu_check()
     assert not eng.npu_passed(state) and service.npu_hung and not service.npu_offered()
@@ -750,6 +962,11 @@ def test_diagnostics_block_when_the_npu_passed(tmp_path, monkeypatch):
     lines = selfcheck.npu_lines(service, speeds, soc="QTI SM8850")
     text = "\n".join(lines)
     assert lines[0] == "NPU: available" and "SoC: QTI SM8850" in lines
+    import re
+
+    assert re.fullmatch(r"Stage 1 \(check\): \d+\.\d s · Stage 2 \(start\): \d+\.\d s", lines[2])
+    assert lines[3] == f"NPU files: llama.cpp {RELEASE} · libggml-htp-v81.so on the phone"
+    assert not any(line.startswith("Last download error") for line in lines)
     for name in eng.NPU_STEPS:
         assert f"✓ {name}: {name} ok" in lines
     assert "Arch: v81" in lines and "Device: HTP0" in lines
@@ -766,7 +983,13 @@ def test_diagnostics_block_when_the_npu_passed(tmp_path, monkeypatch):
 def test_diagnostics_line_for_each_failing_step(tmp_path, step):
     service, _engine, _probe = npu_service(tmp_path, probe=Probe(failing_state(step, "dlopen failed")))
     service.run_npu_check()
-    assert selfcheck.npu_lines(service, soc="x") == [f"NPU: not available ({step}: dlopen failed)"]
+    chat(service)                                                              # stage 2 runs before the NPU load
+    lines = selfcheck.npu_lines(service, soc="x")
+    assert lines[0] == f"NPU: not available ({step}: dlopen failed)"
+    assert lines[1].startswith("Stage 1 (check): 0.") and lines[1].endswith(
+        "Stage 2 (start): not run" if step in eng.NPU_PRECHECK_STEPS else " s")
+    if step not in eng.NPU_PRECHECK_STEPS:
+        assert lines[2] == f"NPU files: llama.cpp {RELEASE} · libggml-htp-v81.so on the phone"
 
 
 def test_diagnostics_line_without_the_npu(tmp_path):
@@ -775,7 +998,9 @@ def test_diagnostics_line_without_the_npu(tmp_path):
     assert selfcheck.npu_lines(None)[0].startswith("NPU: not available (engine:")
     service2, _e, _p = npu_service(tmp_path / "b", probe=Probe(passing_state(arch=69)))
     service2.run_npu_check()
-    assert selfcheck.npu_lines(service2, soc="") == ["NPU: not available (arch: unsupported HTP arch 69)"]
+    lines = selfcheck.npu_lines(service2, soc="")
+    assert lines[0] == "NPU: not available (arch: unsupported HTP arch 69)" and len(lines) == 2
+    assert lines[1].startswith("Stage 1 (check): ") and lines[1].endswith("Stage 2 (start): not run")
     speeds = selfcheck.npu_speed_check(service2, Q40)
     assert "NPU not available (arch" in speeds["npu"]["skipped"] and speeds["cpu"]["tokens"] > 0
 
@@ -789,7 +1014,7 @@ def test_self_check_services_share_the_app_markers(tmp_path):
     app_prefs = fakes.FakePrefs({"other": 1})
     prefs = selfcheck._DictPrefs({svc.SETTINGS_KEY: {"n_ctx": 2048}}, shared=app_prefs)
     for key in (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.NPU_FALLBACK_KEY, svc.NPU_CHECK_KEY,
-                svc.NPU_CHECK_ATTEMPT_KEY):
+                svc.NPU_SESSION_KEY, svc.NPU_CHECK_ATTEMPT_KEY):
         prefs.set(key, {"stem": "s"})
         assert app_prefs.get(key) == {"stem": "s"} and prefs.get(key) == {"stem": "s"}
     prefs.set(svc.SETTINGS_KEY, {"n_ctx": 1})
@@ -820,7 +1045,7 @@ def test_self_check_services_share_the_app_markers(tmp_path):
 
 def test_npu_backend_check_reads_the_wheel(monkeypatch):
     ext = types.SimpleNamespace(npu_backend_shipped=lambda: True, register_npu_backend=lambda *a: {},
-                                device_index=lambda n: 0)
+                                npu_precheck=lambda: {}, npu_skeleton_source=lambda: {}, device_index=lambda n: 0)
     monkeypatch.setattr(selfcheck.importlib, "import_module", lambda name: ext)
     assert selfcheck.npu_backend_check()["functions"] is True and selfcheck.npu_backend_check()["shipped"] is True
     monkeypatch.setattr(selfcheck.importlib, "import_module", lambda name: types.SimpleNamespace())
@@ -850,3 +1075,223 @@ def test_the_job_log_names_the_backend(tmp_path, monkeypatch):
     plain, _e = make_service(tmp_path / "p")
     chat(plain, "fake-echo")
     assert "backend" not in plain.health("local/fake-echo")
+
+
+# ---- the two stages and the NPU files' first-use download (A1-A6) -------------------------------------------------
+
+def test_engine_precheck_and_skeleton_source(monkeypatch):
+    _ext(monkeypatch, npu_precheck=lambda: {"arch": "v81", "error": None,
+                                            "steps": [{"name": n, "ok": True, "detail": ""} for n in eng.NPU_PRECHECK_STEPS]},
+         npu_skeleton_source=lambda: SOURCE)
+    state = eng.npu_precheck()
+    assert state["arch"] == 81 and eng.npu_precheck_failure(state) is None
+    assert eng.npu_skeleton_source() == SOURCE and eng.npu_skeleton_file(SOURCE, 81)["name"] == "libggml-htp-v81.so"
+    assert eng.npu_skeleton_file(SOURCE, 69) is None
+    _ext(monkeypatch, npu_skeleton_source=lambda: {**SOURCE, "url": URL.replace("https:", "http:")})
+    assert eng.npu_skeleton_source() is None                                   # never a plain-http archive
+    _ext(monkeypatch, npu_backend_shipped=lambda: True)                       # a wheel without npu_precheck
+    assert eng.npu_precheck_failure(eng.npu_precheck()) == ("shipped", eng.NO_NPU)
+    assert eng.npu_skeleton_source() is None
+    assert eng.npu_precheck_failure({"arch": 81, "steps": [{"name": "shipped", "ok": True}]})[0] == "libcdsprpc"
+
+
+def _skel_files(service) -> dict:
+    import os
+
+    folder = service.npu_skel_dir()
+    return {name: open(os.path.join(folder, name), "rb").read() for name in sorted(os.listdir(folder))}
+
+
+def test_the_first_npu_load_downloads_the_files_once(tmp_path):
+    import os
+
+    http = FakeHTTP(chunk_delay=0.01)
+    service, engine, probe = npu_service(tmp_path, files=False, http=http)
+    root = tmp_path / "htp"
+    for old in ("9.16.0_abc_llama-0.3.37", "b9999"):                         # the test build's folders, an old release
+        os.makedirs(root / old, exist_ok=True)
+        (root / old / "libggml-htp-v81.so").write_bytes(b"old")
+    service.run_npu_check()
+    assert service.npu_offered() and not service.npu_files_ready() and http.calls == []  # stage 1 downloads nothing
+    phases: list = []
+    service.subscribe(lambda snap: phases.append((snap.state, snap.phase, (service.npu_progress() or {}).get("phase"))))
+    assert chat(service) == "Echo: hi" and engine.backends == ["npu"]
+    # one plain GET of the fixed URL, its redirect followed by hand (https only), a generic User-Agent, a short
+    # connect timeout; no device or user data
+    assert [c["url"] for c in http.calls] == [URL, ASSET]
+    assert all(c["allow_redirects"] is False and c["timeout"] == svc.NPU_FETCH_TIMEOUT for c in http.calls)
+    assert http.calls[0]["headers"] == {"Accept-Encoding": "identity", "User-Agent": "Glossarion-Mobile"}
+    # only the five pinned members, each verified; the archive is gone; the other folders too
+    assert _skel_files(service) == {f"libggml-htp-{arch}.so": data for arch, data in SKELETONS.items()}
+    assert sorted(os.listdir(root)) == [RELEASE] and probe.calls[0][0] == service.npu_skel_dir()
+    # the load showed the download, then the NPU's start, then the model (A3, B2)
+    loading = [phase for state, phase, _p in phases if state == "loading" and phase]
+    assert any(p.startswith("Getting NPU files · ") and p.endswith(" MB") for p in loading)
+    assert svc.NPU_STARTING_TEXT in loading and loading.index(svc.NPU_STARTING_TEXT) > 0
+    assert {p for _s, _ph, p in phases} >= {"downloading", "starting"} and service.npu_progress() is None
+    assert service.npu_status_line() == "Hexagon v81 (HTP0) ready" and service.npu_files_ready()
+    # an app update with the same engine keeps the files (keyed on the release, A5)
+    newer, engine2, probe2 = npu_service(tmp_path, files=False, http=FakeHTTP(), version="9.16.1/llama-0.3.37")
+    chat(newer)
+    assert engine2.backends == ["npu"] and newer._npu_http.calls == [] and len(probe2.calls) == 1
+
+
+def test_the_status_line_before_and_after_the_files(tmp_path):
+    big = {**SOURCE, "size": 26027402}                                          # the real archive's size
+    service, _engine, _probe = npu_service(tmp_path, files=False, source=big)
+    service.run_npu_check()
+    assert service.npu_status_line() == "NPU files (26 MB) download from llama.cpp's release at the first model load."
+    place_skeleton(tmp_path / "htp")
+    assert service.npu_files_ready(refresh=True) and service.npu_status_line() == "Hexagon v81 (HTP) ready"
+
+
+def test_an_offline_phone_falls_through_and_tries_again_only_on_request(tmp_path):
+    import requests
+
+    http = FakeHTTP(error=requests.ConnectionError("no network"))
+    service, engine, probe = npu_service(tmp_path, files=False, http=http)
+    assert chat(service) == "Echo: hi"
+    assert engine.backends == ["cpu"] and len(http.calls) == 1 and probe.calls == []  # one try, no retry loop
+    assert service.npu_fallback(Q40) is None and service.npu_offered()          # not a model fallback (A4)
+    line = "NPU files not downloaded: Download failed (ConnectionError)"
+    assert service.npu_status_line() == line and service.npu_files_note(Q40) == line
+    assert f"Last download error: Download failed (ConnectionError)" in selfcheck.npu_lines(service, soc="")
+    assert f"NPU files: llama.cpp {RELEASE} · libggml-htp-v81.so not downloaded" in selfcheck.npu_lines(service, soc="")
+    chat(service, text="again")
+    assert engine.backends == ["cpu"] and len(http.calls) == 1                 # no reload, no second try
+    # the next start tries again
+    later, engine2, _p = npu_service(tmp_path, files=False, http=FakeHTTP(), prefs=service.prefs)
+    chat(later)
+    assert engine2.backends == ["npu"]
+    # "Try the NPU again" too
+    service._npu_http = FakeHTTP()
+    assert service.retry_npu(Q40) and service.npu_download_error is None
+    chat(service)
+    assert engine.backends == ["cpu", "npu"] and service._npu_http.calls == []  # the other start had fetched them
+
+
+def test_a_stop_during_the_download_ends_the_load_and_the_next_load_resumes(tmp_path):
+    import os
+
+    from glossarion_mobile.services.local_llm.server import LocalLLMError
+
+    http = FakeHTTP(chunk_delay=0.05)
+    service, engine, probe = npu_service(tmp_path, files=False, http=http)
+    service.run_npu_check()
+    stopper = threading.Timer(0.12, service.stop_generation)
+    stopper.start()
+    with pytest.raises(LocalLLMError) as stopped:
+        chat(service)
+    stopper.join()
+    # the Stop ended the load: nothing loaded on the GPU / CPU, and it is not a failed download
+    assert stopped.value.status == 499 and engine.backends == [] and probe.calls == []
+    assert service.npu_download_error is None and not service._npu_fetch_tried
+    assert service.snapshot().state == "idle" and service.npu_progress() is None
+    assert service.npu_status_line().startswith("NPU files (")              # "… download … at the first model load."
+    part = os.path.join(service.npu_skel_dir(), "skeletons.tar.gz.part")
+    assert 0 < os.path.getsize(part) < len(ARCHIVE)                           # kept for the next try
+    # the next job's load resumes it, no "Try the NPU again" needed
+    service._npu_http = http2 = FakeHTTP()
+    assert chat(service) == "Echo: hi"
+    assert engine.backends == ["npu"] and http2.calls[-1]["headers"]["Range"].startswith("bytes=")
+    assert not os.path.exists(part) and len(_skel_files(service)) == 5
+
+
+def test_an_archive_left_by_a_dead_app_is_extracted_without_a_download(tmp_path):
+    import os
+
+    service, engine, _probe = npu_service(tmp_path, files=False, http=FakeHTTP(error=AssertionError("no download")))
+    service.run_npu_check()
+    folder = service.npu_skel_dir()
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "skeletons.tar.gz"), "wb") as handle:  # verified, renamed, never extracted
+        handle.write(ARCHIVE)
+    with open(os.path.join(folder, "libggml-htp-v73.so.tmp"), "wb") as handle:  # an extraction cut short
+        handle.write(b"half")
+    assert chat(service) == "Echo: hi" and engine.backends == ["npu"] and service._npu_http.calls == []
+    assert sorted(os.listdir(folder)) == sorted(f"libggml-htp-{arch}.so" for arch in ARCHS)
+
+
+def test_leftovers_next_to_ready_files_go_at_the_first_npu_load(tmp_path):
+    import os
+
+    service, engine, _probe = npu_service(tmp_path)                         # the phone's file is on disk
+    service.run_npu_check()
+    folder = service.npu_skel_dir()
+    for name in ("skeletons.tar.gz", "skeletons.tar.gz.part", "skeletons.tar.gz.part.json",
+                 "libggml-htp-v79.so.tmp"):
+        with open(os.path.join(folder, name), "wb") as handle:
+            handle.write(b"left over")
+    assert chat(service) == "Echo: hi" and engine.backends == ["npu"]
+    assert os.listdir(folder) == ["libggml-htp-v81.so"]
+
+
+@pytest.mark.parametrize("case", ["archive checksum", "member checksum", "symlink member", "http redirect",
+                                  "missing member", "oversized member"])
+def test_a_bad_download_writes_nothing_and_falls_through(tmp_path, case):
+    import hashlib
+    import os
+
+    http, source = FakeHTTP(), None
+    if case == "archive checksum":
+        source = {**SOURCE, "sha256": "0" * 64}
+    elif case == "member checksum":
+        source = make_source(ARCHIVE, skeletons={**SKELETONS, "v85": b"other bytes" * 50})
+        source["files"]["v85"]["size"] = len(SKELETONS["v85"])
+    elif case == "symlink member":
+        # the phone's own skeleton is a link in this archive: never followed, nothing extracted
+        archive = build_archive({a: d for a, d in SKELETONS.items() if a != "v81"},
+                                links=(("llama-b12387/lib/libggml-htp-v81.so", "/etc/passwd"),))
+        http, source = FakeHTTP(archive), make_source(archive)
+    elif case == "http redirect":
+        http = FakeHTTP(redirect="http://example.invalid/llama.tar.gz")
+    elif case == "missing member":
+        archive = build_archive({a: d for a, d in SKELETONS.items() if a != "v73"})
+        http, source = FakeHTTP(archive), make_source(archive)
+    else:
+        archive = build_archive({**SKELETONS, "v79": SKELETONS["v79"] * 3})
+        http, source = FakeHTTP(archive), make_source(archive)
+        source["files"]["v79"].update(size=len(SKELETONS["v79"]),
+                                      sha256=hashlib.sha256(SKELETONS["v79"]).hexdigest())
+    service, engine, probe = npu_service(tmp_path, files=False, http=http, source=source)
+    assert chat(service) == "Echo: hi"
+    assert engine.backends == ["cpu"] and probe.calls == [] and service.npu_fallback(Q40) is None
+    folder = service.npu_skel_dir()
+    assert not [n for n in os.listdir(folder) if n.endswith(".so") or n.endswith(".tmp")]  # nothing kept
+    assert not os.path.exists(os.path.join(folder, "skeletons.tar.gz"))
+    assert service.npu_status_line().startswith("NPU files not downloaded: ")
+    if case == "http redirect":
+        assert service.npu_download_error == "the download was redirected to an address that is not https"
+        assert [c["url"] for c in http.calls] == [URL]
+    if case in ("archive checksum", "member checksum"):
+        assert "checksum mismatch" in service.npu_download_error
+
+
+def test_the_start_failing_after_a_download_keeps_the_npu_off(tmp_path):
+    service, engine, probe = npu_service(tmp_path, files=False, gpu=True,
+                                         probe=Probe(failing_state("session", "unsigned PD denied")))
+    chat(service)
+    assert len(probe.calls) == 1 and engine.backends == ["gpu"] and not service.npu_offered()
+    assert service.npu_failure() == ("session", "unsigned PD denied") and service.npu_fallback(Q40) is None
+    assert selfcheck.npu_lines(service, soc="")[0] == "NPU: not available (session: unsigned PD denied)"
+    chat(service, text="again")
+    assert engine.backends == ["gpu"] and len(probe.calls) == 1                # stage 2 at most once
+
+
+def test_register_without_the_files_registers_nothing_and_is_not_a_failure(tmp_path):
+    # the INTERFACE's "NPU files not downloaded" (a file that went away after the check): this load is not on the
+    # NPU, the NPU stays offered, nothing is saved as a failed start
+    service, engine, probe = npu_service(tmp_path, files=True, http=FakeHTTP(error=OSError("offline")))
+    import os
+
+    service.run_npu_check()
+    original = probe.__call__
+
+    def vanished(skel_dir, options):
+        os.remove(os.path.join(skel_dir, "libggml-htp-v81.so"))
+        return original(skel_dir, options)
+
+    service._npu_probe = vanished
+    chat(service)
+    assert engine.backends == ["cpu"] and service.npu_offered() and service.prefs.get(svc.NPU_SESSION_KEY) is None
+    assert service.npu_download_error == eng.NPU_FILES_MISSING

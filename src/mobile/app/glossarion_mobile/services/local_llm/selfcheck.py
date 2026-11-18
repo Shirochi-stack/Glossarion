@@ -53,7 +53,7 @@ SUITE_MESSAGES = (
 #: the Prefs keys a check's own service shares with the app's (the NPU crash markers, fallbacks and check): the
 #: backend aborts the process on DSP failures, so a self-check that dies on the NPU is recorded like the app's own
 SHARED_PREF_KEYS = (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.NPU_FALLBACK_KEY, svc.NPU_CHECK_KEY,
-                    svc.NPU_CHECK_ATTEMPT_KEY, svc.NPU_KEY, svc.NPU_POWER_KEY)
+                    svc.NPU_SESSION_KEY, svc.NPU_CHECK_ATTEMPT_KEY, svc.NPU_KEY, svc.NPU_POWER_KEY)
 
 
 class _DictPrefs:
@@ -384,17 +384,42 @@ def npu_backend_check() -> dict:
         carried = bool(shipped()) if shipped is not None else None
     except Exception as exc:
         carried = f"{type(exc).__name__}: {exc}"
-    return {"functions": shipped is not None and getattr(ext, "register_npu_backend", None) is not None,
-            "shipped": carried, "platform": eng.npu_platform(), "device_index": getattr(ext, "device_index", None) is not None}
+    functions = all(getattr(ext, name, None) is not None
+                    for name in ("npu_backend_shipped", "npu_precheck", "npu_skeleton_source", "register_npu_backend"))
+    return {"functions": functions, "shipped": carried, "platform": eng.npu_platform(),
+            "device_index": getattr(ext, "device_index", None) is not None}
 
 
 def npu_summary(service: Any) -> dict:
     """What the diagnostics and the llama suite report about the NPU (no native call)."""
     failure = service.npu_failure()
     fallbacks = {stem: fb["reason"] for stem in service._npu_fallbacks() if (fb := service.npu_fallback(stem))}
+    source = service.npu_source() or {}
+    spec = service.npu_skeleton()
     return {"offered": service.npu_offered(), "failure": list(failure) if failure else None,
             "state": service.npu_state(), "use_npu": service.use_npu(), "power": service.npu_power(),
-            "last_load": service.last_load, "fallbacks": fallbacks, "hung": service.npu_hung}
+            "last_load": service.last_load, "fallbacks": fallbacks, "hung": service.npu_hung,
+            "seconds": service.npu_seconds(), "release": source.get("release"),
+            "files": {spec["name"]: service.npu_files_ready(refresh=True)} if spec else {},
+            "download_error": service.npu_download_error}
+
+
+def _npu_stage_lines(service: Any) -> list:
+    """How long the two NPU stages took, the skeleton release and whether the phone's file is on disk, and the
+    last download error (only what is known)."""
+    summary = npu_summary(service)
+    seconds = summary["seconds"]
+    lines = []
+    if seconds:
+        lines.append(" · ".join(f"{label}: {seconds[key]:.1f} s" if key in seconds else f"{label}: not run"
+                                for key, label in (("check", "Stage 1 (check)"), ("start", "Stage 2 (start)"))))
+    if summary["release"]:
+        files = ", ".join(f"{name} {'on the phone' if present else 'not downloaded'}"
+                          for name, present in summary["files"].items())
+        lines.append(f"NPU files: llama.cpp {summary['release']}" + (f" · {files}" if files else ""))
+    if summary["download_error"]:
+        lines.append(f"Last download error: {summary['download_error']}")
+    return lines
 
 
 def npu_speed_check(service: Any, stem: str, *, backends: tuple = ("npu", "gpu", "cpu"),
@@ -460,12 +485,14 @@ def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str]
     failure = service.npu_failure()
     if failure is not None:
         hang = service.npu_hang_note() if getattr(service, "npu_hung", False) else None
-        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else [])
+        extra = _npu_stage_lines(service) if service.npu_possible() else []
+        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else []) + extra
     state = service.npu_state() or {}
     soc = eng.soc_label() if soc is None else soc
     lines = ["NPU: available"]
     if soc:
         lines.append(f"SoC: {soc}")
+    lines.extend(_npu_stage_lines(service))
     for step in state.get("steps") or []:
         detail = str(step.get("detail") or "")
         lines.append(f"{'✓' if step.get('ok') else '✕'} {step.get('name')}" + (f": {detail}" if detail else ""))

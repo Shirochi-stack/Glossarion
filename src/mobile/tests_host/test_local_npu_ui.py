@@ -2,7 +2,9 @@
 rows anywhere (owner 2026-11-18: the existing slots use the NPU under Auto), the existing Custom sheets' and the
 Sigma quant sheet's NPU marks only where the phone's NPU check passed (a pick stays an ordinary Auto row), the
 preset editor's Backend and NPU layers, the engine card's "Use NPU" and power mode, the row's backend line, its
-fallback line and "Try the NPU again". Fakes only (FakeEngine, FakePrefs, a fake NPU check, the fake Hugging Face).
+fallback line and "Try the NPU again"; the three screens never wait for a slow NPU check or files download and show
+its progress bar instead, then follow it; the picker's "Model manager › On-device" row leads with the Halgakos avatar.
+Fakes only (FakeEngine, FakePrefs, a fake NPU check, the fake Hugging Face, a fake release host).
 """
 
 from __future__ import annotations
@@ -256,6 +258,11 @@ def test_engine_card_use_npu_and_power_mode(tmp_path):
     assert panel.save_npu() is False and passed.use_npu() is False
     panel.npu_power.value = "balanced"
     assert panel.save_npu_power() == "balanced" and passed.npu_power() == "balanced"
+    # the NPU has not started in this process: the first NPU load uses the new mode, no restart needed
+    assert panel.npu_power_note.value == "Burst is the fastest and may slow down when the phone gets hot."
+    passed._npu_session(passed.npu_skel_dir())                                 # stage 2 ran (a first NPU load)
+    panel.npu_power.value = "power_saver"
+    panel.save_npu_power()
     assert panel.npu_power_note.value == "Applies after restarting Glossarion."
 
 
@@ -283,3 +290,154 @@ def test_row_backend_line_fallback_and_try_again(tmp_path):
     assert not any(item.content == "Try the NPU again" for item in keys[f"local-preset-menu-{index}"].items)
     panel.render_engine(service.snapshot(), push=False)
     assert "Runs on NPU: Hexagon v81 (HTP0)" in panel.engine_detail.value
+
+
+# ---- no delay, a progress bar instead (B1-B3) ------------------------------------------------------------------------
+
+def _wait(condition, seconds=8.0):
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert condition()
+
+
+def _three_screens(service):
+    """Build Model manager › On-device, the Welcome page and the picker's On-device tab: (seconds, panel keys,
+    Welcome keys, picker texts)."""
+    import time
+
+    from glossarion_mobile.ui.sheets import model_sheet as ms
+    from test_welcome_drawer_compact import by_key, screen
+
+    started = time.monotonic()
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs)
+    panel.build()
+    welcome = screen(local_engine=lambda: service, prefs=service.prefs)
+    sheet = ms.ModelSheet(current_model="gpt-6", models=["gpt-6"],
+                          env=ms.SheetEnv(prefs=service.prefs, local_engine=service), tab="ondevice")
+    seconds = time.monotonic() - started
+    return seconds, panel, welcome, sheet, lambda: by_key(welcome.page_area.content), \
+        lambda: [t for row in sheet.ondevice_list.controls for t in _texts(row)]
+
+
+def test_the_screens_never_wait_for_a_slow_check_and_follow_it(tmp_path):
+    from test_local_npu import Pre
+
+    service, _engine, probe = npu_service(tmp_path, stems=(), precheck=Pre(delay=3.0))
+    service.start()
+    try:
+        _wait(lambda: service.npu_progress() is not None)                        # stage 1 is running (and slow)
+        seconds, panel, welcome, sheet, welcome_keys, picker_texts = _three_screens(service)
+        assert seconds < 1.5 and service._npu_state is None                    # well under the 3 s check
+        keys = _by_key(panel.control)
+        assert keys["local-npu-box"].visible and keys["local-npu-progress"].visible
+        assert keys["local-npu-progress"].value is None                       # indeterminate
+        assert keys["local-npu-line"].value == "Checking the NPU…" and not keys["local-npu"].visible
+        assert _texts(welcome_keys()["welcome-npu-busy"]) == ["Checking the NPU…"]
+        assert "Checking the NPU…" in picker_texts()
+        # the check's end re-renders the screens after npu_progress() turns None (``_notify`` in its finally): wait for
+        # the screens themselves, not only the service
+        _wait(lambda: service._npu_state is not None and service.npu_progress() is None
+              and _by_key(panel.control)["local-npu-line"].value == "Hexagon v81 (HTP) ready"
+              and "welcome-npu-busy" not in welcome_keys() and "Checking the NPU…" not in picker_texts())
+        keys = _by_key(panel.control)
+        assert keys["local-npu-box"].visible and not keys["local-npu-progress"].visible and keys["local-npu"].visible
+        assert keys["local-npu-line"].value == "Hexagon v81 (HTP) ready" and probe.calls == []
+        assert "welcome-npu-busy" not in welcome_keys() and "Checking the NPU…" not in picker_texts()
+    finally:
+        service.stop()
+        from glossarion_mobile.services.local_llm import service as svc
+
+        svc.set_default_service(None)
+
+
+def test_a_failing_slow_check_hides_the_section_without_a_line(tmp_path):
+    from test_local_npu import Pre
+
+    service, _engine, _probe = npu_service(tmp_path, stems=(), precheck=Pre(failing_state("libcdsprpc", "nope"),
+                                                                             delay=1.5))
+    service.start()
+    try:
+        _wait(lambda: service.npu_progress() is not None)
+        _seconds, panel, _welcome, _sheet, _wk, _pt = _three_screens(service)
+        assert _by_key(panel.control)["local-npu-box"].visible
+        _wait(lambda: service._npu_state is not None and service.npu_progress() is None
+              and not _by_key(panel.control)["local-npu-box"].visible)
+        _no_npu_rows(_texts(panel.control), set())                             # no "not available" text
+    finally:
+        service.stop()
+        from glossarion_mobile.services.local_llm import service as svc
+
+        svc.set_default_service(None)
+
+
+def test_the_screens_show_a_slow_download_and_the_start(tmp_path):
+    import threading
+
+    from test_local_npu import FakeHTTP, Probe
+
+    service, engine, _probe = npu_service(tmp_path, files=False, http=FakeHTTP(chunk_delay=0.35),
+                                          probe=Probe(delay=1.0))
+    service.run_npu_check()
+    worker = threading.Thread(target=lambda: chat(service), daemon=True)
+    worker.start()
+    _wait(lambda: (service.npu_progress() or {}).get("phase") == "downloading")
+    seconds, panel, welcome, sheet, welcome_keys, picker_texts = _three_screens(service)
+    assert seconds < 1.5 and worker.is_alive()                                 # well under the ~3 s download
+    keys = _by_key(panel.control)
+    assert keys["local-npu-progress"].visible and keys["local-npu-progress"].value is not None  # determinate
+    assert keys["local-npu-line"].value.startswith("Getting NPU files · ") and keys["local-npu-line"].value.endswith(" MB")
+    assert panel.engine_state.value.startswith("Loading… · m-Q4_0 · Getting NPU files · ")  # the model's own state
+    assert _texts(welcome_keys()["welcome-npu-busy"])[0].startswith("Getting NPU files · ")
+    assert any(str(t).startswith("Getting NPU files · ") for t in picker_texts())
+    _wait(lambda: service.npu_progress() is not None and service.npu_progress()["phase"] == "starting")
+    keys = _by_key(panel.control)
+    assert keys["local-npu-line"].value == "Starting the NPU…" and keys["local-npu-progress"].value is None
+    assert panel.engine_state.value == "Loading… · m-Q4_0 · Starting the NPU…"
+    worker.join(10)
+    assert engine.backends == ["npu"]
+    keys = _by_key(panel.control)
+    assert not keys["local-npu-progress"].visible and keys["local-npu-line"].value == "Hexagon v81 (HTP0) ready"
+    assert "welcome-npu-busy" not in welcome_keys()
+
+
+def test_a_failed_download_line_and_try_again_on_the_row(tmp_path):
+    import requests
+
+    from test_local_npu import FakeHTTP
+
+    service, engine, _probe = npu_service(tmp_path, files=False, http=FakeHTTP(error=requests.Timeout("slow")))
+    set_backend(service, "m-Q4_0", "auto")
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
+    panel.build()
+    chat(service)
+    panel.render(push=False)
+    line = "NPU files not downloaded: Download failed (Timeout)"
+    assert _by_key(panel.control)["local-npu-line"].value == line
+    index = len(presets.load_presets(service.prefs)) - 1
+    keys = _by_key(panel.preset_column)
+    assert keys[f"local-preset-backend-{index}"].value == line
+    service._npu_http = FakeHTTP()
+    retry = next(i for i in keys[f"local-preset-menu-{index}"].items if i.content == "Try the NPU again")
+    retry.on_click(None)
+    chat(service)
+    assert engine.backends == ["cpu", "npu"]
+
+
+# ---- the picker's "Model manager › On-device" row: the Halgakos avatar (C) --------------------------------------------
+
+def test_the_ondevice_manager_row_leads_with_the_halgakos_avatar(tmp_path):
+    from glossarion_mobile.ui.components.empty_state import HALGAKOS_AVATAR
+    from glossarion_mobile.ui.sheets import model_sheet as ms
+
+    for service in _services(tmp_path)[::2]:
+        sheet = ms.ModelSheet(current_model="gpt-6", models=["gpt-6"],
+                              env=ms.SheetEnv(prefs=service.prefs, local_engine=service), tab="ondevice")
+        row = next(r for r in sheet.ondevice_list.controls if getattr(r, "key", None) == "ondevice-manager")
+        assert isinstance(row.leading, ft.CircleAvatar) and row.leading.foreground_image_src == HALGAKOS_AVATAR
+        assert row.leading.radius * 2 == ms.ONDEVICE_MANAGER_AVATAR == 24          # a ListTile icon's size
+        assert row.title.value == ms.ONDEVICE_MANAGER_LABEL
+    sheet = ms.ModelSheet(current_model="gpt-6", models=["gpt-6"], env=ms.SheetEnv(prefs=fakes.FakePrefs()))
+    assert isinstance(sheet._ondevice_manager_row().leading, ft.CircleAvatar)  # the no-engine row too
