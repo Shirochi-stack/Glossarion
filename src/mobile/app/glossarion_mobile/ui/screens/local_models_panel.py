@@ -25,12 +25,20 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   Cancel / Resume / Use / In use / Retry. Rows of models that read images say so ("Reads images").
   The ⋮ menu edits, removes the preset, adds the image support to a text-only download or deletes the
   file; Add preset sits in the card's header, Restore defaults closes the card.
+* **Delete** (one action for every row with something on the phone: a downloaded preset or Custom row's ⋮
+  "Delete file", Delete on Other downloads, Delete on a failed download): one confirmation naming the model and
+  the space freed (the model, its image support and unfinished parts: ``Registry.disk_bytes``); a row that is not
+  one of the defaults may also remove its preset there. A model a running job uses, or one loading or answering,
+  is refused with the reason under its row (``service.delete_blocker``); loaded and idle, it is unloaded first.
+  The row then shows Download again (an Other downloads row goes); a selected model that is gone shows "not
+  downloaded" like any missing file.
 * **Add from Hugging Face**: any repo, repo:quant or huggingface.co link. A repo (or repo link) lists
   every GGUF file of the repository with its size (``FileChooser``, the usual quant preselected); a
   quant or file reference goes straight to the download question. Optionally saved as a preset. Once the
   download's row is on the page (Other downloads, below the card) the page scrolls to it, once; so does a
   Custom pick to its new preset row.
-* **Downloaded models**: files no preset covers, and paused downloads (Resume / Cancel).
+* **Downloaded models**: files no preset covers, paused downloads (Resume / Cancel) and failed ones whose part
+  is still on the phone (Retry / Delete).
 
 Models are ``local/<stem>`` (the GGUF file name), routed by the shared ``local/`` route to the in-app
 endpoint, so the chosen model works for chat, translation, glossary and every other job (a vision model
@@ -45,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable, Optional
 
 import flet as ft
@@ -942,8 +951,14 @@ class OnDeviceFlow:
                 downloaded.append((stem, entry))
                 listed.add(stem)
         pending = [(stem, state) for stem, state in list(self.downloads.states.items())
-                   if stem not in listed and (state.running or state.paused)]
+                   if stem not in listed and (state.running or state.paused or self.failed_part(stem))]
         return downloaded, pending
+
+    def failed_part(self, key: str) -> bool:
+        """``key``'s download failed and left its part on the phone (Retry resumes it, Delete frees it)."""
+        state = self.downloads.states.get(key)
+        return bool(state is not None and state.error and not state.running
+                    and os.path.exists(self.service.registry.file_path(key) + dl.PART_SUFFIX))
 
     async def get_preset_resume(self, index: int) -> Optional[str]:
         """Resume the preset's paused download, then load and use it (the Resume button)."""
@@ -1136,6 +1151,9 @@ class LocalModelsPanel(OnDeviceFlow):
     #: download stem (model or projector) -> scroll anchor key of the row showing its progress (last render)
     _anchors: Optional[dict] = None
     _hf_focused: bool = False
+    _delete_notes: Optional[dict] = None
+    #: the "Also remove the preset" checkbox of the last Delete confirmation (None: not offered)
+    delete_dialog_option: Any = None
 
     # ---- build ------------------------------------------------------------------------------------
 
@@ -1557,19 +1575,91 @@ class LocalModelsPanel(OnDeviceFlow):
         self.hf_status.color = ft.Colors.ERROR if error else ft.Colors.ON_SURFACE_VARIANT
         _push(self.hf_status, self.hf_field)
 
-    def delete_file(self, stem: str) -> bool:
-        busy = self.service.busy_with(stem)
-        removed = self.service.delete(stem)
-        if not removed and busy:
-            self.say("The model is busy; delete it when the current answer is done")
-        self.render()
-        return removed
+    # ---- delete -------------------------------------------------------------------------------------
 
-    def confirm_delete(self, stem: str) -> ConfirmDialog:
-        entry = self.service.registry.load().get(stem) or {}
-        dialog = ConfirmDialog(title="Delete model file",
-                               body=f"Delete local/{stem} ({dl.format_bytes(entry.get('size'))}) from this device?",
-                               confirm_label="Delete", destructive=True, on_confirm=lambda: self.delete_file(stem))
+    @property
+    def delete_notes(self) -> dict:
+        """stem -> why its Delete was refused (shown under its row while that reason holds)."""
+        if self._delete_notes is None:
+            self._delete_notes = {}
+        return self._delete_notes
+
+    def deletable(self, key: Optional[str]) -> bool:
+        """Something of ``key`` is on the phone and no download of it is running (Cancel stops that one)."""
+        if not key or self.downloads.running(key):
+            return False
+        registry = self.service.registry
+        if key.endswith(dl.PROJECTOR_SUFFIX):
+            return os.path.exists(registry.file_path(key) + dl.PART_SUFFIX)
+        if self.downloads.running(registry.projector_key(key)):
+            return False
+        return bool(registry.resolve(key) or registry.disk_bytes(key))
+
+    def _refused(self, stem: str) -> bool:
+        reason = self.service.delete_blocker(_owner(stem))
+        if reason:
+            self.delete_notes[_owner(stem)] = reason
+            self.render()
+            return True
+        return False
+
+    def delete_file(self, stem: str, preset: Optional[dict] = None) -> bool:
+        """Delete ``stem`` (a model: ``service.delete``; a projector's download key: its unfinished part) and,
+        with ``preset``, that preset row too. Refused with the reason under the row (``delete_notes``)."""
+        if self._refused(stem):
+            return False
+        if stem.endswith(dl.PROJECTOR_SUFFIX):
+            removed = self.downloads.cancel(stem)
+        else:
+            removed = self.service.delete(stem)
+            if self.deletable(stem):  # the unload did not get the engine
+                self.delete_notes[stem] = f"local/{stem} is busy: delete it when the current answer is done"
+                self.render()
+                return False
+            for row in self.presets():
+                if self.stem_of_preset(row) == stem or self.preset_stems.get(self.preset_key(row)) == stem:
+                    self.errors.pop(self.preset_key(row), None)
+                    self.preset_stems.pop(self.preset_key(row), None)
+        self.delete_notes.pop(_owner(stem), None)
+        if preset is not None:
+            presets.remove_row(self.prefs, preset)
+        self.render()
+        self._render_gpu_swap()
+        return bool(removed)
+
+    def confirm_delete(self, stem: str, index: Optional[int] = None) -> Optional[ConfirmDialog]:
+        """The one confirmation of a Delete: the model (its preset's name when ``index`` names the row), the
+        space freed and what goes; a row that is not one of the defaults may remove its preset as well. None
+        (no dialog) when the delete is refused: the reason shows under the row."""
+        if self._refused(stem):
+            return None
+        if self.delete_notes.pop(_owner(stem), None):  # an earlier refusal's reason is gone
+            self.render()
+        registry = self.service.registry
+        rows = self.presets()
+        preset = rows[index] if index is not None and 0 <= index < len(rows) else None
+        if stem.endswith(dl.PROJECTOR_SUFFIX):
+            part = registry.file_path(stem) + dl.PART_SUFFIX
+            freed = os.path.getsize(part) if os.path.exists(part) else 0
+            label, items = f"the image support of local/{_owner(stem)}", ["Unfinished image support download"]
+        else:
+            freed = registry.disk_bytes(stem)
+            label = f"{preset['name']} (local/{stem})" if preset else f"local/{stem}"
+            items = [text for key, text in ((stem, "Model file"), (registry.projector_key(stem), "Image support"))
+                     if os.path.exists(registry.file_path(key))]
+            items += [f"Unfinished {text.lower()} download" for key, text in
+                      ((stem, "Model"), (registry.projector_key(stem), "Image support"))
+                      if os.path.exists(registry.file_path(key) + dl.PART_SUFFIX)]
+        also = None
+        if preset is not None and not _is_default_preset(preset):
+            also = ft.Checkbox(label=f"Also remove the preset “{preset['name']}”", value=False, key="local-delete-preset")
+        dialog = ConfirmDialog(title="Delete model", body=f"Delete {label} from this phone? This frees "
+                                                          f"{dl.format_bytes(freed)}.",
+                               items=items, extras=[also] if also is not None else None, confirm_label="Delete",
+                               destructive=True,
+                               on_confirm=lambda: self.delete_file(stem, preset if also is not None and also.value
+                                                                   else None))
+        self.delete_dialog_option = also
         self.last_dialog = dialog
         if self.page is not None:
             dialog.show(self.page)
@@ -1583,6 +1673,8 @@ class LocalModelsPanel(OnDeviceFlow):
         if self._sampling_profile != self.service.uses_normal_settings(self.selected_stem()):
             self.render_engine(self.service.snapshot(), push=push)
         self._anchors = {}
+        if self._delete_notes:  # a refusal shows while its reason holds (the job ended, the answer is done)
+            self._delete_notes = {s: r for s, r in self._delete_notes.items() if self.service.delete_blocker(s)}
         rows: list = []
         preset_rows = self.presets()
         if not preset_rows:
@@ -1642,6 +1734,9 @@ class LocalModelsPanel(OnDeviceFlow):
         elif state in ("use", "in_use"):
             status_text.color = semantic("success")
         lines.append(status_text)
+        note = self.delete_notes.get(stem) if stem else None
+        if note:
+            lines.append(_delete_note(note, f"local-preset-delete-note-{index}"))
         body: list = [ft.Row([ft.Column(lines, spacing=0, tight=True, expand=True)], spacing=0)]
         if progress:
             body.append(ft.ProgressBar(value=download.fraction, border_radius=4, key=f"local-preset-progress-{index}"))
@@ -1662,9 +1757,9 @@ class LocalModelsPanel(OnDeviceFlow):
         if state in ("use", "in_use") and stem and not self.service.is_vision(stem):
             items.append(ft.PopupMenuItem(content="Add image support", icon=ft.Icons.IMAGE_OUTLINED,
                                           on_click=lambda e, i=index: self.spawn(self.add_vision(i))))
-        if state in ("use", "in_use") and stem:
+        if state not in ("downloading", "busy") and self.deletable(stem):  # downloaded, paused or failed
             items.append(ft.PopupMenuItem(content="Delete file", icon=ft.Icons.DELETE_OUTLINE,
-                                          on_click=lambda e, s=stem: self.confirm_delete(s)))
+                                          on_click=lambda e, s=stem, i=index: self.confirm_delete(s, i)))
         trailing.append(ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", key=f"local-preset-menu-{index}",
                                            items=items))
         return ft.Container(
@@ -1725,6 +1820,7 @@ class LocalModelsPanel(OnDeviceFlow):
         in_use = current.lower() == f"local/{stem}".lower()
         status = ("Loaded · " if loaded else "") + ("in use · " if in_use else "") + dl.format_bytes(entry.get("size"))
         vision = [_vision_line(f"local-other-vision-{stem}")] if entry.get("mmproj") else []
+        note = self.delete_notes.get(stem)
         return ft.Container(
             key=f"local-other-{stem}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
@@ -1732,6 +1828,7 @@ class LocalModelsPanel(OnDeviceFlow):
                 ft.Text(f"local/{stem}", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 _small(f"{entry.get('repo', '')} · {status}", max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 *vision,
+                *([_delete_note(note, f"local-other-delete-note-{stem}")] if note else []),
                 ft.Row([
                     ft.TextButton(content="In use" if in_use else "Use", disabled=in_use, key=f"local-other-use-{stem}",
                                   on_click=lambda e, s=stem: self.spawn(self._use_other(s))),
@@ -1743,14 +1840,21 @@ class LocalModelsPanel(OnDeviceFlow):
 
     def _download_row(self, stem: str, state: dl.DownloadState) -> ft.Control:
         buttons: list = []
+        failed = not state.running and not state.paused and bool(state.error)
         if state.running:
             buttons.append(ft.TextButton(content="Pause", icon=ft.Icons.PAUSE, key=f"local-dl-pause-{stem}",
                                          on_click=lambda e, s=stem: self.pause(s)))
         else:
-            buttons.append(ft.TextButton(content="Resume", icon=ft.Icons.PLAY_ARROW, key=f"local-dl-resume-{stem}",
-                                         on_click=lambda e, s=stem: self.spawn(self.resume(s))))
-        buttons.append(ft.TextButton(content="Cancel", icon=ft.Icons.CLOSE, key=f"local-dl-cancel-{stem}",
-                                     on_click=lambda e, s=stem: self.cancel(s)))
+            buttons.append(ft.TextButton(content="Retry" if failed else "Resume",
+                                         icon=ft.Icons.REFRESH if failed else ft.Icons.PLAY_ARROW,
+                                         key=f"local-dl-resume-{stem}", on_click=lambda e, s=stem: self.spawn(self.resume(s))))
+        if failed:  # its part stays on the phone until it is retried or deleted
+            buttons.append(ft.TextButton(content="Delete", icon=ft.Icons.DELETE_OUTLINE, key=f"local-dl-delete-{stem}",
+                                         on_click=lambda e, s=stem: self.confirm_delete(s)))
+        else:
+            buttons.append(ft.TextButton(content="Cancel", icon=ft.Icons.CLOSE, key=f"local-dl-cancel-{stem}",
+                                         on_click=lambda e, s=stem: self.cancel(s)))
+        note = self.delete_notes.get(_owner(stem))
         return ft.Container(
             key=f"local-dl-{stem}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
@@ -1760,6 +1864,7 @@ class LocalModelsPanel(OnDeviceFlow):
                                    overflow=ft.TextOverflow.ELLIPSIS)], spacing=0, tight=True),
                 _small(_download_status(state), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.ProgressBar(value=state.fraction, border_radius=4),
+                *([_delete_note(note, f"local-dl-delete-note-{stem}")] if note else []),
                 ft.Row(buttons, spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
             ], spacing=2, tight=True),
         )
@@ -1856,6 +1961,18 @@ def custom_note(family: dict) -> str:
     parts = [" · ".join((f"{group} " if group and i == 0 else "") + size["label"] for i, (_n, size) in enumerate(sizes))
              for group, sizes in size_groups(family)]
     return "Choose a size and a quant: " + " · ".join(parts)
+
+
+def _is_default_preset(row: dict) -> bool:
+    """One of the stock rows (``presets.DEFAULT_PRESETS``: same name and repository); every other row is the
+    user's own (Add preset, Add from Hugging Face, a Custom pick), which a Delete may remove too."""
+    return any(d["name"] == row.get("name") and d["repo"].casefold() == str(row.get("repo") or "").casefold()
+               for d in presets.DEFAULT_PRESETS)
+
+
+def _delete_note(text: str, key: str) -> ft.Control:
+    """Why a Delete was refused, under the row it was tapped on."""
+    return _small(text, color=ft.Colors.ERROR, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS, key=key, selectable=True)
 
 
 def _vision_line(key: str) -> ft.Control:

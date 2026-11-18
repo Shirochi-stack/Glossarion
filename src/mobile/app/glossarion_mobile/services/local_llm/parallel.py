@@ -80,7 +80,6 @@ class RequestSlots:
                 self.queue.remove(ticket)
                 self.condition.notify_all()
                 raise
-        owner._notify()
 
         def release():
             try:
@@ -92,7 +91,8 @@ class RequestSlots:
                     self.condition.notify_all()
                 owner._notify()
 
-        try:
+        try:  # the slot is taken: every path below gives it back
+            owner._notify()
             run = worker._chat_serial(model, body, lambda: owner._stops != arrived or should_stop())
         except BaseException:
             release()

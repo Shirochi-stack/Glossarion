@@ -110,7 +110,9 @@ class ConfirmDialog:
         items: Optional[Sequence[str]] = None,
         on_confirm: Optional[Callable[[], Any]] = None,
         on_cancel: Optional[Callable[[], Any]] = None,
+        extras: Optional[Sequence[ft.Control]] = None,
     ) -> None:
+        """``extras``: controls under the body and items (an option such as a checkbox the action reads)."""
         self.title = title
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
@@ -124,6 +126,7 @@ class ConfirmDialog:
             content.append(ft.Text(body, theme_style=ft.TextThemeStyle.BODY_MEDIUM))
         for item in items or ():
             content.append(ft.Text(f"• {item}", theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True))
+        content.extend(extras or ())
         self.progress = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
         content.append(ft.Row([self.progress], alignment=ft.MainAxisAlignment.CENTER))
         self.cancel_button = ft.TextButton(content=cancel_label, on_click=self._on_cancel)

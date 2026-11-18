@@ -173,6 +173,56 @@ class Registry:
             self.save(entries)
             return found
 
+    def disk_bytes(self, stem: str) -> int:
+        """Bytes a delete of ``stem`` frees: the model, its vision projector (``<stem>.mmproj.gguf``, only ever
+        this model's) and the unfinished parts of both."""
+        total = 0
+        for key in (stem, self.projector_key(stem)):
+            path = self.file_path(key)
+            total += _size(path) + _size(path + PART_SUFFIX)
+        return total
+
+    def repair_projector_models(self) -> list:
+        """Entries whose file is a vision projector (``hf.is_projector_name``: Add from Hugging Face downloaded
+        ``…-mmproj-Q8_0.gguf`` as the model when the projector's name did not start with "mmproj") never load.
+        Such a file becomes the image support of a downloaded text-only model of the same repository (the
+        same bytes the model's own projector download would fetch); else it is deleted, as is an unfinished
+        model download of one. Returns ``[(stem, "attached to <model>" | "deleted")]``."""
+        done: list = []
+        with self._lock:
+            entries = self.load()
+            for stem, entry in list(entries.items()):
+                if not hf.is_projector_name(entry.get("file")):
+                    continue
+                repo = str(entry.get("repo") or "").casefold()
+                owner = next((s for s, e in entries.items() if s != stem and not e.get("mmproj")
+                              and str(e.get("repo") or "").casefold() == repo
+                              and not hf.is_projector_name(e.get("file"))), None)
+                entries.pop(stem)
+                if owner is not None:
+                    try:
+                        os.replace(self.file_path(stem), self.file_path(self.projector_key(owner)))
+                        entries[owner] = dict(entries[owner], mmproj={
+                            key: entry[key] for key in ("file", "revision", "sha256", "size", "downloaded_at")
+                            if key in entry})
+                        done.append((stem, f"attached to {owner}"))
+                        continue
+                    except OSError:
+                        log.debug("could not move %s", stem, exc_info=True)
+                _remove(self.file_path(stem))
+                _remove(self.file_path(self.projector_key(stem)))
+                done.append((stem, "deleted"))
+            if done:
+                self.save(entries)
+            for stem, meta in self.pending_parts().items():
+                if meta.get("kind") != "mmproj" and hf.is_projector_name(meta.get("file")):
+                    _remove(self.file_path(stem) + PART_SUFFIX)
+                    _remove(self.file_path(stem) + PART_SUFFIX + ".json")
+                    done.append((stem, "deleted"))
+        for stem, what in done:
+            log.info("local/%s was a vision projector downloaded as a model: %s", stem, what)
+        return done
+
     def resolve(self, name: Any) -> Optional[str]:
         """The registered stem for ``name`` (``local/`` optional; case-insensitive), else None."""
         from glossarion_mobile.services.local_llm import stem_of

@@ -20,7 +20,7 @@ from glossarion_mobile.services.local_llm import service as svc
 from glossarion_mobile.services.local_llm.server import LocalLLMError
 from test_local_llm_server import make_service
 
-BUSY = "The on-device model is busy; try again when the current answer is done"
+BUSY = svc.BUSY_FOR_JOB
 MESSAGES = {"messages": [{"role": "user", "content": "one two three"}]}
 
 
