@@ -82,6 +82,10 @@ UNTRACKED_STATUSES = ("", "not_translated")  # rows with no progress entry to re
 PROCESS_RUNNING_TITLE = "Process Running"
 PROCESS_RUNNING = "Wait for the current translation or glossary process to finish first."
 RETRANSLATE_FAILED = "Retranslation Reset Failed"
+#: The desktop result-box title of an action that did what it was asked: the reloaded rows / grid show it, so
+#: no message (owner 2026-11-18: no pop-up for what the screen already shows); a warning or "nothing changed"
+#: outcome is still said.
+RESULT_SUCCESS = "Success"
 # Hotfix 1 issue 9: a job-backed action that waits behind another job says so (it would otherwise do nothing
 # visible until that job ends)
 RETRANSLATE_QUEUED = "Queued: resetting {count} row(s) for retranslation · runs after the current job"
@@ -489,7 +493,8 @@ class ChaptersTab:
                 return None
             self.image_selected = set()
             await self.reload_images()
-        self.show_message(title, message)
+        if title != RESULT_SUCCESS:  # the reloaded grid shows a success; a partial one says what failed
+            self.show_message(title, message)
         return message
 
     def _more_items(self) -> list:
@@ -1600,8 +1605,8 @@ class ChaptersTab:
         return job_id
 
     async def _on_qa_end(self, snap: Any) -> Optional[str]:
-        """The scan ended: the rows reload (its QA marks), the Output tab lists the new report, and a finished
-        scan offers its report (a failed one says why)."""
+        """The scan ended: the rows reload (its QA marks) and the Output tab lists the new report; a failed scan
+        says why."""
         try:
             await self.page.reload_progress(force=True)
         except Exception:
@@ -1617,15 +1622,7 @@ class ChaptersTab:
             return message
         if state != "DONE":
             return None
-        from glossarion_mobile.job_kinds.qa import REPORT_FILE
-
-        report = next((str(p) for p in getattr(snap, "outputs", ()) or () if str(p).endswith(REPORT_FILE)), None)
-        if report:
-            from glossarion_mobile.ui.tools.qa_screen import open_qa_report
-
-            self.ctx.say("QA scan finished", "Report", lambda: open_qa_report(self.ctx, report))
-        else:
-            self.ctx.say("QA scan finished")
+        # no message: the rows show the QA marks and the Output tab lists the report (owner 2026-11-18)
         return "QA scan finished"
 
     async def retranslate(self, rows: Sequence[pm.RowVM]) -> Any:
@@ -1767,8 +1764,14 @@ class ChaptersTab:
             self.show_message(RETRANSLATE_FAILED, str(snap.error))
             return str(snap.error)
         message = str(result.get("retranslate_message") or "")
-        if message:
-            self.show_message(str(result.get("retranslate_title") or "Retranslate"), message)
+        title = str(result.get("retranslate_title") or "Retranslate")
+        counts = result.get("retranslate_counts") or {}
+        # a "Success" text can still name files it failed to delete (SDLXLIFF sidecars, Machine Translation
+        # previews): nothing on screen shows those, so it is said
+        failed = any(str(key).endswith("_failed_count") and int(value or 0) > 0
+                     for key, value in (counts.items() if isinstance(counts, dict) else ()))
+        if message and (title != RESULT_SUCCESS or failed):  # the reloaded rows show the reset; a warning says why
+            self.show_message(title, message)
         return message or None
 
     async def _on_resolve_qa_end(self, snap: Any) -> Optional[str]:
@@ -1863,9 +1866,9 @@ class ChaptersTab:
         return True
 
     async def _apply_planned(self, plan: pm.ActionPlan) -> Optional[str]:
-        """Apply a confirmed plan on the io pool, refresh the rows and the stats, then the desktop result text
-        (``show_message``: a snackbar, a sheet when long), like the desktop Progress Manager's result box after
-        its refresh (hotfix 1 issue 9: the action used to change the file without any confirmation)."""
+        """Apply a confirmed plan on the io pool, refresh the rows and the stats (hotfix 1 issue 9: the action
+        used to change the file without any visible change); an outcome the rows do not show
+        (``progress_model.TitledResult``) then opens the desktop result text (``show_message``)."""
         async with self.busy.run():
             try:
                 message = await self.ctx.io(pm.apply_action, self.page.service, self.view, plan)
@@ -1879,9 +1882,10 @@ class ChaptersTab:
         repairs = getattr(message, "repairs", None)
         if repairs and int(getattr(message, "repaired", 0) or 0) > 0:
             self.show_repair_comparison(str(message), repairs, int(message.repaired))
-        elif str(message or ""):
-            own = message.box_title if isinstance(message, pm.TitledResult) else ""
-            title = own or ACTION_RESULT_TITLES.get(plan.action, "Progress Manager")
+        elif isinstance(message, pm.TitledResult) and str(message):
+            # a plain result is what the reloaded rows show (owner 2026-11-18: no pop-up for it); a titled one
+            # is an outcome they do not (a QA repair, an image insert, nothing changed)
+            title = message.box_title or ACTION_RESULT_TITLES.get(plan.action, "Progress Manager")
             self.show_message(title, str(message))
         return message
 

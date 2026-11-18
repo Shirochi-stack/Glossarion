@@ -33,10 +33,13 @@ from glossarion_mobile.ui.theme import HIT_TARGET, mono_family, number_keyboard,
 log = logging.getLogger("glossarion.ui")
 
 __all__ = ["EntryTypePickerEditor", "EntryTypesEditor", "FullScreenEditor", "JsonEditor", "ListEditor",
-           "MultiplierEditor", "PathEditor", "PromptEditor", "SecretEditor",
+           "MultiplierEditor", "PathEditor", "PromptEditor", "SECRET_STORAGE_NOTE", "SecretEditor",
            "count_label"]
 
 SaveHandler = Callable[[Any], Optional[str]]
+
+#: Where a secret setting is kept (the SecretEditor and the settings SecretTile show it under the field).
+SECRET_STORAGE_NOTE = "Stored encrypted in config.json with the key kept in the device's secure storage."
 
 
 def count_label(text: str) -> str:
@@ -272,7 +275,7 @@ class SecretEditor(FullScreenEditor):
         )
         self.clear_button = ft.TextButton(content="Clear", icon=ft.Icons.BACKSPACE_OUTLINED, on_click=self._on_clear)
         note = ft.Text(
-            "Stored encrypted in config.json with the key kept in the device's secure storage.",
+            SECRET_STORAGE_NOTE,
             theme_style=ft.TextThemeStyle.BODY_SMALL,
             color=ft.Colors.ON_SURFACE_VARIANT,
         )

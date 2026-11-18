@@ -26,7 +26,7 @@ OpenAI server (``diagnostics.fake_llm_server``) on 127.0.0.1, imported through S
    source in the mobile QA defaults - Quick Scan, duplicate-check sample size 0 (config.json has none: "Glossarion
    Mobile default" in the job log, ``scan_html_folder`` receives 0) - with the book as its origin. While the scan
    runs (held at the scanner's entry) Run QA scan is disabled ("already queued or running"); when it ends, its
-   report exists, the "QA scan finished" snackbar offers it, and the button comes back.
+   report exists, the Output tab lists it (no pop-up, owner 2026-11-18), and the button comes back.
 
 Test rule (earlier batches): a test that asserts a job is still RUNNING holds the fake model from its own
 ``on_response`` hook (``HoldGate`` in test_devfix_issue12.py), never with sleeps; nothing is aborted.
@@ -647,12 +647,12 @@ def test_owner_issue7_progress_manager_run_buttons(isolated, monkeypatch):
             assert await _until(lambda: _buttons(book_page) == ((False, None), (False, None)), 20), \
                 _buttons(book_page)
             assert app.config_store.get(("qa_scanner_settings", "quick_scan_sample_size")) is None  # not written
-            # the snackbar offers the report ("Report" is the SnackBar's own action label); its action opens it
-            await driver.wait(text="QA scan finished", timeout=30)
-            bar = _snackbar(run, "QA scan finished")
-            assert bar is not None and bar.action == "Report" and bar.on_action is not None, bar
-            await run.session.dispatch_event(bar._i, "action", None)
-            assert await _until(lambda: run.route().startswith("/tools/qa/report/"), 20), run.route()
+            # no pop-up (owner 2026-11-18): the Output tab, marked stale, lists the report under QA reports
+            assert await _until(lambda: book_page.output.stale, 20)
+            assert _snackbar(run, "QA scan finished") is None
+            await book_page.output.reload()
+            assert any(_norm(p) == _norm(report) for p in book_page.output.groups.get("qa", ())), \
+                book_page.output.groups
         except Exception:
             for row in run.tester.dump(300):
                 print(row)

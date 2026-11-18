@@ -5,7 +5,8 @@ during a glossary or translation run.
 
 * Run QA scan submits the chat's one-tap scan for this book (``qa_scan`` job, ``qa_model.CHAT_QA_MODE``
   Quick Scan; the job applies the mobile sample size 0) on the book's workspace and raw source, with the
-  book's Library origin; a double tap queues one scan; a finished scan reloads the rows and offers its report.
+  book's Library origin; a double tap queues one scan; a finished scan reloads the rows and the Output tab lists
+  its report (no pop-up, owner 2026-11-18).
 * Both buttons wait (disabled, the reason as tooltip) while a translation or glossary run is active (any book:
   jobs run one at a time; also at its glossary gate) or queued for this book; Run QA scan also while this
   book's own scan is queued or running. They follow every JobsView delivery live - checked with a scripted
@@ -15,8 +16,9 @@ Issue 9 (owner, device): "Lack of feedback when interacting with progress manage
 progress just happens with no refresh". Root cause: ``ChaptersTab._apply_planned`` wrote the progress and
 reloaded silently (5f74999e dropped the result snackbar, nothing showed work in progress), so an action looked
 like nothing happened. Now the list's progress bar runs while the action writes and the rows reload, the rows,
-the stats chips and the strip refresh at once (desktop ``_refresh_retranslation_data``), then the desktop
-result text follows; failures say why. Glossary Progress actions do the same (a forced reload: a poll load in
+the stats chips and the strip refresh at once (desktop ``_refresh_retranslation_data``); that refresh is the
+confirmation (owner 2026-11-18: no pop-up for what the rows show), the desktop result text only for an outcome
+the rows do not show (nothing changed, a QA repair); failures say why. Glossary Progress actions do the same (a forced reload: a poll load in
 flight no longer swallows the action's refresh).
 
 Run from src/mobile with the mobile venv (Python 3.12):
@@ -139,8 +141,8 @@ async def _until(predicate, timeout=TIMEOUT):
 @needs_flet
 def test_restore_in_progress_shows_work_refreshes_rows_and_counts_and_confirms(real_env, monkeypatch):
     """The owner's case: an In progress row's action. While it writes, the list's progress bar runs; the row,
-    the stats chips and the strip refresh at once (and reach the client); then the desktop result text
-    ("In Progress Restored") follows as a snackbar."""
+    the stats chips and the strip refresh at once (and reach the client); the refreshed row is the confirmation
+    (no "In Progress Restored" pop-up for what the screen shows, owner 2026-11-18)."""
     _needs_cores()
     from glossarion_mobile.ui.library import progress_model as pm
 
@@ -172,8 +174,8 @@ def test_restore_in_progress_shows_work_refreshes_rows_and_counts_and_confirms(r
         assert chips["in_progress"] == 0 and chips["failed"] == 2
         assert any(c.text.endswith("2") for c in chapters.view.chips if c.group == "failed")
         assert b"Failed" in _sent(conn, start)  # the refreshed row was pushed to the client
-        assert _messages(ctx)[-1] == "Successfully marked 1 as failed."
-        assert chapters.last_message == ("In Progress Restored", "Successfully marked 1 as failed.")
+        assert "Successfully marked 1 as failed." not in _messages(ctx)
+        assert chapters.last_message is None  # no result box either
         scr.dispose()
 
     asyncio.run(scenario())
@@ -181,8 +183,8 @@ def test_restore_in_progress_shows_work_refreshes_rows_and_counts_and_confirms(r
 
 @needs_flet
 def test_bulk_remove_qa_confirms_and_a_failed_write_says_why(real_env, monkeypatch):
-    """A bulk selection action (Remove QA mark): the confirmation, then refreshed rows/chips + the desktop text;
-    a write that fails says why and the progress bar stops."""
+    """A bulk selection action (Remove QA mark): the confirmation, then refreshed rows/chips (no pop-up for
+    them); a write that fails says why and the progress bar stops."""
     _needs_cores()
     from glossarion_mobile.ui.library import progress_model as pm
 
@@ -207,7 +209,7 @@ def test_bulk_remove_qa_confirms_and_a_failed_write_says_why(real_env, monkeypat
         message = await chapters.run_action("remove_qa", chapters.selected_rows())
         assert asked[-1] == ("Confirm Remove Failed Mark", "Remove failed mark from 1 chapters?")
         assert message == "Removed failed mark from 1 chapters."
-        assert _messages(ctx)[-1] == "Removed failed mark from 1 chapters."
+        assert message not in _messages(ctx)  # the refreshed rows and chips show it
         after = _chips(chapters)
         assert not chapters.selecting and before["failed"] == 1 and after["failed"] == 0
         assert after["completed"] == before["completed"] + 1
@@ -231,7 +233,7 @@ def test_bulk_remove_qa_confirms_and_a_failed_write_says_why(real_env, monkeypat
 @needs_flet
 def test_glossary_progress_action_refreshes_even_with_a_poll_load_in_flight(real_env):
     """Glossary Progress › Mark as completed: the rows refresh (a forced reload waits for a poll load in flight
-    instead of being dropped) and a snackbar says what changed."""
+    instead of being dropped); the refreshed row is the confirmation (no pop-up, owner 2026-11-18)."""
     if _TLU._core("glossary_progress_core", "open_glossary_progress", "mark_glossary_completed") is None:
         pytest.skip("glossary_progress_core not importable")
 
@@ -241,21 +243,15 @@ def test_glossary_progress_action_refreshes_even_with_a_poll_load_in_flight(real
         tab = screen.glossary_tab
         row = next(r for r in tab.visible_rows() if r.kind == "chapter" and r.status == "not_completed")
         screen._loading_glossary = True  # a 2 s poll load is reading the file right now
+        said = len(ctx.notes)
         result = await tab.run_action("mark_completed", [row])
         assert result is not None
         assert next(r for r in tab.view.rows if r.key == row.key).status == "completed"
-        assert _messages(ctx)[-1] == "Marked 1 chapter as completed"
+        assert _messages(ctx)[said:] == []
         assert not tab.loading.visible
         screen.dispose()
 
     asyncio.run(scenario())
-    from glossarion_mobile.ui.library.glossary_tab import action_done_text
-
-    one = types.SimpleNamespace(kind="chapter", title="Ch.4 · ch004.xhtml")
-    two = types.SimpleNamespace(kind="minimal", title="Minimal Pass")
-    assert action_done_text("remove", [one]) == "Removed Ch.4 from progress"
-    assert action_done_text("remove", [one, two]) == "Removed 2 rows from progress"
-    assert action_done_text("mark_completed", [one, one]) == "Marked 2 chapters as completed"
 
 
 # ==========================================================================
@@ -327,7 +323,7 @@ def _snap(job_id, kind, state, *, origin=None, inputs=(), question=None, refinin
 
 
 @needs_flet
-def test_run_qa_scan_queues_the_books_quick_scan_once_and_offers_the_report(real_env):
+def test_run_qa_scan_queues_the_books_quick_scan_once_and_lists_the_report(real_env):
     _needs_cores()
     from glossarion_mobile.job_kinds.qa import report_path_for
     from glossarion_mobile.services.jobs import JobState
@@ -358,13 +354,14 @@ def test_run_qa_scan_queues_the_books_quick_scan_once_and_offers_the_report(real
         assert chapters.qa_button.disabled and chapters.qa_button.tooltip == QA_RUNNING
         assert not chapters.run_button.disabled  # a QA scan does not block Run translation
         assert await chapters.run_qa_scan() is None and _messages(ctx)[-1] == QA_RUNNING
-        # the scan ends: the rows reload, the report is offered, the button comes back
+        # the scan ends: the rows reload, the Output tab will list the report (no pop-up), the button comes back
         report = report_path_for(str(real_env["ws"]))
+        screen.output.stale = False
         jobs.end("job1", JobState.DONE, outputs=(report,))
-        assert await _until(lambda: any(n[0] == "QA scan finished" for n in ctx.notes))
-        note = next(n for n in ctx.notes if n[0] == "QA scan finished")
-        assert note[1] == "Report" and callable(note[2])
-        assert not chapters.qa_button.disabled and chapters.qa_button.tooltip is None
+        assert await _until(lambda: screen.output.stale)
+        assert await _until(lambda: not chapters.qa_button.disabled)
+        assert chapters.qa_button.tooltip is None
+        assert not any(n[0] == "QA scan finished" for n in ctx.notes)
         # a failed scan says why
         assert await chapters.run_qa_scan() == "job2"
         jobs.end("job2", JobState.FAILED, error="boom")
@@ -572,3 +569,108 @@ def test_resolve_qa_and_insert_image_results_carry_the_desktop_box_titles():
         assert (result.box_title, str(result)) == (shared[1], shared[2])
     # the table holds only real desktop titles; these two take theirs from the result
     assert "resolve_qa" not in chapters_tab.ACTION_RESULT_TITLES and "insert_image" not in chapters_tab.ACTION_RESULT_TITLES
+
+
+def test_a_result_the_rows_show_is_not_said_but_nothing_changed_is():
+    """Owner 2026-11-18 (no pop-up for what the screen shows): a Progress Manager action that changed rows returns
+    a plain result (the reloaded rows are the confirmation; ``_apply_planned`` says nothing), one that changed
+    nothing a ``TitledResult`` the Chapters tab still says ("No in-progress marks were changed." is not on screen)."""
+    from glossarion_mobile.ui.library import chapters_tab
+    from glossarion_mobile.ui.library import progress_model as pm
+
+    class Actions:
+        restored: dict = {}
+
+        def restore_in_progress(self, progress_file, output_dir, targets):
+            return self.restored
+
+        def restore_in_progress_message(self, result):
+            return "Successfully restored 1." if any(result.values()) else "No in-progress marks were changed."
+
+    actions = Actions()
+    service = types.SimpleNamespace(core=types.SimpleNamespace(module=lambda name: actions), mark_dirty=lambda: None)
+    view = types.SimpleNamespace(state=types.SimpleNamespace(data={"progress_file": "p.json", "output_dir": "out"},
+                                                             owner=None))
+    plan = pm.ActionPlan("restore_in_progress", [{"key": "1"}], 1)
+    actions.restored = {"restored": 1, "deleted": 0, "failed": 0}
+    changed = pm.apply_action(service, view, plan)
+    assert changed == "Successfully restored 1." and not isinstance(changed, pm.TitledResult)
+    actions.restored = {"restored": 0, "deleted": 0, "failed": 0}
+    unchanged = pm.apply_action(service, view, plan)
+    assert unchanged == "No in-progress marks were changed." and isinstance(unchanged, pm.TitledResult)
+
+    said: list = []
+    results = iter([changed, unchanged])
+
+    async def io(fn, *args, **kwargs):
+        return next(results)
+
+    async def reload_progress(force=False):
+        return None
+
+    class Busy:
+        @contextlib.asynccontextmanager
+        async def run(self):
+            yield
+
+    tab = chapters_tab.ChaptersTab.__new__(chapters_tab.ChaptersTab)
+    tab.ctx = types.SimpleNamespace(io=io, say=lambda message, *a: said.append(message), show=said.append)
+    tab.page = types.SimpleNamespace(service=service, reload_progress=reload_progress)
+    tab.view, tab.busy, tab.last_message = view, Busy(), None
+    tab.exit_selection = lambda: None
+    assert asyncio.run(tab._apply_planned(plan)) == changed
+    assert said == [] and tab.last_message is None  # the reloaded rows show it
+    asyncio.run(tab._apply_planned(plan))
+    assert said == ["No in-progress marks were changed."]
+    assert tab.last_message == ("In Progress Restored", "No in-progress marks were changed.")
+
+
+def test_remove_pending_says_the_skipped_rows():
+    """Review finding: rows Remove Pending Mark skipped stay Pending with no reason on screen, so a result with
+    skipped selections is said; only a clean one is not."""
+    from glossarion_mobile.ui.library import progress_model as pm
+
+    class Actions:
+        result: dict = {}
+
+        def remove_pending_marks(self, progress_file, output_dir, targets):
+            return self.result
+
+        def remove_pending_message(self, result):
+            return f"Restored {result['recovered']} pending entries. Skipped {result['skipped']} ineligible selections."
+
+    actions = Actions()
+    service = types.SimpleNamespace(core=types.SimpleNamespace(module=lambda name: actions), mark_dirty=lambda: None)
+    view = types.SimpleNamespace(state=types.SimpleNamespace(data={"progress_file": "p.json", "output_dir": "out"},
+                                                             owner=None))
+    plan = pm.ActionPlan("remove_pending", [{"key": "1"}], 1)
+    actions.result = {"recovered": 2, "skipped": 0}
+    assert not isinstance(pm.apply_action(service, view, plan), pm.TitledResult)
+    actions.result = {"recovered": 2, "skipped": 3}
+    assert isinstance(pm.apply_action(service, view, plan), pm.TitledResult)
+
+
+def test_a_retranslate_success_that_failed_to_delete_files_is_said():
+    """Review finding: the desktop's "Success" text can name SDLXLIFF sidecars or Machine Translation previews it
+    failed to delete; nothing on screen shows that, so it is said. A clean success is not."""
+    from glossarion_mobile.ui.library import chapters_tab
+
+    said: list = []
+
+    async def reload_progress(force=False):
+        return None
+
+    tab = chapters_tab.ChaptersTab.__new__(chapters_tab.ChaptersTab)
+    tab.ctx = types.SimpleNamespace(say=lambda message, *a: said.append(message), show=said.append)
+    tab.page = types.SimpleNamespace(reload_progress=reload_progress)
+    tab.view, tab.last_message = None, None
+
+    def end(counts):
+        return types.SimpleNamespace(state="DONE", error=None, result={
+            "retranslate_title": "Success", "retranslate_message": "Successfully reset 1 chapter statuses to pending.",
+            "retranslate_counts": counts})
+
+    asyncio.run(tab._on_retranslate_end(end({"status_reset_count": 1, "sidecar_failed_count": 0})))
+    assert said == []
+    asyncio.run(tab._on_retranslate_end(end({"status_reset_count": 1, "sidecar_failed_count": 1})))
+    assert said and tab.last_message[0] == "Success"

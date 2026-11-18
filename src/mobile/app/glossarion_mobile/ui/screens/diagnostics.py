@@ -2,10 +2,10 @@
 
 U9 additions (``services.logs``): a dismissible previous-crash banner · Logging & dumps (HTTP
 logging switch → ``<logs>/http_requests``, Save payloads switch → ``SAVE_PAYLOAD``, the Payloads /
-HTTP requests folders with their size, Open in Files and Clear, Memory stats off by default, a
-link to Debug mode) · Log files (run.log, crash.log, freeze.log, memory.log: View / Share) and
-"Share logs bundle" (secrets redacted) · Developer options (Developer mode: Library Copy Path) ·
-Process priority / CPU affinity (not available on mobile, with the reason).
+HTTP requests folders with their size, Open in Files and Clear, Memory stats off by default, the
+"Show debug buttons" switch itself) · Log files (run.log, crash.log, freeze.log, memory.log: View / Share)
+and "Share logs bundle" (secrets redacted) · Developer options (Developer mode: Library Copy Path).
+Process priority / CPU affinity are not shown (mobile apps cannot change them).
 
 Cards: Runtime (bootstrap result, paths, backend warm import) · Self-test
 (runs ``diagnostics.selftest`` on a worker thread through ``SelfTestRunner``
@@ -34,7 +34,6 @@ from glossarion_mobile.state.app_state import AppState
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 from glossarion_mobile.ui.components.log_console import LAYOUT_ALL_EXTENT, LogConsole
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 from glossarion_mobile.ui.router import RouteMatch
@@ -43,6 +42,8 @@ from glossarion_mobile.ui.theme import HIT_TARGET, log_text, mono_family, status
 
 __all__ = ["DiagnosticsScreen", "runtime_lines"]
 
+#: The desktop Debug Controls switch (debug payloads, Show debug buttons) shown in Logging & dumps.
+DEBUG_BUTTONS_KEY = "show_debug_buttons"
 _CHECK_STATUS = {"pass": ("CHECK_CIRCLE", "completed"), "fail": ("ERROR", "failed"), "skip": ("REMOVE_CIRCLE_OUTLINE", "skipped")}
 
 
@@ -96,9 +97,12 @@ class DiagnosticsScreen(Screen):
         navigate: Optional[Callable[..., Any]] = None,
         notify: Optional[Callable[..., Any]] = None,
         file_ref: Optional[Callable[[str], str]] = None,
+        settings_ctx: Any = None,
     ) -> None:
         super().__init__(match)
         self.prefs = prefs
+        self.settings_ctx = settings_ctx  # SettingsContext: the shared "Show debug buttons" tile
+        self.debug_tile: Any = None
         self.paths = paths if paths is not None else rb.get_paths()
         self.files = files
         self.config_snapshot = config_snapshot
@@ -293,8 +297,7 @@ class DiagnosticsScreen(Screen):
                 self.memory_switch,
                 ft.Text("Off by default (the desktop memory logger is disabled); writes logs/memory.log.",
                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
-                ft.TextButton(content="Debug mode (verbose payloads)…", icon=ft.Icons.TUNE, key="diag-debug-mode",
-                              on_click=lambda e: self.open_debug_settings()),
+                *self._debug_controls(),
                 ft.Row([
                     ft.FilledTonalButton(content="Check environment", icon=ft.Icons.FACT_CHECK_OUTLINED,
                                          key="diag-env-check", on_click=lambda e: self._spawn(self.check_environment())),
@@ -314,16 +317,35 @@ class DiagnosticsScreen(Screen):
         self.dev_switch = toggle(label="Developer mode", value=bool(self._pref(dl.PREF_DEVELOPER, False)),
                                     key="diag-developer",
                                     on_change=lambda e: self._set_pref(dl.PREF_DEVELOPER, bool(e.control.value)))
+        # Process priority / CPU affinity are not shown: mobile apps cannot change them (dl.PRIORITY_REASON;
+        # owner 2026-11-18: "Not available on mobile" rows waste space)
         dev_card = SectionCard(title="Developer options", icon="DEVELOPER_MODE", children=[
             self.dev_switch,
             ft.Text("Shows developer actions such as Library › ⋯ › Copy Path.", theme_style=ft.TextThemeStyle.BODY_SMALL,
                     color=ft.Colors.ON_SURFACE_VARIANT),
-            *[ft.ListTile(title=ft.Text(name, color=ft.Colors.ON_SURFACE_VARIANT), disabled=True, dense=True,
-                          subtitle=ft.Row([ReasonChip(reason="Not available on mobile", detail=dl.PRIORITY_REASON)]),
-                          key=f"diag-{key}")
-              for name, key in (("Process priority", "priority"), ("CPU affinity", "affinity"))],
         ], key="diag-developer-card")
         return [logging_card, logs_card, dev_card]
+
+    def _debug_controls(self) -> list:
+        """The "Show debug buttons" switch itself (the shared settings tile, as on the Settings home), not a
+        link to a one-row page; nothing without the settings context."""
+        ctx = self.settings_ctx
+        schema = getattr(ctx, "schema", None)
+        if schema is None or not getattr(schema, "available", False):
+            return []
+        spec = schema.spec(DEBUG_BUTTONS_KEY)
+        if spec is None:
+            return []
+        from glossarion_mobile.ui.settings.tiles import EffectiveConfig, make_tile
+
+        try:
+            self.debug_tile = make_tile(spec, ctx, config=EffectiveConfig(ctx.store))
+        except Exception:
+            import logging
+
+            logging.getLogger("glossarion.diagnostics").exception("building the debug buttons tile failed")
+            return []
+        return [self.debug_tile.control]
 
     def _spawn(self, coro: Any) -> Any:
         dispatcher = self.dispatcher
@@ -394,13 +416,6 @@ class DiagnosticsScreen(Screen):
         if self.navigate is not None:
             try:
                 self.navigate("settings.env_preview")
-            except Exception:
-                pass
-
-    def open_debug_settings(self) -> None:
-        if self.navigate is not None:
-            try:
-                self.navigate("settings.section", {"section": "other.debug"})
             except Exception:
                 pass
 
@@ -518,6 +533,9 @@ class DiagnosticsScreen(Screen):
             self.state.selftest_running.subscribe(self._on_running),
             self.state.backend.subscribe(lambda _v: self._on_refresh()),
         ]
+        store = getattr(self.settings_ctx, "store", None)
+        if self.debug_tile is not None and store is not None:  # changed elsewhere (Settings home)
+            self._unsubs.append(store.observe_all(lambda key, value: self.settings_ctx.on_ui(self.debug_tile.refresh)))
 
     def dispose(self) -> None:
         for unsub in self._unsubs:

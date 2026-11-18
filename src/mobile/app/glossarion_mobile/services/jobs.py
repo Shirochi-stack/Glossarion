@@ -2538,23 +2538,37 @@ class JobService:
             interrupted = list(self._interrupted)
             history = list(self._history)
             live = [(job.id, job.spec, dict(job.output_dirs), job.output_dir) for job in self._live_jobs_locked()]
+            # carried-on entries held by a job that does not do their work (a QA scan, a compile of the book)
+            uncovered = [s for s in self._carried_on if not (self._carried_by.get(s.id) or {}).get("covers", True)]
         resumed = {snap.id for snap in interrupted
                    if snap.id != new_id and target is not None and target.covers(self._ended_target(snap))}
         carried: dict = {}
+        relinked: dict = {}
         for job_id, spec, dirs, folder in live:
             books = job_books(spec, dirs, folder)
             target_now = job_target(spec)
             for snap in history:
                 if snap.id != job_id and snap.id not in carried and same_books(self._books_of_ended(snap), books):
                     carried[snap.id] = (job_id, target_now is not None and target_now.covers(self._ended_target(snap)))
-        if not resumed and not carried:
+            for snap in uncovered:  # a live job that does the work takes such an entry over (carried_into follows it)
+                if (snap.id != job_id and snap.id not in relinked and target_now is not None
+                        and same_books(self._books_of_ended(snap), books)
+                        and target_now.covers(self._ended_target(snap))):
+                    relinked[snap.id] = job_id
+        if not resumed and not carried and not relinked:
             return
         with self._lock:
             if resumed:
                 self._interrupted = [s for s in self._interrupted if s.id not in resumed]
                 self._write_interrupted_locked()
+            for job_id, into in relinked.items():
+                who = self._carried_by.get(job_id)
+                if who is not None and not who.get("covers") and job_id not in carried:
+                    self._carried_by[job_id] = {"job": into, "covers": True}
             if carried:
                 self._carry_on_locked(carried)
+            elif relinked:
+                self._write_history_locked()
         log.info("%d earlier job(s) of the running books left the Jobs page", len(resumed) + len(carried))
         self._changed()
 
@@ -2603,6 +2617,24 @@ class JobService:
         who = self._carried_by.get(job_id)
         into = who.get("job") if who else None
         return any(job.id == into for job in self._live_jobs_locked())
+
+    def carried_into(self, job_id: str) -> Optional[str]:
+        """The newest job, not ended yet, that carries job ``job_id``'s work on: the links a newer run of its book
+        left (``_carried_by`` of a job that does that work, never a QA scan or a compile of the book) or a Resume
+        (``_resumed_into``), followed old -> new -> newer. None when no such job is queued or running."""
+        with self._lock:
+            current, newest, seen = job_id, None, {job_id}
+            while True:
+                who = self._carried_by.get(current)
+                into = who.get("job") if who and who.get("covers") else None
+                into = into or self._resumed_into.get(current)
+                if not into or into in seen:
+                    return newest
+                seen.add(into)
+                current = into
+                job = self._find_live(into)
+                if job is not None and job.state not in TERMINAL_STATES:
+                    newest = into
 
     def latest_job_for(self, path: Any, family: str = FAMILY_TRANSLATION) -> Optional[JobSnapshot]:
         """The job that stands for ``path``'s work now: the active one, else the newest ended or Interrupted

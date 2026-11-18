@@ -65,8 +65,8 @@ from glossarion_mobile.ui.settings.editors import (
     ListEditor,
     MultiplierEditor,
     PathEditor,
+    SECRET_STORAGE_NOTE,
     PromptEditor,
-    SecretEditor,
 )
 from glossarion_mobile.ui.settings.model import (
     ANTI_DUPLICATE_OFF,
@@ -96,7 +96,9 @@ __all__ = [
     "MOBILE_DEFAULT_TEXTS",
     "MOBILE_MINIMUMS",
     "MOBILE_READONLY_REASONS",
+    "MODEL_KEY",
     "listed_setting",
+    "ModelTile",
     "MultiplierGridTile",
     "NumberTile",
     "PathTile",
@@ -118,6 +120,9 @@ log = logging.getLogger("glossarion.settings")
 HIGHLIGHT = ft.Colors.with_opacity(0.14, ft.Colors.PRIMARY)
 
 
+
+#: The global model (Model & API): a searchable ModelPicker, written through ``setting_writes`` like the model menu.
+MODEL_KEY = "model"
 
 #: The −/+ step of token budgets (owner 2026-10-20: steps of 1 were useless for output limits); other
 #: whole numbers step by 1, decimals by 0.1.
@@ -474,12 +479,13 @@ class SettingTile:
             extra = self.implied_writes(value)
             if extra:  # keys the desktop control writes together with this one, in one store write
                 self.store.set_many({self.path: value, **extra})
-            elif len(self.path) == 1 and (self.key in RULE_KEYS
-                                         or self.key in (PROFILE_KEY, EXTRACTION_KEY, *RELATIONS_FRESH_DEFAULT_KEYS)):
+            elif len(self.path) == 1 and (self.key in RULE_KEYS or self.key in (
+                    PROFILE_KEY, EXTRACTION_KEY, MODEL_KEY, *RELATIONS_FRESH_DEFAULT_KEYS)):
                 # the desktop control's side effects (output-mode flags, glossary-mode toggles,
                 # thoughts lock, target-language fan-out, profile extraction method, the On-device
                 # translation profile of the extraction method, the Relations Tracker's custom field;
-                # a Relations Tracker toggle set by hand stops following the model)
+                # a Relations Tracker toggle set by hand stops following the model; the global model's
+                # On-device profiles and batch size, as the model menu sets it)
                 write_setting(self.store, self.key, value)
             else:
                 self.store.set(self.path, value)
@@ -1256,14 +1262,88 @@ class PromptTile(SettingTile):
 
 
 class SecretTile(SettingTile):
+    """A key edited in place (owner 2026-11-18: no pop-up editor): the shared ``KeyField`` under the tile
+    (masked, eye, the animated Save button with "Saved" / "Not saved: …" under it, Copy), writing the key
+    as it is typed like the model menu's key field; an emptied field removes the key. The main API key's
+    Test sends the selected model with it (the model menu's Test)."""
+
     kind = "secret"
 
-    def activate(self) -> SecretEditor:
+    def build_editor_row(self) -> Optional[ft.Control]:
+        from glossarion_mobile.ui.screens.key_editor import KeyField, store_saver
+
+        on_test = None
+        if self.key == "api_key":
+            from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+            test_key = sheet_env().test_key
+            if test_key is not None:
+                on_test = lambda value: test_key(value, str(self.store.effective("model") or ""))  # noqa: E731
         current = self.store.get(self.path, "")
-        self.editor = SecretEditor(self.ctx, title=self.label, subtitle=self.key,
-                                   value="" if str(current or "").startswith("ENC:") else (current or ""),
-                                   on_save=self.save_from_editor).show()
-        return self.editor
+        self.key_field = KeyField(value="" if current is None else str(current), label=self.label,
+                                  on_change=self.save_key, on_save=store_saver(self.save_key, self.store),
+                                  on_test=on_test, copy_text=getattr(self.ctx, "copy_text", None))
+        self.storage_note = ft.Text(SECRET_STORAGE_NOTE, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                    color=ft.Colors.ON_SURFACE_VARIANT)
+        return ft.Column([self.key_field, self.storage_note], spacing=4, tight=True)
+
+    def save_key(self, value: str) -> Optional[str]:
+        """Store the typed key (``apply``: the same store write as every setting, encrypted when the
+        file is written); an empty field removes it. Returns why it was not stored, else None."""
+        value = str(value or "").strip()
+        if value:
+            if not self.apply(value):
+                return str(self.error or "this setting cannot be changed")
+        elif self.store.has(self.path):
+            if not self.editable:
+                return "this setting cannot be changed"
+            self.store.unset(self.path)
+            self.refresh()
+        return None
+
+    def refresh_value(self) -> None:
+        """The stored key into the field when it changed elsewhere (reset, Discard, another screen); the
+        field the user is typing in already holds it, and a key this device cannot decrypt stays empty."""
+        field = getattr(self, "key_field", None)
+        if field is None:
+            return
+        current = self.store.get(self.path, "") if self.store.has(self.path) else ""
+        text = "" if current is None else str(current)
+        if text.startswith("ENC:") or text == field.value:
+            return
+        field.set_value(text, notify=False)
+
+
+class ModelTile(SettingTile):
+    """The global model (``model``): the model menu's searchable picker (``ModelPicker``: the ModelSheet in
+    field mode, any listed model or a typed id) instead of a bare text field. A pick is stored like the
+    model menu's (``setting_writes.write_setting``: the On-device profiles and batch size follow)."""
+
+    kind = "text"
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        from glossarion_mobile.ui.sheets.model_sheet import ModelPicker, sheet_env
+
+        value = self.value()
+        self.picker = ModelPicker(value="" if value is None else str(value), label=self.label, env=sheet_env(),
+                                  page=getattr(self.ctx, "page", None), on_change=self._on_pick)
+        return self.picker
+
+    def refresh_value(self) -> None:
+        value = self.value()
+        text = "" if value is None else str(value)
+        if self.picker.value != text:
+            self.picker.value = self.picker.field.value = text
+            self.picker.refresh_reason()
+
+    def _on_pick(self, value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text != str(self.value() or ""):
+            self.apply(text)
+
+    def activate(self) -> Any:
+        """Tapping the row opens the picker too."""
+        return self.picker.open()
 
 
 def _google_credentials_problem(path: str) -> Optional[str]:
@@ -1554,6 +1634,8 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None,
         cls = ProfileTile
     elif key in DELAY_RANGE_KEYS:  # '5' or a range '5-7'
         cls = DelayRangeTile
+    elif key == MODEL_KEY and len(config_path(spec)) == 1:
+        cls = ModelTile
     else:
         cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
     return cls(spec, ctx, config=config, include_dependencies=include_dependencies)

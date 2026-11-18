@@ -1058,9 +1058,8 @@ class AccountsScreen(Screen):
                 status.update()
             except Exception:
                 pass
-        if self.notify is not None:
-            self.notify("DeepSeek: signed in · use authds/flash or authds/pro" if present
-                        else "DeepSeek: no session found. Sign in on the page, then check again")
+        if self.notify is not None and not present:  # signed in shows on the status line (no pop-up)
+            self.notify("DeepSeek: no session found. Sign in on the page, then check again")
         return present
 
     def _experimental_tile(self) -> ft.Control:

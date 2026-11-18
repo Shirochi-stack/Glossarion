@@ -342,26 +342,16 @@ class EndpointsScreen(Screen):  # type: ignore[misc,valid-type]
         return ft.Container(content=ft.Row(chips, wrap=True, spacing=6, run_spacing=4),
                             padding=ft.Padding.only(left=12, right=12, bottom=6))
 
-    def _secret_field(self, key: str, tile: Any) -> "ft.Control":
-        """Secrets: the masked KeyField (eye · Save · Copy) under the tile, writing the same key."""
-        from glossarion_mobile.ui.screens.key_editor import KeyField, store_saver
-
-        def save(value: str) -> Optional[str]:
-            """Store the value; why it was not stored (the field's Save button shows it), else None."""
-            if value:
-                if not tile.apply(value):
-                    return str(getattr(tile, "error", "") or "this setting cannot be changed")
-            elif self.ctx.store.has(key):
-                self.ctx.store.unset(key)
-                tile.refresh()
-            return None
-
-        current = self.ctx.store.get(key, "") or ""
-        field = KeyField(value=str(current), label=tile.label, on_change=save,
-                         on_save=store_saver(save, self.ctx.store), read_clipboard=self.read_clipboard,
-                         copy_text=self.copy_text, test_reason="Use Test connection")
+    def _secret_field(self, key: str, tile: Any) -> None:
+        """Secrets: the SecretTile's own KeyField (eye · Save · Copy); its Test is this page's Test connection."""
+        field = getattr(tile, "key_field", None)
+        if field is None:
+            return
+        if self.copy_text is not None and field.copy_text is None:
+            field.copy_text = self.copy_text
+            field.copy_button.disabled = False
+        field.test_button.tooltip = "Use Test connection"
         self.secret_fields[key] = field
-        return ft.Container(content=field, padding=ft.Padding.only(left=12, right=12, bottom=8))
 
     def quick_paste(self, tile: Any, value: str) -> bool:
         """A quick-paste chip. Override API Endpoint follows the desktop pastes / Clear
@@ -403,8 +393,8 @@ class EndpointsScreen(Screen):  # type: ignore[misc,valid-type]
                 if tile is None:
                     continue
                 children.append(tile.control)
-                if tile.kind == "secret" and tile.editable:
-                    children.append(self._secret_field(key, tile))
+                if tile.kind == "secret":
+                    self._secret_field(key, tile)
                 dep = self.dependency.get(key)
                 if dep is not None:
                     children.append(ft.Container(content=ReasonChip(reason=dep[0], detail=dep[1]),

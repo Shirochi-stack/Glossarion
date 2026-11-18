@@ -211,6 +211,23 @@ class LogConsole(ft.Column):
             self._unsubscribe()
             self._unsubscribe = None
 
+    def set_buffer(self, buffer: Optional[LogBuffer]) -> None:
+        """Show ``buffer`` instead (the Job page follows a newer run of its book): the old buffer's lines, held
+        lines and dropped-line counts go, and a console that was attached opens on the new buffer's backlog."""
+        attached = self._unsubscribe is not None
+        self.detach()
+        self.buffer = buffer
+        self.lines.clear()
+        self.pending.clear()
+        self.pending_gap = 0
+        self.gap_total = 0
+        self._opening_seq = None
+        self._rebuild()
+        self._show_jump()
+        if attached:
+            self.attach()
+        self._after_change()
+
     # ---- data ------------------------------------------------------------------
 
     def _kinds(self) -> Optional[set]:

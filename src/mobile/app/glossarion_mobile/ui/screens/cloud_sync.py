@@ -1798,8 +1798,7 @@ class U10Actions:
                 error.visible = True
                 self._push(error)
                 return result
-            self._close(holder.get("dialog"))
-            self.say(f"{label} upload link saved")
+            self._close(holder.get("dialog"))  # closing is the success (a bad link keeps it open with why)
             return result
 
         steps: list = [
@@ -2298,19 +2297,16 @@ class DriveSyncSection:
         if self.unavailable_reason():
             self.say(REASON_DETAILS.get(self.unavailable_reason() or "", "") or DRIVE_PHONE_ONLY_DETAIL)
             return None
+        # a success shows in the status line and the button (owner 2026-11-18: no pop-up); a failure says why
         if self.state.get("signed_in"):
             async def disconnect() -> None:
-                result = await self._apply("disconnect", failed="Could not disconnect Google Drive")
-                if result.get("ok"):
-                    self.say("Google Drive disconnected")
+                await self._apply("disconnect", failed="Could not disconnect Google Drive")
 
             return self.show(ConfirmDialog(title="Disconnect Google Drive?", body=DRIVE_DISCONNECT_BODY,
                                            confirm_label="Disconnect", destructive=True, on_confirm=disconnect))
 
         async def connect() -> None:
-            result = await self._apply("connect", failed="Google Drive sign-in failed")
-            if result.get("ok"):
-                self.say("Google Drive connected")
+            await self._apply("connect", failed="Google Drive sign-in failed")
 
         return self.show(ConfirmDialog(title=DRIVE_CONSENT_TITLE, body=DRIVE_CONSENT_BODY, confirm_label="Sign in",
                                        on_confirm=connect))
@@ -3034,10 +3030,8 @@ class CloudSyncScreen(PageScreen):
 
     async def _drive_account(self, connected: bool) -> None:
         result = await self.share_facade.call("disconnect_drive" if connected else "connect_drive")
-        if not result.get("ok"):
+        if not result.get("ok"):  # a success shows in the refreshed row (owner 2026-11-18: no pop-up)
             self.say(str(result.get("message") or "Google Drive sign-in failed"))
-        else:
-            self.say("Google Drive disconnected" if connected else "Google Drive connected")
         await self.refresh()
 
     async def forget_gofile(self) -> bool:

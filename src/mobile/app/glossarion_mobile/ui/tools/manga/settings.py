@@ -46,6 +46,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.switch_row import switch_row
+from glossarion_mobile.ui.settings.manga_layout import MANGA_SECTION, SCHEMA_GROUPS, group_manga_keys
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
 from glossarion_mobile.ui.tools.manga.common import MangaTab, font_choices, push, reason_or_chip
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, toggle
@@ -63,43 +64,6 @@ RESET_CONFIRM_TEXT = ("Are you sure you want to reset all rendering settings to 
                       "• All other rendering options")
 
 log = logging.getLogger("glossarion.tools.manga")
-
-#: Schema groups of the "All manga settings" card (desktop dialog tab order).
-SCHEMA_GROUPS = (
-    ("ocr", "OCR"),
-    ("detection", "Bubble detection"),
-    ("context", "Context"),
-    ("inpainting", "Inpainting & mask"),
-    ("rendering", "Rendering"),
-    ("font_sizing", "Font sizing"),
-    ("preprocessing", "Preprocessing"),
-    ("compression", "Image compression"),
-    ("tiling", "Tiling"),
-    ("advanced", "Advanced"),
-    ("manual_edit", "Manual edit"),
-    ("other", "Other"),
-)
-_DETECTION_OCR_KEYS = re.compile(r"^manga_settings\.ocr\.(bubble_|detector_type|detect_|rtdetr_|"
-                                 r"use_rtdetr_for_ocr_regions|skip_rtdetr_merging|preserve_empty_blocks)")
-_PREFIX_GROUPS = (
-    (r"^manga_settings\.ocr\.", "ocr"),
-    (r"^manga_settings\.inpainting\.", "inpainting"),
-    (r"^manga_settings\.(mask_dilation|dilation_|use_all_iterations|all_iterations|"
-     r"\w*dilation_iterations|auto_iterations|cloud_)", "inpainting"),
-    (r"^manga_settings\.rendering\.", "rendering"),
-    (r"^manga_settings\.font_sizing\.", "font_sizing"),
-    (r"^manga_settings\.preprocessing\.", "preprocessing"),
-    (r"^manga_settings\.compression\.", "compression"),
-    (r"^manga_settings\.tiling\.", "tiling"),
-    (r"^manga_settings\.advanced\.", "advanced"),
-    (r"^manga_settings\.manual_edit\.", "manual_edit"),
-    (r"^(rapidocr_|qwen2vl_|manga_ocr_)", "ocr"),
-    (r"^manga_(bg_|font|text_|shadow_|safe_area|constrain|force_caps|strict_text|free_text|max_font|"
-     r"min_readable)", "rendering"),
-    (r"^manga_(inpaint|skip_inpaint|local_inpaint|disable_inpaint|custom|[\w-]*_model_path)", "inpainting"),
-    (r"^manga_(full_page|visual_context|glossary)", "context"),
-    (r"^experimental_translate_all$", "advanced"),
-)
 
 #: Keys the curated cards edit (left out of the generic groups).
 CURATED_KEYS = frozenset({
@@ -130,24 +94,6 @@ COLOR_SWATCHES = ((0, 0, 0), (255, 255, 255), (102, 0, 0), (204, 128, 128), (30,
 SAMPLE_TEXT = "Wait… you're the one\nwho saved me?"
 #: Config keys the Files tab persists on every list change (not settings: no re-render).
 FILES_KEYS = frozenset({svc.K_SELECTED, svc.K_SKIPPED, svc.K_FOLDER_ROOTS, svc.K_SPLIT_SUBFOLDERS})
-
-
-def group_manga_keys(keys: Sequence[str], *, exclude: frozenset = frozenset()) -> list:
-    """``[(group id, title, keys)]`` for the schema keys of ``manga.settings`` (desktop tab order)."""
-    buckets: dict = {gid: [] for gid, _title in SCHEMA_GROUPS}
-    for key in keys:
-        if key in exclude:
-            continue
-        if _DETECTION_OCR_KEYS.search(key):
-            buckets["detection"].append(key)
-            continue
-        group = "other"
-        for pattern, gid in _PREFIX_GROUPS:
-            if re.search(pattern, key):
-                group = gid
-                break
-        buckets[group].append(key)
-    return [(gid, title, tuple(buckets[gid])) for gid, title in SCHEMA_GROUPS if buckets[gid]]
 
 
 def _rgb(value: Any, default: tuple) -> tuple:
@@ -1430,8 +1376,9 @@ class SettingsTab(MangaTab):
     def _section_keys(self) -> list:
         settings = getattr(self.ctx, "settings", None)
         schema = getattr(settings, "schema", None) if settings is not None else None
-        section = schema.section("manga.settings") if schema is not None and getattr(schema, "available", False) else None
-        return list(section.keys) if section is not None else []
+        section = schema.section(MANGA_SECTION) if schema is not None and getattr(schema, "available", False) else None
+        # settings that are not available on mobile are not listed (or counted): no "Not available on mobile" rows
+        return [key for key in section.keys if schema.availability(key)[0]] if section is not None else []
 
     def _build_all_groups(self) -> None:
         keys = self._section_keys()
