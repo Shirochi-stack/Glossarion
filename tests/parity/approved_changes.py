@@ -5337,6 +5337,167 @@ _HEADING_LINK_WORKER = [
  ),
 ]
 
+# 2026-11-19 QA chunk localisation reads markdown chunk sources (enhanced extraction): their [text](<href>)
+# links and pipe tables are rendered before the chunk comparison; the enhanced-mode markdown-to-HTML
+# step keeps [text](<href>) and <https://...> link targets as links (the real diffs, applied after the
+# entries above, _HEADING_LINK_SCANNER and _HEADING_LINK_WORKER included)
+_MARKDOWN_CHUNK_SOURCE_SCANNER = [
+ (
+  (
+   ')\n'
+   '_HTML_ELEMENT_RE = re.compile(r"<[A-Za-z][^>]*>")\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_losses(marked, chunk_entry):\n'
+   '    """Per marker block, the links and table elements its recorded source has\n'
+   '    and its output block lost (or, for links, gained).\n'
+   '\n'
+   "    Uses the document check's own profile, so hrefs are normalised the same\n"
+   '    way. A loss only counts when the chunks together lost it too: a link the\n'
+   '    model moved into the next chunk charges nobody. Returns None when a chunk\n'
+   '    has no recorded source (older progress files) or no recorded source is\n'
+   '    HTML (markdown/text sources of enhanced extraction have no <a> or table\n'
+   '    to compare with); the findings then stay whole-document ones.\n'
+   '    """\n'
+   '    profiles = {}\n'
+   '    any_html_source = False\n'
+   '    for index, block in marked.items():\n'
+   '        record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '        source = record.get("source") if isinstance(record, dict) else None\n'
+   '        if not isinstance(source, str) or not source.strip():\n'
+   '            return None\n'
+   '        any_html_source = any_html_source or bool(_HTML_ELEMENT_RE.search(source))\n'
+   '        profiles[index] = (\n'
+   '            _html_preservation_profile(source),\n'
+   '            _html_preservation_profile(block.get("content", "")),\n'
+   '        )\n'
+   '    if not any_html_source:\n'
+   '        return None\n'
+   '    totals = {"source_links": Counter(), "output_links": Counter(),\n'
+  ),
+  (
+   ')\n'
+   '# Angle-bracket candidates, and the markdown link targets html2text writes for\n'
+   '# enhanced extraction ([text](<href>), href possibly with spaces) to skip.\n'
+   '_ANGLE_BRACKET_RE = re.compile(r"<([^<>]*)>")\n'
+   '_MARKDOWN_LINK_TARGET_RE = re.compile(r"\\]\\(<[^<>\\n]*>")\n'
+   '_ANGLE_TAG_NAME_RE = re.compile(r"\\s*/?\\s*([A-Za-z][A-Za-z0-9]*)")\n'
+   '# Tags enhanced (html2text) extraction keeps as raw HTML inside its markdown,\n'
+   '# the ones convert_enhanced_text_to_html restores: pictures and ruby. A source\n'
+   '# holding only these is still markdown.\n'
+   '_MARKDOWN_RAW_HTML_TAGS = frozenset((\n'
+   "    'img', 'svg', 'picture', 'figure', 'figcaption', 'image', 'source',\n"
+   "    'canvas', 'map', 'area', 'ruby', 'rt', 'rp', 'rb', 'rtc',\n"
+   '))\n'
+   '\n'
+   '\n'
+   'def _chunk_source_as_html(source):\n'
+   '    """A chunk\'s recorded source as HTML the preservation profile can read.\n'
+   '\n'
+   '    HTML sources are returned as they are. Markdown sources of enhanced\n'
+   '    extraction (links as ``[text](<href>)``, tables as pipe rows) are rendered\n'
+   "    with the markdown library the translation's own markdown-to-HTML step\n"
+   "    uses, so their links and tables count like the output's. A source is HTML\n"
+   '    when it has a real tag by the same test that keeps markup elsewhere\n'
+   '    (looks_like_valid_html_tag): prose such as <Status Window>, autolinks such\n'
+   '    as <https://...> or <#note> and link targets are not tags. Returns None\n'
+   '    when markdown cannot be rendered."""\n'
+   '    from html_tag_entities import looks_like_valid_html_tag\n'
+   '    for match in _ANGLE_BRACKET_RE.finditer(_MARKDOWN_LINK_TARGET_RE.sub("](", source)):\n'
+   '        inner = match.group(1)\n'
+   '        name = _ANGLE_TAG_NAME_RE.match(inner)\n'
+   '        if (name and name.group(1).lower() not in _MARKDOWN_RAW_HTML_TAGS\n'
+   '                and looks_like_valid_html_tag(inner)):\n'
+   '            return source\n'
+   '    try:\n'
+   '        import markdown\n'
+   "        return markdown.markdown(source, extensions=['tables'])\n"
+   '    except Exception:\n'
+   '        return None\n'
+   '\n'
+   '\n'
+   'def _chunk_preservation_losses(marked, chunk_entry):\n'
+   '    """Per marker block, the links and table elements its recorded source has\n'
+   '    and its output block lost (or, for links, gained).\n'
+   '\n'
+   "    Uses the document check's own profile, so hrefs are normalised the same\n"
+   '    way; a markdown source (enhanced extraction) is rendered to HTML first.\n'
+   '    A loss only counts when the chunks together lost it too: a link the\n'
+   '    model moved into the next chunk charges nobody. Returns None when a chunk\n'
+   '    has no recorded source (older progress files) or a markdown source cannot\n'
+   '    be rendered; the findings then stay whole-document ones.\n'
+   '    """\n'
+   '    profiles = {}\n'
+   '    for index, block in marked.items():\n'
+   '        record = chunk_entry.get("entries", {}).get(str(index), {})\n'
+   '        source = record.get("source") if isinstance(record, dict) else None\n'
+   '        if not isinstance(source, str) or not source.strip():\n'
+   '            return None\n'
+   '        source_html = _chunk_source_as_html(source)\n'
+   '        if source_html is None:\n'
+   '            return None\n'
+   '        profiles[index] = (\n'
+   '            _html_preservation_profile(source_html),\n'
+   '            _html_preservation_profile(block.get("content", "")),\n'
+   '        )\n'
+   '    totals = {"source_links": Counter(), "output_links": Counter(),\n'
+  ),
+ ),
+]
+
+_MARKDOWN_LINK_TARGET_WORKER = [
+ (
+  (
+   '    def _escape_tag_like(m):\n'
+   '        inner = m.group(1)\n'
+   '        try:\n'
+  ),
+  (
+   '    def _escape_tag_like(m):\n'
+   "        if m.group('link_target'):\n"
+   '            return m.group(0)\n'
+   "        inner = m.group('inner')\n"
+   '        try:\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   "    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)\n"
+   '\n'
+  ),
+  (
+   '\n'
+   '    # Markdown link targets are not tags: enhanced extraction (html2text)\n'
+   '    # writes every link as [text](<href>) and a link whose text is its URL as\n'
+   '    # <https://...>. Escaping them made the href "&lt;https://...&gt;".\n'
+   '    _md_link_target = (\n'
+   "        r'\\]\\(<[^<>\\n]*>'\n"
+   "        r'|<(?:(?:https?|ftps?)://|mailto:)[^\\s<>]+>'\n"
+   '    )\n'
+   '    plain_text = re.sub(\n'
+   "        rf'(?P<link_target>{_md_link_target})|<(?P<inner>/?[a-zA-Z][^>]*)>',\n"
+   '        _escape_tag_like,\n'
+   '        plain_text,\n'
+   '    )\n'
+   '\n'
+  ),
+ ),
+ (
+  (
+   '    )\n'
+   '    if _html_tag_re.search(plain_text):\n'
+   '        try:\n'
+  ),
+  (
+   '    )\n'
+   "    if _html_tag_re.search(re.sub(_md_link_target, '', plain_text)):\n"
+   '        try:\n'
+  ),
+ ),
+]
+
+
 
 APPROVED = (
     {
@@ -6997,6 +7158,22 @@ APPROVED = (
             "src/scan_html_folder.py": _HEADING_LINK_SCANNER,
             "src/metadata_batch_translator.py": _HEADING_LINK_HEADERS,
             "src/TransateKRtoEN.py": _HEADING_LINK_WORKER,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-19",
+        "what": "QA chunk localisation reads markdown chunk sources: a chunk source recorded by enhanced (html2text) "
+                "extraction is markdown, with links written as [text](<href>); it is rendered with the markdown "
+                "library before the per-chunk link/table comparison, so a lost link fails only the chunk that "
+                "lost it instead of every chunk. A source counts as HTML only when it has a tag "
+                "looks_like_valid_html_tag accepts: <https://...> or <#note> autolinks, link targets and prose "
+                "such as <Status Window> do not. The enhanced-mode markdown-to-HTML step no longer escapes "
+                "[text](<href>) link targets and <https://...> / <mailto:...> autolinks as prose (the href "
+                "became &lt;https://...&gt;); other angle-bracket prose is escaped as before",
+        "source": {
+            "src/scan_html_folder.py": _MARKDOWN_CHUNK_SOURCE_SCANNER,
+            "src/TransateKRtoEN.py": _MARKDOWN_LINK_TARGET_WORKER,
         },
         "values": {},
     },

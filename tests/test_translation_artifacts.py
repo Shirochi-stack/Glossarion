@@ -2336,14 +2336,15 @@ def test_lost_link_without_recorded_chunk_sources_stays_on_every_chunk(tmp_path)
     assert progress.prog["chapters"]["1"]["status"] == "completed"
 
 
-def test_changed_link_with_markdown_chunk_sources_stays_on_every_chunk(tmp_path):
-    # enhanced extraction records markdown chunk sources: they have no <a> to
-    # compare with, so no chunk may be charged with its own kept links
+def test_changed_link_with_markdown_chunk_sources_fails_only_its_chunk(tmp_path):
+    # enhanced extraction records markdown chunk sources: their links are
+    # read as links, so the kept ones charge nobody and the changed one
+    # charges only its chunk
     markdown_sources = (
         "# [Title](https://archiveofourown.org/works/1/chapters/2)\n\n"
         "See the [notes](#chapter_1_endnotes).\n\nOne.",
         "Two with a [link](https://example.org/a?x=1&y=2).",
-        "Three.\n\n| a | b |",
+        "Three.\n\n| a | b |\n|---|---|",
     )
     outputs = list(_LINKED_CHUNK_SOURCES)
     outputs[1] = outputs[1].replace("https://example.org/a?x=1&amp;y=2", "https://example.org/b")
@@ -2355,13 +2356,207 @@ def test_changed_link_with_markdown_chunk_sources_stays_on_every_chunk(tmp_path)
     assert result["issues"] == [issue]
     by_chunk = {item["chunk_index"]: item for item in result["chunk_results"]}
     assert {index: item["issues"] for index, item in by_chunk.items()} == {
-        1: [issue], 2: [issue], 3: [issue],
+        1: [], 2: [issue], 3: [],
     }
-    expected_preview = "missing: https://example.org/a?x=1&y=2; unexpected: https://example.org/b"
-    assert all(
-        item["qa_issue_previews"] == {issue: expected_preview} for item in by_chunk.values()
-    )
+    assert by_chunk[2]["qa_issue_previews"] == {
+        issue: "missing: https://example.org/a?x=1&y=2; unexpected: https://example.org/b"
+    }
     assert "unexpected: https://archiveofourown.org" not in str(result["chunk_results"])
+    assert _chunk_statuses(progress) == {1: "completed", 2: "qa_failed", 3: "completed"}
+
+
+# html2text (enhanced extraction) writes link targets as <...> autolinks:
+# "[text](<href>)". Synthetic chunk sources in that form.
+_HTML2TEXT_CHUNK_SOURCES = (
+    "#  [Chapter 1](<../Text/0000_Information.xhtml>): Title\n\n"
+    "\\(See the end of the chapter for [notes](<#chapter_1_endnotes>).\\)\n\nOne.",
+    "Two.\n\nMore two.",
+    "Three.\n\n<img alt=\"\" src=\"../images/pic.png\"/>",
+)
+_HTML2TEXT_DOCUMENT_SOURCE = (
+    '<div class="chapter" id="chapter-1"><div><h1>'
+    '<a href="../Text/0000_Information.xhtml">Chapter 1</a>: Title</h1></div>'
+    '<div class="notes"><p>(See the end of the chapter for '
+    '<a href="#chapter_1_endnotes">notes</a>.)</p></div>'
+    '<p>One.</p><p>Two.</p><p>More two.</p><p>Three.</p>'
+    '<img alt="" src="../images/pic.png"/>'
+    '<div class="end notes" id="chapter_1_endnotes"><p>End.</p></div></div>'
+)
+_HTML2TEXT_CHUNK_OUTPUTS = (
+    '<h1><a href="../Text/0000_Information.xhtml">Chapter 1</a>: Title</h1>\n'
+    '<p>(See the end of the chapter for <a href="#chapter_1_endnotes">notes</a>.)</p>\n'
+    '<p>One.</p>',
+    "<p>Two.</p>\n<p>More two.</p>",
+    '<p>Three.</p>\n<p><img alt="" src="../images/pic.png"/></p>',
+)
+
+
+def test_markdown_chunk_sources_with_autolinks_charge_only_the_chunk_that_lost_the_link(tmp_path):
+    # the old header update replaced the heading and with it the link
+    outputs = list(_HTML2TEXT_CHUNK_OUTPUTS)
+    outputs[0] = outputs[0].replace(
+        '<a href="../Text/0000_Information.xhtml">Chapter 1</a>: Title', "Chapter 1: Title"
+    )
+    progress, result = _scan_three_chunk_chapter(
+        tmp_path, outputs, recorded_sources=_HTML2TEXT_CHUNK_SOURCES,
+        document_source=_HTML2TEXT_DOCUMENT_SOURCE,
+    )
+
+    issue = "missing_link_targets_1_lost_(1/2)"
+    assert result["issues"] == [issue]
+    by_chunk = {item["chunk_index"]: item for item in result["chunk_results"]}
+    assert {index: item["issues"] for index, item in by_chunk.items()} == {
+        1: [issue], 2: [], 3: [],
+    }
+    assert by_chunk[1]["qa_issue_previews"] == {issue: "../Text/0000_Information.xhtml"}
+    assert _chunk_statuses(progress) == {1: "qa_failed", 2: "completed", 3: "completed"}
+    assert progress.prog["chapters"]["1"]["status"] == "completed"
+
+
+def test_markdown_chunk_sources_charge_each_link_to_the_chunk_that_lost_it(tmp_path):
+    sources = list(_HTML2TEXT_CHUNK_SOURCES)
+    sources[2] = "Three with a [link](<https://example.org/c>)."
+    outputs = list(_HTML2TEXT_CHUNK_OUTPUTS)
+    # the model dropped the notes link in chunk 1 and the link in chunk 3
+    outputs[0] = outputs[0].replace('<a href="#chapter_1_endnotes">notes</a>', "notes")
+    outputs[2] = "<p>Three with a link.</p>"
+    document = _HTML2TEXT_DOCUMENT_SOURCE.replace(
+        '<p>Three.</p><img alt="" src="../images/pic.png"/>',
+        '<p>Three with a <a href="https://example.org/c">link</a>.</p>',
+    )
+    progress, result = _scan_three_chunk_chapter(
+        tmp_path, outputs, recorded_sources=sources, document_source=document,
+    )
+
+    issue = "missing_link_targets_2_lost_(1/3)"
+    assert result["issues"] == [issue]
+    by_chunk = {item["chunk_index"]: item for item in result["chunk_results"]}
+    assert {index: item["issues"] for index, item in by_chunk.items()} == {
+        1: [issue], 2: [], 3: [issue],
+    }
+    assert by_chunk[1]["qa_issue_previews"] == {issue: "#chapter_1_endnotes"}
+    assert by_chunk[3]["qa_issue_previews"] == {issue: "https://example.org/c"}
+    assert _chunk_statuses(progress) == {1: "qa_failed", 2: "completed", 3: "qa_failed"}
+
+
+def test_chunk_source_as_html_keeps_html_and_renders_markdown():
+    from scan_html_folder import _chunk_source_as_html, _html_preservation_profile
+
+    html_source = '<p>See <a href="https://example.org/a">a</a>.</p>'
+    assert _chunk_source_as_html(html_source) == html_source
+    # autolinks and kept pictures do not make a markdown source HTML
+    for markdown_source, href in (
+        ("[a](<https://example.org/a>)", "https://example.org/a"),
+        ("[a](<#note_1>) and <img src=\"p.png\"/>", "#note_1"),
+        ("[a](<../Text/b.xhtml>)", "../Text/b.xhtml"),
+    ):
+        rendered = _chunk_source_as_html(markdown_source)
+        assert _html_preservation_profile(rendered)["link_hrefs"] == {href: 1}
+    table = _chunk_source_as_html("| a | b |\n|---|---|\n| 1 | 2 |")
+    assert _html_preservation_profile(table)["table_counts"]["td"] == 2
+    # prose in angle brackets (html2text writes &lt;Status Window&gt; as is)
+    # and a link target with a space are not tags either
+    for markdown_source, hrefs in (
+        ("# [C](<https://example.org/c/1>)\n\n<Status Window> opened.",
+         {"https://example.org/c/1": 1}),
+        ("[A](<a.xhtml#s>) [B](<a b.xhtml>)", {"a.xhtml#s": 1, "a b.xhtml": 1}),
+    ):
+        rendered = _chunk_source_as_html(markdown_source)
+        assert rendered != markdown_source
+        assert _html_preservation_profile(rendered)["link_hrefs"] == hrefs
+
+
+def test_prose_in_angle_brackets_keeps_link_findings_on_their_own_chunk():
+    from scan_html_folder import (
+        _chunk_preservation_covers, _chunk_preservation_losses, _chunk_preservation_preview,
+    )
+
+    entry = {"entries": {
+        "1": {"source": "# [Chapter 1](<https://example.com/c/1>)\n\n<Status Window> opened.\n"},
+        "2": {"source": "Second part with [a note](<#note1>).\n"},
+    }}
+    # chunk 1 lost its heading link: only chunk 1 is charged
+    marked = {
+        1: {"content": "<h1>Chapter 1</h1><p>&lt;Status Window&gt; opened.</p>"},
+        2: {"content": '<p>Second part with <a href="#note1">a note</a>.</p>'},
+    }
+    losses = _chunk_preservation_losses(marked, entry)
+    assert losses[1]["lost_links"] == ["https://example.com/c/1"]
+    assert losses[2]["lost_links"] == [] and losses[2]["extra_links"] == []
+    assert _chunk_preservation_covers("missing_link_targets_1_lost_(1/2)", losses)
+    # chunk 2 changed its link, chunk 1 kept its own: chunk 1 is not charged
+    marked = {
+        1: {"content": '<h1><a href="https://example.com/c/1">Chapter 1</a></h1>'
+                       "<p>&lt;Status Window&gt; opened.</p>"},
+        2: {"content": '<p>Second part with <a href="#note9">a note</a>.</p>'},
+    }
+    losses = _chunk_preservation_losses(marked, entry)
+    issue = "changed_link_targets_1_found"
+    assert _chunk_preservation_covers(issue, losses)
+    assert _chunk_preservation_preview(issue, losses[1]) == ""
+    assert _chunk_preservation_preview(issue, losses[2]) == "missing: #note1; unexpected: #note9"
+
+
+def test_real_shaped_ledger_with_markdown_sources_marks_only_the_losing_chunk(tmp_path):
+    # translation_progress.json written by hand in the shape a real enhanced
+    # extraction run leaves: chapter row keyed "1@2" without original_basename,
+    # ledger keyed by content hash with markdown "source" per entry
+    content_hash = "ab" * 32
+    outputs = list(_HTML2TEXT_CHUNK_OUTPUTS[:2])
+    outputs[0] = outputs[0].replace(
+        '<a href="../Text/0000_Information.xhtml">Chapter 1</a>: Title', "Chapter 1: Title"
+    )
+    output_name = "response_0001_1_Chapter.html"
+    (tmp_path / output_name).write_text(
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\"/>\n</head>\n<body>\n"
+        + "\n".join(wrap_chunk_html(content_hash, index, 2, output)
+                    for index, output in enumerate(outputs, 1))
+        + "\n</body>\n</html>",
+        encoding="utf-8",
+    )
+    entries = {
+        str(index): {
+            "index": index, "status": "qa_failed",
+            "qa_issues_found": ["missing_link_targets_1_lost_(1/2)"],
+            "model_name": "model", "key_identifier": "Key#1 (model)",
+            "last_updated": 1.0, "result_sha256": "0" * 64, "qa_timestamp": 1.0,
+            "source": source, "source_sha256": "1" * 64, "duplicate_confidence": 0,
+        }
+        for index, source in enumerate(_HTML2TEXT_CHUNK_SOURCES[:2], 1)
+    }
+    progress_data = {
+        "chapters": {
+            "1@2": {
+                "actual_num": 1, "content_hash": content_hash,
+                "output_file": output_name, "status": "completed",
+                "has_chunk_qa_failures": True, "qa_issues_found": [],
+            },
+        },
+        "chapter_chunks": {
+            content_hash: {
+                "schema_version": 2, "total": 2, "completed": [],
+                "chunks": {"1": "# Chapter 1", "2": "Two."},
+                "chunk_metadata": {"1": {"model_name": "model"}, "2": {"model_name": "model"}},
+                "entries": entries, "chapter_status": "qa_failed", "last_updated": 1.0,
+            },
+        },
+        "version": "2.1",
+        "output_mode": "html",
+        "completed_list": [],
+    }
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(json.dumps(progress_data), encoding="utf-8")
+    issue = "missing_link_targets_1_lost_(1/2)"
+    result = {
+        "filename": output_name, "filepath": str(tmp_path / output_name),
+        "file_index": 0, "chapter_num": 1, "issues": [issue],
+        "qa_issue_previews": {issue: "../Text/0000_Information.xhtml"},
+        "duplicate_confidence": 0,
+    }
+
+    assert _attach_chunk_results_to_scan(str(tmp_path), [result], {}, lambda _m: None) == 1
+    by_chunk = {item["chunk_index"]: item["issues"] for item in result["chunk_results"]}
+    assert by_chunk == {1: [issue], 2: []}
 
 
 def test_link_loss_no_chunk_source_accounts_for_stays_a_whole_document_finding(tmp_path):

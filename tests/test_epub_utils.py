@@ -5288,7 +5288,30 @@ def test_preserve_asterisk_separator_lines_toggle_defaults_on(
     assert '<p>*****</p>' not in converted_html
 
 
-_STANDARD_OPF_CONTAINER = """<?xml version="1.0"?>
+def test_markdown_link_targets_in_angle_brackets_stay_links(monkeypatch):
+    # html2text writes enhanced-mode links as [text](<href>) and a link whose
+    # text is its URL as <https://...>; neither is prose to escape
+    from TransateKRtoEN import convert_enhanced_text_to_html
+    from scan_html_folder import _html_preservation_profile
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv('USE_MARKDOWN2_CONVERTER', '0')
+    source = (
+        '# [Title](<https://example.org/c/1>)\n\n'
+        'See [notes](<#notes_1>), [b](<a b.xhtml>), [c](<../Text/c.xhtml>) '
+        'and <https://example.org/bare>.\n\n<Status Window> opened.'
+    )
+
+    html = convert_enhanced_text_to_html(source, {'preserve_structure': True})
+
+    assert _html_preservation_profile(html)['link_hrefs'] == {
+        'https://example.org/c/1': 1, '#notes_1': 1, 'a b.xhtml': 1,
+        '../Text/c.xhtml': 1, 'https://example.org/bare': 1,
+    }
+    assert '&lt;Status Window&gt; opened.' in html
+
+
+_STANDARD_OPF_CONTAINER ="""<?xml version="1.0"?>
 <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
            version="1.0">
   <rootfiles>

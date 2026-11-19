@@ -5307,7 +5307,43 @@ _CHUNK_PRESERVATION_ISSUE_RE = re.compile(
     r"^(?:(?P<links>missing_link_targets_|changed_link_targets_)"
     r"|missing_table_elements_(?P<table>[a-z]+)_)(?P<count>\d+)_"
 )
-_HTML_ELEMENT_RE = re.compile(r"<[A-Za-z][^>]*>")
+# Angle-bracket candidates, and the markdown link targets html2text writes for
+# enhanced extraction ([text](<href>), href possibly with spaces) to skip.
+_ANGLE_BRACKET_RE = re.compile(r"<([^<>]*)>")
+_MARKDOWN_LINK_TARGET_RE = re.compile(r"\]\(<[^<>\n]*>")
+_ANGLE_TAG_NAME_RE = re.compile(r"\s*/?\s*([A-Za-z][A-Za-z0-9]*)")
+# Tags enhanced (html2text) extraction keeps as raw HTML inside its markdown,
+# the ones convert_enhanced_text_to_html restores: pictures and ruby. A source
+# holding only these is still markdown.
+_MARKDOWN_RAW_HTML_TAGS = frozenset((
+    'img', 'svg', 'picture', 'figure', 'figcaption', 'image', 'source',
+    'canvas', 'map', 'area', 'ruby', 'rt', 'rp', 'rb', 'rtc',
+))
+
+
+def _chunk_source_as_html(source):
+    """A chunk's recorded source as HTML the preservation profile can read.
+
+    HTML sources are returned as they are. Markdown sources of enhanced
+    extraction (links as ``[text](<href>)``, tables as pipe rows) are rendered
+    with the markdown library the translation's own markdown-to-HTML step
+    uses, so their links and tables count like the output's. A source is HTML
+    when it has a real tag by the same test that keeps markup elsewhere
+    (looks_like_valid_html_tag): prose such as <Status Window>, autolinks such
+    as <https://...> or <#note> and link targets are not tags. Returns None
+    when markdown cannot be rendered."""
+    from html_tag_entities import looks_like_valid_html_tag
+    for match in _ANGLE_BRACKET_RE.finditer(_MARKDOWN_LINK_TARGET_RE.sub("](", source)):
+        inner = match.group(1)
+        name = _ANGLE_TAG_NAME_RE.match(inner)
+        if (name and name.group(1).lower() not in _MARKDOWN_RAW_HTML_TAGS
+                and looks_like_valid_html_tag(inner)):
+            return source
+    try:
+        import markdown
+        return markdown.markdown(source, extensions=['tables'])
+    except Exception:
+        return None
 
 
 def _chunk_preservation_losses(marked, chunk_entry):
@@ -5315,26 +5351,25 @@ def _chunk_preservation_losses(marked, chunk_entry):
     and its output block lost (or, for links, gained).
 
     Uses the document check's own profile, so hrefs are normalised the same
-    way. A loss only counts when the chunks together lost it too: a link the
+    way; a markdown source (enhanced extraction) is rendered to HTML first.
+    A loss only counts when the chunks together lost it too: a link the
     model moved into the next chunk charges nobody. Returns None when a chunk
-    has no recorded source (older progress files) or no recorded source is
-    HTML (markdown/text sources of enhanced extraction have no <a> or table
-    to compare with); the findings then stay whole-document ones.
+    has no recorded source (older progress files) or a markdown source cannot
+    be rendered; the findings then stay whole-document ones.
     """
     profiles = {}
-    any_html_source = False
     for index, block in marked.items():
         record = chunk_entry.get("entries", {}).get(str(index), {})
         source = record.get("source") if isinstance(record, dict) else None
         if not isinstance(source, str) or not source.strip():
             return None
-        any_html_source = any_html_source or bool(_HTML_ELEMENT_RE.search(source))
+        source_html = _chunk_source_as_html(source)
+        if source_html is None:
+            return None
         profiles[index] = (
-            _html_preservation_profile(source),
+            _html_preservation_profile(source_html),
             _html_preservation_profile(block.get("content", "")),
         )
-    if not any_html_source:
-        return None
     totals = {"source_links": Counter(), "output_links": Counter(),
               "source_tables": Counter(), "output_tables": Counter()}
     for source_profile, output_profile in profiles.values():
