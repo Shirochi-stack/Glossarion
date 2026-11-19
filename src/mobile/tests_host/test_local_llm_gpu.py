@@ -1,12 +1,12 @@
-"""Optional GPU for the on-device engine (``services/local_llm``): "Use GPU (experimental)" (off by default,
-offered only with a GPU backend), the automatic CPU fallback (GPU load failure, a GPU answer failing, a
-crash while the GPU started), the device line, the RAM gate, ``LlamaEngine``'s layer placement and its
-first-token check, the Q4_0 GPU presets and the engine card's controls. FakeEngine / a fake llama_cpp.
+"""The GPU for the on-device engine (``services/local_llm``): the "Run on" GPU modes (CPU + GPU with the GPU layers
+setting, GPU only with every layer; offered only with a GPU backend), the automatic CPU fallback (GPU load failure, a GPU
+answer failing, a crash while the GPU started), the device line, the RAM gate, ``LlamaEngine``'s layer placement and
+its first-token check and the Q4_0 GPU presets. FakeEngine / a fake llama_cpp. The engine card's controls are tested in
+test_local_npu_ui.py.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import math
 import types
 
@@ -27,8 +27,8 @@ def _chat(service, model="local/fake-echo", text="hi"):
         return "".join(run.deltas)
 
 
-def _gpu_service(tmp_path, engine=None, gpu_on=True, backend="OpenCL", **kwargs):
-    prefs = kwargs.pop("prefs", None) or fakes.FakePrefs({svc.GPU_KEY: True} if gpu_on else {})
+def _gpu_service(tmp_path, engine=None, mode="cpu_gpu", backend="OpenCL", **kwargs):
+    prefs = kwargs.pop("prefs", None) or fakes.FakePrefs({svc.RUN_MODE_KEY: mode} if mode else {})
     return make_service(tmp_path, engine=engine, prefs=prefs, gpu_backend=backend, **kwargs)
 
 
@@ -44,35 +44,57 @@ def test_gpu_is_offered_on_ios_and_android_arm64_only(monkeypatch):
     assert eng.gpu_offer("desktop", "AMD64") is None and eng.gpu_offer("", "aarch64") is None
 
 
-def test_gpu_is_off_by_default_and_hidden_without_a_backend(tmp_path):
+def test_auto_runs_on_the_cpu_and_the_gpu_modes_need_a_backend(tmp_path):
     service, engine = make_service(tmp_path, gpu_backend="OpenCL")
-    assert not service.use_gpu() and service.gpu_note() is None
+    assert service.run_mode() == "auto" and not service.use_gpu() and service.gpu_note() is None
+    assert service.run_mode_options() == ["auto", "cpu_gpu", "gpu", "cpu"]   # iOS 15+ / Android without the NPU
+    assert service.run_mode_label("auto") == "Auto (CPU only)" and not service.gpu_layers_apply()
     _chat(service)
     assert engine.gpu_loads == [False] and service.snapshot().device == "CPU"
-    # no backend (desktop, x86_64): the saved setting is ignored and cannot be switched on
-    service, engine = make_service(tmp_path / "x", prefs=fakes.FakePrefs({svc.GPU_KEY: True}))
-    assert service.gpu_backend is None and not service.use_gpu() and service.save_gpu(True) is False
+    # no backend (desktop, x86_64, iOS 13 / 14): no dropdown, a saved GPU mode runs on the CPU and cannot be chosen
+    service, engine = make_service(tmp_path / "x", prefs=fakes.FakePrefs({svc.RUN_MODE_KEY: "gpu"}))
+    assert service.gpu_backend is None and service.run_mode_options() == [] and not service.use_gpu()
+    assert service.run_mode_shown() == "cpu" and service.save_run_mode("cpu_gpu") == "cpu"
+    assert service.prefs.get(svc.RUN_MODE_KEY) == "gpu"                        # the saved value is kept
     _chat(service)
     assert engine.gpu_loads == [False]
 
 
 # ---- GPU load, device line, setting changes ---------------------------------------------------------------
 
-def test_gpu_on_loads_on_the_gpu_and_says_which_device(tmp_path):
+def test_cpu_gpu_loads_on_the_gpu_and_says_which_device(tmp_path):
     service, engine = _gpu_service(tmp_path, eng.FakeEngine(gpu_device="QUALCOMM Adreno(TM) 830 (OpenCL)"))
+    assert service.use_gpu() and service.gpu_layers_apply()
     assert _chat(service) == "Echo: hi"
-    assert engine.gpu_loads == [True] and engine.calls[-1]["gpu"] is True
+    assert engine.gpu_loads == [True] and engine.calls[-1]["gpu"] is True and engine.n_gpu_layers == 8
     snap = service.snapshot()
     assert snap.device == "GPU: QUALCOMM Adreno(TM) 830 (OpenCL)" and snap.gpu_note is None
     # the first answer ended: no crash marker left behind
     assert service.prefs.get(svc.GPU_ATTEMPT_KEY) is None
     _chat(service, text="again")
     assert engine.gpu_loads == [True]                         # no reload
-    # switching the GPU off frees the idle model; the next request loads it on the CPU
-    assert service.save_gpu(False) is False and service.loaded_stem is None
+    # CPU only: nothing is freed from the screen; the next request loads it on the CPU
+    assert service.save_run_mode("cpu") == "cpu" and service.loaded_stem == "fake-echo"
     _chat(service)
     assert engine.gpu_loads == [True, False] and service.snapshot().device == "CPU"
-    assert service.prefs.get(svc.GPU_KEY) is False
+    assert service.prefs.get(svc.RUN_MODE_KEY) == "cpu" and not service.use_gpu()
+
+
+def test_gpu_only_offloads_every_layer_whatever_the_setting(tmp_path):
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "gpu", svc.GPU_LAYERS_KEY: 0})
+    service, engine = _gpu_service(tmp_path, prefs=prefs)
+    assert service.use_gpu() and not service.gpu_layers_apply()               # the slider is for CPU + GPU
+    _chat(service)
+    assert engine.gpu_loads == [True] and engine.n_gpu_layers == -1
+    service.save_gpu_layers(4)
+    _chat(service)
+    assert engine.gpu_loads == [True, True] and engine.n_gpu_layers == -1     # the setting change reloaded it
+    # a failure: the CPU, kept for that model
+    engine.unload()
+    failing, engine2 = _gpu_service(tmp_path / "f", eng.FakeEngine(gpu_error="out of GPU memory"), mode="gpu")
+    _chat(failing)
+    assert engine2.gpu_loads == [True, False] and failing.gpu_fallback()["reason"] == "out of GPU memory"
+    assert failing.gpu_note() == "GPU unavailable for fake-echo: out of GPU memory — using CPU"
 
 
 def test_gpu_failure_at_load_falls_back_to_the_cpu_and_stays_there(tmp_path):
@@ -82,17 +104,17 @@ def test_gpu_failure_at_load_falls_back_to_the_cpu_and_stays_there(tmp_path):
     assert engine.gpu_loads == [True, False] and not engine.on_gpu
     snap = service.snapshot()
     assert snap.device == "CPU" and snap.gpu_note == f"GPU unavailable for a: {reason} — using CPU"
-    assert service.gpu_fallback() == {"stem": "a", "reason": reason}
+    assert service.gpu_fallback() == {"stem": "a", "reason": reason, "layers": eng.DEFAULT_GPU_LAYERS}
     assert service.prefs.get(svc.GPU_ATTEMPT_KEY) is None
     _chat(service, "local/a", "again")
     assert engine.gpu_loads == [True, False]                  # stays on the CPU: no reload loop
     # another model gets a new GPU try
     _chat(service, "local/b")
     assert engine.gpu_loads == [True, False, True, False] and service.gpu_fallback()["stem"] == "b"
-    # switching the setting off and on forgets the fallback
-    service.save_gpu(False)
+    # saving a run mode forgets the fallback
+    service.save_run_mode("cpu")
     assert service.gpu_fallback() is None and service.gpu_note() is None
-    service.save_gpu(True)
+    service.save_run_mode("cpu_gpu")
     engine.gpu_error = None
     _chat(service, "local/b")
     assert engine.gpu_loads[-1] is True and engine.on_gpu and service.snapshot().gpu_note is None
@@ -110,7 +132,7 @@ def test_gpu_failure_while_answering_retries_the_request_on_the_cpu(tmp_path):
 
 
 def test_a_crash_while_the_gpu_started_keeps_that_model_on_the_cpu(tmp_path):
-    prefs = fakes.FakePrefs({svc.GPU_KEY: True, svc.GPU_ATTEMPT_KEY: {"stem": "fake-echo", "at": 1}})
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu", svc.GPU_ATTEMPT_KEY: {"stem": "fake-echo", "at": 1}})
     service, engine = _gpu_service(tmp_path, prefs=prefs)
     service.start()
     try:
@@ -136,10 +158,82 @@ def test_the_crash_marker_lives_from_the_gpu_load_to_the_first_answer(tmp_path):
     assert service.prefs.get(svc.GPU_ATTEMPT_KEY)
     service.unload()
     assert service.prefs.get(svc.GPU_ATTEMPT_KEY) is None
-    # a marker from a run with the GPU since switched off is dropped silently
+    # a marker left while the run mode shows Auto still counts where the build has a GPU (a model's "GPU" row loads
+    # on the GPU under Auto): recorded, so the next load does not crash the same way
     prefs = fakes.FakePrefs({svc.GPU_ATTEMPT_KEY: {"stem": "fake-echo"}})
     service, _engine = make_service(tmp_path / "y", prefs=prefs, gpu_backend="Metal")
+    assert service._recover_gpu_attempt() == "fake-echo" and service.gpu_fallback()["stem"] == "fake-echo"
+    # without a GPU backend it is dropped silently
+    prefs = fakes.FakePrefs({svc.GPU_ATTEMPT_KEY: {"stem": "fake-echo"}})
+    service, _engine = make_service(tmp_path / "z", prefs=prefs)
     assert service._recover_gpu_attempt() == "fake-echo" and service.gpu_fallback() is None
+
+
+def test_a_gpu_preset_row_is_cpu_gpu_under_any_run_mode(tmp_path):
+    service, engine = _gpu_service(tmp_path, mode="auto")
+    presets.save_presets(service.prefs, [{"name": "row", "repo": "t/fake-echo", "file": "fake-echo.gguf", "quant": "",
+                                          "note": "", "n_ctx": 0, "backend": "gpu"}])
+    _chat(service)
+    assert engine.gpu_loads == [True] and engine.n_gpu_layers == 8
+    assert service._placement("fake-echo") == ("gpu", 8, None)
+    service.save_run_mode("cpu")
+    assert service._placement("fake-echo") == ("gpu", 8, None)               # the row wins over the dropdown
+
+
+def test_a_gpu_preset_row_shows_the_slider_the_gpu_line_and_the_hint_state(tmp_path):
+    # Auto on a GPU phone, the model's row says "GPU": the screens follow the model, not the dropdown
+    service, engine = _gpu_service(tmp_path, eng.FakeEngine(gpu_error="out of GPU memory"), mode="auto")
+    presets.save_presets(service.prefs, [{"name": "row", "repo": "t/fake-echo", "file": "fake-echo.gguf", "quant": "",
+                                          "note": "", "n_ctx": 0, "backend": "gpu"}])
+    assert not service.use_gpu() and not service.gpu_layers_apply()            # "Run on" alone: Auto
+    assert service.model_run_mode("fake-echo") == "cpu_gpu"
+    assert service.use_gpu("fake-echo") and service.gpu_layers_apply("fake-echo")
+    _chat(service)
+    assert engine.gpu_loads == [True, False]
+    assert service.gpu_note() == "GPU unavailable for fake-echo: out of GPU memory — using CPU"
+    # the other way round: CPU + GPU in the dropdown, a row that says "CPU" uses no slider
+    presets.save_presets(service.prefs, [{"name": "row", "repo": "t/fake-echo", "file": "fake-echo.gguf", "quant": "",
+                                          "note": "", "n_ctx": 0, "backend": "cpu"}])
+    service.save_run_mode("cpu_gpu")
+    assert service.gpu_layers_apply() and not service.gpu_layers_apply("fake-echo")
+    assert not service.use_gpu("fake-echo")
+
+
+def test_gpu_only_failing_leaves_cpu_and_gpu_on_the_gpu(tmp_path):
+    # GPU only (every layer) failed for the model: CPU + GPU's 8 layers still run on the GPU, with no GPU line
+    record = {"stem": "fake-echo", "reason": "out of device memory", "layers": -1}
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu", svc.GPU_FALLBACK_KEY: dict(record)})
+    service, engine = _gpu_service(tmp_path, prefs=prefs)
+    assert service._placement("fake-echo") == ("gpu", 8, None) and service.gpu_note() is None
+    _chat(service)
+    assert engine.gpu_loads == [True] and engine.n_gpu_layers == 8
+    # GPU only itself stays on the CPU and says why
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "gpu", svc.GPU_FALLBACK_KEY: dict(record)})
+    service, _engine = _gpu_service(tmp_path / "g", prefs=prefs)
+    assert service._placement("fake-echo") == ("cpu", 0, None)
+    assert service.gpu_note() == "GPU unavailable for fake-echo: out of device memory — using CPU"
+    # 8 layers failing keeps 8 and more off; an older record without a count keeps every GPU load off
+    for stored, mode, placed in (({**record, "layers": 8}, "cpu_gpu", ("cpu", 0, None)),
+                                 ({**record, "layers": 8}, "gpu", ("cpu", 0, None)),
+                                 ({"stem": "fake-echo", "reason": "x"}, "cpu_gpu", ("cpu", 0, None))):
+        prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: mode, svc.GPU_FALLBACK_KEY: stored})
+        service, _engine = _gpu_service(tmp_path / f"{mode}-{stored.get('layers')}", prefs=prefs)
+        assert service._placement("fake-echo") == placed
+    # a crash in GPU only is recorded with its count: CPU + GPU is left alone
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu",
+                             svc.GPU_ATTEMPT_KEY: {"stem": "fake-echo", "at": 1, "layers": -1}})
+    service, _engine = _gpu_service(tmp_path / "c", prefs=prefs)
+    assert service._recover_gpu_attempt() == "fake-echo"
+    assert service.gpu_fallback() == {"stem": "fake-echo", "reason": svc.CRASH_REASON, "layers": -1}
+    assert service._placement("fake-echo") == ("gpu", 8, None)
+
+
+def test_the_cpu_and_gpu_note_names_q4_0_only_for_opencl(tmp_path):
+    android, _engine = _gpu_service(tmp_path)
+    assert "Fastest with Q4_0." in android.run_mode_note("cpu_gpu")
+    ios, _engine = _gpu_service(tmp_path / "ios", backend="Metal")
+    assert ios.run_mode_note("cpu_gpu") == ("The GPU layers below run on the GPU, the rest on the CPU. A failure uses "
+                                            "the CPU.")
 
 
 def test_ram_gate_counts_the_gpu(tmp_path):
@@ -272,107 +366,6 @@ def test_former_gpu_presets_are_q4_0_of_the_default_repos():
     assert not any("Q4_0" in p["file"] for p in presets.DEFAULT_PRESETS)
 
 
-# ---- the engine card ---------------------------------------------------------------------------------------
-
-def _has(module: str) -> bool:
-    try:
-        return importlib.util.find_spec(module) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-needs_flet = pytest.mark.skipif(not (_has("flet") and _has("msgpack")), reason="flet/msgpack not installed")
-
-
-@needs_flet
-def test_engine_card_gpu_switch_note_and_status(tmp_path):
-    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
-
-    # no GPU backend: nothing to switch
-    prefs = fakes.FakePrefs()
-    service, _engine = make_service(tmp_path / "none", prefs=prefs)
-    panel = LocalModelsPanel(service=service, prefs=prefs)
-    panel.build()
-    assert not panel.gpu_switch.visible and not panel.gpu_note.visible
-    # Android arm64 (OpenCL): off by default
-    prefs = fakes.FakePrefs()
-    engine = eng.FakeEngine(gpu_error="no supported GPU: llama.cpp's OpenCL backend runs on Qualcomm Adreno GPUs only")
-    service, engine = make_service(tmp_path / "android", prefs=prefs, engine=engine, gpu_backend="OpenCL")
-    panel = LocalModelsPanel(service=service, prefs=prefs)
-    panel.build()
-    assert panel.gpu_switch.visible and panel.gpu_switch.value is False and panel.gpu_switch.key == "local-gpu"
-    assert panel.gpu_switch.label == "Use GPU (experimental)" and "Adreno" in panel.gpu_note.value
-    assert "Q4_0" in panel.gpu_note.value
-    panel.gpu_switch.value = True
-    assert panel.save_gpu() is True and prefs.get(svc.GPU_KEY) is True
-    # owner 2026-10-31: the switch adds no presets any more (the Custom rows replace them)
-    assert presets.load_presets(prefs) == list(presets.DEFAULT_PRESETS)
-    # a GPU failure shows on the card, the device line says CPU
-    _chat(service)
-    panel.render_engine(service.snapshot(), push=False)
-    assert panel.gpu_status.visible and panel.gpu_status.value.startswith("GPU unavailable for fake-echo: no supported GPU")
-    assert "Runs on CPU" in panel.engine_detail.value
-    # iOS (Metal): the switch
-    prefs = fakes.FakePrefs({svc.GPU_KEY: True})
-    service, _engine = make_service(tmp_path / "ios", prefs=prefs, gpu_backend="Metal")
-    panel = LocalModelsPanel(service=service, prefs=prefs)
-    panel.build()
-    assert panel.gpu_switch.visible and panel.gpu_switch.value is True and "Metal" in panel.gpu_note.value
-
-
-@needs_flet
-def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
-    """owner 2026-10-22: a model downloaded before "Use GPU" was switched on (the defaults are K-quants)
-    still runs on the Adreno GPU, maybe slower than the CPU, and nothing failed to make it fall back: the
-    engine card (and the Welcome page) say so. Owner 2026-10-31: the tap opens the Custom menu at that family
-    and size with Q4_0 highlighted."""
-    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
-
-    light = next(p for p in presets.DEFAULT_PRESETS if p["name"] == "Light")
-    q4_file = "Qwen3.5-2B-Q4_0.gguf"
-    assert presets.is_gpu_quant(q4_file)
-    assert presets.file_quant(light["file"]) == "Q4_K_XL" and not presets.is_gpu_quant(light["file"])
-
-    def downloaded(service, stem, file):
-        with open(service.registry.file_path(stem), "wb") as handle:  # the registry lists files on disk
-            handle.write(b"GGUF")
-        service.registry.add(stem, {"repo": light["repo"], "file": file, "revision": "r", "sha256": "0" * 64,
-                                    "size": 4, "downloaded_at": 1})
-
-    def panel_for(sub, backend="OpenCL", gpu_on=True, file=light["file"]):
-        prefs = fakes.FakePrefs({svc.GPU_KEY: True} if gpu_on else {})
-        service, _engine = make_service(tmp_path / sub, stems=(), prefs=prefs, gpu_backend=backend)
-        downloaded(service, "light", file)
-        current = {"model": "local/light"}
-        panel = LocalModelsPanel(service=service, prefs=prefs, current_model=lambda: current["model"])
-        panel.build()
-        return panel, prefs, service, current
-
-    panel, prefs, service, current = panel_for("android")
-    assert panel.gpu_swap_box.visible
-    assert panel.gpu_swap_text.value.startswith("Light is Q4_K_XL, which can be slow on this GPU")
-    assert panel.gpu_swap_button.content == "Choose Q4_0 · Qwen 3.5 2B"
-    # the tap: the Custom menu at that family and size, Q4_0 highlighted; nothing joins the list yet
-    spawned = []
-    panel.spawn_fn = lambda coro: (spawned.append(coro), coro.close())
-    sheet = panel.open_gpu_swap()
-    assert sheet.family["id"] == "qwen35" and sheet.size["label"] == "2B" and sheet.highlight_gpu and len(spawned) == 1
-    assert presets.load_presets(prefs) == list(presets.DEFAULT_PRESETS)
-    # the Q4_0 model in use: the hint goes
-    downloaded(service, "light-q4", q4_file)
-    current["model"] = "local/light-q4"
-    panel._render_gpu_swap(push=False)
-    assert not panel.gpu_swap_box.visible
-    # no hint: GPU off, a Q4_0 model, iOS (Metal runs the K-quants), a non-local model
-    assert not panel_for("off", gpu_on=False)[0].gpu_swap_box.visible
-    assert not panel_for("q4", file=q4_file)[0].gpu_swap_box.visible
-    assert not panel_for("ios", backend="Metal")[0].gpu_swap_box.visible
-    panel, _prefs, _service, current = panel_for("remote")
-    current["model"] = "authgpt/gpt-6-luna"
-    panel._render_gpu_swap(push=False)
-    assert not panel.gpu_swap_box.visible
-
-
 # ---- the smoke check: inert while off -------------------------------------------------------------------------
 
 def test_smoke_check_fails_when_a_gpu_backend_registered_by_itself(monkeypatch):
@@ -451,31 +444,6 @@ def test_native_gpu_placement_uses_selected_count(fake_llama, count):
     assert _FakeLlama.made[-1].kwargs["n_gpu_layers"] == count
     assert engine.on_gpu == (count != 0)
     assert bool(_FakeLlama.made[-1].evals) == (count != 0)
-
-
-def test_gpu_slider_maps_cpu_partial_and_all(tmp_path, monkeypatch):
-    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
-    service, engine = _gpu_service(tmp_path)
-    monkeypatch.setattr(service, "gpu_layer_limit", lambda stem=None: 24)
-    panel = LocalModelsPanel(service=service, prefs=service.prefs)
-    panel.build()
-    try:
-        assert panel.gpu_layers_slider.max == 24
-        assert panel.gpu_layers_slider.value == 8 and not panel.gpu_layers_slider.disabled
-        for position, expected in ((16, 16), (0, 0), (24, -1)):
-            panel.gpu_layers_slider.value = position
-            panel.gpu_layers_slider.on_change(None)
-            panel.gpu_layers_slider.on_change_end(None)
-            assert service.gpu_layers() == expected
-        assert panel.gpu_layers_label.value == "GPU layers: 24 / 24"
-        panel.gpu_switch.value = False
-        panel.save_gpu()
-        assert panel.gpu_layers_slider.disabled
-        panel.gpu_switch.value = True
-        panel.save_gpu()
-        assert not panel.gpu_layers_slider.disabled and service.gpu_layers() == -1
-    finally:
-        panel.dispose()
 
 
 def test_zero_selected_during_gpu_load_is_applied_on_next_request(tmp_path):

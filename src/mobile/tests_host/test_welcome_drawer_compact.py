@@ -305,35 +305,36 @@ def test_page_one_lists_the_users_own_on_device_presets(tmp_path):
     assert picked == [4] and lp.load_presets(kwargs["prefs"])[4]["name"] == "Gemma E2B"
 
 
-def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_path):
-    """owner 2026-10-22: "Use GPU (experimental)" on the Welcome page too: the Model manager's switch (same
-    setting), under the on-device cells; switching it on adds the Q4_0 presets (Android; hotfix 3: no extra
-    tap, the button is only the fallback). No backend: none."""
+def test_page_one_offers_run_on_where_the_build_has_a_gpu_backend(tmp_path):
+    """owner 2026-10-22: the Model manager's GPU choice on the Welcome page too, now its "Run on" dropdown (same
+    setting) under the on-device cells, without its line, slider or GPU fallback line. Choosing changes no preset.
+    Only Auto and CPU only (no GPU backend, no NPU): no dropdown."""
     from glossarion_mobile.services.local_llm import presets as lp
     from glossarion_mobile.services.local_llm import service as svc
 
     kwargs, service, _engine = _engine_kwargs(tmp_path / "x86")
     assert service.gpu_backend is None  # the host / emulator: no GPU backend
-    assert "welcome-gpu" not in by_key(screen(**kwargs).page_area.content)
+    assert "welcome-run-mode" not in by_key(screen(**kwargs).page_area.content)
 
     kwargs, service, _engine = _engine_kwargs(tmp_path / "arm64")
     service.gpu_backend = "OpenCL"
     s = screen(**kwargs)
     rows = by_key(s.page_area.content)
-    switch = rows["welcome-gpu"]
-    assert switch.visible and switch.value is False and switch.label == "Use GPU (experimental)"
-    assert "welcome-gpu-note" not in rows and "welcome-gpu-status" not in rows  # page 1 stays compact
+    dropdown = rows["welcome-run-mode"]
+    assert dropdown.visible and dropdown.value == "auto" and dropdown.label == "Run on"
+    assert [o.text for o in dropdown.options] == ["Auto (CPU only)", "CPU + GPU", "GPU only", "CPU only"]
+    assert "welcome-run-mode-note" not in rows and "welcome-gpu-status" not in rows  # page 1 stays compact
     assert "welcome-gpu-layers" not in rows  # the layer slider belongs in On-device settings
     assert "welcome-gpu-presets" not in rows  # the Custom cells replace that button
-    # the K-quant hint (test_local_llm_gpu) lives here too; hidden while no local/ model is in use
+    # the K-quant hint (test_local_npu_ui) lives here too; hidden while no local/ model is in use
     assert not rows["welcome-gpu-swap"].visible
-    switch.value = True
-    switch.on_change(None)
-    assert kwargs["prefs"].get(svc.GPU_KEY) is True and service.use_gpu()
-    # the switch changes no preset: the same cells, and it still shows the saved setting
+    dropdown.value = "cpu_gpu"
+    dropdown.on_select(None)
+    assert kwargs["prefs"].get(svc.RUN_MODE_KEY) == "cpu_gpu" and service.use_gpu()
+    # the choice changes no preset: the same cells, and it still shows the saved setting
     assert [p["name"] for p in lp.load_presets(kwargs["prefs"])] == [p["name"] for p in lp.DEFAULT_PRESETS]
     rows = by_key(s.page_area.content)
-    assert rows["welcome-gpu"].value is True
+    assert rows["welcome-run-mode"].value == "cpu_gpu"
     assert len(rows["welcome-ondevice"].controls) == len(lp.DEFAULT_PRESETS) + len(lp.CUSTOM_FAMILIES)
 
 
@@ -357,7 +358,7 @@ def test_page_one_fits_with_the_former_gpu_presets(width, tmp_path):
                                               "sha256": "0" * 64, "size": 4, "downloaded_at": 1})
     s = screen(**kwargs)
     rows = by_key(s.page_area.content)
-    assert rows["welcome-gpu"].value is False
+    assert rows["welcome-run-mode"].value == "auto"
     cells = rows["welcome-ondevice"].controls
     assert len(cells) == len(lp.DEFAULT_PRESETS) + len(lp.GPU_PRESETS) + len(lp.CUSTOM_FAMILIES)
     names = [cell.content.controls[0] for cell in cells]
@@ -375,7 +376,7 @@ def test_page_one_fits_with_the_former_gpu_presets(width, tmp_path):
 
 @pytest.mark.parametrize("width", PHONES)
 def test_page_one_fits_with_the_custom_cells(width, tmp_path):
-    """Owner 2026-10-31: the four Custom cells replace the Q4_0 presets: eight cells with the GPU switch."""
+    """Owner 2026-10-31: the four Custom cells replace the Q4_0 presets: eight cells with the "Run on" dropdown."""
     from glossarion_mobile.services.local_llm import presets as lp
 
     kwargs, service, _engine = _engine_kwargs(tmp_path)
@@ -391,7 +392,7 @@ def test_page_one_fits_with_the_custom_cells(width, tmp_path):
     budget = HEIGHTS[width] - (24 + 56 + 48 + 32 + 8 + 48 + 20)
     if width >= 412:  # the owner's phone class: page 1 still fits
         assert _page_height(s, content_w) <= budget, (width, budget)
-    else:  # 360 x 800: the second row of cells and the GPU switch need ~100 dp more than is left: it scrolls
+    else:  # 360 x 800: the second row of cells and "Run on" need ~100 dp more than is left: it scrolls
         assert s.page_area.content.scroll == ft.ScrollMode.AUTO
 
 

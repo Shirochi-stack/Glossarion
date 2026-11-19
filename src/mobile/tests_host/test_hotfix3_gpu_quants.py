@@ -1,7 +1,7 @@
-"""The "Use GPU (experimental)" switch and the presets list. Hotfix 3 and 6 made the switch add the GPU-friendly
-Q4_0 presets (``presets.GPU_PRESETS``); owner 2026-10-31: the Custom rows replace them, so the switch only turns
-the GPU on and off on Android and iOS alike, and no build, tap or offer adds a preset. What the former rows left
-behind on a phone is in test_devfix7_custom_models.py. FakeEngine / FakePrefs, no network.
+"""The "Run on" dropdown and the presets list. Hotfix 3 and 6 made the former "Use GPU (experimental)" switch add the
+GPU-friendly Q4_0 presets (``presets.GPU_PRESETS``); owner 2026-10-31: the Custom rows replace them, so choosing
+where the model runs only changes that, on Android and iOS alike, and no build, choice or offer adds a preset. What the
+former rows left behind on a phone is in test_devfix7_custom_models.py. FakeEngine / FakePrefs, no network.
 """
 
 from __future__ import annotations
@@ -42,33 +42,32 @@ def _names(prefs) -> list:
     return [p["name"] for p in presets.load_presets(prefs)]
 
 
-def _tap_switch(panel, value: bool) -> None:
-    """The user flips the switch: Flet sets the value, then runs on_change."""
-    panel.gpu_switch.value = value
-    panel.gpu_switch.on_change(None)
+def _pick(dropdown, mode: str) -> None:
+    """The user picks a mode: Flet sets the value, then runs on_select."""
+    dropdown.value = mode
+    dropdown.on_select(None)
 
 
 @pytest.mark.parametrize("backend", ["OpenCL", "Metal"])
-def test_the_switch_changes_no_preset_and_says_nothing(tmp_path, backend):
+def test_choosing_a_mode_changes_no_preset_and_says_nothing(tmp_path, backend):
     panel, prefs, service, said = _panel(tmp_path, backend=backend)
-    assert panel.gpu_switch.visible and panel.gpu_switch.value is False and _names(prefs) == DEFAULT_NAMES
-    _tap_switch(panel, True)
-    assert prefs.get(svc.GPU_KEY) is True and service.use_gpu() and _names(prefs) == DEFAULT_NAMES
-    _tap_switch(panel, False)
-    assert prefs.get(svc.GPU_KEY) is False and not service.use_gpu() and _names(prefs) == DEFAULT_NAMES
+    assert panel.run_mode.visible and panel.run_mode.value == "auto" and _names(prefs) == DEFAULT_NAMES
+    for mode, gpu in (("cpu_gpu", True), ("gpu", True), ("cpu", False), ("auto", False)):
+        _pick(panel.run_mode, mode)
+        assert prefs.get(svc.RUN_MODE_KEY) == mode and service.use_gpu() is gpu and _names(prefs) == DEFAULT_NAMES
     assert said == [] and service.registry.resolve("fake-echo")
 
 
-def test_a_build_without_a_gpu_backend_hides_the_switch(tmp_path):
-    panel, prefs, _service, said = _panel(tmp_path, backend=None)
-    assert not panel.gpu_switch.visible
-    panel.gpu_switch.value = True
-    assert panel.save_gpu() is False and panel.gpu_switch.value is False
+def test_a_build_without_a_gpu_backend_hides_the_dropdown(tmp_path):
+    panel, prefs, service, said = _panel(tmp_path, backend=None)
+    assert not panel.run_mode.visible and panel.run_mode.options == []
+    _pick(panel.run_mode, "cpu_gpu")
+    assert service.run_mode() == "auto" and not service.use_gpu() and panel.run_mode.value is None
     assert _names(prefs) == DEFAULT_NAMES and said == []
 
 
-def test_the_welcome_page_switch_keeps_its_cells(tmp_path):
-    """The Welcome page ("Run on this phone") shows the same switch (``OnDeviceFlow._gpu_section``)."""
+def test_the_welcome_page_dropdown_keeps_its_cells(tmp_path):
+    """The Welcome page ("Run on this phone") shows the same dropdown (``OnDeviceFlow._run_section``)."""
     from test_welcome_drawer_compact import _engine_kwargs, by_key, screen
 
     kwargs, service, _engine = _engine_kwargs(tmp_path)
@@ -76,12 +75,10 @@ def test_the_welcome_page_switch_keeps_its_cells(tmp_path):
     s = screen(**kwargs)
     rows = by_key(s.page_area.content)
     count = len(DEFAULT_NAMES) + len(presets.CUSTOM_FAMILIES)
-    assert rows["welcome-gpu"].value is False and _names(kwargs["prefs"]) == DEFAULT_NAMES
+    assert rows["welcome-run-mode"].value == "auto" and _names(kwargs["prefs"]) == DEFAULT_NAMES
     assert len(rows["welcome-ondevice"].controls) == count and "welcome-gpu-presets" not in rows
-    switch = rows["welcome-gpu"]
-    switch.value = True
-    switch.on_change(None)
-    assert kwargs["prefs"].get(svc.GPU_KEY) is True and _names(kwargs["prefs"]) == DEFAULT_NAMES
+    _pick(rows["welcome-run-mode"], "cpu_gpu")
+    assert kwargs["prefs"].get(svc.RUN_MODE_KEY) == "cpu_gpu" and _names(kwargs["prefs"]) == DEFAULT_NAMES
     rows = by_key(s.page_area.content)
-    assert rows["welcome-gpu"].value is True and len(rows["welcome-ondevice"].controls) == count
+    assert rows["welcome-run-mode"].value == "cpu_gpu" and len(rows["welcome-ondevice"].controls) == count
     assert "welcome-model-local" not in rows  # no note

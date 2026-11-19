@@ -10,9 +10,9 @@ means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a sav
 one) wins. ``CUSTOM_FAMILIES`` are the fixed Custom rows beside the saved list: a family's parameter sizes,
 whose quants come from the repository's own files; a quant the user chooses becomes an ordinary saved row.
 
-NPU (Snapdragon Hexagon): a row may name its ``backend`` ("npu", "gpu" or "cpu"; none = "auto": the NPU when
-the phone's NPU check passed, "Use NPU" is on and the quant is one the backend accepts, else the GPU / CPU rule)
-and its ``npu_layers`` (none = all). There are no separate NPU rows (owner 2026-11-18): the default and Custom
+NPU (Snapdragon Hexagon): a row may name its ``backend`` ("npu": NPU only, "gpu": CPU + GPU, or "cpu"; none =
+"auto": the engine card's "Run on" mode, whose Auto is the NPU when the phone's NPU check passed and the quant is one
+the backend accepts, else the CPU) and its ``npu_layers`` (none = all). There are no separate NPU rows (owner 2026-11-18): the default and Custom
 rows are "auto", so they run on the NPU where it is offered; ``npu_quant_kind`` marks the Custom and Sigma quants.
 """
 

@@ -2,8 +2,8 @@ Glossarion overlay of flet-dev/mobile-forge recipes/llama-cpp-python/patches/mob
 (0fadbfab0d63d11164030dfddc955ed980e32e2c, BSD-3-Clause, see ../../LICENSE.mobile-forge):
 upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON),
 a seventh one for the runtime CPU variants of the Android arm64 build, an eighth one for the
-optional GPU backends, a ninth one for the DRY sampler and a tenth one for the optional NPU
-backend:
+optional GPU backends, a ninth one for the DRY sampler, a tenth one for the optional NPU
+backend and an eleventh one for tensor split across the NPU and the GPU:
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
 
@@ -66,6 +66,18 @@ backend:
       session). device_index(name) is the main_gpu of a registered backend ("HTP", "OpenCL") in
       llama.cpp's own device order (llama_prepare_model_devices). The GPU path shares the backend
       loading helpers (_load_backend, _beside_libggml, _android_arm64).
+
+11. Tensor split across the NPU and the GPU (split_mode TENSOR over HTP0 + GPUOpenCL):
+    - ggml/src/ggml-backend-meta.cpp: ggml_backend_meta_buffer_set_tensor stages a whole-tensor write
+      (offset 0 and the tensor's full size: how the model loader writes each weight) in one host buffer
+      per device, with the function's own index arithmetic (glossarion_meta_set_2d copies what
+      ggml_backend_tensor_set_2d would write, to the same offsets), and sends each device's slice with
+      ONE ggml_backend_tensor_set (glossarion_meta_flush). Upstream writes an axis-0 slice row by row
+      (one set_tensor per row on a backend without set_tensor_2d, as OpenCL) and a multi-segment slice
+      segment by segment; OpenCL's quantised set_tensor (Q4_0, Q8_0, the K-quants) ignores offset and
+      size, converts the whole slice on the first write, and the second write aborts in
+      clCreateSubBuffer (CL_CHECK). Partial writes, mirrored tensors and slices that are one chunk
+      already go straight to the devices as before.
 
 Upstream's description:
 
@@ -1014,6 +1026,129 @@ index 5ff78f2..8f22817 100644
          elseif (APPLE)
              ggml_add_cpu_backend_variant(apple_m1             DOTPROD)
              ggml_add_cpu_backend_variant(apple_m2_m3          DOTPROD MATMUL_INT8)
+diff --git a/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp b/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp
+index 595a582..76c4d4f 100644
+--- a/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp
++++ b/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp
+@@ -1502,11 +1502,72 @@ static void ggml_backend_meta_buffer_memset_tensor(
+     }
+ }
+ 
++// Glossarion: a whole-tensor write of a split weight is staged per device and sent with ONE set_tensor each:
++// OpenCL's quantised set_tensor converts the whole slice on its first call and aborts on a second partial write.
++struct glossarion_meta_stage {
++    std::vector<uint8_t> bytes;   // the slice as a backend that honours offsets would hold it after the writes
++    size_t               written = 0;
++};
++
++// ggml_backend_tensor_set_2d(tensor, data, offset, size, n_copies, stride_tensor, stride_data), into stage->bytes
++// instead of the tensor when stage != nullptr (same bytes, same destination offsets).
++static void glossarion_meta_set_2d(glossarion_meta_stage * stage, ggml_tensor * tensor, const void * data, size_t offset,
++        size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
++    if (stage == nullptr) {
++        ggml_backend_tensor_set_2d(tensor, data, offset, size, n_copies, stride_tensor, stride_data);
++        return;
++    }
++    GGML_ASSERT(tensor);
++    GGML_ASSERT((tensor->view_src ? tensor->view_src->buffer : tensor->buffer) != NULL && "tensor buffer not set");
++    if (size == 0) {
++        return; // ggml_backend_tensor_set_2d writes nothing either
++    }
++    GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
++    if (stage->bytes.empty()) {
++        stage->bytes.resize(ggml_nbytes(tensor)); // zero-filled; glossarion_meta_flush checks the writes cover it
++    }
++    for (size_t i = 0; i < n_copies; i++) {
++        GGML_ASSERT(offset + i*stride_tensor + size <= stage->bytes.size() && "tensor write out of bounds");
++        memcpy(stage->bytes.data() + offset + i*stride_tensor, (const char *) data + i*stride_data, size);
++    }
++    stage->written += n_copies*size;
++}
++
++// the one whole write of a staged slice; an empty slice is skipped (the old writes sent it nothing)
++static void glossarion_meta_flush(glossarion_meta_stage * stage, ggml_tensor * tensor) {
++    const size_t nbytes = ggml_nbytes(tensor);
++    if (stage == nullptr || nbytes == 0) {
++        return;
++    }
++    GGML_ASSERT(stage->written == nbytes && stage->bytes.size() == nbytes);
++    ggml_backend_tensor_set(tensor, stage->bytes.data(), 0, nbytes);
++    std::vector<uint8_t>().swap(stage->bytes);
++}
++
+ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+     const size_t n_bufs = ggml_backend_meta_buffer_n_bufs(buffer);
+     const ggml_backend_meta_split_state split_state = ggml_backend_meta_get_split_state(tensor, /*assume_sync =*/ false);
+     GGML_ASSERT(ggml_is_contiguous(tensor) || split_state.axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED);
+ 
++    // Glossarion: stage(j) is device j's host copy when this call writes the whole tensor (the model loader does),
++    // nullptr for a partial write, which goes straight to the devices as before.
++    const bool whole = offset == 0 && size == ggml_nbytes(tensor);
++    std::vector<glossarion_meta_stage> stages; // allocated on first use: mirrored and partial calls pay nothing
++    auto stage = [&](size_t j) -> glossarion_meta_stage * {
++        if (!whole) {
++            return nullptr;
++        }
++        if (stages.empty()) {
++            stages.resize(n_bufs);
++        }
++        return &stages[j];
++    };
++    auto flush_all = [&]() {
++        for (size_t j = 0; j < n_bufs; j++) {
++            glossarion_meta_flush(stage(j), ggml_backend_meta_buffer_simple_tensor(tensor, j));
++        }
++    };
++
+     if (split_state.n_segments != 1 || split_state.nr[0] != 1) {
+         GGML_ASSERT(split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS);
+         GGML_ASSERT(split_state.nr[0] != 0);
+@@ -1531,7 +1592,7 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+                         ggml_tensor * simple_tensor = ggml_backend_meta_buffer_simple_tensor(tensor, j);
+                         GGML_ASSERT(split_state.ne[s*n_bufs + j] % blck_size == 0);
+                         const size_t nbytes = split_state.ne[s*n_bufs + j]/blck_size * tensor->nb[0];
+-                        ggml_backend_tensor_set_2d(simple_tensor, (const char *) data + offset_data,
++                        glossarion_meta_set_2d(stage(j), simple_tensor, (const char *) data + offset_data,
+                             simple_offsets[j] + row_start * simple_tensor->nb[1], nbytes,
+                             row_count, simple_tensor->nb[1], tensor->nb[1]);
+                         offset_data       += nbytes;
+@@ -1540,6 +1601,7 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+                 }
+             }
+             GGML_ASSERT(offset_data*row_count == size);
++            flush_all();
+             return;
+         }
+         GGML_ASSERT(split_state.axis == GGML_BACKEND_SPLIT_AXIS_1);
+@@ -1556,7 +1618,7 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+                 for (size_t j = 0; j < n_bufs; j++) {
+                     ggml_tensor * simple_tensor = ggml_backend_meta_buffer_simple_tensor(tensor, j);
+                     const size_t nbytes = split_state.ne[s*n_bufs + j] * tensor->nb[1];
+-                    ggml_backend_tensor_set_2d(simple_tensor, (const char *) data + offset_data,
++                    glossarion_meta_set_2d(stage(j), simple_tensor, (const char *) data + offset_data,
+                         simple_offsets[j] + row_start * simple_tensor->nb[2], nbytes,
+                         row_count, simple_tensor->nb[2], tensor->nb[2]);
+                     offset_data       += nbytes;
+@@ -1565,6 +1627,7 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+             }
+         }
+         GGML_ASSERT(offset_data*row_count == size);
++        flush_all();
+         return;
+     }
+ 
+@@ -1586,7 +1649,10 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+                     continue;
+                 }
+                 const size_t simple_offset = i_start * chunk_size_j;
+-                ggml_backend_tensor_set_2d(simple_tensor, (const char *) data + offset_j, simple_offset, chunk_size_j, i_stop - i_start, chunk_size_j, chunk_size_full);
++                // Glossarion: one chunk is already one whole write of the slice; only several chunks are staged
++                glossarion_meta_stage * stage_j = i_stop - i_start > 1 ? stage(j) : nullptr;
++                glossarion_meta_set_2d(stage_j, simple_tensor, (const char *) data + offset_j, simple_offset, chunk_size_j, i_stop - i_start, chunk_size_j, chunk_size_full);
++                glossarion_meta_flush(stage_j, simple_tensor);
+                 offset_j += chunk_size_j;
+             }
+             GGML_ASSERT(offset_j == chunk_size_full);
 diff --git a/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp b/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp
 index c3bc926..bbe39fc 100644
 --- a/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp

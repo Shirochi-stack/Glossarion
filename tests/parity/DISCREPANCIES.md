@@ -4392,6 +4392,9 @@ behaviour.
   manager and Welcome page); "Add GPU-friendly presets (Q4_0)" is only the fallback while one is missing.
   `presets.add_gpu_presets` adds only what fits under `MAX_PRESETS` (50), so its count is true. Switching it off keeps
   every preset and file. iOS (Metal) and builds without a GPU backend add nothing.
+- Superseded: since 2026-10-31 the Custom rows replace these presets and nothing adds them; since 2026-11-19 the
+  switch itself is gone: the engine card's "Run on" dropdown (mobile Prefs `local_llm_run_mode`) chooses where the
+  model runs, and no choice adds or removes a preset.
 - Tests: tests_host/test_hotfix3_gpu_quants.py.
 
 ### Sheets and dialogs close reliably (issue 1; mobile UI only)

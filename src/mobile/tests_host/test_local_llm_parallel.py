@@ -152,7 +152,7 @@ def test_model_switch_waits_for_secondary_and_context_failure_releases_slot(tmp_
 
 
 def test_gpu_markers_are_independent_for_each_context(tmp_path):
-    service, made = ready(tmp_path, gpu_backend="OpenCL", prefs=FakePrefs({svc.GPU_KEY: True}))
+    service, made = ready(tmp_path, gpu_backend="OpenCL", prefs=FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu"}))
     first = chat(service)
     with ThreadPoolExecutor(1) as pool:
         second = pool.submit(chat, service).result(3)

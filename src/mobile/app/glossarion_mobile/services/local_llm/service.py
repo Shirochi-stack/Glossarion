@@ -46,13 +46,29 @@
   decides and the engine gets ``params["ban_scripts"]``. The opt-in "Allow emoticons and symbols from
   other scripts (kaomoji)" (config ``script_ban_allow_kaomoji``, shared with the API models' ban; shown
   under the switch too) arrives as ``glossarion_allow_kaomoji`` and becomes ``params["ban_allow_kaomoji"]``.
-* **GPU (experimental, off by default;** Prefs ``GPU_KEY``, Model manager › On-device › engine card): offered
-  where the build has a GPU backend (``engine.gpu_offer``: Metal on iOS, OpenCL / Adreno on Android
-  arm64). With it on, a load offloads the saved layer count (eight by default; all is opt-in); when that fails
-  (``GpuUnavailable``: no backend / device, the model or its first token failed) or a GPU answer fails,
-  the reason is logged and kept (Prefs ``GPU_FALLBACK_KEY``), the model loads on the CPU, and that model
-  stays on the CPU until the setting or the model changes; the engine card says "GPU unavailable: …".
-  A GPU load leaves a marker (``GPU_ATTEMPT_KEY``) until the model's first answer ends: when the app
+* **Run on (owner 2026-11-19;** Prefs ``RUN_MODE_KEY``, Model manager › On-device › engine card): one dropdown
+  instead of "Use GPU" and "Use NPU". ``RUN_MODES``: "auto" (``auto_mode``: NPU only where the NPU can run the model,
+  else CPU only), "npu" (NPU only), "npu_gpu" (NPU + GPU: llama.cpp's layer split, half of the layers on each),
+  "npu_gpu_tensor" (NPU + GPU, tensor split: every layer split across both), "cpu_gpu" (the GPU layers setting on the
+  GPU, the rest on the CPU), "gpu" (every layer on the GPU) and "cpu". ``run_mode_options`` lists what this phone
+  has (the NPU ones where the NPU is offered, the GPU ones where the build has a GPU backend; none at all, so no
+  dropdown, where only Auto and CPU only would exist). A saved mode the phone does not offer now runs the nearest one
+  (``run_mode_shown``: NPU only -> CPU only, NPU + GPU -> CPU + GPU) and comes back once it is offered. Saving a mode
+  (``save_run_mode``) forgets the GPU and NPU + GPU fallbacks and never unloads (the next request reloads when the
+  placement differs). Everyone starts on Auto: the first start writes "auto" whatever "Use GPU" / "Use NPU" were
+  (``GPU_KEY`` / ``NPU_KEY``, cleared then, with the NPU + GPU fallbacks the automatic build left). A model's preset
+  row overrides the dropdown: "npu" is NPU only without the quant check, "gpu" CPU + GPU, "cpu" CPU only.
+* **Fallback chains** (``_placement``; each step at most once per load, its failure recorded before the next step, no
+  retry loop, every chain ends on the CPU): NPU only -> CPU only; NPU + GPU (either split) -> NPU only -> CPU + GPU ->
+  CPU only; CPU + GPU and GPU only -> CPU only. The second parallel context never uses the NPU (NPU only and Auto ->
+  CPU only, NPU + GPU -> CPU + GPU).
+* **GPU** (offered where the build has a GPU backend: ``engine.gpu_offer``, Metal on iOS 15+, OpenCL / Adreno on
+  Android arm64): a GPU load offloads the GPU layers setting (CPU + GPU; eight by default) or every layer (GPU only);
+  when that fails (``GpuUnavailable``: no backend / device, the model or its first token failed) or a GPU answer
+  fails, the reason is logged and kept (Prefs ``GPU_FALLBACK_KEY``, with that load's GPU layers), the model loads on
+  the CPU, and that model's GPU loads with as many GPU layers or more stay on the CPU until the run mode or the model
+  changes (GPU only failing keeps CPU + GPU's smaller count on the GPU); the engine card says "GPU unavailable: …".
+  A GPU load leaves a marker (``GPU_ATTEMPT_KEY``, with its GPU layers) until the model's first answer ends: when the app
   died in between (a driver crash aborts the process), the next start records the fallback instead of
   crashing again. The RAM gate adds ``gpu_extra`` (GPU memory is shared with the CPU on phones).
 * **NPU (Snapdragon Hexagon):** a third backend, chosen per model at load time (``_placement``). Two stages on
@@ -70,16 +86,15 @@
   load resumes the part. Either
   stage still running after ``NPU_WATCHDOG_SECONDS``, or one the app died in (marker ``NPU_CHECK_ATTEMPT_KEY``
   with its stage), and a failing stage 2 (``NPU_SESSION_KEY``) keep the NPU off until the app version changes.
-  The NPU is offered (``npu_offered``) when stage 1 passed and stage 2 has not failed. A model's ``backend`` (its
-  preset row; "auto" for every other model, Add from Hugging Face included): "auto" runs on the NPU when it is
-  offered, "Use NPU" (``NPU_KEY``, on when unset) is on, the model has no NPU fallback and its quant is one
-  the backend accepts (``presets.npu_quant_kind`` not "cpu"), else today's GPU / CPU rule; "npu" / "gpu" / "cpu"
-  name the device. An NPU load that fails (or its first token), a failing NPU answer, a first NPU load still
+  The NPU is offered (``npu_offered``) when stage 1 passed and stage 2 has not failed. A load starts on the NPU when
+  its run mode starts there (Auto, NPU only, NPU + GPU), the NPU is offered, the model has no NPU fallback and its
+  quant is one the backend accepts (``presets.npu_quant_kind`` not "cpu"; a preset row's "npu" skips that check),
+  else the next step of its chain. An NPU load that fails (or its first token), a failing NPU answer, a first NPU load still
   running after ``NPU_WATCHDOG_SECONDS`` (the restart message; native code is never killed) or a marker still set
   at the next start (``NPU_ATTEMPT_KEY`` around an NPU load and its first token, ``NPU_INFLIGHT_KEY`` around
   every NPU answer while the app is in the foreground: the backend aborts the process on DSP failures; both are
   written to disk before the native call) records an NPU fallback for that model
-  (``NPU_FALLBACK_KEY``): it runs on the GPU / CPU until its file, its backend choice or the app version changes,
+  (``NPU_FALLBACK_KEY``): it runs on the next step of its chain until its file, its backend choice or the app version changes,
   or "Try the NPU again" (``retry_npu``). No retry loop. The second parallel context and the vision projector
   never use the NPU. Power mode: ``NPU_POWER_KEY`` (upstream's modes, default burst), applied when the backend
   registers (a change applies after a restart). The screens only read this state (``npu_progress``,
@@ -88,25 +103,23 @@
   ``NPU_CHECK_ATTEMPT_KEY``, the timing's ``SPEED_KEY``) carries ``engine.RUN_ID``; when the next start turns one into a
   fallback, the reason ends with ggml's abort message when the note (``engine.capture_aborts``) was written by that same
   run (``engine.with_abort_reason``); a note of any other run is never attached.
-* **NPU + GPU (owner 2026-11-19, experimental; off: ``AUTO_SPLIT_ENABLED``):** it crashed at model load on the first
-  phone, so ``_split_wanted`` answers no and "auto" with "Use GPU" on runs on the NPU alone; the rest of this paragraph
-  is what it does when switched on. "auto" loads a model on the NPU and the GPU at once
-  (``AUTO_SPLIT``: the tensor split, the only mode that runs both chips at the same time) when it would run on the NPU
-  and "Use GPU" is on, the build has a GPU backend, and the model has no GPU fallback and no NPU + GPU fallback
-  (``_split_wanted``); the whole model is offloaded (the GPU layers setting is for GPU loads alone). It is an NPU load
-  in every other respect: the same NPU preparation, the attempt marker (``NPU_ATTEMPT_KEY`` with ``"split"``), the
-  first-load watchdog and the in-flight marker around every answer (``NPU_INFLIGHT_KEY`` with ``"split"``). A refused
-  load (``SplitUnavailable``: the architecture, a device missing, its first token), not enough memory for both
-  (``ram_check`` with the GPU's share), a failing answer or a marker still set at the next start records an NPU + GPU
-  fallback for that model (``SPLIT_FALLBACK_KEY``, kept like the NPU fallback: until its file, its backend choice or
-  the app version changes, "Use GPU" is switched, or "Try the NPU again"); that load and the next ones run on the NPU
-  alone with all of its own fallbacks. No retry loop. Every other case is unchanged ("Use GPU" off: the NPU alone; a
-  model's "npu" / "gpu" / "cpu"; phones without the NPU).
-* **NPU + GPU (device checks):** ``split_override`` ("layer" / "tensor", set by ``selfcheck.npu_speed_check``
-  alone) loads the model on the NPU and the GPU together (``engine.load(split=...)``) after the same NPU preparation;
-  nothing falls back: a refused load raises ``LocalLLMError`` with llama.cpp's reason, and no NPU or GPU marker or
-  fallback is written for it (the timing has its own crash marker, ``SPEED_KEY``). The timing's overrides never take
-  the "auto" rule above: its NPU run is the NPU alone.
+* **NPU + GPU (run modes "npu_gpu" and "npu_gpu_tensor", experimental):** an NPU load in every respect (the same
+  NPU preparation, the attempt marker ``NPU_ATTEMPT_KEY`` and the in-flight marker ``NPU_INFLIGHT_KEY``, both with
+  ``"split"`` and ``"mode"``, the first-load watchdog) with the whole model on both chips (``engine.load(split=...)``;
+  the GPU layers setting is for CPU + GPU alone). A refused load (``SplitUnavailable``), a failed first token or
+  answer, not enough memory for both (``ram_check`` with the GPU's share) or a marker still set at the next start
+  records that option's fallback for the model (``SPLIT_FALLBACK_KEY`` for the layer split,
+  ``SPLIT_TENSOR_FALLBACK_KEY`` for the tensor split: one record each, so dropping one keeps the other; kept like the
+  NPU fallback: until its file, its backend choice or the app version changes, a run mode is saved, or "Try the NPU
+  again"); that load and the next ones run on the NPU alone, then the rest of the chain. Markers the automatic build
+  left (``"split"`` without ``"mode"``) are dropped at start without a record.
+* **Device checks' timing:** ``run_override`` (set by ``selfcheck.npu_speed_check`` alone) places exactly one mode:
+  "npu", "cpu_gpu", "gpu" and "cpu" load as their run mode would (an NPU only timing skips the quant check; their
+  markers and fallbacks apply); "npu_gpu", "npu_gpu_tensor", "npu_cpu" (NPU + CPU, layer split: half of the layers on
+  the NPU, the first half on the CPU) and "handoff" (NPU reads, CPU writes: ``engine.load(handoff=True)``, two copies
+  of the model, ``ram_check(handoff=True)``) never fall back: a refused load raises ``LocalLLMError`` with
+  llama.cpp's reason, and no NPU or GPU marker or fallback is written for them (the timing has its own crash marker,
+  ``SPEED_KEY``).
 """
 
 from __future__ import annotations
@@ -177,7 +190,26 @@ FORCED_TRUNCATION_KEY = "local_llm_forced_truncation"
 FORCED_TRUNCATION_SECONDS_KEY = "local_llm_forced_truncation_seconds"
 #: "Mark glossary forced truncation as complete" of the on-device engine (on by default)
 MARK_GLOSSARY_COMPLETE_KEY = "local_llm_mark_glossary_complete"
-#: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
+#: Prefs key of "Run on" (one of ``RUN_MODES``; "auto" when unset)
+RUN_MODE_KEY = "local_llm_run_mode"
+#: the dropdown's options in their order (``run_mode_options`` lists the ones this phone has)
+RUN_MODES = ("auto", "npu", "npu_gpu", "npu_gpu_tensor", "cpu_gpu", "gpu", "cpu")
+RUN_MODE_LABELS = {"auto": "Auto", "npu": "NPU only", "npu_gpu": "NPU + GPU", "npu_gpu_tensor": "NPU + GPU, tensor split",
+                   "cpu_gpu": "CPU + GPU", "gpu": "GPU only", "cpu": "CPU only"}
+#: the NPU + GPU modes and the split each loads (``engine.SPLITS``)
+RUN_MODE_SPLITS = {"npu_gpu": "layer", "npu_gpu_tensor": "tensor"}
+#: the run modes whose chain starts on the NPU
+NPU_RUN_MODES = ("npu", "npu_gpu", "npu_gpu_tensor")
+#: the device checks' timing-only modes (``run_override``): NPU + CPU with a layer split, and NPU reads, CPU writes
+TIMING_MODES = ("npu_cpu", "handoff")
+#: the modes the timing loads exactly as asked (no fallback, no NPU / GPU marker): the two NPU + GPU modes and the
+#: timing-only ones
+STRICT_TIMING_MODES = ("npu_gpu", "npu_gpu_tensor") + TIMING_MODES
+#: what a saved mode runs instead while the phone does not offer it (``run_mode_shown``)
+RUN_MODE_INSTEAD = {"npu": "cpu", "npu_gpu": "cpu_gpu", "npu_gpu_tensor": "cpu_gpu", "cpu_gpu": "cpu", "gpu": "cpu"}
+#: a preset row's backend over the dropdown ("auto": follow it)
+ROW_BACKEND_MODES = {"npu": "npu", "gpu": "cpu_gpu", "cpu": "cpu"}
+#: legacy (read only by ``_migrate_run_mode``): Prefs key of "Use GPU (experimental)" (a bool, off when unset)
 GPU_KEY = "local_llm_gpu"
 GPU_LAYERS_KEY = "local_llm_gpu_layers"
 MAX_GPU_LAYERS = 128
@@ -187,7 +219,7 @@ GPU_FALLBACK_KEY = "local_llm_gpu_fallback"
 #: Prefs key of a GPU load whose first answer has not ended yet: ``{"stem"}`` (crash detection)
 GPU_ATTEMPT_KEY = "local_llm_gpu_attempt"
 CRASH_REASON = "Glossarion closed while the GPU was starting this model"
-#: Prefs key of "Use NPU" (a bool, on when unset; shown only where the NPU check passed)
+#: legacy (read only by ``_migrate_run_mode``): Prefs key of "Use NPU" (a bool, on when unset)
 NPU_KEY = "local_llm_npu"
 #: Prefs key of the NPU power mode (``engine.NPU_POWER_MODES``; unset: upstream's default)
 NPU_POWER_KEY = "local_llm_npu_power"
@@ -205,19 +237,17 @@ NPU_CHECK_KEY = "local_llm_npu_check"
 NPU_SESSION_KEY = "local_llm_npu_session"
 #: Prefs key of an NPU stage running now: ``{"version", "at", "stage"}`` (stage 1 or 2)
 NPU_CHECK_ATTEMPT_KEY = "local_llm_npu_check_attempt"
-#: Prefs key of the device checks' timing (``selfcheck.npu_speed_check``): ``{"version", "stem", "at", "running",
-#: "modes"}``; ``running`` names the mode being timed (written to disk before it starts: still set at the next run,
-#: the app died in it), ``modes`` the last result of each mode (a later step reads them to choose a placement)
+#: Prefs key of the device checks' timing (``selfcheck.npu_speed_check``): ``{"format": 2, "version", "stem", "at",
+#: "run", "running", "crashed", "notes", "auto", "modes"}``; ``running`` names the mode being timed (written to disk
+#: before it starts: still set at the next run, the app died in it), ``modes`` the last result of each mode
 SPEED_KEY = "local_llm_speed_check"
-#: Prefs key of the NPU + GPU fallbacks: ``{stem: {"reason", "file", "backend", "version", "at"}}`` (that model runs
-#: on the NPU alone; kept like ``NPU_FALLBACK_KEY``, and forgotten when "Use GPU" is switched)
+#: Prefs keys of the NPU + GPU fallbacks, one per split: ``{stem: {"reason", "split", "file", "backend", "version",
+#: "at"}}`` (that model runs on the NPU alone instead of that option; kept like ``NPU_FALLBACK_KEY``, and forgotten
+#: when a run mode is saved). ``SPLIT_FALLBACK_KEY`` is "NPU + GPU" (the layer split); an entry there without
+#: ``"split"`` is a leftover of the automatic build (its tensor split) and never counts.
 SPLIT_FALLBACK_KEY = "local_llm_split_fallback"
-#: the split "auto" uses on NPU + GPU (``engine.SPLITS``): the tensor split runs both chips at once (the layer split
-#: runs its halves one after the other)
-AUTO_SPLIT = "tensor"
-#: "auto"'s NPU + GPU (``_split_wanted``): crashed at model load on a Galaxy Z Fold 8 on 2026-11-19, switched off
-#: until the cause is known (the device checks' timing still runs both NPU + GPU modes)
-AUTO_SPLIT_ENABLED = False
+SPLIT_TENSOR_FALLBACK_KEY = "local_llm_split_tensor_fallback"
+SPLIT_FALLBACK_KEYS = {"layer": SPLIT_FALLBACK_KEY, "tensor": SPLIT_TENSOR_FALLBACK_KEY}
 SPLIT_CRASH_REASON = "Glossarion closed while the NPU + GPU was running this model"
 NPU_CRASH_REASON = "Glossarion closed while the NPU was running this model"
 NPU_CHECK_CRASH_REASON = "Glossarion closed while the NPU check was running"
@@ -376,6 +406,12 @@ def npu_skel_dir(release: str, root: Optional[str] = None) -> str:
     not the app version: an app update with the same engine keeps them)."""
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(release or "dev")).strip("_.") or "dev"
     return os.path.join(root or npu_htp_root(), name)
+
+
+def _split_marker(split: str) -> dict:
+    """The NPU markers' fields of an NPU + GPU load: its split and its run mode (a marker of the automatic build has
+    no ``"mode"`` and is dropped at start)."""
+    return {"split": split, "mode": next(m for m, s in RUN_MODE_SPLITS.items() if s == split)}
 
 
 def _npu_blocked_state(reason: str) -> dict:
@@ -630,13 +666,14 @@ class LocalEngineService:
         self._loaded_npu = False
         #: what ran the last load (diagnostics): ``{"stem", "backend", "device", "seconds"}``
         self.last_load: Optional[dict] = None
-        #: a backend the self-check forces for its timing runs ("npu" / "gpu" / "cpu"; None: the usual choice)
-        self.backend_override: Optional[str] = None
-        #: "layer" / "tensor": the self-check's NPU + GPU timing runs (None: every other load)
-        self.split_override: Optional[str] = None
+        #: the mode the device checks' timing places exactly (a run mode other than "auto", or a ``TIMING_MODES`` one;
+        #: None: every other load)
+        self.run_override: Optional[str] = None
         self._loaded_split: Optional[str] = None
-        self._loaded_split_auto = False  # the loaded NPU + GPU model came from "auto" (markers and fallbacks apply)
-        self._npu_inflight_split = False  # the NPU answer running now is an NPU + GPU one (its in-flight marker)
+        #: the loaded model is one of the timing's exact loads (``STRICT_TIMING_MODES``: no marker, no fallback)
+        self._loaded_strict = False
+        self._loaded_handoff = False  # the loaded model is the timing's NPU reads, CPU writes
+        self._npu_inflight_split: Optional[str] = None  # the NPU + GPU split of the NPU answer running now
         self._npu_hung_split = False  # the first load that hung was an NPU + GPU one
         self.clock = clock
         self.memory = memory or memory_info
@@ -663,6 +700,8 @@ class LocalEngineService:
         self._unload_when_idle = False  # the selection moved off the loaded model while it answered
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
         self._parallel = None if _parallel_child else RequestSlots(self)
+        if not _parallel_child:
+            self._migrate_run_mode()
         self._migrate_sigma_defaults()
         #: ``Registry.repair_projector_models`` at start: projectors an earlier version downloaded as models
         self.repaired: list = [] if _parallel_child else self._repair_projector_models()
@@ -673,6 +712,21 @@ class LocalEngineService:
         except Exception:
             log.exception("repairing projector downloads failed")
             return []
+
+    def _migrate_run_mode(self) -> None:
+        """Owner 2026-11-19: everyone starts on Auto. While ``RUN_MODE_KEY`` is unset (a fresh install, or the first
+        start after "Use GPU" / "Use NPU"), it becomes "auto" whatever those were; their keys are cleared, and so are
+        the NPU + GPU fallbacks the automatic build recorded (its tensor split; "NPU + GPU" is the layer split now)."""
+        if self.prefs is None or self._pref(RUN_MODE_KEY) is not None:
+            return
+        gpu, npu = self._pref(GPU_KEY), self._pref(NPU_KEY)
+        self._set_pref(RUN_MODE_KEY, "auto")
+        for key in (GPU_KEY, NPU_KEY, SPLIT_FALLBACK_KEY):
+            if self._pref(key) is not None:
+                self._set_pref(key, None)
+        if gpu is not None or npu is not None:
+            log.info("on-device run mode: Auto (from Use GPU %s, Use NPU %s)", "on" if gpu else "off",
+                     "off" if npu is False else "on")
 
     def _migrate_sigma_defaults(self) -> None:
         if self.prefs is None or self._pref("sigma_defaults_v1"):
@@ -1019,9 +1073,96 @@ class LocalEngineService:
         except Exception:
             log.debug("saving %s failed", key, exc_info=True)
 
-    def use_gpu(self) -> bool:
-        """"Use GPU (experimental)": off unless switched on, and only where a GPU backend is offered."""
-        return bool(self.gpu_backend) and bool(self._pref(GPU_KEY))
+    # ---- Run on --------------------------------------------------------------------------------------------
+
+    def run_mode(self) -> str:
+        """The saved "Run on" mode ("auto" when unset or unknown)."""
+        raw = str(self._pref(RUN_MODE_KEY) or "").strip()
+        return raw if raw in RUN_MODES else "auto"
+
+    def run_mode_options(self) -> list:
+        """The modes this phone offers, in ``RUN_MODES`` order: Auto and CPU only always, NPU only where the NPU is
+        offered, CPU + GPU and GPU only where the build has a GPU backend, both NPU + GPU modes where it has both.
+        Empty (no dropdown) when only Auto and CPU only would exist. Saved state only (the screens call it)."""
+        npu = self.npu_offered()
+        gpu = bool(self.gpu_backend)
+        offered = {"auto": True, "npu": npu, "npu_gpu": npu and gpu, "npu_gpu_tensor": npu and gpu, "cpu_gpu": gpu,
+                   "gpu": gpu, "cpu": True}
+        options = [mode for mode in RUN_MODES if offered[mode]]
+        return options if len(options) > 2 else []
+
+    def _mode_instead(self, mode: str, options: Optional[list] = None) -> str:
+        """``mode`` if this phone offers it, else what runs instead (``RUN_MODE_INSTEAD``, step by step)."""
+        allowed = (options if options is not None else self.run_mode_options()) or ["auto", "cpu"]
+        while mode not in allowed:
+            mode = RUN_MODE_INSTEAD.get(mode, "auto")
+        return mode
+
+    def run_mode_shown(self) -> str:
+        """The dropdown's value: the saved mode when this phone offers it, else what runs instead (NPU only -> CPU only,
+        NPU + GPU -> CPU + GPU, a GPU mode without a GPU backend -> CPU only). The saved value is kept."""
+        return self._mode_instead(self.run_mode())
+
+    def auto_mode(self) -> str:
+        """What Auto runs here: "npu" where the NPU is offered, else "cpu" (a model the NPU cannot take runs on the CPU
+        whatever this says)."""
+        return "npu" if self.npu_offered() else "cpu"
+
+    def run_mode_label(self, mode: str) -> str:
+        """The dropdown text of ``mode``: "Auto (NPU only)" / "Auto (CPU only)" for Auto."""
+        if mode == "auto":
+            return f"Auto ({RUN_MODE_LABELS[self.auto_mode()]})"
+        return RUN_MODE_LABELS.get(mode, str(mode))
+
+    def run_mode_note(self, mode: Optional[str] = None) -> str:
+        """One plain line under the dropdown for ``mode`` (default: the shown one)."""
+        mode = mode or self.run_mode_shown()
+        if mode == "auto":
+            return "Uses the NPU on this phone." if self.auto_mode() == "npu" else "Uses the CPU on this phone."
+        return {
+            "npu": "The NPU runs the model. A failure, or a quant it cannot run, uses the CPU.",
+            "npu_gpu": "Half the layers on the NPU, half on the GPU. A failure uses the NPU alone.",
+            "npu_gpu_tensor": "Every layer split between the NPU and the GPU. A failure uses the NPU alone.",
+            # Q4_0 is the Adreno (OpenCL) kernels' fast quant; Metal has no such rule
+            "cpu_gpu": "The GPU layers below run on the GPU, the rest on the CPU. "
+                       + ("Fastest with Q4_0. " if self.gpu_backend == "OpenCL" else "") + "A failure uses the CPU.",
+            "gpu": "Every layer on the GPU. A failure uses the CPU.",
+            "cpu": "The CPU runs the model.",
+        }.get(mode, "")
+
+    def save_run_mode(self, mode: Any) -> str:
+        """Save "Run on": a mode this phone does not offer is refused (the shown value comes back). Forgets the GPU
+        fallback and both NPU + GPU fallbacks (a new choice gives them a new try) and this service's GPU attempt
+        marker; never unloads (no native work from a screen): the next request reloads when its placement differs."""
+        value = str(mode or "").strip()
+        if value not in self.run_mode_options():
+            return self.run_mode_shown()
+        self._set_pref(RUN_MODE_KEY, value)
+        self._set_pref(GPU_FALLBACK_KEY, None)
+        for key in SPLIT_FALLBACK_KEYS.values():
+            if self._pref(key):
+                self._set_pref(key, None)
+        if self._gpu_attempt is not None:
+            self._clear_gpu_attempt()
+        self._notify()
+        return value
+
+    def model_run_mode(self, stem: Optional[str] = None) -> str:
+        """The run mode ``stem`` follows, as the screens show it: its preset row's backend ("GPU": CPU + GPU, "NPU":
+        NPU only, "CPU": CPU only; what runs instead where the phone lacks it), else "Run on" (``run_mode_shown``,
+        also without ``stem``)."""
+        stem = (self.registry.resolve(stem) or stem) if stem else None
+        mode = ROW_BACKEND_MODES.get(self.backend_choice(stem)) if stem else None
+        return self._mode_instead(mode) if mode else self.run_mode_shown()
+
+    def use_gpu(self, stem: Optional[str] = None) -> bool:
+        """``stem``'s run mode (``model_run_mode``; default "Run on") puts layers on the GPU (CPU + GPU, GPU only,
+        either NPU + GPU). Read only."""
+        return bool(self.gpu_backend) and self.model_run_mode(stem) in ("cpu_gpu", "gpu", "npu_gpu", "npu_gpu_tensor")
+
+    def gpu_layers_apply(self, stem: Optional[str] = None) -> bool:
+        """The GPU layers setting is used by ``stem``'s run mode (CPU + GPU; default "Run on"): the slider shows."""
+        return self.model_run_mode(stem) == "cpu_gpu"
 
     def gpu_layer_limit(self, stem: Optional[str] = None) -> Optional[int]:
         """Transformer blocks plus the output layer of the selected downloaded GGUF."""
@@ -1056,53 +1197,75 @@ class LocalEngineService:
         return value
 
     def gpu_fallback(self) -> Optional[dict]:
-        """``{"stem", "reason"}`` of the model kept on the CPU after a GPU failure, else None."""
+        """``{"stem", "reason"[, "layers"]}`` of the model kept on the CPU after a GPU failure, else None; ``layers``:
+        the GPU layers of the load that failed (-1: all; absent in an older record)."""
         raw = self._pref(GPU_FALLBACK_KEY)
         if isinstance(raw, dict) and raw.get("stem"):
-            return {"stem": str(raw["stem"]), "reason": str(raw.get("reason") or "unknown reason")}
+            fallback = {"stem": str(raw["stem"]), "reason": str(raw.get("reason") or "unknown reason")}
+            if isinstance(raw.get("layers"), int):
+                fallback["layers"] = raw["layers"]
+            return fallback
         return None
 
     def gpu_note(self) -> Optional[str]:
-        """The engine card's GPU line while the GPU is on: why a model runs on the CPU instead."""
-        if not self.use_gpu():
-            return None
+        """The engine card's GPU line while the fallback's model would use the GPU: why it runs on the CPU instead
+        (not when the record leaves its GPU layers free: all layers failed, fewer run)."""
         fallback = self.gpu_fallback()
-        if fallback is None:
+        if fallback is None or not self.use_gpu(fallback["stem"]):
+            return None
+        mode = self.model_run_mode(fallback["stem"])
+        if mode in ("gpu", "cpu_gpu") and \
+                self._gpu_free(fallback["stem"], -1 if mode == "gpu" else self.gpu_layers(fallback["stem"])):
             return None
         return f"GPU unavailable for {fallback['stem']}: {fallback['reason']} — using CPU"
 
-    def save_gpu(self, enabled: Any) -> bool:
-        """Switch the GPU on or off: forgets any GPU fallback and frees an idle loaded model, so the next
-        request loads it on the new device (a model that is answering reloads on its next request). The NPU + GPU
-        fallbacks go too: switching it gives NPU + GPU a new try."""
-        value = bool(enabled) and bool(self.gpu_backend)
-        self._set_pref(GPU_KEY, value)
-        self._set_pref(GPU_FALLBACK_KEY, None)
-        if self._pref(SPLIT_FALLBACK_KEY):
-            self._set_pref(SPLIT_FALLBACK_KEY, None)
-        self._clear_gpu_attempt()
-        if self.loaded_stem is not None and (self._loaded_gpu != value and not self._loaded_npu
-                                             or self._loaded_split_auto and not value):
-            self.unload()
-        self._notify()
-        return value
-
-    def _gpu_wanted(self, stem: str) -> bool:
-        if not self.use_gpu() or self.gpu_layers() == 0:
+    def _gpu_free(self, stem: str, layers: Optional[int] = None) -> bool:
+        """The GPU may take ``stem`` with ``layers`` GPU layers (-1: all; None: any count): the build has a GPU backend
+        and no GPU fallback of the model covers that count. A fallback keeps off loads with as many GPU layers as the
+        one that failed, or more (GPU only failing leaves CPU + GPU's smaller count free); an older record without a
+        count keeps off every GPU load of the model."""
+        if not self.gpu_backend:
             return False
         fallback = self.gpu_fallback()
-        return not (fallback and fallback["stem"] == stem)
+        if not fallback or fallback["stem"] != stem:
+            return True
+        failed = fallback.get("layers")
+        if failed is None or layers is None:
+            return False
+        return self._gpu_layer_count(stem, layers) < self._gpu_layer_count(stem, failed)
 
-    def _gpu_failed(self, stem: str, reason: str) -> None:
-        """Keep ``stem`` on the CPU (until the setting or the model changes) and say why."""
+    def _gpu_layer_count(self, stem: str, layers: int) -> float:
+        """``layers`` as a count to compare: -1 (all) is the model's whole count (unbounded when unknown)."""
+        if layers >= 0:
+            return layers
+        return self.gpu_layer_limit(stem) or float("inf")
+
+    def _split_gpu_layers(self, stem: str) -> int:
+        """The GPU's share of an NPU + GPU load (half the layers, ``_gpu_free``'s count); -1 when the count is unknown."""
+        limit = self.gpu_layer_limit(stem)
+        return (int(limit) + 1) // 2 if limit else -1
+
+    def _cpu_gpu_step(self, stem: str) -> tuple:
+        """``(gpu, layers)`` of the CPU + GPU step for ``stem``: the GPU layers setting, or the CPU (layers 0, no GPU
+        backend, a GPU fallback that covers that count)."""
+        layers = self.gpu_layers(stem)
+        return (True, layers) if layers != 0 and self._gpu_free(stem, layers) else (False, 0)
+
+    def _gpu_failed(self, stem: str, reason: str, layers: Optional[int] = None) -> None:
+        """Keep ``stem`` on the CPU (until the setting or the model changes; with ``layers``, only loads with that
+        many GPU layers or more) and say why."""
         reason = " ".join(str(reason or "unknown reason").split())[:300]
         log.warning("on-device GPU unavailable for %s: %s; using the CPU", stem, reason)
-        self._set_pref(GPU_FALLBACK_KEY, {"stem": stem, "reason": reason})
+        entry = {"stem": stem, "reason": reason}
+        if isinstance(layers, int) and layers != 0:
+            entry["layers"] = layers
+        self._set_pref(GPU_FALLBACK_KEY, entry)
         self._clear_gpu_attempt()
 
-    def _mark_gpu_attempt(self, stem: str) -> None:
+    def _mark_gpu_attempt(self, stem: str, layers: Optional[int] = None) -> None:
         self._gpu_attempt = stem
-        self._set_pref(self._gpu_attempt_key, {"stem": stem, "at": int(time.time()), "run": eng.RUN_ID})
+        self._set_pref(self._gpu_attempt_key, {"stem": stem, "at": int(time.time()), "run": eng.RUN_ID,
+                                               **({"layers": layers} if isinstance(layers, int) else {})})
 
     def _clear_gpu_attempt(self) -> None:
         if self._gpu_attempt is not None or self._pref(self._gpu_attempt_key):
@@ -1111,15 +1274,17 @@ class LocalEngineService:
 
     def _recover_gpu_attempt(self) -> Optional[str]:
         """At start: a GPU load whose first answer never ended means the process died on the GPU (a
-        driver abort cannot be caught): keep that model on the CPU. Returns its stem."""
+        driver abort cannot be caught): keep that model on the CPU. Returns its stem. Recorded wherever the build has
+        a GPU backend, whatever the run mode shows now: a preset row's "GPU" loads on the GPU under Auto too."""
         raw = self._pref(GPU_ATTEMPT_KEY) or self._pref(GPU_ATTEMPT_KEY + "_parallel")
         if not isinstance(raw, dict) or not raw.get("stem"):
             return None
         stem = str(raw["stem"])
         self._set_pref(GPU_ATTEMPT_KEY, None)
         self._set_pref(GPU_ATTEMPT_KEY + "_parallel", None)
-        if self.use_gpu():
-            self._gpu_failed(stem, eng.with_abort_reason(CRASH_REASON, raw))
+        if self.gpu_backend:
+            layers = raw.get("layers")
+            self._gpu_failed(stem, eng.with_abort_reason(CRASH_REASON, raw), layers if isinstance(layers, int) else None)
         return stem
 
     # ---- NPU -------------------------------------------------------------------------------------------
@@ -1130,6 +1295,8 @@ class LocalEngineService:
             return None
         if getattr(engine, "split", None):
             return "NPU + GPU"
+        if getattr(engine, "handoff", False):
+            return "NPU + CPU"
         return "NPU" if getattr(engine, "on_npu", False) else "GPU" if getattr(engine, "on_gpu", False) else "CPU"
 
     def npu_possible(self) -> bool:
@@ -1164,7 +1331,7 @@ class LocalEngineService:
 
     def npu_offered(self) -> bool:
         """Stage 1 passed and stage 2 has not failed for this app version (this process's answers, or the saved
-        ones until they have run): "Use NPU", the power mode and the Custom / Sigma quants' NPU marks show. Never on
+        ones until they have run): the NPU run modes, the power mode and the Custom / Sigma quants' NPU marks show. Never on
         a build without the NPU functions. Reads saved state only (the screens call it)."""
         return self.npu_possible() and self.npu_failure() is None
 
@@ -1369,7 +1536,8 @@ class LocalEngineService:
         """The model row's warning while this start's NPU files download failed and ``stem`` would run on the NPU."""
         if not stem or not self.npu_download_error or not self.npu_offered():
             return None
-        if not self._npu_choice_wants(stem, self.backend_choice(stem)):
+        mode, forced = self._model_mode(stem, timing=False)
+        if mode not in NPU_RUN_MODES + ("auto",) or not self._npu_rule(stem, forced):
             return None
         return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
 
@@ -1401,12 +1569,19 @@ class LocalEngineService:
         if not isinstance(raw, dict) or not raw.get("stem"):
             self._set_pref(NPU_INFLIGHT_KEY, None, durable=True)
             return None
-        self._set_pref(NPU_INFLIGHT_KEY, None)
         stem = str(raw["stem"])
-        if raw.get("split"):
-            # NPU + GPU: that model runs on the NPU alone (while ``AUTO_SPLIT_ENABLED`` is off the record is unused)
-            self._split_failed(stem, eng.with_abort_reason(SPLIT_CRASH_REASON, raw))
+        split, mode = raw.get("split"), raw.get("mode")
+        if split and RUN_MODE_SPLITS.get(mode) == split:
+            # NPU + GPU (that option): the model runs on the NPU alone instead (saved with the cleared markers)
+            self._set_pref(NPU_INFLIGHT_KEY, None)
+            self._split_failed(stem, eng.with_abort_reason(SPLIT_CRASH_REASON, raw), split)
+        elif split:
+            # the automatic build's NPU + GPU (``"split"`` True / "tensor", no run mode): nothing is recorded
+            log.info("on-device NPU + GPU: dropped a marker of an earlier build for %s; no fallback", stem)
+            self._set_pref(NPU_INFLIGHT_KEY, None, durable=True)
+            return None
         else:
+            self._set_pref(NPU_INFLIGHT_KEY, None)
             self._npu_failed(stem, eng.with_abort_reason(NPU_CRASH_REASON, raw))  # saved with the cleared markers
         return stem
 
@@ -1535,24 +1710,6 @@ class LocalEngineService:
             self._npu_phase = None
             self._notify()
 
-    def use_npu(self) -> bool:
-        """"Use NPU": on unless switched off (it only matters where the NPU check passed)."""
-        raw = self._pref(NPU_KEY)
-        return raw is None or bool(raw)
-
-    def save_use_npu(self, enabled: Any) -> bool:
-        """Switch the NPU on or off for "Auto" models; an idle loaded model that would now run elsewhere is
-        freed, so the next request loads it on the new device."""
-        value = bool(enabled)
-        changed = value != self.use_npu()
-        self._set_pref(NPU_KEY, value)
-        stem = self.loaded_stem
-        if changed and stem is not None and (self._loaded_npu or self.npu_offered()) \
-                and self.backend_choice(stem) == "auto":
-            self.unload()  # busy: the next load after the answer uses the new choice
-        self._notify()
-        return value
-
     def npu_power(self) -> str:
         raw = str(self._pref(NPU_POWER_KEY) or "").strip()
         return raw if raw in eng.NPU_POWER_MODES else eng.NPU_DEFAULT_POWER
@@ -1584,6 +1741,12 @@ class LocalEngineService:
             value = 0
         return value if value > 0 else -1
 
+    def npu_cpu_layers(self, stem: str) -> Optional[int]:
+        """NPU + CPU, layer split (timing only): half of the model's layers on the NPU (llama.cpp offloads the last
+        ones and the output layer), at least one; None when the layer count is unknown."""
+        limit = self.gpu_layer_limit(stem)
+        return max(1, int(limit) // 2) if limit else None
+
     def _npu_fallbacks(self) -> dict:
         raw = self._pref(NPU_FALLBACK_KEY)
         return dict(raw) if isinstance(raw, dict) else {}
@@ -1612,47 +1775,55 @@ class LocalEngineService:
     def _npu_failed(self, stem: str, reason: str) -> None:
         """Keep ``stem`` off the NPU (see ``npu_fallback``) and say why."""
         reason = " ".join(str(reason or "unknown reason").split())[:300]
-        log.warning("on-device NPU unavailable for %s: %s; using the %s", stem, reason,
-                    "GPU" if self._gpu_wanted(stem) else "CPU")
+        log.warning("on-device NPU unavailable for %s: %s; using the %s", stem, reason, self._after_npu_target(stem))
         fallbacks = self._npu_fallbacks()
         fallbacks[stem] = self._fallback_entry(stem, reason)
         self._set_pref(NPU_FALLBACK_KEY, fallbacks, durable=True)
         self._clear_npu_attempt()
 
-    def _split_fallbacks(self) -> dict:
-        raw = self._pref(SPLIT_FALLBACK_KEY)
-        return dict(raw) if isinstance(raw, dict) else {}
+    def _split_fallbacks(self, split: str = "layer") -> dict:
+        """The NPU + GPU fallbacks of ``split`` ("layer" / "tensor"): entries of that split only (an entry without
+        ``"split"`` is a leftover of the automatic build)."""
+        raw = self._pref(SPLIT_FALLBACK_KEYS[split])
+        return {stem: entry for stem, entry in raw.items() if isinstance(entry, dict) and entry.get("split") == split} \
+            if isinstance(raw, dict) else {}
 
-    def split_fallback(self, stem: Optional[str]) -> Optional[dict]:
-        """``{"stem", "reason"}`` while "auto" keeps ``stem`` on the NPU alone instead of NPU + GPU: until its file,
-        its backend choice or the app version changes, "Use GPU" is switched, or "Try the NPU again"."""
-        return self._kept_fallback(self._split_fallbacks(), stem)
+    def split_fallback(self, stem: Optional[str], split: str = "layer") -> Optional[dict]:
+        """``{"stem", "reason", "split"}`` while ``stem`` runs on the NPU alone instead of that NPU + GPU option
+        ("layer": NPU + GPU, "tensor": NPU + GPU, tensor split): until its file, its backend choice or the app version
+        changes, a run mode is saved, or "Try the NPU again"."""
+        fallback = self._kept_fallback(self._split_fallbacks(split), stem)
+        return {**fallback, "split": split} if fallback else None
 
-    def _split_failed(self, stem: str, reason: str) -> None:
-        """Keep ``stem`` on the NPU alone (see ``split_fallback``) and say why; on disk at once."""
+    def _split_failed(self, stem: str, reason: str, split: str = "layer") -> None:
+        """Keep ``stem`` on the NPU alone instead of that NPU + GPU option (see ``split_fallback``) and say why; on
+        disk at once. The other option's record is left alone."""
         reason = " ".join(str(reason or "unknown reason").split())[:300]
-        log.warning("on-device NPU + GPU unavailable for %s: %s; using the NPU alone", stem, reason)
-        fallbacks = self._split_fallbacks()
-        fallbacks[stem] = self._fallback_entry(stem, reason)
-        self._set_pref(SPLIT_FALLBACK_KEY, fallbacks, durable=True)
+        label = RUN_MODE_LABELS["npu_gpu_tensor" if split == "tensor" else "npu_gpu"]
+        log.warning("on-device %s unavailable for %s: %s; using the NPU alone", label, stem, reason)
+        fallbacks = self._split_fallbacks(split)
+        fallbacks[stem] = {**self._fallback_entry(stem, reason), "split": split}
+        self._set_pref(SPLIT_FALLBACK_KEYS[split], fallbacks, durable=True)
         self._clear_npu_attempt()
 
     def retry_npu(self, stem: str) -> bool:
         """"Try the NPU again": forget the model's NPU fallback, and a failed NPU files download of this start (the
-        next NPU load downloads once more), and its NPU + GPU fallback; an idle loaded model reloads on its next
-        request."""
+        next NPU load downloads once more), and both of its NPU + GPU fallbacks; an idle loaded model reloads on its
+        next request."""
         fallbacks = self._npu_fallbacks()
-        splits = self._split_fallbacks()
         files = bool(self.npu_files_note(stem))
         if files:
             self._npu_fetch_tried = False
             self.npu_download_error = None
-        split = splits.pop(stem, None) is not None
+        split = False
+        for name, key in SPLIT_FALLBACK_KEYS.items():
+            splits = self._split_fallbacks(name)
+            if splits.pop(stem, None) is not None:
+                split = True
+                self._set_pref(key, splits)
         if fallbacks.pop(stem, None) is None and not files and not split:
             return False
         self._set_pref(NPU_FALLBACK_KEY, fallbacks)
-        if split:
-            self._set_pref(SPLIT_FALLBACK_KEY, splits)
         if self._npu_hung_stem == stem:
             self.npu_hung = False
             self._npu_hung_stem = None
@@ -1666,29 +1837,34 @@ class LocalEngineService:
         NPU load hung in this process, else why ``stem`` (default: the loaded or loading model) runs elsewhere."""
         stem = stem or self._stem
         fallback = self.npu_fallback(stem) if stem else None
-        target = "GPU" if stem and self._gpu_wanted(stem) else "CPU"
+        target = self._after_npu_target(stem) if stem else "CPU"
         if self.npu_hung and stem and stem == self._npu_hung_stem:
             if self._npu_hung_split:
                 return "The NPU + GPU did not answer. Restart Glossarion; this model will use the NPU."
             return f"The NPU did not answer. Restart Glossarion; this model will use the {target}."
         if fallback is None:
+            mode = self._model_mode(stem, timing=False)[0] if stem else None
+            split = self.split_fallback(stem, RUN_MODE_SPLITS[mode]) if mode in RUN_MODE_SPLITS else None
+            if split is not None:
+                return f"{RUN_MODE_LABELS[mode]} unavailable for {stem}: {split['reason']}. Using the NPU."
             return None
         return f"NPU unavailable for {stem}: {fallback['reason']}. Using {target}."
 
-    def _write_npu_inflight(self, stem: Any = "", split: bool = False) -> None:
+    def _write_npu_inflight(self, stem: Any = "", split: Optional[str] = None) -> None:
         """Set (a stem) or clear (None) the in-flight marker of the NPU answer running now, or rewrite it ("",
         ``on_lifecycle``), on disk before returning; ``background``: the app is in the background now; ``split``:
-        an NPU + GPU answer (a crash in it records the NPU + GPU fallback)."""
+        an NPU + GPU answer of that split (a crash in it records that option's fallback)."""
         with self._npu_marker_lock:
             if stem != "":
                 self._npu_inflight = stem
-                self._npu_inflight_split = bool(split and stem)
+                self._npu_inflight_split = split if stem else None
             elif self._npu_inflight is None:
                 return
             current = self._npu_inflight
+            split = self._npu_inflight_split
             self._set_pref(NPU_INFLIGHT_KEY, None if current is None else {
                 "stem": current, "at": int(time.time()), "background": self.background_since is not None,
-                "run": eng.RUN_ID, **({"split": True} if self._npu_inflight_split else {})},
+                "run": eng.RUN_ID, **(_split_marker(split) if split else {})},
                 durable=True)
 
     def npu_hang_note(self) -> Optional[str]:
@@ -1703,7 +1879,7 @@ class LocalEngineService:
     def _mark_npu_attempt(self, stem: str, split: Optional[str] = None) -> None:
         self._npu_attempt = stem
         self._set_pref(NPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time()), "run": eng.RUN_ID,
-                                         **({"split": split} if split else {})}, durable=True)
+                                         **(_split_marker(split) if split else {})}, durable=True)
 
     def _clear_npu_attempt(self) -> None:
         # only this service's own marker: the parallel secondary and the self-check services share the key
@@ -1711,66 +1887,82 @@ class LocalEngineService:
             self._npu_attempt = None
             self._set_pref(NPU_ATTEMPT_KEY, None, durable=True)
 
-    def _npu_choice_wants(self, stem: str, choice: str) -> bool:
-        """``stem``'s own rule asks for the NPU: its choice is "npu", or "auto" with "Use NPU" on and a quant the
-        backend accepts, and the model has no NPU fallback (prefs only)."""
-        if self._is_child or self._npu_probe is None or choice not in ("auto", "npu"):
+    def _model_mode(self, stem: str, *, timing: bool = True) -> tuple:
+        """``(mode, forced)``: the run mode the next load of ``stem`` follows: the device checks' ``run_override``
+        (``timing``), else its preset row's backend ("npu": NPU only, forced: no quant check; "gpu": CPU + GPU; "cpu"),
+        else "Run on". The second parallel context never uses the NPU (NPU only and Auto -> CPU only, NPU + GPU ->
+        CPU + GPU)."""
+        if timing and self.run_override and self.run_override != "auto":
+            mode, forced = self.run_override, True
+        else:
+            choice = self.backend_choice(stem)
+            mode, forced = ROW_BACKEND_MODES.get(choice) or self.run_mode(), choice == "npu"
+        if self._is_child and (mode in NPU_RUN_MODES + TIMING_MODES or mode == "auto"):
+            mode = "cpu_gpu" if mode in RUN_MODE_SPLITS else "cpu"
+        return mode, forced
+
+    def _npu_rule(self, stem: str, forced: bool) -> bool:
+        """The NPU may take ``stem`` by its own rule: this service can use the NPU, the quant is one the backend accepts
+        (``forced``: a preset row's or the timing's NPU skips that check) and the model has no NPU fallback (prefs
+        only)."""
+        if self._is_child or self._npu_probe is None:
             return False
-        if choice == "auto":
-            if not self.use_npu():
-                return False
-            if presets.npu_quant_kind((self.registry.load().get(stem) or {}).get("file")) == "cpu":
-                return False
+        if not forced and presets.npu_quant_kind((self.registry.load().get(stem) or {}).get("file")) == "cpu":
+            return False
         return not self.npu_fallback(stem)
 
-    def _npu_wanted(self, stem: str, choice: str) -> bool:
-        """The NPU for ``stem`` now: its own rule asks for it, the NPU is offered (stage 1 runs here first when the
-        start's background check has not answered yet) and this start's NPU files download has not failed."""
-        if not self._npu_choice_wants(stem, choice):
+    def _npu_wanted(self, stem: str, forced: bool) -> bool:
+        """The NPU for ``stem`` now: its rule allows it, the NPU is offered (stage 1 runs here first when the start's
+        background check has not answered yet), this start's NPU files download has not failed, and its first NPU +
+        GPU load did not hang in this process (off the NPU until the restart)."""
+        if not self._npu_rule(stem, forced):
             return False
         if self._stage1() is None:
             self.run_npu_check()  # a load that comes before the start's background check waits for it
+        if self.npu_hung and self._npu_hung_split and self._npu_hung_stem == stem:
+            return False
         return self.npu_offered() and not (self._npu_fetch_tried and self.npu_download_error)
 
-    def _split_wanted(self, stem: str) -> bool:
-        """"auto" puts ``stem`` (already wanted on the NPU) on NPU + GPU: no device checks override, "Use GPU" on
-        where the build has a GPU backend, and no GPU fallback and no NPU + GPU fallback for the model (prefs only).
-        Never while ``AUTO_SPLIT_ENABLED`` is off."""
-        if not AUTO_SPLIT_ENABLED or self.backend_override or self.split_override or not self.use_gpu():
-            return False
-        fallback = self.gpu_fallback()
-        if fallback and fallback["stem"] == stem:
-            return False
-        return not self.split_fallback(stem)
+    def _after_npu(self, stem: str) -> tuple:
+        """``(gpu, layers)`` of the step after the NPU in ``stem``'s chain: CPU + GPU for the NPU + GPU modes (the CPU
+        when it cannot take the model), the CPU for NPU only and Auto."""
+        if self._model_mode(stem)[0] in RUN_MODE_SPLITS:
+            return self._cpu_gpu_step(stem)
+        return False, 0
+
+    def _after_npu_target(self, stem: str) -> str:
+        """"CPU + GPU" or "CPU": where ``stem`` runs once the NPU drops it (the notes and the log)."""
+        return "CPU + GPU" if self._after_npu(stem)[0] else "CPU"
 
     def _placement(self, stem: str) -> tuple:
-        """``(backend, layers)`` of the next load of ``stem``: ("split", -1) (NPU + GPU, ``_split_wanted``),
-        ("npu", NPU layers), ("gpu", GPU layers) or ("cpu", 0)."""
-        choice = self.backend_override or self.backend_choice(stem)
-        if choice == "cpu":
-            return "cpu", 0
-        if self._npu_wanted(stem, choice):
-            if choice == "auto" and self._split_wanted(stem):
-                return "split", -1
-            if not (self.npu_hung and self._npu_hung_split and self._npu_hung_stem == stem):
-                return "npu", self.npu_layers(stem)
-            # its first NPU + GPU load hung: off the NPU until the restart (today's GPU / CPU rule below)
-        if choice == "gpu":
-            fallback = self.gpu_fallback()
-            layers = self.gpu_layers(stem)
-            if self.gpu_backend and layers != 0 and not (fallback and fallback["stem"] == stem):
-                return "gpu", layers
-            return "cpu", 0
-        if self._gpu_wanted(stem):
-            return "gpu", self.gpu_layers(stem)
-        return "cpu", 0
+        """``(backend, layers, split)`` of the next load of ``stem`` along its run mode's chain (``_model_mode``):
+        ("npu", -1, "layer" / "tensor") NPU + GPU, ("npu", NPU layers, None) NPU only, ("gpu", GPU layers, None) CPU +
+        GPU (or -1: GPU only), ("cpu", 0, None). A step whose device cannot take the model now (the NPU not offered,
+        a fallback, the quant, a failed files download, no GPU backend, GPU layers 0) gives way to the next one."""
+        mode, forced = self._model_mode(stem)
+        if mode == "auto":
+            mode = "npu" if self._npu_wanted(stem, forced) else "cpu"
+        if mode in NPU_RUN_MODES:
+            if self._npu_wanted(stem, forced):
+                split = RUN_MODE_SPLITS.get(mode)
+                if split and self._gpu_free(stem, self._split_gpu_layers(stem)) and not self.split_fallback(stem, split):
+                    return "npu", -1, split
+                return "npu", self.npu_layers(stem), None
+            gpu, layers = self._after_npu(stem)
+            return ("gpu", layers, None) if gpu else ("cpu", 0, None)
+        if mode == "gpu":
+            return ("gpu", -1, None) if self._gpu_free(stem, -1) else ("cpu", 0, None)
+        if mode == "cpu_gpu":
+            gpu, layers = self._cpu_gpu_step(stem)
+            return ("gpu", layers, None) if gpu else ("cpu", 0, None)
+        return "cpu", 0, None
 
     def _load_on_npu(self, engine: Any, stem: str, path: str, n_ctx: int, mmproj: Optional[str], layers: int,
                      split: Optional[str] = None) -> bool:
         """One NPU load (watched by the attempt marker until it returns); True when the model runs on the NPU.
         Any failure, or a first load still running after ``npu_watchdog_seconds``, records the NPU fallback.
-        ``split``: "auto"'s NPU + GPU load (the whole model on both); its failures record the NPU + GPU fallback."""
-        failed = self._split_failed if split else self._npu_failed
+        ``split``: an NPU + GPU load (the whole model on both); its failures record that option's fallback."""
+        failed = (lambda s, why: self._split_failed(s, why, split)) if split else self._npu_failed
         self._mark_npu_attempt(stem, split)
         fired = threading.Event()
         timer = None
@@ -1802,7 +1994,7 @@ class LocalEngineService:
             # its own in-flight marker, so an idle loaded model leaves no marker behind
             self._clear_npu_attempt()
             return True
-        except Exception as exc:  # NpuUnavailable, or anything else the NPU path raised
+        except Exception as exc:  # NpuUnavailable / SplitUnavailable, or anything else the NPU path raised
             if timer is not None:
                 timer.cancel()
             if engine.loaded:
@@ -1851,16 +2043,35 @@ class LocalEngineService:
 
     # ---- RAM gate --------------------------------------------------------------------------------
 
-    def ram_check(self, stem: str, n_ctx: Optional[int] = None, *, vision: bool = False, gpu: bool = False) -> tuple:
-        """``("ok"|"confirm"|"refuse", message)`` for loading ``stem`` (``vision``: with its projector;
-        ``gpu``: on the GPU, ``gpu_extra`` more)."""
-        entry = self.registry.load().get(stem) or {}
-        size = int(entry.get("size") or 0)
+    def _model_size(self, stem: str) -> int:
+        size = int((self.registry.load().get(stem) or {}).get("size") or 0)
         if not size:
             try:
                 size = os.path.getsize(self.registry.file_path(stem))
             except OSError:
                 size = 0
+        return size
+
+    def handoff_need(self, stem: str, n_ctx: Optional[int] = None) -> int:
+        """Bytes NPU reads, CPU writes needs: the weights twice (the NPU's repacked copy cannot map the file; the CPU
+        repacks Q4_0 / Q8_0 into its own memory on arm64) and a second KV cache."""
+        size = self._model_size(stem)
+        n_ctx = int(n_ctx or self.context_for(stem))
+        return ram_need(size, n_ctx) + int(size * 1.15) + n_ctx * 64 * 1024
+
+    def ram_check(self, stem: str, n_ctx: Optional[int] = None, *, vision: bool = False, gpu: bool = False,
+                  handoff: bool = False) -> tuple:
+        """``("ok"|"confirm"|"refuse", message)`` for loading ``stem`` (``vision``: with its projector;
+        ``gpu``: on the GPU, ``gpu_extra`` more; ``handoff``: NPU reads, CPU writes, ``handoff_need``)."""
+        entry = self.registry.load().get(stem) or {}
+        size = self._model_size(stem)
+        if handoff:
+            need = self.handoff_need(stem, n_ctx)
+            verdict, message = self.ram_verdict(need, (self.preset_for(stem) or {}).get("name") or stem)
+            if verdict == "refuse":
+                message = (f"not enough memory for two copies of the model (needs {_gb(need)}, phone has "
+                           f"{_gb(self.memory()[0])})")
+            return verdict, message
         need = ram_need(size, n_ctx or self.context_for(stem))
         if gpu:
             need += gpu_extra(size)
@@ -1904,28 +2115,25 @@ class LocalEngineService:
         fallback = self.gpu_fallback()
         if fallback and fallback["stem"] != stem:
             self._set_pref(GPU_FALLBACK_KEY, None)  # another model: the GPU gets a new try
-        # the self-check's NPU + GPU timing (``split_override``), else the model's usual placement
-        split = self.split_override if self.split_override in eng.SPLITS and not self._is_child else None
-        backend, layers = ("split", -1) if split else self._placement(stem)
-        # "auto"'s NPU + GPU (``_placement``): an NPU load with the NPU's markers, watchdog and its own fallback
-        combined = backend == "split" and split is None
-        if combined:
-            split = AUTO_SPLIT
-        npu = backend == "npu"
+        if self.run_override in STRICT_TIMING_MODES and not self._is_child:
+            self._load_strict(stem, self.run_override, vision=vision)
+            return
+        backend, layers, split = self._placement(stem)
+        npu = backend == "npu" and split is None
         gpu = backend == "gpu"
-        gpu_layers = layers if gpu or npu or split else 0
-        # a changed Context (Model manager or Welcome slider), GPU / NPU setting or backend reloads the model on the
-        # next request
+        gpu_layers = layers if backend != "cpu" else 0
+        # a changed Context (Model manager or Welcome slider), run mode, GPU layers or backend reloads the model on
+        # the next request
         if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
                 and self._loaded_gpu == gpu and self._loaded_npu == npu and self._loaded_gpu_layers == gpu_layers \
-                and self._loaded_split == split and self._loaded_split_auto == combined \
+                and self._loaded_split == split and not self._loaded_strict and not self._loaded_handoff \
                 and engine.n_threads == self.threads():
             if vision and not engine.vision_loaded:  # the projector loads with the first image
                 ctx = engine.n_ctx or self.context_for(stem)
-                verdict, message = self.ram_check(stem, ctx, vision=True, gpu=True) if combined else ("ok", "")
+                verdict, message = self.ram_check(stem, ctx, vision=True, gpu=True) if split else ("ok", "")
                 if verdict == "refuse" and self.ram_check(stem, ctx, vision=True)[0] != "refuse":
                     # no room for the projector beside the GPU's share: remembered, reloaded on the NPU alone
-                    self._split_failed(stem, f"not enough memory for both: {message}")
+                    self._split_failed(stem, f"not enough memory for both: {message}", split)
                     self._ensure_loaded(stem, vision=vision)
                     return
                 self._gate_ram(stem, ctx, vision=True,
@@ -1937,13 +2145,14 @@ class LocalEngineService:
         path = self.registry.file_path(stem)
         if not os.path.isfile(path):
             raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
-        verdict, message = self.ram_check(stem, n_ctx, vision=vision, gpu=True) if combined else ("ok", "")
-        if verdict == "refuse":
-            # too little memory for the GPU's share: remembered, this load and the next ones use the NPU alone (not
-            # remembered when the NPU alone does not fit either: the gate below refuses the load)
-            if self.ram_check(stem, n_ctx, vision=vision)[0] != "refuse":
-                self._split_failed(stem, f"not enough memory for both: {message}")
-            split, combined, npu, gpu_layers = None, False, True, self.npu_layers(stem)
+        if split:
+            verdict, message = self.ram_check(stem, n_ctx, vision=vision, gpu=True)
+            if verdict == "refuse":
+                # too little memory for the GPU's share: remembered, this load and the next ones use the NPU alone
+                # (not remembered when the NPU alone does not fit either: the gate below refuses the load)
+                if self.ram_check(stem, n_ctx, vision=vision)[0] != "refuse":
+                    self._split_failed(stem, f"not enough memory for both: {message}", split)
+                split, npu, gpu_layers = None, True, self.npu_layers(stem)
         self._gate_ram(stem, n_ctx, vision=vision, gpu=gpu or bool(split))
         if engine.loaded:
             self._unload_locked()
@@ -1954,21 +2163,9 @@ class LocalEngineService:
                  f", NPU + GPU ({split} split)" if split else ", NPU" if npu else f", GPU {self.gpu_backend}" if gpu else "")
         started = time.monotonic()
         mmproj = self.registry.projector_path(stem)
-        if split and not combined:
-            # the same NPU preparation; without the NPU (or the GPU) this timing run does not load at all
-            try:
-                reason = self._prepare_npu()
-            except LocalLLMError:
-                self._set("idle", None)
-                raise
-            if reason is None and not self.gpu_backend:
-                reason = "this build has no GPU backend"
-            if reason is not None:
-                self._set("idle", None)
-                raise LocalLLMError(503, "split_unavailable", f"NPU not available ({reason})", "server_error")
-        if npu or combined:
+        if npu or split:
             # the NPU files (downloaded at the first NPU load) and stage 2; while they run the loading state says so
-            # (``EngineSnapshot.phase``). Neither keeps the model from loading: today's GPU / CPU rule, no fallback;
+            # (``EngineSnapshot.phase``). Neither keeps the model from loading: the chain's next step, no fallback;
             # only a Stop during the download ends the load.
             try:
                 reason = self._prepare_npu()
@@ -1980,58 +2177,128 @@ class LocalEngineService:
                 reason = f"{type(exc).__name__}: {exc}"
             if reason is not None:
                 log.info("on-device model %s: not on the NPU this time (%s)", stem, reason)
-                npu = False
-                split, combined = None, False
-                gpu = self._gpu_wanted(stem)
-                gpu_layers = self.gpu_layers(stem) if gpu else 0
+                npu, split = False, None
+                gpu, gpu_layers = self._after_npu(stem)
         try:
-            if split and not combined:
-                # no NPU / GPU marker or fallback: the timing marks this mode itself (``SPEED_KEY``)
-                engine.load(path, n_ctx, self.threads(), mmproj=mmproj, npu=True, split=split)
-            elif combined and not self._load_on_npu(engine, stem, path, n_ctx, mmproj, -1, split=split):
-                # the NPU + GPU fallback is recorded: the NPU alone for this load, with its own fallbacks below; after
-                # a hang (it returned late) this load does not wait on the NPU again: today's GPU / CPU rule
-                split, combined = None, False
+            if split and not self._load_on_npu(engine, stem, path, n_ctx, mmproj, -1, split=split):
+                # that option's fallback is recorded: the NPU alone for this load, with its own fallback below; after a
+                # hang (it returned late) this load does not wait on the NPU again: the step after the NPU
+                split = None
                 if self.npu_hung and self._npu_hung_split and self._npu_hung_stem == stem:
-                    gpu = self._gpu_wanted(stem)
-                    gpu_layers = self.gpu_layers(stem) if gpu else 0
+                    gpu, gpu_layers = self._after_npu(stem)
                 else:
                     npu, gpu_layers = True, self.npu_layers(stem)
             if npu and not self._load_on_npu(engine, stem, path, n_ctx, mmproj, gpu_layers):
-                # the NPU fallback is recorded: today's GPU / CPU rule for this load
+                # the NPU fallback is recorded: the chain's next step for this load
                 npu = False
-                gpu = self._gpu_wanted(stem)
-                gpu_layers = self.gpu_layers(stem) if gpu else 0
+                gpu, gpu_layers = self._after_npu(stem)
             if npu or split:
                 pass  # loaded on the NPU (or the NPU + GPU)
             elif gpu:
-                self._mark_gpu_attempt(stem)
+                self._mark_gpu_attempt(stem, gpu_layers)
                 try:
                     engine.load(path, n_ctx, self.threads(), mmproj=mmproj, gpu=True, n_gpu_layers=gpu_layers)
                 except Exception as exc:  # GpuUnavailable, or anything else the GPU path raised
-                    self._gpu_failed(stem, str(exc) or type(exc).__name__)
+                    self._gpu_failed(stem, str(exc) or type(exc).__name__, gpu_layers)
                     engine.load(path, n_ctx, self.threads(), mmproj=mmproj)
             else:
                 engine.load(path, n_ctx, self.threads(), mmproj=mmproj)
         except Exception as exc:
-            self._clear_gpu_attempt()
-            self._clear_npu_attempt()
-            self._loaded_gpu = False
-            self._loaded_npu = False
-            self._loaded_split = None
-            self._loaded_split_auto = False
-            self._set("idle", None, f"Could not load {stem}: {exc}")
-            log.exception("loading %s failed", stem)
-            raise LocalLLMError(500, "load_failed", f"Could not load local/{stem}: {exc}", "server_error") from exc
-        if self.backend_override or (split and not combined):
+            self._load_failed(stem, exc)
+        if self.run_override:
             # the device checks' timing: a CPU load runs once too (an NPU / GPU load's first-token check did), so
             # every mode's timed prompt starts on a model that has run (``LlamaEngine.warm``)
             getattr(engine, "warm", lambda: None)()
-        self._loaded_gpu = bool(getattr(engine, "on_gpu", False))  # record what loaded, not a setting changed during load
+        self._loaded(engine, stem, n_ctx, started, gpu_layers, strict=False)
+
+    def _load_strict(self, stem: str, mode: str, *, vision: bool = False) -> None:
+        """The device checks' timing of ``mode`` exactly ("npu_gpu", "npu_gpu_tensor", "npu_cpu", "handoff"): the same
+        NPU preparation, then one load with no fallback and no NPU / GPU marker (the timing marks the mode itself,
+        ``SPEED_KEY``); a refusal raises ``LocalLLMError`` with the reason, and nothing loads instead."""
+        engine = self._engine()
+        n_ctx = self.context_for(stem)
+        split = RUN_MODE_SPLITS.get(mode)
+        handoff = mode == "handoff"
+        npu = mode == "npu_cpu"
+        layers = self.npu_cpu_layers(stem) if npu else -1
+        if npu and layers is None:
+            raise LocalLLMError(503, "split_unavailable", "NPU + CPU: the model's layer count is unknown", "server_error")
+        if self._stem == stem and engine.loaded and self._loaded_strict and (not engine.n_ctx or engine.n_ctx == n_ctx) \
+                and self._loaded_split == split and self._loaded_handoff == handoff and self._loaded_npu == npu \
+                and self._loaded_gpu_layers == layers and engine.n_threads == self.threads():
+            if vision and not engine.vision_loaded:
+                self._gate_ram(stem, engine.n_ctx or n_ctx, vision=True, gpu=bool(split))
+            return
+        available, reason = self.engine_status()
+        if not available:
+            raise LocalLLMError(503, "engine_unavailable", reason or eng.UNAVAILABLE, "server_error")
+        path = self.registry.file_path(stem)
+        if not os.path.isfile(path):
+            raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
+        if handoff:
+            verdict, message = self.ram_check(stem, n_ctx, handoff=True)
+            if verdict == "refuse":
+                raise LocalLLMError(507, "insufficient_memory", message, "server_error")
+            if verdict == "confirm":
+                log.warning("loading anyway: %s", message)
+        else:
+            self._gate_ram(stem, n_ctx, vision=vision, gpu=bool(split))
+        if engine.loaded:
+            self._unload_locked()
+        self._unload_when_idle = False
+        self._set("loading", stem)
+        log.info("loading on-device model %s for the timing: %s (n_ctx %d)", stem,
+                 {"npu_cpu": f"NPU + CPU, {layers} layers on the NPU", "handoff": "NPU reads, CPU writes"}.get(
+                     mode, f"NPU + GPU ({split} split)"), n_ctx)
+        started = time.monotonic()
+        try:
+            if self._npu_probe is not None and self._stage1() is None:
+                self.run_npu_check()  # a timing that comes before the start's background check waits for it
+            reason = self._prepare_npu()
+        except LocalLLMError:
+            self._set("idle", None)
+            raise
+        if reason is None and split and not self.gpu_backend:
+            reason = "this build has no GPU backend"
+        if reason is not None:
+            self._set("idle", None)
+            raise LocalLLMError(503, "split_unavailable", f"NPU not available ({reason})", "server_error")
+        try:
+            if split:
+                engine.load(path, n_ctx, self.threads(), mmproj=self.registry.projector_path(stem), npu=True,
+                            split=split)
+            elif handoff:
+                engine.load(path, n_ctx, self.threads(), npu=True, handoff=True)  # no projector in this mode
+            else:
+                engine.load(path, n_ctx, self.threads(), mmproj=self.registry.projector_path(stem), npu=True,
+                            n_gpu_layers=layers)
+        except Exception as exc:
+            self._load_failed(stem, exc)
+        getattr(engine, "warm", lambda: None)()
+        self._loaded(engine, stem, n_ctx, started, layers, strict=True)
+
+    def _load_failed(self, stem: str, exc: Exception) -> None:
+        """A load that ended without a model: nothing is marked as loaded; raises ``LocalLLMError`` (500)."""
+        self._clear_gpu_attempt()
+        self._clear_npu_attempt()
+        self._loaded_gpu = False
+        self._loaded_npu = False
+        self._loaded_split = None
+        self._loaded_strict = False
+        self._loaded_handoff = False
+        self._set("idle", None, f"Could not load {stem}: {exc}")
+        log.exception("loading %s failed", stem)
+        raise LocalLLMError(500, "load_failed", f"Could not load local/{stem}: {exc}", "server_error") from exc
+
+    def _loaded(self, engine: Any, stem: str, n_ctx: int, started: float, gpu_layers: int, *, strict: bool) -> None:
+        """Record what loaded (not a setting changed during the load) and go "ready"."""
+        self._loaded_gpu = bool(getattr(engine, "on_gpu", False))
         self._loaded_npu = bool(getattr(engine, "on_npu", False))
         self._loaded_split = getattr(engine, "split", None)
-        self._loaded_split_auto = combined and bool(self._loaded_split)
-        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu or self._loaded_npu or self._loaded_split else 0
+        self._loaded_handoff = bool(getattr(engine, "handoff", False))
+        self._loaded_strict = strict
+        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu or self._loaded_npu or self._loaded_split \
+            or self._loaded_handoff else 0
         self._load_seconds = round(time.monotonic() - started, 2)
         self.log.append((stem, self._load_seconds))
         self.last_load = {"stem": stem, "backend": self._engine_backend() or "CPU",
@@ -2061,7 +2328,8 @@ class LocalEngineService:
         self._loaded_gpu = False
         self._loaded_npu = False
         self._loaded_split = None
-        self._loaded_split_auto = False
+        self._loaded_strict = False
+        self._loaded_handoff = False
         self._clear_gpu_attempt()  # unloaded normally: the GPU did not take the app down
         self._clear_npu_attempt()  # nor the NPU
         self._set("idle", None)
@@ -2300,8 +2568,10 @@ class LocalEngineService:
         inflight = [False]  # this answer set the NPU in-flight marker (cleared in ``release``)
 
         def mark_inflight(engine: Any) -> None:
-            # an NPU answer, or "auto"'s NPU + GPU one (the device checks' NPU + GPU runs have their own marker)
-            split = bool(getattr(engine, "split", None)) and self._loaded_split_auto
+            # an NPU answer or an NPU + GPU one of a run mode (the timing's exact loads have their own marker)
+            if self._loaded_strict:
+                return
+            split = getattr(engine, "split", None)
             if getattr(engine, "on_npu", False) or split:
                 inflight[0] = True
                 self._write_npu_inflight(stem, split=split)
@@ -2351,15 +2621,17 @@ class LocalEngineService:
             except (LocalLLMError, KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
+                if self._loaded_strict:
+                    raise  # the timing's exact load: reported, never answered elsewhere
                 if getattr(engine, "on_npu", False):
-                    # the NPU failed on this prompt: the same request again on the GPU / CPU (once)
+                    # the NPU failed on this prompt: the same request again on the chain's next step (once)
                     self._npu_failed(stem, f"the NPU failed while answering ({exc})")
-                elif getattr(engine, "split", None) and self._loaded_split_auto:
+                elif getattr(engine, "split", None):
                     # NPU + GPU failed on this prompt: the same request again on the NPU alone (once)
-                    self._split_failed(stem, f"the NPU + GPU failed while answering ({exc})")
+                    self._split_failed(stem, f"the NPU + GPU failed while answering ({exc})", engine.split)
                 elif getattr(engine, "on_gpu", False):
                     # the GPU failed on this prompt: the same request again on the CPU
-                    self._gpu_failed(stem, f"the GPU failed while answering ({exc})")
+                    self._gpu_failed(stem, f"the GPU failed while answering ({exc})", self._loaded_gpu_layers)
                 else:
                     raise
                 if inflight[0]:

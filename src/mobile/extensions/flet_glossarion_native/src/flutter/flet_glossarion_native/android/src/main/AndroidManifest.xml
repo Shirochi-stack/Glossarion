@@ -20,8 +20,8 @@
     providers reachable after a reboot ("Unknown authority" otherwise). No
     storage permission is added; the system picker grants access per folder.
   * <uses-native-library libOpenCL.so required="false">: the on-device engine's
-    optional GPU backend (libggml-opencl.so, "Use GPU" in Model manager ›
-    On-device) loads the phone's own OpenCL driver. Android 12+ (targetSdk 31+)
+    optional GPU backend (libggml-opencl.so, the GPU modes of "Run on" in Model
+    manager › On-device) loads the phone's own OpenCL driver. Android 12+ (targetSdk 31+)
     hides vendor libraries from apps that do not declare them; required="false"
     keeps the app installable everywhere (no OpenCL: the GPU falls back to the CPU).
   * <uses-native-library libcdsprpc.so required="false">: the same for the optional

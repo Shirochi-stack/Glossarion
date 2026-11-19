@@ -43,9 +43,9 @@ the NPU or the reverse (a wheel without ``device_index`` keeps ``main_gpu`` 0 fo
 the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailable`` on any failure. The
 "ggml-hex:" lines of the native log are kept (``hex_log_lines``) for the diagnostics.
 
-NPU + GPU together (``load(..., npu=True, split="layer" | "tensor")``; the device checks' timing asks for both, and
-the service's "auto" rule for "tensor" when "Use GPU" is on: ``service.AUTO_SPLIT``, off while
-``service.AUTO_SPLIT_ENABLED`` is): the model on exactly two devices, the NPU first and the GPU second, half of it each
+NPU + GPU together (``load(..., npu=True, split="layer" | "tensor")``; the service's "Run on" modes "NPU + GPU"
+(layer) and "NPU + GPU, tensor split", and the device checks' timing): the model on exactly two devices, the NPU first
+and the GPU second, half of it each
 (``tensor_split`` 1:1), all layers offloaded. llama-cpp-python 0.3.37's ``Llama()`` has ``split_mode``,
 ``main_gpu``, ``tensor_split``, ``flash_attn``, ``type_k`` / ``type_v`` but no device list, and builds its
 ``llama_model_params`` (llama.py: ``llama_model_default_params()``, then the load in the same ``__init__``); the
@@ -56,6 +56,17 @@ uses those devices in that order (``llama_prepare_model_devices``); ``main_gpu``
 mode TENSOR, experimental upstream); it needs flash attention on (every load already has it) and an unquantised KV
 cache, so this load alone passes ``type_k`` / ``type_v`` f16. A refusal (the architecture, flash attention, memory, a
 device missing) raises ``SplitUnavailable`` with llama.cpp's own error line (``native_errors``).
+
+NPU reads, CPU writes (``load(..., npu=True, handoff=True)``; the device checks' timing only): two copies of the model,
+``reader`` on the NPU (every layer, split mode NONE on the HTP) and ``llm`` on the CPU, with the same context settings.
+Each answer's prompt (the exact tokens ``Llama.generate`` gets, through a wrapper set on the CPU model for that
+``chat`` call only) is read by the NPU up to its last token but one, the sequence's memory is copied to the CPU
+context (``llama_state_seq_get_data`` / ``llama_state_seq_set_data``, sequence 0; never ``Llama.save_state``, which
+copies the scores), and the CPU model reads the last token itself and writes the answer: llama-cpp-python replays one
+token after a restored state, and a hybrid model's recurrent part cannot roll back a restored last token. The load runs
+the same hand-off once on ``GPU_CHECK_PROMPT`` (a refused state, a failed copy or bad logits raise
+``SplitUnavailable``); it is also the warm-up of both models. ``last_timing`` gains ``handoff_s`` and
+``handoff_bytes``; no projector (no vision in this mode).
 
 Native aborts (``capture_aborts``): a GGML_ABORT / GGML_ASSERT ends the process and Android keeps no stderr, so before
 the first native work (``npu_precheck``, ``npu_state``, every ``LlamaEngine.load``) ggml's abort callback is registered
@@ -796,12 +807,29 @@ def _split_of(npu: Any, split: Optional[str]) -> Optional[str]:
     return split
 
 
+def _handoff_of(npu: Any, split: Optional[str], handoff: Any) -> bool:
+    """``load``'s NPU-reads / CPU-writes mode: an NPU load without a split."""
+    if not handoff:
+        return False
+    if not npu or split is not None:
+        raise ValueError("NPU reads, CPU writes is an NPU load without a split (npu=True, split=None)")
+    return True
+
+
 def _timing(prompt_tokens: int, started: float, first_at: float, ended: float, tokens: int) -> dict:
     """``last_timing`` of an answer: the prompt from ``started`` to the first output token, the generation from
     there to ``ended`` (no output: all of it was the prompt)."""
     first_at = first_at or ended
     return {"prompt_tokens": int(prompt_tokens), "prompt_s": max(first_at - started, 0.0), "tokens": int(tokens),
             "gen_s": max(ended - first_at, 0.0)}
+
+
+def _with_handoff(timing: dict, handoff: Optional[dict]) -> dict:
+    """``timing`` plus ``handoff_s`` / ``handoff_bytes`` of the answer's hand-off (NPU reads, CPU writes), when one ran.
+    The prompt figures already include it: the prompt runs to the first output token."""
+    if handoff:
+        timing.update(handoff_s=float(handoff.get("seconds") or 0.0), handoff_bytes=int(handoff.get("bytes") or 0))
+    return timing
 
 
 class _Base:
@@ -817,6 +845,10 @@ class _Base:
         #: "layer" / "tensor": the loaded model is split over the NPU and the GPU (``on_npu`` / ``on_gpu`` stay
         #: False: no NPU or GPU marker or fallback is about such a load)
         self.split: Optional[str] = None
+        #: NPU reads, CPU writes (``load(handoff=True)``): the NPU reads each prompt, the CPU writes the answer
+        self.handoff = False
+        #: the last answer's hand-off: ``{"seconds", "bytes", "read_s"}`` (None: no hand-off ran)
+        self.last_handoff: Optional[dict] = None
         self.device: Optional[str] = None  # what runs the loaded model ("GPU: … (OpenCL)", "NPU: …", "CPU …")
         #: the last answer's speed: ``{"prompt_tokens", "prompt_s", "tokens", "gen_s"}`` (``gen_s``: from the first
         #: output token to the last, over ``tokens - 1`` tokens)
@@ -824,11 +856,14 @@ class _Base:
 
     @property
     def backend(self) -> Optional[str]:
-        """"NPU", "GPU", "CPU" or "NPU + GPU" of the loaded model, None without one."""
+        """"NPU", "GPU", "CPU", "NPU + GPU" or "NPU + CPU" (NPU reads, CPU writes) of the loaded model, None without
+        one."""
         if self.path is None:
             return None
         if self.split:
             return "NPU + GPU"
+        if self.handoff:
+            return "NPU + CPU"
         return "NPU" if self.on_npu else "GPU" if self.on_gpu else "CPU"
 
     @property
@@ -866,7 +901,8 @@ class FakeEngine(_Base):
                  gpu_error: Optional[str] = None, gpu_chat_error: Optional[str] = None,
                  npu_device: str = "Hexagon v81 (HTP0)", npu_error: Optional[str] = None,
                  npu_chat_error: Optional[str] = None, npu_load_delay: float = 0.0,
-                 split_error: Optional[dict] = None, split_chat_error: Optional[str] = None) -> None:
+                 split_error: Optional[dict] = None, split_chat_error: Optional[str] = None,
+                 handoff_error: Optional[str] = None, handoff_bytes: int = 3_200_000) -> None:
         super().__init__()
         self.delay = delay
         self.think = think
@@ -881,9 +917,12 @@ class FakeEngine(_Base):
         self.npu_load_delay = npu_load_delay  # an NPU load takes this long (the watchdog tests)
         self.split_error = dict(split_error or {})  # {split: why}: that NPU + GPU load raises SplitUnavailable(why)
         self.split_chat_error = split_chat_error  # a chat on the NPU + GPU raises RuntimeError(split_chat_error)
+        self.handoff_error = handoff_error  # an NPU-reads / CPU-writes load raises SplitUnavailable(handoff_error)
+        self.handoff_bytes = int(handoff_bytes)  # the sequence state each hand-off copies
         self.loads: list = []
         self.gpu_loads: list = []  # the gpu flag of every load attempt
-        self.backends: list = []  # "npu" / "gpu" / "cpu" / "npu+gpu:layer" / "npu+gpu:tensor" of every load attempt
+        #: "npu" / "gpu" / "cpu" / "npu+gpu:layer" / "npu+gpu:tensor" / "npu+cpu:handoff" of every load attempt
+        self.backends: list = []
         self.npu_layers: list = []  # the layer count of every NPU load attempt
         self.unloads = 0
         self.generated = 0  # tokens produced since the last chat started
@@ -897,15 +936,25 @@ class FakeEngine(_Base):
             self.warms.append(self.backends[-1])
 
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False, split: Optional[str] = None) -> None:
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False, split: Optional[str] = None,
+             handoff: bool = False) -> None:
         split = _split_of(npu, split)
-        npu = bool(npu) and split is None
-        gpu = bool(gpu and n_gpu_layers != 0) and not npu and split is None
-        self.n_gpu_layers = -1 if split else int(n_gpu_layers) if gpu or npu else 0
+        handoff = _handoff_of(npu, split, handoff)
+        npu = bool(npu) and split is None and not handoff
+        gpu = bool(gpu and n_gpu_layers != 0) and not npu and split is None and not handoff
+        self.n_gpu_layers = -1 if split or handoff else int(n_gpu_layers) if gpu or npu else 0
         if self.load_delay:
             time.sleep(self.load_delay)
         self.gpu_loads.append(bool(gpu))
-        self.backends.append(f"npu+gpu:{split}" if split else "npu" if npu else "gpu" if gpu else "cpu")
+        self.backends.append(f"npu+gpu:{split}" if split else "npu+cpu:handoff" if handoff else "npu" if npu
+                             else "gpu" if gpu else "cpu")
+        if handoff:
+            if self.npu_load_delay:
+                time.sleep(self.npu_load_delay)
+            if self.handoff_error:
+                self.unload()
+                raise SplitUnavailable(self.handoff_error)
+            mmproj = None  # no vision in this mode
         if split:
             if self.npu_load_delay:
                 time.sleep(self.npu_load_delay)
@@ -928,7 +977,9 @@ class FakeEngine(_Base):
         self.on_gpu = bool(gpu)
         self.on_npu = npu
         self.split = split
+        self.handoff = handoff
         self.device = (f"NPU + GPU ({split} split): {self.npu_device} + {self.gpu_device}" if split
+                       else f"NPU + CPU: {self.npu_device} reads, CPU writes" if handoff
                        else f"NPU: {self.npu_device}" if npu else f"GPU: {self.gpu_device}" if gpu else "CPU")
         self.loads.append((path, int(n_ctx), int(n_threads)))
 
@@ -941,6 +992,7 @@ class FakeEngine(_Base):
         self.on_gpu = False
         self.on_npu = False
         self.split = None
+        self.handoff = False
         self.device = None
 
     @property
@@ -952,7 +1004,8 @@ class FakeEngine(_Base):
 
     def chat(self, messages: Sequence[dict], params: dict, should_stop: Callable[[], bool]) -> Iterator[str]:
         self.calls.append({"messages": list(messages), "params": dict(params), "gpu": self.on_gpu, "npu": self.on_npu,
-                           "split": self.split})
+                           "split": self.split, "handoff": self.handoff})
+        self.last_handoff = None
         self.generated = 0
         if self.on_gpu and self.gpu_chat_error:
             raise RuntimeError(self.gpu_chat_error)
@@ -969,6 +1022,11 @@ class FakeEngine(_Base):
             if not self._projector:
                 self._projector = True
                 self.projector_loads += 1
+        if self.handoff:
+            # the NPU's read and the copy of its state (the real engine does both before the CPU's first token)
+            self.last_handoff = {"seconds": 0.01, "bytes": self.handoff_bytes, "read_s": 0.0}
+            if should_stop():
+                raise GenerationStopped("A Stop arrived while the prompt was being evaluated")
         last = next((m for m in reversed(list(messages)) if m.get("role") == "user"), {})
         text = self.reply(list(messages)) if self.reply else f"Echo: {_text_of(last.get('content'))}"
         if images and not self.reply:
@@ -992,7 +1050,8 @@ class FakeEngine(_Base):
         prompt = self.count_prompt(messages)
         self.last_usage = {"prompt_tokens": prompt, "completion_tokens": self.generated,
                            "total_tokens": prompt + self.generated}
-        self.last_timing = _timing(prompt, started, first_at, time.monotonic(), self.generated)
+        self.last_timing = _with_handoff(_timing(prompt, started, first_at, time.monotonic(), self.generated),
+                                         self.last_handoff)
 
 
 # Backend registration and llama-cpp-python's first initialization are process-global.
@@ -1008,6 +1067,7 @@ class LlamaEngine(_Base):
     def __init__(self) -> None:
         super().__init__()
         self.llm: Any = None
+        self.reader: Any = None  # NPU reads, CPU writes: the NPU copy of the model (``llm`` is the CPU one)
         self.formatter: Any = None
         self.vision_handler: Any = None
         self._scripts: Any = None  # the loaded model's script_ban.VocabScripts (computed on first use)
@@ -1034,8 +1094,12 @@ class LlamaEngine(_Base):
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False, split: Optional[str] = None) -> None:
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False, split: Optional[str] = None,
+             handoff: bool = False) -> None:
         split = _split_of(npu, split)
+        if _handoff_of(npu, split, handoff):
+            self._load_handoff(path, n_ctx, n_threads)
+            return
         npu = bool(npu) and split is None
         gpu = bool(gpu and n_gpu_layers != 0) and not npu and split is None
         llama_cpp = self._module()
@@ -1132,6 +1196,58 @@ class LlamaEngine(_Base):
                 device = f"CPU ({variant})" if variant and variant not in ("builtin", "none") else "CPU"
             self.device = device
 
+    def _load_handoff(self, path: str, n_ctx: int, n_threads: int) -> None:
+        """NPU reads, CPU writes: the NPU copy (``reader``: every layer on the HTP) and the CPU copy (``llm``) of the
+        model with the same context settings, then one hand-off on ``GPU_CHECK_PROMPT`` (the self-test, and the
+        warm-up of both). Any failure frees both and raises ``SplitUnavailable`` with llama.cpp's reason."""
+        llama_cpp = self._module()
+        capture_aborts()  # before the models load
+        with self._lock, _NATIVE_LOAD_LOCK:
+            self.unload()
+            index = device_index(NPU_BACKEND)
+            if index < 0:
+                raise SplitUnavailable(_NPU_STATE.get("error") or "the NPU backend is not registered")
+            common = {"model_path": str(path), "n_ctx": int(n_ctx), "n_threads": int(n_threads),
+                      "n_threads_batch": int(n_threads), "n_batch": 512, "n_ubatch": 512, "use_mmap": True,
+                      "use_mlock": False, "verbose": False, "swa_full": False, "flash_attn": True}
+            _NATIVE_ERRORS.clear()
+            reader = llm = None
+            try:
+                try:
+                    reader = llama_cpp.Llama(**common, n_gpu_layers=-1, split_mode=SPLIT_MODE_NONE, main_gpu=index)
+                except Exception as exc:
+                    raise SplitUnavailable(f"the model did not load on the NPU ({exc})") from exc
+                try:
+                    _gpu_check(reader)
+                except Exception as exc:
+                    raise SplitUnavailable(f"the first token on the NPU failed ({exc})") from exc
+                try:
+                    llm = llama_cpp.Llama(**common, n_gpu_layers=0, split_mode=SPLIT_MODE_NONE, main_gpu=-1)
+                except Exception as exc:
+                    raise SplitUnavailable(f"the model did not load on the CPU ({exc})") from exc
+                try:
+                    _handoff_check(llama_cpp, reader, llm)
+                except Exception as exc:
+                    raise SplitUnavailable(f"the CPU could not continue from the NPU ({exc})") from exc
+            except SplitUnavailable as exc:
+                for model in (llm, reader):  # the CPU copy first, as ``unload``
+                    if model is not None:
+                        _close(model)
+                native = native_reason()
+                if native:
+                    raise SplitUnavailable(f"{exc}: {native}") from exc
+                raise
+            self.formatter = _make_formatter(llm)
+            if self.formatter is not None:
+                llm.chat_handler = self.formatter.to_chat_handler()
+            self.llm, self.reader = llm, reader
+            self.sliding_window = _sliding_window(llama_cpp, llm)
+            self.path, self.n_ctx, self.n_threads = str(path), int(n_ctx), int(n_threads)
+            self.mmproj = None  # no vision in this mode
+            self.handoff = True
+            self._checked = True  # the hand-off check ran both models
+            self.device = f"NPU + CPU: {npu_label()} reads, CPU writes"
+
     @property
     def vision_loaded(self) -> bool:
         return self.vision_handler is not None and getattr(self.vision_handler, "mtmd_ctx", None) is not None
@@ -1150,6 +1266,7 @@ class LlamaEngine(_Base):
     def unload(self) -> None:
         with self._lock:
             llm, self.llm = self.llm, None
+            reader, self.reader = self.reader, None
             handler, self.vision_handler = self.vision_handler, None
             self.formatter = None
             self._scripts = None
@@ -1159,6 +1276,8 @@ class LlamaEngine(_Base):
             self.on_gpu = False
             self.on_npu = False
             self.split = None
+            self.handoff = False
+            self.last_handoff = None
             self.device = None
             # The projector goes before its model. llama-cpp-python 0.3.37 registers mtmd_free on the
             # model's own exit stack, after the context and the model, so ``llm.close()`` below runs it
@@ -1175,6 +1294,9 @@ class LlamaEngine(_Base):
                 except Exception:
                     log.debug("closing the model failed", exc_info=True)
                 del llm
+            if reader is not None:  # NPU reads, CPU writes: the NPU copy after the CPU one
+                _close(reader)
+                del reader
 
     def script_ban(self, scripts: Sequence[str], allow_kaomoji: bool = False, source: str = "",
                    whitelist: bool = False) -> Any:
@@ -1279,6 +1401,9 @@ class LlamaEngine(_Base):
         heartbeat.start()
         self.live = heartbeat  # the job notification's on-device row (``notification_row``)
         prompt_done = _stop_between_decodes(llm, should_stop, on_batch=heartbeat.read)
+        self.last_handoff = None
+        handoff_done = self._handoff_for_this_call(llm, should_stop, heartbeat) if self.reader is not None \
+            else (lambda: None)
         try:
             if handler is not None:
                 # the MTMD handler evaluates the prompt (text and image chunks) in this call and returns the
@@ -1331,10 +1456,12 @@ class LlamaEngine(_Base):
             if self.live is heartbeat:
                 self.live = None
             prompt_done()
+            handoff_done()
             cpus_done()
             # the prompt's evaluated tokens (a reused prefix is not evaluated again), else its estimate
-            self.last_timing = _timing(heartbeat.prompt_read or heartbeat.prompt_total, heartbeat.started,
-                                       heartbeat.first_token_at, time.monotonic(), completion)
+            self.last_timing = _with_handoff(_timing(heartbeat.prompt_read or heartbeat.prompt_total, heartbeat.started,
+                                                     heartbeat.first_token_at, time.monotonic(), completion),
+                                             self.last_handoff)
         prompt = 0
         try:
             prompt = self.count_prompt(messages)
@@ -1342,6 +1469,82 @@ class LlamaEngine(_Base):
             pass
         self.last_usage = {"prompt_tokens": prompt, "completion_tokens": completion,
                            "total_tokens": prompt + completion}
+
+    def _handoff_for_this_call(self, llm: Any, should_stop: Callable[[], bool], heartbeat: "_Heartbeat") -> Callable[[], None]:
+        """NPU reads, CPU writes, for one ``chat`` call: ``llm.generate`` (an instance attribute over the class's) gets
+        the exact prompt tokens ``_create_completion`` built; the NPU reads all but the last (a Stop is seen between
+        two of its decodes, its batches count as the prompt's progress), its sequence state goes to the CPU context,
+        and the CPU's own ``generate`` reads the last token and writes the answer. Returns the function that removes
+        the wrapper (safe to call again)."""
+        reader = self.reader
+        llama_cpp = self._module()
+        original = llm.generate
+
+        def generate(tokens: Any, *args: Any, **kwargs: Any) -> Any:
+            tokens = list(tokens)
+            if len(tokens) > 1:
+                started = time.monotonic()
+                reader.reset()
+                reader._ctx.kv_cache_clear()
+                done = _stop_between_decodes(reader, should_stop, on_batch=heartbeat.read)
+                try:
+                    reader.eval(tokens[:-1])
+                finally:
+                    done()
+                read_at = time.monotonic()
+                copied = _handoff_state(llama_cpp, reader, llm, tokens)
+                self.last_handoff = {"seconds": time.monotonic() - read_at, "bytes": copied,
+                                     "read_s": read_at - started}
+            return original(tokens, *args, **kwargs)
+
+        llm.generate = generate
+
+        def done() -> None:
+            if vars(llm).get("generate") is generate:
+                del llm.generate  # the class's own method again
+
+        return done
+
+
+def _handoff_state(llama_cpp: Any, reader: Any, llm: Any, tokens: Sequence[int]) -> int:
+    """Copy sequence 0's memory from the NPU context (``reader``, which has read ``tokens[:-1]``) to the CPU context
+    (``llm``, emptied first) and set the CPU model's token record to match, so its ``generate`` replays only the last
+    token. Returns the bytes copied; raises ``RuntimeError`` when the state is empty or refused (llama.cpp returns 0
+    on any mismatch: layer count, KV types, V transposition, free cells)."""
+    import ctypes
+
+    size = int(llama_cpp.llama_state_seq_get_size(reader.ctx, 0))
+    if size <= 0:
+        raise RuntimeError("the NPU's state is empty")
+    buffer = (ctypes.c_uint8 * size)()
+    copied = int(llama_cpp.llama_state_seq_get_data(reader.ctx, buffer, size, 0))
+    llm.reset()
+    llm._ctx.kv_cache_clear()
+    if copied <= 0 or not int(llama_cpp.llama_state_seq_set_data(llm.ctx, buffer, copied, 0)):
+        raise RuntimeError("the CPU could not read the NPU's state")
+    count = len(tokens) - 1
+    llm.input_ids[:count] = list(tokens[:count])
+    llm.n_tokens = count
+    llm._requires_eval = True
+    return copied
+
+
+def _handoff_check(llama_cpp: Any, reader: Any, llm: Any) -> None:
+    """The hand-off once at load: the NPU reads ``GPU_CHECK_PROMPT`` but its last token, the CPU takes its state and
+    reads the last token; the CPU's logits must be finite and not all equal. Leaves both models reset."""
+    tokens = list(llm.tokenize(GPU_CHECK_PROMPT.encode("utf-8"), add_bos=True, special=False))[:64]
+    if len(tokens) < 2:
+        raise RuntimeError("the check prompt has too few tokens")
+    try:
+        reader.reset()
+        reader._ctx.kv_cache_clear()
+        reader.eval(tokens[:-1])
+        _handoff_state(llama_cpp, reader, llm, tokens)
+        llm.eval(tokens[-1:])
+        _check_logits(llm)
+    finally:
+        reader.reset()
+        llm.reset()
 
 
 class ContextOverflow(ValueError):
@@ -1595,8 +1798,6 @@ def _gpu_check(llm: Any) -> None:
     """The GPU's or the NPU's first tokens: evaluate ``GPU_CHECK_PROMPT`` (a batch) and one more token; the last
     logits must be finite and not all equal (a broken kernel gives NaN / inf / zeros). Leaves the
     model reset."""
-    import math
-
     tokens = list(llm.tokenize(GPU_CHECK_PROMPT.encode("utf-8"), add_bos=True, special=False))[:64]
     if not tokens:
         raise RuntimeError("the check prompt has no tokens")
@@ -1604,11 +1805,18 @@ def _gpu_check(llm: Any) -> None:
         llm.reset()
         llm.eval(tokens)
         llm.eval(tokens[-1:])
-        n_vocab = int(llm.n_vocab())
-        logits = llm._ctx.get_logits()
-        values = [float(logits[i]) for i in range(n_vocab)]
+        _check_logits(llm)
     finally:
         llm.reset()
+
+
+def _check_logits(llm: Any) -> None:
+    """The last decode's logits are finite and not all equal (a broken kernel or state gives NaN / inf / zeros)."""
+    import math
+
+    n_vocab = int(llm.n_vocab())
+    logits = llm._ctx.get_logits()
+    values = [float(logits[i]) for i in range(n_vocab)]
     bad = sum(1 for v in values if not math.isfinite(v))
     if bad:
         raise RuntimeError(f"{bad} of {n_vocab} logits are NaN or infinite")

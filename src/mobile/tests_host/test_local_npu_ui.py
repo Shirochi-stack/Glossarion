@@ -1,10 +1,11 @@
 """NPU in the three on-device places (Model manager › On-device, the Welcome page, the model picker): no extra NPU
 rows anywhere (owner 2026-11-18: the existing slots use the NPU under Auto), the existing Custom sheets' and the
 Sigma quant sheet's NPU marks only where the phone's NPU check passed (a pick stays an ordinary Auto row), the
-preset editor's Backend and NPU layers, the engine card's "Use NPU" and power mode, the row's backend line, its
+preset editor's Backend and NPU layers, the engine card's "Run on" dropdown (its modes per phone, its line, the GPU
+layers slider under CPU + GPU only, the GPU fallback line, the Q4_0 hint) and power mode, the row's backend line, its
 fallback line and "Try the NPU again"; the three screens never wait for a slow NPU check or files download and show
 its progress bar instead, then follow it; the picker's "Model manager › On-device" row leads with the Halgakos avatar;
-the device checks' NPU card times the five modes on a worker thread, shows the progress and stops on Stop.
+the device checks' NPU card times every mode on a worker thread, shows the progress and stops on Stop.
 Fakes only (FakeEngine, FakePrefs, a fake NPU check, the fake Hugging Face, a fake release host).
 """
 
@@ -32,7 +33,6 @@ from test_devfix7_custom_models import _by_key, _Page, _texts  # noqa: E402
 from test_local_llm_server import make_service  # noqa: E402
 from test_local_npu import Probe, chat, failing_state, npu_service, set_backend  # noqa: E402
 from test_local_npu import _no_abort_note  # noqa: E402,F401 - the autouse fixture
-from glossarion_mobile.services.local_llm import selfcheck  # noqa: E402
 from glossarion_mobile.services.local_llm import service as svc  # noqa: E402
 from test_bootstrap import _fake_session, _shutdown, _spike_main, app_env, storage  # noqa: E402,F401 - fixtures
 
@@ -252,15 +252,50 @@ def test_the_editor_has_backend_and_npu_layers_only_with_the_npu(tmp_path):
 
 # ---- engine card, backend line, Try the NPU again -------------------------------------------------------------------
 
-def test_engine_card_use_npu_and_power_mode(tmp_path):
+def _tensor() -> str:
+    """The internal value of "NPU + GPU, tensor split" (whatever the service names it)."""
+    return next(mode for mode in svc.RUN_MODES if svc.RUN_MODE_LABELS[mode] == "NPU + GPU, tensor split")
+
+
+def _pick(panel, mode) -> str:
+    """The user picks ``mode`` in "Run on": Flet sets the value, then runs on_select."""
+    panel.run_mode.value = mode
+    panel.run_mode.on_select(None)
+    return panel.run_mode.value
+
+
+ALL_LABELS = ["Auto (NPU only)", "NPU only", "NPU + GPU", "NPU + GPU, tensor split", "CPU + GPU", "GPU only", "CPU only"]
+
+
+def test_engine_card_run_on_and_power_mode(tmp_path):
+    """One "Run on" dropdown, the app's existing dropdown built like the NPU power mode: every mode this phone has
+    (an NPU phone with the GPU backend: all seven, tensor split right after NPU + GPU), Auto naming what it runs,
+    one line on the chosen mode. Choosing saves at once, says nothing and runs no native work."""
     passed, _failed, _plain = _services(tmp_path)
-    panel = lmp.LocalModelsPanel(service=passed, prefs=passed.prefs)
+    said: list = []
+    panel = lmp.LocalModelsPanel(service=passed, prefs=passed.prefs, notify=said.append)
     panel.build()
     keys = _by_key(panel.control)
-    assert keys["local-npu"].value is True and keys["local-npu-power"].value == "burst"
+    assert "local-npu" not in keys and "local-gpu" not in keys and "local-npu-switch-note" not in keys
+    run_on, power = keys["local-run-mode"], keys["local-npu-power"]
+    assert type(run_on) is type(power) is ft.Dropdown and run_on.dense is power.dense is True
+    assert run_on.label == "Run on" and run_on.visible and run_on.value == "auto"
+    assert [o.key for o in run_on.options] == ["auto", "npu", "npu_gpu", _tensor(), "cpu_gpu", "gpu", "cpu"]
+    assert [o.text for o in run_on.options] == ALL_LABELS
+    assert keys["local-run-mode-note"].value == "Uses the NPU on this phone."
+    assert not keys["local-gpu-layers-box"].visible                            # the slider is CPU + GPU's alone
+    loads = list(getattr(passed.engine, "loads", None) or [])                 # no engine made yet, or its loads
+    for mode in ("npu", "npu_gpu", _tensor(), "gpu", "cpu", "cpu_gpu", "auto"):
+        assert _pick(panel, mode) == mode and passed.prefs.get(svc.RUN_MODE_KEY) == mode
+        assert passed.run_mode() == mode and panel.run_mode_note.value == passed.run_mode_note(mode)
+        assert panel.gpu_layers_box.visible is (mode == "cpu_gpu")
+    assert list(getattr(passed.engine, "loads", None) or []) == loads and said == []  # no native work, no snackbar
+    assert passed.loaded_stem is None
+    assert [o.text for o in run_on.options] == ALL_LABELS                      # the labels never change
+    # a value this phone does not have is refused: the dropdown shows the saved one again
+    assert _pick(panel, "bogus") == "auto" and passed.run_mode() == "auto"
+    assert keys["local-npu-power"].value == "burst"
     assert [o.key for o in keys["local-npu-power"].options] == list(eng.NPU_POWER_MODES)
-    panel.npu_switch.value = False
-    assert panel.save_npu() is False and passed.use_npu() is False
     panel.npu_power.value = "balanced"
     assert panel.save_npu_power() == "balanced" and passed.npu_power() == "balanced"
     # the NPU has not started in this process: the first NPU load uses the new mode, no restart needed
@@ -297,48 +332,217 @@ def test_row_backend_line_fallback_and_try_again(tmp_path):
     assert "Runs on NPU: Hexagon v81 (HTP0)" in panel.engine_detail.value
 
 
-def test_row_and_engine_card_name_npu_and_gpu_together(tmp_path, monkeypatch):
-    # "Use GPU" on: Auto runs on NPU + GPU (when switched on); the existing row line and engine detail say so
-    monkeypatch.setattr(svc, "AUTO_SPLIT_ENABLED", True)
-    service, engine, _probe = npu_service(tmp_path, gpu=True)
+@pytest.mark.parametrize("label,split", [("NPU + GPU", "layer"), ("NPU + GPU, tensor split", "tensor")])
+def test_row_and_engine_card_name_npu_and_gpu_together(tmp_path, label, split):
+    # "Run on" NPU + GPU (either split): the existing row line and engine detail say so; no new rows, no slider
+    service, engine, _probe = npu_service(tmp_path)
     set_backend(service, "m-Q4_0", "auto")
     panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
     panel.build()
+    service.run_npu_check()                                                    # the card follows the answer
+    mode = next(o.key for o in panel.run_mode.options if o.text == label)
+    assert _pick(panel, mode) == mode and not panel.gpu_layers_box.visible
     chat(service)
+    assert engine.backends == [f"npu+gpu:{split}"]
     panel.render(push=False)
     index = len(presets.load_presets(service.prefs)) - 1
     keys = _by_key(panel.preset_column)
     assert keys[f"local-preset-backend-{index}"].value == "Runs on NPU + GPU"
     assert not any(item.content == "Try the NPU again" for item in keys[f"local-preset-menu-{index}"].items)
     panel.render_engine(service.snapshot(), push=False)
-    assert "Runs on NPU + GPU (tensor split): Hexagon v81 (HTP0) + Fake GPU (Test)" in panel.engine_detail.value
-    service.gpu_layer_limit = lambda stem=None: 24                             # the GPU layers note says it
-    panel._gpu_limits_state = None
-    panel._refresh_gpu_limits()
-    assert panel.gpu_layers_note.value.endswith("A model on the NPU and the GPU together uses all layers.")
+    assert f"Runs on NPU + GPU ({split} split): Hexagon v81 (HTP0) + Fake GPU (Test)" in panel.engine_detail.value
+    assert not panel.npu_status.visible and panel.run_mode.value == mode
 
 
-def test_while_npu_and_gpu_is_off_auto_says_npu_and_the_layers_note_is_as_before(tmp_path):
-    # the default (``svc.AUTO_SPLIT_ENABLED`` off): "Use GPU" on + Auto runs on the NPU alone, and nothing on the
-    # screens mentions NPU + GPU, not even with an NPU + GPU record left by the build that crashed
-    assert svc.AUTO_SPLIT_ENABLED is False
-    service, engine, _probe = npu_service(tmp_path, gpu=True)
+@pytest.mark.parametrize("label,split,other", [("NPU + GPU, tensor split", "tensor", "NPU + GPU"),
+                                               ("NPU + GPU", "layer", "NPU + GPU, tensor split")])
+def test_a_refused_npu_and_gpu_runs_on_the_npu_and_keeps_its_label(tmp_path, label, split, other):
+    """Owner 2026-11-19: the tensor split is a "Run on" option of its own. When the load is refused (it aborts at load
+    on the owner's phone until the engine fix), the model runs on the NPU alone; the option keeps its label (no "not
+    available" wording) and the existing fallback line says why."""
+    engine = eng.FakeEngine(split_error={split: "llama.cpp refused the split"})
+    service, engine, _probe = npu_service(tmp_path, engine=engine)
     set_backend(service, "m-Q4_0", "auto")
-    service._split_failed("m-Q4_0", svc.SPLIT_CRASH_REASON)
     panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
     panel.build()
+    service.run_npu_check()                                                    # the card follows the answer
+    mode = next(o.key for o in panel.run_mode.options if o.text == label)
+    _pick(panel, mode)
+    chat(service)
+    assert engine.backends == [f"npu+gpu:{split}", "npu"]
+    panel.render_engine(service.snapshot(), push=False)
+    panel.render(push=False)
+    assert panel.run_mode.value == mode and [o.text for o in panel.run_mode.options] == ALL_LABELS
+    assert not any("not available" in o.text for o in panel.run_mode.options)
+    assert panel.npu_status.visible
+    assert "unavailable for m-Q4_0" in panel.npu_status.value and "llama.cpp refused the split" in panel.npu_status.value
+    assert panel.npu_status.value.endswith("Using the NPU.")
+    index = len(presets.load_presets(service.prefs)) - 1
+    assert _by_key(panel.preset_column)[f"local-preset-backend-{index}"].value == "Runs on NPU · Hexagon v81"
+    assert "Runs on NPU: Hexagon v81 (HTP0)" in panel.engine_detail.value
+    # picking the other split loads it
+    engine.split_error = {}
+    other_mode = next(o.key for o in panel.run_mode.options if o.text == other)
+    _pick(panel, other_mode)
+    chat(service)
+    assert engine.backends[-1] == f"npu+gpu:{'layer' if split == 'tensor' else 'tensor'}"
+
+
+def test_auto_runs_on_the_npu_alone_and_an_old_npu_and_gpu_record_changes_nothing(tmp_path):
+    # Auto on an NPU phone with the GPU backend: the NPU alone, no slider, and an NPU + GPU record left by the build
+    # that crashed adds no line to the engine card or the row
+    service, engine, _probe = npu_service(tmp_path)
+    set_backend(service, "m-Q4_0", "auto")
+    service._split_failed("m-Q4_0", svc.SPLIT_CRASH_REASON)
+    service.run_npu_check()
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
+    panel.build()
+    assert panel.run_mode.value == "auto" and panel.run_mode.options[0].text == "Auto (NPU only)"
     chat(service)
     assert engine.backends == ["npu"]
     panel.render(push=False)
+    panel.render_engine(service.snapshot(), push=False)
     index = len(presets.load_presets(service.prefs)) - 1
     keys = _by_key(panel.preset_column)
     assert keys[f"local-preset-backend-{index}"].value == "Runs on NPU · Hexagon v81"
     assert not any(item.content == "Try the NPU again" for item in keys[f"local-preset-menu-{index}"].items)
-    service.gpu_layer_limit = lambda stem=None: 24
-    panel._gpu_limits_state = None
-    panel._refresh_gpu_limits()
-    assert panel.gpu_layers_note.value.endswith("Changes apply to the next model load.")
-    assert "NPU + GPU" not in "\n".join(selfcheck.npu_lines(service, soc=""))
+    assert not panel.gpu_layers_box.visible and not panel.npu_status.visible
+
+
+# ---- "Run on" per phone, the GPU line, the slider and the Q4_0 hint (the engine card's former GPU switch tests) ------
+
+def test_run_on_is_hidden_where_only_auto_and_cpu_exist(tmp_path):
+    """x86_64 and iOS 13 / 14 (no GPU backend, no NPU): no dropdown, no line, no slider on either screen; a saved
+    GPU mode is refused."""
+    from test_welcome_drawer_compact import by_key, screen
+
+    service, _engine = make_service(tmp_path)
+    assert service.gpu_backend is None and service.run_mode_options() == []
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs)
+    panel.build()
+    keys = _by_key(panel.control)
+    assert not keys["local-run-mode"].visible and not keys["local-run-mode-note"].visible
+    assert not keys["local-gpu-layers-box"].visible and not keys["local-gpu-swap"].visible
+    assert service.save_run_mode("cpu_gpu") == "auto" and not service.use_gpu()
+    assert "welcome-run-mode" not in by_key(screen(local_engine=lambda: service, prefs=service.prefs).page_area.content)
+
+
+@pytest.mark.parametrize("backend", ["OpenCL", "Metal"])
+def test_a_gpu_phone_without_the_npu_offers_the_gpu_modes(tmp_path, backend):
+    """Android arm64 without the NPU, iOS 15+: Auto (CPU only), CPU + GPU, GPU only, CPU only."""
+    service, _engine = make_service(tmp_path, gpu_backend=backend)
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs)
+    panel.build()
+    assert [o.key for o in panel.run_mode.options] == ["auto", "cpu_gpu", "gpu", "cpu"]
+    assert [o.text for o in panel.run_mode.options] == ["Auto (CPU only)", "CPU + GPU", "GPU only", "CPU only"]
+    assert panel.run_mode.value == "auto" and panel.run_mode_note.value == "Uses the CPU on this phone."
+
+
+def test_engine_card_run_on_gpu_line_and_device(tmp_path):
+    prefs = fakes.FakePrefs()
+    engine = eng.FakeEngine(gpu_error="no supported GPU: llama.cpp's OpenCL backend runs on Qualcomm Adreno GPUs only")
+    service, engine = make_service(tmp_path / "android", prefs=prefs, engine=engine, gpu_backend="OpenCL")
+    panel = lmp.LocalModelsPanel(service=service, prefs=prefs)
+    panel.build()
+    assert panel.run_mode.key == "local-run-mode" and not panel.gpu_status.visible
+    assert _pick(panel, "cpu_gpu") == "cpu_gpu" and service.use_gpu()
+    assert "Q4_0" in panel.run_mode_note.value
+    assert presets.load_presets(prefs) == list(presets.DEFAULT_PRESETS)       # a mode adds no presets
+    # a GPU failure shows on the card, the device line says CPU
+    chat(service, stem="fake-echo")
+    panel.render_engine(service.snapshot(), push=False)
+    assert panel.gpu_status.visible
+    assert panel.gpu_status.value.startswith("GPU unavailable for fake-echo: no supported GPU")
+    assert "Runs on CPU" in panel.engine_detail.value
+    # a new choice gives the GPU a new try: the line goes
+    _pick(panel, "gpu")
+    panel.render_engine(service.snapshot(), push=False)
+    assert not panel.gpu_status.visible
+    # iOS (Metal), GPU only saved before
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "gpu"})
+    service, _engine = make_service(tmp_path / "ios", prefs=prefs, gpu_backend="Metal")
+    panel = lmp.LocalModelsPanel(service=service, prefs=prefs)
+    panel.build()
+    assert panel.run_mode.visible and panel.run_mode.value == "gpu" and not panel.gpu_layers_box.visible
+
+
+def test_gpu_slider_maps_cpu_partial_and_all(tmp_path, monkeypatch):
+    service, _engine = make_service(tmp_path, prefs=fakes.FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu"}),
+                                    gpu_backend="OpenCL")
+    monkeypatch.setattr(service, "gpu_layer_limit", lambda stem=None: 24)
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs)
+    panel.build()
+    try:
+        assert panel.gpu_layers_box.visible and panel.gpu_layers_slider.max == 24
+        assert panel.gpu_layers_slider.value == 8 and not panel.gpu_layers_slider.disabled
+        for position, expected in ((16, 16), (0, 0), (24, -1)):
+            panel.gpu_layers_slider.value = position
+            panel.gpu_layers_slider.on_change(None)
+            panel.gpu_layers_slider.on_change_end(None)
+            assert service.gpu_layers() == expected
+        assert panel.gpu_layers_label.value == "GPU layers: 24 / 24"
+        assert panel.gpu_layers_note.value.endswith("Changes apply to the next model load.")
+        for mode in ("gpu", "auto", "cpu"):                                    # the slider is CPU + GPU's alone
+            _pick(panel, mode)
+            assert not panel.gpu_layers_box.visible
+        _pick(panel, "cpu_gpu")
+        assert panel.gpu_layers_box.visible and service.gpu_layers() == -1     # the setting is kept
+    finally:
+        panel.dispose()
+
+
+def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
+    """owner 2026-10-22: a K-quant model in use on the Adreno GPU may be slower than the CPU: the engine card (and the
+    Welcome page) say so while "Run on" puts layers on the GPU. Owner 2026-10-31: the tap opens the Custom menu at
+    that family and size with Q4_0 highlighted."""
+    light = next(p for p in presets.DEFAULT_PRESETS if p["name"] == "Light")
+    q4_file = "Qwen3.5-2B-Q4_0.gguf"
+    assert presets.is_gpu_quant(q4_file)
+    assert presets.file_quant(light["file"]) == "Q4_K_XL" and not presets.is_gpu_quant(light["file"])
+
+    def downloaded(service, stem, file):
+        with open(service.registry.file_path(stem), "wb") as handle:  # the registry lists files on disk
+            handle.write(b"GGUF")
+        service.registry.add(stem, {"repo": light["repo"], "file": file, "revision": "r", "sha256": "0" * 64,
+                                    "size": 4, "downloaded_at": 1})
+
+    def panel_for(sub, backend="OpenCL", mode="cpu_gpu", file=light["file"]):
+        prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: mode} if mode else {})
+        service, _engine = make_service(tmp_path / sub, stems=(), prefs=prefs, gpu_backend=backend)
+        downloaded(service, "light", file)
+        current = {"model": "local/light"}
+        panel = lmp.LocalModelsPanel(service=service, prefs=prefs, current_model=lambda: current["model"])
+        panel.build()
+        return panel, prefs, service, current
+
+    panel, prefs, service, current = panel_for("android")
+    assert panel.gpu_swap_box.visible
+    assert panel.gpu_swap_text.value.startswith("Light is Q4_K_XL, which can be slow on this GPU")
+    assert panel.gpu_swap_button.content == "Choose Q4_0 · Qwen 3.5 2B"
+    # the tap: the Custom menu at that family and size, Q4_0 highlighted; nothing joins the list yet
+    spawned = []
+    panel.spawn_fn = lambda coro: (spawned.append(coro), coro.close())
+    sheet = panel.open_gpu_swap()
+    assert sheet.family["id"] == "qwen35" and sheet.size["label"] == "2B" and sheet.highlight_gpu and len(spawned) == 1
+    assert presets.load_presets(prefs) == list(presets.DEFAULT_PRESETS)
+    # the Q4_0 model in use: the hint goes
+    downloaded(service, "light-q4", q4_file)
+    current["model"] = "local/light-q4"
+    panel._render_gpu_swap(push=False)
+    assert not panel.gpu_swap_box.visible
+    # GPU only shows it too; choosing CPU only hides it at once
+    panel, _prefs, _service, _current = panel_for("gpu-only", mode="gpu")
+    assert panel.gpu_swap_box.visible
+    _pick(panel, "cpu")
+    assert not panel.gpu_swap_box.visible
+    # no hint: Auto (CPU only here), a Q4_0 model, iOS (Metal runs the K-quants), a non-local model
+    assert not panel_for("auto", mode=None)[0].gpu_swap_box.visible
+    assert not panel_for("q4", file=q4_file)[0].gpu_swap_box.visible
+    assert not panel_for("ios", backend="Metal")[0].gpu_swap_box.visible
+    panel, _prefs, _service, current = panel_for("remote")
+    current["model"] = "authgpt/gpt-6-luna"
+    panel._render_gpu_swap(push=False)
+    assert not panel.gpu_swap_box.visible
 
 
 # ---- no delay, a progress bar instead (B1-B3) ------------------------------------------------------------------------
@@ -383,7 +587,9 @@ def test_the_screens_never_wait_for_a_slow_check_and_follow_it(tmp_path):
         keys = _by_key(panel.control)
         assert keys["local-npu-box"].visible and keys["local-npu-progress"].visible
         assert keys["local-npu-progress"].value is None                       # indeterminate
-        assert keys["local-npu-line"].value == "Checking the NPU…" and not keys["local-npu"].visible
+        assert keys["local-npu-line"].value == "Checking the NPU…" and not keys["local-npu-power"].visible
+        assert [o.text for o in keys["local-run-mode"].options] == ["Auto (CPU only)", "CPU + GPU", "GPU only",
+                                                                    "CPU only"]
         assert _texts(welcome_keys()["welcome-npu-busy"]) == ["Checking the NPU…"]
         assert "Checking the NPU…" in picker_texts()
         # the check's end re-renders the screens after npu_progress() turns None (``_notify`` in its finally): wait for
@@ -392,8 +598,13 @@ def test_the_screens_never_wait_for_a_slow_check_and_follow_it(tmp_path):
               and _by_key(panel.control)["local-npu-line"].value == "Hexagon v81 (HTP) ready"
               and "welcome-npu-busy" not in welcome_keys() and "Checking the NPU…" not in picker_texts())
         keys = _by_key(panel.control)
-        assert keys["local-npu-box"].visible and not keys["local-npu-progress"].visible and keys["local-npu"].visible
+        assert keys["local-npu-box"].visible and not keys["local-npu-progress"].visible
+        assert keys["local-npu-power"].visible
         assert keys["local-npu-line"].value == "Hexagon v81 (HTP) ready" and probe.calls == []
+        # the check's answer added the NPU modes to "Run on" on both screens, and Auto names the NPU
+        assert [o.text for o in keys["local-run-mode"].options] == ALL_LABELS
+        assert keys["local-run-mode"].value == "auto"
+        _wait(lambda: [o.text for o in welcome_keys()["welcome-run-mode"].options] == ALL_LABELS)
         assert "welcome-npu-busy" not in welcome_keys() and "Checking the NPU…" not in picker_texts()
     finally:
         service.stop()
@@ -492,15 +703,19 @@ def test_the_ondevice_manager_row_leads_with_the_halgakos_avatar(tmp_path):
     assert isinstance(sheet._ondevice_manager_row().leading, ft.CircleAvatar)  # the no-engine row too
 
 
-# ---- Logs & diagnostics › device checks › NPU (Snapdragon): the five-way timing ---------------------------------------
+# ---- Logs & diagnostics › device checks › NPU (Snapdragon): timing every mode -----------------------------------------
 
-def test_device_checks_npu_card_times_five_modes_follows_and_stops(app_env, tmp_path, monkeypatch):
+def test_device_checks_npu_card_times_every_mode_follows_and_stops(app_env, tmp_path, monkeypatch):
     from glossarion_mobile.services.local_llm import selfcheck
     from glossarion_mobile.ui import spike
 
-    service, engine, _probe = npu_service(tmp_path / "svc", gpu=True, engine=eng.FakeEngine(delay=0.02))
+    service, engine, _probe = npu_service(tmp_path / "svc", engine=eng.FakeEngine(delay=0.02))
     service.run_npu_check()
+    monkeypatch.setattr(service, "gpu_layer_limit", lambda stem=None: 24)     # NPU + CPU's layer split needs it
     monkeypatch.setattr(spike.SpikeApp, "_engine_service", staticmethod(lambda: service))
+    labels =[selfcheck.SPEED_LABELS[mode] for mode in selfcheck.speed_modes(service)]
+    count = len(labels)
+    assert count == len(selfcheck.SPEED_MODES)                                 # this phone has every mode
 
     async def until(predicate, timeout=10.0):
         deadline = asyncio.get_running_loop().time() + timeout
@@ -517,32 +732,32 @@ def test_device_checks_npu_card_times_five_modes_follows_and_stops(app_env, tmp_
         try:
             card = app.cards["npu"]
             buttons = card.control.content.content.controls[2].controls
-            assert [b.content for b in buttons] == ["Refresh", "Time NPU, GPU, CPU and NPU + GPU", "Stop"]
+            assert [b.content for b in buttons] == ["Refresh", "Time every mode", "Stop"]
             await app.npu_stop()                                               # nothing runs: nothing happens
             seen: list = []
             original = card.set
             monkeypatch.setattr(card, "set", lambda status, text=None: (seen.append((status, text)),
                                                                          original(status, text)))
             await app.npu_time()
-            assert card.status == "pass"
             text = card.result.value
-            for label in selfcheck.SPEED_LABELS.values():
-                assert f"  {label}: prompt " in text
+            assert card.status == "pass", text
+            for label in labels:
+                assert f"  {label}: prompt " in text, text
             running = [t for s, t in seen if s == "running" and t]
             assert running[0] == "Timing local/m-Q4_0…"
             assert [t.splitlines()[0] for t in running[1:]] == [
-                f"Timing local/m-Q4_0: {label} ({i} of 5)…" for i, label in enumerate(selfcheck.SPEED_LABELS.values(), 1)]
+                f"Timing local/m-Q4_0: {label} ({i} of {count})…" for i, label in enumerate(labels, 1)]
             # Stop during a slow answer: the card says so, the timing ends at its next stop check
             engine.delay = 0.05
             engine.reply = lambda messages: " ".join(["word"] * 60)
             task = asyncio.ensure_future(app.npu_time())
-            await until(lambda: "(1 of 5)" in (card.result.value or ""))
+            await until(lambda: f"(1 of {count})" in (card.result.value or ""))
             await app.npu_time()                                               # a second press while it runs: ignored
             await app.npu_stop()
             assert card.result.value.endswith("Stopping after the current step…")
             await task
-            assert card.status == "pass" and "  GPU: stopped" in card.result.value
-            assert "  NPU + GPU, tensor split: stopped" in card.result.value and not app._npu_timing
+            assert card.status == "pass" and f"  {labels[1]}: stopped" in card.result.value
+            assert f"  {labels[-1]}: stopped" in card.result.value and not app._npu_timing
             assert service.prefs.get(svc.SPEED_KEY)["running"] is None
         finally:
             await _shutdown(app)

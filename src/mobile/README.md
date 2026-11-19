@@ -168,11 +168,13 @@ libmtmd (the image encoder of vision models).
   and generate without SIGILL.
 
 * **GPU (optional, experimental; Android arm64 OpenCL, iOS Metal).** Model manager › On-device › engine
-  card › "Use GPU (experimental)", off by default and shown only where the build has a GPU backend. With
-  it on, a load offloads every layer to the GPU and runs a short check (a prompt and one more token,
-  finite logits); when the backend finds no usable GPU, the model does not load on it, that check fails,
-  or a later answer fails on the GPU, the reason is logged, the model reloads on the CPU and the card
-  says "GPU unavailable for <model>: <reason> — using CPU" until the setting or the model changes. The
+  card › "Run on" (Auto by default; NPU section below): "CPU + GPU" puts the GPU layers setting's layers on
+  the GPU (8 by default, the rest on the CPU; the slider shows under this mode only, or for a model whose
+  preset Backend is "GPU"), "GPU only" every layer.
+  These modes show only where the build has a GPU backend. A GPU load runs a short check (a prompt and one
+  more token, finite logits); when the backend finds no usable GPU, the model does not load on it, that check
+  fails, or a later answer fails on the GPU, the reason is logged, the model reloads on the CPU and the card
+  says "GPU unavailable for <model>: <reason> — using CPU" until a new "Run on" choice or the model changes. The
   card also says what runs the model ("Runs on GPU: QUALCOMM Adreno(TM) 830 (OpenCL)", "Runs on CPU
   (android_armv8.6_1)"). A driver crash cannot be caught in Python, so a GPU load leaves a marker in
   Prefs until the model's first answer ends; when the app died in between, the next start keeps that
@@ -259,21 +261,35 @@ library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
   per-mode marker carry the same run: the recorded reason then ends with the message, e.g. "Glossarion
   closed while the NPU was running this model: ggml-backend-meta.cpp:635: ...". A note of another run is
   never attached. The device checks card shows the last one ("Last native abort (time): ...").
-* NPU + GPU (experimental, owner 2026-11-19; switched off by `service.AUTO_SPLIT_ENABLED` after it crashed
-  at model load on a Galaxy Z Fold 8 the same day: "auto" with "Use GPU" on runs on the NPU alone, and a
-  record or marker the crashed build left changes nothing; the code and its tests stay, the tests switch it
-  on). When on: with "Use GPU" on, a model whose backend is "auto" and that
-  would run on the NPU loads on the NPU and the Adreno GPU at once: llama.cpp's tensor split
-  (`LLAMA_SPLIT_MODE_TENSOR`, every layer divided between the two devices, the whole model offloaded; the
-  GPU layers setting applies to GPU-only loads). The layer split is not used for this: the OpenCL backend has
-  no async, so its two halves run one after the other. The tensor split needs flash attention and an f16 KV
-  cache (both set for this load) and refuses some architectures. It is an NPU load in every other respect:
-  the attempt and in-flight crash markers (marked `split`) and the first-load watchdog. A refusal, not enough
-  RAM for both, a failing answer or a crash recorded at the next start keeps that model on the NPU alone
-  (Prefs `local_llm_split_fallback`, then the NPU's own GPU / CPU fallbacks) until its file, its backend
-  choice or the app version changes, "Use GPU" is switched or "Try the NPU again"; the device checks card
-  shows why ("NPU + GPU dropped: ..."). The device checks' timing still measures NPU, GPU, CPU, layer split
-  and tensor split each by itself, also while the "auto" rule is off.
+* "Run on" (owner 2026-11-19; one dropdown in the engine card, also on the Welcome page, replaces "Use GPU
+  (experimental)" and "Use NPU"; Prefs `local_llm_run_mode`). Everyone starts on Auto, also after the update:
+  the two old switches are not carried over and their keys are cleared. Modes, each listed only where the
+  phone has it: Auto ("Auto (NPU only)" where the NPU check passed, else "Auto (CPU only)"), NPU only, NPU +
+  GPU (layer split), NPU + GPU, tensor split, CPU + GPU, GPU only, CPU only. The dropdown is hidden where only
+  Auto and CPU only exist (x86_64, iOS 13 / 14). A choice is saved with no native work; the next request loads
+  the model that way. Fallbacks, each step tried once and recorded before the next, ending on a working
+  backend: NPU only → CPU only; NPU + GPU (either split) → NPU only → CPU + GPU → CPU only; CPU + GPU and GPU
+  only → CPU only (a GPU record keeps off only loads with as many GPU layers or more, so GPU only failing
+  leaves CPU + GPU on the GPU). A preset's Backend "Auto" follows the dropdown, "GPU" is CPU + GPU.
+* NPU + GPU (experimental): the model on the NPU and the Adreno GPU at once, every layer offloaded (the GPU
+  layers setting is for CPU + GPU). "NPU + GPU" is llama.cpp's layer split (`LLAMA_SPLIT_MODE_LAYER`, a slice
+  of the layers on each device, 1:1); "NPU + GPU, tensor split" is `LLAMA_SPLIT_MODE_TENSOR` (every layer
+  divided between the two; it needs flash attention and an f16 KV cache, both set for it, and refuses some
+  architectures; it aborted at model load on a Galaxy Z Fold 8 and its engine fix is separate, so the app is
+  safe either way). Both are NPU loads in every other respect: the attempt and in-flight crash markers (marked
+  with the split) and the first-load watchdog. A refusal, not enough RAM for both, a failing first token or
+  answer, or a crash recorded at the next start keeps that model on the NPU alone (then the NPU only chain);
+  each split has its own record (Prefs `local_llm_split_fallback` for the layer split,
+  `local_llm_split_tensor_fallback` for the tensor split), so dropping the tensor split leaves the layer split
+  alone. The record stays until its file, its backend choice or the app version changes, a new
+  "Run on" choice or "Try the NPU again"; the option keeps its label and the NPU status line and the device
+  checks card say why ("NPU + GPU dropped: ...", "NPU + GPU, tensor split dropped: ..."). The automatic NPU + GPU rule of the same day
+  (`AUTO_SPLIT_ENABLED`) is gone.
+* Device checks › NPU (Snapdragon) › "Time every mode": every "Run on" mode this phone has, plus two that are
+  timed only: "NPU + CPU, layer split" (half the layers on the NPU) and "NPU + CPU, NPU reads, CPU writes" (the
+  NPU model reads all but the last prompt token, its sequence state moves to a CPU model that writes the
+  answer; two copies of the model in memory); "NPU + GPU, tensor split" is timed last. The last line names
+  the fastest of the modes that ran on their own device.
 * What CI still builds with the Hexagon SDK: the ARM side. `ggml-hexagon` compiles against the SDK's
   headers and its qaic stub generator (`htp_iface`). `[hexagon]` pins the Hexagon SDK 6.7.0.0 (the
   tarball llama.cpp's own Android toolchain image installs, a public GitHub release of

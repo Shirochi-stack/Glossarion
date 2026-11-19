@@ -314,7 +314,7 @@ def test_on_device_rows_fit_phone_widths(tmp_path, width):
 
 
 def test_hotfix6_q4_0_presets_show_with_the_gpu_off_and_use_loads_when_ram_is_tight(tmp_path):
-    """Owner 2026-10-27: on Android (OpenCL) the picker lists the GPU-friendly presets whatever "Use GPU" says,
+    """Owner 2026-10-27: on Android (OpenCL) the picker lists the GPU-friendly presets whatever "Run on" says,
     and Use on a model tight on free RAM loads it: the warning is the sheet's note, never a question."""
     async def scenario():
         prefs = fakes.FakePrefs()  # the default presets

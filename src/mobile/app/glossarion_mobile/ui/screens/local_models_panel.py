@@ -10,17 +10,21 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   the on-device sampling fields, "Block other scripts in translations (adaptive)" (on by default; ``script_ban``)
   and under it the Settings tile of "Allow emoticons and symbols from other scripts (kaomoji)" (config
   ``script_ban_allow_kaomoji``, off by default; the same value as in Settings and on the desktop).
-  Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
-  default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
-  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". With the GPU on and a K-quant
-  model in use on Android (OpenCL), a hint opens the Custom menu at that model's size with Q4_0 highlighted.
+  "Run on" (``_run_section``; the existing dropdown, built like the NPU power mode): Auto (default; it names what
+  it runs, "Auto (NPU only)" / "Auto (CPU only)"), NPU only, NPU + GPU, NPU + GPU tensor split, CPU + GPU, GPU
+  only, CPU only, each only where this phone has it (``service.run_mode_options``; hidden where only Auto and CPU
+  only exist: x86_64, iOS 13 / 14), one line on the chosen mode, the GPU layers slider under CPU + GPU only. The
+  card says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and, after a GPU failure, "GPU
+  unavailable for <model>: <reason> — using CPU". With the GPU in use and a K-quant model on Android (OpenCL), a
+  hint opens the Custom menu at that model's size with Q4_0 highlighted. Choosing a mode runs no native work: the
+  next request loads the model that way.
 * **Custom** (``presets.CUSTOM_FAMILIES``, owner 2026-10-31; the same rows on the Welcome page and in the model
   picker): Qwen 3.5, Llama, Gemma and LFM2, each with a Custom button. ``CustomModelSheet``: a parameter size,
   then a quant out of the real files of that repository (size and RAM hint; "No quant" is its unquantized
   file). The quant Android's GPU is fast for is marked with the uncropped Halgakos and "GPU-friendly". A chosen
   quant becomes an ordinary preset row through the one-tap flow (``OnDeviceFlow.get_custom``).
-* **NPU** (only where the phone's NPU check passed: ``service.npu_offered``; nothing at all elsewhere): the engine
-  card's "Use NPU" (on by default), the power mode and the NPU status line (``_npu_section``: that the NPU files
+* **NPU** (only where the phone's NPU check passed: ``service.npu_offered``; nothing at all elsewhere): the NPU
+  options of "Run on", the power mode and the NPU status line (``_npu_section``: that the NPU files
   download from llama.cpp's release at the first model load, why they did not, or the ready NPU). While the check,
   the files' download or the NPU's start runs, the section shows a progress bar and one line ("Checking the NPU…",
   "Getting NPU files · 12 / 26 MB", "Starting the NPU…"; the Welcome page and the picker show the same bar,
@@ -71,7 +75,6 @@ import flet as ft
 
 from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import hf, presets
-from glossarion_mobile.services.local_llm import service as llm_service
 from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
@@ -252,7 +255,7 @@ class LocalPresetEditor:
         self.npu_layers = ft.TextField(value=str(preset.get("npu_layers") or ""), label="NPU layers (optional)",
                                        hint_text="all", dense=True, keyboard_type=ft.KeyboardType.NUMBER,
                                        visible=self.npu, key="local-preset-npu-layers")
-        self.backend_note = _small("Auto uses the NPU when the quant suits it, else the GPU or CPU.",
+        self.backend_note = _small("Auto follows Run on in the engine card.",
                                    visible=self.npu, key="local-preset-backend-note")
         self.error = ft.Text("", color=ft.Colors.ERROR, visible=False, selectable=True)
         self.dialog = ft.BottomSheet(
@@ -1099,19 +1102,27 @@ class OnDeviceFlow:
         size = presets.download_size(preset)
         return "download", f"Not downloaded · {dl.format_bytes(size)}" if size else "Not downloaded"
 
-    # ---- GPU ------------------------------------------------------------------------------------------
+    # ---- Run on, GPU -----------------------------------------------------------------------------------
 
     def _gpu_backend(self) -> Optional[str]:
         return getattr(self.service, "gpu_backend", None)
 
-    def _gpu_section(self, key_prefix: str = "local") -> list:
-        """"Use GPU (experimental)" (off by default; only where the build has a GPU backend), its note, the
-        fallback line ("GPU unavailable: … — using CPU") and the Q4_0 hint. Shared by the Model manager's
-        engine card and the Welcome page ("Run on this phone"); *key_prefix* keeps their control keys apart."""
-        backend = self._gpu_backend()
-        use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
-        self.gpu_switch = toggle(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
-                                    on_change=lambda e: self.save_gpu())
+    def run_mode_options(self) -> list:
+        """The "Run on" modes this phone has (``service.run_mode_options``, in its order); [] hides the dropdown
+        (only Auto and CPU only would exist). Reads saved state only."""
+        try:
+            return list(getattr(self.service, "run_mode_options", lambda: [])())
+        except Exception:
+            return []
+
+    def _run_section(self, key_prefix: str = "local") -> list:
+        """"Run on" (the existing dropdown, built like the NPU power mode; hidden without choices), one line on the
+        chosen mode, the GPU layers slider (shown under CPU + GPU only), the GPU fallback line ("GPU unavailable: …
+        — using CPU") and the Q4_0 hint. Shared by the Model manager's engine card and the Welcome page ("Run on
+        this phone"); *key_prefix* keeps their control keys apart."""
+        self.run_mode = ft.Dropdown(label="Run on", value=None, dense=True, key=f"{key_prefix}-run-mode",
+                                    options=[], visible=False, on_select=lambda e: self.save_run_mode())
+        self.run_mode_note = _small("", key=f"{key_prefix}-run-mode-note", visible=False)
         self.gpu_layers_label = _small("")
         self.gpu_layers_slider = ft.Slider(min=0, max=1, divisions=1, value=0,
                                            key=f"{key_prefix}-gpu-layers", disabled=True,
@@ -1120,17 +1131,8 @@ class OnDeviceFlow:
         self.gpu_layers_note = _small("")
         self.gpu_layers_box = ft.Column([
             self.gpu_layers_label, self.gpu_layers_slider, self.gpu_layers_note],
-            spacing=0, tight=True, visible=bool(backend), key=f"{key_prefix}-gpu-layers-box")
+            spacing=0, tight=True, visible=False, key=f"{key_prefix}-gpu-layers-box")
         self._gpu_limits_state = None
-        self._refresh_gpu_limits()
-        if backend == "OpenCL":
-            text = ("Runs the model on a Qualcomm Adreno GPU (Snapdragon) through OpenCL. Fastest with Q4_0 models; "
-                    "other quantizations can be slower than the CPU. Other GPUs, or a failure, fall back to the "
-                    "CPU automatically.")
-        else:
-            text = ("Runs the model on the iPhone's or iPad's GPU through Metal. A failure falls back to the CPU "
-                    "automatically. The GPU shares the device's memory.")
-        self.gpu_note = _small(text, key=f"{key_prefix}-gpu-note", visible=bool(backend))
         self.gpu_status = ft.Text("", color=semantic("warning"), visible=False, key=f"{key_prefix}-gpu-status",
                                   theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True)
         # the current model is a K-quant the Adreno kernels run slowly: one tap opens its size's Custom menu
@@ -1139,18 +1141,47 @@ class OnDeviceFlow:
                                              on_click=lambda e: self.open_gpu_swap(tapped_page(e)))
         self.gpu_swap_box = ft.Column([self.gpu_swap_text, self.gpu_swap_button], spacing=0, tight=True,
                                       key=f"{key_prefix}-gpu-swap")
+        self._render_run_mode(push=False)
         self._render_gpu_swap(push=False)
-        return [self.gpu_switch, self.gpu_layers_box, self.gpu_note, self.gpu_status, self.gpu_swap_box]
+        return [self.run_mode, self.run_mode_note, self.gpu_layers_box, self.gpu_status, self.gpu_swap_box]
+
+    def _render_run_mode(self, push: bool = True) -> None:
+        """Re-read the dropdown's choices and value (the NPU check answering adds the NPU ones and changes what
+        Auto names), its line and the slider's visibility. Reads saved state only."""
+        dropdown = getattr(self, "run_mode", None)
+        if dropdown is None:
+            return
+        service = self.service
+        modes = self.run_mode_options()
+        choices = [(mode, service.run_mode_label(mode)) for mode in modes]
+        if choices != [(option.key, option.text) for option in dropdown.options]:
+            dropdown.options = [ft.DropdownOption(key=mode, text=text) for mode, text in choices]
+        shown = service.run_mode_shown() if modes else None
+        dropdown.value = shown
+        dropdown.visible = bool(modes)
+        note = service.run_mode_note(shown) if modes else None
+        self.run_mode_note.value = note or ""
+        self.run_mode_note.visible = bool(note)
+        self._refresh_gpu_limits()
+        if push:
+            _push(dropdown, self.run_mode_note)
+
+    def save_run_mode(self) -> str:
+        """The dropdown's choice: saved at once (the service refuses a mode this phone does not have). No native work
+        here and no snackbar: the next request loads the model that way."""
+        value = str(self.service.save_run_mode(self.run_mode.value))
+        self._render_run_mode(push=False)
+        self._render_gpu_swap(push=False)
+        _push(self.run_mode, self.run_mode_note, self.gpu_layers_box, self.gpu_swap_box)
+        return value
 
     def _npu_section(self, key_prefix: str = "local") -> list:
-        """"Use NPU" (on by default), the power mode and the NPU status line: shown where the phone's NPU is offered,
-        and with a progress bar while its check, its files' download or its start runs (``render_npu`` follows them;
-        nothing here waits for them)."""
+        """The power mode and the NPU status line: shown where the phone's NPU is offered, and with a progress bar
+        while its check, its files' download or its start runs (``render_npu`` follows them; nothing here waits for
+        them). The NPU modes themselves are options of "Run on" (``_run_section``)."""
         from glossarion_mobile.services.local_llm import engine as eng
 
         service = self.service
-        self.npu_switch = toggle(label="Use NPU", value=bool(getattr(service, "use_npu", lambda: True)()),
-                                 key=f"{key_prefix}-npu", on_change=lambda e: self.save_npu())
         self.npu_power = ft.Dropdown(label="NPU power mode", value=getattr(service, "npu_power", lambda: eng.NPU_DEFAULT_POWER)(),
                                      dense=True, key=f"{key_prefix}-npu-power",
                                      options=[ft.DropdownOption(key=mode, text=mode.replace("_", " "))
@@ -1162,9 +1193,7 @@ class OnDeviceFlow:
         self.npu_bar = ft.ProgressBar(value=None, bar_height=3, border_radius=2, visible=False,
                                       key=f"{key_prefix}-npu-progress")
         self.npu_line = _small("", visible=False, key=f"{key_prefix}-npu-line", selectable=True)
-        self.npu_switch_note = _small("Auto models use the NPU when their quant suits it. A failure, or a quant the "
-                                      "NPU cannot run, uses the GPU or CPU instead.", key=f"{key_prefix}-npu-switch-note")
-        self.npu_settings = [self.npu_switch, self.npu_switch_note, self.npu_power, self.npu_power_note]
+        self.npu_settings = [self.npu_power, self.npu_power_note]
         self.npu_box = ft.Column([
             _small(NPU_SECTION_TEXT, key=f"{key_prefix}-npu-note"),
             self.npu_bar, self.npu_line,
@@ -1219,12 +1248,6 @@ class OnDeviceFlow:
         if push:
             _push(box)
 
-    def save_npu(self) -> bool:
-        value = bool(self.service.save_use_npu(self.npu_switch.value))
-        self.npu_switch.value = value
-        _push(self.npu_switch)
-        return value
-
     def save_npu_power(self) -> str:
         value = str(self.service.save_npu_power(self.npu_power.value))
         self.npu_power.value = value
@@ -1237,20 +1260,23 @@ class OnDeviceFlow:
         stem = self.selected_stem()
         total = self.service.gpu_layer_limit(stem)
         layers = self.service.gpu_layers(stem)
-        state = (stem, total, layers, self.service.use_gpu())
+        # the slider is CPU + GPU's alone: shown only while the selected model runs that way ("Run on", or its preset
+        # row's Backend "GPU")
+        shown = bool(self.run_mode_options()) and bool(
+            getattr(self.service, "gpu_layers_apply", lambda stem=None: False)(stem))
+        state = (stem, total, layers, shown)
         if state == self._gpu_limits_state:
             return
         self._gpu_limits_state = state
         self._gpu_total = total
+        self.gpu_layers_box.visible = shown
         self.gpu_layers_slider.max = total or 1
         self.gpu_layers_slider.divisions = total or 1
         self.gpu_layers_slider.value = (total if layers == -1 else min(layers, total)) if total else 0
-        self.gpu_layers_slider.disabled = not total or not self.service.use_gpu()
+        self.gpu_layers_slider.disabled = not total
         self.gpu_layers_note.value = (
             "Includes the output layer. 0 uses CPU; the far right offloads all layers. "
             "Lower this if the phone feels sluggish. Changes apply to the next model load."
-            + (" A model on the NPU and the GPU together uses all layers."
-               if llm_service.AUTO_SPLIT_ENABLED and self.npu_offered() else "")
             if total else "Select a downloaded model to detect its GPU layer limit.")
         self._gpu_layers_changed()
         _push(self.gpu_layers_box)
@@ -1273,25 +1299,19 @@ class OnDeviceFlow:
         self._refresh_gpu_limits()
         return saved
 
-    def save_gpu(self) -> bool:
-        """The switch; every preset and file stays as it is."""
-        value = bool(self.service.save_gpu(self.gpu_switch.value))
-        self.gpu_switch.value = value
-        self._refresh_gpu_limits()
-        self._render_gpu_swap(push=False)
-        _push(self.gpu_switch, self.gpu_layers_slider, self.gpu_swap_box)
-        return value
-
     def gpu_swap(self) -> Optional[tuple]:
-        """Android GPU on and the current ``local/`` model is not a Q4_0 file while its repository is in the
-        Custom table (each has a Q4_0 file): ``(stem, label, quant, family, size)``, else None. The model still
-        runs (on the GPU, maybe slower than the CPU); only a failure falls back to the CPU."""
-        if self._gpu_backend() != "OpenCL" or not self.service.use_gpu():
+        """Android GPU in use (the current ``local/`` model's run mode, "Run on" or its preset row's Backend, puts
+        layers on it) and that model is not a Q4_0 file while its repository is in the Custom table (each has a Q4_0
+        file): ``(stem, label, quant, family, size)``, else None. The model still runs (on the GPU, maybe slower than
+        the CPU); only a failure falls back to the CPU."""
+        if self._gpu_backend() != "OpenCL":
             return None
         model = str(self.current_model() if self.current_model is not None else "") or ""
         if not model.lower().startswith("local/"):
             return None
         stem = model[len("local/"):]
+        if not self.service.use_gpu(stem):
+            return None
         entry = self.service.registry.load().get(stem) or {}
         file = entry.get("file")
         if not file or presets.is_gpu_quant(file):
@@ -1382,7 +1402,7 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Save", key="local-settings-save", on_click=lambda e: self.save_settings())],
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.settings_error,
-            *self._gpu_section(),
+            *self._run_section(),
             *self._npu_section(),
             self.parallel_switch,
             _small("Off by default. When enabled, up to two requests can run at once, using extra memory. "
@@ -1489,7 +1509,7 @@ class LocalModelsPanel(OnDeviceFlow):
         self.gpu_status.visible = bool(note)
         self._render_gpu_swap(push=False)  # a model was loaded / switched
         self.render_npu(snap, push=push)  # the NPU check may have finished since the card was built
-        self._refresh_gpu_limits()
+        self._render_run_mode(push=push)  # ... and added the NPU modes to "Run on" (also the slider)
         self._threads_changed()
         normal = self.service.uses_normal_settings(self.selected_stem())
         if getattr(self, "_sampling_profile", None) != normal:
