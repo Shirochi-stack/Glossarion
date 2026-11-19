@@ -5497,6 +5497,162 @@ _MARKDOWN_LINK_TARGET_WORKER = [
  ),
 ]
 
+# 2026-11-19 A QA-failed metadata row is retranslated on the next run like a Progress Manager reset,
+# unless this run's Partial.b/b2 pass refines it; a completed metadata phase drops its QA marks (the real
+# diff, applied after the entries above)
+_METADATA_QA_RETRANSLATE_WORKER = [
+ (
+  (
+   '\n'
+   '    def metadata_regeneration_request(self):\n'
+   '        """Return ``(reset_all, fields)`` requested by pending metadata rows."""\n'
+   '        reset_all = False\n'
+   '        fields = set()\n'
+   '        retry_statuses = {\n'
+   '            "pending", "failed", "error", "file_missing", "not_translated"\n'
+   '        }\n'
+   '        for _key, entry in self.metadata_entries():\n'
+   '            status = str(entry.get("status", "")).lower()\n'
+   '            if status not in retry_statuses and not entry.get("metadata_regeneration_requested"):\n'
+   '                continue\n'
+  ),
+  (
+   '\n'
+   '    def metadata_regeneration_request(self, left_to_refinement=None):\n'
+   '        """Return ``(reset_all, fields)`` requested by pending metadata rows.\n'
+   '\n'
+   '        A QA-failed row is redone like a Progress Manager reset, unless\n'
+   '        ``left_to_refinement(entry)`` says this run refines it instead.\n'
+   '        """\n'
+   '        reset_all = False\n'
+   '        fields = set()\n'
+   '        retry_statuses = {\n'
+   '            "pending", "failed", "error", "file_missing", "not_translated",\n'
+   '            "qa_failed",\n'
+   '        }\n'
+   '        for _key, entry in self.metadata_entries():\n'
+   '            status = str(entry.get("status", "")).lower()\n'
+   '            if status not in retry_statuses and not entry.get("metadata_regeneration_requested"):\n'
+   '                continue\n'
+   '            if (\n'
+   '                status == "qa_failed"\n'
+   '                and not entry.get("metadata_regeneration_requested")\n'
+   '                and left_to_refinement is not None\n'
+   '                and left_to_refinement(entry)\n'
+   '            ):\n'
+   '                continue\n'
+  ),
+ ),
+ (
+  (
+   '            elif status == "completed":\n'
+   '                entry.pop("failure_reason", None)\n'
+   '                entry.pop("error_message", None)\n'
+   '                entry.pop("metadata_regeneration_requested", None)\n'
+   '            chapters[entry_key] = entry\n'
+  ),
+  (
+   '            elif status == "completed":\n'
+   '                for field in (\n'
+   '                    "failure_reason", "error_message",\n'
+   '                    "metadata_regeneration_requested",\n'
+   '                    "qa_issues", "qa_timestamp", "qa_issues_found",\n'
+   '                    "qa_issue_previews", "duplicate_confidence",\n'
+   '                ):\n'
+   '                    entry.pop(field, None)\n'
+   '            chapters[entry_key] = entry\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   'def _append_partial_b_translation_artifact_chapters(\n'
+   '    chapters,\n'
+   '    out,\n'
+   '    progress_manager,\n'
+   '    config,\n'
+   '):\n'
+   '    """Add QA-failed metadata/TOC/header artifacts to Partial.b/b2 input."""\n'
+   '    mode = str(\n'
+   '        getattr(config, "MULTIPASS_REFINEMENT_MODE", "") or ""\n'
+   '    ).strip().lower()\n'
+   '    result = list(chapters or [])\n'
+   '    if mode not in ("partial.b", "partial.b2"):\n'
+   '        return result\n'
+   '    if parse_chapter_range(os.getenv("CHAPTER_RANGE", "")):\n'
+   '        # Metadata/TOC/header compilation artifacts are not separate entries in\n'
+   '        # the chapter-range preview. Do not append whole-book targets to a\n'
+   '        # range-limited Partial.b/b2 run; any in-range spine HTML already in\n'
+   '        # ``chapters`` remains eligible normally.\n'
+   '        return result\n'
+  ),
+  (
+   '\n'
+   'def _partial_b_artifact_refinement_mode(config):\n'
+   '    """Return the Partial.b/b2 mode that refines translation artifacts, or \'\'."""\n'
+   '    mode = str(\n'
+   '        getattr(config, "MULTIPASS_REFINEMENT_MODE", "") or ""\n'
+   '    ).strip().lower()\n'
+   '    if mode not in ("partial.b", "partial.b2"):\n'
+   '        return ""\n'
+   '    if parse_chapter_range(os.getenv("CHAPTER_RANGE", "")):\n'
+   '        # Metadata/TOC/header compilation artifacts are not separate entries in\n'
+   '        # the chapter-range preview. Do not append whole-book targets to a\n'
+   '        # range-limited Partial.b/b2 run; any in-range spine HTML already in\n'
+   '        # ``chapters`` remains eligible normally.\n'
+   '        return ""\n'
+   '    return mode\n'
+   '\n'
+   '\n'
+   'def _metadata_qa_failure_left_to_refinement(config, entry, *, is_subtitle_file=False):\n'
+   '    """Whether this run\'s Partial.b/b2 pass refines a QA-failed metadata row.\n'
+   '\n'
+   '    Such a row is not retranslated first. These are the runs that reach\n'
+   '    ``_append_partial_b_translation_artifact_chapters`` with a QA match.\n'
+   '    """\n'
+   '    if not _partial_b_artifact_refinement_mode(config):\n'
+   '        return False\n'
+   '    output_mode = str(getattr(config, "OUTPUT_MODE", "") or "")\n'
+   '    refinement_runs = output_mode == "refinement" or (\n'
+   '        bool(getattr(config, "MULTIPASS_MODE", False))\n'
+   '        and output_mode not in ("refinement", "audio", "image", "video")\n'
+   '        and not is_subtitle_file\n'
+   '    )\n'
+   '    return refinement_runs and _entry_has_foreign_character_qa_issue(entry)\n'
+   '\n'
+   '\n'
+   'def _append_partial_b_translation_artifact_chapters(\n'
+   '    chapters,\n'
+   '    out,\n'
+   '    progress_manager,\n'
+   '    config,\n'
+   '):\n'
+   '    """Add QA-failed metadata/TOC/header artifacts to Partial.b/b2 input."""\n'
+   '    mode = _partial_b_artifact_refinement_mode(config)\n'
+   '    result = list(chapters or [])\n'
+   '    if not mode:\n'
+   '        return result\n'
+  ),
+ ),
+ (
+  (
+   '    metadata_reset_all, metadata_reset_fields = (\n'
+   '        progress_manager.metadata_regeneration_request()\n'
+   '    )\n'
+  ),
+  (
+   '    metadata_reset_all, metadata_reset_fields = (\n'
+   '        progress_manager.metadata_regeneration_request(\n'
+   '            lambda entry: _metadata_qa_failure_left_to_refinement(\n'
+   '                config, entry, is_subtitle_file=is_subtitle_file\n'
+   '            )\n'
+   '        )\n'
+   '    )\n'
+  ),
+ ),
+]
+
+
 
 
 APPROVED = (
@@ -7175,6 +7331,18 @@ APPROVED = (
             "src/scan_html_folder.py": _MARKDOWN_CHUNK_SOURCE_SCANNER,
             "src/TransateKRtoEN.py": _MARKDOWN_LINK_TARGET_WORKER,
         },
+        "values": {},
+    },
+    {
+        "date": "2026-11-19",
+        "what": "A QA-failed metadata row is retranslated: the next translation run treats a QA Failed metadata "
+                "row like one reset in the Progress Manager (its phase fields restored from the saved originals "
+                "and translated again, the row rebuilt as pending without QA marks). It is left alone when that "
+                "run's Partial.b/b2 pass refines it: Partial.b/b2 mode, no chapter range, a refinement output run "
+                "or a multipass translation run, and a foreign-character QA issue on the row. A metadata phase "
+                "marked completed drops qa_issues, qa_issues_found, qa_issue_previews, qa_timestamp and "
+                "duplicate_confidence",
+        "source": {"src/TransateKRtoEN.py": _METADATA_QA_RETRANSLATE_WORKER},
         "values": {},
     },
 )

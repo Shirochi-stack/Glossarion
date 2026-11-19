@@ -2504,6 +2504,216 @@ def test_progress_backend_does_not_delete_metadata_history_for_empty_plan(
     assert progress.prog["chapters"]["__metadata__"] == existing
 
 
+_QA_METADATA = {
+    "title": "Translated 失败 Title",
+    "original_title": "원제",
+    "title_translated": True,
+    "description": "Translated description",
+    "original_description": "설명",
+    "description_translated": True,
+    "language": "en",
+}
+_QA_METADATA_FIELDS = {"title": True, "description": True}
+_QA_METADATA_MARKS = (
+    "qa_issues", "qa_issues_found", "qa_issue_previews", "qa_timestamp",
+    "duplicate_confidence",
+)
+
+
+def _completed_metadata_rows(tmp_path, mode):
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(_QA_METADATA, ensure_ascii=False), encoding="utf-8"
+    )
+    progress = ProgressManager(str(tmp_path))
+    plan = progress.configure_metadata_progress(
+        mode,
+        dict(_QA_METADATA),
+        _QA_METADATA_FIELDS,
+        str(metadata_path),
+        source_path=str(tmp_path / "book.epub"),
+    )
+    for phase in plan:
+        entry = progress.prog["chapters"][phase["key"]]
+        assert entry["status"] == "completed"
+        entry["model_name"] = "old-model"
+    progress.save()
+    return progress, plan, metadata_path
+
+
+def _scan_metadata_qa_failure(tmp_path):
+    """Mark metadata.json the way the QA scanner does."""
+    update_progress_file(
+        str(tmp_path),
+        [{
+            "filename": "metadata.json",
+            "filepath": str(tmp_path / "metadata.json"),
+            "file_index": 0,
+            "issues": ["Chinese_text_found_2_chars_[失败]"],
+            "qa_issue_previews": {},
+            "duplicate_confidence": 0,
+            "score": 1,
+        }],
+        lambda _msg: None,
+    )
+    return ProgressManager(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "mode, expected_keys",
+    [
+        ("together", ["__metadata__"]),
+        ("metadata_separate", ["__metadata__:title", "__metadata__:fields"]),
+        (
+            "parallel",
+            ["__metadata__:field:title", "__metadata__:field:description"],
+        ),
+    ],
+)
+def test_qa_failed_metadata_rows_are_retranslated_like_a_reset(
+    tmp_path, mode, expected_keys
+):
+    _progress, plan, metadata_path = _completed_metadata_rows(tmp_path, mode)
+    assert [phase["key"] for phase in plan] == expected_keys
+
+    progress = _scan_metadata_qa_failure(tmp_path)
+    # Every row shares metadata.json, so the scanner marks all of them.
+    assert [
+        entry["status"] for _key, entry in progress.metadata_entries()
+    ] == ["qa_failed"] * len(expected_keys)
+
+    reset_all, reset_fields = progress.metadata_regeneration_request()
+    assert reset_all is False
+    assert reset_fields == {"title", "description"}
+
+    progress.configure_metadata_progress(
+        mode,
+        dict(_QA_METADATA),
+        _QA_METADATA_FIELDS,
+        str(metadata_path),
+        source_path=str(tmp_path / "book.epub"),
+        reset_all=reset_all,
+        reset_fields=reset_fields,
+    )
+    for key in expected_keys:
+        entry = progress.prog["chapters"][key]
+        assert entry["status"] == "pending"
+        assert entry["metadata_regeneration_requested"] is True
+        assert not any(mark in entry for mark in _QA_METADATA_MARKS)
+
+    set_current_thread_actual_request_model("new-model", "KEY 2")
+    for key in expected_keys:
+        progress.update_metadata_status("completed", str(metadata_path), key=key)
+        entry = progress.prog["chapters"][key]
+        assert entry["status"] == "completed"
+        assert entry["model_name"] == "new-model"
+        assert entry["key_identifier"] == "KEY 2"
+        assert "metadata_regeneration_requested" not in entry
+        assert not any(mark in entry for mark in _QA_METADATA_MARKS)
+    assert progress.metadata_regeneration_request() == (False, set())
+
+
+def test_only_qa_failed_metadata_phases_are_requested(tmp_path):
+    progress, _plan, _path = _completed_metadata_rows(tmp_path, "parallel")
+    assert progress.metadata_regeneration_request() == (False, set())
+
+    entry = progress.prog["chapters"]["__metadata__:field:description"]
+    entry.update({
+        "status": "qa_failed",
+        "qa_issues": True,
+        "qa_issues_found": ["Chinese_text_found_2_chars_[失败]"],
+    })
+
+    assert progress.metadata_regeneration_request() == (False, {"description"})
+
+
+def test_metadata_completion_clears_stale_qa_marks(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"]["__metadata__"] = {
+        "actual_num": -1,
+        "output_file": "metadata.json",
+        "status": "qa_failed",
+        "special_type": "metadata",
+        "metadata_fields": ["title"],
+        "qa_issues": True,
+        "qa_issues_found": ["Chinese_text_found_2_chars_[失败]"],
+        "qa_issue_previews": {"x": "y"},
+        "qa_timestamp": 1.0,
+        "duplicate_confidence": 0,
+    }
+
+    entry = progress.update_metadata_status("completed", key="__metadata__")
+
+    assert entry["status"] == "completed"
+    assert not any(mark in entry for mark in _QA_METADATA_MARKS)
+
+
+class _MetadataRefinementConfig:
+    MULTIPASS_MODE = True
+    MULTIPASS_REFINEMENT_MODE = "partial.b"
+    OUTPUT_MODE = "translation"
+
+
+@pytest.mark.parametrize(
+    "overrides, chapter_range, issue, left_to_refinement",
+    [
+        ({}, "", "Chinese_text_found_2_chars_[失败]", True),
+        ({"MULTIPASS_REFINEMENT_MODE": "partial.b2"}, "", "Chinese_text_found_2_chars_[失败]", True),
+        (
+            {"MULTIPASS_MODE": False, "OUTPUT_MODE": "refinement"},
+            "", "Chinese_text_found_2_chars_[失败]", True,
+        ),
+        ({"MULTIPASS_REFINEMENT_MODE": "partial"}, "", "Chinese_text_found_2_chars_[失败]", False),
+        ({"MULTIPASS_REFINEMENT_MODE": "full"}, "", "Chinese_text_found_2_chars_[失败]", False),
+        ({"MULTIPASS_MODE": False}, "", "Chinese_text_found_2_chars_[失败]", False),
+        ({}, "2-3", "Chinese_text_found_2_chars_[失败]", False),
+        ({}, "", "EMPTY_OUTPUT", False),
+    ],
+)
+def test_partial_b_refinement_keeps_its_qa_failed_metadata_row(
+    tmp_path, monkeypatch, overrides, chapter_range, issue, left_to_refinement
+):
+    import TransateKRtoEN as backend
+
+    monkeypatch.setenv("CHAPTER_RANGE", chapter_range)
+    config = _MetadataRefinementConfig()
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"]["__metadata__"] = {
+        "actual_num": -1,
+        "output_file": "metadata.json",
+        "status": "qa_failed",
+        "special_type": "metadata",
+        "metadata_fields": ["title", "description"],
+        "qa_issues": True,
+        "qa_issues_found": [issue],
+    }
+
+    request = progress.metadata_regeneration_request(
+        lambda entry: backend._metadata_qa_failure_left_to_refinement(
+            config, entry
+        )
+    )
+
+    # A row the Partial.b/b2 pass refines stays QA failed for that pass; any
+    # other QA-failed row is retranslated.
+    expected = (False, set()) if left_to_refinement else (
+        False, {"title", "description"}
+    )
+    assert request == expected
+
+
+def test_translation_run_passes_refinement_check_to_metadata_request():
+    import TransateKRtoEN as backend
+
+    source = inspect.getsource(backend.main)
+    call = source.split("progress_manager.metadata_regeneration_request(", 1)[1]
+    assert call.lstrip().startswith(
+        "lambda entry: _metadata_qa_failure_left_to_refinement("
+    )
+
+
 def test_progress_update_captures_actual_request_model(tmp_path):
     progress = ProgressManager(str(tmp_path))
     set_current_thread_actual_request_model("deepseek-v4", "FALLBACK KEY (deepseek-v4)")
