@@ -354,10 +354,14 @@ def test_arch_registry_and_missing_steps():
     assert not eng.npu_passed(None) and not eng.npu_passed({})
 
 
-def test_npu_platform_is_android_arm64_only():
+def test_npu_platform_is_android_arm64_and_ios():
     assert eng.npu_platform("android", "aarch64") and eng.npu_platform("android", "arm64-v8a")
-    assert not eng.npu_platform("android", "x86_64") and not eng.npu_platform("ios", "arm64")
+    assert not eng.npu_platform("android", "x86_64")
     assert not eng.npu_platform("desktop", "aarch64")
+    # iOS (the Apple Neural Engine; simulators too: stage 1's "device" step says no there), but only on the iOS
+    # runtime itself when the machine is not given: a host test with platform "ios" never runs the NPU check
+    assert eng.npu_platform("ios", "arm64") and eng.npu_platform("ios", "x86_64")
+    assert not eng.npu_platform("ios")
 
 
 def test_device_index_places_gpu_and_npu_loads(fake_llama, monkeypatch):  # noqa: F811

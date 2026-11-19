@@ -218,7 +218,8 @@ libmtmd (the image encoder of vision models).
 
 Experimental, Android arm64 only: llama.cpp's Hexagon backend (`ggml-hexagon`, registry name `HTP`) runs
 the model on the phone's Qualcomm Hexagon NPU (the cDSP's HTP), reached through the vendor's FastRPC
-library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
+library `libcdsprpc.so`. x86_64 builds exactly as before (no backend); iOS has its own NPU backend, see
+"NPU (Apple Neural Engine)" below.
 
 * What the APK carries: `libggml-hexagon.so`, an ordinary arm64 `GGML_BACKEND_DL` module next to
   `libggml-opencl.so` (`llama_cpp/lib`, the APK's jniLibs), and the small marker file
@@ -274,6 +275,66 @@ library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
   `recipes/llama-cpp-python/` (the patch included) rebuilds the engine wheel once: the wheel cache keys
   hash them.
 
+#### NPU (Apple Neural Engine)
+
+Experimental, iPhone and iPad, **test builds only**. The iOS engine can run part of a model on the Apple
+Neural Engine through `ggml-ane`, a backend from llama.cpp pull request 31969 ("ggml: (research) add ANE
+(Apple Neural Engine) backend", commit `a45d7d2e`, MIT). That pull request is a draft and is not merged
+into llama.cpp.
+
+* **It uses a private Apple interface.** The backend loads Apple's private `AppleNeuralEngine.framework` at
+  run time (dlopen, classes looked up by name). Nothing private is linked into the app, but the interface
+  is undocumented: an iOS update can change it, and App Store / TestFlight review refuses apps that use
+  it. Ship it only in test builds (the unsigned or AltStore IPA), never in a signed App Store build.
+* What it needs on the phone: iOS 18 or later (its programs use the iOS 18 format). Simulators have no
+  Neural Engine; the app checks the device before it touches the framework, so a simulator never loads
+  it.
+* Phone storage: the first time a model loads on the NPU, iOS compiles it (about a minute for a small
+  model, longer for 2B and up) and keeps the compiled copy in its own cache, roughly 2.5 times the model's
+  int8 weights (an estimate). **Glossarion cannot remove these copies**, and the backend's own purge does
+  not free the space on iOS. The engine therefore compiles each model once (it collects the shapes it
+  uses, compiles them together and then freezes: a new shape runs on the CPU instead of compiling
+  another copy), uses int8 weights, and the app checks free storage before the first compile (the copy
+  plus about twice the int8 weights of temporary files while the model is loaded, plus 2 GB). Each
+  context below 8192 tokens is its own copy; every context from 8192 up shares one (attention reads at
+  most 8192 cache rows on the Neural Engine; longer runs on the CPU). Any NPU load on iOS (Auto, a model
+  set to NPU, the diagnostics timing) needs a GGUF of at most 1.5 GB. The engine card lists the copies
+  made so far (an estimate, also from loads that failed half way), even when the NPU is no longer
+  offered. Later loads should reuse the cached copy (to be confirmed on a phone).
+* What the IPA carries: `libggml-ane.dylib` in `llama_cpp/lib` of every iOS slice, linked into
+  `libggml` like `libggml-metal` (the patched loader loads it before `libggml`; loading it does nothing),
+  and the marker `llama_cpp/npu-backend.txt` with the text `libggml-ane.dylib`. Nothing is downloaded.
+* The build: `recipes/llama-cpp-python/patches/ane-backend.patch` (applied after `mobile.patch`) holds the
+  pull request's backend, adapted to the vendored llama.cpp (its header lists every change: the registry
+  does not register it at start, the marker, counters, the freeze, the test program and the functions the
+  loader calls). `wheels.py stage-ane` writes `glossarion/ane-init.cmake` (`GGML_ANE` ON or OFF) into
+  both slices of the support tree's `Python.xcframework`, and the iOS branch of `meta.yaml` loads it with
+  `-C{HOST_PYTHON_HOME}/glossarion/ane-init.cmake`. The deployment target stays 13.0.
+* At run time (the patched loader, `mobile.patch` 11., only when the app asks): `npu_precheck()` runs
+  shipped, device (`platform.ios_ver()`: not a simulator, iOS 18 or later) and framework (the framework
+  and its classes load; nothing is compiled or registered). `register_npu_backend()` repeats them, sets
+  `GGML_ANE_WEIGHTS=int8` (unless the app passes another value) and removes the backend's development
+  switches (`GGML_ANE_PURGE_CACHE`, `GGML_ANE_DUMP_DIR`, `GGML_ANE_PROFILE`), registers the backend
+  (registry name `ANE`) and compiles and runs one small test program. `npu_model_begin`, `npu_collect`,
+  `npu_freeze` and `npu_stats` drive the per-model compile pass. `device_index("ANE")` gives its
+  `main_gpu` (its device type is GPU).
+* Checks: `wheels.py verify-native` / `verify-site-packages` expect `libggml-ane` in each iOS slice and
+  the marker, check that `libggml` links it, that it links only `libggml-base` / `libggml-cpu`, `/usr/lib`,
+  Foundation, IOSurface and CoreFoundation, that it exports the functions the loader calls, and that no
+  library links a private framework. `ci/verify_ipa.py` checks the IPA carries the backend and the marker
+  and no copy of the private framework, and fails an App Store / TestFlight build that carries it
+  (`--export-method` app-store / app-store-connect, or a provisioning profile without a device list).
+  `assert-selftest` checks the simulator smoke run: the engine loads, the NPU functions are there, the
+  NPU check stops at the device step, and no NPU backend is registered (`registered` is empty).
+  `wheels.py stage-ane --forge` first checks that forge still points `{HOST_PYTHON_HOME}` at those slices.
+* The switch: `[ane] enabled = false` in `ci/wheels/wheelhouse.toml` builds the engine without it
+  (`GGML_ANE=OFF`, no `libggml-ane`, no marker, no installed header; the checks then expect none). It is
+  on on this branch.
+* Not known yet (needs a real iPhone): where iOS keeps the compiled copies, whether deleting the app
+  frees them, the real size, whether a second launch reuses them, the speed against Metal for the default
+  Qwen3.5 models (only some of their operations run on the Neural Engine; the rest stays on the CPU) and
+  the translation quality with int8 weights.
+
 * Size: about 4 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
   of Python, resolved by pip). Android also installs `flet-libcpp-shared` (`libc++_shared.so`,
   which must exist exactly once in the APK: Gradle merges jniLibs).
@@ -281,7 +342,7 @@ library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
   verify-site-packages --platform <p> --package llama-cpp-python build/site-packages` checks what
   pip installed, both against the same profile: the pinned version and build >= 1000, exactly the
   profile's libraries (the five; arm64: the CPU variants instead of libggml-cpu, plus libggml-opencl;
-  iOS: plus libggml-metal), then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
+  iOS: plus libggml-metal, and libggml-ane while `[ane]` is on), then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
   libc++_shared, libc/libm/libdl/liblog) and every strong import resolved by a sibling,
   libc++_shared or the NDK API-24 stubs (Android); the slice's CPU and platform, minos <= 13.0
   (14.0 on the arm64 simulator), only sibling and `/usr/lib` dylibs and no DYNAMIC_LOOKUP binds (iOS).

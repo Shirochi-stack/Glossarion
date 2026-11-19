@@ -385,7 +385,7 @@ def test_smoke_check_fails_when_a_gpu_backend_registered_by_itself(monkeypatch):
         def __call__(self, *a):
             return self.fn(*a)
 
-    registered = {b"Metal"}
+    registered = {b"MTL"}  # ggml-metal's registry name at the pin (ggml-metal.cpp); "Metal" never matches it
     libggml = types.SimpleNamespace(ggml_backend_reg_by_name=_Fn(lambda name: 1 if name in registered else 0))
     ext = types.SimpleNamespace(gpu_backend_name=lambda: "Metal", GPU_STATE={}, _LIBGGML=libggml)
     monkeypatch.setattr(selfcheck.importlib, "import_module", lambda name: ext)
@@ -395,7 +395,7 @@ def test_smoke_check_fails_when_a_gpu_backend_registered_by_itself(monkeypatch):
     registered.clear()
     assert selfcheck.gpu_backend_check() == {"backend": "Metal", "registered": [], "requested": False, "state": {}}
     # the user switched it on: registered is expected
-    registered.add(b"Metal")
+    registered.add(b"MTL")
     ext.GPU_STATE = {"backend": "Metal", "device": "Apple A17 Pro GPU", "error": None}
     assert selfcheck.gpu_backend_check()["registered"] == ["Metal"]
     # the app and the build disagree (an Android arm64 build without libggml-opencl)

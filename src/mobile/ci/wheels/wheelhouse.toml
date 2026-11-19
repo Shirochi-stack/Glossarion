@@ -9,7 +9,7 @@
 # PIP_FIND_LINKS (.github/actions/mobile-wheelhouse). Nothing here is uploaded to an index or a release.
 #
 # Read by:
-#   ci/wheels/wheels.py             env / fetch / stage-openssl / stage-opencl / stage-hexagon / collect / retag /
+#   ci/wheels/wheels.py             env / fetch / stage-openssl / stage-opencl / stage-hexagon / stage-ane / collect / retag /
 #                                   verify-native / verify-site-packages / assert-selftest
 #   tools/check_mobile_wheels.py    --wheelhouse / --wheelhouse-plan / --verify-wheelhouse / --verify-installed
 #
@@ -144,6 +144,29 @@ v75 = { name = "libggml-htp-v75.so", member = "llama-b12387/lib/libggml-htp-v75.
 v79 = { name = "libggml-htp-v79.so", member = "llama-b12387/lib/libggml-htp-v79.so", size = 1034088, sha256 = "d92f8f270d799184ba22893568fa574335e06e1bc3aa60384d27b1a8d554b01b" }
 v81 = { name = "libggml-htp-v81.so", member = "llama-b12387/lib/libggml-htp-v81.so", size = 1046408, sha256 = "f635668d342ff7cb7c088795d549bc8a94ba11a4c8afa2384e610ad61c925526" }
 v85 = { name = "libggml-htp-v85.so", member = "llama-b12387/lib/libggml-htp-v85.so", size = 1046408, sha256 = "35cb77a2447b98451b2c5919bdf1feba5d0b1b32e9786341c10cb1e27488201d" }
+
+# The optional NPU backend on iOS (Apple Neural Engine; ggml-ane from llama.cpp pull request 31969, commit a45d7d2e,
+# a DRAFT that is not merged upstream): recipes/llama-cpp-python/patches/ane-backend.patch adds libggml-ane.dylib
+# (linked into libggml, like libggml-metal) and the marker llama_cpp/npu-backend.txt to all three iOS slices; the
+# loader refuses simulators and iOS below 18 at run time.
+#
+# THE SWITCH: enabled = false builds the engine without it: wheels.py stage-ane writes GGML_ANE OFF into the CMake
+# initial cache the iOS recipe loads (the patch itself is always applied, and with GGML_ANE OFF it adds no code and
+# installs nothing: the same code as without it, only __LINE__ numbers in ggml-backend-reg.cpp move), and
+# verify-native / verify-site-packages / ci/verify_ipa.py then expect no libggml-ane and no marker. Android never
+# builds it. ci/verify_ipa.py fails an App Store / TestFlight build that carries it.
+#
+# CAVEATS: it uses Apple's PRIVATE AppleNeuralEngine.framework (dlopen at run time, classes by name; nothing private
+# is linked, verify-native fails on any PrivateFrameworks load command), which App Store / TestFlight review
+# refuses: test builds only. Every compiled program stays in the OS compile cache, which the app cannot remove
+# (about 2.5x the model's int8 weights per model, a minute or more to compile at its first NPU load). See
+# src/mobile/README.md "NPU (Apple Neural Engine)".
+# targets: exactly the three iOS slices; pr / commit: where ane-backend.patch comes from (informational).
+[ane]
+enabled = true
+targets = ["iphoneos.arm64", "iphonesimulator.arm64", "iphonesimulator.x86_64"]
+pr = 31969
+commit = "a45d7d2e"
 
 # The wheels we promise. version must equal the pyproject pin, sdist_sha256 the uv.lock sdist
 # hash, and requires_dist the wheel METADATA's Requires-Dist entries that carry no extra marker.

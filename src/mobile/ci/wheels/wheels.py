@@ -22,6 +22,9 @@ Used by ``build_wheels.sh`` and ``.github/workflows/mobile-wheels.yml``:
     stage-hexagon    Android: the Hexagon SDK (sha256-checked, extracted once) and the CMake initial
                      cache the llama-cpp-python arm64 recipe loads (-C): GGML_HEXAGON=ON with the SDK
                      paths, or OFF when wheelhouse.toml [hexagon] enabled = false (the NPU backend)
+    stage-ane        iOS: the CMake initial cache the llama-cpp-python iOS recipe loads (-C) from each
+                     Python.xcframework slice: GGML_ANE ON, or OFF when wheelhouse.toml [ane] enabled =
+                     false (the iOS NPU backend, recipes/llama-cpp-python/patches/ane-backend.patch)
     collect          copy only the promised wheels from forge's dist/ into <cache>/<package>/
     retag            the manifest's [wheel.retag] targets (iOS Pillow): download PyPI's official
                      wheel (url + sha256 from the manifest), rewrite only its file name, the WHEEL
@@ -44,6 +47,7 @@ Exit codes: 0 ok, 1 check or build failure, 2 usage error.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import datetime
 import hashlib
@@ -143,6 +147,7 @@ AARCH64_FEATURE_ENCODINGS = {
 MH_TWOLEVEL = 0x80
 LC_SYMTAB = 0x2
 N_STAB, N_TYPE, N_EXT, N_UNDF, N_PBUD = 0xE0, 0x0E, 0x01, 0x0, 0xC
+N_SECT = 0xE
 MACHO_SPECIAL_ORDINALS = {0x00: "SELF_LIBRARY_ORDINAL", 0xFE: "DYNAMIC_LOOKUP_ORDINAL", 0xFF: "EXECUTABLE_ORDINAL"}
 PILLOW_FEATURES = ("jpg", "zlib", "webp", "freetype2")
 PILLOW_ROUNDTRIP = ("JPEG", "PNG", "WEBP")
@@ -803,6 +808,129 @@ def cmd_stage_hexagon(ctx: Ctx, args) -> None:
         f"(no HTP skeletons are built; the app downloads llama.cpp {spec['skeletons']['release']}'s)")
 
 
+# ============================================================================ ANE (iOS NPU backend)
+#: The package whose iOS build carries the optional NPU backend (libggml-ane, patches/ane-backend.patch).
+ANE_PACKAGE = "llama-cpp-python"
+#: [ane] targets must be exactly these (the recipe's iOS branch loads the initial cache in every slice).
+ANE_TARGETS = ("iphoneos.arm64", "iphonesimulator.arm64", "iphonesimulator.x86_64")
+#: The CMake initial cache stage-ane writes into each Python.xcframework slice; the iOS recipe loads it with
+#: -C{HOST_PYTHON_HOME}/<this> (forge's HOST_PYTHON_HOME is the slice of the sdk/arch being built).
+ANE_INIT_CACHE = "glossarion/ane-init.cmake"
+#: The Python.xcframework slices forge's HOST_PYTHON_HOME points at (forge cross.py XCFRAMEWORK_SLICES).
+ANE_XCFRAMEWORK_SLICES = ("ios-arm64", "ios-arm64_x86_64-simulator")
+ANE_LIB = "libggml-ane"
+#: The symbols the loader looks up in libggml-ane (mobile.patch 11.); verify-native checks they are exported.
+ANE_EXPORTS = ("ggml_backend_ane_reg", "ggml_backend_ane_collect_shapes", "ggml_backend_ane_set_kv_buckets",
+               "glossarion_ane_probe", "glossarion_ane_selftest", "glossarion_ane_freeze",
+               "glossarion_ane_set_cpu_threads", "glossarion_ane_get_stats", "glossarion_ane_reset_stats")
+#: The only sibling libraries libggml-ane may link.
+ANE_SIBLINGS = ("libggml-base", "libggml-cpu")
+#: Apple's private frameworks may only be dlopened at run time (the ANE's AppleNeuralEngine): no load command.
+PRIVATE_FRAMEWORKS = "/System/Library/PrivateFrameworks/"
+#: What llama_cpp/npu-backend.txt says on each platform (the loader's npu_backend_name() reads it).
+NPU_MARKER_TEXT = {"android": "libggml-hexagon.so", "ios": "libggml-ane.dylib"}
+
+
+def ane_spec(data: dict, where: str = "wheelhouse.toml") -> dict | None:
+    """[ane] of the manifest when enabled ({targets, pr, commit}), None when it is switched off (enabled = false,
+    or no table). Raises WheelsError on a bad table."""
+    spec = data.get("ane")
+    if spec is None:
+        return None
+    if not isinstance(spec, dict) or not isinstance(spec.get("enabled"), bool):
+        raise WheelsError(f"{where}: [ane] needs enabled = true or false")
+    if not spec["enabled"]:
+        return None
+    targets = spec.get("targets")
+    if not isinstance(targets, list) or tuple(targets) != ANE_TARGETS:
+        raise WheelsError(f"{where}: [ane] targets must be {list(ANE_TARGETS)} (the recipe's iOS branch loads the "
+                          f"ANE initial cache in every slice), got {targets!r}")
+    pr, commit = spec.get("pr"), spec.get("commit")
+    if not (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0) or \
+            not (isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{7,40}", commit)):
+        raise WheelsError(f"{where}: [ane] needs pr (llama.cpp's pull request number) and commit (its hex commit)")
+    return {"targets": tuple(targets), "pr": pr, "commit": commit}
+
+
+def ane_targets(ctx: Ctx) -> tuple:
+    """The iOS targets whose llama-cpp-python wheel carries libggml-ane (() when [ane] is switched off)."""
+    spec = ane_spec(ctx.data, ctx.manifest_path.name)
+    if spec is None:
+        return ()
+    built = {t for w in ctx.manifest.wheels if w.name == ANE_PACKAGE for t in w.built_targets}
+    return tuple(t for t in spec["targets"] if t in built)
+
+
+def builds_ane_recipe(ctx: Ctx, packages=None) -> bool:
+    """This iOS run builds the llama-cpp-python wheel, whose recipe loads the ANE initial cache (written whether the
+    backend is on or off)."""
+    if ctx.platform != "ios" or ANE_PACKAGE not in {w.name for w in ctx.wheels(packages)}:
+        return False
+    return any(cmw.platform_of(t) == "ios" for w in ctx.wheels(packages) if w.name == ANE_PACKAGE
+               for t in w.built_targets)
+
+
+def ane_init_cache(enabled: bool) -> str:
+    """The CMake initial cache (cmake -C) of the iOS llama-cpp-python build: GGML_ANE ON or OFF."""
+    return ("# Written by src/mobile/ci/wheels/wheels.py stage-ane (wheelhouse.toml [ane]); loaded with -C\n"
+            f'set(GGML_ANE {"ON" if enabled else "OFF"} CACHE BOOL "" FORCE)\n')
+
+
+def forge_ane_errors(forge_dir: Path) -> list:
+    """What the recipe's -C{HOST_PYTHON_HOME}/glossarion/ane-init.cmake relies on in the mobile-forge checkout: build.py
+    formats script_env with a "HOST_PYTHON_HOME" key, and cross.py's XCFRAMEWORK_SLICES maps every [ane] target to
+    one of ANE_XCFRAMEWORK_SLICES (where stage-ane writes) and uses them all. [] when it holds."""
+    src = Path(forge_dir) / "src" / "forge"
+    errors = []
+    try:
+        build = (src / "build.py").read_text(encoding="utf-8")
+        cross = (src / "cross.py").read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"{src}: cannot read forge's build.py / cross.py ({exc})"]
+    if not re.search(r'''["']HOST_PYTHON_HOME["']\s*:''', build) or ".format(**script_vars)" not in build:
+        errors.append(f"{src / 'build.py'}: script_env is no longer formatted with a HOST_PYTHON_HOME key (the recipe's "
+                      f"-C{{HOST_PYTHON_HOME}}/{ANE_INIT_CACHE} needs it)")
+    slices = {}
+    try:
+        for node in ast.walk(ast.parse(cross)):
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "XCFRAMEWORK_SLICES"
+                                                    for t in node.targets):
+                slices = ast.literal_eval(node.value)
+    except (SyntaxError, ValueError) as exc:
+        errors.append(f"{src / 'cross.py'}: XCFRAMEWORK_SLICES is not readable ({exc})")
+    wanted = {tuple(t.split(".", 1)): None for t in ANE_TARGETS}
+    got = {target: slices.get(target) for target in wanted} if isinstance(slices, dict) else {}
+    if not got or any(v not in ANE_XCFRAMEWORK_SLICES for v in got.values()) or \
+            set(got.values()) != set(ANE_XCFRAMEWORK_SLICES):
+        errors.append(f"{src / 'cross.py'}: XCFRAMEWORK_SLICES gives {got or slices!r} for the [ane] targets; stage-ane "
+                      f"writes into {list(ANE_XCFRAMEWORK_SLICES)}")
+    return errors
+
+
+def cmd_stage_ane(ctx: Ctx, args) -> None:
+    """Write the iOS llama-cpp-python build's CMake initial cache into both slices of the support tree's
+    Python.xcframework (--xcframework): GGML_ANE ON with [ane] enabled, OFF when it is switched off. With --forge,
+    first check that this forge still resolves {HOST_PYTHON_HOME} to those slices (forge_ane_errors)."""
+    if not builds_ane_recipe(ctx, args.packages):
+        log("no iOS llama-cpp-python build in these packages; nothing to stage")
+        return
+    if getattr(args, "forge", None):
+        problems = forge_ane_errors(Path(args.forge))
+        if problems:
+            raise WheelsError("; ".join(problems))
+        log(f"ok {args.forge}: forge formats script_env with HOST_PYTHON_HOME = the slices {list(ANE_XCFRAMEWORK_SLICES)}")
+    enabled = ane_spec(ctx.data, ctx.manifest_path.name) is not None
+    xcf = Path(args.xcframework)
+    for slice_name in ANE_XCFRAMEWORK_SLICES:
+        if not (xcf / slice_name).is_dir():
+            raise WheelsError(f"{xcf}: no slice {slice_name} (is it the support tree's Python.xcframework?)")
+    for slice_name in ANE_XCFRAMEWORK_SLICES:
+        init = xcf / slice_name / ANE_INIT_CACHE
+        init.parent.mkdir(parents=True, exist_ok=True)
+        init.write_text(ane_init_cache(enabled), encoding="utf-8")
+        log(f"ok {init}: GGML_ANE {'ON (the iOS NPU backend, libggml-ane)' if enabled else 'OFF ([ane] is switched off)'}")
+
+
 # ============================================================================ collect / assemble / provenance
 def _wheel_identity(filename: str):
     parts = filename[:-4].split("-") if filename.endswith(".whl") else []
@@ -1393,22 +1521,26 @@ def parse_macho(data: bytes) -> dict:
         elif cmd == LC_SYMTAB:
             symtab = struct.unpack_from("<IIII", data, off + 8)      # symoff, nsyms, stroff, strsize
         off += cmdsize
-    undefined = None
+    undefined = defined = None
     if symtab is not None:
         symoff, nsyms, stroff, strsize = symtab
         if symoff + nsyms * 16 > len(data) or stroff + strsize > len(data):
             raise ValueError("LC_SYMTAB points outside the file")
         strings = data[stroff:stroff + strsize]
-        undefined = []
+        undefined, defined = [], []
         for n_strx, n_type, _sect, n_desc, _value in struct.iter_unpack("<IBBHQ", data[symoff:symoff + nsyms * 16]):
-            if n_type & N_STAB or not n_type & N_EXT or (n_type & N_TYPE) not in (N_UNDF, N_PBUD):
+            kind = n_type & N_TYPE
+            if n_type & N_STAB or not n_type & N_EXT or kind not in (N_UNDF, N_PBUD, N_SECT):
                 continue
             if n_strx >= strsize:
                 raise ValueError(f"symbol name offset {n_strx} is outside the string table")
             name = strings[n_strx:strings.index(b"\0", n_strx)].decode("utf-8", "replace")
-            undefined.append((name, (n_desc >> 8) & 0xFF))
+            if kind == N_SECT:
+                defined.append(name)
+            else:
+                undefined.append((name, (n_desc >> 8) & 0xFF))
     return {"cputype": cputype & 0xFFFFFFFF, "filetype": filetype, "flags": flags, "dylibs": dylibs,
-            "builds": builds, "version_mins": version_mins, "undefined": undefined}
+            "builds": builds, "version_mins": version_mins, "undefined": undefined, "defined": defined}
 
 
 def _macho_version(v: int) -> tuple:
@@ -1604,11 +1736,12 @@ def check_ios_binary(name: str, data: bytes, target: str, package: str, openssl:
 
 
 def verify_native_wheel(path: Path, package: str, target: str, openssl: str, minos: tuple, stubs=None,
-                        hexagon=None) -> tuple:
+                        hexagon=None, ane=None) -> tuple:
     """(errors, notes) for one wheel. ``stubs``: NdkStubs for the Android import checks; ``hexagon``:
-    hexagon_targets() (the NPU backend expected in the llama-cpp-python wheel of those targets)."""
+    hexagon_targets() (the NPU backend expected in the llama-cpp-python wheel of those targets); ``ane``:
+    ane_targets() (the iOS NPU backend expected there)."""
     if package in SITE_PROFILES:
-        return verify_profile_wheel(path, package, target, minos, stubs, hexagon)
+        return verify_profile_wheel(path, package, target, minos, stubs, hexagon, ane)
     errors, notes = [], []
     with zipfile.ZipFile(path) as zf:
         sos = sorted(n for n in zf.namelist() if n.endswith(".so"))
@@ -1661,15 +1794,18 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
         print(f"NDK for the import checks: {ndk or 'none (pass --ndk, or set NDK_HOME or ANDROID_HOME)'}")
     errors, notes = [], []
     hexagon = hexagon_targets(ctx) if ctx.platform == "android" else {}
+    ane = ane_targets(ctx) if ctx.platform == "ios" else ()
     if ctx.platform == "android":
         print(f"NPU backend (wheelhouse.toml [hexagon]): "
               f"{', '.join(f'{t} {list(a)}' for t, a in hexagon.items()) or 'switched off (none expected)'}")
+    else:
+        print(f"NPU backend (wheelhouse.toml [ane]): {', '.join(ane) or 'switched off (none expected)'}")
     for w, target in ctx.manifest.promised(ctx.platform):
         matches = find_wheel(wheelhouse, w.filename(target, ctx.manifest.build_tag))
         if len(matches) != 1:
             errors.append(f"{wheelhouse}: expected one {w.filename(target, ctx.manifest.build_tag)}")
             continue
-        errs, ns = verify_native_wheel(matches[0], w.name, target, openssl, minos, stubs, hexagon)
+        errs, ns = verify_native_wheel(matches[0], w.name, target, openssl, minos, stubs, hexagon, ane)
         if w.retag_source(target):
             retag_errs = verify_retagged(matches[0], w, target, args.official, ctx.manifest.build_tag)
             errs += retag_errs
@@ -1723,8 +1859,15 @@ SITE_PROFILES = {
         # siblings and bionic, and nothing may need it), plus its ``marker`` file. No HTP skeleton may ship
         # (npu_skeleton_files), whether the backend is on or off.
         "hexagon": {"lib": "libggml-hexagon", "marker": NPU_MARKER},
+        # The optional iOS NPU backend (mobile.patch 11., patches/ane-backend.patch), on the targets wheelhouse.toml
+        # [ane] names (ane_targets; none when it is switched off): libggml-ane, linked into libggml like
+        # libggml-metal (libggml must LC_LOAD_DYLIB it, which is why the loader preloads it), plus the same marker
+        # file. It links only libggml-base / libggml-cpu, /usr/lib and the public frameworks below, exports what the
+        # loader looks up (ANE_EXPORTS), and nothing may link a private framework (it dlopens AppleNeuralEngine).
+        "ane": {"lib": ANE_LIB, "marker": NPU_MARKER},
         # System frameworks an iOS library may link besides /usr/lib (Metal is in every iOS 13+).
-        "ios_frameworks": {"libggml-metal": ("Foundation", "Metal", "MetalKit", "CoreFoundation", "CoreGraphics")},
+        "ios_frameworks": {"libggml-metal": ("Foundation", "Metal", "MetalKit", "CoreFoundation", "CoreGraphics"),
+                           ANE_LIB: ("Foundation", "IOSurface", "CoreFoundation")},
         # The optional AArch64 instructions each arm64 library may use (aarch64_code_features); every
         # other library must run on an armv8.0 core. A variant must also contain the instructions its
         # feature set promises (proof that its -march flags took effect).
@@ -1741,12 +1884,14 @@ SITE_PROFILES = {
 }
 
 
-def profile_libs(profile: dict, target: str, hexagon=None) -> tuple:
+def profile_libs(profile: dict, target: str, hexagon=None, ane=None) -> tuple:
     """The library stems a SITE_PROFILES entry expects for ``target``; ``hexagon``: hexagon_targets() (the NPU
-    backend's library on the targets it names)."""
+    backend's library on the targets it names); ``ane``: ane_targets() (the iOS NPU backend's library)."""
     libs = tuple(profile.get("target_libs", {}).get(target, profile["libs"]))
     if (hexagon or {}).get(target) and "hexagon" in profile:
         libs += (profile["hexagon"]["lib"],)
+    if target in (ane or ()) and "ane" in profile:
+        libs += (profile["ane"]["lib"],)
     return libs
 
 
@@ -1775,22 +1920,35 @@ def npu_skeleton_files(names, head) -> list:
     return sorted(out)
 
 
-def check_npu_files(label: str, names, head, enabled: bool) -> tuple:
+def _npu_expected(target: str, hexagon=None, ane=None) -> bool:
+    """``target`` carries an NPU backend: hexagon_targets() names it (Android) or ane_targets() does (iOS)."""
+    return bool((hexagon or {}).get(target)) or target in (ane or ())
+
+
+def check_npu_files(label: str, names, head, enabled: bool, platform: str = "android") -> tuple:
     """(errors, notes) of the NPU backend's package data (``names``: every file of the wheel / site-packages,
     relative POSIX paths; ``head``: see npu_skeleton_files): no HTP skeleton anywhere, and the marker
-    NPU_MARKER exactly when the backend is expected (``enabled``)."""
+    NPU_MARKER exactly when the backend is expected (``enabled``), saying the ``platform``'s backend library
+    (NPU_MARKER_TEXT: libggml-hexagon.so on Android, libggml-ane.dylib on iOS)."""
     names = list(names)
     errors, notes = [], []
+    switch, source = ("[ane]", "patches/ane-backend.patch") if platform == "ios" else ("[hexagon]", "mobile.patch 10.")
     skeletons = npu_skeleton_files(names, head)
     if skeletons:
         errors.append(f"{label}: HTP skeleton files {skeletons}: they may not ship (Hexagon SDK licence); the app "
                       f"downloads them from llama.cpp's release (wheelhouse.toml [hexagon] skeleton_*)")
     if enabled and NPU_MARKER not in names:
-        errors.append(f"{label}: no {NPU_MARKER} (the NPU backend's marker, mobile.patch 10.)")
+        errors.append(f"{label}: no {NPU_MARKER} (the NPU backend's marker, {source})")
     elif not enabled and NPU_MARKER in names:
-        errors.append(f"{label}: {NPU_MARKER} is there, but no NPU backend is expected ([hexagon] is switched off)")
-    elif enabled and not skeletons:
-        notes.append(f"{label}: {NPU_MARKER} marks the NPU backend; no HTP skeleton ships")
+        errors.append(f"{label}: {NPU_MARKER} is there, but no NPU backend is expected ({switch} is switched off)")
+    elif enabled:
+        raw = head(NPU_MARKER) or b""
+        text = raw.decode("utf-8", "replace").strip()
+        if text != NPU_MARKER_TEXT[platform]:
+            errors.append(f"{label}: {NPU_MARKER} says {text!r}, expected {NPU_MARKER_TEXT[platform]!r} (the "
+                          f"loader's npu_backend_name() reads it)")
+        elif not skeletons:
+            notes.append(f"{label}: {NPU_MARKER} marks the NPU backend; no HTP skeleton ships")
     return errors, notes
 
 
@@ -1901,9 +2059,42 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
     return errors, notes
 
 
-def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None) -> tuple:
-    """``frameworks``: {stem: (framework names)} a library may link from /System/Library/Frameworks."""
+def _check_ane_libs(target: str, libs: dict, machos: dict, expected: bool) -> list:
+    """The iOS NPU backend's link rules (``machos``: {stem: parse_macho()} of the libraries that parsed). Always: no
+    library has a load command for a private framework (the ANE's AppleNeuralEngine is dlopened at run time).
+    ``expected`` (the target carries libggml-ane): libggml links @rpath/libggml-ane.dylib (the loader preloads it
+    for that reason), libggml-ane links no sibling but ANE_SIBLINGS, and it exports ANE_EXPORTS."""
+    errors = []
+    for stem, macho in machos.items():
+        private = [d for d in macho["dylibs"] if d.startswith(PRIVATE_FRAMEWORKS)]
+        if private:
+            errors.append(f"{target}: lib/{stem}.dylib: links {private}: a private framework may only be loaded at "
+                          f"run time (dlopen), never linked")
+    if not expected:
+        return errors
+    libggml, ane = machos.get("libggml"), machos.get(ANE_LIB)
+    if libggml is not None and f"@rpath/{ANE_LIB}.dylib" not in libggml["dylibs"]:
+        errors.append(f"{target}: lib/libggml.dylib does not link @rpath/{ANE_LIB}.dylib (was the ANE backend "
+                      f"built and linked into libggml? wheelhouse.toml [ane] is enabled)")
+    if ane is not None:
+        siblings = [d for d in ane["dylibs"] if d.startswith("@rpath/")
+                    and d[len("@rpath/"):-len(".dylib")] not in ANE_SIBLINGS]
+        if siblings:
+            errors.append(f"{target}: lib/{ANE_LIB}.dylib: links {siblings} (only {', '.join(ANE_SIBLINGS)} of its "
+                          f"siblings)")
+        exported = set(ane["defined"] or ())
+        missing = [s for s in ANE_EXPORTS if f"_{s}" not in exported]
+        if missing:
+            errors.append(f"{target}: lib/{ANE_LIB}.dylib: does not export {missing} (the loader looks them up; "
+                          f"is it patches/ane-backend.patch's build?)")
+    return errors
+
+
+def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None, ane: bool = False) -> tuple:
+    """``frameworks``: {stem: (framework names)} a library may link from /System/Library/Frameworks; ``ane``: this
+    target carries the iOS NPU backend (libggml-ane, _check_ane_libs)."""
     errors, notes = [], []
+    machos = {}
     siblings = r"@rpath/(" + "|".join(re.escape(s) for s in libs) + r")\.dylib|/usr/lib/.+"
     cputype, platform = MACHO_EXPECT[target]
     limit = ios_minos_limit(target, minos)
@@ -1918,6 +2109,7 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None)
         except (ValueError, struct.error) as e:
             errors.append(f"{target}: {name}: {e}")
             continue
+        machos[stem] = macho
         if macho["cputype"] != cputype:
             errors.append(f"{target}: {name}: cputype {macho['cputype']:#x} is not {target}")
         plats = macho_platforms(macho)
@@ -1944,14 +2136,19 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None)
             errors.append(f"{target}: {name}: {len(unbound)} undefined symbols bound to none of its dylibs "
                           f"{_brief(unbound)} (DYNAMIC_LOOKUP: dyld fails on them at run time)")
         notes.append(f"{target}: {name} {describe_macho(macho)}; {len(data) / 1e6:.2f} MB")
+    errors += _check_ane_libs(target, libs, machos, ane)
+    if ane and not any(e.startswith(f"{target}: lib/libggml") for e in errors) and ANE_LIB in machos:
+        notes.append(f"{target}: lib/{ANE_LIB}.dylib iOS NPU backend: linked into libggml, exports "
+                     f"{len(ANE_EXPORTS)} loader symbols, no private framework linked")
     return errors, notes
 
 
-def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, stubs=None, hexagon=None) -> tuple:
+def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, stubs=None, hexagon=None,
+                         ane=None) -> tuple:
     """verify-native for a ctypes package with a SITE_PROFILES entry (llama-cpp-python): the wheel holds
     exactly the profile's libraries (``hexagon``: hexagon_targets(), the NPU backend's library and marker; no
-    HTP skeleton ever), checked like verify-site-packages checks the installed copy (on Android against the NDK's
-    libc++_shared.so, which flet-libcpp-shared ships on the device)."""
+    HTP skeleton ever; ``ane``: ane_targets(), the iOS NPU backend's), checked like verify-site-packages checks the
+    installed copy (on Android against the NDK's libc++_shared.so, which flet-libcpp-shared ships on the device)."""
     import tempfile
 
     profile = SITE_PROFILES[package]
@@ -1973,12 +2170,12 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
                     with zf.open(name) as stream:
                         return stream.read(20)
 
-                errs, ns = check_npu_files(path.name, names, head, bool((hexagon or {}).get(target)))
+                errs, ns = check_npu_files(path.name, names, head, _npu_expected(target, hexagon, ane), platform)
                 errors += errs
                 notes += ns
         lib_dir = root / profile["lib_dir"]
         libs = _shared_libs(lib_dir, platform) if lib_dir.is_dir() else {}
-        expected = profile_libs(profile, target, hexagon)
+        expected = profile_libs(profile, target, hexagon, ane)
         if sorted(libs) != sorted(expected):
             errors.append(f"{path.name}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
                           f"{sorted(expected)}")
@@ -1989,17 +2186,19 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
                 errors.append(f"{path.name}: cannot check the imports against {profile['android_cxx']}: {problem}")
             errs, ns = _check_android_site_libs(target, root, libs, profile, stubs, cxx=[cxx] if cxx else [])
         else:
-            errs, ns = _check_ios_site_libs(target, libs, minos, profile.get("ios_frameworks"))
+            errs, ns = _check_ios_site_libs(target, libs, minos, profile.get("ios_frameworks"),
+                                            target in (ane or ()) and "ane" in profile)
     errors += [f"{path.name}: {e}" for e in errs if not (platform == "android" and cxx is None and "copies of" in e)]
     notes += [f"{path.name}: {n}" for n in ns]
     return errors, notes
 
 
 def verify_site_packages(site_packages, platform: str, package: str, version: str, stubs=None,
-                         minos: tuple = (13, 0), targets=None, hexagon=None) -> tuple:
+                         minos: tuple = (13, 0), targets=None, hexagon=None, ane=None) -> tuple:
     """(errors, notes): the index-installed native ``package`` in each arch directory of a flet build's
     site-packages (build/site-packages/<target>) is the pinned build with the expected libraries
-    (``hexagon``: hexagon_targets(), the NPU backend's library and marker per target; no HTP skeleton ever)."""
+    (``hexagon``: hexagon_targets(), the NPU backend's library and marker per target; no HTP skeleton ever;
+    ``ane``: ane_targets(), the iOS NPU backend's library and marker)."""
     name = cmw.canonical(package)
     profile = SITE_PROFILES.get(name)
     if profile is None:
@@ -2037,7 +2236,7 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
             errors.append(f"{target}: no {profile['lib_dir']}/ in {arch_dir}")
             continue
         libs = _shared_libs(lib_dir, platform)
-        expected = profile_libs(profile, target, hexagon)
+        expected = profile_libs(profile, target, hexagon, ane)
         if sorted(libs) != sorted(expected):
             others = sorted(p.name for p in lib_dir.iterdir())
             errors.append(f"{target}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
@@ -2048,13 +2247,14 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
             # the whole site-packages of this arch: a skeleton may not ship in any package
             names = [p.relative_to(arch_dir).as_posix() for p in sorted(arch_dir.rglob("*")) if p.is_file()]
             errs, ns = check_npu_files(target, names, lambda n: _file_head(arch_dir / n),
-                                       bool((hexagon or {}).get(target)))
+                                       _npu_expected(target, hexagon, ane), platform)
             errors += errs
             notes += ns
         if platform == "android":
             errs, ns = _check_android_site_libs(target, arch_dir, libs, profile, stubs)
         else:
-            errs, ns = _check_ios_site_libs(target, libs, minos, profile.get("ios_frameworks"))
+            errs, ns = _check_ios_site_libs(target, libs, minos, profile.get("ios_frameworks"),
+                                            target in (ane or ()) and "ane" in profile)
         errors += errs
         notes += ns
     if not seen:
@@ -2072,9 +2272,12 @@ def cmd_verify_site_packages(ctx: Ctx, args) -> int:
         stubs = NdkStubs(ndk)
         print(f"NDK for the import checks: {ndk or 'none (pass --ndk, or set NDK_HOME or ANDROID_HOME)'}")
     project = cmw.load_project(ctx.pyproject)
+    ane = ane_targets(ctx) if ctx.platform == "ios" else ()
+    if ctx.platform == "ios":
+        print(f"NPU backend (wheelhouse.toml [ane]): {', '.join(ane) or 'switched off (none expected)'}")
     errors, notes = verify_site_packages(args.site_packages, ctx.platform, args.package, version, stubs,
                                          ctx.ios_deployment_target, project.android_archs + project.ios_archs,
-                                         hexagon_targets(ctx))
+                                         hexagon_targets(ctx), ane)
     for n in notes:
         print(f"ok      {n}")
     for e in errors:
@@ -2135,6 +2338,58 @@ def check_selftest_report(report: dict, platform: str, crypto_version: str, open
                 errors.append(f"Pillow on iOS lacks {lacking} (reported {modules}): a reduced build, not PyPI's "
                               f"official wheel from the wheelhouse")
     return errors
+
+
+def check_ane_selftest(report: dict, enabled: bool) -> list:
+    """The iOS simulator smoke run and the NPU backend ([ane]): the ``llama_engine`` check passed (libggml loaded
+    with libggml-ane linked in), its ``npu`` entry has the loader's NPU functions, ``shipped`` equals [ane] enabled,
+    and with [ane] enabled its ``precheck`` (npu_precheck(), steps shipped, device, framework) shows "shipped" ok
+    and "device" failed: a simulator stops there, before the private framework is touched; and its ``registered``
+    (the NPU backends ggml has registered) is []."""
+    checks = {c.get("name"): c for c in report.get("checks") or [] if isinstance(c, dict)}
+    engine = checks.get("llama_engine")
+    if engine is None:
+        return ["check 'llama_engine' is missing from the report (the engine and its NPU entry)"]
+    if engine.get("status") != "pass":
+        return [f"check 'llama_engine' is {engine.get('status')}: {engine.get('error') or engine.get('reason')}"]
+    npu = (engine.get("detail") or {}).get("npu")
+    if not isinstance(npu, dict):
+        return [f"llama_engine has no npu entry (got {npu!r})"]
+    errors = []
+    if npu.get("functions") is not True:
+        errors.append(f"llama_engine npu: the loader's NPU functions are missing (functions = {npu.get('functions')!r})")
+    if npu.get("shipped") is not enabled:
+        errors.append(f"llama_engine npu: shipped = {npu.get('shipped')!r}, but wheelhouse.toml [ane] is "
+                      f"{'enabled' if enabled else 'switched off'}")
+    if enabled:
+        pre = npu.get("precheck")
+        steps = {s.get("name"): s for s in (pre or {}).get("steps") or [] if isinstance(s, dict)} \
+            if isinstance(pre, dict) else {}
+        if not steps:
+            errors.append(f"llama_engine npu: no precheck steps (got {pre!r})")
+        else:
+            if (steps.get("shipped") or {}).get("ok") is not True:
+                errors.append(f"llama_engine npu precheck: step 'shipped' is not ok: {steps.get('shipped')}")
+            if (steps.get("device") or {}).get("ok") is not False:
+                errors.append(f"llama_engine npu precheck: step 'device' should fail on the simulator (no Neural "
+                              f"Engine), got {steps.get('device')}")
+            if (steps.get("framework") or {}).get("ok"):
+                errors.append(f"llama_engine npu precheck: step 'framework' ran on the simulator: {steps.get('framework')}")
+        # at run time, not only in the patch text: neither the import nor ggml's registry start registered the ANE
+        if npu.get("registered") != []:
+            errors.append(f"llama_engine npu: registered = {npu.get('registered')!r}, expected [] on the simulator "
+                          f"(nothing may register the NPU backend before the app starts it)")
+    return errors
+
+
+def ane_selftest_errors(report: dict, source, enabled: bool) -> tuple:
+    """(errors, warning or None) of check_ane_selftest for the evidence load_selftest_evidence found: a
+    GLOSSARION_WHEELS line carries only the wheel checks, so without a llama_engine check there it is a warning (the
+    JSON report was not found), never an error."""
+    has_engine = any(isinstance(c, dict) and c.get("name") == "llama_engine" for c in report.get("checks") or [])
+    if WHEELS_MARKER in str(source) and not has_engine:
+        return [], f"NPU backend not checked: {source} has no llama_engine check (selftest-smoke.json was not found)"
+    return check_ane_selftest(report, enabled), None
 
 
 def _wheels_payloads(text: str) -> list:
@@ -2215,6 +2470,12 @@ def cmd_assert_selftest(ctx: Ctx, args) -> int:
         raise WheelsError(f"pyproject pins pillow {pins['pillow']}, the manifest builds {pillow.version}")
     openssl, _spec = openssl_spec(ctx)
     errors = check_selftest_report(report, ctx.platform, crypto.version, openssl, pins["pillow"])
+    if ctx.platform == "ios":
+        ane_errors, warning = ane_selftest_errors(report, source, bool(ane_targets(ctx)))
+        errors += ane_errors
+        if warning:
+            print(f"::warning title=Mobile wheels on device::{warning}" if os.environ.get("GITHUB_ACTIONS")
+                  else f"WARNING {warning}")
     for e in errors:
         print(f"::error title=Mobile wheels on device::{e}" if os.environ.get("GITHUB_ACTIONS") else f"ERROR   {e}")
     print(f"assert-selftest ({ctx.platform}, {source}): cryptography {crypto.version} with OpenSSL {openssl}, "
@@ -2247,6 +2508,9 @@ def cmd_env(ctx: Ctx, args) -> None:
         spec = hexagon_spec(ctx.data, ctx.manifest_path.name)
         values["HEXAGON_SDK_FILE"] = spec["sdk"]["file"] if spec else ""
         values["HEXAGON_SDK_SHA256"] = spec["sdk"]["sha256"] if spec else ""
+    else:
+        # the iOS NPU backend's switch (the workflow logs it; stage-ane writes the CMake initial cache from it)
+        values["ANE_ENABLED"] = "true" if ane_spec(ctx.data, ctx.manifest_path.name) is not None else "false"
     # No IPHONEOS_DEPLOYMENT_TARGET / OPENSSL_STATIC here: forge's compile_env() never passes the
     # outer environment to the build, so those live in the recipes' script_env (checked below).
     for w in ctx.wheels():
@@ -2308,6 +2572,13 @@ def main(argv=None) -> int:
     p.add_argument("--downloads", required=True, help="where fetch put the SDK tarball (fetch --hexagon-dest)")
     p.add_argument("--ndk", required=True, help="the NDK forge builds with ($NDK_HOME): the initial cache goes there")
     p.add_argument("--work", required=True, help="where the SDK is unpacked (reused while its sha256 matches)")
+    p = add("stage-ane", "iOS: the llama-cpp-python iOS build's CMake initial cache (GGML_ANE ON / OFF from [ane])",
+            packages=True)
+    p.add_argument("--xcframework", required=True,
+                   help="the support tree's Python.xcframework ($MOBILE_FORGE_IOS_SUPPORT_PATH/support/<py>/iOS/"
+                        "Python.xcframework): the cache goes into each slice, where {HOST_PYTHON_HOME} points")
+    p.add_argument("--forge", help="the mobile-forge checkout: checks that its build.py and cross.py still point "
+                                   "{HOST_PYTHON_HOME} at those slices before anything is written")
     p = add("collect", "copy the promised wheels from forge's dist/ into the wheel cache", packages=True)
     p.add_argument("--dist", required=True)
     p.add_argument("--cache", required=True)
@@ -2358,6 +2629,8 @@ def main(argv=None) -> int:
             cmd_stage_opencl(ctx, args)
         elif args.cmd == "stage-hexagon":
             cmd_stage_hexagon(ctx, args)
+        elif args.cmd == "stage-ane":
+            cmd_stage_ane(ctx, args)
         elif args.cmd == "collect":
             cmd_collect(ctx, args)
         elif args.cmd == "retag":

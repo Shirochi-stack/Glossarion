@@ -41,7 +41,15 @@
 #     libggml-hexagon is a GGML_BACKEND_DL module next to libggml-opencl (plus the marker file
 #     llama_cpp/npu-backend.txt). The HTP skeletons (Hexagon DSP files) are not built and not shipped: the
 #     app downloads them from llama.cpp's own release of the vendored commit (wheelhouse.toml [hexagon]).
-#     x86_64 and iOS: none.
+#     x86_64: none.
+#   - the optional NPU backend on iOS (all three slices; registered on demand by the patched loader,
+#     patches/mobile.patch 11.): patches/ane-backend.patch adds ggml-ane from llama.cpp pull request 31969
+#     (a draft that uses Apple's private AppleNeuralEngine framework, loaded at run time) and
+#     -C{HOST_PYTHON_HOME}/glossarion/ane-init.cmake, the CMake initial cache wheels.py stage-ane writes into
+#     each Python.xcframework slice from wheelhouse.toml [ane]: GGML_ANE=ON, or OFF when [ane] enabled = false
+#     (HOST_PYTHON_HOME is one of the keys forge formats script_env with: the slice of this sdk/arch).
+#     libggml-ane is linked into libggml like libggml-metal; the deployment target stays 13.0 (the loader
+#     refuses simulators and iOS below 18 at run time). The patch is always applied; the cache is the switch.
 package:
   name: llama-cpp-python
   version: "0.3.37"
@@ -99,6 +107,7 @@ build:
       -DGGML_VULKAN=OFF
       -DGGML_OPENCL=OFF
       -DGGML_RPC=OFF
+      -C{HOST_PYTHON_HOME}/glossarion/ane-init.cmake
 # {% endif %}
 
 requirements:
@@ -120,3 +129,5 @@ requirements:
 # both are in 0.3.37's llama.cpp, with the DK=512 split.)
 patches:
   - mobile.patch
+  # the iOS NPU backend (ggml-ane); forge applies the list in order, so it sees mobile.patch's tree
+  - ane-backend.patch

@@ -311,8 +311,10 @@ def test_recipe_loads_the_hexagon_initial_cache_on_android_arm64_only():
         caches = [a for a in args if a.startswith("-C")]
         if (sdk, arch) == ("android", "arm64-v8a"):
             assert caches == ["-C{NDK_ROOT}/" + wh.HEXAGON_INIT_CACHE], args
-        else:
+        elif sdk == "android":
             assert caches == [], (sdk, arch, args)
+        else:                                                    # every iOS slice: the ANE cache (stage-ane)
+            assert caches == ["-C{HOST_PYTHON_HOME}/" + wh.ANE_INIT_CACHE], (sdk, arch, args)
         # the switch lives in the initial cache only: no -DGGML_HEXAGON / SDK path in the recipe
         assert not any("HEXAGON" in a for a in args), args
 
@@ -680,7 +682,7 @@ def test_npu_precheck_runs_the_cheap_steps_only(tmp_path, monkeypatch, kw, steps
     for _ in range(2):                                                            # any number of calls
         result = ns["npu_precheck"]()
         assert result["arch"] == arch and result["error"] == error and _steps(result) == steps, result
-        assert set(result) == {"arch", "error", "steps"}
+        assert set(result) == {"backend", "arch", "error", "steps"} and result["backend"] == "HTP"
     assert ns["NPU_PRECHECK_STEPS"] == ("shipped", "libcdsprpc", "arch")
     # no backend load, no hexagon dlopen, no environment, no state
     assert calls["load"] == [] and not any(n.endswith("libggml-hexagon.so") for n in calls["cdll"])
@@ -755,33 +757,53 @@ def _file_diffs(text: str) -> dict:
                                                         re.M | re.S)}
 
 
-def test_patch_hunk_headers_match_their_bodies():
-    """Every hunk's @@ -a,b +c,d @@ counts its body exactly, and the new starts follow from the earlier hunks of
-    the same file (the patch is edited by hand; a wrong count only shows when forge applies it in CI)."""
-    text = PATCH.read_text(encoding="utf-8")
-    assert "\r" not in text
+ANE_PATCH = RECIPE.parent / "patches" / "ane-backend.patch"
+
+
+def _check_hunks(path: Path) -> int:
+    """Every hunk's @@ -a[,b] +c[,d] @@ counts its body exactly, and the new starts follow from the earlier hunks of
+    the same file; a new file is one hunk @@ -0,0 +1,n @@ from /dev/null. Returns the number of hunks."""
+    text = path.read_text(encoding="utf-8")
+    assert "\r" not in text, path.name
     total = 0
     for name, body in _file_diffs(text).items():
         lines = body.split("\n")
-        assert lines[1] == f"--- a/{name}" and lines[2] == f"+++ b/{name}", name
-        shift, last_old_end, i = 0, 0, 3
+        start = next(i for i, line in enumerate(lines) if line.startswith("--- "))
+        new_file = lines[start] == "--- /dev/null"
+        assert lines[start] == ("--- /dev/null" if new_file else f"--- a/{name}"), (path.name, name)
+        assert lines[start + 1] == f"+++ b/{name}", (path.name, name)
+        assert all(line.startswith(("new file mode ", "index ", "diff --git")) or line == ""
+                   for line in lines[1:start]), (path.name, name, lines[1:start])
+        shift, last_old_end, i = 0, 0, start + 2
         while i < len(lines) and lines[i].startswith("@@ "):
-            m = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@", lines[i])
+            m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", lines[i])
             assert m, lines[i]
-            a, b, c, d = map(int, m.groups())
+            a, c = int(m.group(1)), int(m.group(3))
+            b, d = int(m.group(2) or 1), int(m.group(4) or 1)
             i += 1
             old = new = 0
-            while i < len(lines) and lines[i][:1] in (" ", "-", "+") and not lines[i].startswith("@@ "):
-                old += lines[i][0] in " -"
-                new += lines[i][0] in " +"
+            while i < len(lines) and lines[i][:1] in (" ", "-", "+", "\\") and not lines[i].startswith("@@ "):
+                if lines[i][0] != "\\":
+                    old += lines[i][0] in " -"
+                    new += lines[i][0] in " +"
                 i += 1
-            assert (old, new) == (b, d), f"{name} @@ -{a},{b} +{c},{d} @@: the body has -{old} +{new}"
-            assert a > last_old_end and c == a + shift, f"{name} @@ -{a},{b} +{c},{d} @@: new start should be {a + shift}"
+            where = f"{path.name} {name} @@ -{a},{b} +{c},{d} @@"
+            assert (old, new) == (b, d), f"{where}: the body has -{old} +{new}"
+            if new_file:
+                assert (a, b, c, total) == (0, 0, 1, total) and old == 0, where
+            else:
+                assert a > last_old_end and c == a + shift, f"{where}: new start should be {a + shift}"
             shift += d - b
             last_old_end = a + b - 1
             total += 1
-        assert all(line == "" for line in lines[i:]), f"{name}: unexpected text after the hunks: {lines[i:i + 2]}"
-    assert total >= 16
+        assert all(line == "" for line in lines[i:]), f"{path.name} {name}: unexpected text after the hunks: {lines[i:i + 2]}"
+    return total
+
+
+def test_patch_hunk_headers_match_their_bodies():
+    """Both patches of the recipe are hand-checked: a wrong count only shows when forge applies them in CI."""
+    assert _check_hunks(PATCH) >= 16
+    assert _check_hunks(ANE_PATCH) >= 11
 
 
 def test_patch_builds_and_installs_no_skeleton_and_adds_the_session_check():
@@ -817,6 +839,8 @@ def test_loader_steps_match_the_app(monkeypatch):
     ns = _patched_cpu_loader(_real_ctypes_ns())
     assert ns["NPU_STEPS"] == ("shipped", "libcdsprpc", "arch", "skeletons", "registry", "session")
     assert ns["NPU_BACKEND"] == "HTP" and ns["NPU_LIBRARY"] == "libggml-hexagon.so"
+    assert ns["NPU_STEPS_BY_BACKEND"] == {"HTP": ns["NPU_STEPS"],
+                                          "ANE": ("shipped", "device", "framework", "registry", "compile")}
     monkeypatch.syspath_prepend(str(MOBILE / "app"))
     try:
         from glossarion_mobile.services.local_llm import engine
@@ -824,6 +848,9 @@ def test_loader_steps_match_the_app(monkeypatch):
         pytest.skip("glossarion_mobile not importable")
     if hasattr(engine, "NPU_STEPS"):
         assert tuple(engine.NPU_STEPS) == ns["NPU_STEPS"]
+    if hasattr(engine, "NPU_STEPS_BY_BACKEND"):
+        assert {k: tuple(v) for k, v in engine.NPU_STEPS_BY_BACKEND.items()} == ns["NPU_STEPS_BY_BACKEND"]
+    elif hasattr(engine, "NPU_BACKEND"):
         assert engine.NPU_BACKEND == ns["NPU_BACKEND"]
 
 

@@ -43,6 +43,19 @@ the NPU or the reverse (a wheel without ``device_index`` keeps ``main_gpu`` 0 fo
 the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailable`` on any failure. The
 "ggml-hex:" lines of the native log are kept (``hex_log_lines``) for the diagnostics.
 
+NPU on iOS (Apple Neural Engine, llama.cpp draft PR 31969; the wheel's marker says libggml-ane.dylib): the same two
+stages under the same names, with the steps of ``NPU_STEPS_BY_BACKEND["ANE"]`` (stage 1: shipped, device = iOS 18 or
+later and not a simulator, framework = the private framework's classes load; stage 2: registry, compile = one fixed
+test program). There are no files to download (``npu_skeleton_source`` names none). Each state says its ``backend``
+("HTP" / "ANE"); the HTP arch rules apply to "HTP" only. An NPU load on the ANE runs a compile pass instead of the
+first-token check (``_ane_compile_pass``): one KV bucket of the context size, a collect pass of 512 copies of one
+token id and one more token, the service's storage gate (``npu_gate``), the real pass that compiles every program
+family once, the finite-logits check, then the freeze (a shape that has no compiled program runs on the CPU, so a
+model compiles exactly once). The KV bucket is the context, at most ``ANE_MAX_KV`` (``ane_kv_bucket``), and the
+batch is at most the context minus one, so a 512-token context works. A backend that already refuses every compile
+(``storage_refused`` from an earlier load in this process) ends the load with ``NpuStorageFull(before_pass=True)``. ``npu_stats`` reads the backend's counters (pending / fresh / cached compiles) for
+the service's progress line. The "ggml_ane" / "ggml-ane" lines of the native log are kept with the "ggml-hex:" ones.
+
 Script ban (``params["ban_scripts"]``, the ``script_ban.SCRIPTS`` names decided by the service): ``LlamaEngine``
 passes a logits processor that sets the token ids of those scripts (Han / kana / Hangul, Devanagari,
 Thai, Arabic, Cyrillic ...) to -inf. The vocabulary is decoded once, on the first such request after a
@@ -70,9 +83,10 @@ log = logging.getLogger("glossarion.local_llm")
 progress_log = logging.getLogger("glossarion.local_llm.progress")
 
 __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
-           "GpuUnavailable", "LlamaEngine", "NpuUnavailable", "cpu_variant", "default_threads", "device_index",
-           "engine_status", "gpu_offer", "gpu_state", "hex_log_lines", "npu_failure", "npu_passed", "npu_platform",
-           "npu_precheck", "npu_precheck_failure", "npu_skeleton_file", "npu_skeleton_source", "npu_state",
+           "GpuUnavailable", "LlamaEngine", "NpuStorageFull", "NpuUnavailable", "ane_kv_bucket", "cpu_variant", "default_threads", "device_index",
+           "engine_status", "gpu_offer", "gpu_state", "hex_log_lines", "npu_backend", "npu_collect", "npu_failure",
+           "npu_freeze", "npu_kind", "npu_model_begin", "npu_passed", "npu_platform", "npu_precheck",
+           "npu_precheck_failure", "npu_skeleton_file", "npu_skeleton_source", "npu_state", "npu_stats",
            "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
@@ -111,6 +125,16 @@ class NpuUnavailable(RuntimeError):
     the message says why. The engine holds no model afterwards."""
 
 
+class NpuStorageFull(NpuUnavailable):
+    """The ANE backend refuses every compile for the rest of this process (a compile failed for lack of storage:
+    ``storage_refused``). ``before_pass``: it was already refusing when this load's compile pass began, so the
+    loading model is not to blame (the service records no fallback for it)."""
+
+    def __init__(self, message: str, before_pass: bool = False) -> None:
+        super().__init__(message)
+        self.before_pass = bool(before_pass)
+
+
 #: llama.cpp's LLAMA_SPLIT_MODE_NONE: the whole model on ``main_gpu`` (-1: on no device = the CPU).
 SPLIT_MODE_NONE = 0
 #: the registry name of llama.cpp's Hexagon backend (ggml-hexagon at the pinned commit)
@@ -122,6 +146,20 @@ NPU_MIN_ARCH = 73
 NPU_STEPS = ("shipped", "libcdsprpc", "arch", "skeletons", "registry", "session")
 #: the steps of ``npu_precheck`` (stage 1), the cheap ones before the backend needs its skeleton
 NPU_PRECHECK_STEPS = NPU_STEPS[:3]
+#: the registry name of the Apple Neural Engine backend (llama.cpp PR 31969)
+ANE_BACKEND = "ANE"
+#: the steps of ``register_npu_backend`` per backend (the loader's table); the first three are stage 1's
+NPU_STEPS_BY_BACKEND = {NPU_BACKEND: NPU_STEPS, ANE_BACKEND: ("shipped", "device", "framework", "registry", "compile")}
+#: the prompt batch of an NPU load on the ANE: every full chunk has the same "512 with output" shape
+ANE_BATCH = 512
+#: the largest KV bucket of an ANE load: the backend's attention reads ``min(bucket, cache rows)`` rows, falls back to
+#: the KV length in use (a new shape at every position) above 16384, and on iPhones attention over more than 8192 rows
+#: stays on the CPU (ggml-ane.cpp, TARGET_OS_IPHONE). One bucket of at most 8192 keeps one attention shape per model.
+ANE_MAX_KV = 8192
+#: the counters of ``npu_stats`` (``glossarion_ane_stats``)
+ANE_STATS = ("families_pending", "bytes_pending", "compiles_fresh", "compiles_cached", "bytes_fresh",
+             "compile_failures", "cpu_segments", "storage_refused")
+ANE_STORAGE_TEXT = "not enough free storage for the NPU copy of this model"
 #: ``register_npu_backend``'s "skeletons" detail when the phone's skeleton is not in its folder
 NPU_FILES_MISSING = "NPU files not downloaded"
 #: GGML_HEXAGON_POWER_MODE and the modes ggml-hexagon.cpp documents at the pin (its default: burst)
@@ -138,9 +176,23 @@ _HEX_HOOK: list = []  # the installed log callback (kept alive: ctypes calls it 
 _NPU_STATE: dict = {}  # the last ``npu_state`` answer of this process
 
 
+def ane_kv_bucket(n_ctx: int) -> int:
+    """The one KV bucket of an ANE load with a context of ``n_ctx`` tokens: the context, at most ``ANE_MAX_KV``
+    (the compiled copy depends on it, so every context from 8192 up shares one copy)."""
+    return max(1, min(int(n_ctx or 0), ANE_MAX_KV))
+
+
 def npu_platform(platform: Optional[str] = None, machine: Optional[str] = None) -> bool:
-    """Android arm64: the only builds that can carry the Hexagon backend (nothing is imported)."""
+    """Android arm64 (the Hexagon backend) or iOS (the Apple Neural Engine; simulators included, where stage 1's
+    "device" step says no): the builds that can carry an NPU backend (nothing is imported). iOS needs the iOS
+    runtime itself (``sys.platform``) unless ``machine`` is given."""
     name = (platform or os.environ.get("GLOSSARION_PLATFORM") or "").strip().lower()
+    if name == "ios":
+        if machine is not None:
+            return machine.strip().lower() in ("arm64", "aarch64", "x86_64")
+        import sys
+
+        return sys.platform == "ios"
     if name != "android":
         return False
     import platform as _platform
@@ -170,6 +222,15 @@ def _arch_number(value: Any) -> Optional[int]:
         return int(text)
     except ValueError:
         return None
+
+
+def npu_kind(state: Optional[dict]) -> str:
+    """The backend a state belongs to: "ANE" when it says so, else "HTP" (the Hexagon rules)."""
+    return ANE_BACKEND if (state or {}).get("backend") == ANE_BACKEND else NPU_BACKEND
+
+
+def _known_backend(value: Any) -> Optional[str]:
+    return str(value) if value in NPU_STEPS_BY_BACKEND else None
 
 
 def _steps(raw: Any) -> list:
@@ -203,10 +264,15 @@ def npu_precheck() -> dict:
 
 
 def npu_precheck_state(raw: Any) -> dict:
-    """``npu_precheck``'s answer in the service's shape (arch 81 for "v81")."""
+    """``npu_precheck``'s answer in the service's shape (arch 81 for "v81"; an ANE answer keeps its backend and
+    its chip, and never has an arch)."""
     state = dict(raw) if isinstance(raw, dict) else {}
-    return {"backend": None, "device": "", "arch": _arch_number(state.get("arch")),
-            "error": str(state.get("error") or ""), "steps": _steps(state.get("steps"))}
+    backend = _known_backend(state.get("backend"))
+    out = {"backend": backend, "device": "", "arch": None if backend == ANE_BACKEND else _arch_number(state.get("arch")),
+           "error": str(state.get("error") or ""), "steps": _steps(state.get("steps"))}
+    if backend == ANE_BACKEND:
+        out["chip"] = str(state.get("chip") or "")
+    return out
 
 
 def npu_precheck_failure(state: Optional[dict]) -> Optional[tuple]:
@@ -217,9 +283,12 @@ def npu_precheck_failure(state: Optional[dict]) -> Optional[tuple]:
         if not step.get("ok"):
             return str(step.get("name") or "?"), str(step.get("detail") or state.get("error") or "failed")
     names = {step.get("name") for step in steps}
-    for name in NPU_PRECHECK_STEPS:
+    kind = npu_kind(state)
+    for name in NPU_STEPS_BY_BACKEND[kind][:3]:
         if name not in names:
             return name, str(state.get("error") or "not checked")
+    if kind == ANE_BACKEND:
+        return None
     arch = state.get("arch")
     if not isinstance(arch, int) or arch < NPU_MIN_ARCH:
         return "arch", f"unsupported HTP arch {arch!r}" if arch is not None else "the HTP arch is unknown"
@@ -238,6 +307,10 @@ def npu_skeleton_source() -> Optional[dict]:
     except Exception:
         log.debug("npu_skeleton_source failed", exc_info=True)
         return None
+    if isinstance(raw, dict) and raw.get("files") == {} and not raw.get("url") and raw.get("release"):
+        # the ANE build: nothing to download (its "files" is empty on purpose)
+        return {"release": str(raw["release"]), "commit": str(raw.get("commit") or ""), "url": "", "size": 0,
+                "sha256": "", "files": {}}
     if not isinstance(raw, dict) or not str(raw.get("url") or "").startswith("https://") \
             or not raw.get("sha256") or not isinstance(raw.get("files"), dict) or not raw.get("release"):
         return None
@@ -283,6 +356,9 @@ def npu_state(skel_dir: str, options: Optional[dict] = None) -> dict:
     out = {"backend": state.get("backend"), "device": str(state.get("device") or ""),
            "arch": _arch_number(state.get("arch")), "error": str(state.get("error") or ""),
            "steps": _steps(state.get("steps"))}
+    if out["backend"] == ANE_BACKEND:
+        out["arch"] = None
+        out["chip"] = str(state.get("chip") or "")
     _NPU_STATE.clear()
     _NPU_STATE.update(out)
     return out
@@ -296,14 +372,16 @@ def npu_failure(state: Optional[dict]) -> Optional[tuple]:
         if not step.get("ok"):
             return str(step.get("name") or "?"), str(step.get("detail") or state.get("error") or "failed")
     names = {step.get("name") for step in steps}
-    for name in NPU_STEPS:
+    kind = npu_kind(state)
+    for name in NPU_STEPS_BY_BACKEND[kind]:
         if name not in names:
             return name, str(state.get("error") or "not checked")
-    arch = state.get("arch")
-    if not isinstance(arch, int) or arch < NPU_MIN_ARCH:
-        return "arch", f"unsupported HTP arch {arch!r}" if arch is not None else "the HTP arch is unknown"
+    if kind == NPU_BACKEND:
+        arch = state.get("arch")
+        if not isinstance(arch, int) or arch < NPU_MIN_ARCH:
+            return "arch", f"unsupported HTP arch {arch!r}" if arch is not None else "the HTP arch is unknown"
     if state.get("error"):
-        return "session", str(state["error"])
+        return NPU_STEPS_BY_BACKEND[kind][-1], str(state["error"])
     if not state.get("device"):
         return "registry", "no NPU device"
     return None
@@ -314,9 +392,17 @@ def npu_passed(state: Optional[dict]) -> bool:
     return bool(state) and npu_failure(state) is None
 
 
+def npu_backend() -> str:
+    """The registry name of this process's registered NPU backend ("HTP" before any registration)."""
+    return npu_kind(_NPU_STATE)
+
+
 def npu_label(state: Optional[dict] = None) -> str:
-    """"Hexagon v81 (HTP0)" of the registered NPU."""
+    """"Hexagon v81 (HTP0)" / "Apple Neural Engine (h15)" of the registered NPU."""
     state = state if state is not None else _NPU_STATE
+    if npu_kind(state) == ANE_BACKEND:
+        chip = str(state.get("chip") or "")
+        return f"Apple Neural Engine ({chip})" if chip else "Apple Neural Engine"
     arch = state.get("arch")
     device = str(state.get("device") or "") or NPU_BACKEND
     return f"Hexagon v{arch} ({device})" if arch else f"Hexagon ({device})"
@@ -324,7 +410,7 @@ def npu_label(state: Optional[dict] = None) -> str:
 
 def soc_label() -> str:
     """``ro.soc.manufacturer`` + ``ro.soc.model`` (Android 12+; a label for the diagnostics only), '' elsewhere."""
-    if not npu_platform():
+    if not npu_platform() or (os.environ.get("GLOSSARION_PLATFORM") or "").strip().lower() != "android":
         return ""
     import subprocess
 
@@ -355,20 +441,67 @@ def device_index(name: str, missing: int = -1) -> int:
         return -1
 
 
+def _ane_call(name: str, *args: Any) -> Any:
+    """The wheel's ANE primitive ``name`` (iOS loader), None on a build without it or when it fails."""
+    ext = _extensions()
+    function = getattr(ext, name, None) if ext is not None else None
+    if function is None:
+        return None
+    try:
+        return function(*args)
+    except Exception:
+        log.debug("%s failed", name, exc_info=True)
+        return None
+
+
+def npu_model_begin(n_ctx_cache: int, n_threads: int) -> None:
+    """Before a model's compile pass: one KV bucket of the cache size (the attention shape never changes), the
+    CPU threads of the frozen segments, freeze off and the counters reset."""
+    _ane_call("npu_model_begin", int(n_ctx_cache), int(n_threads))
+
+
+def npu_collect(on: bool) -> None:
+    """Graphs are only translated and their shapes recorded (no compile) while ``on``."""
+    _ane_call("npu_collect", bool(on))
+
+
+def npu_freeze(on: bool) -> None:
+    """While ``on`` a shape without a compiled program runs on the CPU instead of compiling."""
+    _ane_call("npu_freeze", bool(on))
+
+
+def npu_stats() -> dict:
+    """The ANE backend's counters (``ANE_STATS``), {} on a build without them (safe while a decode runs)."""
+    raw = _ane_call("npu_stats")
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name in ANE_STATS:
+        try:
+            out[name] = int(raw.get(name) or 0)
+        except (TypeError, ValueError):
+            out[name] = 0
+    return out
+
+
+#: the native log lines kept for the diagnostics: Hexagon's, and the ANE backend's
+_NPU_LOG_PREFIXES = ("ggml-hex:", "ggml_ane", "ggml-ane")
+
+
 def _remember_hex(text: str) -> None:
     pending = _HEX_PENDING[0] + text
     *lines, rest = pending.split("\n")
     _HEX_PENDING[0] = rest[-2000:]
     for line in lines:
         line = line.strip()
-        if line.startswith("ggml-hex:"):
+        if line.startswith(_NPU_LOG_PREFIXES):
             _HEX_LOG.append(line[:400])
 
 
 def hex_log_lines() -> list:
-    """The last ``HEX_LOG_LINES`` "ggml-hex:" lines of the native log (since ``capture_hex_log``)."""
+    """The last ``HEX_LOG_LINES`` "ggml-hex:" (and ANE backend) lines of the native log (since ``capture_hex_log``)."""
     lines = list(_HEX_LOG)
-    if _HEX_PENDING[0].strip().startswith("ggml-hex:"):
+    if _HEX_PENDING[0].strip().startswith(_NPU_LOG_PREFIXES):
         lines = (lines + [_HEX_PENDING[0].strip()[:400]])[-HEX_LOG_LINES:]
     return lines
 
@@ -411,6 +544,9 @@ def capture_hex_log() -> bool:
         return False
     _HEX_HOOK.append(callback)
     return True
+#: the registry names of the GPU backends for ``device_index`` (ggml-metal registers as "MTL" at the pin); a GPU
+#: backend named here that is not in llama.cpp's device list fails the GPU load instead of using device 0
+GPU_REGISTRY_NAMES = {"Metal": "MTL", "OpenCL": "OpenCL"}
 #: what the GPU check evaluates (a batch, then one more token)
 GPU_CHECK_PROMPT = ("The lighthouse keeper climbed the stairs every evening, counted each step and wrote the "
                     "weather into a book that nobody had read for forty years.")
@@ -597,8 +733,16 @@ class FakeEngine(_Base):
                  reply: Optional[Callable[[list], str]] = None, gpu_device: str = "Fake GPU (Test)",
                  gpu_error: Optional[str] = None, gpu_chat_error: Optional[str] = None,
                  npu_device: str = "Hexagon v81 (HTP0)", npu_error: Optional[str] = None,
-                 npu_chat_error: Optional[str] = None, npu_load_delay: float = 0.0) -> None:
+                 npu_chat_error: Optional[str] = None, npu_load_delay: float = 0.0,
+                 npu_compile: Optional[Sequence[dict]] = None, npu_step_delay: float = 0.0) -> None:
         super().__init__()
+        #: an ANE load's compile pass: ``npu_stats`` after the collect pass (given to the load's ``npu_gate``), then
+        #: one snapshot per ``npu_step_delay`` (None: a load without a compile pass, the Hexagon way). storage_refused
+        #: in the first one: the backend already refused compiles when the pass began (``NpuStorageFull``)
+        self.npu_compile = [dict(s) for s in npu_compile] if npu_compile is not None else None
+        self.npu_step_delay = npu_step_delay
+        self._npu_stats: dict = {}
+        self.npu_gates: list = []  # the stats every ``npu_gate`` call saw
         self.delay = delay
         self.think = think
         self.load_delay = load_delay
@@ -620,8 +764,13 @@ class FakeEngine(_Base):
         self.projector_loads = 0
         self._projector = False
 
+    def npu_stats(self) -> dict:
+        """The compile pass's counters as the running load has them (``npu_compile``)."""
+        return dict(self._npu_stats)
+
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False) -> None:
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False,
+             npu_gate: Optional[Callable[[dict], None]] = None) -> None:
         npu = bool(npu)
         gpu = bool(gpu and n_gpu_layers != 0) and not npu
         self.n_gpu_layers = int(n_gpu_layers) if gpu or npu else 0
@@ -631,8 +780,29 @@ class FakeEngine(_Base):
         self.backends.append("npu" if npu else "gpu" if gpu else "cpu")
         if npu:
             self.npu_layers.append(int(n_gpu_layers))
+            if self.npu_compile:
+                self._npu_stats = {}  # like LlamaEngine: nothing until this load's compile pass reset the counters
             if self.npu_load_delay:
                 time.sleep(self.npu_load_delay)
+            if self.npu_compile:
+                self._npu_stats = dict(self.npu_compile[0])
+                if self._npu_stats.get("storage_refused"):  # already refusing when the pass began
+                    self.unload()
+                    raise NpuStorageFull(ANE_STORAGE_TEXT, before_pass=True)
+                try:
+                    if npu_gate is not None:
+                        self.npu_gates.append(dict(self._npu_stats))
+                        npu_gate(dict(self._npu_stats))
+                    for step in self.npu_compile[1:]:
+                        if self.npu_step_delay:
+                            time.sleep(self.npu_step_delay)
+                        self._npu_stats = dict(step)
+                except Exception:
+                    self.unload()
+                    raise
+                if self._npu_stats.get("storage_refused"):
+                    self.unload()
+                    raise NpuStorageFull(ANE_STORAGE_TEXT)
             if self.npu_error:
                 self.unload()
                 raise NpuUnavailable(self.npu_error)
@@ -720,6 +890,7 @@ class LlamaEngine(_Base):
         self._scripts: Any = None  # the loaded model's script_ban.VocabScripts (computed on first use)
         self.sliding_window = 0  # the loaded model's SWA window in tokens (0: none)
         self.live: Optional["_Heartbeat"] = None  # the request running now (``chat``), for the notification
+        self._npu_live = False  # the ANE counters belong to this engine's current load (``npu_stats``)
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -728,17 +899,25 @@ class LlamaEngine(_Base):
         except Exception as exc:
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
+    def npu_stats(self) -> dict:
+        """The ANE backend's counters of this engine's last ANE load (the service polls them while a compile pass runs;
+        they are process-wide, so {} until that load's compile pass has reset them), {} elsewhere."""
+        return npu_stats() if getattr(self, "_npu_live", False) else {}
+
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False) -> None:
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False,
+             npu_gate: Optional[Callable[[dict], None]] = None) -> None:
         npu = bool(npu)
         gpu = bool(gpu and n_gpu_layers != 0) and not npu
         llama_cpp = self._module()
         with self._lock, _NATIVE_LOAD_LOCK:
             self.unload()
+            self._npu_live = False  # until this load's compile pass resets the counters: the last model's are stale
             device = None
+            ane = npu and npu_backend() == ANE_BACKEND
             if npu:
                 # registered by the service's NPU check (``npu_state``) before any NPU load
-                index = device_index(NPU_BACKEND)
+                index = device_index(npu_backend())
                 if index < 0:
                     raise NpuUnavailable(_NPU_STATE.get("error") or "the NPU backend is not registered")
                 device = f"NPU: {npu_label()}"
@@ -750,12 +929,12 @@ class LlamaEngine(_Base):
                     raise GpuUnavailable(state.get("error") or "no GPU device")
                 device = f"GPU: {state['device']} ({state.get('backend')})"
                 # the GPU backend's own device: never the NPU, whatever else is registered (a build without
-                # ``device_index`` has the GPU as its only device: 0)
+                # ``device_index`` has the GPU as its only device: 0). Metal's registry name is "MTL"
                 backend = str(state.get("backend") or "")
-                index = device_index(backend, missing=0)
+                index = device_index(GPU_REGISTRY_NAMES.get(backend, backend), missing=0)
                 if index < 0:
-                    if backend == "OpenCL":
-                        raise GpuUnavailable("the OpenCL backend is not in llama.cpp's device list")
+                    if backend in GPU_REGISTRY_NAMES:
+                        raise GpuUnavailable(f"the {backend} backend is not in llama.cpp's device list")
                     index = 0
                 # The UI chooses the count; -1 offloads all layers only when explicitly selected.
                 placement = {"n_gpu_layers": int(n_gpu_layers), "split_mode": SPLIT_MODE_NONE, "main_gpu": index}
@@ -776,7 +955,19 @@ class LlamaEngine(_Base):
                 if gpu:
                     raise GpuUnavailable(f"the model did not load on the GPU ({exc})") from exc
                 raise
-            if gpu or npu:
+            if ane:
+                try:
+                    _ane_compile_pass(llm, int(n_threads), npu_gate,
+                                      on_begin=lambda: setattr(self, "_npu_live", True))
+                except NpuUnavailable:
+                    _close(llm)
+                    npu_freeze(False)
+                    raise
+                except Exception as exc:
+                    _close(llm)
+                    npu_freeze(False)
+                    raise NpuUnavailable(f"preparing the model for the NPU failed ({exc})") from exc
+            elif gpu or npu:
                 try:
                     _gpu_check(llm)
                 except Exception as exc:
@@ -1257,8 +1448,6 @@ def _gpu_check(llm: Any) -> None:
     """The GPU's or the NPU's first tokens: evaluate ``GPU_CHECK_PROMPT`` (a batch) and one more token; the last
     logits must be finite and not all equal (a broken kernel gives NaN / inf / zeros). Leaves the
     model reset."""
-    import math
-
     tokens = list(llm.tokenize(GPU_CHECK_PROMPT.encode("utf-8"), add_bos=True, special=False))[:64]
     if not tokens:
         raise RuntimeError("the check prompt has no tokens")
@@ -1266,11 +1455,78 @@ def _gpu_check(llm: Any) -> None:
         llm.reset()
         llm.eval(tokens)
         llm.eval(tokens[-1:])
-        n_vocab = int(llm.n_vocab())
-        logits = llm._ctx.get_logits()
-        values = [float(logits[i]) for i in range(n_vocab)]
+        _check_logits(llm)
     finally:
         llm.reset()
+
+
+def _ane_token(llm: Any) -> int:
+    """The one token id of the ANE compile pass: the model's BOS, else 0 (token ids only, never text)."""
+    try:
+        bos = int(llm.token_bos())
+    except Exception:
+        bos = -1
+    return bos if bos >= 0 else 0
+
+
+def _ane_compile_pass(llm: Any, n_threads: int, gate: Optional[Callable[[dict], None]] = None,
+                     on_begin: Optional[Callable[[], None]] = None) -> None:
+    """An NPU load on the ANE (``_NATIVE_LOAD_LOCK`` held): one KV bucket (``ane_kv_bucket`` of the context), a
+    collect pass (``ANE_BATCH`` copies of one token id, at most the context minus one, then one token: the two shapes a
+    chat uses, recorded without compiling), ``gate`` with the counters (the service's storage check; it raises
+    ``NpuUnavailable``), the real pass (every program family compiles once, or loads from the iOS cache), the
+    finite-logits check, then the freeze: from here a shape with no compiled program (a prompt's remainder chunk, an
+    odd graph, attention over more than ``ANE_MAX_KV`` rows) runs on the CPU and never compiles. ``on_begin`` runs
+    once the counters were reset for this model."""
+    token = _ane_token(llm)
+    try:
+        n_ctx = int(llm.n_ctx())
+    except Exception:
+        n_ctx = 0
+    if n_ctx < 2:
+        raise RuntimeError(f"the context ({n_ctx} tokens) is too small")
+    npu_model_begin(ane_kv_bucket(n_ctx), n_threads)
+    if on_begin is not None:
+        on_begin()
+    if npu_stats().get("storage_refused"):
+        # an earlier load of this process ran out of storage: the backend refuses every compile until the app restarts
+        raise NpuStorageFull(ANE_STORAGE_TEXT, before_pass=True)
+    # the batch and then one more token must fit the context (a 512-token context: 511 + 1)
+    batch = [token] * min(ANE_BATCH, n_ctx - 1)
+    npu_collect(True)
+    try:
+        llm.reset()
+        llm.eval(batch)
+        llm.reset()
+        llm.eval([token])
+    finally:
+        npu_collect(False)
+        llm.reset()
+    if gate is not None:
+        gate(npu_stats())
+    try:
+        try:
+            llm.eval(batch)
+            llm.eval([token])
+        except Exception as exc:
+            if npu_stats().get("storage_refused"):  # the backend refused the compile: the phone's storage is full
+                raise NpuStorageFull(ANE_STORAGE_TEXT) from exc
+            raise
+        if npu_stats().get("storage_refused"):
+            raise NpuStorageFull(ANE_STORAGE_TEXT)
+        _check_logits(llm)
+    finally:
+        llm.reset()
+    npu_freeze(True)
+
+
+def _check_logits(llm: Any) -> None:
+    """The last logits must be finite and not all equal (a broken kernel gives NaN / inf / zeros)."""
+    import math
+
+    n_vocab = int(llm.n_vocab())
+    logits = llm._ctx.get_logits()
+    values = [float(logits[i]) for i in range(n_vocab)]
     bad = sum(1 for v in values if not math.isfinite(v))
     if bad:
         raise RuntimeError(f"{bad} of {n_vocab} logits are NaN or infinite")

@@ -441,3 +441,86 @@ def test_the_ondevice_manager_row_leads_with_the_halgakos_avatar(tmp_path):
         assert row.title.value == ms.ONDEVICE_MANAGER_LABEL
     sheet = ms.ModelSheet(current_model="gpt-6", models=["gpt-6"], env=ms.SheetEnv(prefs=fakes.FakePrefs()))
     assert isinstance(sheet._ondevice_manager_row().leading, ft.CircleAvatar)  # the no-engine row too
+
+
+# ---- iOS: the Apple Neural Engine in the same places ----------------------------------------------------------------
+
+def test_engine_card_on_an_iphone_has_no_power_mode_and_shows_the_copies(tmp_path):
+    from glossarion_mobile.services.local_llm import service as svc
+    from test_local_npu_ane import FRESH, ane, talk
+
+    service, engine, _probe = ane(tmp_path, engine=eng.FakeEngine(npu_compile=FRESH,
+                                                                  npu_device="Apple Neural Engine (h15)"))
+    service.run_npu_check()
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs)
+    panel.build()
+    keys = _by_key(panel.control)
+    assert keys["local-npu-box"].visible and keys["local-npu"].visible and keys["local-npu-switch-note"].visible
+    assert keys["local-npu-note"].value == lmp.NPU_SECTION_TEXT_ANE
+    assert keys["local-npu-switch-note"].value == lmp.NPU_SWITCH_NOTE_ANE
+    assert not keys["local-npu-power"].visible and not keys["local-npu-power-note"].visible
+    assert keys["local-npu-line"].value == svc.NPU_ANE_READY_TEXT and not keys["local-npu-copies"].visible
+    assert not panel.npu_quant_marks() and panel.npu_offered()               # every quant suits the ANE
+    talk(service)
+    panel.render_npu(push=False)
+    keys = _by_key(panel.control)
+    assert keys["local-npu-copies"].visible and keys["local-npu-copies"].value == service.npu_copies_line()
+    assert keys["local-npu-line"].value == "Apple Neural Engine (h15) ready"
+    assert panel.backend_line("m-Q4_K_M") == ("Runs on NPU · Apple Neural Engine", False)
+    assert not any("· NPU" in str(t) or "not available" in str(t) for t in _texts(panel.preset_column))
+
+
+def test_the_custom_sheet_has_no_quant_marks_on_an_iphone(tmp_path, fake_hf):
+    from test_local_npu_ane import ane
+
+    service, _engine, _probe = ane(tmp_path, stems=())
+    service.run_npu_check()
+    sheet = _open_qwen(service, NINE)
+    keys = _by_key(sheet.quant_box)
+    assert not any(k.startswith("custom-quant-npu") for k in keys) and "custom-npu-size-note" not in keys
+    assert lmp.NPU_FRIENDLY_TEXT not in _texts(sheet.quant_box)
+
+
+def test_the_screens_show_the_compile_pass_without_waiting(tmp_path):
+    import threading
+
+    from test_local_npu_ane import FRESH, ane, talk
+
+    engine = eng.FakeEngine(npu_compile=FRESH, npu_step_delay=0.4, npu_device="Apple Neural Engine (h15)")
+    service, engine, _probe = ane(tmp_path, engine=engine)
+    service.run_npu_check()
+    worker = threading.Thread(target=lambda: talk(service), daemon=True)
+    worker.start()
+    _wait(lambda: (service.npu_progress() or {}).get("text", "").startswith("Preparing this model for the NPU · 1 / 4"))
+    seconds, panel, welcome, sheet, welcome_keys, picker_texts = _three_screens(service)
+    assert seconds < 1.0 and worker.is_alive()                                 # well under the 1.6 s compile pass
+    keys = _by_key(panel.control)
+    line = keys["local-npu-line"].value
+    assert line.startswith("Preparing this model for the NPU · ") and line.endswith(" / 4 (first time only)")
+    assert keys["local-npu-progress"].visible and keys["local-npu-progress"].value is not None  # determinate
+    assert panel.engine_state.value.startswith("Loading… · m-Q4_K_M · Preparing this model for the NPU · ")
+    assert _texts(welcome_keys()["welcome-npu-busy"])[0].startswith("Preparing this model for the NPU · ")
+    assert any(str(t).startswith("Preparing this model for the NPU · ") for t in picker_texts())
+    worker.join(10)
+    assert engine.backends == ["npu"] and service.npu_progress() is None
+
+
+def test_the_screens_never_wait_for_a_slow_iphone_check(tmp_path):
+    from glossarion_mobile.services.local_llm import service as svc
+    from test_local_npu_ane import AnePre, AneProbe, ane_service, ane_state
+
+    service, _engine, probe = ane_service(tmp_path, stems=(), probe=AneProbe(ane_state()),
+                                          precheck=AnePre(ane_state(), delay=2.0))
+    service.start()
+    try:
+        _wait(lambda: service.npu_progress() is not None)
+        seconds, panel, _welcome, _sheet, welcome_keys, picker_texts = _three_screens(service)
+        assert seconds < 1.0 and service._npu_state is None
+        assert _by_key(panel.control)["local-npu-line"].value == "Checking the NPU…"
+        assert _texts(welcome_keys()["welcome-npu-busy"]) == ["Checking the NPU…"]
+        _wait(lambda: service._npu_state is not None and service.npu_progress() is None
+              and _by_key(panel.control)["local-npu-line"].value == svc.NPU_ANE_READY_TEXT)
+        assert probe.calls == []                                               # stage 2 waits for a load
+    finally:
+        service.stop()
+        svc.set_default_service(None)

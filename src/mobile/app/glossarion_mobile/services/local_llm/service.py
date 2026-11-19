@@ -84,6 +84,23 @@
   never use the NPU. Power mode: ``NPU_POWER_KEY`` (upstream's modes, default burst), applied when the backend
   registers (a change applies after a restart). The screens only read this state (``npu_progress``,
   ``npu_status_line``): no stage, download or NPU lock runs on the UI thread.
+* **NPU on iOS (Apple Neural Engine):** the same machinery, keyed on the stages' ``backend`` ("ANE";
+  ``npu_backend``). Stage 1 is the loader's ``npu_precheck`` (the build carries libggml-ane, iOS 18 or later and
+  not a simulator, the private framework's classes load) and saves ``{"files": {}}`` as its source; stage 2
+  registers the backend and compiles one test program. There are no files to download and no power mode. Any NPU
+  load there (Auto, the model's own "NPU" choice, the diagnostics' timing) needs the GGUF to be at most
+  ``NPU_ANE_MAX_FILE_BYTES``; for Auto every recognisable quant suits it. Each model's NPU load runs a compile pass
+  (``engine._ane_compile_pass``) under the attempt marker: the engine card shows "Preparing this model for the NPU ·
+  3 / 14" from the engine's counters (``npu_progress`` phase "compiling"), the watchdog counts from the last
+  progress (not while the app is in the background or suspended), and after the collect pass ``_npu_storage_gate``
+  wants free storage of (``NPU_COPY_FACTOR`` + ``NPU_TEMP_FACTOR``) x the pending weights + ``NPU_FREE_MARGIN``
+  unless the ledger (``NPU_COPIES_KEY``) has the complete copy. iOS keeps those compiled copies and nothing can
+  remove them, so the ledger only reports them (``npu_copies_line``, also while the NPU is not offered): the gate
+  enters a "partial" estimate before the compiles start and ``_finish_npu_copy`` corrects it after the pass, worked
+  or failed. A compile that ran out of storage makes the backend refuse every compile until a restart
+  (``eng.NpuStorageFull``): no further NPU load is tried in that process, and a load that meets that state is not
+  recorded as that model's fallback. On iOS the attempt marker also carries the "background" flag: a kill while the
+  app is in the background records nothing.
 """
 
 from __future__ import annotations
@@ -197,6 +214,27 @@ NPU_WATCHDOG_SECONDS = 120.0
 #: seconds stage 1 runs before the screens show "Checking the NPU…": a build without the backend and a phone
 #: without a Hexagon DSP answer at once and never show it (they look as they did before the NPU)
 NPU_CHECK_QUIET_SECONDS = 0.5
+#: Prefs key of the NPU copies iOS keeps (Apple Neural Engine): ``{key: {"stem", "file", "size", "n_ctx",
+#: "engine", "bytes_estimate", "at"}}`` (key: file, size, context and engine version)
+NPU_COPIES_KEY = "local_llm_npu_copies"
+#: an ANE model's compile pass (``npu_progress`` phase "compiling")
+NPU_COMPILING_TEXT = "Preparing this model for the NPU · {done} / {total}"
+NPU_FIRST_TIME_TEXT = " (first time only)"
+NPU_ANE_READY_TEXT = ("Apple Neural Engine ready. Each model's first NPU load prepares a copy (about a minute, plus "
+                      "phone storage).")
+NPU_COPIES_TEXT = "NPU copies of models: about {size} of phone storage. iOS keeps them; Glossarion cannot remove them."
+#: Auto uses the Apple Neural Engine only for GGUF files up to this size (each model's copy costs phone storage)
+NPU_ANE_MAX_FILE_BYTES = 1_500_000_000
+#: the compiled copy of a model on iOS: about this many times its int8 weights, and the free storage kept on top
+NPU_COPY_FACTOR = 2.5
+NPU_FREE_MARGIN = 2_000_000_000
+#: what the compile pass keeps on disk on top of the cache while the model is loaded, in int8 weights: each family's
+#: unlinked blob in TMPDIR and the weight file each compiled program maps (ggml-ane.cpp / ggml-ane-runtime.m)
+NPU_TEMP_FACTOR = 2.0
+#: seconds between two reads of the ANE counters while a compile pass runs (progress and watchdog)
+NPU_PROGRESS_POLL_SECONDS = 0.5
+#: a gap this long between two of those reads means the app was suspended (the watchdog starts again from there)
+NPU_SUSPEND_GAP_SECONDS = 5.0
 MAX_WAITERS = 8
 IDLE_UNLOAD = 600.0
 BACKGROUND_UNLOAD = 60.0
@@ -307,6 +345,43 @@ def gpu_extra(size: int) -> int:
 
 def _gb(count: float) -> str:
     return f"{count / 1e9:.1f} GB"
+
+
+def _compile_counts(stats: Optional[dict]) -> tuple:
+    """``(done, pending, fresh)`` program families of an ANE compile pass's counters."""
+    stats = stats or {}
+
+    def number(name: str) -> int:
+        try:
+            return max(0, int(stats.get(name) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    fresh = number("compiles_fresh")
+    return fresh + number("compiles_cached"), number("families_pending"), fresh
+
+
+def _compiling_progress(stats: Optional[dict]) -> dict:
+    """``npu_progress`` of an ANE compile pass: "Starting the NPU…" until the families are known, then "Preparing this
+    model for the NPU · 3 / 14" (" (first time only)" once a program compiled fresh), with its fraction."""
+    done, pending, fresh = _compile_counts(stats)
+    total = done + pending
+    if not total:
+        return {"phase": "compiling", "text": NPU_STARTING_TEXT, "fraction": None}
+    text = NPU_COMPILING_TEXT.format(done=done, total=total) + (NPU_FIRST_TIME_TEXT if fresh else "")
+    return {"phase": "compiling", "text": text, "fraction": max(0.0, min(1.0, done / total))}
+
+
+def _free_storage(path: str) -> Optional[int]:
+    """Free bytes for the app at ``path`` (``os.statvfs``), None where unknown."""
+    statvfs = getattr(os, "statvfs", None)
+    if statvfs is None:
+        return None
+    try:
+        info = statvfs(path)
+        return int(info.f_bavail) * int(info.f_frsize)
+    except (OSError, ValueError):
+        return None
 
 
 def _platform() -> str:
@@ -595,11 +670,19 @@ class LocalEngineService:
         self._npu_hung_stem: Optional[str] = None  # the model whose first NPU load hung (its restart message)
         self._npu_inflight: Optional[str] = None  # stem of the NPU answer running now (its in-flight marker)
         self._npu_marker_lock = threading.Lock()
+        self._npu_attempt_lock = threading.RLock()  # the attempt marker (the loading thread, and lifecycle on iOS)
         self.npu_watchdog_seconds = NPU_WATCHDOG_SECONDS
         self.npu_quiet_seconds = NPU_CHECK_QUIET_SECONDS
         self._npu_loaded_once = False  # a first NPU load returned in this process (the watchdog is for the first)
         self._npu_attempt: Optional[str] = None  # stem of an NPU load whose first answer has not ended
         self._loaded_npu = False
+        self._npu_compile: dict = {}  # the ANE counters while a model's compile pass runs (phase "compiling")
+        #: the ANE backend refuses every compile until the app restarts (a compile ran out of storage in this
+        #: process): no further NPU load is tried, and no model is blamed for it
+        self._npu_storage_full = False
+        #: free bytes of the phone's storage at a path (tests replace it; None: unknown, the gate lets it through)
+        self.free_storage: Callable[[str], Optional[int]] = _free_storage
+        self.npu_progress_poll = NPU_PROGRESS_POLL_SECONDS
         #: what ran the last load (diagnostics): ``{"stem", "backend", "device", "seconds"}``
         self.last_load: Optional[dict] = None
         #: a backend the self-check forces for its timing runs ("npu" / "gpu" / "cpu"; None: the usual choice)
@@ -1093,8 +1176,24 @@ class LocalEngineService:
         return "NPU" if getattr(engine, "on_npu", False) else "GPU" if getattr(engine, "on_gpu", False) else "CPU"
 
     def npu_possible(self) -> bool:
-        """This build could have an NPU (Android arm64, or a test's fakes): the check runs here."""
+        """This build could have an NPU (Android arm64, iOS, or a test's fakes): the check runs here."""
         return self._npu_probe is not None
+
+    def npu_backend(self) -> str:
+        """The NPU backend of this phone: "ANE" (Apple Neural Engine) or "HTP" (Hexagon), as the stages' answers say
+        (saved state only), else by the platform."""
+        for state in (self._stage2(), self._stage1()):
+            backend = (state or {}).get("backend")
+            if backend in eng.NPU_STEPS_BY_BACKEND:
+                return str(backend)
+        return eng.ANE_BACKEND if self.platform == "ios" else eng.NPU_BACKEND
+
+    def npu_is_ane(self) -> bool:
+        return self.npu_backend() == eng.ANE_BACKEND
+
+    def npu_needs_files(self) -> bool:
+        """The backend needs files downloaded before it starts (the Hexagon skeletons; the ANE needs none)."""
+        return not self.npu_is_ane()
 
     def _saved_npu(self, key: str) -> Optional[dict]:
         """This app version's saved stage answer (``NPU_CHECK_KEY`` / ``NPU_SESSION_KEY``), else None."""
@@ -1142,7 +1241,10 @@ class LocalEngineService:
         return eng.npu_failure(session) if session is not None else None
 
     def npu_options(self) -> dict:
-        """The GGML_HEXAGON_* options ``register_npu_backend`` sets before the backend loads."""
+        """The GGML_HEXAGON_* options ``register_npu_backend`` sets before the backend loads (none on the ANE: the
+        loader keeps its own defaults)."""
+        if self.npu_is_ane():
+            return {}
         return {eng.NPU_POWER_ENV: self.npu_power()}
 
     def npu_skel_dir(self) -> Optional[str]:
@@ -1156,6 +1258,8 @@ class LocalEngineService:
             return self._npu_source
         saved = self._saved_npu(NPU_CHECK_KEY)
         source = saved.get("source") if saved else None
+        if isinstance(source, dict) and not self.npu_needs_files():
+            return source  # the ANE: {"files": {}}, nothing to download
         return source if isinstance(source, dict) and source.get("files") else None
 
     def npu_skeleton(self) -> Optional[dict]:
@@ -1165,7 +1269,9 @@ class LocalEngineService:
 
     def npu_files_ready(self, refresh: bool = False) -> bool:
         """The phone's skeleton is in its folder: a regular file of the pinned size (a cached stat; ``refresh``
-        looks again)."""
+        looks again). Always True on a backend that needs no files (the ANE)."""
+        if not self.npu_needs_files():
+            return True
         if self._npu_files_present is None or refresh:
             folder, spec = self.npu_skel_dir(), self.npu_skeleton()
             present = False
@@ -1248,7 +1354,9 @@ class LocalEngineService:
             if not blocked:
                 state = eng.npu_precheck_state(state)
             source = None
-            if not blocked and eng.npu_precheck_failure(state) is None:
+            if not blocked and eng.npu_precheck_failure(state) is None and eng.npu_kind(state) == eng.ANE_BACKEND:
+                source = {"files": {}}  # the Apple Neural Engine: nothing to download
+            elif not blocked and eng.npu_precheck_failure(state) is None:
                 try:
                     source = self._npu_source_fn()
                 except Exception:
@@ -1259,9 +1367,13 @@ class LocalEngineService:
                                       {"name": "arch", "ok": False, "detail": state["error"]}]
                     source = None
             failure = eng.npu_precheck_failure(state)
-            log.info("on-device NPU check in %.1f s: %s", seconds,
-                     f"Hexagon v{state.get('arch')}, NPU files from llama.cpp {source['release']}" if failure is None
-                     else f"not used ({failure[0]}: {failure[1]})")
+            if failure is not None:
+                summary = f"not used ({failure[0]}: {failure[1]})"
+            elif eng.npu_kind(state) == eng.ANE_BACKEND:
+                summary = eng.npu_label(state)
+            else:
+                summary = f"Hexagon v{state.get('arch')}, NPU files from llama.cpp {source['release']}"
+            log.info("on-device NPU check in %.1f s: %s", seconds, summary)
             self._set_pref(NPU_CHECK_KEY, {"version": self.app_version, "state": state, "blocked": blocked,
                                            "seconds": seconds, "source": source})
             self._set_pref(NPU_CHECK_ATTEMPT_KEY, None, durable=True)
@@ -1301,6 +1413,8 @@ class LocalEngineService:
                     "fraction": max(0.0, min(1.0, done / total)) if total else None}
         if phase == "starting":
             return {"phase": phase, "text": NPU_STARTING_TEXT, "fraction": None}
+        if phase == "compiling":
+            return _compiling_progress(self._npu_compile)
         return None
 
     def _npu_load_phase(self) -> Optional[str]:
@@ -1317,6 +1431,10 @@ class LocalEngineService:
             return progress["text"]
         if not self.npu_offered():
             return None
+        if self.npu_is_ane():
+            if not self.npu_copies():
+                return NPU_ANE_READY_TEXT
+            return f"{eng.npu_label(self.npu_state() or {})} ready"
         if self.npu_download_error:
             return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
         if not self.npu_files_ready():
@@ -1332,6 +1450,95 @@ class LocalEngineService:
         if not self._npu_choice_wants(stem, self.backend_choice(stem)):
             return None
         return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
+
+    # ---- NPU copies (Apple Neural Engine): what iOS keeps, and the storage gate ----------------------------------
+
+    def npu_copies(self) -> dict:
+        """The ledger of the compiled NPU copies iOS keeps (``NPU_COPIES_KEY``; Prefs only)."""
+        raw = self._pref(NPU_COPIES_KEY)
+        return {str(k): v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
+
+    def npu_copies_bytes(self) -> int:
+        total = 0
+        for entry in self.npu_copies().values():
+            try:
+                total += max(0, int(entry.get("bytes_estimate") or 0))
+            except (TypeError, ValueError):
+                pass
+        return total
+
+    def npu_copies_line(self) -> Optional[str]:
+        """The engine card's one line about those copies (iOS, whenever the ledger has some: the copies stay on the
+        phone when the NPU is no longer offered, e.g. after an iOS update fails the NPU's start)."""
+        if not self.npu_is_ane() or not self.npu_copies():
+            return None
+        return NPU_COPIES_TEXT.format(size=_gb(self.npu_copies_bytes()))
+
+    def _npu_copy_key(self, stem: str, n_ctx: int) -> tuple:
+        """``(key, entry)`` of ``stem``'s copy in the ledger: its file, size, KV bucket (``eng.ane_kv_bucket``: the
+        compiled programs depend on it, not on the context itself) and engine version."""
+        entry = self.registry.load().get(stem) or {}
+        file, size = str(entry.get("file") or stem), int(entry.get("size") or 0)
+        kv = eng.ane_kv_bucket(n_ctx)
+        key = f"{file}|{size}|{kv}|{eng.ENGINE_VERSION}"
+        return key, {"stem": stem, "file": file, "size": size, "n_ctx": int(n_ctx), "kv": kv,
+                     "engine": eng.ENGINE_VERSION}
+
+    def _npu_storage_gate(self, stem: str, n_ctx: int) -> Callable[[dict], None]:
+        """The gate an ANE load calls after its collect pass: a complete copy the ledger already has is expected in
+        the iOS cache; otherwise the phone needs (``NPU_COPY_FACTOR`` + ``NPU_TEMP_FACTOR``) x the pending weights +
+        ``NPU_FREE_MARGIN`` free, else ``NpuUnavailable`` (the load uses the GPU / CPU). A pass that goes ahead first
+        enters its copy in the ledger as "partial" (an estimate from the pending weights), so a pass that fails or is
+        killed half way still shows the storage it may have used; ``_finish_npu_copy`` corrects it."""
+        key, entry = self._npu_copy_key(stem, n_ctx)
+
+        def gate(stats: dict) -> None:
+            copies = self.npu_copies()
+            old = copies.get(key)
+            if old and not old.get("partial"):
+                return
+            pending = max(0, int((stats or {}).get("bytes_pending") or 0))
+            need = int(pending * (NPU_COPY_FACTOR + NPU_TEMP_FACTOR)) + NPU_FREE_MARGIN
+            try:
+                free = self.free_storage(self.registry.root)
+            except Exception:
+                free = None
+            if free is not None and free < need:
+                raise eng.NpuUnavailable(f"{eng.ANE_STORAGE_TEXT} (needs about {_gb(need)})")
+            if pending:
+                base = int((old or {}).get("base", (old or {}).get("bytes_estimate")) or 0)
+                copies[key] = {**entry, "bytes_estimate": base + int(pending * NPU_COPY_FACTOR), "base": base,
+                               "partial": True, "at": int(time.time())}
+                self._set_pref(NPU_COPIES_KEY, copies, durable=True)
+
+        return gate
+
+    def _finish_npu_copy(self, stem: str, n_ctx: int, stats: dict, ok: bool) -> None:
+        """After an ANE load's compile pass, whether it worked or not: the ledger entry of its copy from what really
+        compiled fresh (``bytes_fresh`` x ``NPU_COPY_FACTOR``, an estimate) on top of what the entry had before the
+        pass; still "partial" when the pass failed (the storage is spent all the same). A pass with nothing fresh
+        leaves no new entry."""
+        stats = stats or {}
+        key, entry = self._npu_copy_key(stem, n_ctx)
+        copies = self.npu_copies()
+        old = copies.get(key) or {}
+        base = int(old.get("base", old.get("bytes_estimate")) or 0)
+        fresh = max(0, int(stats.get("compiles_fresh") or 0))
+        estimate = int(max(0, int(stats.get("bytes_fresh") or 0)) * NPU_COPY_FACTOR) if fresh else 0
+        if not estimate and not old.get("partial"):
+            return  # nothing new (a cache hit of a copy the ledger has, or a pass that compiled nothing)
+        total = base + estimate
+        if not total:
+            copies.pop(key, None)
+        else:
+            row = {**entry, "bytes_estimate": total, "at": int(time.time())}
+            if not ok:
+                row.update({"partial": True, "base": total})
+            copies[key] = row
+        self._set_pref(NPU_COPIES_KEY, copies)
+        if fresh:
+            log.info("on-device NPU: %s compiled %d program families (about %s of phone storage)%s", stem, fresh,
+                     _gb(estimate), "" if ok else "; the load then failed")
 
     def _recover_npu(self) -> Optional[str]:
         """At start: an NPU stage the app died in (this version) keeps the NPU off; an NPU load or answer the app
@@ -1356,7 +1563,14 @@ class LocalEngineService:
             log.info("on-device NPU: the app closed in the background during an answer of %s; no NPU fallback",
                      inflight.get("stem"))
             inflight = None
-        raw = inflight or self._pref(NPU_ATTEMPT_KEY)
+        attempt_marker = self._pref(NPU_ATTEMPT_KEY)
+        if not inflight and isinstance(attempt_marker, dict) and attempt_marker.get("background"):
+            # iOS: the app was in the background during that NPU load (its compile pass); iOS ends suspended apps
+            # too, so it records nothing either
+            log.info("on-device NPU: the app closed in the background while %s loaded on the NPU; no NPU fallback",
+                     attempt_marker.get("stem"))
+            attempt_marker = None
+        raw = inflight or attempt_marker
         self._set_pref(NPU_ATTEMPT_KEY, None)
         if not isinstance(raw, dict) or not raw.get("stem"):
             self._set_pref(NPU_INFLIGHT_KEY, None, durable=True)
@@ -1381,6 +1595,10 @@ class LocalEngineService:
             failure = self.npu_failure()
             if failure is not None:
                 return f"{failure[0]}: {failure[1]}"
+            if not self.npu_needs_files():  # the ANE: no files, stage 2 registers it and compiles its test program
+                state = self._npu_session("")
+                failure = eng.npu_failure(state)
+                return None if failure is None else f"{failure[0]}: {failure[1]}"
             folder, spec, source = self.npu_skel_dir(), self.npu_skeleton(), self.npu_source()
             if not (folder and spec and source):
                 return "this engine build names no NPU files for this phone"
@@ -1524,7 +1742,7 @@ class LocalEngineService:
 
     def npu_power_pending(self) -> bool:
         """The saved power mode differs from the one the registered backend started with (needs a restart)."""
-        if self._npu_session_state is None or not eng.npu_passed(self._npu_session_state):
+        if self._npu_session_state is None or not eng.npu_passed(self._npu_session_state) or self.npu_is_ane():
             return False
         return getattr(self, "_npu_power_started", self.npu_power()) != self.npu_power()
 
@@ -1624,30 +1842,66 @@ class LocalEngineService:
 
     def _mark_npu_attempt(self, stem: str) -> None:
         self._npu_attempt = stem
-        self._set_pref(NPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time())}, durable=True)
+        self._write_npu_attempt()
+
+    def _write_npu_attempt(self) -> None:
+        """The attempt marker of ``_npu_attempt`` on disk; on iOS with the "background" flag (rewritten on lifecycle
+        changes): iOS suspends and ends backgrounded apps during a long compile pass, which is no NPU crash."""
+        with self._npu_attempt_lock:
+            stem = self._npu_attempt
+            if stem is None:
+                return
+            marker = {"stem": stem, "at": int(time.time())}
+            if self.platform == "ios":
+                marker["background"] = self.background_since is not None
+            self._set_pref(NPU_ATTEMPT_KEY, marker, durable=True)
 
     def _clear_npu_attempt(self) -> None:
         # only this service's own marker: the parallel secondary and the self-check services share the key
-        if self._npu_attempt is not None:
-            self._npu_attempt = None
-            self._set_pref(NPU_ATTEMPT_KEY, None, durable=True)
+        with self._npu_attempt_lock:
+            if self._npu_attempt is not None:
+                self._npu_attempt = None
+                self._set_pref(NPU_ATTEMPT_KEY, None, durable=True)
 
     def _npu_choice_wants(self, stem: str, choice: str) -> bool:
         """``stem``'s own rule asks for the NPU: its choice is "npu", or "auto" with "Use NPU" on and a quant the
         backend accepts, and the model has no NPU fallback (prefs only)."""
         if self._is_child or self._npu_probe is None or choice not in ("auto", "npu"):
             return False
+        entry = self.registry.load().get(stem) or {}
+        if self.npu_is_ane() and self._npu_file_size(stem, entry) > NPU_ANE_MAX_FILE_BYTES:
+            # each model's NPU copy costs phone storage that iOS keeps: small files only, whatever chose the NPU
+            # (Auto, the model's own "NPU" choice or the diagnostics' timing run)
+            return False
         if choice == "auto":
             if not self.use_npu():
                 return False
-            if presets.npu_quant_kind((self.registry.load().get(stem) or {}).get("file")) == "cpu":
+            if self.npu_is_ane():
+                # every quant is requantised to int8
+                if presets.npu_quant_kind(entry.get("file"), eng.ANE_BACKEND) == "cpu":
+                    return False
+            elif presets.npu_quant_kind(entry.get("file")) == "cpu":
                 return False
         return not self.npu_fallback(stem)
+
+    def _npu_file_size(self, stem: str, entry: dict) -> int:
+        """``stem``'s GGUF size in bytes: the registry's, else the file's on disk; unknown counts as too big for the
+        ANE (its copy could not be bounded)."""
+        try:
+            size = int(entry.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            return size
+        try:
+            return int(os.path.getsize(self.registry.file_path(stem)))
+        except (OSError, TypeError, ValueError, AttributeError):
+            return NPU_ANE_MAX_FILE_BYTES + 1
 
     def _npu_wanted(self, stem: str, choice: str) -> bool:
         """The NPU for ``stem`` now: its own rule asks for it, the NPU is offered (stage 1 runs here first when the
         start's background check has not answered yet) and this start's NPU files download has not failed."""
-        if not self._npu_choice_wants(stem, choice):
+        if not self._npu_choice_wants(stem, choice) or self._npu_storage_full:
             return False
         if self._stage1() is None:
             self.run_npu_check()  # a load that comes before the start's background check waits for it
@@ -1677,23 +1931,31 @@ class LocalEngineService:
         self._mark_npu_attempt(stem)
         fired = threading.Event()
         timer = None
-        if not self._npu_loaded_once:
-            def hang() -> None:
-                fired.set()
-                self.npu_hung = True
-                self._npu_hung_stem = stem
-                self._npu_failed(stem, NPU_HANG_REASON)
-                self._notify()
+        ane = self.npu_is_ane()
 
+        def hang() -> None:
+            fired.set()
+            self.npu_hung = True
+            self._npu_hung_stem = stem
+            self._npu_failed(stem, NPU_HANG_REASON)
+            self._notify()
+
+        if ane:
+            # every ANE load runs its compile pass (minutes the first time): the watchdog counts from its last progress
+            timer = self._watch_npu_compile(engine, hang)
+        elif not self._npu_loaded_once:
             timer = threading.Timer(self.npu_watchdog_seconds, hang)
             timer.daemon = True
             timer.start()
+        extra = {"npu_gate": self._npu_storage_gate(stem, n_ctx)} if ane else {}
+        ok = False
         try:
-            engine.load(path, n_ctx, self.threads(), mmproj=mmproj, npu=True, n_gpu_layers=layers)
+            engine.load(path, n_ctx, self.threads(), mmproj=mmproj, npu=True, n_gpu_layers=layers, **extra)
             if fired.is_set():
                 raise eng.NpuUnavailable(NPU_HANG_REASON)
             if not getattr(engine, "on_npu", False):
                 raise eng.NpuUnavailable("the engine did not load the model on the NPU")
+            ok = True
             self._npu_loaded_once = True
             # the load ran its first token on the DSP (``engine.load``'s check); from here every NPU answer has
             # its own in-flight marker, so an idle loaded model leaves no marker behind
@@ -1704,13 +1966,76 @@ class LocalEngineService:
                 timer.cancel()
             if engine.loaded:
                 engine.unload()
-            if not fired.is_set():
+            if isinstance(exc, eng.NpuStorageFull):
+                # the backend refuses every compile until the app restarts: no more NPU loads in this process
+                self._npu_storage_full = True
+            if isinstance(exc, eng.NpuStorageFull) and exc.before_pass:
+                log.warning("on-device NPU: %s uses the %s: an earlier NPU load ran out of storage; the NPU is off "
+                            "until Glossarion restarts", stem, "GPU" if self._gpu_wanted(stem) else "CPU")
+            elif not fired.is_set():
                 self._npu_failed(stem, str(exc) or type(exc).__name__)
             self._clear_npu_attempt()
             return False
         finally:
             if timer is not None:
                 timer.cancel()
+            if ane:
+                # the copy's storage is spent whether the pass worked or not (the iOS cache keeps what compiled)
+                try:
+                    self._finish_npu_copy(stem, n_ctx, self._engine_npu_stats(engine), ok)
+                except Exception:
+                    log.debug("writing the NPU copies ledger failed", exc_info=True)
+                self._npu_phase = None
+                self._npu_compile = {}
+                self._notify()
+
+    @staticmethod
+    def _engine_npu_stats(engine: Any) -> dict:
+        stats = getattr(engine, "npu_stats", None)
+        try:
+            return dict(stats() or {}) if callable(stats) else {}
+        except Exception:
+            log.debug("reading the NPU counters failed", exc_info=True)
+            return {}
+
+    def _watch_npu_compile(self, engine: Any, hang: Callable[[], None]) -> threading.Event:
+        """While an ANE load runs: the engine card's "Preparing this model for the NPU · n / m" (phase "compiling",
+        read from the engine's counters every ``npu_progress_poll`` s) and the watchdog, which fires ``hang`` when the
+        compile has made no progress for ``npu_watchdog_seconds`` (time in the background, or while iOS had the app
+        suspended, does not count). Returns the event that ends it (``cancel``)."""
+        done = threading.Event()
+        done.cancel = done.set  # type: ignore[attr-defined] - stops like the Timer of the Hexagon path
+        self._npu_compile = {}
+        self._npu_phase = "compiling"
+        self._notify()
+        poll = max(0.01, min(self.npu_progress_poll, self.npu_watchdog_seconds / 4))
+
+        def watch() -> None:
+            last = None
+            previous = time.monotonic()
+            deadline = previous + self.npu_watchdog_seconds
+            while not done.wait(poll):
+                now = time.monotonic()
+                if self.background_since is not None or now - previous > max(4 * poll, NPU_SUSPEND_GAP_SECONDS):
+                    # in the background, or this thread did not run for a while (iOS suspends a backgrounded app,
+                    # the compile with it, while the clock goes on): that time is no hang
+                    deadline = now + self.npu_watchdog_seconds
+                previous = now
+                stats = self._engine_npu_stats(engine)
+                counts = _compile_counts(stats)[:2]
+                if counts != last:
+                    last = counts
+                    deadline = time.monotonic() + self.npu_watchdog_seconds
+                    if not done.is_set():
+                        self._npu_compile = stats
+                        self._notify()
+                if time.monotonic() >= deadline:
+                    if not done.is_set():
+                        hang()
+                    return
+
+        threading.Thread(target=watch, name="gl-llm-npu-compile", daemon=True).start()
+        return done
 
     def preset_for(self, stem: str) -> Optional[dict]:
         """The preset that brought ``stem`` (same repo and file; else a file-less preset of that repo)."""
@@ -2338,6 +2663,8 @@ class LocalEngineService:
             if self.background_since is None:
                 self.background_since = self.clock()
                 self._write_npu_inflight()  # a kill from here on is not counted as an NPU crash
+                if self.platform == "ios":
+                    self._write_npu_attempt()  # nor during an NPU load's compile pass
             if self.platform == "ios" and not self.job_active():
                 return "unloaded" if self.unload() else None
             return None
@@ -2345,6 +2672,8 @@ class LocalEngineService:
             if self.background_since is not None:
                 self.background_since = None
                 self._write_npu_inflight()
+                if self.platform == "ios":
+                    self._write_npu_attempt()
             return None
         if name == "detach":
             # Android destroys the activity (Back, or memory pressure in the background) while the process

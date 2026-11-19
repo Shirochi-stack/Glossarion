@@ -8,6 +8,9 @@
   ``npu_lines(service, speeds)``: the NPU block of the device checks (check steps, arch, device, the last load,
   ``npu_speed_check``'s timing of the suite prompt on NPU, GPU and CPU, the fallbacks, the "ggml-hex:" log), or one
   "NPU: not available (step: reason)" line. Their services share the app's NPU markers (``SHARED_PREF_KEYS``).
+  On iOS (Apple Neural Engine) the block names the chip, how long the check and the start took and whether the
+  test program came from the iOS cache, the NPU copies of models iOS keeps (an estimate), and the "ggml-ane" log;
+  ``npu_backend_check`` also reports stage 1 itself (``precheck``: it stops at "device" on a simulator).
 * ``fake_route_check(root)`` (e2e ``local_route_fake_engine``): ``LocalLLMServer`` + ``FakeEngine`` +
   ``UnifiedClient`` with ``local/fake-echo``, offline, plain and streaming.
 * ``llama_suite()`` (suite ``llama``, ``glossarion://app/__selftest__?suite=llama``): downloads the
@@ -53,7 +56,8 @@ SUITE_MESSAGES = (
 #: the Prefs keys a check's own service shares with the app's (the NPU crash markers, fallbacks and check): the
 #: backend aborts the process on DSP failures, so a self-check that dies on the NPU is recorded like the app's own
 SHARED_PREF_KEYS = (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.NPU_FALLBACK_KEY, svc.NPU_CHECK_KEY,
-                    svc.NPU_SESSION_KEY, svc.NPU_CHECK_ATTEMPT_KEY, svc.NPU_KEY, svc.NPU_POWER_KEY)
+                    svc.NPU_SESSION_KEY, svc.NPU_CHECK_ATTEMPT_KEY, svc.NPU_KEY, svc.NPU_POWER_KEY,
+                    svc.NPU_COPIES_KEY)
 
 
 class _DictPrefs:
@@ -125,6 +129,20 @@ def engine_check() -> dict:
             "gpu": gpu_backend_check(), "npu": npu_backend_check()}
 
 
+def _registered(ext: Any, registry_name: str) -> bool:
+    """ggml has a backend registered under ``registry_name`` (``ggml_backend_reg_by_name``: a name lookup in the
+    registry, it starts no backend); False without the loader's libggml handle."""
+    libggml = getattr(ext, "_LIBGGML", None)
+    if libggml is None:
+        return False
+    import ctypes
+
+    by_name = libggml.ggml_backend_reg_by_name
+    by_name.restype = ctypes.c_void_p
+    by_name.argtypes = [ctypes.c_char_p]
+    return bool(by_name(registry_name.encode("ascii")))
+
+
 def gpu_backend_check() -> dict:
     """The optional GPU backend is shipped where it should be and inert until the app asks for it:
     iOS loaded libggml-metal (linked into libggml), the Android arm64 build names OpenCL, and no GPU
@@ -138,15 +156,8 @@ def gpu_backend_check() -> dict:
     if offered is not None and offered != backend:  # (iOS 13 / 14: Metal shipped, not offered)
         raise AssertionError(f"the app offers GPU backend {offered!r}, the engine build ships {backend!r}")
     requested = bool(getattr(ext, "GPU_STATE", {}))
-    registered = []
-    libggml = getattr(ext, "_LIBGGML", None)
-    if libggml is not None:
-        import ctypes
-
-        by_name = libggml.ggml_backend_reg_by_name
-        by_name.restype = ctypes.c_void_p
-        by_name.argtypes = [ctypes.c_char_p]
-        registered = [n for n in ("Metal", "OpenCL") if by_name(n.encode("ascii"))]
+    # by their registry names (ggml-metal registers as "MTL"): reported by the app's names
+    registered = [n for n in ("Metal", "OpenCL") if _registered(ext, eng.GPU_REGISTRY_NAMES[n])]
     if registered and not requested:
         raise AssertionError(f"GPU backend {registered} registered although the GPU was never switched on")
     return {"backend": backend, "registered": registered, "requested": requested,
@@ -377,7 +388,8 @@ def parallel_generation_check(service: svc.LocalEngineService, stem: str) -> dic
 
 def npu_backend_check() -> dict:
     """The NPU backend as this build has it, without registering anything: whether the wheel has the NPU
-    functions and ships the backend (``npu_backend_shipped``), and whether this platform could use it."""
+    functions and ships the backend (``npu_backend_shipped``), whether this platform could use it, and which NPU
+    backends ggml has registered ("registered"; one registered before the app started the NPU is an error)."""
     ext = importlib.import_module("llama_cpp._ctypes_extensions")
     shipped = getattr(ext, "npu_backend_shipped", None)
     try:
@@ -386,8 +398,32 @@ def npu_backend_check() -> dict:
         carried = f"{type(exc).__name__}: {exc}"
     functions = all(getattr(ext, name, None) is not None
                     for name in ("npu_backend_shipped", "npu_precheck", "npu_skeleton_source", "register_npu_backend"))
-    return {"functions": functions, "shipped": carried, "platform": eng.npu_platform(),
-            "device_index": getattr(ext, "device_index", None) is not None}
+    out = {"functions": functions, "shipped": carried, "platform": eng.npu_platform(),
+           "device_index": getattr(ext, "device_index", None) is not None}
+    name = getattr(ext, "npu_backend_name", None)
+    if name is not None:
+        try:
+            out["backend"] = name()
+        except Exception as exc:
+            out["backend"] = f"{type(exc).__name__}: {exc}"
+    precheck = getattr(ext, "npu_precheck", None)
+    if precheck is not None:
+        # stage 1 itself: cheap, registers nothing; on an iPhone simulator it stops at "device", before the framework
+        try:
+            raw = precheck()
+            out["precheck"] = {"backend": raw.get("backend"), "error": raw.get("error"),
+                               "steps": [dict(s) for s in raw.get("steps") or [] if isinstance(s, dict)]} \
+                if isinstance(raw, dict) else {"error": f"unexpected answer {type(raw).__name__}", "steps": []}
+        except Exception as exc:
+            out["precheck"] = {"error": f"{type(exc).__name__}: {exc}", "steps": []}
+    # nothing registers an NPU backend before register_npu_backend has loaded it (NPU_STATE): not the import, not
+    # ggml's registry start (ane-backend.patch 1.), not this check
+    requested = bool(getattr(ext, "NPU_STATE", {}))
+    out["registered"] = [n for n in (eng.NPU_BACKEND, eng.ANE_BACKEND) if _registered(ext, n)]
+    out["requested"] = requested
+    if out["registered"] and not requested:
+        raise AssertionError(f"NPU backend {out['registered']} registered although the app never started the NPU")
+    return out
 
 
 def npu_summary(service: Any) -> dict:
@@ -401,7 +437,22 @@ def npu_summary(service: Any) -> dict:
             "last_load": service.last_load, "fallbacks": fallbacks, "hung": service.npu_hung,
             "seconds": service.npu_seconds(), "release": source.get("release"),
             "files": {spec["name"]: service.npu_files_ready(refresh=True)} if spec else {},
-            "download_error": service.npu_download_error}
+            "download_error": service.npu_download_error, "backend": service.npu_backend(),
+            "copies": len(service.npu_copies()), "copies_bytes": service.npu_copies_bytes()}
+
+
+def _ane_head_line(service: Any, state: dict) -> str:
+    """"Apple Neural Engine (h15) · check 0.1 s · start 1.4 s (test program from the iOS cache)"."""
+    parts = [eng.npu_label(state)]
+    seconds = service.npu_seconds()
+    for key, label in (("check", "check"), ("start", "start")):
+        parts.append(f"{label} {seconds[key]:.1f} s" if key in seconds else f"{label}: not run")
+    compile_step = next((s for s in state.get("steps") or [] if s.get("name") == "compile"), None)
+    text = " · ".join(parts)
+    if compile_step and compile_step.get("ok"):
+        detail = str(compile_step.get("detail") or "")
+        text += " (test program from the iOS cache)" if "cache" in detail else " (test program compiled)"
+    return text
 
 
 def _npu_stage_lines(service: Any) -> list:
@@ -477,29 +528,48 @@ def _speed_text(result: Optional[dict]) -> str:
     return str(result.get("skipped") or result.get("error") or "not run")
 
 
+def _ane_copies_lines(service: Any) -> list:
+    """"NPU copies: 2 models, about 3.4 GB of phone storage (estimate)" while the ledger has some, else []."""
+    count = len(service.npu_copies())
+    if not count:
+        return []
+    return [f"NPU copies: {count} model{'s' if count != 1 else ''}, about "
+            f"{service.npu_copies_bytes() / 1e9:.1f} GB of phone storage (estimate)"]
+
+
 def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str] = None) -> list:
     """The NPU block of Logs & diagnostics › device checks (selectable text: copy it from there). Without the NPU,
     one line: "NPU: not available (step: reason)"."""
     if service is None:
         return ["NPU: not available (engine: the on-device engine is not running)"]
     failure = service.npu_failure()
+    ane = service.npu_is_ane()
     if failure is not None:
         hang = service.npu_hang_note() if getattr(service, "npu_hung", False) else None
         extra = _npu_stage_lines(service) if service.npu_possible() else []
-        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else []) + extra
+        # iOS: the copies made while the NPU worked stay on the phone
+        copies = _ane_copies_lines(service) if ane else []
+        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else []) + extra + copies
     state = service.npu_state() or {}
     soc = eng.soc_label() if soc is None else soc
     lines = ["NPU: available"]
     if soc:
         lines.append(f"SoC: {soc}")
-    lines.extend(_npu_stage_lines(service))
+    if ane:
+        lines.append(_ane_head_line(service, state))
+        lines.extend(_ane_copies_lines(service))
+    else:
+        lines.extend(_npu_stage_lines(service))
     for step in state.get("steps") or []:
         detail = str(step.get("detail") or "")
         lines.append(f"{'✓' if step.get('ok') else '✕'} {step.get('name')}" + (f": {detail}" if detail else ""))
-    lines.append(f"Arch: v{state.get('arch')}")
-    lines.append(f"Device: {state.get('device') or '?'}")
-    lines.append(f"Use NPU: {'on' if service.use_npu() else 'off'} · power mode: {service.npu_power()}"
-                 + (" (applies after a restart)" if service.npu_power_pending() else ""))
+    if ane:
+        lines.append(f"Use NPU: {'on' if service.use_npu() else 'off'}")
+    else:
+        lines.append(f"Arch: v{state.get('arch')}")
+        lines.append(f"Device: {state.get('device') or '?'}")
+        lines.append(f"Use NPU: {'on' if service.use_npu() else 'off'} · power mode: {service.npu_power()}"
+                     + (" (applies after a restart)" if service.npu_power_pending() else ""))
     last = service.last_load
     if last:
         lines.append(f"Last load: {last['stem']} on {last['backend']} ({last['device']}) in {last['seconds']:.1f} s")
@@ -519,7 +589,8 @@ def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str]
     if service.npu_hung:
         lines.append(service.npu_hang_note() or "")
     hex_lines = eng.hex_log_lines()
-    lines.append("ggml-hex log:" if hex_lines else "ggml-hex log: none captured")
+    label = "ggml-ane log" if ane else "ggml-hex log"
+    lines.append(f"{label}:" if hex_lines else f"{label}: none captured")
     lines.extend(f"  {line}" for line in hex_lines)
     return lines
 

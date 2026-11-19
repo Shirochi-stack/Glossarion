@@ -45,6 +45,13 @@
 # generator). The HTP skeletons are neither built nor shipped: the app downloads them from llama.cpp's own
 # release at first NPU use, and verify-native fails a wheel that carries one. [hexagon] enabled = false: no
 # download, no backend. See src/mobile/README.md "NPU (Snapdragon)".
+#
+# NPU on iOS (wheelhouse.toml [ane], on on this branch): the recipe's patches/ane-backend.patch adds ggml-ane
+# (llama.cpp pull request 31969, a draft that dlopens Apple's private AppleNeuralEngine framework at run time) and
+# wheels.py stage-ane writes GGML_ANE ON / OFF into the CMake initial cache every iOS slice loads; the slices then
+# carry libggml-ane (linked into libggml) and the marker, which verify-native checks. Nothing is downloaded. The
+# llama-cpp-python cache key already hashes the recipe (both patches), wheels.py and wheelhouse.toml. See
+# src/mobile/README.md "NPU (Apple Neural Engine)".
 
 name: Mobile wheels (cryptography, Pillow, llama-cpp-python)
 
@@ -127,6 +134,10 @@ jobs:
             echo "FORGE_DIR=$RUNNER_TEMP/forge"
           } >> "$GITHUB_ENV"
           uv run --no-project python src/mobile/ci/wheels/wheels.py env --platform "$PLATFORM" --format github | tee -a "$GITHUB_OUTPUT"
+          if [ "$PLATFORM" = ios ]; then
+            ane="$(grep -E '^ane_enabled=' "$GITHUB_OUTPUT" | tail -n 1 | cut -d= -f2)"
+            echo "::notice title=iOS NPU backend (wheelhouse.toml [ane])::enabled=${ane:-unknown} (llama.cpp pull request 31969, a draft using Apple's private AppleNeuralEngine framework: test builds only)"
+          fi
           # The cache steps below are written per package; fail if the manifest moved on without them.
           # Retagged official wheels ([wheel.retag]) are neither built nor cached: the retag step makes them.
           case "$PLATFORM" in

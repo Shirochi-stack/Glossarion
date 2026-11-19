@@ -29,7 +29,11 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   the Sigma quant sheet mark each file "NPU-friendly" / "Partly CPU on NPU" (and Qwen 3.5 9B is over the NPU's
   3.5 GB). The preset editor gains Backend (Auto / NPU / GPU / CPU) and NPU layers;
   a row says which backend runs its loaded model ("Runs on NPU · Hexagon v81") or why the NPU was not used, with
-  "Try the NPU again" in its menu.
+  "Try the NPU again" in its menu. On iOS (Apple Neural Engine) the section says so, has no power mode and no quant
+  marks (every quant is requantised), its status line says each model's first NPU load prepares a copy, the bar
+  shows "Preparing this model for the NPU · 3 / 14" while a model's compile pass runs, and one line reports the NPU
+  copies of models iOS keeps (``service.npu_copies_line``; the app cannot remove them, so there is no button; the
+  line stays when the NPU is no longer offered, alone in the section).
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -106,6 +110,10 @@ GPU_FRIENDLY_TEXT = "GPU-friendly"
 NPU_FRIENDLY_TEXT = "NPU-friendly"
 NPU_PARTLY_CPU_TEXT = "Partly CPU on NPU"
 NPU_SECTION_TEXT = "NPU (Snapdragon): runs on the phone's AI chip."
+NPU_SECTION_TEXT_ANE = "NPU (Apple Neural Engine): runs on the phone's AI chip."
+NPU_SWITCH_NOTE = ("Auto models use the NPU when their quant suits it. A failure, or a quant the NPU cannot run, uses "
+                   "the GPU or CPU instead.")
+NPU_SWITCH_NOTE_ANE = "Auto models up to 1.5 GB use the NPU. A failure uses the GPU or CPU instead."
 #: config.json key of "Allow emoticons and symbols from other scripts (kaomoji)", shown under the script ban
 KAOMOJI_KEY = "script_ban_allow_kaomoji"
 #: config.json key of "Whitelist source text", shown under it
@@ -384,7 +392,9 @@ class CustomModelSheet:
         self.family = family
         self.size = size
         self.highlight_gpu = highlight_gpu
-        self.npu = bool(getattr(flow, "npu_offered", lambda: False)())  # the quants' NPU marks
+        # the quants' NPU marks (Hexagon only: the Apple Neural Engine takes every quant)
+        marks = getattr(flow, "npu_quant_marks", None) or getattr(flow, "npu_offered", lambda: False)
+        self.npu = bool(marks())
         self.on_used = on_used
         self.listings: dict = {}  # repo -> RepoFiles of this sheet (another size tapped and back: no new request)
         self.loading = False
@@ -728,7 +738,7 @@ class OnDeviceFlow:
             return selected
         installed = {entry.get("file") for entry in self.service.registry.load().values()
                      if str(entry.get("repo", "")).casefold() == repo.casefold()}
-        chooser = FileChooser(repo, files, selected, installed=installed, npu=self.npu_offered())
+        chooser = FileChooser(repo, files, selected, installed=installed, npu=self.npu_quant_marks())
         self.last_dialog = chooser
         chooser.show(self.page)
         return await chooser.future
@@ -982,6 +992,18 @@ class OnDeviceFlow:
         except Exception:
             return False
 
+    def npu_is_ane(self) -> bool:
+        """The phone's NPU is the Apple Neural Engine (saved state only)."""
+        try:
+            return bool(getattr(self.service, "npu_is_ane", lambda: False)())
+        except Exception:
+            return False
+
+    def npu_quant_marks(self) -> bool:
+        """The Custom and Sigma quants carry their NPU marks: where the NPU is offered and it is the Hexagon one (the
+        Apple Neural Engine requantises every weight, so no quant is marked there)."""
+        return self.npu_offered() and not self.npu_is_ane()
+
     def backend_line(self, stem: Optional[str]) -> Optional[tuple]:
         """``(text, warning)`` of a model row: which backend runs the loaded model ("Runs on NPU · Hexagon v81",
         "Runs on GPU", "Runs on CPU"), else the NPU fallback with its reason; None without either."""
@@ -1158,13 +1180,15 @@ class OnDeviceFlow:
         self.npu_bar = ft.ProgressBar(value=None, bar_height=3, border_radius=2, visible=False,
                                       key=f"{key_prefix}-npu-progress")
         self.npu_line = _small("", visible=False, key=f"{key_prefix}-npu-line", selectable=True)
-        self.npu_switch_note = _small("Auto models use the NPU when their quant suits it. A failure, or a quant the "
-                                      "NPU cannot run, uses the GPU or CPU instead.", key=f"{key_prefix}-npu-switch-note")
+        self.npu_switch_note = _small(NPU_SWITCH_NOTE, key=f"{key_prefix}-npu-switch-note")
         self.npu_settings = [self.npu_switch, self.npu_switch_note, self.npu_power, self.npu_power_note]
+        self.npu_section_note = _small(NPU_SECTION_TEXT, key=f"{key_prefix}-npu-note")
+        # iOS: the NPU copies of models iOS keeps (the app cannot remove them: a line, no button)
+        self.npu_copies_line = _small("", visible=False, key=f"{key_prefix}-npu-copies", selectable=True)
         self.npu_box = ft.Column([
-            _small(NPU_SECTION_TEXT, key=f"{key_prefix}-npu-note"),
+            self.npu_section_note,
             self.npu_bar, self.npu_line,
-            *self.npu_settings, self.npu_status,
+            *self.npu_settings, self.npu_copies_line, self.npu_status,
         ], spacing=4, tight=True, visible=False, key=f"{key_prefix}-npu-box")
         self.render_npu(push=False)
         return [self.npu_box]
@@ -1195,9 +1219,18 @@ class OnDeviceFlow:
         service = self.service
         offered = self.npu_offered()
         progress = self.npu_progress()
-        box.visible = offered or progress is not None
+        ane = self.npu_is_ane()
+        # iOS: the copies stay on the phone (and their line on the card) when the NPU is no longer offered
+        copies = getattr(service, "npu_copies_line", lambda: None)() if ane else None
+        box.visible = offered or progress is not None or bool(copies)
         for control in self.npu_settings:
-            control.visible = offered
+            # the Apple Neural Engine has no power mode
+            control.visible = offered and not (ane and (control is self.npu_power or control is self.npu_power_note))
+        self.npu_section_note.value = NPU_SECTION_TEXT_ANE if ane else NPU_SECTION_TEXT
+        self.npu_section_note.visible = offered or progress is not None
+        self.npu_switch_note.value = NPU_SWITCH_NOTE_ANE if ane else NPU_SWITCH_NOTE
+        self.npu_copies_line.value = copies or ""
+        self.npu_copies_line.visible = bool(copies)
         self.npu_bar.visible = progress is not None
         self.npu_bar.value = progress["fraction"] if progress is not None else None
         line = progress["text"] if progress is not None else (

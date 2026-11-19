@@ -2,8 +2,9 @@ Glossarion overlay of flet-dev/mobile-forge recipes/llama-cpp-python/patches/mob
 (0fadbfab0d63d11164030dfddc955ed980e32e2c, BSD-3-Clause, see ../../LICENSE.mobile-forge):
 upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON),
 a seventh one for the runtime CPU variants of the Android arm64 build, an eighth one for the
-optional GPU backends, a ninth one for the DRY sampler and a tenth one for the optional NPU
-backend:
+optional GPU backends, a ninth one for the DRY sampler, a tenth one for the optional NPU
+backend and an eleventh one for the optional NPU backend on iOS (its C, Objective-C and CMake
+side is patches/ane-backend.patch, applied after this one):
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
 
@@ -67,6 +68,34 @@ backend:
       llama.cpp's own device order (llama_prepare_model_devices). The GPU path shares the backend
       loading helpers (_load_backend, _beside_libggml, _android_arm64).
 
+11. Optional NPU backend on iOS (Apple Neural Engine, ggml-ane from llama.cpp pull request 31969, a
+    draft that uses Apple's private AppleNeuralEngine framework; built when wheelhouse.toml [ane]
+    enabled = true, see patches/ane-backend.patch for the backend and its Glossarion changes). The
+    same functions as 10., with the ANE's own steps; only _ctypes_extensions.py changes here:
+    - the preload chains load libggml-ane before libggml (which links it; loading it calls nothing),
+      skipped silently where it does not exist (_LIBGGML_ANE).
+    - npu_backend_name() reads the marker llama_cpp/npu-backend.txt: "ANE" (libggml-ane.dylib),
+      "HTP" (libggml-hexagon.so) or None; NPU_STEPS_BY_BACKEND gives each backend's steps (ANE:
+      shipped, device, framework, registry, compile; the first three are npu_precheck()'s). Every
+      returned state carries "backend", the ANE's also "chip" (its sub type, e.g. "h15"; "arch"
+      stays None so no Hexagon arch rule applies).
+    - iOS: npu_backend_shipped() is the ANE marker plus ggml_backend_ane_reg in the preloaded
+      library (looked up, not called); npu_skeleton_source() names release b12387 / commit a956a852
+      and no files (nothing to download); npu_precheck() checks "device" with platform.ios_ver() (no
+      simulator, iOS 18 or later) before "framework" (glossarion_ane_probe: dlopen and class lookups,
+      nothing compiled or registered), so a simulator never touches the private framework;
+      register_npu_backend(skel_dir, options) (never raises; skel_dir is ignored) repeats them, sets
+      GGML_ANE_WEIGHTS (int8 unless the options give it) and GGML_ANE_SEG_WEIGHT_MB from the options,
+      removes GGML_ANE_PURGE_CACHE / GGML_ANE_DUMP_DIR / GGML_ANE_PROFILE from the environment (never
+      sets GLOSSARION_GGML_EAGER_ANE), then registers the backend (ggml_backend_register; from here on
+      the answer stays for the process) and runs glossarion_ane_selftest ("compile": one test program
+      compiled, or loaded from the iOS compile cache, and run).
+    - npu_model_begin(n_ctx_cache, n_threads) (one KV bucket = the context size, the CPU fallback's
+      threads, not frozen, counters reset), npu_collect(on), npu_freeze(on) and npu_stats() (the
+      backend's counters: struct glossarion_ane_stats) drive the app's per-model compile pass; no-ops
+      (None / {}) without libggml-ane. There is no purge: the backend has none that frees the iOS
+      compile cache.
+
 Upstream's description:
 
 It does five things:
@@ -128,10 +157,10 @@ index 89c1295..9912977 100644
          execute_process(
              COMMAND uname -m
 diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
-index 02cee8a..81cf4a2 100644
+index 02cee8a..f5a95bd 100644
 --- a/llama_cpp/_ctypes_extensions.py
 +++ b/llama_cpp/_ctypes_extensions.py
-@@ -21,39 +21,627 @@ from typing_extensions import TypeAlias
+@@ -21,39 +21,883 @@ from typing_extensions import TypeAlias
  
  _EMSCRIPTEN_SIDE_MODULE_SUFFIX = ".cpython-00-wasm32-emscripten.so"
  
@@ -262,6 +291,7 @@ index 02cee8a..81cf4a2 100644
 +GPU_STATE: dict = {}
 +_LIBGGML = None
 +_LIBGGML_METAL = None
++_LIBGGML_ANE = None  # iOS: the NPU backend, preloaded before libggml (which links it); registered on demand only
 +_BASE_PATH: Optional[pathlib.Path] = None
 +
 +
@@ -396,13 +426,41 @@ index 02cee8a..81cf4a2 100644
 +#     that load has passed nothing is loaded or remembered, so a call after the download can still succeed.
 +#   * Its arch query falls back to v73 without a word when it fails; ours runs first and decides, and
 +#     GGML_HEXAGON_ARCH carries the answer.
-+#: {"backend", "device", "arch", "error", "steps"} once register_npu_backend() has loaded the backend; {} before.
++# Glossarion: the iOS build's NPU backend (Apple Neural Engine, ggml-ane: llama.cpp pull request 31969, a draft,
++# patches/ane-backend.patch), the same functions with their own steps:
++#   * libggml-ane.dylib is linked into libggml (like libggml-metal), so the preload chain loads it before libggml;
++#     loading it calls nothing. The marker llama_cpp/npu-backend.txt says "libggml-ane.dylib" (npu_backend_name()).
++#   * It uses Apple's private AppleNeuralEngine.framework (dlopen, classes by name). The framework is touched only
++#     by npu_precheck()'s "framework" step (glossarion_ane_probe: dlopen and class lookups, nothing compiled), after
++#     the "device" step passed (an iPhone, not a simulator, iOS 18 or later: the programs use the iOS 18 opset), and
++#     by register_npu_backend(), which registers the backend (the patched registry never does) and compiles one
++#     test program (glossarion_ane_selftest).
++#   * Nothing to download: npu_skeleton_source() names no files.
++#   * Compiled programs land in the OS compile cache, which the app cannot remove; the backend's own purge does not
++#     give the space back on iOS, so GGML_ANE_PURGE_CACHE (and the other development switches) are removed from the
++#     environment, never set. npu_model_begin / npu_collect / npu_freeze / npu_stats drive the app's per-model compile
++#     pass: one KV bucket, collect the shapes, compile each program family once, then freeze (a new shape runs on the
++#     CPU instead of compiling another copy).
++#: {"backend", "device", "arch", "error", "steps"} (ANE: and "chip") once register_npu_backend() has loaded the
++#: backend; {} before.
 +NPU_STATE: dict = {}
 +NPU_BACKEND = "HTP"  # ggml-hexagon's registry name
 +NPU_LIBRARY = "libggml-hexagon.so"
-+NPU_MARKER = "npu-backend.txt"  # package data of a build with libggml-hexagon (ggml-hexagon/CMakeLists.txt)
++NPU_MARKER = "npu-backend.txt"  # package data of a build with an NPU backend (ggml-hexagon/ or ggml-ane/CMakeLists.txt)
 +NPU_STEPS = ("shipped", "libcdsprpc", "arch", "skeletons", "registry", "session")
 +NPU_PRECHECK_STEPS = NPU_STEPS[:3]  # the steps before the skeletons are needed (npu_precheck)
++ANE_BACKEND = "ANE"  # ggml-ane's registry (and device) name
++ANE_LIBRARY = "libggml-ane.dylib"
++ANE_STEPS = ("shipped", "device", "framework", "registry", "compile")
++#: The steps of each backend; the first three are npu_precheck()'s.
++NPU_STEPS_BY_BACKEND = {NPU_BACKEND: NPU_STEPS, ANE_BACKEND: ANE_STEPS}
++ANE_MIN_IOS = (18, 0)  # the programs use the MIL <ios18> opset
++ANE_OPTIONS = ("GGML_ANE_WEIGHTS", "GGML_ANE_SEG_WEIGHT_MB")  # the options register_npu_backend accepts on iOS
++ANE_DEFAULT_WEIGHTS = "int8"  # every weight requantised to int8 per row: half the cache of fp16 for F16 models
++ANE_DROPPED_ENV = ("GGML_ANE_PURGE_CACHE", "GGML_ANE_DUMP_DIR", "GGML_ANE_PROFILE")  # development switches
++# iOS: nothing to download (the shape of the Hexagon pins below, no files)
++_ANE_SOURCE = {"release": "b12387", "commit": "a956a852c9c8bc1fb07206364838ddef299178c0", "url": "", "size": 0,
++               "sha256": "", "files": {}}
 +_NPU_MARKER_SOURCE = None  # the file standing in for llama_cpp/npu-backend.txt (tests); None: the package's own
 +# The HTP skeletons of llama.cpp's own release of the commit this package vendors (vendor/llama.cpp), built by
 +# upstream's CI from the same ggml-hexagon sources (its htp_iface matches this libggml-hexagon). The same values
@@ -437,26 +495,56 @@ index 02cee8a..81cf4a2 100644
 +def npu_skeleton_source() -> dict:
 +    """Where this engine build's HTP skeletons come from (a constant, returned as a copy): llama.cpp's release
 +    tag, the commit it is built from (the one this package vendors), the archive's url / size / sha256 and, per
-+    HTP arch ("v73" ... "v85"), the file name, the archive member, its size and sha256."""
++    HTP arch ("v73" ... "v85"), the file name, the archive member, its size and sha256. iOS (the ANE): the same
++    release and commit, no url and no files (nothing to download)."""
++    if _npu_kind() == ANE_BACKEND:
++        return {**_ANE_SOURCE, "files": {}}
 +    return {**_NPU_SKELETONS, "files": {arch: dict(f) for arch, f in _NPU_SKELETONS["files"].items()}}
++
++
++def _npu_marker_source():
++    source = _NPU_MARKER_SOURCE
++    if source is None:
++        import importlib.resources
++
++        source = importlib.resources.files(globals().get("__package__") or "llama_cpp") / NPU_MARKER
++    return source
 +
 +
 +def _npu_marker() -> bool:
 +    """llama_cpp/npu-backend.txt is in the package (a directory, or sitepackages.zip on Android)."""
 +    try:
-+        source = _NPU_MARKER_SOURCE
-+        if source is None:
-+            import importlib.resources
-+
-+            source = importlib.resources.files(globals().get("__package__") or "llama_cpp") / NPU_MARKER
-+        return bool(source.is_file())
++        return bool(_npu_marker_source().is_file())
 +    except Exception:
 +        return False
 +
 +
++def npu_backend_name() -> Optional[str]:
++    """The NPU backend this build ships, from its marker's text: "ANE" (libggml-ane.dylib), "HTP"
++    (libggml-hexagon.so) or None. Loads nothing."""
++    try:
++        source = _npu_marker_source()
++        text = source.read_text(encoding="utf-8").strip() if source.is_file() else ""
++    except Exception:
++        return None
++    return {ANE_LIBRARY: ANE_BACKEND, NPU_LIBRARY: NPU_BACKEND}.get(text)
++
++
++def _ios() -> bool:
++    return sys.platform == "ios"
++
++
++def _npu_kind() -> str:
++    """Whose steps apply: the shipped backend's, else the platform's (iOS: ANE, otherwise HTP)."""
++    return npu_backend_name() or (ANE_BACKEND if _ios() else NPU_BACKEND)
++
++
 +def npu_backend_shipped() -> bool:
-+    """This build carries libggml-hexagon: its marker in the package, and the library next to libggml (or in the
-+    APK's jniLibs on Android arm64). Loads nothing."""
++    """This build carries its NPU backend. Android: libggml-hexagon's marker in the package, and the library next to
++    libggml (or in the APK's jniLibs on Android arm64). iOS: the marker says libggml-ane.dylib and the preloaded
++    libggml-ane has ggml_backend_ane_reg (looked up, not called). Loads nothing."""
++    if npu_backend_name() == ANE_BACKEND:
++        return _LIBGGML_ANE is not None and getattr(_LIBGGML_ANE, "ggml_backend_ane_reg", None) is not None
 +    return _npu_marker() and (_beside_libggml(NPU_LIBRARY) or _android_arm64())
 +
 +
@@ -530,12 +618,75 @@ index 02cee8a..81cf4a2 100644
 +    return arch if _npu_step(state, "arch", arch > 0 and f"v{arch}" in files, detail) else None
 +
 +
++def _ane_fn(name: str, restype, argtypes):
++    """A function of the preloaded libggml-ane (None when this build or this platform has none)."""
++    fn = getattr(_LIBGGML_ANE, name, None) if _LIBGGML_ANE is not None else None
++    if fn is not None:
++        fn.restype = restype
++        fn.argtypes = argtypes
++    return fn
++
++
++def _ios_device():
++    """(ok, detail) of the ANE's "device" step: an iPhone or iPad, not a simulator, iOS ANE_MIN_IOS or later
++    (platform.ios_ver(), Python 3.13: system, release, model, is_simulator)."""
++    import platform as _platform
++
++    ios_ver = getattr(_platform, "ios_ver", None)
++    info = ios_ver() if ios_ver is not None else None
++    release = str(info[1] or "") if info is not None else ""
++    if not release:
++        return False, "not an iPhone or iPad"
++    model, simulator = str(info[2] or "iPhone"), bool(info[3])
++    if simulator:
++        return False, "iPhone simulator: no Neural Engine"
++    parts = []
++    for piece in release.split(".")[:2]:
++        digits = "".join(c for c in piece if c.isdigit())
++        parts.append(int(digits) if digits else 0)
++    if tuple(parts + [0] * (2 - len(parts))) < ANE_MIN_IOS:
++        return False, f"needs iOS {ANE_MIN_IOS[0]} or later (this phone: iOS {release})"
++    return True, f"{model}, iOS {release}"
++
++
++def _ane_prechecks(state: dict) -> bool:
++    """ANE_STEPS[:3]: this build has libggml-ane, the device can run it (the framework is never touched on a
++    simulator or below iOS 18), the private framework and its classes load (glossarion_ane_probe: dlopen and class
++    lookups, nothing compiled or registered). Sets state["chip"]; sets no environment."""
++    shipped = npu_backend_shipped()
++    if not _npu_step(state, "shipped", shipped, ANE_LIBRARY if shipped
++                     else "this build carries no NPU backend (libggml-ane)"):
++        return False
++    ok, detail = _ios_device()
++    if not _npu_step(state, "device", ok, detail):
++        return False
++    probe = _ane_fn("glossarion_ane_probe", ctypes.c_int, [ctypes.c_char_p, ctypes.c_size_t])
++    if probe is None:
++        _npu_step(state, "framework", False, "not checked: this build has no framework check")
++        return False
++    chip = ctypes.create_string_buffer(64)
++    if int(probe(chip, 64)) != 1:
++        _npu_step(state, "framework", False, "the Apple Neural Engine framework did not load")
++        return False
++    state["chip"] = (chip.value or b"").decode("utf-8", "replace").strip() or "unknown"
++    return _npu_step(state, "framework", True, f"Apple Neural Engine {state['chip']}")
++
++
 +def npu_precheck() -> dict:
 +    """The cheap NPU checks, before the skeletons are needed (NPU_PRECHECK_STEPS: shipped, libcdsprpc, arch):
-+    {"arch": "v81" or None, "error": None or why, "steps": [{"name", "ok", "detail"}]}, one entry per step, the
-+    steps after the first failure "not checked". Loads no backend, sets no GGML_HEXAGON_* variable, never
-+    raises; any number of calls."""
-+    state = {"arch": None, "error": None, "steps": []}
++    {"backend": "HTP", "arch": "v81" or None, "error": None or why, "steps": [{"name", "ok", "detail"}]}, one entry
++    per step, the steps after the first failure "not checked". Loads no backend, sets no GGML_HEXAGON_* variable,
++    never raises; any number of calls. iOS (the ANE): the steps shipped, device, framework, and "chip" (the ANE sub
++    type, e.g. "h15") next to "arch" (always None there); registers nothing."""
++    if _npu_kind() == ANE_BACKEND:
++        state = {"backend": ANE_BACKEND, "arch": None, "chip": None, "error": None, "steps": []}
++        try:
++            _ane_prechecks(state)
++            _npu_fill(state, ANE_STEPS[:3])
++        except Exception as exc:  # a missing symbol, a bad handle: report, never raise into the app
++            _npu_fill(state, ANE_STEPS[:3], exc)
++        return state
++    state = {"backend": NPU_BACKEND, "arch": None, "error": None, "steps": []}
 +    try:
 +        arch = _npu_prechecks(state)
 +        state["arch"] = f"v{arch}" if arch is not None else None
@@ -602,6 +753,58 @@ index 02cee8a..81cf4a2 100644
 +                  or "the session did not open")
 +
 +
++def _register_ane(state: dict, options: dict) -> None:
++    if not _ane_prechecks(state):
++        return
++    if _LIBGGML is None:
++        _npu_step(state, "registry", False, "the engine's libraries are not loaded")
++        return
++    # the environment, before the backend reads it (once, at its first graph): the accepted options, int8 weights
++    # unless the caller says otherwise, and none of the development switches (GGML_ANE_PURGE_CACHE cannot give
++    # the cache space back on iOS)
++    ignored = []
++    for key, setting in (options or {}).items():
++        if str(key) in ANE_OPTIONS:
++            os.environ[str(key)] = str(setting)
++        else:
++            ignored.append(str(key))
++    if "GGML_ANE_WEIGHTS" not in (options or {}):
++        os.environ["GGML_ANE_WEIGHTS"] = ANE_DEFAULT_WEIGHTS
++    for key in ANE_DROPPED_ENV:
++        os.environ.pop(key, None)
++    reg_fn = _ane_fn("ggml_backend_ane_reg", ctypes.c_void_p, [])
++    state["_loaded"] = True  # from here on the backend may be registered: remember the answer
++    reg = reg_fn() if reg_fn is not None else None
++    if not reg:
++        _npu_step(state, "registry", False, "the ANE backend did not start")
++        return
++    _ggml("ggml_backend_register", None, [ctypes.c_void_p])(reg)
++    count = int(_ggml("ggml_backend_reg_dev_count", ctypes.c_size_t, [ctypes.c_void_p])(reg))
++    dev = _ggml("ggml_backend_reg_dev_get", ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_size_t])(reg, 0) if count \
++        else None
++    name = (_ggml("ggml_backend_dev_name", ctypes.c_char_p, [ctypes.c_void_p])(dev) or b"").decode("utf-8", "replace") \
++        if dev else ""
++    note = f"; ignored options {ignored} (only {', '.join(ANE_OPTIONS)})" if ignored else ""
++    good = count == 1 and name == ANE_BACKEND
++    if not _npu_step(state, "registry", good, f"{ANE_BACKEND} registered, 1 device: {name}{note}" if good
++                     else f"{ANE_BACKEND} registered with {count} device(s){': ' + name if name else ''}{note}"):
++        return
++    state["device"] = name
++    selftest = _ane_fn("glossarion_ane_selftest", ctypes.c_int,
++                       [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_int)])
++    if selftest is None:
++        _npu_step(state, "compile", False, "not checked: this build has no test program")
++        return
++    err = ctypes.create_string_buffer(512)
++    cached = ctypes.c_int(0)
++    if int(selftest(err, 512, ctypes.byref(cached))) == 0:
++        _npu_step(state, "compile", True, "test program ran (from the iOS cache)" if cached.value
++                  else "test program compiled and ran")
++    else:
++        _npu_step(state, "compile", False, (err.value or b"").decode("utf-8", "replace").strip()
++                  or "the test program failed")
++
++
 +def register_npu_backend(skel_dir, options=None) -> dict:
 +    """Register the Hexagon NPU backend with ggml. Never raises. ``skel_dir``: the directory that holds the
 +    phone's downloaded libggml-htp-v<arch>.so (npu_skeleton_source()); ``options``: {GGML_HEXAGON_* name:
@@ -610,18 +813,99 @@ index 02cee8a..81cf4a2 100644
 +    without NPU files, the skeleton not in skel_dir yet: "NPU files not downloaded") registers and remembers
 +    nothing. Returns {"backend": "HTP", "device": "HTP0" or "", "arch": int or None, "error": "" or why,
 +    "steps": [{"name", "ok", "detail"}]} with one entry per NPU_STEPS name, in order; the steps after the
-+    first failure are "not checked"."""
++    first failure are "not checked".
++
++    iOS (the ANE): ``skel_dir`` is ignored; ``options`` may hold GGML_ANE_WEIGHTS (default int8) and
++    GGML_ANE_SEG_WEIGHT_MB; GGML_ANE_PURGE_CACHE / GGML_ANE_DUMP_DIR / GGML_ANE_PROFILE are removed from the
++    environment. The steps (ANE_STEPS) repeat the prechecks, then "registry" (ggml_backend_register of
++    ggml_backend_ane_reg(): one device, "ANE"; from here on the answer stays for the process) and "compile" (one test
++    program compiled, or loaded from the iOS compile cache, and run). Returns {"backend": "ANE", "device": "ANE" or "",
++    "arch": None, "chip": the ANE sub type or None, "error", "steps"}."""
 +    if NPU_STATE:
 +        return {**NPU_STATE, "steps": [dict(s) for s in NPU_STATE["steps"]]}
-+    state = {"backend": NPU_BACKEND, "device": "", "arch": None, "error": "", "steps": []}
++    if _npu_kind() == ANE_BACKEND:
++        state = {"backend": ANE_BACKEND, "device": "", "arch": None, "chip": None, "error": "", "steps": []}
++        names = ANE_STEPS
++    else:
++        state = {"backend": NPU_BACKEND, "device": "", "arch": None, "error": "", "steps": []}
++        names = NPU_STEPS
 +    try:
-+        _register_npu(state, skel_dir, dict(options or {}))
-+        _npu_fill(state, NPU_STEPS)
++        if names is ANE_STEPS:
++            _register_ane(state, dict(options or {}))
++        else:
++            _register_npu(state, skel_dir, dict(options or {}))
++        _npu_fill(state, names)
 +    except Exception as exc:  # a missing symbol, a bad handle: report, never raise into the app
-+        _npu_fill(state, NPU_STEPS, exc)
++        _npu_fill(state, names, exc)
 +    if state.pop("_loaded", False):
 +        NPU_STATE.update(state)
 +    return {**state, "steps": [dict(s) for s in state["steps"]]}
++
++
++#: The fields of struct glossarion_ane_stats (ggml-ane.h, patches/ane-backend.patch), in order.
++ANE_STATS_FIELDS = ("families_pending", "bytes_pending", "compiles_fresh", "compiles_cached", "bytes_fresh",
++                    "compile_failures", "cpu_segments", "storage_refused")
++_ANE_STATS: list = []
++
++
++def _ane_stats_type():
++    """struct glossarion_ane_stats: seven int64_t, then int32_t storage_refused; defined once."""
++    if not _ANE_STATS:
++
++        class _AneStats(ctypes.Structure):
++            _fields_ = [(name, ctypes.c_int64) for name in ANE_STATS_FIELDS[:-1]] + [(ANE_STATS_FIELDS[-1], ctypes.c_int32)]
++
++        _ANE_STATS.append(_AneStats)
++    return _ANE_STATS[0]
++
++
++def npu_model_begin(n_ctx_cache: int, n_threads: int) -> None:
++    """iOS: before a model's compile pass. One KV bucket, the context's KV cache size (llama_n_ctx), so attention
++    keeps one shape; the CPU fallback's threads; not frozen; the counters reset. A no-op elsewhere."""
++    kv = _ane_fn("ggml_backend_ane_set_kv_buckets", None, [ctypes.POINTER(ctypes.c_int), ctypes.c_int])
++    if kv is None:
++        return None
++    kv((ctypes.c_int * 1)(int(n_ctx_cache)), 1)
++    threads = _ane_fn("glossarion_ane_set_cpu_threads", None, [ctypes.c_int])
++    if threads is not None:
++        threads(int(n_threads))
++    npu_freeze(False)
++    reset = _ane_fn("glossarion_ane_reset_stats", None, [])
++    if reset is not None:
++        reset()
++    return None
++
++
++def npu_collect(on: bool) -> None:
++    """iOS: collect mode (graphs only translated, their shapes added to the program families; nothing compiled or
++    run). A no-op elsewhere."""
++    fn = _ane_fn("ggml_backend_ane_collect_shapes", None, [ctypes.c_bool])
++    if fn is not None:
++        fn(bool(on))
++    return None
++
++
++def npu_freeze(on: bool) -> None:
++    """iOS: frozen, a shape without a compiled program runs on the CPU instead of compiling. A no-op elsewhere."""
++    fn = _ane_fn("glossarion_ane_freeze", None, [ctypes.c_bool])
++    if fn is not None:
++        fn(bool(on))
++    return None
++
++
++def npu_stats() -> dict:
++    """iOS: the backend's counters (families_pending, bytes_pending, compiles_fresh, compiles_cached, bytes_fresh,
++    compile_failures, cpu_segments, storage_refused); {} elsewhere. Safe from another thread while a decode runs
++    (ctypes releases the GIL)."""
++    if _LIBGGML_ANE is None:
++        return {}
++    stats_type = _ane_stats_type()
++    fn = _ane_fn("glossarion_ane_get_stats", None, [ctypes.POINTER(stats_type)])
++    if fn is None:
++        return {}
++    stats = stats_type()
++    fn(ctypes.byref(stats))
++    return {name: int(getattr(stats, name)) for name in ANE_STATS_FIELDS}
 +
 +
 +def _device_props_type():
@@ -649,7 +933,8 @@ index 02cee8a..81cf4a2 100644
 +
 +def device_index(name: str) -> int:
 +    """The main_gpu that puts a split_mode NONE model on the registered backend whose registry name is
-+    ``name`` ("HTP", "OpenCL"); -1 when it is not registered. Repeats llama.cpp's default device list
++    ``name`` ("HTP", "OpenCL"; iOS: "ANE", whose device type is GPU, and "MTL", Metal's registry name); -1 when it is
++    not registered. Repeats llama.cpp's default device list
 +    (vendor/llama.cpp/src/llama.cpp, llama_prepare_model_devices, at the pin) over ggml's devices in
 +    registration order:
 +        case GGML_BACKEND_DEVICE_TYPE_CPU:
@@ -785,7 +1070,7 @@ index 02cee8a..81cf4a2 100644
      if sys.platform == "win32":
          os.add_dll_directory(str(base_path))
          os.environ["PATH"] = str(base_path) + os.pathsep + os.environ["PATH"]
-@@ -67,9 +655,14 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
+@@ -67,9 +911,14 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "lib"))
          cdll_args["winmode"] = ctypes.RTLD_GLOBAL
@@ -801,7 +1086,7 @@ index 02cee8a..81cf4a2 100644
          lib_dir = str(base_path)
          ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
          if lib_dir not in ld_library_path.split(os.pathsep):
-@@ -79,43 +672,70 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
+@@ -79,43 +928,72 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
                  else f"{lib_dir}{os.pathsep}{ld_library_path}"
              )
  
@@ -830,14 +1115,14 @@ index 02cee8a..81cf4a2 100644
 +    # that dyld cannot resolve on its own, but each preloaded framework's
 +    # install-id (@rpath/lib<name>.dylib, which serious-python leaves unchanged for
 +    # dylibs) matches the ref, so RTLD_GLOBAL preloading satisfies them.
-+    # ggml-metal (iOS only; linked into libggml, so it must be loaded before it) is skipped
-+    # silently where it does not exist.
++    # ggml-metal and ggml-ane (iOS only; linked into libggml, so they must be loaded before it;
++    # loading them calls nothing) are skipped silently where they do not exist.
 +    dependencies = {
-+        "llama": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml"),
-+        "mtmd": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml", "llama"),
-+        "llava": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml", "llama"),
++        "llama": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml-ane", "ggml"),
++        "mtmd": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml-ane", "ggml", "llama"),
++        "llava": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml-ane", "ggml", "llama"),
 +    }
-+    global _LIBGGML, _LIBGGML_METAL, _BASE_PATH
++    global _LIBGGML, _LIBGGML_METAL, _LIBGGML_ANE, _BASE_PATH
 +    _BASE_PATH = base_path
 +    libggml = None
 +    for dependency in dependencies.get(lib_base_name, ()):
@@ -865,6 +1150,8 @@ index 02cee8a..81cf4a2 100644
 +            libggml = loaded
 +        elif dependency == "ggml-metal" and loaded is not None:
 +            _LIBGGML_METAL = loaded
++        elif dependency == "ggml-ane" and loaded is not None:
++            _LIBGGML_ANE = loaded
 +
 +    # Glossarion: with GGML_BACKEND_DL (the Android arm64 wheel) libggml links no CPU
 +    # backend; register the best CPU variant before libllama runs.

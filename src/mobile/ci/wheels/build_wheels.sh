@@ -20,7 +20,9 @@
 #   6. wheels.py stage-openssl: static OpenSSL 3.5.9 replaces the support tree's 3.0.x, and every
 #      other libcrypto.a/libssl.a in the support tree is deleted (see "Link order" below);
 #   7. iOS: include/<arch>-<sdk> -> python3.13 symlinks, because cryptography-cffi's build.rs
-#      derives Python.h's directory from PYO3_CROSS_LIB_DIR (platform-config/<arch>-<sdk>);
+#      derives Python.h's directory from PYO3_CROSS_LIB_DIR (platform-config/<arch>-<sdk>), and
+#      wheels.py stage-ane: the CMake initial cache the iOS engine recipe loads from each
+#      Python.xcframework slice (GGML_ANE ON, or OFF when [ane] is off: the optional NPU backend);
 #   8. forge <host> <recipe directory> for each package (src/mobile/ci/wheels/recipes/<package>);
 #   9. wheels.py collect: only the promised wheels go to $WHEELCACHE/<package>/.
 #
@@ -188,6 +190,12 @@ if [ "$platform" = ios ]; then
     [ -f "$xcf/$slice/include/$name/Python.h" ] || die "$xcf/$slice/include/$name does not resolve to Python.h"
     echo "$slice/include/$name -> python$PY_SHORT"
   done
+  echo "::endgroup::"
+  echo "::group::The iOS engine's CMake initial cache (the optional NPU backend, wheelhouse.toml [ane])"
+  # A no-op unless llama-cpp-python is built; writes GGML_ANE ON / OFF into both slices, where the recipe's
+  # -C{HOST_PYTHON_HOME}/glossarion/ane-init.cmake finds it (--forge: first checks that this forge still formats
+  # script_env with HOST_PYTHON_HOME = those slices).
+  python "$wheels_py" stage-ane --platform ios --xcframework "$xcf" --forge "$FORGE_DIR" "${packages[@]}"
   echo "::endgroup::"
 fi
 

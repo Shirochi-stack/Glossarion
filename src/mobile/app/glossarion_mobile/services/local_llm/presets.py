@@ -163,11 +163,16 @@ _NPU_TYPES = {"Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "IQ4_NL", "IQ2_XXS", "Q1_0
 _K_QUANT = re.compile(r"^Q[2-6]_K(?:_[A-Z]+)?$")
 
 
-def npu_quant_kind(file: Any) -> str:
+def npu_quant_kind(file: Any, backend: str = "HTP") -> str:
     """How a GGUF suits the NPU: "best" (Q4_0), "ok" (another weight type the backend accepts: Q4_1, Q5_x, Q8_0,
     the K-quants Q2_K-Q6_K with their size suffixes, IQ4_NL, IQ2_XXS, MXFP4, NVFP4, F16, BF16, F32) or "cpu" (not
-    accepted or not recognisable: IQ4_XS, IQ3_*, ...; those layers would run on the CPU, so Auto skips the NPU)."""
+    accepted or not recognisable: IQ4_XS, IQ3_*, ...; those layers would run on the CPU, so Auto skips the NPU).
+    ``backend`` "ANE" (Apple Neural Engine): every recognisable quant is "ok", because the backend requantises every
+    weight to int8."""
     quant = file_quant(file)
+    if str(backend or "").upper() == "ANE":
+        name = str(file or "").upper()
+        return "ok" if quant or "MXFP4" in name or "NVFP4" in name else "cpu"
     if quant == "Q4_0":
         return "best"
     if quant in _NPU_TYPES or _K_QUANT.match(quant):

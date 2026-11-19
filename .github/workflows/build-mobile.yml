@@ -1199,6 +1199,7 @@ jobs:
           "dist/X_${ARTIFACT_PREFIX}_iOS.ipa"
           --bundle-id "$APP_PACKAGE" --version "$BUILD_VERSION" --build-number "$BUILD_NUMBER"
           --pyproject src/mobile/pyproject.toml --expect-signed
+          --export-method "${{ steps.signing.outputs.export_method }}"
 
       - name: Upload signed IPA
         uses: actions/upload-artifact@v7

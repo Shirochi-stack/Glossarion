@@ -48,7 +48,10 @@ def test_patch_defers_metal_and_preloads_it():
     added = "\n".join(line[1:] for line in text.splitlines() if line.startswith("+"))
     assert 'if (getenv("GLOSSARION_GGML_EAGER_METAL") != nullptr) {\n            register_backend(ggml_backend_metal_reg());' \
         in added
-    assert '"llama": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml"),' in added
+    # libggml links libggml-metal and (iOS NPU, mobile.patch 11.) libggml-ane: both are preloaded before it
+    for lib in ("llama", "mtmd", "llava"):
+        tail = ', "llama"' if lib != "llama" else ""
+        assert f'"{lib}": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml-ane", "ggml"{tail}),' in added, lib
     assert "def register_gpu_backend() -> dict:" in added and "ggml_backend_register" in added
     # the description names the new section
     assert "8. Optional GPU backends" in text.split("diff --git", 1)[0]
