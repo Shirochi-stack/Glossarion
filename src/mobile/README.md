@@ -250,6 +250,18 @@ library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
   through `glossarion_hexagon_session_check()`. It reports each step: shipped, libcdsprpc, arch,
   skeletons, registry, session. `device_index("HTP")` / `device_index("OpenCL")` give the `main_gpu` of
   each registered backend in llama.cpp's own device order.
+* NPU + GPU (experimental, owner 2026-11-19): with "Use GPU" on, a model whose backend is "auto" and that
+  would run on the NPU loads on the NPU and the Adreno GPU at once: llama.cpp's tensor split
+  (`LLAMA_SPLIT_MODE_TENSOR`, every layer divided between the two devices, the whole model offloaded; the
+  GPU layers setting applies to GPU-only loads). The layer split is not used for this: the OpenCL backend has
+  no async, so its two halves run one after the other. The tensor split needs flash attention and an f16 KV
+  cache (both set for this load) and refuses some architectures. It is an NPU load in every other respect:
+  the attempt and in-flight crash markers (marked `split`) and the first-load watchdog. A refusal, not enough
+  RAM for both, a failing answer or a crash recorded at the next start keeps that model on the NPU alone
+  (Prefs `local_llm_split_fallback`, then the NPU's own GPU / CPU fallbacks) until its file, its backend
+  choice or the app version changes, "Use GPU" is switched or "Try the NPU again"; the device checks card
+  shows why ("NPU + GPU dropped: ..."). The device checks' timing still measures NPU, GPU, CPU, layer split
+  and tensor split each by itself. To drop the feature, `service._split_wanted` returning False is enough.
 * What CI still builds with the Hexagon SDK: the ARM side. `ggml-hexagon` compiles against the SDK's
   headers and its qaic stub generator (`htp_iface`). `[hexagon]` pins the Hexagon SDK 6.7.0.0 (the
   tarball llama.cpp's own Android toolchain image installs, a public GitHub release of

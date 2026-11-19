@@ -6,7 +6,8 @@
   on Android arm64, none on x86_64) and nothing registered it while the GPU is off.
 * ``npu_backend_check()`` (in ``engine_check``): the wheel's NPU functions and whether it ships the backend;
   ``npu_lines(service, speeds)``: the NPU block of the device checks (check steps, arch, device, the last load,
-  ``npu_speed_check``'s timing of the suite prompt on NPU, GPU and CPU, the fallbacks, the "ggml-hex:" log), or one
+  ``npu_speed_check``'s timing of the suite prompt on NPU, GPU and CPU and on NPU + GPU with a layer and a tensor
+  split: prompt and generation tokens per second, stored in ``svc.SPEED_KEY``; the fallbacks, the "ggml-hex:" log), or one
   "NPU: not available (step: reason)" line. Their services share the app's NPU markers (``SHARED_PREF_KEYS``).
 * ``fake_route_check(root)`` (e2e ``local_route_fake_engine``): ``LocalLLMServer`` + ``FakeEngine`` +
   ``UnifiedClient`` with ``local/fake-echo``, offline, plain and streaming.
@@ -27,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import os
+import threading
 import time
 from typing import Any, Iterator, Optional
 
@@ -394,11 +396,12 @@ def npu_summary(service: Any) -> dict:
     """What the diagnostics and the llama suite report about the NPU (no native call)."""
     failure = service.npu_failure()
     fallbacks = {stem: fb["reason"] for stem in service._npu_fallbacks() if (fb := service.npu_fallback(stem))}
+    splits = {stem: fb["reason"] for stem in service._split_fallbacks() if (fb := service.split_fallback(stem))}
     source = service.npu_source() or {}
     spec = service.npu_skeleton()
     return {"offered": service.npu_offered(), "failure": list(failure) if failure else None,
             "state": service.npu_state(), "use_npu": service.use_npu(), "power": service.npu_power(),
-            "last_load": service.last_load, "fallbacks": fallbacks, "hung": service.npu_hung,
+            "last_load": service.last_load, "fallbacks": fallbacks, "split_fallbacks": splits, "hung": service.npu_hung,
             "seconds": service.npu_seconds(), "release": source.get("release"),
             "files": {spec["name"]: service.npu_files_ready(refresh=True)} if spec else {},
             "download_error": service.npu_download_error}
@@ -422,59 +425,224 @@ def _npu_stage_lines(service: Any) -> list:
     return lines
 
 
-def npu_speed_check(service: Any, stem: str, *, backends: tuple = ("npu", "gpu", "cpu"),
-                    tokens: int = SUITE_TOKENS) -> dict:
-    """The llama suite's prompt (``SUITE_MESSAGES``, at most ``tokens`` tokens) on each backend in turn, through the
-    service (the NPU crash markers apply): ``{backend: {"backend", "tokens", "seconds", "tok_s", "load_s"}}``, or
-    ``{"skipped": why}`` / ``{"error": why}``. The model is unloaded afterwards: its next request loads it on its usual
-    backend. Refused while a job runs."""
+#: the timed modes in their order: the three backends alone, then the NPU and the GPU together ("layer": each holds a
+#: slice of the layers; "tensor": every layer split across both, llama.cpp's experimental mode)
+SPEED_MODES = ("npu", "gpu", "cpu", "layer", "tensor")
+SPEED_LABELS = {"npu": "NPU", "gpu": "GPU", "cpu": "CPU", "layer": "NPU + GPU, layer split",
+                "tensor": "NPU + GPU, tensor split"}
+#: what each mode runs on when nothing falls back (``LocalEngineService._engine_backend``)
+SPEED_BACKENDS = {"npu": "NPU", "gpu": "GPU", "cpu": "CPU", "layer": "NPU + GPU", "tensor": "NPU + GPU"}
+SPEED_CRASHED = "crashed last time"
+SPEED_CRASHED_SKIPPED = "crashed last time, skipped (time again to try it)"
+SPEED_STOPPED = "stopped"
+SPEED_RUNNING = "the timing is already running"
+_SPEED_LOCK = threading.Lock()  # one timing at a time in this process (its crash marker is the app's)
+
+
+def speed_modes(service: Any) -> tuple:
+    """The modes the timing lists here: NPU, GPU and CPU, and the two NPU + GPU modes only where the NPU is offered
+    and the build has a GPU backend (nowhere else, not even as a "not available" line)."""
+    both = bool(service.npu_offered() and service.gpu_backend)
+    return SPEED_MODES if both else SPEED_MODES[:3]
+
+
+def saved_speeds(service: Any) -> Optional[dict]:
+    """The last timing's results as stored (``svc.SPEED_KEY``), with the mode the app died in as ``{"crashed":
+    ...}``; None before any timing. Prefs only."""
+    raw = service._pref(svc.SPEED_KEY)
+    if not isinstance(raw, dict) or not isinstance(raw.get("modes"), dict):
+        return None
+    modes = {mode: dict(result) for mode, result in raw["modes"].items() if mode in SPEED_MODES and
+             isinstance(result, dict)}
+    running = raw.get("running")
+    if running in SPEED_MODES and not _SPEED_LOCK.locked():
+        modes[running] = {"crashed": SPEED_CRASHED}
+    return {mode: modes[mode] for mode in SPEED_MODES if mode in modes}
+
+
+def _speed_result(service: Any, ran: str, usage: dict, timing: dict, seconds: float) -> dict:
+    """One mode's numbers: prompt tokens per second (the prompt's evaluation up to the first output token) and
+    generation tokens per second (from the first output token to the last)."""
+    prompt, prompt_s = int(timing.get("prompt_tokens") or 0), float(timing.get("prompt_s") or 0.0)
+    count = int(usage.get("completion_tokens") or timing.get("tokens") or 0)
+    gen_s = float(timing.get("gen_s") or 0.0)
+    return {"backend": ran, "device": getattr(service.engine, "device", None), "prompt_tokens": prompt,
+            "prompt_tok_s": round(prompt / prompt_s, 2) if prompt and prompt_s > 0 else None, "tokens": count,
+            "gen_tok_s": round((count - 1) / gen_s, 2) if count > 1 and gen_s > 0 else None,
+            "seconds": round(seconds, 2), "tok_s": round(count / seconds, 2), "load_s": service._load_seconds,
+            "layers": int(getattr(service, "_loaded_gpu_layers", 0) or 0), "layer_limit": _layer_limit(service)}
+
+
+def _layer_limit(service: Any) -> Optional[int]:
+    """The loaded model's transformer blocks plus its output layer (``gpu_layer_limit``), None when unknown."""
+    try:
+        return service.gpu_layer_limit(service.loaded_stem) if service.loaded_stem else None
+    except Exception:
+        return None
+
+
+def npu_speed_check(service: Any, stem: str, *, backends: Optional[tuple] = None, tokens: int = SUITE_TOKENS,
+                    should_stop: Optional[Any] = None, progress: Optional[Any] = None) -> dict:
+    """The llama suite's prompt (``SUITE_MESSAGES``, at most ``tokens`` tokens) timed in each mode in turn
+    (``backends``, default ``speed_modes``: NPU, GPU, CPU, then NPU + GPU with a layer split and with a tensor split),
+    through the service (the NPU crash markers apply to the NPU run): ``{mode: {"backend", "prompt_tok_s",
+    "gen_tok_s", ...}}``, or ``{"skipped": why}`` / ``{"error": why}``; a mode llama.cpp refuses gets its reason and
+    the next one still runs. Each mode is marked on disk (``svc.SPEED_KEY`` ``running``) from before its load until
+    its model is freed: when the app dies in it, it joins ``crashed`` and every later timing reports it "crashed last
+    time" and skips it until a timing has done so and ended without dying; the one after that tries it again (no
+    automatic retry: each crash is reported before that mode runs again). The results are stored there too, over the
+    last timing's of the same model (a mode this one did not reach keeps its earlier result). ``should_stop()`` ends
+    the timing at the next stop check (a load is native and runs to its end first); ``progress(text)`` follows it.
+    The model is unloaded before (outside any mode's marker) and after each mode: its next request loads it on its
+    usual backend. Refused while a job runs."""
     if service.job_active():
         return {"error": "a job is running: try again when it is done"}
+    if not _SPEED_LOCK.acquire(blocking=False):
+        return {"error": SPEED_RUNNING}
+    stop = should_stop or (lambda: False)
+    say = progress or (lambda text: None)
+    modes = tuple(backends) if backends is not None else speed_modes(service)
+    saved = service._pref(svc.SPEED_KEY)
+    saved = saved if isinstance(saved, dict) else {}
+    # the modes the app died in and that no timing has reported since (the last one: ``running``)
+    pending = {m for m in list(saved.get("crashed") or []) + [saved.get("running")] if m in SPEED_MODES}
+    reported: set = set()
+    kept = saved.get("modes") if saved.get("stem") == stem and isinstance(saved.get("modes"), dict) else {}
+    entry = {"version": service.app_version, "stem": stem, "at": int(time.time()), "running": None,
+             "crashed": sorted(pending), "modes": {m: dict(r) for m, r in kept.items()
+                                                   if m in SPEED_MODES and isinstance(r, dict)}}
     results: dict = {}
-    previous = service.backend_override
+    previous, previous_split = service.backend_override, service.split_override
     try:
-        for backend in backends:
-            if backend == "npu" and not service.npu_offered():
+        service.unload()  # the model loaded before the timing is freed outside any mode's marker
+        for index, mode in enumerate(modes, 1):
+            if stop():
+                results[mode] = {"skipped": SPEED_STOPPED}
+                continue
+            if mode in pending:
+                results[mode] = {"crashed": SPEED_CRASHED, "skipped": SPEED_CRASHED_SKIPPED}
+                reported.add(mode)
+                continue
+            if mode in ("npu", "layer", "tensor") and not service.npu_offered():
                 failure = service.npu_failure() or ("check", "not available")
-                results[backend] = {"skipped": f"NPU not available ({failure[0]}: {failure[1]})"}
+                results[mode] = {"skipped": f"NPU not available ({failure[0]}: {failure[1]})"}
                 continue
-            if backend == "gpu" and not service.gpu_backend:
-                results[backend] = {"skipped": "this build has no GPU backend"}
+            if mode in ("gpu", "layer", "tensor") and not service.gpu_backend:
+                results[mode] = {"skipped": "this build has no GPU backend"}
                 continue
-            service.backend_override = backend
-            ok, error = service.load_blocking(stem)
-            if not ok:
-                results[backend] = {"error": error or "the model did not load"}
+            if mode in ("layer", "tensor"):
+                # the NPU or the GPU this model is kept off (a load or a crash there) keeps it off both combined modes
+                fallback = service.npu_fallback(stem)
+                if fallback:
+                    results[mode] = {"skipped": f"NPU unavailable for {stem}: {fallback['reason']}"}
+                    continue
+                fallback = service.gpu_fallback()
+                if fallback and fallback["stem"] == stem:
+                    results[mode] = {"skipped": f"GPU unavailable for {stem}: {fallback['reason']}"}
+                    continue
+            say(speed_progress_text(stem, mode, index, len(modes), results))
+            if stop():
+                results[mode] = {"skipped": SPEED_STOPPED}
                 continue
-            ran = service._engine_backend() or "CPU"
-            started = time.monotonic()
+            _store_speeds(service, entry, results, mode)  # on disk before any native call of this mode
             try:
-                run = service.chat(stem, {"messages": [dict(m) for m in SUITE_MESSAGES], "max_tokens": int(tokens),
-                                          "temperature": 0.2}, lambda: False)
-                with run:
-                    "".join(run.deltas)
-                    usage = run.usage or {}
-            except Exception as exc:
-                results[backend] = {"backend": ran, "error": f"{type(exc).__name__}: {exc}"}
-                continue
-            seconds = max(time.monotonic() - started, 1e-6)
-            count = int(usage.get("completion_tokens") or 0)
-            ran = service._engine_backend() or ran  # an NPU answer that failed was answered elsewhere
-            results[backend] = {"backend": ran, "tokens": count, "seconds": round(seconds, 2),
-                                "tok_s": round(count / seconds, 2), "load_s": service._load_seconds}
+                results[mode] = _time_mode(service, stem, mode, tokens, stop)
+            finally:
+                service.backend_override, service.split_override = previous, previous_split
+                service.unload()  # this mode's model is freed under its own marker
+                _store_speeds(service, entry, results, None)
     finally:
-        service.backend_override = previous
-        service.unload()
+        service.backend_override, service.split_override = previous, previous_split
+        try:
+            service.unload()
+        finally:
+            entry["crashed"] = sorted(pending - reported)  # this timing ended: what it reported runs again next time
+            _store_speeds(service, entry, results, None)
+            _SPEED_LOCK.release()
     return results
 
 
-def _speed_text(result: Optional[dict]) -> str:
+def _store_speeds(service: Any, entry: dict, results: dict, running: Optional[str]) -> None:
+    """Write the timing's state to `svc.SPEED_KEY` on disk now: `running` (the mode under way, else None), the
+    crashed modes not reported yet, and the results so far over the earlier ones of the same model (a mode stopped
+    this time keeps its earlier result; a copy: Prefs keep what they were given)."""
+    modes = {m: dict(r) for m, r in entry["modes"].items()}
+    for mode, result in results.items():
+        if result.get("skipped") != SPEED_STOPPED or mode not in modes:
+            modes[mode] = dict(result)
+    service._set_pref(svc.SPEED_KEY, {**entry, "running": running, "modes": modes}, durable=True)
+
+
+def _time_mode(service: Any, stem: str, mode: str, tokens: int, stop: Any) -> dict:
+    """Load ``stem`` in ``mode`` and time one answer to the suite prompt."""
+    if mode in eng.SPLITS:
+        service.backend_override, service.split_override = None, mode
+    else:
+        service.backend_override, service.split_override = mode, None
+    ok, error = service.load_blocking(stem)
+    if not ok:
+        return {"error": error or "the model did not load"}
+    if stop():
+        return {"skipped": SPEED_STOPPED}
+    ran = service._engine_backend() or "CPU"
+    started = time.monotonic()
+    try:
+        run = service.chat(stem, {"messages": [dict(m) for m in SUITE_MESSAGES], "max_tokens": int(tokens),
+                                  "temperature": 0.2}, lambda: bool(stop()))
+        with run:
+            "".join(run.deltas)
+            usage = run.usage or {}
+    except Exception as exc:
+        if stop():
+            return {"skipped": SPEED_STOPPED}
+        return {"backend": ran, "error": f"{type(exc).__name__}: {exc}"}
+    if stop():
+        return {"skipped": SPEED_STOPPED}
+    seconds = max(time.monotonic() - started, 1e-6)
+    ran = service._engine_backend() or ran  # an NPU answer that failed was answered elsewhere
+    return _speed_result(service, ran, usage, dict(getattr(service.engine, "last_timing", {}) or {}), seconds)
+
+
+def speed_progress_text(stem: str, mode: str, index: int, total: int, results: dict) -> str:
+    """The card while the timing runs: what runs now, then the modes done so far."""
+    lines = [f"Timing local/{stem}: {SPEED_LABELS.get(mode, mode)} ({index} of {total})…"]
+    lines.extend(speed_lines(results))
+    return "\n".join(lines)
+
+
+def _rate(value: Any) -> str:
+    return f"{float(value):.1f} tok/s" if isinstance(value, (int, float)) else "?"
+
+
+def _speed_text(result: Optional[dict], mode: Optional[str] = None) -> str:
     if not result:
         return "not run"
     if "tok_s" in result:
         ran = result.get("backend")
-        return f"{result['tok_s']:.1f} tok/s" + (f" (ran on {ran})" if ran else "")
-    return str(result.get("skipped") or result.get("error") or "not run")
+        text = f"prompt {_rate(result.get('prompt_tok_s'))} · generation {_rate(result.get('gen_tok_s'))}"
+        text += f" (ran on {ran})" if ran and ran != SPEED_BACKENDS.get(mode or "") else ""
+        return text + _partial_text(result)
+    if result.get("skipped"):
+        return str(result["skipped"])
+    if result.get("crashed"):
+        return str(result["crashed"])
+    return str(result.get("error") or "not run")
+
+
+def _partial_text(result: dict) -> str:
+    """" (8 of 33 layers on the GPU, the rest on the CPU)" when the NPU or the GPU ran only some of the layers (the
+    GPU and NPU layer settings); nothing when it ran all of them (-1, or the model's whole count)."""
+    ran, layers, limit = result.get("backend"), result.get("layers"), result.get("layer_limit")
+    if ran not in ("NPU", "GPU") or not isinstance(layers, int) or layers <= 0:
+        return ""
+    if isinstance(limit, int) and limit > 0:
+        return f" ({layers} of {limit} layers on the {ran}, the rest on the CPU)" if layers < limit else ""
+    return f" ({layers} layers on the {ran})"
+
+
+def speed_lines(speeds: dict) -> list:
+    """One line per timed mode, in ``SPEED_MODES`` order."""
+    return [f"  {SPEED_LABELS[mode]}: {_speed_text(speeds.get(mode), mode)}" for mode in SPEED_MODES if mode in speeds]
 
 
 def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str] = None) -> list:
@@ -505,17 +673,22 @@ def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str]
         lines.append(f"Last load: {last['stem']} on {last['backend']} ({last['device']}) in {last['seconds']:.1f} s")
     else:
         lines.append("Last load: none since the app started")
-    if speeds is not None:
-        if "error" in speeds and not any(k in speeds for k in ("npu", "gpu", "cpu")):
+    stored = speeds is None
+    speeds = saved_speeds(service) if speeds is None else speeds
+    if speeds:
+        if "error" in speeds and not any(k in speeds for k in SPEED_MODES):
             lines.append(f"Speed ({SUITE_TOKENS} tokens): {speeds['error']}")
         else:
-            lines.append(f"Speed ({SUITE_TOKENS} tokens): " + " · ".join(
-                f"{name.upper()} {_speed_text(speeds.get(name))}" for name in ("npu", "gpu", "cpu")))
-    fallbacks = npu_summary(service)["fallbacks"]
+            lines.append(f"Speed ({SUITE_TOKENS} tokens{', last timing' if stored else ''}):")
+            lines.extend(speed_lines(speeds))
+    summary = npu_summary(service)
+    fallbacks = summary["fallbacks"]
     if fallbacks:
         lines.extend(f"Fallback: {stem}: {reason}" for stem, reason in sorted(fallbacks.items()))
     else:
         lines.append("Fallback: none")
+    # a model "auto" keeps on the NPU alone instead of NPU + GPU (only when there is one)
+    lines.extend(f"NPU + GPU dropped: {stem}: {reason}" for stem, reason in sorted(summary["split_fallbacks"].items()))
     if service.npu_hung:
         lines.append(service.npu_hang_note() or "")
     hex_lines = eng.hex_log_lines()

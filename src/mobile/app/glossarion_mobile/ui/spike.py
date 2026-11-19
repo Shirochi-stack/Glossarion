@@ -265,6 +265,8 @@ class SpikeApp:
         self._bg_task_id: int = -1
         self._cp_thread: Optional[threading.Thread] = None
         self._cp_stop = threading.Event()
+        self._npu_stop = threading.Event()  # the NPU card's Stop: the timing ends at its next stop check
+        self._npu_timing = False
         self.cards: dict[str, CheckCard] = {}
         self._build_cards()
 
@@ -435,9 +437,12 @@ class SpikeApp:
                 "NPU (Snapdragon)",
                 "The on-device engine's NPU check: each step, how long the check and the NPU's start took, the "
                 "NPU files (llama.cpp release, on the phone or not, the last download error), arch, device, the "
-                "backend of the last load, the fallbacks and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU "
-                "with the loaded or selected on-device model. Long-press the text to copy it.",
-                [("Refresh", self.npu_refresh), ("Time NPU, GPU and CPU", self.npu_time)],
+                "backend of the last load, the fallbacks and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU, "
+                "and on NPU + GPU together (layer split, tensor split) where the phone has the NPU, with the loaded or selected "
+                "on-device model: prompt and generation speed of each. Stop ends it after the current step. "
+                "Long-press the text to copy it.",
+                [("Refresh", self.npu_refresh), ("Time NPU, GPU, CPU and NPU + GPU", self.npu_time),
+                 ("Stop", self.npu_stop)],
             ),
             CheckCard("routes", "Routes seen", "Every page.route change and whether it was whitelisted.", []),
             CheckCard("lifecycle", "Lifecycle", "App lifecycle states (logs are flushed on INACTIVE/HIDE/PAUSE).", []),
@@ -531,19 +536,40 @@ class SpikeApp:
         await self._npu_render()
 
     async def npu_time(self, e: Any = None) -> None:
+        """Time each mode on a worker thread (``selfcheck.npu_speed_check``); the card follows it and Stop ends it."""
         from glossarion_mobile.services.local_llm import selfcheck
 
+        if self._npu_timing:
+            return
         service = self._engine_service()
         stem = (service.loaded_stem or next(iter(sorted(service.registry.load())), None)) if service is not None else None
         if not stem:
             await self._npu_render({"error": "download an on-device model first"} if service is not None else None)
             return
-        self._card("npu").set("running", f"Timing local/{stem} on NPU, GPU and CPU…")
+        card = self._card("npu")
+        self._npu_stop.clear()
+        self._npu_timing = True
+        card.set("running", f"Timing local/{stem}…")
+
+        def progress(text: str) -> None:
+            self.post(card.set, "running", text)
+
         try:
-            speeds = await self._in_thread(selfcheck.npu_speed_check, service, stem, name="gl-spike-npu-time")
+            speeds = await self._in_thread(
+                lambda: selfcheck.npu_speed_check(service, stem, should_stop=self._npu_stop.is_set, progress=progress),
+                name="gl-spike-npu-time")
         except Exception as exc:
             speeds = {"error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            self._npu_timing = False
         await self._npu_render(speeds)
+
+    async def npu_stop(self, e: Any = None) -> None:
+        if not self._npu_timing or self._npu_stop.is_set():
+            return
+        self._npu_stop.set()
+        card = self._card("npu")
+        card.set("running", f"{card.result.value}\nStopping after the current step…")
 
     # ---- routes -----------------------------------------------------------------
 
