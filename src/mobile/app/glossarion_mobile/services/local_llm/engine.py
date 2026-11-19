@@ -44,7 +44,8 @@ the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailab
 "ggml-hex:" lines of the native log are kept (``hex_log_lines``) for the diagnostics.
 
 NPU + GPU together (``load(..., npu=True, split="layer" | "tensor")``; the device checks' timing asks for both, and
-the service's "auto" rule for "tensor" when "Use GPU" is on: ``service.AUTO_SPLIT``): the model on exactly two devices, the NPU first and the GPU second, half of it each
+the service's "auto" rule for "tensor" when "Use GPU" is on: ``service.AUTO_SPLIT``, off while
+``service.AUTO_SPLIT_ENABLED`` is): the model on exactly two devices, the NPU first and the GPU second, half of it each
 (``tensor_split`` 1:1), all layers offloaded. llama-cpp-python 0.3.37's ``Llama()`` has ``split_mode``,
 ``main_gpu``, ``tensor_split``, ``flash_attn``, ``type_k`` / ``type_v`` but no device list, and builds its
 ``llama_model_params`` (llama.py: ``llama_model_default_params()``, then the load in the same ``__init__``); the
@@ -55,6 +56,12 @@ uses those devices in that order (``llama_prepare_model_devices``); ``main_gpu``
 mode TENSOR, experimental upstream); it needs flash attention on (every load already has it) and an unquantised KV
 cache, so this load alone passes ``type_k`` / ``type_v`` f16. A refusal (the architecture, flash attention, memory, a
 device missing) raises ``SplitUnavailable`` with llama.cpp's own error line (``native_errors``).
+
+Native aborts (``capture_aborts``): a GGML_ABORT / GGML_ASSERT ends the process and Android keeps no stderr, so before
+the first native work (``npu_precheck``, ``npu_state``, every ``LlamaEngine.load``) ggml's abort callback is registered
+once per process (``ggml_set_abort_callback`` of the loader's libggml); it writes ggml's "file:line: message", the
+time, the process id and ``RUN_ID`` to ``native_abort.txt`` in the app's data folder and returns (ggml aborts right
+after). The service's crash recovery attaches it (``with_abort_reason``) to the reason of a marker of the same run.
 
 Script ban (``params["ban_scripts"]``, the ``script_ban.SCRIPTS`` names decided by the service): ``LlamaEngine``
 passes a logits processor that sets the token ids of those scripts (Han / kana / Hangul, Devanagari,
@@ -223,6 +230,7 @@ def npu_precheck() -> dict:
     functions, missing = _npu_functions("npu_precheck")
     if missing is not None:
         return missing
+    capture_aborts()
     try:
         raw = functions[0]()
     except Exception as exc:  # pragma: no cover - the wheel's function never raises
@@ -303,6 +311,7 @@ def npu_state(skel_dir: str, options: Optional[dict] = None) -> dict:
     except Exception as exc:
         return _npu_missing("shipped", f"{type(exc).__name__}: {exc}")
     capture_hex_log()
+    capture_aborts()
     try:
         raw = register(str(skel_dir), dict(options or {}))
         state = dict(raw) if isinstance(raw, dict) else {}
@@ -514,6 +523,130 @@ def capture_hex_log() -> bool:
         return False
     _HEX_HOOK.append(callback)
     return True
+
+
+#: the native abort note in the app's data folder (``capture_aborts``): the last ggml_abort message of a run
+ABORT_NOTE_FILE = "native_abort.txt"
+#: the longest native message kept (characters after the build folder is stripped)
+ABORT_NOTE_CHARS = 240
+#: this process: its id and start time (the note and the crash markers carry it; a note matches a marker of its run)
+RUN_ID = f"{os.getpid()}-{int(time.time())}"
+_ABORT_HOOK: list = []  # the registered abort callback (kept alive: ggml calls it from native code)
+_ABORT_NOTES: dict = {}  # path -> the note as read once per process (``abort_note``)
+
+
+def app_data_dir() -> str:
+    """The app's data folder (the app's private files directory on Android): runtime_bootstrap's, else
+    ``GLOSSARION_DATA_DIR``, else ``~/.glossarion``."""
+    base = ""
+    try:
+        from glossarion_mobile import runtime_bootstrap as rb
+
+        paths = rb.get_paths()
+        base = str(paths.data) if paths is not None else ""
+    except Exception:
+        base = ""
+    return base or os.environ.get("GLOSSARION_DATA_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".glossarion")
+
+
+def abort_note_path() -> str:
+    return os.path.join(app_data_dir(), ABORT_NOTE_FILE)
+
+
+def _write_abort_note(target: bytes, prefix: bytes, message: Any) -> None:
+    """The abort callback's whole work: ``<run>\\t<pid>\\t<epoch s>\\t<message>`` into ``target`` with os-level
+    calls, on disk before it returns (ggml calls abort() right after)."""
+    try:
+        text = message if isinstance(message, bytes) else b""
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            os.write(fd, prefix + str(int(time.time())).encode() + b"\t" + text[:2048])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        pass
+
+
+def capture_aborts(path: Optional[str] = None) -> bool:
+    """Register ``ggml_set_abort_callback`` (the loader's libggml, like ``_device_handles``) once per process, before
+    native work: a GGML_ABORT / GGML_ASSERT then writes its "file:line: message" to the note (``abort_note_path``)
+    before the process aborts. False, and nothing else, on a build without the symbol or any failure."""
+    if _ABORT_HOOK:
+        return True
+    try:
+        import ctypes
+
+        ext = _extensions()
+        libggml = getattr(ext, "_LIBGGML", None) if ext is not None else None
+        if libggml is None:
+            return False
+        setter = libggml.ggml_set_abort_callback
+        callback_type = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
+        setter.restype, setter.argtypes = ctypes.c_void_p, [callback_type]
+        target = path or abort_note_path()
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        encoded, prefix = os.fsencode(target), f"{RUN_ID}\t{os.getpid()}\t".encode()
+
+        def on_abort(message: Any) -> None:
+            _write_abort_note(encoded, prefix, message)
+
+        callback = callback_type(on_abort)
+        setter(callback)
+    except Exception:
+        log.debug("registering the native abort callback failed", exc_info=True)
+        return False
+    _ABORT_HOOK.append(callback)
+    return True
+
+
+def _abort_message(raw: str) -> str:
+    """The note's message on one line, without the build machine's folder before "file.cpp:635:", bounded."""
+    text = " ".join(raw.split())
+    text = re.sub(r"^\S*[/\\]([^/\\\s]+:\d+:)", r"\1", text)
+    return text if len(text) <= ABORT_NOTE_CHARS else text[:ABORT_NOTE_CHARS - 1] + "…"
+
+
+def abort_note(path: Optional[str] = None) -> Optional[dict]:
+    """The last native abort's note: ``{"run", "pid", "at", "message"}``, None without one (read once per process: only
+    a dead run writes it)."""
+    target = path or abort_note_path()
+    if target not in _ABORT_NOTES:
+        note = None
+        try:
+            with open(target, "rb") as handle:
+                parts = handle.read(4096).decode("utf-8", "replace").split("\t", 3)
+            if len(parts) == 4 and parts[0] and parts[3].strip():
+                note = {"run": parts[0], "pid": int(parts[1]), "at": int(parts[2]), "message": _abort_message(parts[3])}
+        except (OSError, ValueError):
+            note = None
+        _ABORT_NOTES[target] = note
+    return _ABORT_NOTES[target]
+
+
+def abort_reason(marker: Any, path: Optional[str] = None) -> Optional[str]:
+    """The native abort message of the run that left ``marker`` (a crash marker's ``"run"``), else None: a note from
+    any other run is never attached."""
+    run = marker.get("run") if isinstance(marker, dict) else None
+    note = abort_note(path) if run else None
+    return note["message"] if note and note["run"] == run else None
+
+
+def with_abort_reason(reason: str, marker: Any, limit: int = 300) -> str:
+    """``reason`` followed by the native abort message of ``marker``'s run, when there is one, within ``limit``
+    characters (the recorded reasons' cap), so a cut message keeps its closing ellipsis."""
+    native = abort_reason(marker)
+    if not native:
+        return reason
+    room = limit - len(reason) - 2
+    if room < 2:
+        return reason
+    if len(native) > room:
+        native = native[:room - 1].rstrip() + "…"
+    return f"{reason}: {native}"
+
+
 #: what the GPU check evaluates (a batch, then one more token)
 GPU_CHECK_PROMPT = ("The lighthouse keeper climbed the stairs every evening, counted each step and wrote the "
                     "weather into a book that nobody had read for forty years.")
@@ -906,6 +1039,7 @@ class LlamaEngine(_Base):
         npu = bool(npu) and split is None
         gpu = bool(gpu and n_gpu_layers != 0) and not npu and split is None
         llama_cpp = self._module()
+        capture_aborts()  # before the GPU backend registers and the model loads
         with self._lock, _NATIVE_LOAD_LOCK:
             self.unload()
             device = None

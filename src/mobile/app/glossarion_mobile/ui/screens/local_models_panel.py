@@ -71,6 +71,7 @@ import flet as ft
 
 from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import hf, presets
+from glossarion_mobile.services.local_llm import service as llm_service
 from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
@@ -1248,7 +1249,8 @@ class OnDeviceFlow:
         self.gpu_layers_note.value = (
             "Includes the output layer. 0 uses CPU; the far right offloads all layers. "
             "Lower this if the phone feels sluggish. Changes apply to the next model load."
-            + (" A model on the NPU and the GPU together uses all layers." if self.npu_offered() else "")
+            + (" A model on the NPU and the GPU together uses all layers."
+               if llm_service.AUTO_SPLIT_ENABLED and self.npu_offered() else "")
             if total else "Select a downloaded model to detect its GPU layer limit.")
         self._gpu_layers_changed()
         _push(self.gpu_layers_box)

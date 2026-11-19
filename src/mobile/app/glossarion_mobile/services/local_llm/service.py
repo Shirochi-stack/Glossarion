@@ -84,7 +84,13 @@
   never use the NPU. Power mode: ``NPU_POWER_KEY`` (upstream's modes, default burst), applied when the backend
   registers (a change applies after a restart). The screens only read this state (``npu_progress``,
   ``npu_status_line``): no stage, download or NPU lock runs on the UI thread.
-* **NPU + GPU (owner 2026-11-19, experimental):** "auto" loads a model on the NPU and the GPU at once
+* **Native aborts:** every crash marker (``GPU_ATTEMPT_KEY``, ``NPU_ATTEMPT_KEY``, ``NPU_INFLIGHT_KEY``,
+  ``NPU_CHECK_ATTEMPT_KEY``, the timing's ``SPEED_KEY``) carries ``engine.RUN_ID``; when the next start turns one into a
+  fallback, the reason ends with ggml's abort message when the note (``engine.capture_aborts``) was written by that same
+  run (``engine.with_abort_reason``); a note of any other run is never attached.
+* **NPU + GPU (owner 2026-11-19, experimental; off: ``AUTO_SPLIT_ENABLED``):** it crashed at model load on the first
+  phone, so ``_split_wanted`` answers no and "auto" with "Use GPU" on runs on the NPU alone; the rest of this paragraph
+  is what it does when switched on. "auto" loads a model on the NPU and the GPU at once
   (``AUTO_SPLIT``: the tensor split, the only mode that runs both chips at the same time) when it would run on the NPU
   and "Use GPU" is on, the build has a GPU backend, and the model has no GPU fallback and no NPU + GPU fallback
   (``_split_wanted``); the whole model is offloaded (the GPU layers setting is for GPU loads alone). It is an NPU load
@@ -209,6 +215,9 @@ SPLIT_FALLBACK_KEY = "local_llm_split_fallback"
 #: the split "auto" uses on NPU + GPU (``engine.SPLITS``): the tensor split runs both chips at once (the layer split
 #: runs its halves one after the other)
 AUTO_SPLIT = "tensor"
+#: "auto"'s NPU + GPU (``_split_wanted``): crashed at model load on a Galaxy Z Fold 8 on 2026-11-19, switched off
+#: until the cause is known (the device checks' timing still runs both NPU + GPU modes)
+AUTO_SPLIT_ENABLED = False
 SPLIT_CRASH_REASON = "Glossarion closed while the NPU + GPU was running this model"
 NPU_CRASH_REASON = "Glossarion closed while the NPU was running this model"
 NPU_CHECK_CRASH_REASON = "Glossarion closed while the NPU check was running"
@@ -359,16 +368,7 @@ def current_app_version() -> str:
 def npu_htp_root() -> str:
     """``<app data>/htp``: the HTP skeleton folders (the app's private files directory on Android; FastRPC
     cannot read them from inside the APK)."""
-    base = ""
-    try:
-        from glossarion_mobile import runtime_bootstrap as rb
-
-        paths = rb.get_paths()
-        base = str(paths.data) if paths is not None else ""
-    except Exception:
-        base = ""
-    base = base or os.environ.get("GLOSSARION_DATA_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".glossarion")
-    return os.path.join(base, "htp")
+    return os.path.join(eng.app_data_dir(), "htp")
 
 
 def npu_skel_dir(release: str, root: Optional[str] = None) -> str:
@@ -1102,7 +1102,7 @@ class LocalEngineService:
 
     def _mark_gpu_attempt(self, stem: str) -> None:
         self._gpu_attempt = stem
-        self._set_pref(self._gpu_attempt_key, {"stem": stem, "at": int(time.time())})
+        self._set_pref(self._gpu_attempt_key, {"stem": stem, "at": int(time.time()), "run": eng.RUN_ID})
 
     def _clear_gpu_attempt(self) -> None:
         if self._gpu_attempt is not None or self._pref(self._gpu_attempt_key):
@@ -1119,7 +1119,7 @@ class LocalEngineService:
         self._set_pref(GPU_ATTEMPT_KEY, None)
         self._set_pref(GPU_ATTEMPT_KEY + "_parallel", None)
         if self.use_gpu():
-            self._gpu_failed(stem, CRASH_REASON)
+            self._gpu_failed(stem, eng.with_abort_reason(CRASH_REASON, raw))
         return stem
 
     # ---- NPU -------------------------------------------------------------------------------------------
@@ -1231,8 +1231,8 @@ class LocalEngineService:
         return out
 
     def _mark_npu_stage(self, stage: int) -> None:
-        self._set_pref(NPU_CHECK_ATTEMPT_KEY, {"version": self.app_version, "at": int(time.time()), "stage": stage},
-                       durable=True)
+        self._set_pref(NPU_CHECK_ATTEMPT_KEY, {"version": self.app_version, "at": int(time.time()), "stage": stage,
+                                               "run": eng.RUN_ID}, durable=True)
 
     def _watched(self, name: str, call: Callable[[], dict], slow: Optional[Callable[[], None]] = None) -> tuple:
         """``(state, blocked, seconds)`` of ``call()`` on its own thread, given ``npu_watchdog_seconds``: a call
@@ -1381,7 +1381,7 @@ class LocalEngineService:
             self._set_pref(NPU_CHECK_ATTEMPT_KEY, None)
             if attempt.get("version") == self.app_version:
                 start = attempt.get("stage") == 2
-                reason = NPU_START_CRASH_REASON if start else NPU_CHECK_CRASH_REASON
+                reason = eng.with_abort_reason(NPU_START_CRASH_REASON if start else NPU_CHECK_CRASH_REASON, attempt)
                 saved = self._saved_npu(NPU_CHECK_KEY) or {}
                 entry = {"version": self.app_version, "state": _npu_blocked_state(reason), "blocked": True}
                 if start:
@@ -1404,9 +1404,10 @@ class LocalEngineService:
         self._set_pref(NPU_INFLIGHT_KEY, None)
         stem = str(raw["stem"])
         if raw.get("split"):
-            self._split_failed(stem, SPLIT_CRASH_REASON)  # NPU + GPU: that model runs on the NPU alone
+            # NPU + GPU: that model runs on the NPU alone (while ``AUTO_SPLIT_ENABLED`` is off the record is unused)
+            self._split_failed(stem, eng.with_abort_reason(SPLIT_CRASH_REASON, raw))
         else:
-            self._npu_failed(stem, NPU_CRASH_REASON)  # saved together with the cleared markers
+            self._npu_failed(stem, eng.with_abort_reason(NPU_CRASH_REASON, raw))  # saved with the cleared markers
         return stem
 
     # ---- NPU: the files and stage 2 (a loading thread, holding the gate) -------------------------------------
@@ -1687,7 +1688,7 @@ class LocalEngineService:
             current = self._npu_inflight
             self._set_pref(NPU_INFLIGHT_KEY, None if current is None else {
                 "stem": current, "at": int(time.time()), "background": self.background_since is not None,
-                **({"split": True} if self._npu_inflight_split else {})},
+                "run": eng.RUN_ID, **({"split": True} if self._npu_inflight_split else {})},
                 durable=True)
 
     def npu_hang_note(self) -> Optional[str]:
@@ -1701,8 +1702,8 @@ class LocalEngineService:
 
     def _mark_npu_attempt(self, stem: str, split: Optional[str] = None) -> None:
         self._npu_attempt = stem
-        self._set_pref(NPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time()), **({"split": split} if split else {})},
-                       durable=True)
+        self._set_pref(NPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time()), "run": eng.RUN_ID,
+                                         **({"split": split} if split else {})}, durable=True)
 
     def _clear_npu_attempt(self) -> None:
         # only this service's own marker: the parallel secondary and the self-check services share the key
@@ -1733,8 +1734,9 @@ class LocalEngineService:
 
     def _split_wanted(self, stem: str) -> bool:
         """"auto" puts ``stem`` (already wanted on the NPU) on NPU + GPU: no device checks override, "Use GPU" on
-        where the build has a GPU backend, and no GPU fallback and no NPU + GPU fallback for the model (prefs only)."""
-        if self.backend_override or self.split_override or not self.use_gpu():
+        where the build has a GPU backend, and no GPU fallback and no NPU + GPU fallback for the model (prefs only).
+        Never while ``AUTO_SPLIT_ENABLED`` is off."""
+        if not AUTO_SPLIT_ENABLED or self.backend_override or self.split_override or not self.use_gpu():
             return False
         fallback = self.gpu_fallback()
         if fallback and fallback["stem"] == stem:
