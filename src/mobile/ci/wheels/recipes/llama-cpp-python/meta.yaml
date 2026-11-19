@@ -46,6 +46,8 @@
 #     sends each device's slice of a weight in ONE write (OpenCL's quantised upload aborts on a second one).
 #   - patches/mobile.patch 12.: tensor split with a dense FFN weight the meta device cannot hold (e.g. IQ4_XS on
 #     Hexagon): that layer's FFN weights in the meta buffer are mirrored instead of split.
+#   - patches/mobile.patch 13.: tensor split's AllReduce: the temp tensor each device's partial result is copied
+#     into is initialised by its backend (OpenCL's set_tensor aborted on it: GGML_ASSERT(extra)).
 package:
   name: llama-cpp-python
   version: "0.3.37"
