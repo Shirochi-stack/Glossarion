@@ -43,6 +43,19 @@ the NPU or the reverse (a wheel without ``device_index`` keeps ``main_gpu`` 0 fo
 the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailable`` on any failure. The
 "ggml-hex:" lines of the native log are kept (``hex_log_lines``) for the diagnostics.
 
+NPU + GPU together (``load(..., npu=True, split="layer" | "tensor")``; only the device checks' timing asks for it,
+no normal load does): the model on exactly two devices, the NPU first and the GPU second, half of it each
+(``tensor_split`` 1:1), all layers offloaded. llama-cpp-python 0.3.37's ``Llama()`` has ``split_mode``,
+``main_gpu``, ``tensor_split``, ``flash_attn``, ``type_k`` / ``type_v`` but no device list, and builds its
+``llama_model_params`` (llama.py: ``llama_model_default_params()``, then the load in the same ``__init__``); the
+struct's ``devices`` field (a NULL-terminated ``ggml_backend_dev_t`` list) is filled by ``_model_devices``, which
+wraps ``llama_model_default_params`` for the loading thread only, under ``_NATIVE_LOAD_LOCK``. With a list, llama.cpp
+uses those devices in that order (``llama_prepare_model_devices``); ``main_gpu`` only matters for split mode NONE.
+"layer": each device holds a slice of the layers (split mode LAYER). "tensor": every layer split across both (split
+mode TENSOR, experimental upstream); it needs flash attention on (every load already has it) and an unquantised KV
+cache, so this load alone passes ``type_k`` / ``type_v`` f16. A refusal (the architecture, flash attention, memory, a
+device missing) raises ``SplitUnavailable`` with llama.cpp's own error line (``native_errors``).
+
 Script ban (``params["ban_scripts"]``, the ``script_ban.SCRIPTS`` names decided by the service): ``LlamaEngine``
 passes a logits processor that sets the token ids of those scripts (Han / kana / Hangul, Devanagari,
 Thai, Arabic, Cyrillic ...) to -inf. The vocabulary is decoded once, on the first such request after a
@@ -55,6 +68,7 @@ request's user messages.
 from __future__ import annotations
 
 import collections
+import contextlib
 import importlib
 import importlib.util
 import logging
@@ -70,7 +84,8 @@ log = logging.getLogger("glossarion.local_llm")
 progress_log = logging.getLogger("glossarion.local_llm.progress")
 
 __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GenerationStopped",
-           "GpuUnavailable", "LlamaEngine", "NpuUnavailable", "cpu_variant", "default_threads", "device_index",
+           "GpuUnavailable", "LlamaEngine", "NpuUnavailable", "SPLITS", "SplitUnavailable", "cpu_variant",
+           "default_threads", "device_index",
            "engine_status", "gpu_offer", "gpu_state", "hex_log_lines", "npu_failure", "npu_passed", "npu_platform",
            "npu_precheck", "npu_precheck_failure", "npu_skeleton_file", "npu_skeleton_source", "npu_state",
            "system_info", "vision_status"]
@@ -111,8 +126,21 @@ class NpuUnavailable(RuntimeError):
     the message says why. The engine holds no model afterwards."""
 
 
+class SplitUnavailable(RuntimeError):
+    """The NPU + GPU load failed (a device missing, llama.cpp refused the split, or its first token failed); the
+    message says why. The engine holds no model afterwards."""
+
+
 #: llama.cpp's LLAMA_SPLIT_MODE_NONE: the whole model on ``main_gpu`` (-1: on no device = the CPU).
 SPLIT_MODE_NONE = 0
+#: llama.h's LLAMA_SPLIT_MODE_LAYER and LLAMA_SPLIT_MODE_TENSOR: the NPU + GPU loads (``load(split=...)``)
+SPLITS = {"layer": 1, "tensor": 3}
+#: ggml's GGML_TYPE_F16: the unquantised KV cache a tensor split needs
+GGML_TYPE_F16 = 1
+#: ggml's GGML_LOG_LEVEL_ERROR: the native log lines kept for a refused load's reason
+NATIVE_ERROR_LEVEL = 4
+NATIVE_ERROR_LINES = 5
+_NATIVE_ERRORS: collections.deque = collections.deque(maxlen=NATIVE_ERROR_LINES)
 #: the registry name of llama.cpp's Hexagon backend (ggml-hexagon at the pinned commit)
 NPU_BACKEND = "HTP"
 #: the oldest HTP arch the backend has skeletons for; a lower or unknown arch is never offered (upstream would
@@ -355,7 +383,9 @@ def device_index(name: str, missing: int = -1) -> int:
         return -1
 
 
-def _remember_hex(text: str) -> None:
+def _remember_hex(text: str, level: Optional[int] = None) -> None:
+    if level == NATIVE_ERROR_LEVEL and text.strip():
+        _NATIVE_ERRORS.append(text.strip()[:400])
     pending = _HEX_PENDING[0] + text
     *lines, rest = pending.split("\n")
     _HEX_PENDING[0] = rest[-2000:]
@@ -373,10 +403,83 @@ def hex_log_lines() -> list:
     return lines
 
 
+def native_errors() -> list:
+    """The last ``NATIVE_ERROR_LINES`` error lines of the native log (since ``capture_hex_log``): why llama.cpp
+    refused a load (``llama_model_load_from_file`` only returns NULL)."""
+    return list(_NATIVE_ERRORS)
+
+
+#: the error line llama.cpp adds after every failed model load (llama.cpp's ``llama_model_load_from_file_impl``),
+#: after the line that says why: never the reason itself
+NATIVE_GENERIC_ERRORS = ("failed to load model",)
+
+
+def native_reason() -> Optional[str]:
+    """The last native error line that says why a load failed (``native_errors`` without llama.cpp's generic
+    "failed to load model" that always follows it), or None."""
+    for line in reversed(native_errors()):
+        if not any(line.endswith(f": {generic}") or line == generic for generic in NATIVE_GENERIC_ERRORS):
+            return line
+    return None
+
+
+def _device_handles(names: Sequence[str]) -> list:
+    """The ``ggml_backend_dev_t`` of device 0 of each registered backend in ``names`` ("HTP", "OpenCL"), in that
+    order (``ggml_backend_reg_by_name`` / ``ggml_backend_reg_dev_get`` of the loader's libggml). Raises
+    ``SplitUnavailable`` naming the first backend that is not registered or has no device."""
+    import ctypes
+
+    ext = _extensions()
+    libggml = getattr(ext, "_LIBGGML", None) if ext is not None else None
+    if libggml is None:
+        raise SplitUnavailable("this engine build cannot choose the devices")
+    by_name = libggml.ggml_backend_reg_by_name
+    by_name.restype, by_name.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+    count = libggml.ggml_backend_reg_dev_count
+    count.restype, count.argtypes = ctypes.c_size_t, [ctypes.c_void_p]
+    get = libggml.ggml_backend_reg_dev_get
+    get.restype, get.argtypes = ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_size_t]
+    handles = []
+    for name in names:
+        reg = by_name(str(name).encode("ascii"))
+        if not reg:
+            raise SplitUnavailable(f"the {name} backend is not registered")
+        if int(count(reg)) < 1:
+            raise SplitUnavailable(f"the {name} backend has no device")
+        handles.append(int(get(reg, 0)))
+    return handles
+
+
+@contextlib.contextmanager
+def _model_devices(handles: Sequence[int]) -> Iterator[None]:
+    """While a ``Llama()`` is built on this thread: its ``llama_model_params.devices`` is the NULL-terminated list
+    ``handles`` (llama-cpp-python 0.3.37 has no device argument; llama.py fills the struct it gets from
+    ``llama_cpp.llama_cpp.llama_model_default_params()`` and loads the model in the same ``__init__``). Other
+    threads get the plain defaults. Call under ``_NATIVE_LOAD_LOCK``."""
+    import ctypes
+
+    module = importlib.import_module("llama_cpp.llama_cpp")
+    original = module.llama_model_default_params
+    devices = (ctypes.c_void_p * (len(handles) + 1))(*handles, None)
+    thread = threading.get_ident()
+
+    def with_devices() -> Any:
+        params = original()
+        if threading.get_ident() == thread:
+            params.devices = ctypes.addressof(devices)
+        return params
+
+    module.llama_model_default_params = with_devices
+    try:
+        yield
+    finally:
+        module.llama_model_default_params = original
+
+
 def capture_hex_log() -> bool:
     """Wrap llama-cpp-python's log callback (``llama_cpp._logger``): every line still goes where it went (the
-    original callback prints by the "llama-cpp-python" logger's level); the "ggml-hex:" lines are kept as well.
-    Once per process; False when this build has no log hook."""
+    original callback prints by the "llama-cpp-python" logger's level); the "ggml-hex:" lines are kept as well, and
+    the error lines (``native_errors``). Once per process; False when this build has no log hook."""
     if _HEX_HOOK:
         return True
     try:
@@ -392,7 +495,7 @@ def capture_hex_log() -> bool:
 
     def hook(level: int, text: Any, user_data: Any) -> None:
         try:
-            _remember_hex(text.decode("utf-8", "replace") if isinstance(text, bytes) else str(text or ""))
+            _remember_hex(text.decode("utf-8", "replace") if isinstance(text, bytes) else str(text or ""), int(level))
         except Exception:
             pass
         if original is not None:
@@ -549,6 +652,25 @@ def _text_of(content: Any) -> str:
     return str(content or "")
 
 
+def _split_of(npu: Any, split: Optional[str]) -> Optional[str]:
+    """``load``'s NPU + GPU split ("layer" / "tensor"), None for every other load; a split needs ``npu``."""
+    if split is None:
+        return None
+    if split not in SPLITS:
+        raise ValueError(f"unknown NPU + GPU split {split!r} (known: {', '.join(SPLITS)})")
+    if not npu:
+        raise ValueError("an NPU + GPU split is an NPU load (npu=True)")
+    return split
+
+
+def _timing(prompt_tokens: int, started: float, first_at: float, ended: float, tokens: int) -> dict:
+    """``last_timing`` of an answer: the prompt from ``started`` to the first output token, the generation from
+    there to ``ended`` (no output: all of it was the prompt)."""
+    first_at = first_at or ended
+    return {"prompt_tokens": int(prompt_tokens), "prompt_s": max(first_at - started, 0.0), "tokens": int(tokens),
+            "gen_s": max(ended - first_at, 0.0)}
+
+
 class _Base:
     def __init__(self) -> None:
         self.path: Optional[str] = None
@@ -559,18 +681,31 @@ class _Base:
         self.last_finish = "stop"
         self.on_gpu = False  # the loaded model runs on the GPU
         self.on_npu = False  # the loaded model runs on the NPU
+        #: "layer" / "tensor": the loaded model is split over the NPU and the GPU (``on_npu`` / ``on_gpu`` stay
+        #: False: no NPU or GPU marker or fallback is about such a load)
+        self.split: Optional[str] = None
         self.device: Optional[str] = None  # what runs the loaded model ("GPU: … (OpenCL)", "NPU: …", "CPU …")
+        #: the last answer's speed: ``{"prompt_tokens", "prompt_s", "tokens", "gen_s"}`` (``gen_s``: from the first
+        #: output token to the last, over ``tokens - 1`` tokens)
+        self.last_timing: dict = {}
 
     @property
     def backend(self) -> Optional[str]:
-        """"NPU", "GPU" or "CPU" of the loaded model, None without one."""
+        """"NPU", "GPU", "CPU" or "NPU + GPU" of the loaded model, None without one."""
         if self.path is None:
             return None
+        if self.split:
+            return "NPU + GPU"
         return "NPU" if self.on_npu else "GPU" if self.on_gpu else "CPU"
 
     @property
     def loaded(self) -> bool:
         return self.path is not None
+
+    def warm(self) -> None:
+        """Run the loaded model once the way an NPU / GPU load's first-token check does (``_gpu_check``) when its
+        load did not (a CPU load), so a timed answer starts on a model that has run before. The device checks'
+        timing only; normal loads never call it."""
 
     @property
     def vision(self) -> bool:
@@ -597,7 +732,8 @@ class FakeEngine(_Base):
                  reply: Optional[Callable[[list], str]] = None, gpu_device: str = "Fake GPU (Test)",
                  gpu_error: Optional[str] = None, gpu_chat_error: Optional[str] = None,
                  npu_device: str = "Hexagon v81 (HTP0)", npu_error: Optional[str] = None,
-                 npu_chat_error: Optional[str] = None, npu_load_delay: float = 0.0) -> None:
+                 npu_chat_error: Optional[str] = None, npu_load_delay: float = 0.0,
+                 split_error: Optional[dict] = None, split_chat_error: Optional[str] = None) -> None:
         super().__init__()
         self.delay = delay
         self.think = think
@@ -610,25 +746,39 @@ class FakeEngine(_Base):
         self.npu_error = npu_error  # an NPU load raises NpuUnavailable(npu_error)
         self.npu_chat_error = npu_chat_error  # a chat on the NPU raises RuntimeError(npu_chat_error)
         self.npu_load_delay = npu_load_delay  # an NPU load takes this long (the watchdog tests)
+        self.split_error = dict(split_error or {})  # {split: why}: that NPU + GPU load raises SplitUnavailable(why)
+        self.split_chat_error = split_chat_error  # a chat on the NPU + GPU raises RuntimeError(split_chat_error)
         self.loads: list = []
         self.gpu_loads: list = []  # the gpu flag of every load attempt
-        self.backends: list = []  # "npu" / "gpu" / "cpu" of every load attempt
+        self.backends: list = []  # "npu" / "gpu" / "cpu" / "npu+gpu:layer" / "npu+gpu:tensor" of every load attempt
         self.npu_layers: list = []  # the layer count of every NPU load attempt
         self.unloads = 0
         self.generated = 0  # tokens produced since the last chat started
         self.calls: list = []
         self.projector_loads = 0
         self._projector = False
+        self.warms: list = []  # the backend ("npu" / "gpu" / "cpu" / "npu+gpu:…") of every ``warm`` that ran
+
+    def warm(self) -> None:
+        if self.path is not None and self.backends and self.backends[-1] == "cpu":
+            self.warms.append(self.backends[-1])
 
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False) -> None:
-        npu = bool(npu)
-        gpu = bool(gpu and n_gpu_layers != 0) and not npu
-        self.n_gpu_layers = int(n_gpu_layers) if gpu or npu else 0
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False, split: Optional[str] = None) -> None:
+        split = _split_of(npu, split)
+        npu = bool(npu) and split is None
+        gpu = bool(gpu and n_gpu_layers != 0) and not npu and split is None
+        self.n_gpu_layers = -1 if split else int(n_gpu_layers) if gpu or npu else 0
         if self.load_delay:
             time.sleep(self.load_delay)
         self.gpu_loads.append(bool(gpu))
-        self.backends.append("npu" if npu else "gpu" if gpu else "cpu")
+        self.backends.append(f"npu+gpu:{split}" if split else "npu" if npu else "gpu" if gpu else "cpu")
+        if split:
+            if self.npu_load_delay:
+                time.sleep(self.npu_load_delay)
+            if self.split_error.get(split):
+                self.unload()
+                raise SplitUnavailable(self.split_error[split])
         if npu:
             self.npu_layers.append(int(n_gpu_layers))
             if self.npu_load_delay:
@@ -644,7 +794,9 @@ class FakeEngine(_Base):
         self._projector = False
         self.on_gpu = bool(gpu)
         self.on_npu = npu
-        self.device = f"NPU: {self.npu_device}" if npu else f"GPU: {self.gpu_device}" if gpu else "CPU"
+        self.split = split
+        self.device = (f"NPU + GPU ({split} split): {self.npu_device} + {self.gpu_device}" if split
+                       else f"NPU: {self.npu_device}" if npu else f"GPU: {self.gpu_device}" if gpu else "CPU")
         self.loads.append((path, int(n_ctx), int(n_threads)))
 
     def unload(self) -> None:
@@ -655,6 +807,7 @@ class FakeEngine(_Base):
         self._projector = False
         self.on_gpu = False
         self.on_npu = False
+        self.split = None
         self.device = None
 
     @property
@@ -665,12 +818,17 @@ class FakeEngine(_Base):
         return sum(len(_text_of(m.get("content")).split()) + 4 for m in messages) + self._image_tokens(messages)
 
     def chat(self, messages: Sequence[dict], params: dict, should_stop: Callable[[], bool]) -> Iterator[str]:
-        self.calls.append({"messages": list(messages), "params": dict(params), "gpu": self.on_gpu, "npu": self.on_npu})
+        self.calls.append({"messages": list(messages), "params": dict(params), "gpu": self.on_gpu, "npu": self.on_npu,
+                           "split": self.split})
         self.generated = 0
         if self.on_gpu and self.gpu_chat_error:
             raise RuntimeError(self.gpu_chat_error)
         if self.on_npu and self.npu_chat_error:
             raise RuntimeError(self.npu_chat_error)
+        if self.split and self.split_chat_error:
+            raise RuntimeError(self.split_chat_error)
+        started = time.monotonic()
+        first_at = 0.0
         images = image_count(messages)
         if images:
             if not self.mmproj:
@@ -696,10 +854,12 @@ class FakeEngine(_Base):
             if self.delay:
                 time.sleep(self.delay)
             self.generated += 1
+            first_at = first_at or time.monotonic()
             yield token
         prompt = self.count_prompt(messages)
         self.last_usage = {"prompt_tokens": prompt, "completion_tokens": self.generated,
                            "total_tokens": prompt + self.generated}
+        self.last_timing = _timing(prompt, started, first_at, time.monotonic(), self.generated)
 
 
 # Backend registration and llama-cpp-python's first initialization are process-global.
@@ -721,6 +881,18 @@ class LlamaEngine(_Base):
         self.sliding_window = 0  # the loaded model's SWA window in tokens (0: none)
         self.live: Optional["_Heartbeat"] = None  # the request running now (``chat``), for the notification
         self._lock = threading.RLock()
+        self._checked = False  # the loaded model's first-token check ran (an NPU / GPU load)
+
+    def warm(self) -> None:
+        with self._lock:
+            llm = self.llm
+            if llm is None or self._checked:
+                return
+            self._checked = True
+            try:
+                _gpu_check(llm)
+            except Exception:
+                log.debug("warming the model failed", exc_info=True)
 
     def _module(self) -> Any:
         try:
@@ -729,14 +901,33 @@ class LlamaEngine(_Base):
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
     def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False,
-             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False) -> None:
-        npu = bool(npu)
-        gpu = bool(gpu and n_gpu_layers != 0) and not npu
+             n_gpu_layers: int = DEFAULT_GPU_LAYERS, npu: bool = False, split: Optional[str] = None) -> None:
+        split = _split_of(npu, split)
+        npu = bool(npu) and split is None
+        gpu = bool(gpu and n_gpu_layers != 0) and not npu and split is None
         llama_cpp = self._module()
         with self._lock, _NATIVE_LOAD_LOCK:
             self.unload()
             device = None
-            if npu:
+            handles: Optional[list] = None
+            extra: dict = {}
+            if split:
+                # exactly the NPU and then the GPU (``_model_devices``), half the model each, every layer offloaded
+                if device_index(NPU_BACKEND) < 0:
+                    raise SplitUnavailable(_NPU_STATE.get("error") or "the NPU backend is not registered")
+                state = gpu_state()
+                if not state.get("device"):
+                    raise SplitUnavailable(state.get("error") or "no GPU device")
+                backend = str(state.get("backend") or "")
+                handles = _device_handles((NPU_BACKEND, backend))
+                device = f"NPU + GPU ({split} split): {npu_label()} + {state['device']} ({backend})"
+                placement = {"n_gpu_layers": -1, "split_mode": SPLITS[split], "main_gpu": 0,
+                             "tensor_split": [1.0, 1.0]}
+                if split == "tensor":
+                    # an unquantised KV cache for this load only (flash attention is on for every load)
+                    extra = {"type_k": GGML_TYPE_F16, "type_v": GGML_TYPE_F16}
+                _NATIVE_ERRORS.clear()
+            elif npu:
                 # registered by the service's NPU check (``npu_state``) before any NPU load
                 index = device_index(NPU_BACKEND)
                 if index < 0:
@@ -766,21 +957,28 @@ class LlamaEngine(_Base):
                 # The mobile OpenCL wheel includes the upstream DK512 Gemma 4 kernels; disabling FA
                 # pads Sigma's mixed-size V cache and prevents the fused GPU attention path.
                 # ``chat`` starts every sliding-window request on an empty cache.
-                llm = llama_cpp.Llama(model_path=str(path), n_ctx=int(n_ctx), n_threads=int(n_threads),
-                                      n_threads_batch=int(n_threads), n_batch=512, n_ubatch=512, use_mmap=True,
-                                      use_mlock=False, verbose=False, swa_full=False, flash_attn=True,
-                                      **placement)
+                with _model_devices(handles) if handles else contextlib.nullcontext():
+                    llm = llama_cpp.Llama(model_path=str(path), n_ctx=int(n_ctx), n_threads=int(n_threads),
+                                          n_threads_batch=int(n_threads), n_batch=512, n_ubatch=512, use_mmap=True,
+                                          use_mlock=False, verbose=False, swa_full=False, flash_attn=True,
+                                          **placement, **extra)
             except Exception as exc:
+                if split:
+                    native = native_reason()
+                    raise SplitUnavailable(f"the model did not load on the NPU + GPU ({exc})"
+                                           + (f": {native}" if native else "")) from exc
                 if npu:
                     raise NpuUnavailable(f"the model did not load on the NPU ({exc})") from exc
                 if gpu:
                     raise GpuUnavailable(f"the model did not load on the GPU ({exc})") from exc
                 raise
-            if gpu or npu:
+            if gpu or npu or split:
                 try:
                     _gpu_check(llm)
                 except Exception as exc:
                     _close(llm)
+                    if split:
+                        raise SplitUnavailable(f"the first token on the NPU + GPU failed ({exc})") from exc
                     if npu:
                         raise NpuUnavailable(f"the first token on the NPU failed ({exc})") from exc
                     raise GpuUnavailable(f"the first token on the GPU failed ({exc})") from exc
@@ -793,6 +991,8 @@ class LlamaEngine(_Base):
             self.mmproj = str(mmproj) if mmproj else None
             self.on_gpu = bool(gpu)
             self.on_npu = npu
+            self.split = split
+            self._checked = bool(gpu or npu or split)  # ``_gpu_check`` ran on this load
             if device is None:
                 variant = cpu_variant()
                 device = f"CPU ({variant})" if variant and variant not in ("builtin", "none") else "CPU"
@@ -824,6 +1024,7 @@ class LlamaEngine(_Base):
             self.mmproj = None
             self.on_gpu = False
             self.on_npu = False
+            self.split = None
             self.device = None
             # The projector goes before its model. llama-cpp-python 0.3.37 registers mtmd_free on the
             # model's own exit stack, after the context and the model, so ``llm.close()`` below runs it
@@ -997,6 +1198,9 @@ class LlamaEngine(_Base):
                 self.live = None
             prompt_done()
             cpus_done()
+            # the prompt's evaluated tokens (a reused prefix is not evaluated again), else its estimate
+            self.last_timing = _timing(heartbeat.prompt_read or heartbeat.prompt_total, heartbeat.started,
+                                       heartbeat.first_token_at, time.monotonic(), completion)
         prompt = 0
         try:
             prompt = self.count_prompt(messages)

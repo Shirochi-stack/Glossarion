@@ -84,6 +84,10 @@
   never use the NPU. Power mode: ``NPU_POWER_KEY`` (upstream's modes, default burst), applied when the backend
   registers (a change applies after a restart). The screens only read this state (``npu_progress``,
   ``npu_status_line``): no stage, download or NPU lock runs on the UI thread.
+* **NPU + GPU (device checks only):** ``split_override`` ("layer" / "tensor", set by ``selfcheck.npu_speed_check``
+  alone) loads the model on the NPU and the GPU together (``engine.load(split=...)``) after the same NPU preparation;
+  nothing falls back: a refused load raises ``LocalLLMError`` with llama.cpp's reason, and no NPU or GPU marker or
+  fallback is written for it (the timing has its own crash marker, ``SPEED_KEY``). "auto" never uses it.
 """
 
 from __future__ import annotations
@@ -182,6 +186,10 @@ NPU_CHECK_KEY = "local_llm_npu_check"
 NPU_SESSION_KEY = "local_llm_npu_session"
 #: Prefs key of an NPU stage running now: ``{"version", "at", "stage"}`` (stage 1 or 2)
 NPU_CHECK_ATTEMPT_KEY = "local_llm_npu_check_attempt"
+#: Prefs key of the device checks' timing (``selfcheck.npu_speed_check``): ``{"version", "stem", "at", "running",
+#: "modes"}``; ``running`` names the mode being timed (written to disk before it starts: still set at the next run,
+#: the app died in it), ``modes`` the last result of each mode (a later step reads them to choose a placement)
+SPEED_KEY = "local_llm_speed_check"
 NPU_CRASH_REASON = "Glossarion closed while the NPU was running this model"
 NPU_CHECK_CRASH_REASON = "Glossarion closed while the NPU check was running"
 NPU_START_CRASH_REASON = "Glossarion closed while the NPU was starting"
@@ -604,6 +612,9 @@ class LocalEngineService:
         self.last_load: Optional[dict] = None
         #: a backend the self-check forces for its timing runs ("npu" / "gpu" / "cpu"; None: the usual choice)
         self.backend_override: Optional[str] = None
+        #: "layer" / "tensor": the self-check's NPU + GPU timing runs (None: every other load)
+        self.split_override: Optional[str] = None
+        self._loaded_split: Optional[str] = None
         self.clock = clock
         self.memory = memory or memory_info
         self.server = LocalLLMServer(self)
@@ -1090,6 +1101,8 @@ class LocalEngineService:
         engine = self.engine
         if engine is None or not engine.loaded:
             return None
+        if getattr(engine, "split", None):
+            return "NPU + GPU"
         return "NPU" if getattr(engine, "on_npu", False) else "GPU" if getattr(engine, "on_gpu", False) else "CPU"
 
     def npu_possible(self) -> bool:
@@ -1801,15 +1814,17 @@ class LocalEngineService:
         fallback = self.gpu_fallback()
         if fallback and fallback["stem"] != stem:
             self._set_pref(GPU_FALLBACK_KEY, None)  # another model: the GPU gets a new try
-        backend, layers = self._placement(stem)
+        # the self-check's NPU + GPU timing (``split_override``), else the model's usual placement
+        split = self.split_override if self.split_override in eng.SPLITS and not self._is_child else None
+        backend, layers = ("split", -1) if split else self._placement(stem)
         npu = backend == "npu"
         gpu = backend == "gpu"
-        gpu_layers = layers if gpu or npu else 0
+        gpu_layers = layers if gpu or npu or split else 0
         # a changed Context (Model manager or Welcome slider), GPU / NPU setting or backend reloads the model on the
         # next request
         if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
                 and self._loaded_gpu == gpu and self._loaded_npu == npu and self._loaded_gpu_layers == gpu_layers \
-                and engine.n_threads == self.threads():
+                and self._loaded_split == split and engine.n_threads == self.threads():
             if vision and not engine.vision_loaded:  # the projector loads with the first image
                 self._gate_ram(stem, engine.n_ctx or self.context_for(stem), vision=True,
                                gpu=bool(getattr(engine, "on_gpu", False)))
@@ -1820,16 +1835,28 @@ class LocalEngineService:
         path = self.registry.file_path(stem)
         if not os.path.isfile(path):
             raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
-        self._gate_ram(stem, n_ctx, vision=vision, gpu=gpu)
+        self._gate_ram(stem, n_ctx, vision=vision, gpu=gpu or bool(split))
         if engine.loaded:
             self._unload_locked()
         self._unload_when_idle = False
         self._set("loading", stem)
         size = int((self.registry.load().get(stem) or {}).get("size") or 0)
         log.info("loading on-device model %s (%s, n_ctx %d%s)", stem, _gb(size) if size else "size unknown", n_ctx,
-                 ", NPU" if npu else f", GPU {self.gpu_backend}" if gpu else "")
+                 f", NPU + GPU ({split} split)" if split else ", NPU" if npu else f", GPU {self.gpu_backend}" if gpu else "")
         started = time.monotonic()
         mmproj = self.registry.projector_path(stem)
+        if split:
+            # the same NPU preparation; without the NPU (or the GPU) this timing run does not load at all
+            try:
+                reason = self._prepare_npu()
+            except LocalLLMError:
+                self._set("idle", None)
+                raise
+            if reason is None and not self.gpu_backend:
+                reason = "this build has no GPU backend"
+            if reason is not None:
+                self._set("idle", None)
+                raise LocalLLMError(503, "split_unavailable", f"NPU not available ({reason})", "server_error")
         if npu:
             # the NPU files (downloaded at the first NPU load) and stage 2; while they run the loading state says so
             # (``EngineSnapshot.phase``). Neither keeps the model from loading: today's GPU / CPU rule, no fallback;
@@ -1848,13 +1875,16 @@ class LocalEngineService:
                 gpu = self._gpu_wanted(stem)
                 gpu_layers = self.gpu_layers(stem) if gpu else 0
         try:
-            if npu and not self._load_on_npu(engine, stem, path, n_ctx, mmproj, gpu_layers):
+            if split:
+                # no NPU / GPU marker or fallback: the timing marks this mode itself (``SPEED_KEY``)
+                engine.load(path, n_ctx, self.threads(), mmproj=mmproj, npu=True, split=split)
+            elif npu and not self._load_on_npu(engine, stem, path, n_ctx, mmproj, gpu_layers):
                 # the NPU fallback is recorded: today's GPU / CPU rule for this load
                 npu = False
                 gpu = self._gpu_wanted(stem)
                 gpu_layers = self.gpu_layers(stem) if gpu else 0
-            if npu:
-                pass  # loaded on the NPU
+            if npu or split:
+                pass  # loaded on the NPU (or the NPU + GPU)
             elif gpu:
                 self._mark_gpu_attempt(stem)
                 try:
@@ -1869,12 +1899,18 @@ class LocalEngineService:
             self._clear_npu_attempt()
             self._loaded_gpu = False
             self._loaded_npu = False
+            self._loaded_split = None
             self._set("idle", None, f"Could not load {stem}: {exc}")
             log.exception("loading %s failed", stem)
             raise LocalLLMError(500, "load_failed", f"Could not load local/{stem}: {exc}", "server_error") from exc
+        if self.backend_override or split:
+            # the device checks' timing: a CPU load runs once too (an NPU / GPU load's first-token check did), so
+            # every mode's timed prompt starts on a model that has run (``LlamaEngine.warm``)
+            getattr(engine, "warm", lambda: None)()
         self._loaded_gpu = bool(getattr(engine, "on_gpu", False))  # record what loaded, not a setting changed during load
         self._loaded_npu = bool(getattr(engine, "on_npu", False))
-        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu or self._loaded_npu else 0
+        self._loaded_split = getattr(engine, "split", None)
+        self._loaded_gpu_layers = gpu_layers if self._loaded_gpu or self._loaded_npu or self._loaded_split else 0
         self._load_seconds = round(time.monotonic() - started, 2)
         self.log.append((stem, self._load_seconds))
         self.last_load = {"stem": stem, "backend": self._engine_backend() or "CPU",
@@ -1903,6 +1939,7 @@ class LocalEngineService:
             log.info("on-device model %s unloaded", stem)
         self._loaded_gpu = False
         self._loaded_npu = False
+        self._loaded_split = None
         self._clear_gpu_attempt()  # unloaded normally: the GPU did not take the app down
         self._clear_npu_attempt()  # nor the NPU
         self._set("idle", None)

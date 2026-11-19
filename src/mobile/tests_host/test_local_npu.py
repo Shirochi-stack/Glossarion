@@ -8,13 +8,16 @@ NPU rows), an old saved "· NPU" row still loading on the NPU, the diagnostics b
 self-check's shared markers; the two stages (``npu_precheck`` once per app version, ``register_npu_backend`` once per
 process before the first NPU load) and the first-use download of the HTP skeletons from llama.cpp's release (one GET,
 https redirects only, only the pinned members, checksums, a symlink member, an offline phone, cancel and resume, the
-release-keyed folder). Fakes only: FakeEngine, FakePrefs, fakes of the three wheel functions, tiny tar.gz archives
+release-keyed folder); NPU + GPU together (the engine's layer / tensor placement, its device list and refusals) and
+the device checks' five-way timing (stored results, the per-mode crash marker, refusals, Stop). Fakes only: FakeEngine, FakePrefs, fakes of the three wheel functions, tiny tar.gz archives
 and a fake HTTP client; no native NPU, no network.
 """
 
 from __future__ import annotations
 
+import contextlib
 import itertools
+import math
 import threading
 import time
 import types
@@ -950,13 +953,14 @@ def test_the_watchdog_on_a_hanging_first_load(tmp_path):
 
 def test_diagnostics_block_when_the_npu_passed(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "hex_log_lines", lambda: ["ggml-hex: HTP0 new session : session-id 0"])
-    service, engine, _probe = npu_service(tmp_path, stems=(Q40, QK), gpu=True)
+    service, engine, _probe = npu_service(tmp_path, stems=(Q40, QK), gpu=True, engine=eng.FakeEngine(delay=0.02))
     service.run_npu_check()
     chat(service)
     service._npu_fallbacks()
     speeds = selfcheck.npu_speed_check(service, Q40)
-    assert set(speeds) == {"npu", "gpu", "cpu"} and speeds["npu"]["backend"] == "NPU"
+    assert set(speeds) == set(selfcheck.SPEED_MODES) and speeds["npu"]["backend"] == "NPU"
     assert speeds["gpu"]["backend"] == "GPU" and speeds["cpu"]["backend"] == "CPU"
+    assert speeds["layer"]["backend"] == speeds["tensor"]["backend"] == "NPU + GPU"
     assert all(speeds[b]["tokens"] > 0 for b in speeds) and service.backend_override is None
     assert service.loaded_stem is None                                         # reloads on its usual backend
     lines = selfcheck.npu_lines(service, speeds, soc="QTI SM8850")
@@ -971,8 +975,9 @@ def test_diagnostics_block_when_the_npu_passed(tmp_path, monkeypatch):
         assert f"✓ {name}: {name} ok" in lines
     assert "Arch: v81" in lines and "Device: HTP0" in lines
     assert "Use NPU: on · power mode: burst" in lines
-    assert "Last load: m-Q4_0 on CPU" in text                                 # the CPU timing run was the last
-    assert text.count("tok/s") == 3 and "Speed (16 tokens): NPU " in text
+    assert "Last load: m-Q4_0 on NPU + GPU" in text                           # the tensor split run was the last
+    assert text.count("tok/s") == 10 and "Speed (16 tokens):" in lines
+    assert "  NPU + GPU, tensor split: prompt " in text and " (ran on" not in text
     assert "Fallback: none" in lines
     assert "ggml-hex log:" in lines and "  ggml-hex: HTP0 new session : session-id 0" in lines
     service._npu_failed(QK, "the first token on the NPU failed")
@@ -1008,6 +1013,420 @@ def test_diagnostics_line_without_the_npu(tmp_path):
 def test_speed_check_refuses_during_a_job(tmp_path):
     service, _engine, _probe = npu_service(tmp_path, active_job_model=lambda: f"local/{Q40}")
     assert "error" in selfcheck.npu_speed_check(service, Q40)
+
+
+# ---- NPU + GPU together: the engine's placement and the five-way timing ---------------------------------------------
+
+@pytest.fixture()
+def split_engine(fake_llama, monkeypatch):
+    """LlamaEngine over the fake Llama, with the NPU registered (``device_index``), two device handles and a recorded
+    device list (``_model_devices``)."""
+    indexes = {"HTP": 0, "OpenCL": 1}
+    lists: list = []
+    monkeypatch.setattr(eng, "device_index", lambda name, missing=-1: indexes.get(name, -1))
+    monkeypatch.setattr(eng, "_device_handles", lambda names: [{"HTP": 0x1110, "OpenCL": 0x2220}[n] for n in names])
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def devices(handles):
+        lists.append(list(handles))
+        yield
+
+    monkeypatch.setattr(eng, "_model_devices", devices)
+    monkeypatch.setitem(eng._NPU_STATE, "device", "HTP0")
+    monkeypatch.setitem(eng._NPU_STATE, "arch", 81)
+    return types.SimpleNamespace(gpu=fake_llama, indexes=indexes, lists=lists)
+
+
+def test_engine_split_placement_and_nothing_leaks_into_other_loads(split_engine):
+    engine = eng.LlamaEngine()
+    engine.load("m.gguf", 2048, 4, npu=True, split="layer")
+    layer = _FakeLlama.made[-1]
+    assert (layer.kwargs["n_gpu_layers"], layer.kwargs["split_mode"], layer.kwargs["main_gpu"]) == (-1, 1, 0)
+    assert layer.kwargs["tensor_split"] == [1.0, 1.0] and layer.kwargs["flash_attn"] is True
+    assert "type_k" not in layer.kwargs and "type_v" not in layer.kwargs
+    assert split_engine.lists == [[0x1110, 0x2220]]                            # the NPU first, then the GPU
+    assert layer.evals == [[1, 2, 3, 4], [4]]                                  # the first-token check ran
+    assert engine.split == "layer" and not engine.on_npu and not engine.on_gpu and engine.backend == "NPU + GPU"
+    assert engine.device == "NPU + GPU (layer split): Hexagon v81 (HTP0) + QUALCOMM Adreno(TM) 830 (OpenCL)"
+    engine.load("m.gguf", 2048, 4, npu=True, split="tensor")
+    tensor = _FakeLlama.made[-1]
+    assert layer.closed and (tensor.kwargs["split_mode"], tensor.kwargs["n_gpu_layers"]) == (3, -1)
+    assert (tensor.kwargs["type_k"], tensor.kwargs["type_v"]) == (eng.GGML_TYPE_F16, eng.GGML_TYPE_F16) == (1, 1)
+    assert tensor.kwargs["flash_attn"] is True and tensor.kwargs["tensor_split"] == [1.0, 1.0]
+    # the loads after it: today's placement, no device list, no KV type, no tensor split
+    for kwargs, expected in ((dict(npu=True, n_gpu_layers=-1), (-1, 0, 0)), (dict(gpu=True), (8, 0, 1)),
+                             ({}, (0, 0, -1))):
+        engine.load("m.gguf", 2048, 4, **kwargs)
+        made = _FakeLlama.made[-1].kwargs
+        assert (made["n_gpu_layers"], made["split_mode"], made["main_gpu"]) == expected
+        assert not {"type_k", "type_v", "tensor_split"} & set(made) and engine.split is None
+    assert len(split_engine.lists) == 2
+    engine.unload()
+    assert engine.split is None and engine.backend is None
+
+
+def test_engine_split_refusals_raise_split_unavailable(split_engine, monkeypatch):
+    engine = eng.LlamaEngine()
+    with pytest.raises(ValueError, match="is an NPU load"):                           # a split is an NPU load
+        engine.load("m.gguf", 2048, 4, split="layer")
+    with pytest.raises(ValueError, match="unknown"):
+        engine.load("m.gguf", 2048, 4, npu=True, split="row")
+    split_engine.indexes.pop("HTP")
+    monkeypatch.setitem(eng._NPU_STATE, "error", "")
+    with pytest.raises(eng.SplitUnavailable, match="NPU backend is not registered"):
+        engine.load("m.gguf", 2048, 4, npu=True, split="layer")
+    split_engine.indexes["HTP"] = 0
+    split_engine.gpu.update(device=None, error="no OpenCL driver")
+    with pytest.raises(eng.SplitUnavailable, match="no OpenCL driver"):
+        engine.load("m.gguf", 2048, 4, npu=True, split="tensor")
+    split_engine.gpu.update(device="QUALCOMM Adreno(TM) 830", error=None)
+
+    def missing(names):
+        raise eng.SplitUnavailable("the OpenCL backend has no device")
+
+    monkeypatch.setattr(eng, "_device_handles", missing)
+    with pytest.raises(eng.SplitUnavailable, match="OpenCL backend has no device"):
+        engine.load("m.gguf", 2048, 4, npu=True, split="layer")
+    monkeypatch.setattr(eng, "_device_handles", lambda names: [1, 2])
+    assert not _FakeLlama.made                                                 # nothing was built so far
+    # llama.cpp refuses the model: its own error line is the reason
+    _FakeLlama.fail = "Failed to load model from file: m.gguf"
+    monkeypatch.setattr(eng, "_model_devices", _refuse_with_native_line)
+    with pytest.raises(eng.SplitUnavailable, match=r"did not load on the NPU \+ GPU \(Failed to load model from file: "
+                                                   r"m\.gguf\): .*not implemented for architecture 'gemma3n'$"):
+        engine.load("m.gguf", 2048, 4, npu=True, split="tensor")
+    _FakeLlama.fail = None
+    _FakeLlama.logits = (math.nan, 1.0, 2.0, 3.0)
+    with pytest.raises(eng.SplitUnavailable, match=r"first token on the NPU \+ GPU failed"):
+        engine.load("m.gguf", 2048, 4, npu=True, split="layer")
+    assert _FakeLlama.made[-1].closed and not engine.loaded and engine.split is None
+
+
+@contextlib.contextmanager
+def _refuse_with_native_line(handles):
+    """``_model_devices`` while llama.cpp logs why it refuses (the error log is cleared when the load starts), then
+    the generic line it logs after every failed load (llama.cpp's llama_model_load_from_file_impl)."""
+    eng._remember_hex("llama_model_load: error loading model: LLAMA_SPLIT_MODE_TENSOR not implemented for "
+                      "architecture 'gemma3n'\n", eng.NATIVE_ERROR_LEVEL)
+    eng._remember_hex("llama_model_load_from_file_impl: failed to load model\n", eng.NATIVE_ERROR_LEVEL)
+    yield
+
+
+def test_native_errors_keep_only_error_lines():
+    eng._NATIVE_ERRORS.clear()
+    eng._remember_hex("llama_model_loader: loaded meta data\n", 2)
+    eng._remember_hex("llama_init_from_model: SPLIT_MODE_TENSOR requires flash_attn to be enabled\n",
+                      eng.NATIVE_ERROR_LEVEL)
+    assert eng.native_errors() == ["llama_init_from_model: SPLIT_MODE_TENSOR requires flash_attn to be enabled"]
+    assert eng.native_reason() == eng.native_errors()[0]
+    eng._remember_hex("llama_model_load_from_file_impl: failed to load model\n", eng.NATIVE_ERROR_LEVEL)
+    assert eng.native_reason() == "llama_init_from_model: SPLIT_MODE_TENSOR requires flash_attn to be enabled"
+    eng._NATIVE_ERRORS.clear()
+    eng._remember_hex("llama_model_load_from_file_impl: failed to load model\n", eng.NATIVE_ERROR_LEVEL)
+    assert eng.native_reason() is None                                         # the generic line is no reason
+    eng._NATIVE_ERRORS.clear()
+
+
+def test_model_devices_fills_the_device_list_for_the_loading_thread_only(monkeypatch):
+    import ctypes
+    import sys
+
+    class Params(ctypes.Structure):  # llama_model_params' first fields (llama_cpp.py at the pin)
+        _fields_ = [("devices", ctypes.c_void_p), ("tensor_buft_overrides", ctypes.c_void_p),
+                    ("n_gpu_layers", ctypes.c_int32), ("split_mode", ctypes.c_int)]
+
+    module = types.SimpleNamespace(llama_model_default_params=lambda: Params())
+    original = module.llama_model_default_params
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_cpp", module)
+    seen = {}
+    with eng._model_devices([0x1110, 0x2220]):
+        params = module.llama_model_default_params()
+        listed = ctypes.cast(params.devices, ctypes.POINTER(ctypes.c_void_p))
+        seen["list"] = [listed[0], listed[1], listed[2]]
+        other = threading.Thread(target=lambda: seen.update(other=module.llama_model_default_params().devices))
+        other.start()
+        other.join()
+    assert seen == {"list": [0x1110, 0x2220, None], "other": None}             # NULL-terminated, this thread only
+    assert module.llama_model_default_params is original and module.llama_model_default_params().devices is None
+
+
+def test_device_handles_in_the_asked_order(monkeypatch):
+    class Fn:
+        def __init__(self, call):
+            self.call = call
+
+        def __call__(self, *args):
+            return self.call(*args)
+
+    regs = {b"HTP": 7, b"OpenCL": 9}
+    lib = types.SimpleNamespace(ggml_backend_reg_by_name=Fn(lambda name: regs.get(name, 0)),
+                                ggml_backend_reg_dev_count=Fn(lambda reg: 1 if reg == 7 else 0),
+                                ggml_backend_reg_dev_get=Fn(lambda reg, i: reg * 100 + i))
+    monkeypatch.setattr(eng, "_extensions", lambda: types.SimpleNamespace(_LIBGGML=lib))
+    assert eng._device_handles(("HTP",)) == [700]
+    with pytest.raises(eng.SplitUnavailable, match="the OpenCL backend has no device"):
+        eng._device_handles(("HTP", "OpenCL"))
+    with pytest.raises(eng.SplitUnavailable, match="the Metal backend is not registered"):
+        eng._device_handles(("Metal",))
+    monkeypatch.setattr(eng, "_extensions", lambda: None)
+    with pytest.raises(eng.SplitUnavailable, match="cannot choose the devices"):
+        eng._device_handles(("HTP",))
+
+
+def timed_service(tmp_path, **kwargs):
+    kwargs.setdefault("engine", eng.FakeEngine(delay=0.02))
+    service, engine, probe = npu_service(tmp_path, gpu=True, **kwargs)
+    service.run_npu_check()
+    return service, engine
+
+
+def test_speed_check_times_five_modes_and_stores_them(tmp_path):
+    service, engine = timed_service(tmp_path)
+    texts: list = []
+    speeds = selfcheck.npu_speed_check(service, Q40, progress=texts.append)
+    assert list(speeds) == list(selfcheck.SPEED_MODES)
+    assert engine.backends == ["npu", "gpu", "cpu", "npu+gpu:layer", "npu+gpu:tensor"]
+    for mode, result in speeds.items():
+        assert result["backend"] == selfcheck.SPEED_BACKENDS[mode]
+        assert result["prompt_tok_s"] > 0 and result["gen_tok_s"] > 0 and result["prompt_tokens"] > 0
+    assert speeds["tensor"]["device"] == "NPU + GPU (tensor split): Hexagon v81 (HTP0) + Fake GPU (Test)"
+    assert [t.splitlines()[0] for t in texts] == [f"Timing local/{Q40}: {selfcheck.SPEED_LABELS[m]} ({i} of 5)…"
+                                                  for i, m in enumerate(selfcheck.SPEED_MODES, 1)]
+    assert texts[-1].splitlines()[1].startswith("  NPU: prompt ")              # the modes done so far follow
+    stored = service.prefs.get(svc.SPEED_KEY)
+    assert stored["running"] is None and stored["stem"] == Q40 and stored["version"] == VERSION
+    assert stored["modes"] == speeds and selfcheck.saved_speeds(service) == speeds
+    # the timing changed nothing: no override, no marker, no fallback; "auto" still loads on the NPU alone
+    assert service.split_override is None and service.backend_override is None and service.loaded_stem is None
+    for key in (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.GPU_ATTEMPT_KEY, svc.GPU_FALLBACK_KEY):
+        assert not service.prefs.get(key)
+    assert service.npu_fallback(Q40) is None
+    assert chat(service) == "Echo: hi" and engine.backends[-1] == "npu" and engine.calls[-1]["split"] is None
+    text = "\n".join(selfcheck.npu_lines(service, soc=""))                     # Refresh shows the stored ones
+    assert "Speed (16 tokens, last timing):" in text and text.count("tok/s") == 10
+
+
+def test_without_the_npu_the_combined_modes_are_not_listed(tmp_path):
+    service, engine = timed_service(tmp_path, probe=Probe(passing_state(arch=69)))
+    assert selfcheck.speed_modes(service) == ("npu", "gpu", "cpu")
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert list(speeds) == ["npu", "gpu", "cpu"] and "npu+gpu:layer" not in engine.backends
+    assert "NPU not available (arch" in speeds["npu"]["skipped"]
+    plain, _engine = make_service(tmp_path / "plain", stems=(Q40,), gpu_backend="OpenCL")
+    assert selfcheck.speed_modes(plain) == ("npu", "gpu", "cpu")
+    assert "NPU + GPU" not in "\n".join(selfcheck.speed_lines(speeds))
+
+
+def test_a_refused_split_reports_why_and_the_other_modes_run(tmp_path):
+    why = ("the model did not load on the NPU + GPU (Failed to load model from file): llama_model_load: error loading "
+           "model: LLAMA_SPLIT_MODE_TENSOR not implemented for architecture 'gemma3n'")
+    service, engine = timed_service(tmp_path, engine=eng.FakeEngine(delay=0.02, split_error={"tensor": why}))
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert speeds["tensor"]["error"] == f"Could not load local/{Q40}: {why}"
+    assert speeds["layer"]["gen_tok_s"] > 0 and speeds["cpu"]["gen_tok_s"] > 0
+    assert engine.backends == ["npu", "gpu", "cpu", "npu+gpu:layer", "npu+gpu:tensor"]  # no CPU reload after it
+    assert service.npu_fallback(Q40) is None and service.gpu_fallback() is None
+    lines = selfcheck.speed_lines(speeds)
+    assert lines[-1] == f"  NPU + GPU, tensor split: Could not load local/{Q40}: {why}"
+    assert service.prefs.get(svc.SPEED_KEY)["modes"]["tensor"] == speeds["tensor"]
+
+
+def test_a_failing_split_answer_is_reported_without_a_fallback(tmp_path):
+    service, engine = timed_service(tmp_path, engine=eng.FakeEngine(delay=0.02, split_chat_error="ggml abort"))
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert speeds["layer"] == speeds["tensor"] == {"backend": "NPU + GPU", "error": "RuntimeError: ggml abort"}
+    assert speeds["npu"]["gen_tok_s"] > 0
+    assert service.npu_fallback(Q40) is None and not service.prefs.get(svc.NPU_INFLIGHT_KEY)
+    assert engine.backends.count("cpu") == 1                                   # nothing answered it elsewhere
+
+
+def test_a_model_with_an_npu_fallback_skips_the_combined_modes(tmp_path):
+    service, engine = timed_service(tmp_path)
+    service._npu_failed(Q40, "the first token on the NPU failed")
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    reason = f"NPU unavailable for {Q40}: the first token on the NPU failed"
+    assert speeds["layer"] == {"skipped": reason} == speeds["tensor"]
+    assert speeds["npu"]["backend"] == "GPU"                                   # today's rule: it ran elsewhere
+    assert "(ran on GPU)" in selfcheck.speed_lines(speeds)[0]
+
+
+def test_split_override_without_the_npu_does_not_load(tmp_path):
+    service, engine = npu_service(tmp_path, gpu=True, probe=Probe(failing_state("session", "no session")))[:2]
+    service.run_npu_check()
+    service.split_override = "layer"
+    ok, error = service.load_blocking(Q40)
+    assert not ok and error == "NPU not available (session: no session)" and not engine.backends
+    service.split_override = None
+    assert service.load_blocking(Q40) == (True, None) and engine.backends == ["gpu"]
+
+
+def test_a_mode_the_app_died_in_is_reported_and_skipped_once(tmp_path):
+    seen: list = []
+
+    class Watching(eng.FakeEngine):
+        def load(self, *args, **kwargs):
+            seen.append((kwargs.get("split") or ("npu" if kwargs.get("npu") else "x"),
+                         (service.prefs.get(svc.SPEED_KEY) or {}).get("running"), service.prefs.flushes))
+            super().load(*args, **kwargs)
+
+    prefs = fakes.FakePrefs({svc.GPU_KEY: True})
+    prefs.flushes = 0
+
+    def flush():
+        prefs.flushes += 1
+
+    prefs.flush = flush
+    service, engine = timed_service(tmp_path, engine=Watching(delay=0.02), prefs=prefs)
+    selfcheck.npu_speed_check(service, Q40)
+    marked = {mode: (running, flushes) for mode, running, flushes in seen}
+    assert marked["layer"][0] == "layer" and marked["tensor"][0] == "tensor"   # on disk before the native load
+    assert marked["npu"][0] == "npu" and all(flushes > 0 for _r, flushes in marked.values())
+    # the app died while the layer split ran: the marker is still there at the next start
+    stored = prefs.get(svc.SPEED_KEY)
+    prefs.set(svc.SPEED_KEY, {**stored, "running": "layer"})
+    assert selfcheck.saved_speeds(service)["layer"] == {"crashed": "crashed last time"}
+    assert "  NPU + GPU, layer split: crashed last time" in selfcheck.npu_lines(service, soc="")
+    engine.backends.clear()
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert speeds["layer"]["skipped"] == selfcheck.SPEED_CRASHED_SKIPPED and "npu+gpu:layer" not in engine.backends
+    assert speeds["tensor"]["gen_tok_s"] > 0                                   # the other modes still ran
+    assert "  NPU + GPU, layer split: crashed last time, skipped (time again to try it)" in \
+        selfcheck.speed_lines(speeds)
+    assert prefs.get(svc.SPEED_KEY)["running"] is None
+    engine.backends.clear()
+    speeds = selfcheck.npu_speed_check(service, Q40)                          # asked again: it runs
+    assert speeds["layer"]["gen_tok_s"] > 0 and "npu+gpu:layer" in engine.backends
+
+
+def test_stop_ends_the_timing_and_a_second_timing_is_refused(tmp_path):
+    service, engine = timed_service(tmp_path)
+    stop = threading.Event()
+
+    def progress(text):
+        if "(2 of 5)" in text:
+            stop.set()
+
+    speeds = selfcheck.npu_speed_check(service, Q40, should_stop=stop.is_set, progress=progress)
+    assert speeds["npu"]["gen_tok_s"] > 0 and engine.backends == ["npu"]
+    assert all(speeds[m] == {"skipped": "stopped"} for m in ("gpu", "cpu", "layer", "tensor"))
+    assert service.prefs.get(svc.SPEED_KEY)["running"] is None and service.loaded_stem is None
+    # a Stop during an answer ends it at the next stop check
+    stop.clear()
+    slow = eng.FakeEngine(delay=0.05, reply=lambda messages: " ".join(["word"] * 40))
+    service2, _e = timed_service(tmp_path / "b", engine=slow)
+    threading.Timer(0.3, stop.set).start()
+    speeds = selfcheck.npu_speed_check(service2, Q40, should_stop=stop.is_set)
+    assert speeds["npu"] == {"skipped": "stopped"} and slow.generated < 40
+    with selfcheck._SPEED_LOCK:
+        assert selfcheck.npu_speed_check(service, Q40) == {"error": selfcheck.SPEED_RUNNING}
+
+
+def test_a_stopped_timing_keeps_the_earlier_results_of_the_modes_it_did_not_reach(tmp_path):
+    service, engine = timed_service(tmp_path)
+    first = selfcheck.npu_speed_check(service, Q40)
+    stop = threading.Event()
+    speeds = selfcheck.npu_speed_check(service, Q40, should_stop=stop.is_set,
+                                       progress=lambda text: stop.set() if "(2 of 5)" in text else None)
+    assert speeds["gpu"] == {"skipped": "stopped"}                             # the card shows this run
+    stored = service.prefs.get(svc.SPEED_KEY)["modes"]
+    assert stored["npu"] == speeds["npu"]
+    assert all(stored[m] == first[m] for m in ("gpu", "cpu", "layer", "tensor"))
+    # another model's timing does not mix in the first one's numbers
+    service.prefs.set(svc.SPEED_KEY, {**service.prefs.get(svc.SPEED_KEY), "stem": "other"})
+    selfcheck.npu_speed_check(service, Q40, should_stop=lambda: True)
+    assert service.prefs.get(svc.SPEED_KEY)["modes"] == {m: {"skipped": "stopped"} for m in selfcheck.SPEED_MODES}
+
+
+def test_each_mode_keeps_its_marker_until_its_model_is_freed(tmp_path):
+    freed: list = []
+
+    class Watching(eng.FakeEngine):
+        def unload(self):
+            if self.path is not None:
+                freed.append((self.backends[-1], (service.prefs.get(svc.SPEED_KEY) or {}).get("running")))
+            super().unload()
+
+    service, engine = timed_service(tmp_path, engine=Watching(delay=0.02))
+    assert chat(service) == "Echo: hi" and engine.backends == ["npu"]          # a model loaded before the timing
+    selfcheck.npu_speed_check(service, Q40)
+    assert freed == [("npu", None), ("npu", "npu"), ("gpu", "gpu"), ("cpu", "cpu"), ("npu+gpu:layer", "layer"),
+                     ("npu+gpu:tensor", "tensor")]
+
+
+def test_every_crashed_mode_stays_skipped_until_a_timing_has_reported_it(tmp_path):
+    snapshots: dict = {}
+
+    class Watching(eng.FakeEngine):
+        def load(self, *args, **kwargs):
+            if kwargs.get("split"):
+                snapshots[kwargs["split"]] = dict(service.prefs.get(svc.SPEED_KEY) or {})
+            super().load(*args, **kwargs)
+
+    service, engine = timed_service(tmp_path, engine=Watching(delay=0.02))
+    selfcheck.npu_speed_check(service, Q40)
+    service.prefs.set(svc.SPEED_KEY, snapshots["layer"])                      # the app died in the layer split
+    snapshots.clear()
+    engine.backends.clear()
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert speeds["layer"]["skipped"] == selfcheck.SPEED_CRASHED_SKIPPED and "npu+gpu:layer" not in engine.backends
+    died = snapshots["tensor"]                                                 # on disk while the tensor split ran
+    assert died["running"] == "tensor" and died["crashed"] == ["layer"]
+    service.prefs.set(svc.SPEED_KEY, died)                                     # ... and the app died in it too
+    shown = selfcheck.saved_speeds(service)
+    assert shown["layer"]["crashed"] == shown["tensor"]["crashed"] == selfcheck.SPEED_CRASHED
+    engine.backends.clear()
+    speeds = selfcheck.npu_speed_check(service, Q40)                          # neither runs: both are reported
+    assert speeds["layer"]["skipped"] == speeds["tensor"]["skipped"] == selfcheck.SPEED_CRASHED_SKIPPED
+    assert engine.backends == ["npu", "gpu", "cpu"] and service.prefs.get(svc.SPEED_KEY)["crashed"] == []
+    engine.backends.clear()
+    speeds = selfcheck.npu_speed_check(service, Q40)                          # asked again: both run
+    assert speeds["layer"]["gen_tok_s"] > 0 and speeds["tensor"]["gen_tok_s"] > 0
+
+
+def test_a_model_with_a_gpu_fallback_skips_the_combined_modes(tmp_path):
+    service, engine = timed_service(tmp_path)
+    service._gpu_failed(Q40, "the first token on the GPU failed")
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    reason = f"GPU unavailable for {Q40}: the first token on the GPU failed"
+    assert speeds["layer"] == {"skipped": reason} == speeds["tensor"]
+    assert speeds["gpu"]["backend"] == "CPU" and not any(b.startswith("npu+gpu") for b in engine.backends)
+    other, engine2 = timed_service(tmp_path / "b")
+    other._gpu_failed("another-model", "no")                                   # another model's fallback: they run
+    assert selfcheck.npu_speed_check(other, Q40)["layer"]["gen_tok_s"] > 0
+
+
+def test_the_timing_warms_a_cpu_load_and_says_how_many_layers_a_partial_offload_ran(tmp_path):
+    service, engine = timed_service(tmp_path)
+    assert chat(service) == "Echo: hi" and engine.warms == []                  # a normal load is never warmed
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert engine.warms == ["cpu"]                                             # the offload loads ran their check
+    assert speeds["gpu"]["layers"] == eng.DEFAULT_GPU_LAYERS and speeds["layer"]["layers"] == -1
+    assert speeds["cpu"]["layers"] == 0
+    gpu = {**speeds["gpu"], "layer_limit": 33}
+    assert selfcheck._speed_text(gpu, "gpu").endswith(" (8 of 33 layers on the GPU, the rest on the CPU)")
+    assert not selfcheck._speed_text({**gpu, "layers": 33}, "gpu").endswith(")")
+    assert selfcheck._speed_text({**gpu, "layer_limit": None}, "gpu").endswith(" (8 layers on the GPU)")
+    assert not selfcheck._speed_text({**speeds["layer"], "layer_limit": 33}, "layer").endswith(")")
+    assert selfcheck._speed_text({**speeds["npu"], "layers": 20, "layer_limit": 33}, "npu").endswith(
+        " (20 of 33 layers on the NPU, the rest on the CPU)")
+
+
+def test_llama_engine_warm_runs_the_first_token_check_once_on_a_cpu_load(fake_llama):
+    engine = eng.LlamaEngine()
+    engine.load("m.gguf", 2048, 4)
+    model = _FakeLlama.made[-1]
+    assert model.evals == []
+    engine.warm()
+    engine.warm()
+    assert model.evals == [[1, 2, 3, 4], [4]]                                  # once, the GPU check's tokens
+    engine.load("m.gguf", 2048, 4, gpu=True)
+    gpu = _FakeLlama.made[-1]
+    engine.warm()
+    assert gpu.evals == [[1, 2, 3, 4], [4]]                                    # its load already checked it
+    engine.unload()
+    engine.warm()                                                              # nothing loaded: nothing to do
 
 
 def test_self_check_services_share_the_app_markers(tmp_path):

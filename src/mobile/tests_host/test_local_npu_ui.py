@@ -3,7 +3,8 @@ rows anywhere (owner 2026-11-18: the existing slots use the NPU under Auto), the
 Sigma quant sheet's NPU marks only where the phone's NPU check passed (a pick stays an ordinary Auto row), the
 preset editor's Backend and NPU layers, the engine card's "Use NPU" and power mode, the row's backend line, its
 fallback line and "Try the NPU again"; the three screens never wait for a slow NPU check or files download and show
-its progress bar instead, then follow it; the picker's "Model manager › On-device" row leads with the Halgakos avatar.
+its progress bar instead, then follow it; the picker's "Model manager › On-device" row leads with the Halgakos avatar;
+the device checks' NPU card times the five modes on a worker thread, shows the progress and stops on Stop.
 Fakes only (FakeEngine, FakePrefs, a fake NPU check, the fake Hugging Face, a fake release host).
 """
 
@@ -30,6 +31,8 @@ from glossarion_mobile.ui.screens import local_models_panel as lmp  # noqa: E402
 from test_devfix7_custom_models import _by_key, _Page, _texts  # noqa: E402
 from test_local_llm_server import make_service  # noqa: E402
 from test_local_npu import Probe, chat, failing_state, npu_service, set_backend  # noqa: E402
+from glossarion_mobile.services.local_llm import service as svc  # noqa: E402
+from test_bootstrap import _fake_session, _shutdown, _spike_main, app_env, storage  # noqa: E402,F401 - fixtures
 
 GIB = 1024 ** 3
 REPO = "unsloth/Qwen3.5-2B-GGUF"
@@ -441,3 +444,61 @@ def test_the_ondevice_manager_row_leads_with_the_halgakos_avatar(tmp_path):
         assert row.title.value == ms.ONDEVICE_MANAGER_LABEL
     sheet = ms.ModelSheet(current_model="gpt-6", models=["gpt-6"], env=ms.SheetEnv(prefs=fakes.FakePrefs()))
     assert isinstance(sheet._ondevice_manager_row().leading, ft.CircleAvatar)  # the no-engine row too
+
+
+# ---- Logs & diagnostics › device checks › NPU (Snapdragon): the five-way timing ---------------------------------------
+
+def test_device_checks_npu_card_times_five_modes_follows_and_stops(app_env, tmp_path, monkeypatch):
+    from glossarion_mobile.services.local_llm import selfcheck
+    from glossarion_mobile.ui import spike
+
+    service, engine, _probe = npu_service(tmp_path / "svc", gpu=True, engine=eng.FakeEngine(delay=0.02))
+    service.run_npu_check()
+    monkeypatch.setattr(spike.SpikeApp, "_engine_service", staticmethod(lambda: service))
+
+    async def until(predicate, timeout=10.0):
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not predicate():
+            assert asyncio.get_running_loop().time() < deadline, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        conn, session = _fake_session("windows")
+        page = session.page
+        await _spike_main()(page)
+        await session.after_event(page)
+        app = page.data
+        try:
+            card = app.cards["npu"]
+            buttons = card.control.content.content.controls[2].controls
+            assert [b.content for b in buttons] == ["Refresh", "Time NPU, GPU, CPU and NPU + GPU", "Stop"]
+            await app.npu_stop()                                               # nothing runs: nothing happens
+            seen: list = []
+            original = card.set
+            monkeypatch.setattr(card, "set", lambda status, text=None: (seen.append((status, text)),
+                                                                         original(status, text)))
+            await app.npu_time()
+            assert card.status == "pass"
+            text = card.result.value
+            for label in selfcheck.SPEED_LABELS.values():
+                assert f"  {label}: prompt " in text
+            running = [t for s, t in seen if s == "running" and t]
+            assert running[0] == "Timing local/m-Q4_0…"
+            assert [t.splitlines()[0] for t in running[1:]] == [
+                f"Timing local/m-Q4_0: {label} ({i} of 5)…" for i, label in enumerate(selfcheck.SPEED_LABELS.values(), 1)]
+            # Stop during a slow answer: the card says so, the timing ends at its next stop check
+            engine.delay = 0.05
+            engine.reply = lambda messages: " ".join(["word"] * 60)
+            task = asyncio.ensure_future(app.npu_time())
+            await until(lambda: "(1 of 5)" in (card.result.value or ""))
+            await app.npu_time()                                               # a second press while it runs: ignored
+            await app.npu_stop()
+            assert card.result.value.endswith("Stopping after the current step…")
+            await task
+            assert card.status == "pass" and "  GPU: stopped" in card.result.value
+            assert "  NPU + GPU, tensor split: stopped" in card.result.value and not app._npu_timing
+            assert service.prefs.get(svc.SPEED_KEY)["running"] is None
+        finally:
+            await _shutdown(app)
+
+    asyncio.run(scenario())
