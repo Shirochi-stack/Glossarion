@@ -437,11 +437,13 @@ class SpikeApp:
                 "NPU (Snapdragon)",
                 "The on-device engine's NPU check: each step, how long the check and the NPU's start took, the "
                 "NPU files (llama.cpp release, on the phone or not, the last download error), arch, device, the "
-                "backend of the last load, the fallbacks, the last native abort and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU, "
-                "and on NPU + GPU together (layer split, tensor split) where the phone has the NPU, with the loaded or selected "
-                "on-device model: prompt and generation speed of each. Stop ends it after the current step. "
+                "backend of the last load, the fallbacks, the last native abort and the last ggml-hex log lines. Timing runs the "
+                "self-test prompt with the loaded or selected on-device model in every mode this phone has: the Run on modes "
+                "(NPU only, NPU + GPU, NPU + GPU tensor split, CPU + GPU, GPU only, CPU only) and two that are timed only, "
+                "NPU + CPU with a layer split and NPU + CPU where the NPU reads the prompt and the CPU writes the answer. "
+                "Each line gives prompt and generation speed, and the last one the fastest. Stop ends it after the current step. "
                 "Long-press the text to copy it.",
-                [("Refresh", self.npu_refresh), ("Time NPU, GPU, CPU and NPU + GPU", self.npu_time),
+                [("Refresh", self.npu_refresh), ("Time every mode", self.npu_time),
                  ("Stop", self.npu_stop)],
             ),
             CheckCard("routes", "Routes seen", "Every page.route change and whether it was whitelisted.", []),

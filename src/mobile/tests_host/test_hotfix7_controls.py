@@ -66,8 +66,9 @@ def test_controls_use_selected_model_layers_and_cpu_warning_colors(tmp_path, mon
         service.registry.add(stem, {'file': path.name, 'size': path.stat().st_size})
     panel = LocalModelsPanel(service=service, current_model=lambda: selected[0])
     panel.build()
-    panel.gpu_switch.value = True
-    panel.save_gpu()
+    panel.run_mode.value = 'cpu_gpu'  # "Run on" CPU + GPU: the GPU layers slider shows
+    panel.save_run_mode()
+    assert panel.gpu_layers_box.visible
     assert panel.gpu_layers_slider.max == 10 and not panel.gpu_layers_slider.disabled
     for value, color in [(5,None),(6,ft.Colors.AMBER),(9,ft.Colors.AMBER),(10,ft.Colors.ERROR)]:
         panel.gpu_layers_slider.value = value

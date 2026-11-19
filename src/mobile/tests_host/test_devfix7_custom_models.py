@@ -454,7 +454,7 @@ def test_nothing_adds_them_any_more(tmp_path):
 
 
 def test_the_hint_opens_the_menu_at_that_size_with_q4_0_highlighted(tmp_path, fake_hf):
-    prefs = fakes.FakePrefs({svc.GPU_KEY: True})
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu"})
     service, _engine = make_service(tmp_path, stems=(), prefs=prefs, gpu_backend="OpenCL")
     _download(service, "light", {"repo": REPO, "file": "Qwen3.5-2B-UD-Q4_K_XL.gguf"})
     panel = lmp.LocalModelsPanel(service=service, prefs=prefs, current_model=lambda: "local/light")
@@ -475,7 +475,7 @@ def test_the_hint_opens_the_menu_at_that_size_with_q4_0_highlighted(tmp_path, fa
 
 
 def test_a_model_outside_the_table_gets_no_hint(tmp_path):
-    prefs = fakes.FakePrefs({svc.GPU_KEY: True})
+    prefs = fakes.FakePrefs({svc.RUN_MODE_KEY: "cpu_gpu"})
     service, _engine = make_service(tmp_path, stems=(), prefs=prefs, gpu_backend="OpenCL")
     _download(service, "own", {"repo": "me/x", "file": "x-Q4_K_M.gguf"})
     panel = lmp.LocalModelsPanel(service=service, prefs=prefs, current_model=lambda: "local/own")

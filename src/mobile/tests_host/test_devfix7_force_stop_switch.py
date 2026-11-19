@@ -277,7 +277,7 @@ def test_llama_engine_without_the_seam_still_answers():
 
 def test_a_stopped_prompt_is_a_499_and_never_a_gpu_failure(tmp_path):
     prefs = fakes.FakePrefs()
-    prefs.set(svc.GPU_KEY, True)
+    prefs.set(svc.RUN_MODE_KEY, "cpu_gpu")
 
     class Stopped(eng.FakeEngine):
         def chat(self, messages, params, should_stop):

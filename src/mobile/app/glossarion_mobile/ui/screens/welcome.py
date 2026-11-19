@@ -284,16 +284,25 @@ class WelcomeScreen(Screen):
             self.ondevice.custom_used = self._ondevice_used
             unsubs = [service.downloads.subscribe(lambda state: self.render_ondevice())]
             subscribe = getattr(service, "subscribe", None)
-            if subscribe is not None:  # the NPU check / files / start: only when their bar changes
+            if subscribe is not None:  # the NPU check / files / start, "Run on": only when what they show changes
                 unsubs.append(subscribe(lambda snap: self._npu_changed()))
             self._ondevice_unsub = lambda: [unsub() for unsub in unsubs]
         return self.ondevice
 
+    @staticmethod
+    def _ondevice_shown(flow: Any) -> tuple:
+        """What an engine notice can change in the on-device row: the NPU progress line and the "Run on" choices
+        and value (the NPU check adds the NPU modes and changes what Auto names)."""
+        if flow is None:
+            return None, (), None
+        modes = flow.run_mode_options()
+        service = flow.service
+        return ((flow.npu_progress() or {}).get("text"), tuple((mode, service.run_mode_label(mode)) for mode in modes),
+                service.run_mode_shown() if modes else None)
+
     def _npu_changed(self) -> None:
-        """An engine notice: re-render the on-device row only when the NPU progress line changed."""
-        flow = self.ondevice
-        progress = flow.npu_progress() if flow is not None else None
-        shown = (progress or {}).get("text")
+        """An engine notice: re-render the on-device row only when what it shows from the engine changed."""
+        shown = self._ondevice_shown(self.ondevice)
         if shown != getattr(self, "_npu_shown", None):
             self._npu_shown = shown
             self.render_ondevice()
@@ -315,14 +324,13 @@ class WelcomeScreen(Screen):
                  for index, preset in enumerate(rows)]
         cells.extend(self._custom_cell(flow, family) for family in CUSTOM_FAMILIES)
         lines: list[ft.Control] = [ft.ResponsiveRow(cells, spacing=6, run_spacing=4, key="welcome-ondevice")]
-        if flow._gpu_backend():
-            # the Model manager's "Use GPU (experimental)" switch and its Q4_0 hint; the long
-            # note and layer slider stay in On-device settings to keep Welcome compact.
-            lines.extend(control for control in flow._gpu_section(key_prefix="welcome")
-                         if control is not flow.gpu_note and control is not flow.gpu_status
-                         and control is not flow.gpu_layers_box)
+        if flow.run_mode_options():
+            # the Model manager's "Run on" dropdown and its Q4_0 hint; the mode's line, the layer slider and the
+            # GPU fallback line stay in On-device settings to keep Welcome compact.
+            section = flow._run_section(key_prefix="welcome")
+            lines.extend(control for control in section if control is flow.run_mode or control is flow.gpu_swap_box)
         # what this render shows, read first: ``_npu_changed`` re-renders when a later notice differs from it
-        self._npu_shown = (flow.npu_progress() or {}).get("text")
+        self._npu_shown = self._ondevice_shown(flow)
         busy = flow.npu_progress_row("welcome")  # the NPU check / files / start: a bar, never a wait
         if busy is not None:
             lines.append(busy)

@@ -5,29 +5,30 @@ On the phone (Android arm64, Qualcomm Adreno: the OpenCL GPU backend), Model man
 (experimental)" switched on only revealed an "Add GPU-friendly presets (Q4_0)" button: the Q4_0 presets
 (``presets.GPU_PRESETS``) joined the Models list after a second tap on it.
 
-This file proves on the REAL app objects that switching the GPU on now shows them at once. The whole app runs
+This file proves on the REAL app objects that choosing the GPU shows them at once. The whole app runs
 on a fake Flet session (``test_ui_foundations._start``) as a simulated Android arm64 phone
 (``GLOSSARION_SIMULATE_PLATFORM=android`` and ``platform.machine() == "aarch64"``, so the app's own
 ``engine.gpu_offer`` picks OpenCL and ``ModelsKeysFeature`` builds its own ``LocalEngineService``). The test
-goes through the real shell route ``/settings/models`` and the Model manager's "On-device" segment, and taps
-the "Use GPU" switch through the session the way Flutter sends it (``host_tester.PyTester``: the value, then
-``change``). Only llama.cpp itself is missing on the host: ``engine.engine_status`` says it is there, as in
-the APK. Nothing loads or downloads, and the E2E network guard refuses every non-loopback connection.
+goes through the real shell route ``/settings/models`` and the Model manager's "On-device" segment, and picks
+modes in the engine card's "Run on" dropdown (which replaced the "Use GPU (experimental)" switch) through the
+session the way Flutter sends it (the value, then ``select``). Only llama.cpp itself is missing on the host:
+``engine.engine_status`` says it is there, as in the APK. Nothing loads or downloads, and the E2E network guard
+refuses every non-loopback connection.
 
 Owner 2026-10-31: the Custom rows (``presets.CUSTOM_FAMILIES``) replace the Q4_0 presets; they show whatever the
-switch says, and the switch only turns the GPU on and off.
+GPU choice says, and the choice only says where the model runs.
 
-``test_use_gpu_switch_keeps_the_list_and_every_model``:
+``test_run_on_keeps_the_list_and_every_model``:
 
-1. Before the switch: the four defaults, the owner's own preset (downloaded) and the four Custom rows are
+1. Before a choice (Auto): the four defaults, the owner's own preset (downloaded) and the four Custom rows are
    listed, in the Python tree and in the patches the client received. A Hugging Face file no preset names
    sits under "Other downloads". No "Add GPU-friendly presets" button and no note.
-2. ONE tap on the switch, no other event: the GPU goes on, the list stays as it is, no note.
-3. Off: every row stays, the owner's preset is still "On this device", the other file is still listed, and
+2. ONE pick of CPU + GPU, no other event: the GPU is used, the list stays as it is, no note.
+3. CPU only: every row stays, the owner's preset is still "On this device", the other file is still listed, and
    both files and registry entries are untouched.
-4. Repeated toggles (three on/off cycles, a three-tap burst, and a repeated "change true" while it is on):
-   no Q4_0 row joins the list, and there is never a note.
-5. The Model manager closed and opened again rebuilds the panel without duplicates, with the switch on. The
+4. Repeated choices (three GPU / CPU cycles, a three-pick burst, and the same pick sent again): no Q4_0 row joins
+   the list, and there is never a note.
+5. The Model manager closed and opened again rebuilds the panel without duplicates, with the choice kept. The
    model picker's On-device tab (chat › model) lists the same rows.
 
 Real data stays untouched: the app runs on temp FLET_APP_STORAGE_* dirs (HOME, OUTPUT_DIRECTORY,
@@ -218,7 +219,7 @@ async def _count(tester, *, text=None, key=None) -> int:
     return finder.count
 
 
-async def _assert_list(tester, panel, prefs, *, gpu_on: bool) -> None:
+async def _assert_list(tester, panel, prefs, *, mode: str) -> None:
     """The saved presets and what the page shows: every preset once, the owner's models intact."""
     assert [p["name"] for p in presets.load_presets(prefs)] == EXPECTED
     saved = [(p["repo"], p["file"]) for p in presets.load_presets(prefs)]
@@ -228,8 +229,8 @@ async def _assert_list(tester, panel, prefs, *, gpu_on: bool) -> None:
         assert await _count(tester, text=name) == 1, name  # one visible row each, none duplicated
     assert await _count(tester, key="local-gpu-presets") == 0  # the extra button never shows
     assert await _count(tester, text=BUTTON) == 0
-    switch = (await tester.find_by_key("local-gpu"))
-    assert switch.count == 1 and bool(tester.control(switch.first).value) is gpu_on
+    dropdown = (await tester.find_by_key("local-run-mode"))
+    assert dropdown.count == 1 and tester.control(dropdown.first).value == mode
     # the owner's own models: their preset still on this device, the other file still listed, files on disk
     mine = EXPECTED.index(MINE["name"])
     assert panel.row_state(presets.load_presets(prefs)[mine], MINE_STEM)[0] in ("use", "in_use")
@@ -267,16 +268,19 @@ async def _open_on_device_tab(session, app, tester, *, route: bool = True):
     return screen, screen.local
 
 
-async def _tap_switch(tester) -> None:
-    switch = await tester.find_by_key("local-gpu")
-    assert switch.count == 1
-    await tester.tap(switch.first)
+async def _choose(tester, mode: str) -> None:
+    """A pick in "Run on": Flutter sets the value, then sends ``select``."""
+    finder = await tester.find_by_key("local-run-mode")
+    assert finder.count == 1
+    dropdown = tester.control(finder.first)
+    dropdown.value = mode
+    await tester._dispatch(dropdown, "select", mode)
 
 
 # ---- the scenario ------------------------------------------------------------------------------------------
 
 
-def test_use_gpu_switch_keeps_the_list_and_every_model(phone, offline):
+def test_run_on_keeps_the_list_and_every_model(phone, offline):
     from host_tester import PyTester
 
     from glossarion_mobile.services import model_catalog as mc
@@ -298,55 +302,53 @@ def test_use_gpu_switch_keeps_the_list_and_every_model(phone, offline):
 
         app.notify = spy  # the Model manager's notes (its toast is the app's snack bar)
         try:
-            # the app's own engine: Android, OpenCL offered, the GPU off by default, models under tmp_path
+            # the app's own engine: Android, OpenCL offered, Auto (CPU only here) by default, models under tmp_path
             assert engine is not None and engine.platform == "android" and engine.gpu_backend == "OpenCL"
-            assert not engine.use_gpu() and engine.prefs is app.prefs
+            assert not engine.use_gpu() and engine.prefs is app.prefs and engine.run_mode() == "auto"
             assert os.path.normcase(os.path.abspath(engine.registry.root)).startswith(os.path.normcase(str(phone)))
             _seed_own_models(engine)
             prefs = app.prefs
 
-            # 1. Model manager › On-device with the GPU off: every preset and the Custom rows, no button
+            # 1. Model manager › On-device on Auto: every preset and the Custom rows, no button
             start = len(conn.raw_sent)
             screen, panel = await _open_on_device_tab(session, app, tester)
             assert not engine.use_gpu()
-            await _assert_list(tester, panel, prefs, gpu_on=False)
+            await _assert_list(tester, panel, prefs, mode="auto")
             # the phone got them: the patches sent for the open carry every Custom row
             assert await _until(lambda: set(CUSTOM_NAMES) <= set(_sent_strings(conn, start))), \
                 [s for s in _sent_strings(conn, start) if "Custom" in s]
-            assert await _count(tester, text="Use GPU (experimental)") == 1
+            assert await _count(tester, key="local-run-mode") == 1
+            assert await _count(tester, text="Use GPU (experimental)") == 0  # the switch is gone
             assert panel.other_card.visible and said == []  # added without a note
 
-            # 2. ONE tap on the switch and nothing else: the GPU goes on, the list stays as it is
+            # 2. ONE pick and nothing else: the GPU is used, the list stays as it is
             events = len(tester.events)
-            await _tap_switch(tester)
-            assert tester.events[events:] == [("Switch", "local-gpu", "change")]
-            assert prefs.get(svc.GPU_KEY) is True and engine.use_gpu()
-            await _assert_list(tester, panel, prefs, gpu_on=True)
+            await _choose(tester, "cpu_gpu")
+            assert tester.events[events:] == [("Dropdown", "local-run-mode", "select")]
+            assert prefs.get(svc.RUN_MODE_KEY) == "cpu_gpu" and engine.use_gpu()
+            await _assert_list(tester, panel, prefs, mode="cpu_gpu")
             assert said == []
 
-            # 3. off: every preset, the owner's preset and the other file stay
-            await _tap_switch(tester)
-            assert prefs.get(svc.GPU_KEY) is False and not engine.use_gpu()
-            await _assert_list(tester, panel, prefs, gpu_on=False)
+            # 3. CPU only: every preset, the owner's preset and the other file stay
+            await _choose(tester, "cpu")
+            assert prefs.get(svc.RUN_MODE_KEY) == "cpu" and not engine.use_gpu()
+            await _assert_list(tester, panel, prefs, mode="cpu")
             assert said == []
 
-            # 4. repeated toggles: on/off three times, a three-tap burst, a repeated "change true"
+            # 4. repeated choices: GPU / CPU three times, a three-pick burst, the same pick sent again
             for _cycle in range(3):
-                await _tap_switch(tester)
-                await _assert_list(tester, panel, prefs, gpu_on=True)
-                await _tap_switch(tester)
-                await _assert_list(tester, panel, prefs, gpu_on=False)
-            finder = (await tester.find_by_key("local-gpu")).first
-            switch = tester.control(finder)
-            await asyncio.gather(*(tester.tap(finder) for _ in range(3)))  # three quick taps: on, off, on
-            assert switch.value is True and engine.use_gpu()
-            await _assert_list(tester, panel, prefs, gpu_on=True)
-            switch = tester.control((await tester.find_by_key("local-gpu")).first)
-            await session.dispatch_event(switch._i, "change", "true")  # the client re-sends it while on
-            await _assert_list(tester, panel, prefs, gpu_on=True)
+                await _choose(tester, "gpu")
+                await _assert_list(tester, panel, prefs, mode="gpu")
+                await _choose(tester, "cpu")
+                await _assert_list(tester, panel, prefs, mode="cpu")
+            await asyncio.gather(*(_choose(tester, mode) for mode in ("cpu_gpu", "cpu", "cpu_gpu")))
+            assert engine.run_mode() == "cpu_gpu" and engine.use_gpu()
+            await _assert_list(tester, panel, prefs, mode="cpu_gpu")
+            await _choose(tester, "cpu_gpu")  # the client re-sends it
+            await _assert_list(tester, panel, prefs, mode="cpu_gpu")
             assert said == []  # no note in all; never "already in the list"
 
-            # 5. closed and opened again: the rebuilt panel lists each preset once, the switch on
+            # 5. closed and opened again: the rebuilt panel lists each preset once, the choice kept
             # Android Back, then Settings › Model manager again (the hub tile, in-app navigation)
             await session.dispatch_event(page._i, "view_pop", {"route": page.views[-1].route})
             assert await _until(lambda: app.shell.current_route == "/settings" and page.route == "/settings")
@@ -357,7 +359,7 @@ def test_use_gpu_switch_keeps_the_list_and_every_model(phone, offline):
                                 and app.shell.top_screen is not screen)
             screen2, panel2 = await _open_on_device_tab(session, app, tester, route=False)
             assert screen2 is not screen and panel2 is not panel
-            await _assert_list(tester, panel2, prefs, gpu_on=True)
+            await _assert_list(tester, panel2, prefs, mode="cpu_gpu")
             assert said == []
             # the model picker's On-device tab (chat › model) shows the same rows
             sheet = ms.ModelSheet(current_model=str(app.config_store.get("model", "") or ""), env=ms.sheet_env(),
