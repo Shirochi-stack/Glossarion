@@ -434,7 +434,7 @@ def _expected(choice, passed, use_npu, kind, fallback, use_gpu):
     if choice == "cpu":
         return "cpu"
     if passed and not fallback and (choice == "npu" or (choice == "auto" and use_npu and kind != "cpu")):
-        return "npu"
+        return "split" if choice == "auto" and use_gpu else "npu"              # "auto" + "Use GPU": NPU + GPU
     if choice == "gpu":
         return "gpu"
     return "gpu" if use_gpu else "cpu"
@@ -454,7 +454,7 @@ def test_backend_choice_matrix(tmp_path, choice, passed, use_npu, kind, fallback
 
 
 def test_the_choice_reaches_the_engine_and_the_device_line(tmp_path):
-    service, engine, probe = npu_service(tmp_path, stems=(Q40, IQ), gpu=True)
+    service, engine, probe = npu_service(tmp_path, stems=(Q40, IQ))
     assert chat(service) == "Echo: hi"
     assert engine.backends == ["npu"] and engine.npu_layers == [-1] and engine.calls[-1]["npu"] is True
     snap = service.snapshot()
@@ -465,8 +465,11 @@ def test_the_choice_reaches_the_engine_and_the_device_line(tmp_path):
     assert probe.calls[0][0].replace("\\", "/").endswith(f"htp/{RELEASE}")           # keyed on the release, not the app
     chat(service, text="again")
     assert engine.backends == ["npu"]                                          # no reload
+    service.save_gpu(True)                                                     # "Use GPU" on: Auto runs on NPU + GPU
+    chat(service)
+    assert engine.backends == ["npu", "npu+gpu:tensor"] and service.snapshot().backend == "NPU + GPU"
     chat(service, IQ)                                                          # IQ4_XS: Auto skips the NPU
-    assert engine.backends == ["npu", "gpu"] and service.snapshot().backend == "GPU"
+    assert engine.backends == ["npu", "npu+gpu:tensor", "gpu"] and service.snapshot().backend == "GPU"
     set_backend(service, Q40, "npu", npu_layers=10)
     chat(service)
     assert engine.backends[-1] == "npu" and engine.npu_layers[-1] == 10
@@ -533,7 +536,7 @@ def _register(service, repo, file):
 
 
 @pytest.mark.parametrize("passed,use_npu,use_gpu,expected", [
-    (True, True, False, "npu"), (True, True, True, "npu"),
+    (True, True, False, "npu"), (True, True, True, "split"),
     (True, False, True, "gpu"), (True, False, False, "cpu"),
     (False, True, True, "gpu"), (False, True, False, "cpu"),
 ])
@@ -551,7 +554,7 @@ def test_the_default_slots_use_the_npu_under_auto(tmp_path, passed, use_npu, use
         assert service.backend_choice(stem) == "auto"
         assert service._placement(stem)[0] == expected
     chat(service, stems[1])
-    assert engine.backends == [expected]
+    assert engine.backends == [{"split": "npu+gpu:tensor"}.get(expected, expected)]
 
 
 def test_an_old_saved_npu_row_still_loads_on_the_npu(tmp_path):
@@ -604,17 +607,20 @@ def test_no_npu_build_offers_nothing_and_changes_nothing(tmp_path, monkeypatch):
 
 
 def test_a_failing_load_falls_back_and_keeps_the_reason(tmp_path):
-    engine = eng.FakeEngine(npu_error="the first token on the NPU failed (12 of 248320 logits are NaN)")
+    # NPU + GPU refused, then the NPU alone fails: the GPU (each fallback kept with its reason)
+    engine = eng.FakeEngine(npu_error="the first token on the NPU failed (12 of 248320 logits are NaN)",
+                            split_error={"tensor": "LLAMA_SPLIT_MODE_TENSOR not implemented for architecture 'x'"})
     service, engine, _probe = npu_service(tmp_path, engine=engine, gpu=True)
     assert chat(service) == "Echo: hi"
-    assert engine.backends == ["npu", "gpu"] and service.snapshot().backend == "GPU"
+    assert engine.backends == ["npu+gpu:tensor", "npu", "gpu"] and service.snapshot().backend == "GPU"
+    assert "not implemented for architecture" in service.split_fallback(Q40)["reason"]
     fallback = service.npu_fallback(Q40)
     assert fallback["reason"].startswith("the first token on the NPU failed")
     note = service.snapshot().npu_note
     assert note == f"NPU unavailable for {Q40}: {fallback['reason']}. Using GPU." and "—" not in note
     assert service.prefs.get(svc.NPU_ATTEMPT_KEY) is None
     chat(service, text="again")
-    assert engine.backends == ["npu", "gpu"]                                   # no retry loop
+    assert engine.backends == ["npu+gpu:tensor", "npu", "gpu"]                 # no retry loop
     service.save_gpu(False)
     service.unload()
     chat(service)
@@ -622,10 +628,11 @@ def test_a_failing_load_falls_back_and_keeps_the_reason(tmp_path):
 
 
 def test_a_failing_npu_answer_is_answered_on_the_gpu(tmp_path):
-    engine = eng.FakeEngine(npu_chat_error="ggml-hex: graph-compute failed")
+    engine = eng.FakeEngine(npu_chat_error="ggml-hex: graph-compute failed", split_error={"tensor": "refused"})
     service, engine, _probe = npu_service(tmp_path, engine=engine, gpu=True)
     assert chat(service) == "Echo: hi"
-    assert [c["npu"] for c in engine.calls] == [True, False] and engine.backends == ["npu", "gpu"]
+    assert [c["npu"] for c in engine.calls] == [True, False]
+    assert engine.backends == ["npu+gpu:tensor", "npu", "gpu"]
     assert "the NPU failed while answering (ggml-hex: graph-compute failed)" in service.npu_fallback(Q40)["reason"]
     assert service.prefs.get(svc.NPU_INFLIGHT_KEY) is None and not service.gate.busy
 
@@ -932,6 +939,7 @@ def test_the_watchdog_on_a_hanging_check(tmp_path):
 def test_the_watchdog_on_a_hanging_first_load(tmp_path):
     engine = eng.FakeEngine(npu_load_delay=0.4)
     service, engine, _probe = npu_service(tmp_path, engine=engine, gpu=True)
+    service._split_failed(Q40, "refused earlier")                              # the NPU alone, with the GPU on
     service.npu_watchdog_seconds = 0.05
     assert chat(service) == "Echo: hi"
     assert engine.backends == ["npu", "gpu"] and service.snapshot().backend == "GPU"
@@ -1198,12 +1206,14 @@ def test_speed_check_times_five_modes_and_stores_them(tmp_path):
     stored = service.prefs.get(svc.SPEED_KEY)
     assert stored["running"] is None and stored["stem"] == Q40 and stored["version"] == VERSION
     assert stored["modes"] == speeds and selfcheck.saved_speeds(service) == speeds
-    # the timing changed nothing: no override, no marker, no fallback; "auto" still loads on the NPU alone
+    # the timing changed nothing: no override, no marker, no fallback; "auto" (Use GPU on) loads on NPU + GPU
     assert service.split_override is None and service.backend_override is None and service.loaded_stem is None
-    for key in (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.GPU_ATTEMPT_KEY, svc.GPU_FALLBACK_KEY):
+    for key in (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.GPU_ATTEMPT_KEY, svc.GPU_FALLBACK_KEY,
+                svc.SPLIT_FALLBACK_KEY):
         assert not service.prefs.get(key)
     assert service.npu_fallback(Q40) is None
-    assert chat(service) == "Echo: hi" and engine.backends[-1] == "npu" and engine.calls[-1]["split"] is None
+    assert chat(service) == "Echo: hi" and engine.backends[-1] == "npu+gpu:tensor"
+    assert engine.calls[-1]["split"] == "tensor"
     text = "\n".join(selfcheck.npu_lines(service, soc=""))                     # Refresh shows the stored ones
     assert "Speed (16 tokens, last timing):" in text and text.count("tok/s") == 10
 
@@ -1349,9 +1359,9 @@ def test_each_mode_keeps_its_marker_until_its_model_is_freed(tmp_path):
             super().unload()
 
     service, engine = timed_service(tmp_path, engine=Watching(delay=0.02))
-    assert chat(service) == "Echo: hi" and engine.backends == ["npu"]          # a model loaded before the timing
+    assert chat(service) == "Echo: hi" and engine.backends == ["npu+gpu:tensor"]  # a model loaded before the timing
     selfcheck.npu_speed_check(service, Q40)
-    assert freed == [("npu", None), ("npu", "npu"), ("gpu", "gpu"), ("cpu", "cpu"), ("npu+gpu:layer", "layer"),
+    assert freed == [("npu+gpu:tensor", None), ("npu", "npu"), ("gpu", "gpu"), ("cpu", "cpu"), ("npu+gpu:layer", "layer"),
                      ("npu+gpu:tensor", "tensor")]
 
 
@@ -1714,3 +1724,215 @@ def test_register_without_the_files_registers_nothing_and_is_not_a_failure(tmp_p
     chat(service)
     assert engine.backends == ["cpu"] and service.npu_offered() and service.prefs.get(svc.NPU_SESSION_KEY) is None
     assert service.npu_download_error == eng.NPU_FILES_MISSING
+
+
+# ---- NPU + GPU under "auto" with "Use GPU" on (owner 2026-11-19) -------------------------------------------------
+
+def test_auto_with_use_gpu_runs_on_the_npu_and_the_gpu_together(tmp_path):
+    prefs = fakes.FakePrefs({svc.GPU_KEY: True, svc.GPU_LAYERS_KEY: 8})
+    service, engine, _probe = npu_service(tmp_path, prefs=prefs)
+    assert chat(service) == "Echo: hi"
+    assert engine.backends == ["npu+gpu:tensor"] and engine.calls[-1]["split"] == "tensor"
+    assert engine.n_gpu_layers == -1 and engine.npu_layers == []               # the whole model, not the 8 GPU layers
+    snap = service.snapshot()
+    assert snap.backend == "NPU + GPU" and snap.npu_note is None and snap.gpu_note is None
+    assert snap.device == "NPU + GPU (tensor split): Hexagon v81 (HTP0) + Fake GPU (Test)"
+    assert service.last_load["backend"] == "NPU + GPU" and service.health(f"local/{Q40}")["backend"] == "NPU + GPU"
+    assert "Last load: m-Q4_0 on NPU + GPU" in "\n".join(selfcheck.npu_lines(service, soc=""))
+    for key in (svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY, svc.GPU_ATTEMPT_KEY, svc.SPLIT_FALLBACK_KEY):
+        assert not prefs.get(key)
+    chat(service, text="again")
+    assert engine.backends == ["npu+gpu:tensor"]                               # no reload
+    service.save_gpu_layers(4)                                                 # the GPU layers setting: no reload
+    chat(service)
+    assert engine.backends == ["npu+gpu:tensor"]
+    service.save_gpu(False)                                                    # "Use GPU" off: the NPU alone again
+    assert service.loaded_stem is None                                         # the idle NPU + GPU model is freed
+    chat(service)
+    assert engine.backends == ["npu+gpu:tensor", "npu"] and engine.calls[-1]["split"] is None
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("use_gpu_off", "npu"), ("choice_npu", "npu"), ("choice_gpu", "gpu"), ("choice_cpu", "cpu"),
+    ("gpu_fallback", "npu"), ("no_gpu_backend", "npu"), ("npu_not_offered", "gpu"), ("use_npu_off", "gpu"),
+    ("cpu_quant", "gpu"), ("auto", "npu+gpu:tensor"),
+])
+def test_npu_and_gpu_together_only_in_its_one_case(tmp_path, case, expected):
+    prefs = fakes.FakePrefs({svc.GPU_KEY: case != "use_gpu_off", svc.NPU_KEY: case != "use_npu_off"})
+    probe = Probe(failing_state("libcdsprpc", "dlopen failed")) if case == "npu_not_offered" else None
+    stem = IQ if case == "cpu_quant" else Q40
+    service, engine, _probe = npu_service(tmp_path, stems=(stem,), prefs=prefs, probe=probe)
+    if case.startswith("choice_"):
+        set_backend(service, stem, case[len("choice_"):])
+    if case == "gpu_fallback":
+        service._gpu_failed(stem, "the GPU failed while answering")
+    if case == "no_gpu_backend":
+        service.gpu_backend = None
+    chat(service, stem)
+    assert engine.backends == [expected]
+    assert service.split_fallback(stem) is None and service.npu_fallback(stem) is None
+
+
+def test_a_refused_npu_and_gpu_load_is_remembered_and_the_npu_alone_runs(tmp_path):
+    why = "LLAMA_SPLIT_MODE_TENSOR not implemented for architecture 'gemma3n'"
+    engine = eng.FakeEngine(split_error={"tensor": f"the model did not load on the NPU + GPU: {why}"})
+    service, engine, _probe = npu_service(tmp_path, engine=engine, gpu=True)
+    assert chat(service) == "Echo: hi"
+    assert engine.backends == ["npu+gpu:tensor", "npu"] and service.snapshot().backend == "NPU"
+    assert why in service.split_fallback(Q40)["reason"] and service.npu_fallback(Q40) is None
+    assert service.prefs.get(svc.NPU_ATTEMPT_KEY) is None and service.snapshot().npu_note is None
+    assert f"NPU + GPU dropped: {Q40}: the model did not load on the NPU + GPU: {why}" in \
+        selfcheck.npu_lines(service, soc="")
+    service.unload()
+    chat(service)
+    assert engine.backends == ["npu+gpu:tensor", "npu", "npu"]                 # straight to the NPU alone next time
+    # kept like the NPU fallback: another file, backend choice or app version, "Use GPU" switched, "Try the NPU again"
+    entry = service.registry.load()[Q40]
+    service.registry.add(Q40, {**entry, "file": "m-Q4_0-v2.gguf"})
+    assert service.split_fallback(Q40) is None
+    service.registry.add(Q40, entry)
+    set_backend(service, Q40, "npu")
+    assert service.split_fallback(Q40) is None
+    set_backend(service, Q40, "auto")
+    assert service.split_fallback(Q40)
+    newer, _e, _p = npu_service(tmp_path / "n", prefs=service.prefs, version="9.16.1/llama-0.3.37")
+    newer.registry = service.registry
+    assert newer.split_fallback(Q40) is None
+    assert service.retry_npu(Q40) and service.split_fallback(Q40) is None and not service.retry_npu(Q40)
+    service._split_failed(Q40, "again")
+    service.save_gpu(False)
+    service.save_gpu(True)
+    assert service.split_fallback(Q40) is None
+    engine.split_error = {}
+    chat(service)
+    assert engine.backends[-1] == "npu+gpu:tensor"
+
+
+def test_a_failing_npu_and_gpu_answer_is_answered_on_the_npu_alone(tmp_path):
+    seen = []
+    holder = {}
+
+    def reply(messages):
+        seen.append(holder["service"].prefs.get(svc.NPU_INFLIGHT_KEY))
+        return "fine"
+
+    engine = eng.FakeEngine(reply=reply, split_chat_error="GGML_ASSERT failed")
+    service, engine, _probe = npu_service(tmp_path, engine=engine, gpu=True)
+    holder["service"] = service
+    at_load = []
+    real_load = engine.load
+
+    def watched_load(*args, **kwargs):
+        at_load.append(service.prefs.get(svc.NPU_INFLIGHT_KEY))
+        return real_load(*args, **kwargs)
+
+    engine.load = watched_load
+    assert chat(service) == "fine"
+    assert [c["split"] for c in engine.calls] == ["tensor", None] and engine.backends == ["npu+gpu:tensor", "npu"]
+    assert "the NPU + GPU failed while answering (GGML_ASSERT failed)" in service.split_fallback(Q40)["reason"]
+    # the failed answer's NPU + GPU marker is gone before the NPU alone loads: a crash there records the NPU's fallback
+    assert at_load == [None, None]
+    assert seen[0]["stem"] == Q40 and "split" not in seen[0]                    # the NPU alone's own marker
+    assert service.prefs.get(svc.NPU_INFLIGHT_KEY) is None and not service.gate.busy
+
+
+def test_npu_and_gpu_markers_are_the_npu_markers_with_split(tmp_path):
+    seen = {}
+    holder = {}
+
+    def reply(messages):
+        seen["inflight"] = holder["service"].prefs.get(svc.NPU_INFLIGHT_KEY)
+        return "fine"
+
+    service, engine, _probe = npu_service(tmp_path, engine=eng.FakeEngine(reply=reply), gpu=True)
+    holder["service"] = service
+    real_load = engine.load
+
+    def watched_load(*args, **kwargs):
+        seen["attempt"] = service.prefs.get(svc.NPU_ATTEMPT_KEY)
+        return real_load(*args, **kwargs)
+
+    engine.load = watched_load
+    chat(service)
+    assert seen["attempt"]["stem"] == Q40 and seen["attempt"]["split"] == "tensor"   # before the native load
+    assert seen["inflight"]["stem"] == Q40 and seen["inflight"]["split"] is True
+    assert service.prefs.get(svc.NPU_ATTEMPT_KEY) is None and service.prefs.get(svc.NPU_INFLIGHT_KEY) is None
+
+
+@pytest.mark.parametrize("key", [svc.NPU_ATTEMPT_KEY, svc.NPU_INFLIGHT_KEY])
+def test_a_crash_on_npu_and_gpu_records_its_fallback_at_the_next_start(tmp_path, key):
+    marker = {"stem": Q40, "at": 1, "split": "tensor" if key == svc.NPU_ATTEMPT_KEY else True}
+    prefs = fakes.FakePrefs({svc.GPU_KEY: True, key: marker})
+    service, engine, _probe = npu_service(tmp_path, prefs=prefs)
+    service.start()
+    try:
+        assert prefs.get(svc.NPU_ATTEMPT_KEY) is None and prefs.get(svc.NPU_INFLIGHT_KEY) is None
+        assert service.split_fallback(Q40) == {"stem": Q40, "reason": svc.SPLIT_CRASH_REASON}
+        assert service.npu_fallback(Q40) is None                               # the NPU alone is next, no retry
+        service.run_npu_check()
+        chat(service)
+        chat(service, text="again")
+        assert engine.backends == ["npu"]
+        assert f"NPU + GPU dropped: {Q40}: {svc.SPLIT_CRASH_REASON}" in selfcheck.npu_lines(service, soc="")
+    finally:
+        service.stop()
+        svc.set_default_service(None)
+
+
+def test_not_enough_memory_for_both_uses_the_npu_alone(tmp_path):
+    service, engine, _probe = npu_service(tmp_path, gpu=True)
+    need = svc.ram_need(4, service.context_for(Q40))
+    service.memory = lambda: (need + 64 * svc.MIB, None)                       # enough for the NPU, not the GPU's share
+    assert chat(service) == "Echo: hi"
+    assert engine.backends == ["npu"]
+    assert service.split_fallback(Q40)["reason"].startswith("not enough memory for both: This phone has")
+    service.unload()
+    chat(service)
+    assert engine.backends == ["npu", "npu"]
+
+
+def test_not_enough_memory_for_the_npu_alone_either_records_nothing(tmp_path):
+    service, engine, _probe = npu_service(tmp_path, gpu=True)
+    service.memory = lambda: (64 * svc.MIB, None)
+    with pytest.raises(svc.LocalLLMError) as caught:
+        chat(service)
+    assert caught.value.status == 507 and engine.backends == [] and service.split_fallback(Q40) is None
+
+
+def test_no_room_for_the_projector_beside_the_gpu_share_moves_to_the_npu_alone(tmp_path):
+    service, engine, _probe = npu_service(tmp_path, gpu=True)
+    chat(service)
+    assert engine.backends == ["npu+gpu:tensor"]
+    real = service.ram_check
+    service.ram_check = lambda stem, n_ctx=None, *, vision=False, gpu=False: \
+        ("refuse", "no room") if vision and gpu else real(stem, n_ctx, vision=vision, gpu=gpu)
+    service._ensure_loaded(Q40, vision=True)                                   # the first image
+    assert engine.backends == ["npu+gpu:tensor", "npu"]
+    assert service.split_fallback(Q40)["reason"] == "not enough memory for both: no room"
+
+
+def test_a_hanging_first_npu_and_gpu_load(tmp_path):
+    engine = eng.FakeEngine(npu_load_delay=0.4)
+    service, engine, _probe = npu_service(tmp_path, engine=engine, gpu=True)
+    service.npu_watchdog_seconds = 0.05
+    assert chat(service) == "Echo: hi"
+    # it returned late: this load does not wait on the NPU again (GPU); after the restart the NPU alone runs it
+    assert engine.backends == ["npu+gpu:tensor", "gpu"] and service.npu_hung
+    assert service.split_fallback(Q40)["reason"] == svc.NPU_HANG_REASON and service.npu_fallback(Q40) is None
+    assert service.snapshot().npu_note == \
+        "The NPU + GPU did not answer. Restart Glossarion; this model will use the NPU."
+    chat(service, text="again")                                                # off the NPU until the restart
+    assert engine.backends == ["npu+gpu:tensor", "gpu"] and service.npu_fallback(Q40) is None
+    assert service.snapshot().npu_note == \
+        "The NPU + GPU did not answer. Restart Glossarion; this model will use the NPU."
+
+
+def test_the_device_checks_timing_is_not_redirected_by_the_auto_rule(tmp_path):
+    # "Use GPU" on and an NPU + GPU fallback recorded: each mode still runs by itself, the record stays as it was
+    service, engine = timed_service(tmp_path)
+    service._split_failed(Q40, "refused earlier")
+    speeds = selfcheck.npu_speed_check(service, Q40)
+    assert engine.backends == ["npu", "gpu", "cpu", "npu+gpu:layer", "npu+gpu:tensor"]
+    assert [speeds[m]["backend"] for m in selfcheck.SPEED_MODES] == ["NPU", "GPU", "CPU", "NPU + GPU", "NPU + GPU"]
+    assert service.split_fallback(Q40)["reason"] == "refused earlier"
+    assert not service.prefs.get(svc.NPU_ATTEMPT_KEY) and not service.prefs.get(svc.NPU_INFLIGHT_KEY)

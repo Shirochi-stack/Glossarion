@@ -43,8 +43,8 @@ the NPU or the reverse (a wheel without ``device_index`` keeps ``main_gpu`` 0 fo
 the same first-token check as the GPU (``_gpu_check``) and raises ``NpuUnavailable`` on any failure. The
 "ggml-hex:" lines of the native log are kept (``hex_log_lines``) for the diagnostics.
 
-NPU + GPU together (``load(..., npu=True, split="layer" | "tensor")``; only the device checks' timing asks for it,
-no normal load does): the model on exactly two devices, the NPU first and the GPU second, half of it each
+NPU + GPU together (``load(..., npu=True, split="layer" | "tensor")``; the device checks' timing asks for both, and
+the service's "auto" rule for "tensor" when "Use GPU" is on: ``service.AUTO_SPLIT``): the model on exactly two devices, the NPU first and the GPU second, half of it each
 (``tensor_split`` 1:1), all layers offloaded. llama-cpp-python 0.3.37's ``Llama()`` has ``split_mode``,
 ``main_gpu``, ``tensor_split``, ``flash_attn``, ``type_k`` / ``type_v`` but no device list, and builds its
 ``llama_model_params`` (llama.py: ``llama_model_default_params()``, then the load in the same ``__init__``); the

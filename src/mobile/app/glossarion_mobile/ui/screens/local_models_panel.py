@@ -984,7 +984,8 @@ class OnDeviceFlow:
 
     def backend_line(self, stem: Optional[str]) -> Optional[tuple]:
         """``(text, warning)`` of a model row: which backend runs the loaded model ("Runs on NPU · Hexagon v81",
-        "Runs on GPU", "Runs on CPU"), else the NPU fallback with its reason; None without either."""
+        "Runs on NPU + GPU", "Runs on GPU", "Runs on CPU"), else the NPU fallback with its reason; None without
+        either."""
         service = self.service
         if not stem:
             return None
@@ -1002,6 +1003,8 @@ class OnDeviceFlow:
         device = str(getattr(engine, "device", "") or "")
         if getattr(engine, "on_npu", False):
             return f"Runs on NPU · {device.split(':', 1)[-1].strip().split(' (')[0]}", False
+        if getattr(engine, "split", None):
+            return "Runs on NPU + GPU", False
         if getattr(engine, "on_gpu", False):
             return "Runs on GPU", False
         return "Runs on CPU", False
@@ -1245,6 +1248,7 @@ class OnDeviceFlow:
         self.gpu_layers_note.value = (
             "Includes the output layer. 0 uses CPU; the far right offloads all layers. "
             "Lower this if the phone feels sluggish. Changes apply to the next model load."
+            + (" A model on the NPU and the GPU together uses all layers." if self.npu_offered() else "")
             if total else "Select a downloaded model to detect its GPU layer limit.")
         self._gpu_layers_changed()
         _push(self.gpu_layers_box)

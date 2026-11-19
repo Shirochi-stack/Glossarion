@@ -295,6 +295,26 @@ def test_row_backend_line_fallback_and_try_again(tmp_path):
     assert "Runs on NPU: Hexagon v81 (HTP0)" in panel.engine_detail.value
 
 
+def test_row_and_engine_card_name_npu_and_gpu_together(tmp_path):
+    # "Use GPU" on: Auto runs on NPU + GPU; the existing row line and engine detail say so (no new rows)
+    service, engine, _probe = npu_service(tmp_path, gpu=True)
+    set_backend(service, "m-Q4_0", "auto")
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
+    panel.build()
+    chat(service)
+    panel.render(push=False)
+    index = len(presets.load_presets(service.prefs)) - 1
+    keys = _by_key(panel.preset_column)
+    assert keys[f"local-preset-backend-{index}"].value == "Runs on NPU + GPU"
+    assert not any(item.content == "Try the NPU again" for item in keys[f"local-preset-menu-{index}"].items)
+    panel.render_engine(service.snapshot(), push=False)
+    assert "Runs on NPU + GPU (tensor split): Hexagon v81 (HTP0) + Fake GPU (Test)" in panel.engine_detail.value
+    service.gpu_layer_limit = lambda stem=None: 24                             # the GPU layers note says it
+    panel._gpu_limits_state = None
+    panel._refresh_gpu_limits()
+    assert panel.gpu_layers_note.value.endswith("A model on the NPU and the GPU together uses all layers.")
+
+
 # ---- no delay, a progress bar instead (B1-B3) ------------------------------------------------------------------------
 
 def _wait(condition, seconds=8.0):

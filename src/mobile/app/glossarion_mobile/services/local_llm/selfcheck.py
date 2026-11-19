@@ -396,11 +396,12 @@ def npu_summary(service: Any) -> dict:
     """What the diagnostics and the llama suite report about the NPU (no native call)."""
     failure = service.npu_failure()
     fallbacks = {stem: fb["reason"] for stem in service._npu_fallbacks() if (fb := service.npu_fallback(stem))}
+    splits = {stem: fb["reason"] for stem in service._split_fallbacks() if (fb := service.split_fallback(stem))}
     source = service.npu_source() or {}
     spec = service.npu_skeleton()
     return {"offered": service.npu_offered(), "failure": list(failure) if failure else None,
             "state": service.npu_state(), "use_npu": service.use_npu(), "power": service.npu_power(),
-            "last_load": service.last_load, "fallbacks": fallbacks, "hung": service.npu_hung,
+            "last_load": service.last_load, "fallbacks": fallbacks, "split_fallbacks": splits, "hung": service.npu_hung,
             "seconds": service.npu_seconds(), "release": source.get("release"),
             "files": {spec["name"]: service.npu_files_ready(refresh=True)} if spec else {},
             "download_error": service.npu_download_error}
@@ -680,11 +681,14 @@ def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str]
         else:
             lines.append(f"Speed ({SUITE_TOKENS} tokens{', last timing' if stored else ''}):")
             lines.extend(speed_lines(speeds))
-    fallbacks = npu_summary(service)["fallbacks"]
+    summary = npu_summary(service)
+    fallbacks = summary["fallbacks"]
     if fallbacks:
         lines.extend(f"Fallback: {stem}: {reason}" for stem, reason in sorted(fallbacks.items()))
     else:
         lines.append("Fallback: none")
+    # a model "auto" keeps on the NPU alone instead of NPU + GPU (only when there is one)
+    lines.extend(f"NPU + GPU dropped: {stem}: {reason}" for stem, reason in sorted(summary["split_fallbacks"].items()))
     if service.npu_hung:
         lines.append(service.npu_hang_note() or "")
     hex_lines = eng.hex_log_lines()
