@@ -549,11 +549,13 @@ def fetch_blocking(url: str, final: str, *, size: int, sha256: Optional[str], me
                   "bytes_done": have, "bytes_total": total})
         if wait(delay):
             stop_check()
-        # re-hash what is on disk (the failed write may have left a partial block)
+        # re-hash what is on disk (the failed write may have left a partial block; a try that never connected
+        # left no part at all)
         hasher = hashlib.sha256()
-        with open(part, "rb") as handle:
-            for block in iter(lambda: handle.read(CHUNK * 4), b""):
-                hasher.update(block)
+        if os.path.isfile(part):
+            with open(part, "rb") as handle:
+                for block in iter(lambda: handle.read(CHUNK * 4), b""):
+                    hasher.update(block)
         have = _size(part)
 
     progress({"phase": "verifying", "status": "Verifying…", "bytes_done": have, "bytes_total": total or have})

@@ -230,6 +230,9 @@ def npu_service(tmp_path, *, stems=(Q40,), probe=None, prefs=None, mode=None, en
                                    npu_precheck=precheck, npu_source=lambda: source or SOURCE,
                                    npu_root=str(root), npu_session=http if http is not None else FakeHTTP(),
                                    app_version=version, **{"gpu_backend": "OpenCL", **kwargs})
+    # the files download's back-off between tries: recorded in ``service.slept``, never a real sleep
+    service.slept = []
+    service.npu_fetch_sleep = lambda seconds: service.slept.append(seconds) or False
     return service, engine, probe
 
 
@@ -1616,8 +1619,9 @@ def test_the_first_npu_load_downloads_the_files_once(tmp_path):
     phases: list = []
     service.subscribe(lambda snap: phases.append((snap.state, snap.phase, (service.npu_progress() or {}).get("phase"))))
     assert chat(service) == "Echo: hi" and engine.backends == ["npu"]
-    # one plain GET of the fixed URL, its redirect followed by hand (https only), a generic User-Agent, a short
-    # connect timeout; no device or user data
+    # one plain GET of the fixed URL, its redirect followed by hand (https only), a generic User-Agent, the model
+    # downloads' connect / read timeouts; no device or user data
+    assert svc.NPU_FETCH_TIMEOUT == (20.0, svc.dl.READ_TIMEOUT) and service.slept == []
     assert [c["url"] for c in http.calls] == [URL, ASSET]
     assert all(c["allow_redirects"] is False and c["timeout"] == svc.NPU_FETCH_TIMEOUT for c in http.calls)
     assert http.calls[0]["headers"] == {"Accept-Encoding": "identity", "User-Agent": "Glossarion-Mobile"}
@@ -1645,29 +1649,123 @@ def test_the_status_line_before_and_after_the_files(tmp_path):
     assert service.npu_files_ready(refresh=True) and service.npu_status_line() == "Hexagon v81 (HTP) ready"
 
 
-def test_an_offline_phone_falls_through_and_tries_again_only_on_request(tmp_path):
+def test_an_offline_phone_retries_with_back_off_then_falls_through_and_a_later_load_tries_again(tmp_path):
     import requests
 
+    now = [1000.0]
     http = FakeHTTP(error=requests.ConnectionError("no network"))
-    service, engine, probe = npu_service(tmp_path, files=False, http=http)
+    service, engine, probe = npu_service(tmp_path, files=False, http=http, clock=lambda: now[0])
+    seen: list = []
+    service.subscribe(lambda snap: seen.append((service.npu_progress() or {}).get("text")))
     assert chat(service) == "Echo: hi"
-    assert engine.backends == ["cpu"] and len(http.calls) == 1 and probe.calls == []  # one try, no retry loop
+    # four tries with the short back-off between them (no real sleep: ``npu_service`` records it), then the CPU
+    assert engine.backends == ["cpu"] and len(http.calls) == 4 and probe.calls == []
+    assert service.slept == list(svc.NPU_FETCH_BACKOFF) == [2, 4, 8]
+    # the NPU progress line said so while it waited (not a frozen bar)
+    for delay in (2, 4, 8):
+        retry = f"Connection problem (ConnectionError); retrying in {delay} s…"
+        assert retry in seen
+        # once the wait is over the line goes back to the bytes while the next try connects
+        assert not str(seen[seen.index(retry) + 1]).startswith("Connection problem")
+    assert service.npu_progress() is None
     assert service.npu_fallback(Q40) is None and service.npu_offered()          # not a model fallback (A4)
-    line = "NPU files not downloaded: Download failed (ConnectionError)"
+    line = "NPU files not downloaded: Download failed after 4 tries (ConnectionError)"
     assert service.npu_status_line() == line and service.npu_files_note(Q40) == line
-    assert f"Last download error: Download failed (ConnectionError)" in selfcheck.npu_lines(service, soc="")
+    assert "Last download error: Download failed after 4 tries (ConnectionError)" in selfcheck.npu_lines(service, soc="")
     assert f"NPU files: llama.cpp {RELEASE} · libggml-htp-v81.so not downloaded" in selfcheck.npu_lines(service, soc="")
+    # within the short cool-down a request neither reloads nor downloads again
+    now[0] += svc.NPU_FETCH_COOLDOWN - 1
     chat(service, text="again")
-    assert engine.backends == ["cpu"] and len(http.calls) == 1                 # no reload, no second try
-    # the next start tries again
-    later, engine2, _p = npu_service(tmp_path, files=False, http=FakeHTTP(), prefs=service.prefs)
-    chat(later)
-    assert engine2.backends == ["npu"]
-    # "Try the NPU again" too
+    assert engine.backends == ["cpu"] and len(http.calls) == 4
+    # after it, requests to the model already running on the CPU never unload it to download again
+    for _ in range(3):
+        now[0] += svc.NPU_FETCH_COOLDOWN + 1
+        chat(service, text="still")
+    assert engine.backends == ["cpu"] and len(http.calls) == 4 and service.slept == [2, 4, 8]
+    # the next real load downloads again by itself: no restart, no "Try the NPU again"
+    service.unload()
     service._npu_http = FakeHTTP()
-    assert service.retry_npu(Q40) and service.npu_download_error is None
+    assert chat(service, text="later") == "Echo: later"
+    assert engine.backends == ["cpu", "npu"] and len(service._npu_http.calls) == 2
+    assert service.npu_download_error is None and service.npu_files_note(Q40) is None
+    assert service.npu_status_line() == "Hexagon v81 (HTP0) ready"
+
+
+def test_try_the_npu_again_downloads_at_once_without_the_cool_down(tmp_path):
+    import requests
+
+    now = [50.0]
+    service, engine, _probe = npu_service(tmp_path, files=False, http=FakeHTTP(error=requests.Timeout("slow")),
+                                          clock=lambda: now[0])
     chat(service)
-    assert engine.backends == ["cpu", "npu"] and service._npu_http.calls == []  # the other start had fetched them
+    assert engine.backends == ["cpu"] and service._npu_fetch_cooling()
+    service._npu_http = FakeHTTP()
+    assert service.retry_npu(Q40) and service.npu_download_error is None and not service._npu_fetch_cooling()
+    chat(service)                                                               # the same second: no wait
+    assert engine.backends == ["cpu", "npu"] and len(service._npu_http.calls) == 2
+
+
+def test_a_retry_that_reaches_the_host_goes_on_and_a_stop_in_the_back_off_ends_the_load(tmp_path):
+    import os
+
+    import requests
+
+    from glossarion_mobile.services.local_llm.server import LocalLLMError
+
+    class Flaky(FakeHTTP):
+        """Fails the first ``failures`` requests, then serves the archive."""
+
+        def __init__(self, failures):
+            super().__init__()
+            self.failures = failures
+
+        def get(self, url, **kwargs):
+            if self.failures:
+                self.failures -= 1
+                self.calls.append({"url": url, **kwargs})
+                raise requests.ConnectionError("dropped")
+            return super().get(url, **kwargs)
+
+    # two connection problems, then the download goes through within the same load
+    service, engine, _probe = npu_service(tmp_path / "ok", files=False, http=Flaky(2))
+    assert chat(service) == "Echo: hi" and engine.backends == ["npu"] and service.slept == [2, 4]
+    assert service.npu_download_error is None and len(_skel_files(service)) == 5
+    # a Stop during the back-off: the wait ends, the load ends with it, nothing is recorded
+    stopped, engine2, probe2 = npu_service(tmp_path / "stop", files=False, http=Flaky(9))
+
+    def stop_in_back_off(seconds):
+        stopped.slept.append(seconds)
+        stopped.stop_generation()
+        return True                                                              # interrupted
+
+    stopped.npu_fetch_sleep = stop_in_back_off
+    with pytest.raises(LocalLLMError) as caught:
+        chat(stopped)
+    assert caught.value.status == 499 and stopped.slept == [2] and len(stopped._npu_http.calls) == 1
+    assert engine2.backends == [] and probe2.calls == [] and stopped.npu_download_error is None
+    assert stopped._npu_fetch_failed_at is None and not stopped._npu_fetch_cooling()
+    assert stopped.npu_progress() is None and stopped.snapshot().state == "idle"
+    assert not any(n.endswith(".so") for n in os.listdir(stopped.npu_skel_dir()))
+
+
+def test_the_default_back_off_wait_ends_at_once_on_a_stop(tmp_path):
+    import time as _time
+
+    import requests
+
+    from glossarion_mobile.services.local_llm.server import LocalLLMError
+
+    service, engine, _probe = npu_service(tmp_path, files=False, http=FakeHTTP(error=requests.ConnectionError("x")))
+    service.npu_fetch_sleep = None                                              # the real, interruptible wait
+    service.npu_fetch_backoff = (30,)
+    stopper = threading.Timer(0.3, service.stop_generation)
+    started = _time.monotonic()
+    stopper.start()
+    with pytest.raises(LocalLLMError) as caught:
+        chat(service)
+    stopper.join()
+    assert caught.value.status == 499 and _time.monotonic() - started < 5      # not the 30 s back-off
+    assert engine.backends == [] and service.npu_download_error is None
 
 
 def test_a_stop_during_the_download_ends_the_load_and_the_next_load_resumes(tmp_path):
@@ -1685,7 +1783,7 @@ def test_a_stop_during_the_download_ends_the_load_and_the_next_load_resumes(tmp_
     stopper.join()
     # the Stop ended the load: nothing loaded on the GPU / CPU, and it is not a failed download
     assert stopped.value.status == 499 and engine.backends == [] and probe.calls == []
-    assert service.npu_download_error is None and not service._npu_fetch_tried
+    assert service.npu_download_error is None and service._npu_fetch_failed_at is None
     assert service.snapshot().state == "idle" and service.npu_progress() is None
     assert service.npu_status_line().startswith("NPU files (")              # "… download … at the first model load."
     part = os.path.join(service.npu_skel_dir(), "skeletons.tar.gz.part")

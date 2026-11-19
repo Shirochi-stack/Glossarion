@@ -229,9 +229,9 @@ def test_auto_runs_on_the_cpu_for_a_quant_the_npu_cannot_take_or_a_failed_files_
     service, engine, _probe = npu_service(tmp_path, stems=(Q40, IQ))
     chat(service, IQ)
     assert engine.backends == ["cpu"] and service.npu_fallback(IQ) is None
-    service.npu_download_error, service._npu_fetch_tried = "offline", True    # this start's download failed
+    service.npu_download_error, service._npu_fetch_failed_at = "offline", service.clock()  # a download just failed
     chat(service, Q40)
-    assert engine.backends == ["cpu", "cpu"] and service.npu_fallback(Q40) is None  # no record: next start retries
+    assert engine.backends == ["cpu", "cpu"] and service.npu_fallback(Q40) is None  # no record: a later load retries
 
 
 def test_a_preset_row_npu_skips_the_quant_check_and_falls_back_to_the_cpu(tmp_path):
