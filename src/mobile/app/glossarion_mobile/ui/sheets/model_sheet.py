@@ -350,7 +350,6 @@ class ModelSheet:
         self.tab = wanted if isinstance(wanted, str) and wanted in self.tab_ids else "model"
         self.ondevice: Any = None  # OnDeviceFlow of Model manager › On-device, made when the tab first shows
         self._ondevice_unsubs: list = []
-        self._ondevice_loading: set = set()  # stems of downloaded models whose load + use runs
         self.query = ""
         self.chip = "all"
         self.selected_value: Optional[str] = None
@@ -1016,15 +1015,16 @@ class ModelSheet:
 
         stem = flow.stem_of_preset(preset)
         state, status = flow.row_state(preset, stem)
-        loading = state in ("use", "in_use") and flow.preset_key(preset) in flow.busy
+        loading = state == "loading" or (state in ("use", "in_use") and flow.preset_key(preset) in flow.busy)
         choose_sigma = (lp.is_sigma(preset.get("repo")) and preset.get("name") == "Sigma"
                         and state in ("download", "use", "in_use") and not loading)
         download = flow.active_download(stem)
         target = download.stem if download is not None else stem
         key = f"ondevice-preset-{index}"
-        entry = (flow.service.registry.load().get(stem) or {}) if stem and state in ("use", "in_use") else {}
+        downloaded = state in ("use", "in_use", "loading")
+        entry = (flow.service.registry.load().get(stem) or {}) if stem and downloaded else {}
         size = int(entry.get("size") or 0) or lp.download_size(preset)
-        if stem and state in ("use", "in_use"):
+        if stem and downloaded:
             verdict = self._file_ram(flow, stem)
         else:
             verdict = flow.ram_hint(preset)[0]
@@ -1037,7 +1037,8 @@ class ModelSheet:
         if state not in ("download",):
             color = ft.Colors.ERROR if state == "error" else (
                 semantic("success") if state in ("use", "in_use") else ft.Colors.ON_SURFACE_VARIANT)
-            lines.append(ft.Text("Loading…" if loading else status, theme_style=ft.TextThemeStyle.BODY_SMALL,
+            lines.append(ft.Text(status if state == "loading" else "Loading…" if loading else status,
+                                 theme_style=ft.TextThemeStyle.BODY_SMALL,
                                  max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, color=color, key=f"{key}-status"))
         action = f"{key}-action"
         buttons: list
@@ -1074,9 +1075,12 @@ class ModelSheet:
         elif state == "in_use" and stem:
             on_click = lambda e, m=f"local/{stem}": self.select("model", m)  # noqa: E731
         progress = download.fraction if state in ("downloading", "paused") and download is not None else None
+        bar = state in ("downloading", "paused")
+        if loading:  # load + use from the tap until the load ends: the NPU files' fraction, else indeterminate
+            progress, bar = (flow.loading_state(stem) or (None, None))[1], True
         return self._ondevice_card(key, str(preset.get("name") or stem or "Model"), lines, buttons,
                                    selected=state == "in_use", on_click=on_click, progress=progress,
-                                   progress_key=f"{key}-progress" if state in ("downloading", "paused") else None)
+                                   progress_key=f"{key}-progress" if bar else None)
 
     def _ondevice_custom_row(self, flow: Any, family: dict) -> ft.Control:
         """A Custom row: its button opens the family's menu of sizes and quants (``CustomModelSheet``)."""
@@ -1104,12 +1108,12 @@ class ModelSheet:
         model = f"local/{stem}"
         key = f"ondevice-file-{stem}"
         in_use = str(self.current.get("model") or "").lower() == model.lower()
-        loading = stem in self._ondevice_loading
+        loading = flow.loading_state(stem)  # (text, fraction) from the tap until the load ends
         verdict = self._file_ram(flow, stem)
         facts = " · ".join(x for x in (dl.format_bytes(entry.get("size")) if entry.get("size") else "",
                                        self._ram_text(verdict)) if x)
         loaded = flow.service.loaded_stem == stem
-        status = "Loading…" if loading else (
+        status = loading[0] if loading else (
             ("Loaded · in use" if loaded else "In use") if in_use else ("Loaded" if loaded else "On this device"))
         lines: list = [ft.Text(" · ".join(x for x in (str(entry.get("repo") or ""), facts) if x),
                                theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
@@ -1130,19 +1134,19 @@ class ModelSheet:
             buttons = [ft.FilledButton(content="Use", key=action,
                                        on_click=lambda e, s=stem: self._spawn(self.use_downloaded(s)))]
             on_click = lambda e, s=stem: self._spawn(self.use_downloaded(s))  # noqa: E731
-        return self._ondevice_card(key, model, lines, buttons, selected=in_use, on_click=on_click)
+        return self._ondevice_card(key, model, lines, buttons, selected=in_use, on_click=on_click,
+                                   progress=loading[1] if loading else None,
+                                   progress_key=f"{key}-progress" if loading else None)
 
     async def use_downloaded(self, stem: str) -> bool:
-        """Load a downloaded model (asking when RAM is tight) and pick ``local/<stem>`` (OnDeviceFlow)."""
+        """Load a downloaded model (asking when RAM is tight) and pick ``local/<stem>`` (OnDeviceFlow; its
+        ``loading_state`` shows on the row from the tap until the load ends, a second tap meanwhile does nothing)."""
         flow = self.ondevice_flow()
-        if flow is None or stem in self._ondevice_loading:
+        if flow is None or flow.loading_state(stem) is not None:
             return False
-        self._ondevice_loading.add(stem)
-        self.render_ondevice()
         try:
             return bool(await flow._use_other(stem))
         finally:
-            self._ondevice_loading.discard(stem)
             self.render_ondevice()
 
     def _ondevice_download_row(self, flow: Any, stem: str, state: Any) -> ft.Control:

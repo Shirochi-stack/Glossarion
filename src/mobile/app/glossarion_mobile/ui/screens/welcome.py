@@ -10,7 +10,9 @@
    keyless routes; "Run on this phone (no account needed)": the on-device presets as one-tap buttons
    (size and a RAM hint for this phone from the engine's RAM gate, Light suggested, inline download
    progress; one tap downloads, loads and selects the model through the Model manager's
-   ``OnDeviceFlow``) and the Custom cells (a family's menu of sizes and quants, ``CustomModelSheet``);
+   ``OnDeviceFlow``; from the tap until the load ends the cell says "Loading…" or the NPU's line over a bar,
+   and after a failed NPU files download the row says why with "Try the NPU again") and the Custom cells (a
+   family's menu of sizes and quants, ``CustomModelSheet``);
    then the Model field (ModelPicker, like the desktop's model dropdown) above your
    own API key (the desktop main key field, ``api_key``) and a local Ollama / LM Studio host on your PC
    (Settings › Endpoints). Next
@@ -60,7 +62,7 @@ from glossarion_mobile.ui.screens.welcome_flow import (
     WelcomeFlow,
     welcome_glossary_updates,
 )
-from glossarion_mobile.ui.theme import number_keyboard
+from glossarion_mobile.ui.theme import number_keyboard, semantic
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +106,8 @@ ONDEVICE_CELLS = 4
 #: a cell's second line by ``OnDeviceFlow.row_state`` (short: a quarter of a 360 dp row)
 ONDEVICE_LABELS = {"checking": "Checking…", "paused": "Resume", "busy": "Starting…", "error": "Retry",
                    "in_use": "✓ In use", "use": "Tap to use"}
+#: room above the "Run on" dropdown on Welcome: its floating label clears the cells above it
+RUN_MODE_GAP = 8
 #: the cells of a chosen quant (they must fit a quarter row): a smaller name, on up to two lines, and "Garbage
 #: GPU" for a former preset "Garbage · GPU (Q4_0)" (the full name is the tooltip)
 ONDEVICE_GPU_NAME_SIZE = 10
@@ -291,14 +295,30 @@ class WelcomeScreen(Screen):
 
     @staticmethod
     def _ondevice_shown(flow: Any) -> tuple:
-        """What an engine notice can change in the on-device row: the NPU progress line and the "Run on" choices
-        and value (the NPU check adds the NPU modes and changes what Auto names)."""
+        """What an engine notice can change in the on-device row: the NPU progress line (its files' download: the
+        bytes or the retry line), the "Run on" choices and value (the NPU check adds the NPU modes and changes what
+        Auto names), the loading model (a cell's loading state; an indeterminate bar is not rebuilt while only the
+        load runs) and a failed NPU files download's line ("Try the NPU again")."""
         if flow is None:
-            return None, (), None
+            return None, (), None, None, None
         modes = flow.run_mode_options()
         service = flow.service
+        loading = (tuple(sorted(flow.loading_stems)), getattr(service, "loading_model", lambda: None)())
         return ((flow.npu_progress() or {}).get("text"), tuple((mode, service.run_mode_label(mode)) for mode in modes),
-                service.run_mode_shown() if modes else None)
+                service.run_mode_shown() if modes else None, loading, WelcomeScreen._npu_files_note(flow))
+
+    @staticmethod
+    def _npu_files_note(flow: Any) -> tuple:
+        """``(stem, line)`` of the current on-device model while its NPU files download failed (the service's
+        ``npu_files_note``), else ``(stem, None)``; only while the current model is ``local/<stem>`` (a cloud model
+        with a local one still loaded shows nothing: the try-again reload would switch the model)."""
+        model = str(flow.current_model() if flow.current_model else "")
+        stem = model[len("local/"):] if model.lower().startswith("local/") else None
+        note = getattr(flow.service, "npu_files_note", None)
+        try:
+            return stem, (note(stem) if callable(note) and stem else None)
+        except Exception:
+            return stem, None
 
     def _npu_changed(self) -> None:
         """An engine notice: re-render the on-device row only when what it shows from the engine changed."""
@@ -328,12 +348,19 @@ class WelcomeScreen(Screen):
             # the Model manager's "Run on" dropdown and its Q4_0 hint; the mode's line, the layer slider and the
             # GPU fallback line stay in On-device settings to keep Welcome compact.
             section = flow._run_section(key_prefix="welcome")
-            lines.extend(control for control in section if control is flow.run_mode or control is flow.gpu_swap_box)
+            # the dropdown's floating label sits above its border: room so it clears the cells above
+            lines.extend(ft.Container(content=control, padding=ft.Padding.only(top=RUN_MODE_GAP),
+                                      key="welcome-run-mode-box") if control is flow.run_mode else control
+                         for control in section if control is flow.run_mode or control is flow.gpu_swap_box)
         # what this render shows, read first: ``_npu_changed`` re-renders when a later notice differs from it
         self._npu_shown = self._ondevice_shown(flow)
         busy = flow.npu_progress_row("welcome")  # the NPU check / files / start: a bar, never a wait
         if busy is not None:
             lines.append(busy)
+        else:
+            retry = self._npu_retry_row(flow, *self._npu_shown[4])
+            if retry is not None:
+                lines.append(retry)
         note = self.model_notes.get("local")
         if note:
             lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
@@ -368,6 +395,8 @@ class WelcomeScreen(Screen):
             # tapping a downloading cell offers to cancel it (use_ondevice)
             detail = (f"{download.percent}% · ✕" if download.phase == "downloading"
                       else ONDEVICE_LABELS["checking"])
+        elif state == "loading":
+            detail = status  # "Loading…", or the NPU's own line while its files download or it starts
         elif state == "use" and lp.is_sigma(preset.get("repo")):
             detail = "Installed"
         elif state in ONDEVICE_LABELS:
@@ -386,11 +415,15 @@ class WelcomeScreen(Screen):
             ft.Text(name,
                     theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=2 if gpu or lp.is_sigma(preset.get("repo")) else 1,
                     overflow=ft.TextOverflow.ELLIPSIS, size=ONDEVICE_GPU_NAME_SIZE if gpu else None),
-            ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
-                    color=color or ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=2 if state == "loading" else 1,
+                    overflow=ft.TextOverflow.ELLIPSIS, color=color or ft.Colors.ON_SURFACE_VARIANT),
         ]
         if state in ("downloading", "paused") and download is not None:
             lines.append(ft.ProgressBar(value=download.fraction, bar_height=3, border_radius=2))
+        elif state == "loading":  # from the tap until the load ends: the NPU files' fraction, else indeterminate
+            from glossarion_mobile.ui.screens.local_models_panel import _loading_bar
+
+            lines.append(_loading_bar(flow.loading_state(stem), f"{self.ondevice_key(preset)}-loading"))
         return ft.Container(
             content=ft.Column(lines, spacing=0, tight=True),
             padding=ft.Padding.symmetric(horizontal=6, vertical=5),
@@ -454,6 +487,8 @@ class WelcomeScreen(Screen):
             stem = flow.stem_of_preset(rows[index])
             state, _status = flow.row_state(rows[index], stem)
             download = flow.active_download(stem)
+            if state == "loading":
+                return None  # a second tap while it loads starts nothing
             if state == "downloading" and download is not None:
                 # a second tap on a downloading cell is the undo of a mis-tap
                 name = str(rows[index].get("name") or "this model")
@@ -483,6 +518,31 @@ class WelcomeScreen(Screen):
     def _ondevice_note(self, message: str) -> None:
         if not str(message).startswith("Model: "):  # the flow's own "Model: …" line; use_ondevice says it
             self.model_notes["local"] = str(message)
+
+    def _npu_retry_row(self, flow: Any, stem: Optional[str], line: Optional[str]) -> Optional[ft.Control]:
+        """After a failed NPU files download for the current on-device model: why (the service's line) and the Model
+        manager row's "Try the NPU again", right here; None otherwise (and never while that model loads)."""
+        if not stem or not line or flow.loading_state(stem) is not None:
+            return None
+        return ft.Row([
+            ft.Text(line, theme_style=ft.TextThemeStyle.BODY_SMALL, color=semantic("warning"), max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS, expand=True, key="welcome-npu-files-note"),
+            ft.TextButton(content="Try the NPU again", icon=ft.Icons.MEMORY, key="welcome-npu-retry",
+                          on_click=lambda e, s=stem: call_handler(self.retry_npu, s)),
+        ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="welcome-npu-files")
+
+    async def retry_npu(self, stem: str) -> bool:
+        """"Try the NPU again" on Welcome (``OnDeviceFlow.retry_npu``: the failed download is forgotten), then the
+        model loads again at once, so the NPU files download right away with the cell's loading state and the NPU
+        progress line (on a phone still offline it loads on the CPU again and the line comes back)."""
+        flow = self.ondevice_flow()
+        if flow is None or flow.loading_state(stem) is not None:
+            return False
+        if not flow.retry_npu(stem):
+            self.render_ondevice()
+            return False
+        self.model_notes.pop("local", None)
+        return bool(await flow._use_other(stem))
 
     def render_ondevice(self) -> None:
         """Re-render only the on-device row (download progress arrives several times a second)."""

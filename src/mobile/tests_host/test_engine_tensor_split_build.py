@@ -2,6 +2,10 @@
 whole-tensor write per device and sends each device's slice with ONE ggml_backend_tensor_set, because OpenCL's
 quantised set_tensor aborts on a second partial write. Text-level checks of the patch section (nothing compiles
 here): the guard, the single write per device, the partial path forwarding the old calls unchanged, the header.
+
+mobile.patch 12. (tensor split with a dense FFN weight the meta device cannot hold, e.g. IQ4_XS on Hexagon):
+load_tensors notes the layers whose ffn_gate/ffn_up landed outside the meta buffer and the split-state callback
+mirrors the FFN weights of those layers that are in it. Text-level checks of the two src/ sections.
 """
 
 from __future__ import annotations
@@ -38,10 +42,11 @@ def test_patch_has_the_meta_section_in_file_order_and_touches_no_other_backend()
 def test_header_and_recipe_list_the_item():
     header = PATCH.read_text(encoding="utf-8").split("diff --git", 1)[0]
     assert "\n11. Tensor split across the NPU and the GPU (split_mode TENSOR over HTP0 + GPUOpenCL):\n" in header
-    assert "an eleventh one for tensor split across the NPU and the GPU:" in header
+    assert "an eleventh one for tensor split across the NPU and the GPU and a twelfth one for\n" in header
     assert header.index("\n10. Optional NPU backend") < header.index("\n11. Tensor split") < \
         header.index("Upstream's description:")
     assert "#   - patches/mobile.patch 11.: tensor split across the NPU and the GPU" in RECIPE.read_text(encoding="utf-8")
+    assert "#   - patches/mobile.patch 12.: tensor split with a dense FFN weight" in RECIPE.read_text(encoding="utf-8")
 
 
 def test_the_change_is_marked_with_its_reason():
@@ -131,3 +136,96 @@ def test_exactly_one_whole_write_per_device_in_the_staging_path():
     # the single-chunk branch flushes device j right after its one set_2d
     i = section.index("+                glossarion_meta_flush(stage_j, simple_tensor);")
     assert section[i - 1].startswith("+                glossarion_meta_set_2d(stage_j, simple_tensor, ")
+
+
+# --- mobile.patch 12. -----------------------------------------------------------------------------------------
+
+MODEL_CPP = "vendor/llama.cpp/src/llama-model.cpp"
+MODEL_H = "vendor/llama.cpp/src/llama-model.h"
+
+
+def _model_section(name: str) -> list[str]:
+    return _file_diffs(PATCH.read_text(encoding="utf-8"))[name].splitlines()
+
+
+def _model_added(name: str) -> str:
+    return "\n".join(line[1:] for line in _model_section(name)
+                     if line.startswith("+") and not line.startswith("+++")) + "\n"
+
+
+def test_item_12_is_in_the_header_after_item_11():
+    header = PATCH.read_text(encoding="utf-8").split("diff --git", 1)[0]
+    assert "\n12. Tensor split with a dense FFN weight the meta device cannot hold (split_mode TENSOR):\n" in header
+    assert "tensor split with a weight the meta device cannot hold:\n" in header
+    assert header.index("\n11. Tensor split") < header.index("\n12. Tensor split") < \
+        header.index("Upstream's description:")
+
+
+def test_item_12_only_adds_lines_to_the_model_sources():
+    names = list(_file_diffs(PATCH.read_text(encoding="utf-8")))
+    assert MODEL_CPP in names and MODEL_H in names and names == sorted(names), names
+    for name in (MODEL_CPP, MODEL_H):
+        removed = [line for line in _model_section(name) if line.startswith("-") and not line.startswith("---")]
+        assert removed == [], (name, removed)
+
+
+def test_the_userdata_carries_the_layer_set():
+    added = _model_added(MODEL_H)
+    assert "    std::unordered_set<uint32_t> glossarion_ffn_mirrored_layers;\n" in added
+    # the struct's two upstream fields stay as context, in front of the new one
+    section = _model_section(MODEL_H)
+    assert " struct llama_meta_device_get_split_state_userdata {" in section
+    assert section.index("     const struct llama_model * model;") < \
+        section.index("+    std::unordered_set<uint32_t> glossarion_ffn_mirrored_layers;")
+
+
+def test_load_tensors_notes_gate_up_outside_the_meta_buffer_before_any_buffer_exists():
+    section = _model_section(MODEL_CPP)
+    added = _model_added(MODEL_CPP)
+    # the set is rebuilt on every load and only filled when a meta device is in use (split mode TENSOR)
+    assert "    get_split_state_ud.glossarion_ffn_mirrored_layers.clear();\n" in added
+    assert ("    if (std::any_of(devices.begin(), devices.end(), [](const llama_device & d) { return d.is_meta; })) {\n"
+            in added)
+    # dense FFN tensors only, not the MoE experts / shared experts / router
+    assert ('        static const std::regex pattern_ffn_dense("blk\\\\.(\\\\d+)\\\\.ffn_(gate|up|gate_up|down)\\\\.(weight|bias)");\n'
+            in added)
+    # a context counts as outside when its buffer type does not belong to the meta device
+    assert ("            const bool in_meta = buft_dev != nullptr && std::any_of(devices.begin(), devices.end(),\n"
+            "                [buft_dev](const llama_device & d) { return d.is_meta && d.dev == buft_dev; });\n") in added
+    # inside: any dense FFN tensor marks the layer as present in the meta buffer; outside: only a gate/up weight
+    assert ("                if (in_meta) {\n"
+            "                    layers_in_meta.insert(il);\n"
+            "                } else if (m[2].str() != \"down\" && m[3].str() == \"weight\") {\n"
+            "                    gate_up_outside.emplace(il, std::make_pair(cur, ctx_key.buft));\n"
+            "                }\n") in added
+    # a layer is mirrored only when its gate/up is outside AND some of its FFN is inside (a layer wholly on the
+    # CPU is never asked for a split state and gets no warning)
+    assert ("        for (const auto & [il, where] : gate_up_outside) {\n"
+            "            if (layers_in_meta.count(il) == 0) {\n") in added
+    assert "            get_split_state_ud.glossarion_ffn_mirrored_layers.insert(il);\n" in added
+    assert added.count("glossarion_ffn_mirrored_layers.insert(") == 1
+    # the block runs right before tensors_by_name is filled, i.e. before the buffers (and the split states) exist
+    end = max(i for i, line in enumerate(section) if line.startswith("+"))
+    assert section[end + 1] == "     // populate tensors_by_name"
+
+
+def test_the_callback_mirrors_only_the_noted_layers_dense_ffn_weights():
+    section = _model_section(MODEL_CPP)
+    added = _model_added(MODEL_CPP)
+    assert ('    static const std::regex pattern_glossarion_ffn_dense  '
+            '("blk\\\\.\\\\d+\\\\.ffn_(gate|up|gate_up|down)\\\\.(weight|bias)");\n') in added
+    rule = ("        if (!ud->glossarion_ffn_mirrored_layers.empty() && "
+            "std::regex_match(tensor_name, pattern_glossarion_ffn_dense)) {\n"
+            "            const tensor_config tc_mirrored = get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);\n"
+            "            if (ud->glossarion_ffn_mirrored_layers.count(tc_mirrored.il) > 0) {\n"
+            "                return tc_mirrored;\n"
+            "            }\n"
+            "        }\n")
+    assert rule in added
+    # the rule sits right in front of upstream's FFN rules, so every other layer still gets its axis-1/axis-0 split
+    i = section.index("+        if (!ud->glossarion_ffn_mirrored_layers.empty() && "
+                      "std::regex_match(tensor_name, pattern_glossarion_ffn_dense)) {")
+    after = [line for line in section[i:] if not line.startswith("+")]
+    assert after[:2] == ["         // FFN",
+                         "         if (std::regex_match(tensor_name, pattern_ffn_up_weight) || "
+                         "std::regex_match(tensor_name, pattern_ffn_gate_weight)) {"], after[:2]

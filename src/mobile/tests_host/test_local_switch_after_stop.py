@@ -283,7 +283,7 @@ def test_use_after_a_stopped_job_says_it_waits_and_selects_the_model(tmp_path):
     job["model"] = None
     notes, used = [], []
     panel = types.SimpleNamespace(service=service, context_changed=lambda stem: None, say=notes.append,
-                                  add_model=None, use_model=used.append, render=lambda: None)
+                                  add_model=None, use_model=used.append, render=lambda: None, loading_stems=set())
 
     async def go():
         return await asyncio.wait_for(LocalModelsPanel.activate(panel, "b"), 5)

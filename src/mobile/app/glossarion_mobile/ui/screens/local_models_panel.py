@@ -37,7 +37,10 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
-  Cancel / Resume / Use / In use / Retry. Rows of models that read images say so ("Reads images").
+  Cancel / Resume / Use / In use / Retry; from a Use tap until the load ends (also when it fails) the row shows
+  "Loading…" (or the NPU's line while its files download or it starts) over a bar (``OnDeviceFlow.loading_state``:
+  the same state on the Welcome cells and in the model picker, also for a load started elsewhere). Rows of models
+  that read images say so ("Reads images").
   The ⋮ menu edits, removes the preset, adds the image support to a text-only download or deletes the
   file; Add preset sits in the card's header, Restore defaults closes the card.
 * **Delete** (one action for every row with something on the phone: a downloaded preset or Custom row's ⋮
@@ -599,6 +602,7 @@ class OnDeviceFlow:
         self.errors: dict = {}  # preset key -> last error (the row shows Retry)
         self.preset_stems: dict = {}  # preset key -> stem of its download (file-less presets)
         self.busy: set = set()  # preset keys whose one-tap flow runs
+        self.loading_stems: set = set()  # stems whose load + use (``activate``) a tap started here runs
         self.on_change = on_change
         self.editor: Optional[LocalPresetEditor] = None
         self.last_dialog: Any = None
@@ -832,20 +836,32 @@ class OnDeviceFlow:
         """Load ``stem`` and make ``local/<stem>`` the model. The saved Context stays (mobile hotfix 2: the
         owner's 16,384 was reset to the model's own here); without one the model's own (``context_for``),
         which the Context slider then shows. Tight on free RAM only says so (owner 2026-10-27: Use always
-        loads, the warning is cosmetic)."""
-        self.context_changed(stem)
-        verdict, message = self.service.ram_check(stem)
-        if verdict == "refuse":
-            raise _Failed(message)
-        if verdict == "confirm":
-            self.say(message)
-        available, reason = self.service.engine_status()
-        if available:
-            if self.service.load_must_wait():
-                self.say("Waiting for the current answer to end, then switching the model…")
-            ok, error = await self.service.load(stem)
-            if not ok:
-                raise _Failed(error or "Could not load the model")
+        loads, the warning is cosmetic). From the tap until the load ends (also when it fails) the model's rows
+        show their loading state (``loading_state``), shown before the first await; a second tap meanwhile does
+        nothing (False)."""
+        if stem in self.loading_stems:
+            return False
+        self.loading_stems.add(stem)
+        self.render()
+        try:
+            self.context_changed(stem)
+            verdict, message = self.service.ram_check(stem)
+            if verdict == "refuse":
+                raise _Failed(message)
+            if verdict == "confirm":
+                self.say(message)
+            available, reason = self.service.engine_status()
+            if available:
+                if self.service.load_must_wait():
+                    self.say("Waiting for the current answer to end, then switching the model…")
+                ok, error = await self.service.load(stem)
+                if not ok:
+                    raise _Failed(error or "Could not load the model")
+        except BaseException:
+            self.loading_stems.discard(stem)
+            self.render()  # the loading state ends with the failure too
+            raise
+        self.loading_stems.discard(stem)
         model = f"local/{stem}"
         if self.add_model is not None:
             try:
@@ -999,7 +1015,7 @@ class OnDeviceFlow:
             return (note(stem) if callable(note) else None) or f"NPU unavailable: {fallback(stem)['reason']}", True
         files = getattr(service, "npu_files_note", None)
         files = files(stem) if callable(files) else None
-        if files:  # this start's NPU files download failed: "Try the NPU again" downloads once more
+        if files:  # the NPU files download failed: "Try the NPU again" downloads once more at once
             return files, True
         if service.loaded_stem != stem or not self.npu_offered():
             return None
@@ -1081,14 +1097,37 @@ class OnDeviceFlow:
             self.say(str(exc))
             return False
 
+    def loading_state(self, stem: Optional[str]) -> Optional[tuple]:
+        """``(text, fraction)`` while ``stem`` loads: from a tap here (``activate``) until the load ends, or while
+        the service loads it for anything else (``service.loading_model``). The text is the NPU's own line while
+        the NPU check, its files' download (fraction: the bytes; the retry line while it waits to try again) or
+        its start runs, else "Loading…" (fraction None: an indeterminate bar). None when it is not loading. Reads
+        state only."""
+        if not stem:
+            return None
+        try:
+            loading = getattr(self.service, "loading_model", lambda: None)()
+        except Exception:
+            loading = None
+        if stem not in self.loading_stems and loading != stem:
+            return None
+        progress = self.npu_progress()
+        if progress is not None:
+            return progress["text"], progress["fraction"]
+        return STATE_TEXT["loading"], None
+
     def row_state(self, preset: dict, stem: Optional[str]) -> tuple:
-        """(state, status text) of a preset row: download | downloading | paused | use | in_use | error | busy."""
+        """(state, status text) of a preset row: download | downloading | paused | use | in_use | loading | error |
+        busy."""
         key = self.preset_key(preset)
         state = self.active_download(stem)
         current = str(self.current_model() if self.current_model else "") or ""
         if state is not None and state.running:
             return "downloading", _download_status(state)
         if stem and self.service.registry.resolve(stem):
+            loading = self.loading_state(stem)
+            if loading is not None:
+                return "loading", loading[0]
             loaded = self.service.loaded_stem == stem
             if current.lower() == f"local/{stem}".lower():
                 return "in_use", "Loaded · in use" if loaded else "In use · loads on the first request"
@@ -1959,6 +1998,8 @@ class LocalModelsPanel(OnDeviceFlow):
         body: list = [ft.Row([ft.Column(lines, spacing=0, tight=True, expand=True)], spacing=0)]
         if progress:
             body.append(ft.ProgressBar(value=download.fraction, border_radius=4, key=f"local-preset-progress-{index}"))
+        elif state == "loading":
+            body.append(_loading_bar(self.loading_state(stem), f"local-preset-progress-{index}"))
         target = download.stem if download else stem
         trailing: list = [self._action(index, state, stem, target)]
         if state == "downloading" and stem:
@@ -1979,7 +2020,7 @@ class LocalModelsPanel(OnDeviceFlow):
         if state in ("use", "in_use") and stem and not self.service.is_vision(stem):
             items.append(ft.PopupMenuItem(content="Add image support", icon=ft.Icons.IMAGE_OUTLINED,
                                           on_click=lambda e, i=index: self.spawn(self.add_vision(i))))
-        if state not in ("downloading", "busy") and self.deletable(stem):  # downloaded, paused or failed
+        if state not in ("downloading", "busy", "loading") and self.deletable(stem):  # downloaded, paused or failed
             items.append(ft.PopupMenuItem(content="Delete file", icon=ft.Icons.DELETE_OUTLINE,
                                           on_click=lambda e, s=stem, i=index: self.confirm_delete(s, i)))
         trailing.append(ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", key=f"local-preset-menu-{index}",
@@ -2033,7 +2074,7 @@ class LocalModelsPanel(OnDeviceFlow):
                                    on_click=lambda e, i=index: self.spawn(self.get_preset(i)))
         if state == "in_use":
             return ft.FilledTonalButton(content="In use", icon=ft.Icons.CHECK_CIRCLE, key=key, disabled=True)
-        label = "Downloading…" if state == "downloading" else "Working…"
+        label = {"downloading": "Downloading…", "loading": STATE_TEXT["loading"]}.get(state, "Working…")
         return ft.FilledTonalButton(content=label, key=key, disabled=True)
 
     def _other_row(self, stem: str, entry: dict) -> ft.Control:
@@ -2043,6 +2084,8 @@ class LocalModelsPanel(OnDeviceFlow):
         status = ("Loaded · " if loaded else "") + ("in use · " if in_use else "") + dl.format_bytes(entry.get("size"))
         vision = [_vision_line(f"local-other-vision-{stem}")] if entry.get("mmproj") else []
         note = self.delete_notes.get(stem)
+        loading = self.loading_state(stem)
+        use_label = STATE_TEXT["loading"] if loading is not None else ("In use" if in_use else "Use")
         return ft.Container(
             key=f"local-other-{stem}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
@@ -2050,12 +2093,15 @@ class LocalModelsPanel(OnDeviceFlow):
                 ft.Text(f"local/{stem}", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 _small(f"{entry.get('repo', '')} · {status}", max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 *vision,
+                *([_small(loading[0], max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, key=f"local-other-status-{stem}"),
+                   _loading_bar(loading, f"local-other-progress-{stem}")] if loading is not None else []),
                 *([_delete_note(note, f"local-other-delete-note-{stem}")] if note else []),
                 ft.Row([
-                    ft.TextButton(content="In use" if in_use else "Use", disabled=in_use, key=f"local-other-use-{stem}",
+                    ft.TextButton(content=use_label, disabled=in_use or loading is not None,
+                                  key=f"local-other-use-{stem}",
                                   on_click=lambda e, s=stem: self.spawn(self._use_other(s))),
                     ft.TextButton(content="Delete", icon=ft.Icons.DELETE_OUTLINE, key=f"local-other-delete-{stem}",
-                                  on_click=lambda e, s=stem: self.confirm_delete(s)),
+                                  disabled=loading is not None, on_click=lambda e, s=stem: self.confirm_delete(s)),
                 ], spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
             ], spacing=2, tight=True),
         )
@@ -2165,6 +2211,12 @@ def _owner(key: str) -> str:
 
 def _download_status(state: dl.DownloadState) -> str:
     return f"Image support · {state.status}" if state.stem.endswith(dl.PROJECTOR_SUFFIX) else state.status
+
+
+def _loading_bar(loading: Optional[tuple], key: Optional[str] = None) -> ft.ProgressBar:
+    """The thin bar of a loading model (``OnDeviceFlow.loading_state``): the NPU files' fraction while they
+    download, else indeterminate (the cells' 3 px download bar)."""
+    return ft.ProgressBar(value=loading[1] if loading else None, bar_height=3, border_radius=2, key=key)
 
 
 def size_groups(family: dict) -> list:

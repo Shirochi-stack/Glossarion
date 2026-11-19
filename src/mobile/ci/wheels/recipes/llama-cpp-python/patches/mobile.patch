@@ -3,7 +3,8 @@ Glossarion overlay of flet-dev/mobile-forge recipes/llama-cpp-python/patches/mob
 upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON),
 a seventh one for the runtime CPU variants of the Android arm64 build, an eighth one for the
 optional GPU backends, a ninth one for the DRY sampler, a tenth one for the optional NPU
-backend and an eleventh one for tensor split across the NPU and the GPU:
+backend, an eleventh one for tensor split across the NPU and the GPU and a twelfth one for
+tensor split with a weight the meta device cannot hold:
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
 
@@ -78,6 +79,20 @@ backend and an eleventh one for tensor split across the NPU and the GPU:
       size, converts the whole slice on the first write, and the second write aborts in
       clCreateSubBuffer (CL_CHECK). Partial writes, mirrored tensors and slices that are one chunk
       already go straight to the devices as before.
+
+12. Tensor split with a dense FFN weight the meta device cannot hold (split_mode TENSOR):
+    - src/llama-model.cpp: llama_model_base::load_tensors notes, before any buffer is allocated, the
+      layers whose ffn_gate / ffn_up / ffn_gate_up weight landed outside the meta device's buffer while
+      another dense FFN weight of that layer is in it (glossarion_ffn_mirrored_layers, logged once per
+      layer; layers wholly outside the meta buffer are left alone). The meta device takes a weight only when
+      every device supports its op, and Hexagon has no IQ4_XS matmul, so Unsloth's UD quants put those
+      layers' gate/up on the CPU while ffn_down stays split on axis 0; the CPU's activation comes back
+      mirrored and ggml-backend-meta.cpp aborts ("unsupported mul_mat split states: node=ffn_out-8
+      src0=blk.8.ffn_down.weight axis=0 src1=ffn_swiglu-8 axis=10"). llama_meta_device_get_split_state
+      mirrors the dense FFN weights and biases of those layers that are in the meta buffer, so each
+      device runs the whole projection, exactly as without a split. Nothing changes without a meta
+      device, for MoE expert tensors, or for layers whose gate/up are in the meta buffer.
+    - src/llama-model.h: the layer set in llama_meta_device_get_split_state_userdata.
 
 Upstream's description:
 
@@ -1260,6 +1275,93 @@ index 426c487..e81d676 100644
      MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
      UNITY_BUILD ON
      UNITY_BUILD_BATCH_SIZE 16
+diff --git a/vendor/llama.cpp/src/llama-model.cpp b/vendor/llama.cpp/src/llama-model.cpp
+index a5435cb..d882b34 100644
+--- a/vendor/llama.cpp/src/llama-model.cpp
++++ b/vendor/llama.cpp/src/llama-model.cpp
+@@ -467,6 +467,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+     static const std::regex pattern_ffn_up_shexp_weight   ("blk\\.\\d*\\.ffn_up_shexp.weight");
+     static const std::regex pattern_ffn_gate_shexp_weight ("blk\\.\\d*\\.ffn_gate_shexp.weight");
+     static const std::regex pattern_ffn_down_shexp_weight ("blk\\.\\d*\\.ffn_down_shexp.weight");
++    static const std::regex pattern_glossarion_ffn_dense  ("blk\\.\\d+\\.ffn_(gate|up|gate_up|down)\\.(weight|bias)");
+ 
+     static const std::regex pattern_output_weight("output\\.weight");
+     static const std::regex pattern_output_bias  ("output\\.bias");
+@@ -639,6 +640,17 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0);
+         }
+ 
++        // Glossarion: a layer whose dense FFN gate/up weight is outside the meta buffer (a type the meta device cannot
++        // multiply, e.g. IQ4_XS on Hexagon, goes to the CPU) gets that projection back as a mirrored activation, which
++        // an axis-0 down projection cannot take: its FFN weights in the meta buffer are mirrored, so every device runs
++        // the whole projection, as without a split
++        if (!ud->glossarion_ffn_mirrored_layers.empty() && std::regex_match(tensor_name, pattern_glossarion_ffn_dense)) {
++            const tensor_config tc_mirrored = get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
++            if (ud->glossarion_ffn_mirrored_layers.count(tc_mirrored.il) > 0) {
++                return tc_mirrored;
++            }
++        }
++
+         // FFN
+         if (std::regex_match(tensor_name, pattern_ffn_up_weight) || std::regex_match(tensor_name, pattern_ffn_gate_weight)) {
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1, "ffn_down.weight", "ffn_down_exps.weight");
+@@ -1999,6 +2011,42 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+             (output_s || output_in_s)) {
+         throw std::runtime_error("output scales require a separate output weight");
+     }
++
++    // Glossarion: with a meta device (split mode TENSOR), note the layers whose dense FFN gate/up weight was placed
++    // outside the meta buffer while another dense FFN weight of the same layer is in it, before any meta buffer asks
++    // llama_meta_device_get_split_state for a split state
++    get_split_state_ud.glossarion_ffn_mirrored_layers.clear();
++    if (std::any_of(devices.begin(), devices.end(), [](const llama_device & d) { return d.is_meta; })) {
++        static const std::regex pattern_ffn_dense("blk\\.(\\d+)\\.ffn_(gate|up|gate_up|down)\\.(weight|bias)");
++        std::unordered_set<uint32_t> layers_in_meta;
++        std::map<uint32_t, std::pair<const ggml_tensor *, ggml_backend_buffer_type_t>> gate_up_outside;
++        for (auto & [ctx_key, ctx_ptr] : ml.ctx_map) {
++            ggml_backend_dev_t buft_dev = ggml_backend_buft_get_device(ctx_key.buft);
++            const bool in_meta = buft_dev != nullptr && std::any_of(devices.begin(), devices.end(),
++                [buft_dev](const llama_device & d) { return d.is_meta && d.dev == buft_dev; });
++            for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
++                std::cmatch m;
++                if (!std::regex_match(ggml_get_name(cur), m, pattern_ffn_dense)) {
++                    continue;
++                }
++                const uint32_t il = (uint32_t) std::stoul(m[1].str());
++                if (in_meta) {
++                    layers_in_meta.insert(il);
++                } else if (m[2].str() != "down" && m[3].str() == "weight") {
++                    gate_up_outside.emplace(il, std::make_pair(cur, ctx_key.buft));
++                }
++            }
++        }
++        for (const auto & [il, where] : gate_up_outside) {
++            if (layers_in_meta.count(il) == 0) {
++                continue; // the whole FFN of this layer is outside the meta buffer: nothing to mirror
++            }
++            get_split_state_ud.glossarion_ffn_mirrored_layers.insert(il);
++            LLAMA_LOG_WARN("%s: %s (%s) is in %s, not in the meta buffer: layer %u's FFN weights in the meta buffer are mirrored, not split\n",
++                __func__, ggml_get_name(where.first), ggml_type_name(where.first->type), ggml_backend_buft_name(where.second), il);
++        }
++    }
++
+     // populate tensors_by_name
+     for (auto & [_, ctx_ptr] : ml.ctx_map) {
+         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
+diff --git a/vendor/llama.cpp/src/llama-model.h b/vendor/llama.cpp/src/llama-model.h
+index 1b7ea1c..72a5216 100644
+--- a/vendor/llama.cpp/src/llama-model.h
++++ b/vendor/llama.cpp/src/llama-model.h
+@@ -693,6 +693,9 @@ struct llama_device {
+ struct llama_meta_device_get_split_state_userdata {
+     size_t                     n_devices;
+     const struct llama_model * model;
++
++    // Glossarion: layers with a dense FFN gate/up weight outside the meta device's buffer (load_tensors fills it)
++    std::unordered_set<uint32_t> glossarion_ffn_mirrored_layers;
+ };
+ 
+ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata);
 diff --git a/vendor/llama.cpp/tools/mtmd/CMakeLists.txt b/vendor/llama.cpp/tools/mtmd/CMakeLists.txt
 index 44ad177..0c0410e 100644
 --- a/vendor/llama.cpp/tools/mtmd/CMakeLists.txt

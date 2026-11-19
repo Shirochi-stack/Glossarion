@@ -334,7 +334,7 @@ def test_use_says_it_waits_and_then_selects_the_model(tmp_path):
         engine.release_prompt.set()
 
     panel = types.SimpleNamespace(service=service, context_changed=lambda stem: None, say=say, add_model=None,
-                                  use_model=used.append, render=lambda: None)
+                                  use_model=used.append, render=lambda: None, loading_stems=set())
     assert asyncio.run(LocalModelsPanel.activate(panel, "b")) is True
     run.thread.join(10)
     assert notes == ["Waiting for the current answer to end, then switching the model…"]

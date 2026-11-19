@@ -44,6 +44,8 @@
 #     x86_64 and iOS: none.
 #   - patches/mobile.patch 11.: tensor split across the NPU and the GPU (split_mode TENSOR): the meta backend
 #     sends each device's slice of a weight in ONE write (OpenCL's quantised upload aborts on a second one).
+#   - patches/mobile.patch 12.: tensor split with a dense FFN weight the meta device cannot hold (e.g. IQ4_XS on
+#     Hexagon): that layer's FFN weights in the meta buffer are mirrored instead of split.
 package:
   name: llama-cpp-python
   version: "0.3.37"

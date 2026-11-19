@@ -78,12 +78,14 @@
   wheel's ``register_npu_backend`` through ``engine.npu_state``, which opens a real DSP session) runs at most once
   per process, on the loading thread before the first NPU load, and only once the phone's HTP skeleton is on disk:
   the APK carries none (the Hexagon SDK licence), so that load first downloads ``engine.npu_skeleton_source()``'s
-  llama.cpp release archive (``downloads.fetch_blocking``: one plain GET, https redirects only, no retries) and
-  takes only its pinned skeletons (``downloads.extract_pinned``) into ``npu_skel_dir(<release>)``; folders of
-  other releases go once it is complete. A failed download is not a model fallback: that load runs on the GPU /
-  CPU, the NPU line says why, and it is tried again at the next start or "Try the NPU again". A Stop (or the
-  service stopping) during the download ends that load instead (nothing loads, nothing is recorded); the next NPU
-  load resumes the part. Either
+  llama.cpp release archive (``downloads.fetch_blocking``: plain GETs, https redirects only, the model downloads'
+  read timeout, a 20 s connect timeout, a connection problem retried after ``NPU_FETCH_BACKOFF``: four tries,
+  the NPU progress line saying "Connection problem (…); retrying in N s…") and takes only its pinned skeletons
+  (``downloads.extract_pinned``) into ``npu_skel_dir(<release>)``; folders of other releases go once it is
+  complete. A failed download is not a model fallback: that load runs on the GPU / CPU, the NPU line says why
+  (with "Try the NPU again", which tries at once), and the next model load after ``NPU_FETCH_COOLDOWN`` seconds
+  downloads again by itself (no restart needed; a model already running off the NPU is not reloaded for it). A Stop (or the service stopping) during the download or its
+  back-off ends that load instead (nothing loads, nothing is recorded); the next NPU load resumes the part. Either
   stage still running after ``NPU_WATCHDOG_SECONDS``, or one the app died in (marker ``NPU_CHECK_ATTEMPT_KEY``
   with its stage), and a failing stage 2 (``NPU_SESSION_KEY``) keep the NPU off until the app version changes.
   The NPU is offered (``npu_offered``) when stage 1 passed and stage 2 has not failed. A load starts on the NPU when
@@ -252,8 +254,15 @@ SPLIT_CRASH_REASON = "Glossarion closed while the NPU + GPU was running this mod
 NPU_CRASH_REASON = "Glossarion closed while the NPU was running this model"
 NPU_CHECK_CRASH_REASON = "Glossarion closed while the NPU check was running"
 NPU_START_CRASH_REASON = "Glossarion closed while the NPU was starting"
-#: seconds to connect for the NPU files' download (an offline phone falls through to the GPU / CPU quickly)
-NPU_FETCH_TIMEOUT = (10.0, 30.0)
+#: (connect, read) seconds of the NPU files' download: the model downloads' read timeout, a shorter connect timeout
+#: (a load waits for this download: four hanging connects plus the back-off stay near a minute and a half)
+NPU_FETCH_TIMEOUT = (20.0, dl.READ_TIMEOUT)
+#: seconds between the NPU files download's tries after a connection problem (four tries: a phone without a network
+#: gets its model on the GPU / CPU after about 14 s, one whose connections hang after about 94 s)
+NPU_FETCH_BACKOFF = (2, 4, 8)
+#: seconds after a failed NPU files download during which loads use the GPU / CPU without downloading again; the
+#: next load after that downloads by itself ("Try the NPU again" tries at once)
+NPU_FETCH_COOLDOWN = 60.0
 NPU_CHECKING_TEXT = "Checking the NPU…"
 NPU_STARTING_TEXT = "Starting the NPU…"
 NPU_FILES_ERROR_TEXT = "NPU files not downloaded: {reason}"
@@ -651,8 +660,14 @@ class LocalEngineService:
         self._npu_checking = False  # stage 1 has run longer than ``npu_quiet_seconds`` (the screens show it)
         self._npu_phase: Optional[str] = None  # "downloading" | "starting" while a load prepares the NPU
         self._npu_bytes = (0, 0)  # the files' download: (done, total)
-        self._npu_fetch_tried = False  # this app start downloaded (or tried to download) the NPU files
+        self._npu_fetch_failed_at: Optional[float] = None  # ``clock()`` when the last NPU files download failed
+        self._npu_retry_text: Optional[str] = None  # the download's "Connection problem (…); retrying in N s…"
         self.npu_download_error: Optional[str] = None  # why the last download failed (this process)
+        self.npu_fetch_backoff: tuple = NPU_FETCH_BACKOFF
+        self.npu_fetch_cooldown = NPU_FETCH_COOLDOWN
+        #: the wait between the download's tries: ``sleep(seconds)`` -> True when interrupted (tests replace it; the
+        #: default waits in short steps and ends at once on a Stop or the service stopping)
+        self.npu_fetch_sleep: Optional[Callable[[float], bool]] = None
         self._npu_files_present: Optional[bool] = None  # the phone's skeleton is on disk (cached stat)
         self._npu_cancel = threading.Event()  # the service stops: a running download ends
         self.npu_hung = False  # the check or a first NPU load did not answer in time
@@ -818,6 +833,11 @@ class LocalEngineService:
                 snap = dataclasses.replace(secondary.snapshot(), running=self.server.running)
             snap = dataclasses.replace(snap, queue=snap.queue + len(pool.queue))
         return snap
+
+    def loading_model(self) -> Optional[str]:
+        """The stem of the model loading now (the NPU files and the NPU's start included), else None; a load
+        started anywhere (a tap, a request) counts. Attributes only: the screens call it."""
+        return self._stem if self._state == "loading" else None
 
     def health(self, model: Optional[str] = None) -> dict:
         """``{"state", "model", "queue"}`` (plus ``busy`` and ``load_seconds`` of the last load); with
@@ -1495,8 +1515,8 @@ class LocalEngineService:
 
     def npu_progress(self) -> Optional[dict]:
         """``{"phase", "text", "fraction"}`` while stage 1 ("checking", once it has run ``npu_quiet_seconds``),
-        the NPU files' download ("downloading", a fraction) or stage 2 ("starting") runs, else None. Attributes
-        only: the screens call it."""
+        the NPU files' download ("downloading", a fraction; its text is the retry line while it waits to try again)
+        or stage 2 ("starting") runs, else None. Attributes only: the screens call it."""
         phase = self._npu_phase
         if phase is None and self._npu_checking and self.npu_possible():
             phase = "checking"
@@ -1504,7 +1524,7 @@ class LocalEngineService:
             return {"phase": phase, "text": NPU_CHECKING_TEXT, "fraction": None}
         if phase == "downloading":
             done, total = self._npu_bytes
-            return {"phase": phase, "text": _npu_bytes_text(done, total),
+            return {"phase": phase, "text": self._npu_retry_text or _npu_bytes_text(done, total),
                     "fraction": max(0.0, min(1.0, done / total)) if total else None}
         if phase == "starting":
             return {"phase": phase, "text": NPU_STARTING_TEXT, "fraction": None}
@@ -1533,7 +1553,7 @@ class LocalEngineService:
         return f"{eng.npu_label(self.npu_state() or {})} ready"
 
     def npu_files_note(self, stem: Optional[str]) -> Optional[str]:
-        """The model row's warning while this start's NPU files download failed and ``stem`` would run on the NPU."""
+        """The model row's warning while the last NPU files download failed and ``stem`` would run on the NPU."""
         if not stem or not self.npu_download_error or not self.npu_offered():
             return None
         mode, forced = self._model_mode(stem, timing=False)
@@ -1588,10 +1608,11 @@ class LocalEngineService:
     # ---- NPU: the files and stage 2 (a loading thread, holding the gate) -------------------------------------
 
     def _prepare_npu(self) -> Optional[str]:
-        """Before an NPU load: the phone's skeleton (downloaded once per app start when it is missing), then stage 2
-        (once per process). None when the NPU is registered, else why this load does not use it (no fallback is
-        recorded for the model). A Stop during the download raises ``LocalLLMError`` (499): the load ends, and
-        nothing counts as a failed download (the next NPU load resumes the part)."""
+        """Before an NPU load: the phone's skeleton (downloaded when it is missing; after a failed download, again by
+        the first load once ``npu_fetch_cooldown`` has passed), then stage 2 (once per process). None when the NPU is
+        registered, else why this load does not use it (no fallback is recorded for the model). A Stop during the
+        download raises ``LocalLLMError`` (499): the load ends, and nothing counts as a failed download (the next NPU
+        load resumes the part)."""
         with self._npu_prepare_lock:
             session = self._npu_session_state
             if session is not None:
@@ -1604,20 +1625,20 @@ class LocalEngineService:
             if not (folder and spec and source):
                 return "this engine build names no NPU files for this phone"
             if not self.npu_files_ready(refresh=True):
-                if self._npu_fetch_tried:
-                    return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error or "not tried again yet")
-                self._npu_fetch_tried = True
+                if self._npu_fetch_cooling():
+                    return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
                 error = self._fetch_npu_files(source, folder)
-                if error == NPU_FETCH_CANCELLED:
-                    self._npu_fetch_tried = False  # a Stop is not a refusal of the NPU
+                if error == NPU_FETCH_CANCELLED:  # a Stop is not a refusal of the NPU: nothing is recorded
                     raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)")
                 if error is not None or not self.npu_files_ready(refresh=True):
                     self.npu_download_error = error or "the phone's file is missing from the download"
+                    self._npu_fetch_failed_at = self.clock()
                     log.warning("on-device NPU: %s; this load uses the GPU / CPU",
                                 NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error))
                     self._notify()
                     return NPU_FILES_ERROR_TEXT.format(reason=self.npu_download_error)
             self.npu_download_error = None
+            self._npu_fetch_failed_at = None
             _remove_other_npu_folders(folder)
             _tidy_npu_folder(folder)
             state = self._npu_session(folder)
@@ -1626,13 +1647,15 @@ class LocalEngineService:
 
     def _fetch_npu_files(self, source: dict, folder: str) -> Optional[str]:
         """Download ``source``'s archive (``downloads.fetch_blocking``: resumable part in ``folder``, size and
-        sha256 checked, one plain anonymous GET, https redirects only, no retries) and take only its pinned
-        skeletons (``downloads.extract_pinned``); the archive is deleted afterwards. An archive already in place (it
-        is only renamed there once verified: the app died before extracting it) is extracted without a download.
-        None when done, else why."""
+        sha256 checked, plain anonymous GETs, https redirects only, ``NPU_FETCH_TIMEOUT``, a connection
+        problem retried after each ``npu_fetch_backoff`` delay with the retry line in ``npu_progress``) and take only
+        its pinned skeletons (``downloads.extract_pinned``); the archive is deleted afterwards. An archive already in
+        place (it is only renamed there once verified: the app died before extracting it) is extracted without a
+        download. None when done, else why."""
         archive = os.path.join(folder, NPU_ARCHIVE_NAME)
         stops = self._stops
         self._npu_bytes = (0, int(source.get("size") or 0))
+        self._npu_retry_text = None
         self._npu_phase = "downloading"
         self._notify()
         last = [0.0]
@@ -1640,14 +1663,36 @@ class LocalEngineService:
         def progress(update: dict) -> None:
             if update.get("phase") != "downloading":
                 return
+            status = update.get("status")
+            retrying = str(status) if status else None
+            changed = retrying != self._npu_retry_text
+            self._npu_retry_text = retrying
             self._npu_bytes = (int(update.get("bytes_done") or 0), int(update.get("bytes_total") or 0))
             now = time.monotonic()
-            if now - last[0] >= 0.5:
+            if changed or now - last[0] >= 0.5:
                 last[0] = now
                 self._notify()
 
         def should_stop() -> Optional[str]:
             return "cancel" if self._npu_cancel.is_set() or self._stops != stops else None
+
+        def sleep(seconds: float) -> bool:
+            """The back-off between tries: True as soon as a Stop or the service stopping interrupts it."""
+            if self.npu_fetch_sleep is not None:
+                interrupted = bool(self.npu_fetch_sleep(seconds))
+            else:
+                end = time.monotonic() + float(seconds)
+                interrupted = True
+                while not should_stop():
+                    left = end - time.monotonic()
+                    if left <= 0:
+                        interrupted = False
+                        break
+                    self._npu_cancel.wait(min(0.2, left))
+            if not interrupted and self._npu_retry_text is not None:
+                self._npu_retry_text = None  # the next try connects: the line goes back to the bytes
+                self._notify()
+            return interrupted
 
         meta = {"url": source["url"], "file": source["url"], "repo": "", "size": source["size"],
                 "sha256": source["sha256"], "release": source["release"]}
@@ -1661,7 +1706,8 @@ class LocalEngineService:
                     session = self._npu_http if self._npu_http is not None else _anonymous_session()
                     dl.fetch_blocking(source["url"], archive, size=int(source["size"]), sha256=source["sha256"],
                                       meta=meta, progress=progress, should_stop=should_stop, session=session,
-                                      backoff=(), timeout=NPU_FETCH_TIMEOUT, host="GitHub", https_only=True)
+                                      sleep=sleep, backoff=tuple(self.npu_fetch_backoff), timeout=NPU_FETCH_TIMEOUT,
+                                      host="GitHub", https_only=True)
                 fetched = True
                 dl.extract_pinned(archive, source["files"], folder)
                 dl._remove(archive)
@@ -1679,6 +1725,7 @@ class LocalEngineService:
             return f"{type(exc).__name__}: {exc}"
         finally:
             self._npu_phase = None
+            self._npu_retry_text = None
             self._npu_files_present = None
             self._notify()
 
@@ -1807,13 +1854,13 @@ class LocalEngineService:
         self._clear_npu_attempt()
 
     def retry_npu(self, stem: str) -> bool:
-        """"Try the NPU again": forget the model's NPU fallback, and a failed NPU files download of this start (the
-        next NPU load downloads once more), and both of its NPU + GPU fallbacks; an idle loaded model reloads on its
-        next request."""
+        """"Try the NPU again": forget the model's NPU fallback, and a failed NPU files download (the next NPU load
+        downloads at once, without waiting for ``npu_fetch_cooldown``), and both of its NPU + GPU fallbacks; an idle
+        loaded model reloads on its next request."""
         fallbacks = self._npu_fallbacks()
         files = bool(self.npu_files_note(stem))
         if files:
-            self._npu_fetch_tried = False
+            self._npu_fetch_failed_at = None
             self.npu_download_error = None
         split = False
         for name, key in SPLIT_FALLBACK_KEYS.items():
@@ -1913,15 +1960,30 @@ class LocalEngineService:
 
     def _npu_wanted(self, stem: str, forced: bool) -> bool:
         """The NPU for ``stem`` now: its rule allows it, the NPU is offered (stage 1 runs here first when the start's
-        background check has not answered yet), this start's NPU files download has not failed, and its first NPU +
-        GPU load did not hang in this process (off the NPU until the restart)."""
+        background check has not answered yet), the NPU files download did not fail within ``npu_fetch_cooldown``
+        seconds, and its first NPU + GPU load did not hang in this process (off the NPU until the restart)."""
         if not self._npu_rule(stem, forced):
             return False
         if self._stage1() is None:
             self.run_npu_check()  # a load that comes before the start's background check waits for it
         if self.npu_hung and self._npu_hung_split and self._npu_hung_stem == stem:
             return False
-        return self.npu_offered() and not (self._npu_fetch_tried and self.npu_download_error)
+        return self.npu_offered() and not self._npu_fetch_cooling() and not self._npu_fetch_kept(stem)
+
+    def _npu_fetch_kept(self, stem: str) -> bool:
+        """After a failed NPU files download, ``stem`` is loaded off the NPU: it keeps running there (a request never
+        unloads it to download again); the next real load (another model, a load after an unload, "Try the NPU
+        again") downloads once ``npu_fetch_cooldown`` has passed."""
+        return bool(self.npu_download_error) and self._npu_fetch_failed_at is not None \
+            and self.loaded_stem == stem and not self._loaded_npu and not self._loaded_split
+
+    def _npu_fetch_cooling(self) -> bool:
+        """The last NPU files download failed less than ``npu_fetch_cooldown`` seconds ago: a load now uses the GPU /
+        CPU without downloading again (the first load after that downloads by itself; "Try the NPU again" ends the
+        wait)."""
+        failed = self._npu_fetch_failed_at
+        return bool(self.npu_download_error) and failed is not None and \
+            self.clock() - failed < float(self.npu_fetch_cooldown)
 
     def _after_npu(self, stem: str) -> tuple:
         """``(gpu, layers)`` of the step after the NPU in ``stem``'s chain: CPU + GPU for the NPU + GPU modes (the CPU

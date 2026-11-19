@@ -674,7 +674,7 @@ def test_a_failed_download_line_and_try_again_on_the_row(tmp_path):
     panel.build()
     chat(service)
     panel.render(push=False)
-    line = "NPU files not downloaded: Download failed (Timeout)"
+    line = "NPU files not downloaded: Download failed after 4 tries (Timeout)"
     assert _by_key(panel.control)["local-npu-line"].value == line
     index = len(presets.load_presets(service.prefs)) - 1
     keys = _by_key(panel.preset_column)
