@@ -255,6 +255,77 @@ def _mime(path: str) -> str:
     return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 
+def _size_text(count: Any) -> str:
+    count = max(0, int(count or 0))
+    if count < 1024:
+        return f"{count} B"
+    if count < 1024 * 1024:
+        return f"{count / 1024:.0f} KB"
+    return f"{count / (1024 * 1024):.1f} MB"
+
+
+def _speed_text(count: Any, seconds: Any) -> str:
+    return f"{_size_text(int(count or 0) / max(float(seconds or 0.0), 0.001))}/s"
+
+
+class UploadLog:
+    """Upload progress as log lines: one when a file starts, one at most every ``every`` seconds while it
+    uploads (size sent, percent, speed), and one when it is up (size, time, average speed).
+
+    Called as ``progress(name, sent, total)`` by :class:`DriveSyncRunner`; ``total_text()`` is the tail of
+    the "done" line. A failing ``log_line`` never stops an upload."""
+
+    def __init__(self, log_line: Callable[[str], Any], *, every: float = 1.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._log_line = log_line
+        self.every = float(every)
+        self.clock = clock
+        self.bytes = 0          # bytes of the files that finished uploading
+        self.seconds = 0.0      # time those uploads took
+        self._name = None
+        self._started = 0.0
+        self._last_line = 0.0
+        self._done = False
+
+    def _say(self, text: str) -> None:
+        try:
+            self._log_line(text)
+        except Exception:
+            log.debug("upload log line failed", exc_info=True)
+
+    def __call__(self, name: str, sent: int, total: int) -> None:
+        now = self.clock()
+        sent, total = max(0, int(sent or 0)), max(0, int(total or 0))
+        if name != self._name:  # a new file
+            self._name, self._started, self._last_line, self._done = name, now, now, False
+            if sent < total:
+                self._say(f"⬆️ Drive upload: {name} ({_size_text(total)})…")
+                if sent == 0:
+                    return
+        if self._done:
+            return
+        if total == 0:  # an empty file: nothing worth a line
+            self._done = True
+            return
+        elapsed = now - self._started
+        if sent >= total:
+            self._done = True
+            self.bytes += total
+            self.seconds += elapsed
+            self._say(f"✅ Drive upload: {name}: {_size_text(total)} in {elapsed:.1f} s · "
+                      f"{_speed_text(total, elapsed)}")
+        elif now - self._last_line >= self.every:
+            self._last_line = now
+            self._say(f"⬆️ Drive upload: {name}: {_size_text(sent)} / {_size_text(total)} "
+                      f"({sent * 100 // total}%) · {_speed_text(sent, elapsed)}")
+
+    def total_text(self) -> str:
+        """" · 12.3 MB in 5.4 s (2.3 MB/s)" for the "done" line; "" when nothing was uploaded."""
+        if not self.bytes:
+            return ""
+        return f" · {_size_text(self.bytes)} in {self.seconds:.1f} s ({_speed_text(self.bytes, self.seconds)})"
+
+
 class DriveSyncRunner:
     """Carries out one :class:`SyncPlan` with a ``DriveClient``.
 
@@ -308,6 +379,8 @@ class DriveSyncRunner:
                 result.unchanged += 1
                 return existing.id
         report = (lambda sent, total: progress(name, sent, total)) if progress else None
+        if report is not None and size:
+            report(0, size)  # the upload starts now (the client reports after each chunk)
         if existing is not None:
             try:
                 uploaded = self.client.upload(item.local, name=name, mime=_mime(item.local), file_id=existing.id,
@@ -703,6 +776,7 @@ class DriveSyncService:
                     log.debug("Drive sync result callback failed", exc_info=True)
             return result
         self._log(f"☁️ Drive sync: {label} ({MODE_LABELS[mode]})…")
+        uploads = UploadLog(self._log)
         state: dict = {}
         try:
             compiled = list(job.compiled_files or ())
@@ -728,7 +802,7 @@ class DriveSyncService:
             except Exception:
                 state = {}
             result = DriveSyncRunner(self.client(), state).run(plan, book_key=job.book_key, folder=settings.folder,
-                                                                label=label, cancel=cancel)
+                                                                label=label, cancel=cancel, progress=uploads)
         except ShareError as exc:
             result.error, result.error_code = exc.message, exc.code
             result.finished = time.time()
@@ -749,7 +823,7 @@ class DriveSyncService:
         if result.cancelled:
             self._log(f"☁️ Drive sync cancelled: {label}")
         elif result.ok:
-            self._log(f"✅ Drive sync done: {label}: {result.summary()}")
+            self._log(f"✅ Drive sync done: {label}: {result.summary()}{uploads.total_text()}")
         else:
             reason = result.error or (result.errors[0] if result.errors else result.summary())
             self._log(f"⚠️ Drive sync failed: {label}: {reason}")

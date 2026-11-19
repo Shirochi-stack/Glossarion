@@ -697,7 +697,9 @@ def test_a_compile_uploads_in_the_background_when_sync_is_on(google, tmp_path, b
     assert cloud.sync.worker.wait_idle(15)
     assert google.tree() == {"Library Sync/": b"", "Library Sync/Book.epub": b"v2"}
     assert store.last_sync()["ok"] and store.last_sync()["updated"] == 1
-    assert len(lines) == 4 and lines[0].startswith("☁") and "Drive sync done" in lines[-1]
+    # per sync: the start line, the file's upload start and finish, the done line
+    assert len(lines) == 8 and lines[0].startswith("☁") and "Drive sync done" in lines[-1]
+    assert lines[1] == "⬆️ Drive upload: Book.epub (2 B)…" and lines[2].startswith("✅ Drive upload: Book.epub: 2 B in ")
     assert "sync" in changes
     # full mode with the raw source, through the controller's manual "Sync to Drive now"
     store.set_drive_options(mode="full_raw")
@@ -950,6 +952,66 @@ def test_the_service_asks_the_platform_for_compiled_files_a_job_does_not_name(go
     assert service(resolver).run_blocking(dsc.SyncJob("w", output_folder=str(workspace), compiled_files=(named,),
                                                       reason="compile")).ok
     assert asked == [] and google.tree()["Glossarion/Named.epub"] == b"named"
+
+
+def test_upload_log_lines_show_size_percent_and_speed():
+    lines, now = [], [100.0]
+    uploads = dsc.UploadLog(lines.append, every=1.0, clock=lambda: now[0])
+    mb = 1024 * 1024
+    uploads("Book.epub", 0, 20 * mb)           # the upload starts
+    now[0] += 0.4
+    uploads("Book.epub", 8 * mb, 20 * mb)      # too soon for a line
+    now[0] += 1.6
+    uploads("Book.epub", 16 * mb, 20 * mb)     # 2.0 s in: 8.0 MB/s
+    now[0] += 0.5
+    uploads("Book.epub", 20 * mb, 20 * mb)     # up after 2.5 s
+    uploads("Book.epub", 20 * mb, 20 * mb)     # a repeated last report adds nothing
+    assert lines == [
+        "⬆️ Drive upload: Book.epub (20.0 MB)…",
+        "⬆️ Drive upload: Book.epub: 16.0 MB / 20.0 MB (80%) · 8.0 MB/s",
+        "✅ Drive upload: Book.epub: 20.0 MB in 2.5 s · 8.0 MB/s",
+    ]
+    assert uploads.total_text() == " · 20.0 MB in 2.5 s (8.0 MB/s)"
+    # a small file: a start and a finish line; an empty one: nothing
+    now[0] += 1.0
+    uploads("small.txt", 0, 2048)
+    now[0] += 0.5
+    uploads("small.txt", 2048, 2048)
+    uploads("empty.txt", 0, 0)
+    assert lines[3:] == ["⬆️ Drive upload: small.txt (2 KB)…", "✅ Drive upload: small.txt: 2 KB in 0.5 s · 4 KB/s"]
+    assert dsc.UploadLog(lines.append).total_text() == ""
+
+    def broken(line):
+        raise RuntimeError("log bug")
+
+    dsc.UploadLog(broken)("a", 0, 10)  # a failing log never stops the upload
+
+
+def test_a_sync_logs_each_upload_and_the_total_on_the_done_line(google, tmp_path):
+    workspace = tmp_path / "Work"
+    epub = _write(workspace / "Work_translated.epub", b"e" * (600 * 1024))
+    client, _ = _client(google)
+    lines = []
+    service = dsc.DriveSyncService(
+        settings=lambda: dsc.SyncSettings(enabled=True, mode="compiled", signed_in=True),
+        access=lambda: client.access, load_state=lambda: {}, save_state=lambda state: None,
+        api_base=google.base + "/drive/v3", upload_base=google.base + "/upload/drive/v3", log_line=lines.append)
+    job = dsc.SyncJob("w", label="Work", output_folder=str(workspace), compiled_files=(epub,), reason="compile")
+    assert service.run_blocking(job).ok
+    assert lines[0] == "☁️ Drive sync: Work (Compiled output only)…"
+    assert lines[1] == "⬆️ Drive upload: Work_translated.epub (600 KB)…"
+    assert lines[2].startswith("✅ Drive upload: Work_translated.epub: 600 KB in ") and lines[2].endswith("/s")
+    assert lines[-1].startswith("✅ Drive sync done: Work: 1 new, 0 updated, 0 unchanged · 600 KB in ")
+    assert lines[-1].endswith("/s)") and len(lines) == 4
+    # nothing to upload the second time: no upload lines and no total on the done line
+    lines.clear()
+    state = {}
+    service = dsc.DriveSyncService(
+        settings=lambda: dsc.SyncSettings(enabled=True, mode="compiled", signed_in=True),
+        access=lambda: client.access, load_state=lambda: state, save_state=state.update,
+        api_base=google.base + "/drive/v3", upload_base=google.base + "/upload/drive/v3", log_line=lines.append)
+    assert service.run_blocking(job).ok
+    assert lines[-1] == "✅ Drive sync done: Work: 0 new, 0 updated, 1 unchanged" and len(lines) == 2
 
 
 def test_compile_listeners_get_each_reported_compile_and_never_raise_into_it(google, tmp_path, box):
