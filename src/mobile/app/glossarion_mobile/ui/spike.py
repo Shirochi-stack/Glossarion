@@ -437,7 +437,7 @@ class SpikeApp:
                 "NPU (Snapdragon)",
                 "The on-device engine's NPU check: each step, how long the check and the NPU's start took, the "
                 "NPU files (llama.cpp release, on the phone or not, the last download error), arch, device, the "
-                "backend of the last load, the fallbacks and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU, "
+                "backend of the last load, the fallbacks, the last native abort and the last ggml-hex log lines. Timing runs the self-test prompt on NPU, GPU and CPU, "
                 "and on NPU + GPU together (layer split, tensor split) where the phone has the NPU, with the loaded or selected "
                 "on-device model: prompt and generation speed of each. Stop ends it after the current step. "
                 "Long-press the text to copy it.",

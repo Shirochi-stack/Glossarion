@@ -250,7 +250,19 @@ library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
   through `glossarion_hexagon_session_check()`. It reports each step: shipped, libcdsprpc, arch,
   skeletons, registry, session. `device_index("HTP")` / `device_index("OpenCL")` give the `main_gpu` of
   each registered backend in llama.cpp's own device order.
-* NPU + GPU (experimental, owner 2026-11-19): with "Use GPU" on, a model whose backend is "auto" and that
+* Native aborts: llama.cpp ends the process through `ggml_abort` (GGML_ABORT, GGML_ASSERT) and Android
+  keeps no stderr. Before its first native work (the NPU check, the NPU start, every model load) the
+  engine registers `ggml_set_abort_callback` once per process through the loader's libggml (the handle
+  `_device_handles` uses; no patch change). The callback writes ggml's `file:line: message`, the time,
+  the process id and the run (process id + start time) to `native_abort.txt` in the app's data folder,
+  flushes it and returns. At the next start the NPU, GPU and NPU + GPU crash markers and the timing's
+  per-mode marker carry the same run: the recorded reason then ends with the message, e.g. "Glossarion
+  closed while the NPU was running this model: ggml-backend-meta.cpp:635: ...". A note of another run is
+  never attached. The device checks card shows the last one ("Last native abort (time): ...").
+* NPU + GPU (experimental, owner 2026-11-19; switched off by `service.AUTO_SPLIT_ENABLED` after it crashed
+  at model load on a Galaxy Z Fold 8 the same day: "auto" with "Use GPU" on runs on the NPU alone, and a
+  record or marker the crashed build left changes nothing; the code and its tests stay, the tests switch it
+  on). When on: with "Use GPU" on, a model whose backend is "auto" and that
   would run on the NPU loads on the NPU and the Adreno GPU at once: llama.cpp's tensor split
   (`LLAMA_SPLIT_MODE_TENSOR`, every layer divided between the two devices, the whole model offloaded; the
   GPU layers setting applies to GPU-only loads). The layer split is not used for this: the OpenCL backend has
@@ -261,7 +273,7 @@ library `libcdsprpc.so`. x86_64 and iOS build exactly as before (no backend).
   (Prefs `local_llm_split_fallback`, then the NPU's own GPU / CPU fallbacks) until its file, its backend
   choice or the app version changes, "Use GPU" is switched or "Try the NPU again"; the device checks card
   shows why ("NPU + GPU dropped: ..."). The device checks' timing still measures NPU, GPU, CPU, layer split
-  and tensor split each by itself. To drop the feature, `service._split_wanted` returning False is enough.
+  and tensor split each by itself, also while the "auto" rule is off.
 * What CI still builds with the Hexagon SDK: the ARM side. `ggml-hexagon` compiles against the SDK's
   headers and its qaic stub generator (`htp_iface`). `[hexagon]` pins the Hexagon SDK 6.7.0.0 (the
   tarball llama.cpp's own Android toolchain image installs, a public GitHub release of

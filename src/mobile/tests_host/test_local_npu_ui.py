@@ -31,6 +31,8 @@ from glossarion_mobile.ui.screens import local_models_panel as lmp  # noqa: E402
 from test_devfix7_custom_models import _by_key, _Page, _texts  # noqa: E402
 from test_local_llm_server import make_service  # noqa: E402
 from test_local_npu import Probe, chat, failing_state, npu_service, set_backend  # noqa: E402
+from test_local_npu import _no_abort_note  # noqa: E402,F401 - the autouse fixture
+from glossarion_mobile.services.local_llm import selfcheck  # noqa: E402
 from glossarion_mobile.services.local_llm import service as svc  # noqa: E402
 from test_bootstrap import _fake_session, _shutdown, _spike_main, app_env, storage  # noqa: E402,F401 - fixtures
 
@@ -295,8 +297,9 @@ def test_row_backend_line_fallback_and_try_again(tmp_path):
     assert "Runs on NPU: Hexagon v81 (HTP0)" in panel.engine_detail.value
 
 
-def test_row_and_engine_card_name_npu_and_gpu_together(tmp_path):
-    # "Use GPU" on: Auto runs on NPU + GPU; the existing row line and engine detail say so (no new rows)
+def test_row_and_engine_card_name_npu_and_gpu_together(tmp_path, monkeypatch):
+    # "Use GPU" on: Auto runs on NPU + GPU (when switched on); the existing row line and engine detail say so
+    monkeypatch.setattr(svc, "AUTO_SPLIT_ENABLED", True)
     service, engine, _probe = npu_service(tmp_path, gpu=True)
     set_backend(service, "m-Q4_0", "auto")
     panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
@@ -313,6 +316,29 @@ def test_row_and_engine_card_name_npu_and_gpu_together(tmp_path):
     panel._gpu_limits_state = None
     panel._refresh_gpu_limits()
     assert panel.gpu_layers_note.value.endswith("A model on the NPU and the GPU together uses all layers.")
+
+
+def test_while_npu_and_gpu_is_off_auto_says_npu_and_the_layers_note_is_as_before(tmp_path):
+    # the default (``svc.AUTO_SPLIT_ENABLED`` off): "Use GPU" on + Auto runs on the NPU alone, and nothing on the
+    # screens mentions NPU + GPU, not even with an NPU + GPU record left by the build that crashed
+    assert svc.AUTO_SPLIT_ENABLED is False
+    service, engine, _probe = npu_service(tmp_path, gpu=True)
+    set_backend(service, "m-Q4_0", "auto")
+    service._split_failed("m-Q4_0", svc.SPLIT_CRASH_REASON)
+    panel = lmp.LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: "local/m-Q4_0")
+    panel.build()
+    chat(service)
+    assert engine.backends == ["npu"]
+    panel.render(push=False)
+    index = len(presets.load_presets(service.prefs)) - 1
+    keys = _by_key(panel.preset_column)
+    assert keys[f"local-preset-backend-{index}"].value == "Runs on NPU · Hexagon v81"
+    assert not any(item.content == "Try the NPU again" for item in keys[f"local-preset-menu-{index}"].items)
+    service.gpu_layer_limit = lambda stem=None: 24
+    panel._gpu_limits_state = None
+    panel._refresh_gpu_limits()
+    assert panel.gpu_layers_note.value.endswith("Changes apply to the next model load.")
+    assert "NPU + GPU" not in "\n".join(selfcheck.npu_lines(service, soc=""))
 
 
 # ---- no delay, a progress bar instead (B1-B3) ------------------------------------------------------------------------

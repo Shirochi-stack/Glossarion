@@ -456,8 +456,13 @@ def saved_speeds(service: Any) -> Optional[dict]:
              isinstance(result, dict)}
     running = raw.get("running")
     if running in SPEED_MODES and not _SPEED_LOCK.locked():
-        modes[running] = {"crashed": SPEED_CRASHED}
+        modes[running] = {"crashed": _crashed(SPEED_CRASHED, eng.abort_reason(raw))}
     return {mode: modes[mode] for mode in SPEED_MODES if mode in modes}
+
+
+def _crashed(text: str, native: Optional[str]) -> str:
+    """A crashed mode's text, ending with the native abort message of the run that died in it when there is one."""
+    return f"{text}: {native}" if native else text
 
 
 def _speed_result(service: Any, ran: str, usage: dict, timing: dict, seconds: float) -> dict:
@@ -506,11 +511,16 @@ def npu_speed_check(service: Any, stem: str, *, backends: Optional[tuple] = None
     saved = saved if isinstance(saved, dict) else {}
     # the modes the app died in and that no timing has reported since (the last one: ``running``)
     pending = {m for m in list(saved.get("crashed") or []) + [saved.get("running")] if m in SPEED_MODES}
+    # the native abort message of each pending mode: the one the last run died in gets its note when that run wrote it
+    notes = {m: str(n) for m, n in dict(saved.get("notes") or {}).items() if m in pending and n}
+    native = eng.abort_reason(saved) if saved.get("running") in pending else None
+    if native:
+        notes[saved["running"]] = native
     reported: set = set()
     kept = saved.get("modes") if saved.get("stem") == stem and isinstance(saved.get("modes"), dict) else {}
-    entry = {"version": service.app_version, "stem": stem, "at": int(time.time()), "running": None,
-             "crashed": sorted(pending), "modes": {m: dict(r) for m, r in kept.items()
-                                                   if m in SPEED_MODES and isinstance(r, dict)}}
+    entry = {"version": service.app_version, "stem": stem, "at": int(time.time()), "run": eng.RUN_ID, "running": None,
+             "crashed": sorted(pending), "notes": notes, "modes": {m: dict(r) for m, r in kept.items()
+                                                                  if m in SPEED_MODES and isinstance(r, dict)}}
     results: dict = {}
     previous, previous_split = service.backend_override, service.split_override
     try:
@@ -520,7 +530,8 @@ def npu_speed_check(service: Any, stem: str, *, backends: Optional[tuple] = None
                 results[mode] = {"skipped": SPEED_STOPPED}
                 continue
             if mode in pending:
-                results[mode] = {"crashed": SPEED_CRASHED, "skipped": SPEED_CRASHED_SKIPPED}
+                results[mode] = {"crashed": _crashed(SPEED_CRASHED, notes.get(mode)),
+                                 "skipped": _crashed(SPEED_CRASHED_SKIPPED, notes.get(mode))}
                 reported.add(mode)
                 continue
             if mode in ("npu", "layer", "tensor") and not service.npu_offered():
@@ -557,6 +568,7 @@ def npu_speed_check(service: Any, stem: str, *, backends: Optional[tuple] = None
             service.unload()
         finally:
             entry["crashed"] = sorted(pending - reported)  # this timing ended: what it reported runs again next time
+            entry["notes"] = {m: n for m, n in notes.items() if m in entry["crashed"]}
             _store_speeds(service, entry, results, None)
             _SPEED_LOCK.release()
     return results
@@ -645,6 +657,14 @@ def speed_lines(speeds: dict) -> list:
     return [f"  {SPEED_LABELS[mode]}: {_speed_text(speeds.get(mode), mode)}" for mode in SPEED_MODES if mode in speeds]
 
 
+def _abort_line() -> Optional[str]:
+    """"Last native abort (2026-11-19 14:02): ggml-backend-meta.cpp:635: …" of the note, None without one."""
+    note = eng.abort_note()
+    if not note:
+        return None
+    return f"Last native abort ({time.strftime('%Y-%m-%d %H:%M', time.localtime(note['at']))}): {note['message']}"
+
+
 def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str] = None) -> list:
     """The NPU block of Logs & diagnostics › device checks (selectable text: copy it from there). Without the NPU,
     one line: "NPU: not available (step: reason)"."""
@@ -654,7 +674,9 @@ def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str]
     if failure is not None:
         hang = service.npu_hang_note() if getattr(service, "npu_hung", False) else None
         extra = _npu_stage_lines(service) if service.npu_possible() else []
-        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else []) + extra
+        aborted = _abort_line() if service.npu_possible() else None
+        return [f"NPU: not available ({failure[0]}: {failure[1]})"] + ([hang] if hang else []) + extra \
+            + ([aborted] if aborted else [])
     state = service.npu_state() or {}
     soc = eng.soc_label() if soc is None else soc
     lines = ["NPU: available"]
@@ -687,10 +709,14 @@ def npu_lines(service: Any, speeds: Optional[dict] = None, *, soc: Optional[str]
         lines.extend(f"Fallback: {stem}: {reason}" for stem, reason in sorted(fallbacks.items()))
     else:
         lines.append("Fallback: none")
-    # a model "auto" keeps on the NPU alone instead of NPU + GPU (only when there is one)
-    lines.extend(f"NPU + GPU dropped: {stem}: {reason}" for stem, reason in sorted(summary["split_fallbacks"].items()))
+    # a model "auto" keeps on the NPU alone instead of NPU + GPU (only when there is one, and while "auto" uses it)
+    if svc.AUTO_SPLIT_ENABLED:
+        lines.extend(f"NPU + GPU dropped: {stem}: {reason}" for stem, reason in sorted(summary["split_fallbacks"].items()))
     if service.npu_hung:
         lines.append(service.npu_hang_note() or "")
+    aborted = _abort_line()
+    if aborted:
+        lines.append(aborted)
     hex_lines = eng.hex_log_lines()
     lines.append("ggml-hex log:" if hex_lines else "ggml-hex log: none captured")
     lines.extend(f"  {line}" for line in hex_lines)
