@@ -370,7 +370,7 @@ class LibrarySettingsDialog(QDialog):
         self.save_button = dialog_button("💾 Save", "save")
         self.save_button.clicked.connect(self.save)
         close = dialog_button("Close", "close")
-        close.clicked.connect(self.close)
+        close.clicked.connect(self.reject)
         buttons.addWidget(self.save_button)
         buttons.addWidget(close)
         outer.addLayout(buttons)
@@ -672,16 +672,26 @@ class LibrarySettingsDialog(QDialog):
         self.sign_out_button.setEnabled(True)
         self.refresh()
 
-    def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt
+    def _release(self) -> None:
+        """Cancel a pending sign-in and stop listening (once)."""
+        if getattr(self, "_released", False):
+            return
+        self._released = True
         self._cancel_sign_in()
         try:
             cloud_signals().changed.disconnect(self._on_cloud_changed)
         except (RuntimeError, TypeError):
             pass
+
+    # A shown QDialog turns a close event into reject(), and reject() ends in done(): Close, Esc and the window's X
+    # all arrive there. reject() must not call close() again (Qt then refuses the close and the window stays open).
+    def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt
+        self._release()
         super().closeEvent(event)
 
-    def reject(self) -> None:  # Esc
-        self.close()
+    def done(self, result: int) -> None:
+        self._release()
+        super().done(result)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -883,7 +893,7 @@ class ShareDialog(QDialog):
         bottom = QHBoxLayout()
         bottom.addStretch()
         close = dialog_button("Close", "close")
-        close.clicked.connect(self.close)
+        close.clicked.connect(self.reject)
         bottom.addWidget(close)
         layout.addLayout(bottom)
 
@@ -1137,7 +1147,11 @@ class ShareDialog(QDialog):
             self.status.setText("⚠️ " + (_error_text(error) or "The link could not be deleted."))
         self._refresh_links()
 
-    def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt
+    def _release(self) -> None:
+        """Stop this window's upload and stop listening (once)."""
+        if getattr(self, "_released", False):
+            return
+        self._released = True
         if self._cancel is not None:  # closing the window stops its upload
             self._cancel.cancel()
         self._poll.stop()
@@ -1145,10 +1159,15 @@ class ShareDialog(QDialog):
             cloud_signals().changed.disconnect(self._on_cloud_changed)
         except (RuntimeError, TypeError):
             pass
+
+    # Close, Esc and the window's X all end in done() while the dialog is shown (see LibrarySettingsDialog).
+    def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt
+        self._release()
         super().closeEvent(event)
 
-    def reject(self) -> None:  # Esc
-        self.close()
+    def done(self, result: int) -> None:
+        self._release()
+        super().done(result)
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -762,3 +762,66 @@ def test_new_desktop_ui_module_follows_the_epub_library_spec_tiers():
     data = (SRC / "library_cloud_ui.py").read_bytes()
     ast.parse(data.decode("utf-8"), feature_version=(3, 10))
     assert data.count(b"\r\n") in (0, data.count(b"\n"))
+
+
+# ---------------------------------------------------------------------------------------------------
+# closing a shown dialog
+# ---------------------------------------------------------------------------------------------------
+
+
+def _shown(dialog, app):
+    """Show ``dialog`` without putting it on the screen: a shown QDialog turns a close event into reject()."""
+    from PySide6.QtCore import Qt
+
+    dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
+    dialog.show()
+    app.processEvents()
+    assert dialog.isVisible()
+    return dialog
+
+
+def _close_it(dialog, how):
+    from PySide6.QtWidgets import QPushButton
+
+    if how == "button":
+        buttons = [b for b in dialog.findChildren(QPushButton) if b.text() == "Close"]
+        assert len(buttons) == 1
+        buttons[0].click()
+    elif how == "escape":
+        dialog.reject()
+    else:  # the window's X
+        dialog.close()
+
+
+@pytest.mark.parametrize("how", ["button", "escape", "window"])
+def test_a_shown_library_settings_dialog_closes(qapp, google, tmp_path, box, how):
+    cloud, _store, _lines = _cloud(google, tmp_path, box)
+    dialog = _shown(ui.LibrarySettingsDialog(None, cloud=cloud), qapp)
+    _close_it(dialog, how)
+    qapp.processEvents()
+    assert not dialog.isVisible()
+    assert dialog._released
+    ui._emit_changed("drive")  # a closed dialog no longer listens
+    qapp.processEvents()
+
+
+@pytest.mark.parametrize("how", ["button", "escape", "window"])
+def test_a_shown_share_dialog_closes(qapp, google, tmp_path, box, how):
+    cloud, _store, _lines = _cloud(google, tmp_path, box)
+    dialog = _shown(ui.ShareDialog(_book(tmp_path), None, cloud=cloud), qapp)
+    _close_it(dialog, how)
+    qapp.processEvents()
+    assert not dialog.isVisible()
+    assert dialog._released and not dialog._poll.isActive()
+
+
+def test_no_library_dialog_calls_close_from_reject():
+    """reject() -> close() -> closeEvent() -> reject() made Qt refuse the close: the window stayed open."""
+    import ast
+
+    tree = ast.parse((SRC / "library_cloud_ui.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "reject":
+            calls = [n.func.attr for n in ast.walk(node)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+            assert "close" not in calls, node.lineno
