@@ -24818,7 +24818,9 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     _escape_fired = [False]
 
     def _escape_tag_like(m):
-        inner = m.group(1)
+        if m.group('link_target'):
+            return m.group(0)
+        inner = m.group('inner')
         try:
             mname = re.match(r'\s*/?\s*([a-zA-Z0-9]+)', inner)
             tag = (mname.group(1) if mname else "").lower()
@@ -24851,7 +24853,18 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             _escape_fired[0] = True
         return "&lt;" + inner + "&gt;"
 
-    plain_text = re.sub(r'<(/?[a-zA-Z][^>]*)>', _escape_tag_like, plain_text)
+    # Markdown link targets are not tags: enhanced extraction (html2text)
+    # writes every link as [text](<href>) and a link whose text is its URL as
+    # <https://...>. Escaping them made the href "&lt;https://...&gt;".
+    _md_link_target = (
+        r'\]\(<[^<>\n]*>'
+        r'|<(?:(?:https?|ftps?)://|mailto:)[^\s<>]+>'
+    )
+    plain_text = re.sub(
+        rf'(?P<link_target>{_md_link_target})|<(?P<inner>/?[a-zA-Z][^>]*)>',
+        _escape_tag_like,
+        plain_text,
+    )
 
     # Disabled: the escape-pass above already handles these sequences, so this
     # warning was confusing users who thought something went wrong. Left in
@@ -24875,7 +24888,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         rf'</?(?!(?:{_allowed_alt})(?:[\s/>]))[a-zA-Z][^>]*>',
         re.DOTALL | re.IGNORECASE
     )
-    if _html_tag_re.search(plain_text):
+    if _html_tag_re.search(re.sub(_md_link_target, '', plain_text)):
         try:
             import html2text as _html2text_mod
             _h = _html2text_mod.HTML2Text()
