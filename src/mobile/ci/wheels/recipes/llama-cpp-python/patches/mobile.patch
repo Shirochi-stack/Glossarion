@@ -4,7 +4,8 @@ upstream's five changes below, unchanged, plus a sixth one for the vision build 
 a seventh one for the runtime CPU variants of the Android arm64 build, an eighth one for the
 optional GPU backends, a ninth one for the DRY sampler, a tenth one for the optional NPU
 backend, an eleventh one for tensor split across the NPU and the GPU and a twelfth one for
-tensor split with a weight the meta device cannot hold:
+tensor split with a weight the meta device cannot hold and a thirteenth one for tensor
+split's AllReduce on OpenCL:
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
 
@@ -93,6 +94,17 @@ tensor split with a weight the meta device cannot hold:
       device runs the whole projection, exactly as without a split. Nothing changes without a meta
       device, for MoE expert tensors, or for layers whose gate/up are in the meta buffer.
     - src/llama-model.h: the layer set in llama_meta_device_get_split_state_userdata.
+
+13. Tensor split's AllReduce on a backend that keeps per-tensor state in tensor->extra (OpenCL):
+    - ggml/src/ggml-backend-meta.cpp: ggml_backend_meta_graph_compute's generic AllReduce (allreduce_fallback)
+      copies each device's partial result into a temp tensor on the other device and adds it there. The temp
+      tensor (set_tmp_data) only got a buffer and a data pointer. OpenCL keeps a tensor's device buffer and
+      offset in .extra, which only init_tensor sets, so the first copy aborted in OpenCL's set_tensor
+      ("ggml-opencl.cpp:15816: GGML_ASSERT(extra) failed"). set_tmp_data now resets the temp buffer (OpenCL
+      takes the previous temp tensor's extra back into its pool) and has the owning backend initialise the
+      tensor. The zero-fill node of a device with an empty slice had the same gap: it is now a view of its
+      node, initialised by ggml_backend_view_init as upstream's node_red is. Hexagon's init_tensor only clears
+      its flags; CUDA, which upstream develops the split for, never reads .extra.
 
 Upstream's description:
 
@@ -1042,7 +1054,7 @@ index 5ff78f2..8f22817 100644
              ggml_add_cpu_backend_variant(apple_m1             DOTPROD)
              ggml_add_cpu_backend_variant(apple_m2_m3          DOTPROD MATMUL_INT8)
 diff --git a/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp b/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp
-index 595a582..76c4d4f 100644
+index 595a582..7c496a6 100644
 --- a/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp
 +++ b/vendor/llama.cpp/ggml/src/ggml-backend-meta.cpp
 @@ -1502,11 +1502,72 @@ static void ggml_backend_meta_buffer_memset_tensor(
@@ -1164,6 +1176,33 @@ index 595a582..76c4d4f 100644
                  offset_j += chunk_size_j;
              }
              GGML_ASSERT(offset_j == chunk_size_full);
+@@ -2403,6 +2469,12 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+         }
+         tensor->buffer = buf_ptr.get();
+         tensor->data   = ggml_backend_buffer_get_base(buf_ptr.get());
++        // Glossarion: the owning backend prepares the temp tensor. get_node_aux zeroed it, and OpenCL keeps a tensor's
++        // device buffer and offset in .extra, which only init_tensor sets: the first AllReduce copy into it aborted
++        // (GGML_ASSERT(extra)). The reset first returns the extra of the buffer's previous temp tensor to the pool.
++        ggml_backend_buffer_reset(buf_ptr.get());
++        const ggml_status status_init = ggml_backend_buffer_init_tensor(buf_ptr.get(), tensor);
++        GGML_ASSERT(status_init == GGML_STATUS_SUCCESS);
+     };
+     // FIXME usage_counts
+     auto get_cgraph_aux = [&]() -> ggml_cgraph * {
+@@ -2426,8 +2498,11 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+                 node_zero->op = GGML_OP_FILL;
+                 node_zero->src[0] = node; // only used for the shape, the data is not read
+                 ggml_set_op_params_f32(node_zero, 0, 0.0f);
+-                node_zero->data = node->data;
+-                node_zero->buffer = node->buffer;
++                // Glossarion: a view of the node, initialised by its backend as node_red is below (the same missing
++                // .extra on OpenCL as the temp tensor; only reached when a device's slice is empty)
++                node_zero->view_src = node->view_src == nullptr ? node : node->view_src;
++                node_zero->view_offs = node->view_offs;
++                ggml_backend_view_init(node_zero);
+                 node_zero->flags |= GGML_TENSOR_FLAG_COMPUTE;
+ 
+                 step_cgraphs[j] = get_cgraph_aux();
 diff --git a/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp b/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp
 index c3bc926..bbe39fc 100644
 --- a/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp

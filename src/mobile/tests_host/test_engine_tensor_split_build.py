@@ -75,7 +75,7 @@ def test_staging_is_guarded_by_the_whole_tensor_condition():
 
 
 def test_partial_writes_forward_the_old_calls_unchanged():
-    removed, added = _lines("-"), _lines("+")
+    removed, added = [r for r in _lines("-") if "node_zero" not in r], _lines("+")    # node_zero: item 13, below
     # every removed line is an old ggml_backend_tensor_set_2d call, re-added with only the name changed and the
     # stage pointer in front: same tensor, source, destination offset, size, count and strides
     assert len(removed) == 3 and all("ggml_backend_tensor_set_2d(simple_tensor, " in r for r in removed), removed
@@ -156,7 +156,7 @@ def _model_added(name: str) -> str:
 def test_item_12_is_in_the_header_after_item_11():
     header = PATCH.read_text(encoding="utf-8").split("diff --git", 1)[0]
     assert "\n12. Tensor split with a dense FFN weight the meta device cannot hold (split_mode TENSOR):\n" in header
-    assert "tensor split with a weight the meta device cannot hold:\n" in header
+    assert "tensor split with a weight the meta device cannot hold and a thirteenth one for tensor\n" in header
     assert header.index("\n11. Tensor split") < header.index("\n12. Tensor split") < \
         header.index("Upstream's description:")
 
@@ -229,3 +229,41 @@ def test_the_callback_mirrors_only_the_noted_layers_dense_ffn_weights():
     assert after[:2] == ["         // FFN",
                          "         if (std::regex_match(tensor_name, pattern_ffn_up_weight) || "
                          "std::regex_match(tensor_name, pattern_ffn_gate_weight)) {"], after[:2]
+
+
+# --- mobile.patch 13. -----------------------------------------------------------------------------------------
+
+def test_item_13_is_in_the_header_and_the_recipe():
+    header = PATCH.read_text(encoding="utf-8").split("diff --git", 1)[0]
+    assert ("\n13. Tensor split's AllReduce on a backend that keeps per-tensor state in tensor->extra (OpenCL):\n"
+            in header)
+    assert "split's AllReduce on OpenCL:\n" in header
+    assert header.index("\n12. Tensor split") < header.index("\n13. Tensor split") < \
+        header.index("Upstream's description:")
+    assert "#   - patches/mobile.patch 13.: tensor split's AllReduce" in RECIPE.read_text(encoding="utf-8")
+
+
+def test_the_allreduce_temp_tensor_is_initialised_by_its_backend():
+    section = _section().splitlines()
+    # right after upstream gives the temp tensor its buffer and data pointer: reset (the previous temp tensor's
+    # extra goes back to the backend's pool), then the backend's own init_tensor
+    i = section.index("         tensor->data   = ggml_backend_buffer_get_base(buf_ptr.get());")
+    assert section[i - 1] == "         tensor->buffer = buf_ptr.get();"
+    code = [line[1:].strip() for line in section[i + 1:i + 8] if line.startswith("+") and "//" not in line]
+    assert code == ["ggml_backend_buffer_reset(buf_ptr.get());",
+                    "const ggml_status status_init = ggml_backend_buffer_init_tensor(buf_ptr.get(), tensor);",
+                    "GGML_ASSERT(status_init == GGML_STATUS_SUCCESS);"], code
+    assert section[i + 7] == "     };"
+
+
+def test_the_zero_fill_node_is_a_view_initialised_like_node_red():
+    section = _section().splitlines()
+    removed = [line[1:].strip() for line in section if line.startswith("-") and "node_zero" in line]
+    assert removed == ["node_zero->data = node->data;", "node_zero->buffer = node->buffer;"], removed
+    added = [line[1:].strip() for line in section if line.startswith("+") and "node_zero" in line]
+    # ggml_backend_view_init needs buffer == NULL (get_node_aux zeroed the node) and sets buffer, data and .extra
+    assert added == ["node_zero->view_src = node->view_src == nullptr ? node : node->view_src;",
+                     "node_zero->view_offs = node->view_offs;",
+                     "ggml_backend_view_init(node_zero);"], added
+    i = section.index("+                ggml_backend_view_init(node_zero);")
+    assert section[i + 1] == "                 node_zero->flags |= GGML_TENSOR_FLAG_COMPUTE;"
