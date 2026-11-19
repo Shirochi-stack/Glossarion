@@ -537,7 +537,10 @@ def _profile(**plist) -> bytes:
     return b"0\x82\x1b\x00junk" + plistlib.dumps({"Name": "p", **plist}) + b"\x00\xa0trailer"
 
 
-def test_verify_ipa_fails_a_store_build_that_carries_the_ane(tmp_path, capsys):
+def test_verify_ipa_fails_a_store_build_that_carries_the_ane(tmp_path, capsys, monkeypatch):
+    # the plain output format: in GitHub Actions verify_ipa prints ::warning / ::error annotations instead
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     vi = _verify_ipa()
     assert vi.profile_kind(_profile()) == "store"
     assert vi.profile_kind(_profile(ProvisionedDevices=["x"])) == "ad-hoc"

@@ -1197,7 +1197,7 @@ def test_build_script_runs_end_to_end_with_stubbed_tools(tmp_path, platform, pac
         # iOS: the engine's ANE initial cache into both Python.xcframework slices (a no-op without the engine)
         *([["python", w, "stage-ane", "--platform", "ios", "--xcframework",
             _arg(str(forge / "support" / "support" / ".".join(tc["python_version"].split(".")[:2]) / "iOS" /
-                     "Python.xcframework")), *packages]] if platform == "ios" else []),
+                     "Python.xcframework")), "--forge", f, *packages]] if platform == "ios" else []),
         *(["forge", host, recipe(p)] for p in packages),
         ["python", w, "collect", "--platform", platform, "--dist", _arg(str(forge / "dist")), "--logs",
          _arg(str(forge / "logs")), "--cache", _arg(str(cache)), *packages],
