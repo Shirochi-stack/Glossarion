@@ -4458,16 +4458,28 @@ class ProgressManager:
                 pass
         return content_hash
 
-    def metadata_regeneration_request(self):
-        """Return ``(reset_all, fields)`` requested by pending metadata rows."""
+    def metadata_regeneration_request(self, left_to_refinement=None):
+        """Return ``(reset_all, fields)`` requested by pending metadata rows.
+
+        A QA-failed row is redone like a Progress Manager reset, unless
+        ``left_to_refinement(entry)`` says this run refines it instead.
+        """
         reset_all = False
         fields = set()
         retry_statuses = {
-            "pending", "failed", "error", "file_missing", "not_translated"
+            "pending", "failed", "error", "file_missing", "not_translated",
+            "qa_failed",
         }
         for _key, entry in self.metadata_entries():
             status = str(entry.get("status", "")).lower()
             if status not in retry_statuses and not entry.get("metadata_regeneration_requested"):
+                continue
+            if (
+                status == "qa_failed"
+                and not entry.get("metadata_regeneration_requested")
+                and left_to_refinement is not None
+                and left_to_refinement(entry)
+            ):
                 continue
             phase_fields = entry.get("metadata_fields")
             if isinstance(phase_fields, list) and phase_fields:
@@ -4612,9 +4624,13 @@ class ProgressManager:
                 entry["failure_reason"] = str(error)
                 entry["error_message"] = str(error)
             elif status == "completed":
-                entry.pop("failure_reason", None)
-                entry.pop("error_message", None)
-                entry.pop("metadata_regeneration_requested", None)
+                for field in (
+                    "failure_reason", "error_message",
+                    "metadata_regeneration_requested",
+                    "qa_issues", "qa_timestamp", "qa_issues_found",
+                    "qa_issue_previews", "duplicate_confidence",
+                ):
+                    entry.pop(field, None)
             chapters[entry_key] = entry
             updated = entry
         return updated
@@ -20492,6 +20508,39 @@ def _html_to_enhanced_refinement_text(html_content, chapter):
     return refinement_text, enhanced_info
 
 
+def _partial_b_artifact_refinement_mode(config):
+    """Return the Partial.b/b2 mode that refines translation artifacts, or ''."""
+    mode = str(
+        getattr(config, "MULTIPASS_REFINEMENT_MODE", "") or ""
+    ).strip().lower()
+    if mode not in ("partial.b", "partial.b2"):
+        return ""
+    if parse_chapter_range(os.getenv("CHAPTER_RANGE", "")):
+        # Metadata/TOC/header compilation artifacts are not separate entries in
+        # the chapter-range preview. Do not append whole-book targets to a
+        # range-limited Partial.b/b2 run; any in-range spine HTML already in
+        # ``chapters`` remains eligible normally.
+        return ""
+    return mode
+
+
+def _metadata_qa_failure_left_to_refinement(config, entry, *, is_subtitle_file=False):
+    """Whether this run's Partial.b/b2 pass refines a QA-failed metadata row.
+
+    Such a row is not retranslated first. These are the runs that reach
+    ``_append_partial_b_translation_artifact_chapters`` with a QA match.
+    """
+    if not _partial_b_artifact_refinement_mode(config):
+        return False
+    output_mode = str(getattr(config, "OUTPUT_MODE", "") or "")
+    refinement_runs = output_mode == "refinement" or (
+        bool(getattr(config, "MULTIPASS_MODE", False))
+        and output_mode not in ("refinement", "audio", "image", "video")
+        and not is_subtitle_file
+    )
+    return refinement_runs and _entry_has_foreign_character_qa_issue(entry)
+
+
 def _append_partial_b_translation_artifact_chapters(
     chapters,
     out,
@@ -20499,17 +20548,9 @@ def _append_partial_b_translation_artifact_chapters(
     config,
 ):
     """Add QA-failed metadata/TOC/header artifacts to Partial.b/b2 input."""
-    mode = str(
-        getattr(config, "MULTIPASS_REFINEMENT_MODE", "") or ""
-    ).strip().lower()
+    mode = _partial_b_artifact_refinement_mode(config)
     result = list(chapters or [])
-    if mode not in ("partial.b", "partial.b2"):
-        return result
-    if parse_chapter_range(os.getenv("CHAPTER_RANGE", "")):
-        # Metadata/TOC/header compilation artifacts are not separate entries in
-        # the chapter-range preview. Do not append whole-book targets to a
-        # range-limited Partial.b/b2 run; any in-range spine HTML already in
-        # ``chapters`` remains eligible normally.
+    if not mode:
         return result
 
     existing_names = {
@@ -25648,7 +25689,11 @@ def main(log_callback=None, stop_callback=None):
     )
     _metadata_path_before_extraction = os.path.join(out, "metadata.json")
     metadata_reset_all, metadata_reset_fields = (
-        progress_manager.metadata_regeneration_request()
+        progress_manager.metadata_regeneration_request(
+            lambda entry: _metadata_qa_failure_left_to_refinement(
+                config, entry, is_subtitle_file=is_subtitle_file
+            )
+        )
     )
     if metadata_only:
         # The Library's explicit action is a regeneration request. Reuse the
