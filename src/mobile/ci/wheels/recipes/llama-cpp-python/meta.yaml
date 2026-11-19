@@ -42,6 +42,8 @@
 #     llama_cpp/npu-backend.txt). The HTP skeletons (Hexagon DSP files) are not built and not shipped: the
 #     app downloads them from llama.cpp's own release of the vendored commit (wheelhouse.toml [hexagon]).
 #     x86_64 and iOS: none.
+#   - patches/mobile.patch 11.: tensor split across the NPU and the GPU (split_mode TENSOR): the meta backend
+#     sends each device's slice of a weight in ONE write (OpenCL's quantised upload aborts on a second one).
 package:
   name: llama-cpp-python
   version: "0.3.37"
