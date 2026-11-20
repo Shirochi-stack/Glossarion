@@ -110,6 +110,7 @@ from progress_core import (  # noqa: F401 -- moved in U5; re-exported for deskto
     _pending_mark_chunk_blocks,
     _pending_mark_output_path,
     _persist_progress_manager_source_link,
+    _progress_entry_has_image_reference_qa,
     _progress_entry_has_llm_token_qa,
     _progress_entry_has_meaningful_tts_state,
     _progress_entry_has_missing_image_qa,
@@ -166,6 +167,7 @@ from progress_actions import (  # noqa: F401 -- moved in U5; re-exported for des
     refinement_status_keys,
     remove_qa_marks,
     reset_tts,
+    resolve_image_qa,
     resolve_llm_token_qa,
     restore_in_progress,
     apply_retranslation,
@@ -14196,6 +14198,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             act_restore_in_progress = None
             act_copy_qa = act_open_epub_reader = None
             selected_infos = []
+            image_qa_infos = []
             pending_selected_infos = []
 
             if _skip_keyword:
@@ -14221,7 +14224,21 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                         "📖 Open in EPUB reader"
                     )
                 act_retranslate = menu.addAction("🔁 Retranslate Selected")
-                if has_raw_foreign_text_qa or has_llm_token_qa:
+                try:
+                    for selected_item in listbox.selectedItems():
+                        wrapper = selected_item.data(Qt.UserRole) or {}
+                        selected_infos.append(wrapper.get('info', {}))
+                except RuntimeError:
+                    selected_infos = [display_info]
+                # Every selected row with an image QA mark (missing, extra,
+                # changed references): Resolve QA issue repairs their links.
+                image_qa_infos = [
+                    selected for selected in selected_infos
+                    if _progress_entry_has_image_reference_qa(
+                        (selected or {}).get('info', {})
+                    )
+                ]
+                if has_raw_foreign_text_qa or has_llm_token_qa or image_qa_infos:
                     act_resolve_qa = menu.addAction("⚠️ Resolve QA issue")
 
                 if has_missing_images:
@@ -14234,12 +14251,6 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     "⭐ Remove refinement status"
                 )
 
-                try:
-                    for selected_item in listbox.selectedItems():
-                        wrapper = selected_item.data(Qt.UserRole) or {}
-                        selected_infos.append(wrapper.get('info', {}))
-                except RuntimeError:
-                    selected_infos = [display_info]
                 pending_selected_infos = [
                     {key: selected.get(key) for key in (
                         'progress_key', 'key', 'output_file', 'is_chunk_progress',
@@ -14300,6 +14311,18 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     _resolve_llm_token_qa_issue(
                         display_info,
                         qa_file_path,
+                    )
+                elif image_qa_infos:
+                    # Repair the image links of every selected row first;
+                    # images are inserted only where some are still missing.
+                    kind, title, message, refreshed = resolve_image_qa(
+                        data, image_qa_infos
+                    )
+                    if refreshed:
+                        self._refresh_retranslation_data(data)
+                    self._show_message(
+                        kind, title, message,
+                        parent=data.get('dialog', self),
                     )
                 else:
                     self._start_single_progress_qa_resolution(

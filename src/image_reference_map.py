@@ -104,6 +104,20 @@ def _replace_basename(url, filename):
     return url[:split] + filename + url[len(path):]
 
 
+def _replace_reference(url, filename, page_folder):
+    """*url* naming *filename*, moved to ``images/`` when its own folder has no such file.
+
+    A page keeps the folder its source EPUB used (``../Images/`` beside
+    ``Text/``), which does not exist next to an output file: the workspace
+    keeps every image in ``images/``.
+    """
+    replacement = _replace_basename(url, filename)
+    path = re.split(r'[?#]', replacement, maxsplit=1)[0]
+    if (Path(page_folder) / unquote(path).replace('\\', '/')).is_file():
+        return replacement
+    return 'images/' + filename + replacement[len(path):]
+
+
 def _references(soup):
     """Yield supported local image URLs and setters, in document order."""
     for tag in soup.find_all(True):
@@ -296,12 +310,41 @@ def publish_extracted_images(folder, zf, categorize_resource):
     _save(folder, data)
 
 
-def _resolve_parent(data, identity):
+def _reencoded_parent(data, old):
+    """Find the image that replaced *old* under another format.
+
+    A source that re-encodes its images (JPEG to WebP, say) changes every
+    byte and the extension, yet keeps the rest of the path. The old path must
+    be gone and exactly one current image may share it, or nothing is guessed.
+    """
+    full_path = '/' in old['source_path']
+
+    def stem(source_path):
+        # Legacy flat maps only provide source basenames.
+        root, extension = posixpath.splitext(source_path if full_path else posixpath.basename(source_path))
+        return root.casefold() if extension.lower() in IMAGE_EXTENSIONS else None
+
+    wanted = stem(old['source_path'])
+    if not wanted:
+        return None
+    matches = [i for i in set(data['current'].values())
+               if stem(data['parents'][i]['source_path']) == wanted]
+    if len(matches) != 1:
+        return None
+    extension = posixpath.splitext(data['parents'][matches[0]]['source_path'])[1]
+    if extension.lower() == posixpath.splitext(old['source_path'])[1].lower():
+        return None  # the same file with new contents: a different image
+    return matches[0]
+
+
+def _resolve_parent(data, identity, reencoded=False):
     old = data['parents'].get(identity)
     if not old:
         return None
     candidates = [i for i in set(data['current'].values())
                   if data['parents'][i]['sha256'] == old['sha256']]
+    if not candidates and reencoded:
+        return _reencoded_parent(data, old)
     same_path = [i for i in candidates if data['parents'][i]['source_path'] == old['source_path']]
     if not same_path and '/' not in old['source_path']:
         # Legacy flat maps only provide source basenames.
@@ -333,9 +376,14 @@ def record_translated_page(folder, filename):
 
 
 @_locked
-def repair_image_references(folder, source_dir=None, log=print):
-    """Repair by parent identity without renaming physical image resources."""
+def repair_image_references(folder, source_dir=None, log=print, only=None):
+    """Repair by parent identity without renaming physical image resources.
+
+    ``only`` limits the repair to the HTML files with those names.
+    """
     source_dir = source_dir or folder
+    if only is not None:
+        only = {str(name).casefold() for name in only}
     data = _load(source_dir)
     _recover_pages(folder, data)
     if data['pending']:
@@ -349,6 +397,8 @@ def repair_image_references(folder, source_dir=None, log=print):
     changed = 0
     verified = {}
     for path in _html_files(folder):
+        if only is not None and path.name.casefold() not in only:
+            continue
         content = path.read_text(encoding='utf-8')
         soup = BeautifulSoup(content, 'html.parser')
         prior = data['pages'].get(path.name, {})
@@ -356,7 +406,7 @@ def repair_image_references(folder, source_dir=None, log=print):
         for url, setter in _references(soup):
             name = _basename(url)
             identity = _binding(prior, data, name, renames)
-            target = _resolve_parent(data, identity)
+            target = _resolve_parent(data, identity, reencoded=True)
             record = data['parents'].get(target, {})
             filename = record.get('filename', '')
             target_path = Path(folder) / 'images' / filename
@@ -366,12 +416,15 @@ def repair_image_references(folder, source_dir=None, log=print):
                 refs[name] = identity
                 log(f'Unresolved image reference in {path.name}: {name}')
                 continue
-            replacement = _replace_basename(url, filename)
+            replacement = _replace_reference(url, filename, folder)
             refs[filename] = target
             if replacement != url:
                 setter(replacement)
                 modified = True
-                log(f'Repaired image reference in {path.name}: {name} → {filename}')
+                if name == filename:
+                    log(f'Repaired image folder in {path.name}: {url} → {replacement}')
+                else:
+                    log(f'Repaired image reference in {path.name}: {name} → {filename}')
         if modified:
             # A journal disambiguates filename reuse if the process stops
             # between the HTML replacement and its new bindings being saved.

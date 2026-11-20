@@ -109,6 +109,13 @@ _MISSING_IMAGE_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])missing[_\s-]*images?(?=$|[^a-z0-9])",
     re.IGNORECASE,
 )
+# Every image QA mark of the scanner's source comparison (missing, extra,
+# changed references): the rows whose image links Resolve QA issue repairs.
+_IMAGE_REFERENCE_QA_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:(?:missing|extra)[_\s-]*images?"
+    r"|changed[_\s-]*image[_\s-]*references?)(?=$|[^a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _progress_total_label(total, chunks):
@@ -348,6 +355,22 @@ def _progress_entry_has_missing_image_qa(entry):
         ):
             if _qa_value_has_missing_image_issue(current.get(key)):
                 return True
+        current = current.get('previous_progress_entry')
+    return False
+
+
+def _progress_entry_has_image_reference_qa(entry):
+    """Return whether an entry or restorable snapshot lists an image QA mark
+    (missing, extra or changed references)."""
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        found = current.get('qa_issues_found')
+        if isinstance(found, (list, tuple, set)) and any(
+            _IMAGE_REFERENCE_QA_RE.match(str(issue).strip()) for issue in found
+        ):
+            return True
         current = current.get('previous_progress_entry')
     return False
 

@@ -5337,6 +5337,122 @@ _HEADING_LINK_WORKER = [
  ),
 ]
 
+# 2026-11-20 header update restores a heading link the output lost (the real diffs, applied after
+# _HEADING_LINK_HEADERS)
+_HEADING_LINK_RESTORE_HEADERS = [
+ (
+  (
+   '        extra.extract()\n'
+   '    return "updated"\n'
+   '\n'
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+  (
+   '        extra.extract()\n'
+   '    return "updated"\n'
+   '\n'
+   '\n'
+   'def _source_chapter_first_heading(html_dir, html_file):\n'
+   '    """The first heading (h1, else h2 ... h6) of the source EPUB chapter behind\n'
+   '    an output file, parsed on its own, or None."""\n'
+   '    from output_workspace import read_workspace_source_path\n'
+   '    from progress_core import _index_epub_html_members, _normalize_progress_match_name\n'
+   '    epub_path = read_workspace_source_path(html_dir)\n'
+   "    if not epub_path.lower().endswith('.epub') or not os.path.isfile(epub_path):\n"
+   '        return None\n'
+   '    try:\n'
+   "        with zipfile.ZipFile(epub_path, 'r') as zf:\n"
+   '            _by_path, _by_basename, by_stem = _index_epub_html_members(zf.namelist())\n'
+   '            member = by_stem.get(_normalize_progress_match_name(html_file).lower())\n'
+   '            if not member:\n'
+   '                return None\n'
+   "            source = zf.read(member).decode('utf-8', errors='ignore')\n"
+   '    except (OSError, KeyError, zipfile.BadZipFile):\n'
+   '        return None\n'
+   "    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):\n"
+   "        match = re.search(rf'<{tag_name}\\b[^>]*>[\\s\\S]*?</{tag_name}>', source, flags=re.IGNORECASE)\n"
+   '        if match:\n'
+   "            return BeautifulSoup(match.group(0), 'html.parser').find(tag_name)\n"
+   '    return None\n'
+   '\n'
+   '\n'
+   'def restore_source_heading_links(html_dir, html_file):\n'
+   '    """Give the heading of an output file back the link its source heading holds.\n'
+   '\n'
+   '    AO3 / WebToEpub chapters put a link inside the chapter title. An output\n'
+   '    whose heading lost it (the heading was rewritten as plain text) gets the\n'
+   "    source heading's content with the output's own title text in it; the\n"
+   "    output's heading tag and attributes stay. Nothing changes when the output\n"
+   '    heading still holds a link, picture or table, when the source heading has\n'
+   '    no link, or when the output already has every such link somewhere.\n'
+   '\n'
+   '    Returns True when the file was rewritten.\n'
+   '    """\n'
+   '    html_path = os.path.join(html_dir, html_file)\n'
+   '    try:\n'
+   "        with open(html_path, 'r', encoding='utf-8') as rf:\n"
+   '            content = rf.read()\n'
+   '    except OSError:\n'
+   '        return False\n'
+   '    match = None\n'
+   "    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):\n"
+   "        match = re.search(rf'(<{tag_name}\\b[^>]*>)([\\s\\S]*?)(</{tag_name}>)', content, flags=re.IGNORECASE)\n"
+   '        if match:\n'
+   '            break\n'
+   '    if not match:\n'
+   '        return False\n'
+   "    inner = BeautifulSoup(match.group(2), 'html.parser')\n"
+   '    title = inner.get_text().strip()\n'
+   '    if not title or _heading_has_qa_checked_markup(inner):\n'
+   '        return False\n'
+   '    source_heading = _source_chapter_first_heading(html_dir, html_file)\n'
+   '    if source_heading is None:\n'
+   '        return False\n'
+   '    source_links = [\n'
+   "        str(link.get('href')).strip() for link in source_heading.find_all('a')\n"
+   "        if str(link.get('href') or '').strip()\n"
+   '    ]\n'
+   '    output_links = {\n'
+   "        str(link.get('href') or '').strip()\n"
+   "        for link in BeautifulSoup(content, 'html.parser').find_all('a')\n"
+   '    }\n'
+   '    if not any(href not in output_links for href in source_links):\n'
+   '        return False\n'
+   '    if replace_heading_text_keep_markup(source_heading, title) == "kept":\n'
+   '        return False\n'
+   '    new_inner = source_heading.decode_contents().strip()\n'
+   '    content = content[:match.start(2)] + new_inner + content[match.end(2):]\n'
+   "    with open(html_path, 'w', encoding='utf-8') as wf:\n"
+   '        wf.write(content)\n'
+   '    return True\n'
+   '\n'
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+ ),
+ (
+  (
+   '            html_path = os.path.join(html_dir, html_file)\n'
+   '\n'
+   "            # Skip if the translated name is identical to what's already in the file\n"
+  ),
+  (
+   '            html_path = os.path.join(html_dir, html_file)\n'
+   '\n'
+   '            # A heading that lost the link its source heading holds gets it back\n'
+   '            # first, also when the title itself is already up to date\n'
+   '            try:\n'
+   '                if restore_source_heading_links(html_dir, html_file):\n'
+   '                    print(f"🔗 Restored the heading link of {html_file} from the source")\n'
+   '            except Exception as e:\n'
+   '                print(f"⚠️ Could not restore the heading link of {html_file}: {e}")\n'
+   '\n'
+   "            # Skip if the translated name is identical to what's already in the file\n"
+  ),
+ ),
+]
+
 # 2026-11-19 QA chunk localisation reads markdown chunk sources (enhanced extraction): their [text](<href>)
 # links and pipe tables are rendered before the chunk comparison; the enhanced-mode markdown-to-HTML
 # step keeps [text](<href>) and <https://...> link targets as links (the real diffs, applied after the
@@ -7343,6 +7459,16 @@ APPROVED = (
                 "marked completed drops qa_issues, qa_issues_found, qa_issue_previews, qa_timestamp and "
                 "duplicate_confidence",
         "source": {"src/TransateKRtoEN.py": _METADATA_QA_RETRANSLATE_WORKER},
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
+        "what": "Header update restores a heading link from the source: before the exact header update of a "
+                "file (also when its title is already up to date), a heading without a link, picture or table "
+                "whose source EPUB heading holds a link the output has nowhere gets the source heading's "
+                "content back with the output's own title text in it (first text node, as the keep-markup "
+                "update); the output heading tag and the rest of the file stay as they are",
+        "source": {"src/metadata_batch_translator.py": _HEADING_LINK_RESTORE_HEADERS},
         "values": {},
     },
 )

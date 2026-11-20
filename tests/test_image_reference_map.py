@@ -97,6 +97,105 @@ def test_deleted_or_changed_image_is_unresolved_across_retries(tmp_path, new_ima
     assert original != output.read_bytes()
 
 
+def test_reencoded_image_is_repaired_to_its_new_extension(tmp_path):
+    inventory(tmp_path, {'OEBPS/Images/ch5-0c84.jpg': b'jpeg-bytes', 'OEBPS/Images/ch6-44d3.jpg': b'jpeg-six'},
+              {'ch5-0c84.jpg': 'chapter0005_img_1.jpg', 'ch6-44d3.jpg': 'chapter0006_img_1.jpg'})
+    output = tmp_path / 'response_chapter0005.html'
+    output.write_text('<html><body><img alt="ch5-0c84.jpg" src="../Images/chapter0005_img_1.jpg"/>'
+                      '<img src="../Images/chapter0006_img_1.jpg"/></body></html>', encoding='utf-8')
+    tracking.snapshot_before_refresh(tmp_path)
+    inventory(tmp_path, {'OEBPS/Images/ch5-0c84.webp': b'webp-bytes', 'OEBPS/Images/ch6-44d3.webp': b'webp-six'},
+              {'ch5-0c84.webp': 'chapter0005_img_1.webp', 'ch6-44d3.webp': 'chapter0006_img_1.webp'})
+    assert tracking.repair_image_references(tmp_path) == 1
+    # ``../Images/`` is the source EPUB's folder; the workspace keeps images in ``images/``.
+    assert sources(output) == ['images/chapter0005_img_1.webp', 'images/chapter0006_img_1.webp']
+    assert all((tmp_path / source).is_file() for source in sources(output))
+    assert 'alt="ch5-0c84.jpg"' in output.read_text(encoding='utf-8')
+    before = output.read_bytes()
+    assert tracking.repair_image_references(tmp_path) == 0
+    assert output.read_bytes() == before
+
+
+def test_right_name_in_a_folder_that_does_not_exist_moves_to_images(tmp_path):
+    inventory(tmp_path, {'OEBPS/Images/a.webp': b'A'}, {'a.webp': 'chapter0001_img_1.webp'})
+    output = tmp_path / 'response_chapter0001.html'
+    output.write_text('<html><body><img src="../Images/chapter0001_img_1.webp?v=1#top"/>'
+                      '<img src="images/chapter0001_img_1.webp"/>'
+                      '<img src="https://example.com/Images/chapter0001_img_1.webp"/></body></html>', encoding='utf-8')
+    log = []
+    assert tracking.repair_image_references(tmp_path, log=log.append) == 1
+    assert sources(output) == ['images/chapter0001_img_1.webp?v=1#top', 'images/chapter0001_img_1.webp',
+                               'https://example.com/Images/chapter0001_img_1.webp']
+    assert sum('Repaired image folder' in line for line in log) == 1
+    assert tracking.repair_image_references(tmp_path) == 0
+
+
+def test_reencoded_repair_does_not_guess_between_two_formats(tmp_path):
+    inventory(tmp_path, {'OEBPS/Images/a.jpg': b'original'})
+    output = page(tmp_path, 'response_Chapter.xhtml', ['a.jpg'])
+    tracking.snapshot_before_refresh(tmp_path)
+    inventory(tmp_path, {'OEBPS/Images/a.webp': b'one', 'OEBPS/Images/a.png': b'two'})
+    log = []
+    assert tracking.repair_image_references(tmp_path, log=log.append) == 0
+    assert sources(output) == ['images/a.jpg']
+    assert any('Unresolved' in line for line in log)
+
+
+def test_resolve_qa_repairs_links_first_and_inserts_only_missing_images(tmp_path):
+    import progress_actions
+
+    folder = tmp_path / 'book'
+    folder.mkdir()
+    inventory(folder, {'OEBPS/Images/a-1.jpg': b'jpeg-one', 'OEBPS/Images/a-2.jpg': b'jpeg-two'},
+              {'a-1.jpg': 'chapter0001_img_1.jpg', 'a-2.jpg': 'chapter0001_img_2.jpg'})
+    both = page(folder, 'response_chapter0001.html', ['chapter0001_img_1.jpg', 'chapter0001_img_2.jpg'])
+    one = page(folder, 'response_chapter0002.html', ['chapter0001_img_1.jpg'])
+    untouched = page(folder, 'response_chapter0003.html', ['chapter0001_img_1.jpg'])
+    tracking.snapshot_before_refresh(folder)
+    inventory(folder, {'OEBPS/Images/a-1.webp': b'webp-one', 'OEBPS/Images/a-2.webp': b'webp-two'},
+              {'a-1.webp': 'chapter0001_img_1.webp', 'a-2.webp': 'chapter0001_img_2.webp'})
+    source = '<html><body><img src="../Images/a-1.webp"/><img src="../Images/a-2.webp"/></body></html>'
+    epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(epub, 'w') as archive:
+        for name in ('chapter0001', 'chapter0002', 'chapter0003'):
+            archive.writestr(f'OEBPS/Text/{name}.xhtml', source)
+    entries = {
+        '1': {'output_file': both.name, 'status': 'qa_failed', 'qa_issues': True,
+              'qa_issues_found': ['changed_image_references_2_found', 'Chinese_text_found_2_chars'],
+              'qa_issue_previews': {'changed_image_references_2_found': 'chapter0001_img_1.jpg'}},
+        '2': {'output_file': one.name, 'status': 'qa_failed', 'qa_issues': True,
+              'qa_issues_found': ['missing_images_1_lost_(1/2)']},
+        '3': {'output_file': untouched.name, 'status': 'qa_failed', 'qa_issues': True,
+              'qa_issues_found': ['Chinese_text_found_2_chars']},
+    }
+    progress = folder / 'translation_progress.json'
+    progress.write_text(json.dumps({'chapters': entries}), encoding='utf-8')
+    rows = [{'progress_key': key, 'output_file': entry['output_file'],
+             'original_filename': entry['output_file'].replace('response_', '').replace('.html', '.xhtml'),
+             'info': entry} for key, entry in entries.items()]
+    restored = []
+
+    def restore(translated, _source, verbose=True, rename_map=None):
+        restored.append(translated)
+        return translated.replace('</body>', '<img src="images/chapter0001_img_2.webp"/></body>')
+
+    kind, _title, message, refreshed = progress_actions.resolve_image_qa(
+        {'output_dir': str(folder), 'file_path': str(epub), 'progress_file': str(progress)},
+        rows, restore_fn=restore, log=lambda _line: None)
+    assert (kind, refreshed) == ('info', True)
+    assert sources(both) == ['images/chapter0001_img_1.webp', 'images/chapter0001_img_2.webp']
+    # The existing link was repaired before the insertion saw the file.
+    assert len(restored) == 1 and 'chapter0001_img_1.webp' in restored[0]
+    assert sources(one) == ['images/chapter0001_img_1.webp', 'images/chapter0001_img_2.webp']
+    assert sources(untouched) == ['images/chapter0001_img_1.jpg']
+    saved = json.loads(progress.read_text(encoding='utf-8'))['chapters']
+    assert saved['1']['qa_issues_found'] == ['Chinese_text_found_2_chars']
+    assert 'qa_issue_previews' not in saved['1'] and saved['1']['status'] == 'qa_failed'
+    assert 'qa_issues_found' not in saved['2'] and saved['2']['status'] == 'completed'
+    assert saved['3'] == entries['3']
+    assert 'cleared on 2 of 2' in message
+
+
 def test_identical_bytes_use_source_path_and_ambiguous_matches_do_not_guess(tmp_path):
     inventory(tmp_path, {'OEBPS/Images/a.jpg': b'same', 'OEBPS/Images/b.jpg': b'same'})
     output = page(tmp_path, 'response_Chapter.xhtml', ['a.jpg', 'b.jpg'])

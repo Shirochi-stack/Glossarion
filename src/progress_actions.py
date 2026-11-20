@@ -58,12 +58,14 @@ from progress_core import (
     _merge_and_write_retranslation_progress,
     _pending_mark_chunk_blocks,
     _pending_mark_output_path,
+    _progress_entry_has_image_reference_qa,
     _progress_entry_has_llm_token_qa,
     _progress_entry_has_missing_image_qa,
     _progress_entry_has_raw_foreign_text_qa,
     _progress_item_is_html,
     _QA_MARK_FIELDS,
     _CHUNK_QA_MIRROR_FIELDS,
+    _IMAGE_REFERENCE_QA_RE,
     _MISSING_IMAGE_QA_RE,
     _qa_value_has_llm_token_issue,
     _restore_pending_mark_record,
@@ -429,6 +431,39 @@ def _clear_missing_image_qa_markers(entry):
             entry['last_updated'] = time.time()
             changed = True
     return changed, remaining
+
+def _clear_image_reference_qa_markers(entry):
+    """Clear every image QA mark of the source comparison (missing, extra,
+    changed references); return ``(changed, remaining)``."""
+    changed = False
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        found = current.get('qa_issues_found')
+        if isinstance(found, list):
+            kept = [
+                issue for issue in found
+                if not _IMAGE_REFERENCE_QA_RE.match(str(issue).strip())
+            ]
+            if kept != found:
+                current['qa_issues_found'] = kept
+                changed = True
+        previews = current.get('qa_issue_previews')
+        if isinstance(previews, dict):
+            kept = {
+                key: value for key, value in previews.items()
+                if not _IMAGE_REFERENCE_QA_RE.match(str(key).strip())
+            }
+            if kept != previews:
+                current['qa_issue_previews'] = kept
+                changed = True
+        current = current.get('previous_progress_entry')
+    # The missing-image clearing also settles the entry's QA flag and status
+    # once no mark of any kind is left.
+    missing_changed, remaining = _clear_missing_image_qa_markers(entry)
+    return changed or missing_changed, remaining
+
 
 def _repair_empty_attribute_qa_file(file_path):
     """Apply the shared empty-attribute fixer and verify the issue is gone."""
@@ -1357,6 +1392,158 @@ def _default_restore_fn(translated_html, source_html, verbose=True, rename_map=N
     )
 
 
+def _output_image_rename_map(output_dir):
+    """``image_rename_map.json`` of an output folder, or None."""
+    rename_map = None
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    if os.path.exists(rename_map_path):
+        try:
+            with open(rename_map_path, 'r', encoding='utf-8') as f:
+                rename_map = json.load(f) or {}
+        except Exception:
+            pass
+    return rename_map
+
+
+def _source_chapter_html(data, display_info):
+    """The source EPUB's HTML of a row, matched by file name, or None."""
+    import zipfile
+
+    epub_path = data['file_path']
+    original_filename = display_info.get('original_filename')
+    source_html = None
+
+    if original_filename:
+        try:
+            def normalize_name(n):
+                base = os.path.basename(n)
+                if base.startswith('response_'):
+                    base = base[9:]
+                return os.path.splitext(base)[0].lower()
+
+            target_base = normalize_name(original_filename)
+
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                for fname in zf.namelist():
+                    if normalize_name(fname) == target_base:
+                        source_html = zf.read(fname).decode('utf-8', errors='ignore')
+                        break
+        except Exception as ex:
+            print(f"Extraction error: {ex}")
+    return source_html
+
+
+def _image_qa_issue_types(output_path, source_html, rename_map):
+    """Image issue types the QA scanner's comparison still finds in an output."""
+    from bs4 import BeautifulSoup
+    from scan_html_folder import detect_missing_images
+
+    images = BeautifulSoup(source_html, 'html.parser').find_all('img')
+    source_info = {0: {
+        'image_count': len(images),
+        'image_srcs': [image.get('src', '') for image in images],
+    }}
+    with open(output_path, 'r', encoding='utf-8') as f:
+        translated_html = f.read()
+    _found, details = detect_missing_images(
+        translated_html, 0, source_info, image_rename_map=rename_map
+    )
+    return {detail.get('type') for detail in details}
+
+
+def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
+    """Resolve QA issue for the image QA marks of the selected rows.
+
+    The links of images an output already has are repaired first
+    (``image_reference_map.repair_image_references``: the rename map and the image
+    identity sidecar).  Only when the repaired output still has fewer images than
+    its source are the missing ones inserted (``insert_missing_images``).  A row's
+    image marks (missing, extra, changed references) are cleared once the scanner's
+    own comparison (``detect_missing_images``) finds none; other QA marks stay.
+
+    Returns ``(kind, title, message, refreshed)`` like ``insert_missing_images``.
+    """
+    from image_reference_map import repair_image_references
+
+    output_dir = data['output_dir']
+    rows = {}
+    for info in selected_infos or []:
+        info = info if isinstance(info, dict) else {}
+        progress_entry = info.get('info', {}) or {}
+        output_file = info.get('output_file') or progress_entry.get('output_file')
+        if (
+            output_file
+            and _progress_entry_has_image_reference_qa(progress_entry)
+            and os.path.isfile(os.path.join(output_dir, output_file))
+        ):
+            rows.setdefault(str(output_file).replace('\\', '/').casefold(), info)
+    if not rows:
+        return ('info', "Info", "No selected entry has an image QA issue.", False)
+
+    try:
+        repaired = repair_image_references(
+            output_dir,
+            log=log,
+            only={
+                os.path.basename(info.get('output_file') or info['info']['output_file'])
+                for info in rows.values()
+            },
+        )
+        rename_map = _output_image_rename_map(output_dir)
+        inserted = 0
+        resolved = []
+        for info in rows.values():
+            progress_entry = info.get('info', {}) or {}
+            output_file = info.get('output_file') or progress_entry.get('output_file')
+            output_path = os.path.join(output_dir, output_file)
+            source_html = _source_chapter_html(data, info)
+            if not source_html:
+                continue
+            remaining = _image_qa_issue_types(output_path, source_html, rename_map)
+            if 'missing_images' in remaining:
+                _kind, _title, _message, changed = insert_missing_images(
+                    data, {**info, 'output_file': output_file}, restore_fn
+                )
+                if changed:
+                    inserted += 1
+                    remaining = _image_qa_issue_types(output_path, source_html, rename_map)
+            if not remaining:
+                resolved.append((info, progress_entry))
+
+        def _apply(prog):
+            remaining_other_qa = 0
+            for info, progress_entry in resolved:
+                remaining = False
+                for target in _missing_image_qa_targets(prog, info, progress_entry):
+                    remaining = _clear_image_reference_qa_markers(target)[1] or remaining
+                remaining_other_qa += bool(remaining)
+            return remaining_other_qa
+
+        remaining_other_qa = (
+            mutate_progress(data['progress_file'], _apply) if resolved else 0
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return ('error', "Error", f"Failed to resolve image QA issues: {e}", False)
+
+    lines = [f"Repaired image links in {repaired} file(s)."]
+    if inserted:
+        lines.append(f"Inserted missing images in {inserted} file(s).")
+    lines.append(
+        f"Image QA issue cleared on {len(resolved)} of {len(rows)} selected file(s)."
+    )
+    unresolved = len(rows) - len(resolved)
+    if unresolved:
+        lines.append(f"{unresolved} file(s) still differ from the source images.")
+    if remaining_other_qa:
+        lines.append(f"Other QA issues remain on {remaining_other_qa} file(s).")
+    return (
+        'info', "Resolve QA issue", "\n".join(lines),
+        bool(repaired or inserted or resolved),
+    )
+
+
 def insert_missing_images(data, display_info, restore_fn=None):
     """Insert Missing Image: restore images from the source chapter (RG 30987-31123).
 
@@ -1369,40 +1556,11 @@ def insert_missing_images(data, display_info, restore_fn=None):
         restore_fn = _default_restore_fn
     progress_entry = display_info.get('info', {})
     try:
-        import zipfile
-
         # Load rename map from output directory
-        rename_map = None
-        rename_map_path = os.path.join(data['output_dir'], 'image_rename_map.json')
-        if os.path.exists(rename_map_path):
-            try:
-                with open(rename_map_path, 'r', encoding='utf-8') as f:
-                    rename_map = json.load(f) or {}
-            except Exception:
-                pass
+        rename_map = _output_image_rename_map(data['output_dir'])
 
         # 1. Get Source Content from EPUB
-        epub_path = data['file_path']
-        original_filename = display_info.get('original_filename')
-        source_html = None
-
-        if original_filename:
-            try:
-                def normalize_name(n):
-                    base = os.path.basename(n)
-                    if base.startswith('response_'):
-                        base = base[9:]
-                    return os.path.splitext(base)[0].lower()
-
-                target_base = normalize_name(original_filename)
-
-                with zipfile.ZipFile(epub_path, 'r') as zf:
-                    for fname in zf.namelist():
-                        if normalize_name(fname) == target_base:
-                            source_html = zf.read(fname).decode('utf-8', errors='ignore')
-                            break
-            except Exception as ex:
-                print(f"Extraction error: {ex}")
+        source_html = _source_chapter_html(data, display_info)
 
         if not source_html:
             return ('error', "Error", "Could not extract source HTML for this chapter.", False)
@@ -2874,6 +3032,7 @@ __all__ = [
     'remove_special_keyword',
     'reset_tts',
     'reset_tts_message',
+    'resolve_image_qa',
     'resolve_llm_token_qa',
     'restore_in_progress',
     'restore_in_progress_message',
