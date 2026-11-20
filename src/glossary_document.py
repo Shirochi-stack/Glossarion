@@ -62,6 +62,7 @@ from gender_tracking import (
     tracker_entry_for_raw,
     tracker_path_for_glossary,
 )
+from glossary_files import AUTO_BACKUP, BACKUP_KINDS, MANUAL_BACKUP, backup_kind, parse_backup_name
 from glossary_usage import (
     build_prepared_output_index,
     entry_matches_output_index,
@@ -3127,6 +3128,84 @@ def load_editor_backup(backup_path):
         return json.load(f)
 
 
+#: What the restore list calls each kind of backup (glossary_files.backup_kind; ``other``: a
+#: file in the Backups folder that starts with the glossary's name but is not named like a backup).
+BACKUP_KIND_LABELS = {MANUAL_BACKUP: "Manual", AUTO_BACKUP: "Automatic", "other": "Other file"}
+
+_BACKUP_OPERATION_LABELS = (
+    (re.compile(r"^manual$"), "Backup Now"),
+    (re.compile(r"^before_save$"), "Before Save"),
+    (re.compile(r"^before_export$"), "Before Convert Format"),
+    (re.compile(r"^before_clean$"), "Before Clean Empty Fields"),
+    (re.compile(r"^before_restore$"), "Before Restore Backup"),
+    (re.compile(r"^before_delete_(\d+)$"), "Before deleting {} entries"),
+    (re.compile(r"^before_remove_(\d+)_dupes$"), "Before removing {} duplicates"),
+    (re.compile(r"^before_trim_(\d+)$"), "Before trimming {} entries"),
+    (re.compile(r"^before_filter_remove_(\d+)$"), "Before filtering out {} entries"),
+)
+
+
+def backup_operation_label(operation):
+    """A backup's operation (the middle of its file name) in words; an unknown one as it is."""
+    for pattern, label in _BACKUP_OPERATION_LABELS:
+        match = pattern.match(operation or "")
+        if match:
+            return label.format(*match.groups())
+    return str(operation or "")
+
+
+def editor_backup_rows(glossary_path):
+    """This glossary's backups for a restore list, newest first.
+
+    One ``{'path', 'name', 'kind', 'operation', 'time', 'size'}`` per file of
+    :func:`list_editor_backups`: ``kind`` is ``manual`` / ``auto`` (read from the name, so the
+    backups of every older version are told apart without a migration) or ``other``; ``time``
+    is the moment in the name (seconds), else the file's own time.
+    """
+    rows = []
+    for path in list_editor_backups(glossary_path):
+        name = os.path.basename(path)
+        try:
+            stat = os.stat(path)
+            when, size = stat.st_mtime, stat.st_size
+        except OSError:
+            when, size = 0.0, 0
+        parsed = parse_backup_name(glossary_path, name)
+        kind, operation = "other", ""
+        if parsed is not None:
+            operation = parsed[0]
+            kind = backup_kind(operation)
+            try:
+                when = time.mktime(time.strptime(parsed[1], "%Y%m%d_%H%M%S"))
+            except (ValueError, OverflowError):
+                pass
+        rows.append({'path': path, 'name': name, 'kind': kind, 'operation': operation,
+                     'time': when, 'size': size})
+    rows.sort(key=lambda row: (row['time'], row['name']), reverse=True)
+    return rows
+
+
+def editor_backup_counts(glossary_path):
+    """``{'manual': n, 'auto': n}``: this glossary's backups of each kind."""
+    counts = {kind: 0 for kind in BACKUP_KINDS}
+    for row in editor_backup_rows(glossary_path):
+        if row['kind'] in counts:
+            counts[row['kind']] += 1
+    return counts
+
+
+def load_restorable_backup(backup_path, glossary_format):
+    """A backup's data, when it can replace a glossary of ``glossary_format`` (a list of entries
+    for the list formats, a mapping for the dict one); :class:`GlossaryEditorError` otherwise."""
+    try:
+        data = load_editor_backup(backup_path)
+    except (OSError, ValueError) as e:
+        raise GlossaryEditorError(f"Failed to read the backup: {e}") from e
+    if not isinstance(data, (list, dict)) or isinstance(data, list) != (glossary_format in LIST_FORMATS):
+        raise GlossaryEditorError("The backup does not match this glossary's format")
+    return data
+
+
 def backup_settings_message(enabled, max_backups):
     status = "enabled" if enabled else "disabled"
     if enabled:
@@ -4143,14 +4222,11 @@ class GlossaryDocument:
     def restore_backup(self, backup_path):
         """Replace the entries with a backup's and save them in this file's format.
 
-        The desktop has no restore button for editor backups (users copy them out of the
-        Backups folder); this saves the backup's entries like an edit, after a backup of the
-        current state.
+        Like the desktop editor's Restore Backup button: the backup's entries are saved like an
+        edit, after a backup of the current state.
         """
         self._require_data()
-        data = load_editor_backup(backup_path)
-        if isinstance(data, list) != (self.current_glossary_format in LIST_FORMATS):
-            raise GlossaryEditorError("The backup does not match this glossary's format")
+        data = load_restorable_backup(backup_path, self.current_glossary_format)
         if not self._create_backup("before_restore"):
             return None
         self.current_glossary_data = data

@@ -122,6 +122,7 @@ jobs:
           tests/test_image_glossary_header_only.py \
           tests/test_glossary_document.py \
           tests/test_glossary_files.py \
+          tests/test_glossary_backups.py \
           tests/test_parallel_epub_core.py \
           tests/test_qa_runtime_additions.py \
           tests/test_retranslate_plan_apply.py \

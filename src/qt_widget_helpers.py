@@ -18,6 +18,9 @@
 * ``link_placeholders`` / ``link_placeholders_in_label`` - AI prompt placeholders ({name}) shown like links:
   blue and underlined in a prompt editor, an "Available placeholders" line or a label, with a tooltip
   that says what the placeholder expands to at the moment of the hover (display only).
+* ``BackupBrowserDialog`` - Other Settings' Config Backup Manager window (a newest-first list with
+  Restore Selected / Create New Backup / Open Folder / Delete Selected / Close) for any set of backups;
+  also the Glossary Editor's Restore Backup.
 """
 
 import html
@@ -25,11 +28,11 @@ import os
 import time
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt, QTimer
-from PySide6.QtGui import (QBrush, QColor, QCursor, QInputMethodEvent, QPainter, QPen, QPixmap,
+from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QInputMethodEvent, QPainter, QPen, QPixmap,
                            QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTransform)
-from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QSizePolicy, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QToolTip,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+                               QStyleOptionViewItem, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 # Context menus without the empty icon gutter (Progress Manager rows, the QA scanner's glossary
 # name review)
@@ -854,3 +857,217 @@ def target_language_now(owner):
             return value
     config = getattr(owner, "config", None) or {}
     return str(config.get("output_language") or "English")
+
+
+# ── Backup browser (the Config Backup Manager's window, for any set of backups) ─────────────────────
+
+def format_backup_size(size_bytes):
+    """A backup's size as the backup lists show it (B / KB / MB, whole numbers)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes // 1024} KB"
+    return f"{size_bytes // (1024 * 1024)} MB"
+
+
+def _backup_browser_button(text, background, hover, min_width=180):
+    button = QPushButton(text)
+    button.setMinimumWidth(min_width)
+    button.setMinimumHeight(35)
+    button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {background};
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+            }}
+        """)
+    return button
+
+
+class BackupBrowserDialog(QDialog):
+    """Other Settings' Config Backup Manager window for any set of backups (also the Glossary Editor's
+    Restore Backup): a heading, where the backups are and how many, the backups newest first, and
+    Restore Selected / Create New Backup / Open Folder / Delete Selected / Close.
+
+    ``columns``: ``[(header, width)]``. ``rows``: one ``{'cells': [text per column], 'key': ...,
+    'colors': {column: colour}}`` per backup, newest first (``colors`` optional); ``key`` is what
+    the callbacks get. ``on_restore(key)`` and ``on_delete(key)`` run for the selected row (a
+    warning without one; ``on_delete`` returns True when the backup is gone, and its row goes),
+    ``on_create()`` and ``on_open_folder()`` as they are; the callbacks ask and report through
+    :meth:`message`. A button without a callback is not shown. ``sortable``: a click on a column
+    header sorts by it. The caller shows the window (``show`` or ``exec``).
+    """
+
+    def __init__(self, parent=None, *, window_title, heading, description, location, columns, rows=(),
+                 list_title="Available Backups (Newest First)", on_restore=None, on_create=None,
+                 on_open_folder=None, on_delete=None, icon=None, sortable=False):
+        super().__init__(parent)
+        self._location = location
+        self._on_restore = on_restore
+        self._on_delete = on_delete
+        self._sortable = bool(sortable)
+        self.setWindowTitle(window_title)
+        if icon is not None:
+            self.setWindowIcon(icon)
+
+        # Get screen dimensions and calculate size
+        screen = QApplication.primaryScreen().geometry()
+        self.resize(int(screen.width() * 0.315), int(screen.height() * 0.4))
+
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+
+        # Header
+        title_label = QLabel(heading)
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        main_layout.addWidget(title_label)
+
+        desc_label = QLabel(description)
+        desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+        main_layout.addWidget(desc_label)
+
+        # Info section
+        info_group = QGroupBox("Backup Information")
+        info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(10, 10, 10, 10)
+        self.info_label = QLabel()
+        self.info_label.setStyleSheet("color: white; font-size: 10pt;")
+        info_layout.addWidget(self.info_label)
+        info_group.setLayout(info_layout)
+        main_layout.addWidget(info_group)
+
+        # Backup list section
+        list_group = QGroupBox(list_title)
+        list_layout = QVBoxLayout()
+        list_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(columns))
+        self.tree.setHeaderLabels([header for header, _width in columns])
+        for index, (_header, width) in enumerate(columns):
+            self.tree.setColumnWidth(index, width)
+        self.tree.setMinimumHeight(300)
+        self.tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self.tree.setAlternatingRowColors(True)
+        list_layout.addWidget(self.tree)
+        list_group.setLayout(list_layout)
+        main_layout.addWidget(list_group)
+
+        # Action buttons
+        button_group = QGroupBox("Actions")
+        button_main_layout = QVBoxLayout()
+        button_main_layout.setContentsMargins(10, 10, 10, 10)
+        button_main_layout.setSpacing(10)
+        button_row1 = QHBoxLayout()
+        button_row1.setSpacing(10)
+        button_row2 = QHBoxLayout()
+        button_row2.setSpacing(10)
+
+        # Primary action buttons (Row 1)
+        self.restore_button = _backup_browser_button("✅ Restore Selected", "#28a745", "#218838")
+        self.restore_button.clicked.connect(self._restore_selected)
+        self.restore_button.setVisible(on_restore is not None)
+        button_row1.addWidget(self.restore_button)
+
+        self.create_button = _backup_browser_button("💾 Create New Backup", "#007bff", "#0056b3")
+        if on_create is not None:
+            self.create_button.clicked.connect(lambda: on_create())
+        self.create_button.setVisible(on_create is not None)
+        button_row1.addWidget(self.create_button)
+
+        self.folder_button = _backup_browser_button("📁 Open Folder", "#17a2b8", "#117a8b")
+        if on_open_folder is not None:
+            self.folder_button.clicked.connect(lambda: on_open_folder())
+        self.folder_button.setVisible(on_open_folder is not None)
+        button_row1.addWidget(self.folder_button)
+        button_row1.addStretch()
+
+        # Secondary action buttons (Row 2)
+        self.delete_button = _backup_browser_button("🗑️ Delete Selected", "#dc3545", "#c82333")
+        self.delete_button.clicked.connect(self._delete_selected)
+        self.delete_button.setVisible(on_delete is not None)
+        button_row2.addWidget(self.delete_button)
+        button_row2.addStretch()
+
+        self.close_button = _backup_browser_button("❌ Close", "#6c757d", "#5a6268", min_width=120)
+        self.close_button.clicked.connect(self.close)
+        button_row2.addWidget(self.close_button)
+
+        button_main_layout.addLayout(button_row1)
+        button_main_layout.addLayout(button_row2)
+        button_group.setLayout(button_main_layout)
+        main_layout.addWidget(button_group)
+
+        self.setLayout(main_layout)
+        self.set_rows(rows)
+
+    def set_rows(self, rows):
+        """Show ``rows`` (newest first) and select the first one."""
+        self.tree.setSortingEnabled(False)
+        self.tree.clear()
+        for row in rows:
+            item = QTreeWidgetItem([str(cell) for cell in row['cells']])
+            item.setData(0, Qt.UserRole, row.get('key'))
+            for column, colour in (row.get('colors') or {}).items():
+                item.setForeground(column, QBrush(QColor(colour)))
+            self.tree.addTopLevelItem(item)
+        if self.tree.topLevelItemCount():
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        if self._sortable:
+            # The rows stay as given (newest first) until a header is clicked
+            self.tree.header().setSortIndicator(-1, Qt.AscendingOrder)
+            self.tree.setSortingEnabled(True)
+        self._refresh_info()
+
+    def _refresh_info(self):
+        self.info_label.setText(
+            f"📁 Backup Location: {self._location}\n📊 Total Backups: {self.tree.topLevelItemCount()}")
+
+    def selected_key(self):
+        """The ``key`` of the selected row, None without a selection."""
+        item = self.tree.currentItem()
+        return item.data(0, Qt.UserRole) if item is not None else None
+
+    def message(self, icon, title, text, buttons=None, default=None):
+        """A message box of this window (``QMessageBox.exec``'s answer)."""
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(text)
+        if buttons is not None:
+            box.setStandardButtons(buttons)
+        if default is not None:
+            box.setDefaultButton(default)
+        box.setWindowIcon(self.windowIcon())
+        return box.exec()
+
+    def confirm(self, title, text):
+        """A Yes / No question (No is the default); True for Yes."""
+        return self.message(QMessageBox.Question, title, text,
+                            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _restore_selected(self):
+        if self.tree.currentItem() is None:
+            self.message(QMessageBox.Warning, "No Selection", "Please select a backup to restore.")
+            return
+        self._on_restore(self.selected_key())
+
+    def _delete_selected(self):
+        item = self.tree.currentItem()
+        if item is None:
+            self.message(QMessageBox.Warning, "No Selection", "Please select a backup to delete.")
+            return
+        if self._on_delete(self.selected_key()):
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+            self._refresh_info()
