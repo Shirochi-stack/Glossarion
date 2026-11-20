@@ -10778,14 +10778,16 @@ def _init_worker_process():
 @_stops_at_once
 def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,
                                original_preservation_info, image_rename_map,
-                               check_link_targets, log):
+                               check_link_targets, log, epub_path=None):
     """Auto Link / Image Tag Repair: repair the pages this scan would flag.
 
     A page qualifies when the scan's own comparison with its source page
     reports a missing, extra or changed image reference, or (with the link
     target check on) a lost or changed link target. Only those pages get the
     image link repair and the picture relinking of a translation run, before
-    they are scanned. Returns the flagged page names.
+    they are scanned. When the workspace's extracted images came from another
+    build of *epub_path*, the EPUB is extracted again first, as a run does.
+    Returns the flagged page names.
     """
     flagged = []
     try:
@@ -10830,10 +10832,13 @@ def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,
             if issue:
                 flagged.append(filename)
         if flagged:
-            from image_reference_map import repair_image_references, repair_picture_links
+            from image_reference_map import (
+                refresh_stale_extraction, repair_image_references, repair_picture_links)
             log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")
+            refresh_stale_extraction(folder_path, epub_path, log)
             repaired = repair_image_references(folder_path, log=log, only=flagged)
-            relinked = repair_picture_links(folder_path, log=log, only=flagged)
+            relinked = repair_picture_links(
+                folder_path, log=log, only=flagged, epub_path=epub_path)
             log(f"🛠️ Repaired image links in {repaired} file(s), pictures back in their links in {relinked} file(s)")
     except Exception as exc:
         log(f"⚠️ Auto Link / Image Tag Repair skipped: {exc}")
@@ -10944,7 +10949,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_glossary_names': False,
             'check_missing_images': True,
             'check_link_targets': False,
-            'auto_repair_image_links': True,
+            'auto_repair_image_links': False,
             'exclude_ruby_tags': False,
             'min_file_length': 0,
             'min_duplicate_word_count': 500,
@@ -11603,7 +11608,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Glossary name check (experimental): {'ENABLED' if qa_settings.get('check_glossary_names', False) else 'DISABLED'}")
     log(f"   ✓ Source resource preservation (images/links/tables/graphics): {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
     log(f"   ✓ Link target check (lost or changed links): {'ENABLED' if qa_settings.get('check_link_targets', False) else 'DISABLED'}")
-    log(f"   ✓ Auto Link / Image Tag Repair: {'ENABLED' if qa_settings.get('auto_repair_image_links', True) else 'DISABLED'}")
+    log(f"   ✓ Auto Link / Image Tag Repair: {'ENABLED' if qa_settings.get('auto_repair_image_links', False) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
     log(f"   ✓ Source->output p/h tag check (SDLXLIFF + bookmark fallback): {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
@@ -11764,12 +11769,12 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             pass
     
     if (
-        qa_settings.get('auto_repair_image_links', True)
+        qa_settings.get('auto_repair_image_links', False)
         and check_missing_imgs
         and not text_file_mode
         and str(epub_path or '').lower().endswith('.epub')
     ):
-        _auto_repair_flagged_pages(
+        if _auto_repair_flagged_pages(
             folder_path,
             html_files,
             original_image_info,
@@ -11777,7 +11782,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             image_rename_map,
             qa_settings.get('check_link_targets', False),
             log,
-        )
+            epub_path=epub_path,
+        ):
+            # A repair may have extracted the EPUB again: the scan compares
+            # with the rename map as it is now.
+            try:
+                with open(image_rename_map_path, 'r', encoding='utf-8') as rename_file:
+                    reloaded_rename_map = json.load(rename_file)
+            except (OSError, ValueError, TypeError):
+                reloaded_rename_map = None
+            if isinstance(reloaded_rename_map, dict) and reloaded_rename_map != image_rename_map:
+                image_rename_map = reloaded_rename_map
+                original_preservation_info = _build_source_preservation_info(
+                    original_html_content,
+                    image_rename_map=image_rename_map,
+                )
 
     file_type = "text" if text_file_mode else "HTML"
     log(f"🔍 Found {len(html_files)} {file_type} files. Starting parallel scan...")

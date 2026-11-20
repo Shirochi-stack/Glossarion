@@ -9353,21 +9353,23 @@ SETTINGS = {
      'type': 'float',
      'ui_group': 'AI Truncation Detector — API Settings',
      'ui_sites': ('qa',)},
-    'qa_scanner_settings.auto_repair_image_links': {'default': True,
+    'qa_scanner_settings.auto_repair_image_links': {'default': False,
      'default_source': 'nested',
-     'dialog_default': True,
-     'env': (('QA_AUTO_REPAIR_IMAGE_LINKS', 'qa', True),),
-     'label': 'Auto Link / Image Tag Repair',
-     'nested_default': True,
+     'dialog_default': False,
+     'env': (('QA_AUTO_REPAIR_IMAGE_LINKS', 'qa', False),),
+     'label': 'Auto Link / Image Tag Repair (changes the chapter files)',
+     'nested_default': False,
      'origins': ('nested', 'dialog', 'env'),
      'parent': 'qa_scanner_settings',
      'tooltip': 'Before a chapter is scanned, repairs its image and link tags when the scan would '
                 'flag them: an image link that points at a renamed or re-encoded file or at the '
-                'wrong folder, and a picture that left the link it has in the source. Chapters '
-                'without such an issue are not touched. Needs "Check source resources" on; link '
-                'issues count only with "Check link targets" on.',
+                'wrong folder, and a picture that left the link it has in the source. When the '
+                'extracted images came from another build of the source EPUB, it is extracted '
+                'again first. Chapters without such an issue are not touched. Needs "Check source '
+                'resources" on; link issues count only with "Check link targets" on. Off by '
+                'default: this is the only QA setting that rewrites the translated files.',
      'type': 'bool',
-     'ui_group': 'Detection Options',
+     'ui_group': 'File Processing',
      'ui_sites': ('qa',)},
     'qa_scanner_settings.auto_save_report': {'default': True,
      'default_source': 'nested',

@@ -14326,9 +14326,15 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                         # images are inserted only where some are still
                         # missing, and pictures go back inside their source
                         # links.
-                        kind, title, message, refreshed = resolve_image_qa(
-                            data, image_qa_infos
-                        )
+                        # It may extract the source EPUB's images again first,
+                        # which takes a while on a large book.
+                        QApplication.setOverrideCursor(Qt.WaitCursor)
+                        try:
+                            kind, title, message, refreshed = resolve_image_qa(
+                                data, image_qa_infos
+                            )
+                        finally:
+                            QApplication.restoreOverrideCursor()
                         if refreshed:
                             self._refresh_retranslation_data(data)
                         # A repair that had nothing left to do does not stand

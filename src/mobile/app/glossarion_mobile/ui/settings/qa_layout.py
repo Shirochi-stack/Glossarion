@@ -25,9 +25,11 @@ QA_TABS = (
     ("Files & tags", (
         ("Glossary and tag checks", """
             check_glossary_leakage check_glossary_names check_potential_truncation check_link_targets
-            auto_repair_image_links check_missing_beautifulsoup_tags sdlxliff_tag_retention_threshold sdlxliff_tag_surplus_tolerance sdlxliff_min_source_paragraph_tags
+            check_missing_beautifulsoup_tags sdlxliff_tag_retention_threshold sdlxliff_tag_surplus_tolerance sdlxliff_min_source_paragraph_tags
         """),
-        ("File processing", "min_file_length min_duplicate_word_count min_text_length_for_spacing"),
+        ("File processing", """
+            min_file_length min_duplicate_word_count min_text_length_for_spacing auto_repair_image_links
+        """),
         ("Word count analysis", """
             check_word_count_ratio counting_mode use_auto_multipliers word_count_multipliers
             warn_name_mismatch check_missing_images

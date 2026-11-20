@@ -356,6 +356,37 @@ def _resolve_parent(data, identity, reencoded=False):
     return None
 
 
+def refresh_stale_extraction(folder, epub_path, log=print):
+    """Extract the source EPUB again when the workspace's images came from
+    another build of it. Returns True when the extraction ran.
+
+    A workspace keeps the images and the rename map of its last extraction.
+    After the source EPUB is replaced (its images re-encoded, say) they stay
+    as they were until a translation run extracts again, and until then no
+    page can be repaired: the files its links should name are not there. This
+    is that run's extraction step, for the repairs that work without a run.
+    """
+    import zipfile
+
+    if not str(epub_path or '').lower().endswith('.epub') or not os.path.isfile(epub_path):
+        return False
+    marker = os.path.join(folder, '.resources_extracted')
+    if not os.path.isfile(marker):
+        return False  # nothing says which EPUB build the images came from
+    import Chapter_Extractor as extractor
+    try:
+        with zipfile.ZipFile(epub_path) as archive:
+            if extractor._validate_resource_extraction_marker(
+                    marker, folder, extractor._source_epub_content_fingerprint(archive))[0]:
+                return False
+            log('🔄 The extracted images do not match the source EPUB: extracting it again')
+            extractor.extract_chapters(archive, folder, progress_callback=lambda _message: None)
+    except (OSError, zipfile.BadZipFile) as error:
+        log(f'Source EPUB could not be extracted again: {error}')
+        return False
+    return True
+
+
 _PICTURE_IN_LINK = re.compile(r'<a\b[^>]*>(?:(?!</a\s*>)[\s\S])*?<img\b', re.I)
 
 
@@ -384,13 +415,15 @@ def relink_source_pictures(translated_html, source_html):
     return (str(output), changed) if changed else (translated_html, 0)
 
 
-def repair_picture_links(folder, log=print, only=None):
+def repair_picture_links(folder, log=print, only=None, epub_path=None):
     """Relink the pictures of every translated page whose source EPUB page has
     more pictures inside links than the page has. Returns the pages changed.
 
     A page is parsed only when that count says a picture left its link, so a
     repaired book costs one read per page. ``only`` limits the repair to the
-    pages with those names.
+    pages with those names. ``epub_path`` is the source EPUB when the caller
+    knows it; otherwise the workspace's own source pointer is used (it can
+    name a path of another computer in a copied workspace).
     """
     if only is not None:
         only = {str(name).casefold() for name in only}
@@ -398,7 +431,7 @@ def repair_picture_links(folder, log=print, only=None):
     from progress_core import _index_epub_html_members, _normalize_progress_match_name
     import zipfile
 
-    epub_path = read_workspace_source_path(folder)
+    epub_path = str(epub_path or read_workspace_source_path(folder))
     if not epub_path.lower().endswith('.epub') or not os.path.isfile(epub_path):
         return 0
     changed = 0

@@ -1528,7 +1528,8 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
     Returns ``(kind, title, message, refreshed)`` like ``insert_missing_images``;
     ``refreshed`` is False when no file and no mark changed.
     """
-    from image_reference_map import relink_source_pictures, repair_image_references
+    from image_reference_map import (
+        refresh_stale_extraction, relink_source_pictures, repair_image_references)
 
     output_dir = data['output_dir']
     rows = {}
@@ -1554,6 +1555,10 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
         return ('info', "Info", "No selected entry has an image or link QA issue.", False)
 
     try:
+        # Images extracted from another build of the source EPUB are extracted
+        # again first, as a translation run does: no link can be repaired to a
+        # file that is not there.
+        refreshed = refresh_stale_extraction(output_dir, data.get('file_path'), log)
         repaired = repair_image_references(
             output_dir,
             log=log,
@@ -1627,7 +1632,8 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
         traceback.print_exc()
         return ('error', "Error", f"Failed to resolve image QA issues: {e}", False)
 
-    lines = [f"Repaired image links in {repaired} file(s)."]
+    lines = ["Extracted the source EPUB's images again."] if refreshed else []
+    lines.append(f"Repaired image links in {repaired} file(s).")
     if inserted:
         lines.append(f"Inserted missing images in {inserted} file(s).")
     if relinked_files:

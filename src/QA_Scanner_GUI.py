@@ -3837,21 +3837,6 @@ class QAScannerMixin:
             )
             detection_layout.addWidget(check_link_targets_checkbox)
 
-            auto_repair_image_links_checkbox = self._create_styled_checkbox(
-                "Auto Link / Image Tag Repair"
-            )
-            auto_repair_image_links_checkbox.setChecked(qa_settings.get('auto_repair_image_links', True))
-            auto_repair_image_links_checkbox.setToolTip(
-                _wrapped_tooltip_html(
-                    "Before a chapter is scanned, repairs its image and link tags when the scan "
-                    "would flag them: an image link that points at a renamed or re-encoded file "
-                    "or at the wrong folder, and a picture that left the link it has in the "
-                    "source. Chapters without such an issue are not touched. Needs \"Check "
-                    "source resources\" on; link issues count only with \"Check link targets\" on."
-                )
-            )
-            detection_layout.addWidget(auto_repair_image_links_checkbox)
-
             check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(
                 "Use SDLXLIFF subfolder for source -> output h1/p tag checks"
             )
@@ -4097,6 +4082,25 @@ class QAScannerMixin:
             min_spacing_text_layout.addWidget(min_spacing_hint)
             min_spacing_text_layout.addStretch()
             file_layout.addWidget(min_spacing_text_widget)
+
+            # The one QA setting that changes the translated files.
+            auto_repair_image_links_checkbox = self._create_styled_checkbox(
+                "Auto Link / Image Tag Repair (changes the chapter files)"
+            )
+            auto_repair_image_links_checkbox.setChecked(qa_settings.get('auto_repair_image_links', False))
+            auto_repair_image_links_checkbox.setToolTip(
+                _wrapped_tooltip_html(
+                    "Before a chapter is scanned, repairs its image and link tags when the scan "
+                    "would flag them: an image link that points at a renamed or re-encoded file "
+                    "or at the wrong folder, and a picture that left the link it has in the "
+                    "source. When the extracted images came from another build of the source "
+                    "EPUB, it is extracted again first. Chapters without such an issue are not "
+                    "touched. Needs \"Check source resources\" on; link issues count only with "
+                    "\"Check link targets\" on. Off by default: this is the only QA setting that "
+                    "rewrites the translated files."
+                )
+            )
+            file_layout.addWidget(auto_repair_image_links_checkbox)
 
             scroll_layout.addSpacing(15)
             yield
@@ -5900,7 +5904,7 @@ class QAScannerMixin:
                             ('QA_CHECK_GLOSSARY_NAMES', '1' if qa_settings.get('check_glossary_names', False) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_CHECK_LINK_TARGETS', '1' if qa_settings.get('check_link_targets', False) else '0'),
-                            ('QA_AUTO_REPAIR_IMAGE_LINKS', '1' if qa_settings.get('auto_repair_image_links', True) else '0'),
+                            ('QA_AUTO_REPAIR_IMAGE_LINKS', '1' if qa_settings.get('auto_repair_image_links', False) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
                             ('QA_MIN_DUPLICATE_WORD_COUNT', str(qa_settings.get('min_duplicate_word_count', 500))),
                             ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
@@ -6065,7 +6069,7 @@ class QAScannerMixin:
                     ('check_potential_truncation', check_potential_truncation_checkbox, False),
                     ('check_missing_images', check_missing_images_checkbox, True),
                     ('check_link_targets', check_link_targets_checkbox, False),
-                    ('auto_repair_image_links', auto_repair_image_links_checkbox, True),
+                    ('auto_repair_image_links', auto_repair_image_links_checkbox, False),
                     ('min_file_length', min_length_spinbox, 0),
                     ('min_duplicate_word_count', min_dup_words_spinbox, 500),
                     ('min_text_length_for_spacing', min_spacing_text_spinbox, 0),
@@ -6298,7 +6302,7 @@ class QAScannerMixin:
                     check_potential_truncation_checkbox.setChecked(False)
                     check_missing_images_checkbox.setChecked(True)
                     check_link_targets_checkbox.setChecked(False)
-                    auto_repair_image_links_checkbox.setChecked(True)
+                    auto_repair_image_links_checkbox.setChecked(False)
                     min_length_spinbox.setValue(0)
                     # Set 'detailed' radio button as checked
                     for rb, value in format_radio_buttons:

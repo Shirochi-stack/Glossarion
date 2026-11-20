@@ -315,6 +315,33 @@ def test_run_repair_puts_pictures_back_inside_their_source_links(tmp_path):
     assert tracking.repair_image_references(tmp_path, only={lost.name}) == 0
 
 
+def test_stale_extraction_is_refreshed_only_when_the_marker_names_another_epub(tmp_path, monkeypatch):
+    import Chapter_Extractor as extractor
+
+    epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(epub, 'w') as archive:
+        archive.writestr('OEBPS/Text/chapter0001.xhtml', '<html><body><p>one</p></body></html>')
+    folder = tmp_path / 'book'
+    folder.mkdir()
+    calls = []
+    monkeypatch.setattr(extractor, 'extract_chapters', lambda archive, output_dir, **_kwargs: calls.append(output_dir))
+    verdict = {'valid': True}
+    monkeypatch.setattr(extractor, '_validate_resource_extraction_marker',
+                        lambda *_args: (verdict['valid'], '' if verdict['valid'] else 'source EPUB content changed'))
+    log = []
+
+    # no marker: nothing says which EPUB the images came from
+    assert tracking.refresh_stale_extraction(str(folder), str(epub), log.append) is False
+    (folder / '.resources_extracted').write_text('{}', encoding='utf-8')
+    assert tracking.refresh_stale_extraction(str(folder), str(epub), log.append) is False
+    assert tracking.refresh_stale_extraction(str(folder), str(tmp_path / 'missing.epub'), log.append) is False
+    assert tracking.refresh_stale_extraction(str(folder), str(tmp_path / 'source.pdf'), log.append) is False
+    assert calls == [] and log == []
+    verdict['valid'] = False
+    assert tracking.refresh_stale_extraction(str(folder), str(epub), log.append) is True
+    assert calls == [str(folder)] and len(log) == 1
+
+
 def test_qa_scan_auto_repair_touches_only_the_pages_it_would_flag(tmp_path):
     import scan_html_folder as scanner
 
