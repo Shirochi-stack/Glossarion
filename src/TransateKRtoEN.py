@@ -4608,11 +4608,18 @@ class ProgressManager:
                 "special_type": "metadata",
                 "metadata_progress_key": entry_key,
             })
-            self._apply_model_info(
-                entry,
-                existing,
-                prefer_thread=status in ("in_progress", "completed", "failed", "error"),
-            )
+            if status == "in_progress":
+                # The phase starts before its request has picked a key: the model on the row is
+                # the previous run's (owner 2026-11-20: a retranslated metadata row showed the old
+                # model while in progress). publish_metadata_request_model sets the real one.
+                for stale_field in ("model_name", "model", "key_identifier"):
+                    entry.pop(stale_field, None)
+            else:
+                self._apply_model_info(
+                    entry,
+                    existing,
+                    prefer_thread=status in ("completed", "failed", "error"),
+                )
             if (
                 status in ("completed", "failed", "error")
                 and not self._clean_model_name(entry.get("model_name"))
@@ -4634,6 +4641,49 @@ class ProgressManager:
             chapters[entry_key] = entry
             updated = entry
         return updated
+
+    def publish_metadata_request_model(self, field_names=None):
+        """Show the model and key of the request this thread is about to send on the in-progress
+        metadata rows of *field_names* (every in-progress metadata row when omitted), and save.
+
+        Called at the provider boundary (send_with_interrupt's before_send_callback), where the
+        request's key has been selected.
+        """
+        model_name, key_identifier = _capture_thread_actual_request_metadata()
+        model_name = self._clean_model_name(model_name)
+        if not model_name:
+            return False
+        key_identifier = self._clean_key_identifier(key_identifier)
+        wanted = {str(field) for field in (field_names or ())}
+        changed = False
+        with self._save_lock:
+            for _key, entry in self.metadata_entries():
+                if str(entry.get("status", "")).lower() != "in_progress":
+                    continue
+                phase_fields = entry.get("metadata_fields")
+                if (
+                    wanted
+                    and isinstance(phase_fields, list)
+                    and phase_fields
+                    and not wanted.intersection(str(field) for field in phase_fields)
+                ):
+                    continue
+                if (
+                    entry.get("model_name") == model_name
+                    and entry.get("key_identifier") == key_identifier
+                ):
+                    continue
+                entry["model_name"] = model_name
+                entry.pop("model", None)
+                if key_identifier:
+                    entry["key_identifier"] = key_identifier
+                else:
+                    entry.pop("key_identifier", None)
+                entry["last_updated"] = time.time()
+                changed = True
+            if changed:
+                self.save()
+        return changed
 
     def reset_in_progress_metadata(self):
         """Return interrupted metadata phases to pending without touching completed rows."""
@@ -24080,6 +24130,7 @@ def translate_title(
     glossary_path=None,
     source_path=None,
     settings=None,
+    before_send_callback=None,
 ):
     """Translate the book title using the configured settings"""
     def _result(value, succeeded):
@@ -24180,6 +24231,7 @@ def translate_title(
                 max_tokens=max_tokens,
                 stop_check_fn=_stop_check,
                 context='book_title',
+                before_send_callback=before_send_callback,
             )
         
         # Extract content from response
@@ -26818,6 +26870,10 @@ def main(log_callback=None, stop_callback=None):
                 return_status=True,
                 output_dir=out,
                 source_path=input_path,
+                before_send_callback=(
+                    (lambda: progress_manager.publish_metadata_request_model(["title"]))
+                    if metadata_progress_enabled else None
+                ),
             )
             if title_request_succeeded:
                 if translated_title != original_title:
@@ -26913,6 +26969,10 @@ def main(log_callback=None, stop_callback=None):
                         if metadata_translation_mode == 'parallel' else None
                     ),
                 )
+                if metadata_progress_enabled:
+                    translator.before_send_callback = (
+                        progress_manager.publish_metadata_request_model
+                    )
                 try:
                     translated_metadata = translator.translate_metadata(
                         metadata, fields_to_translate, mode=translator_mode

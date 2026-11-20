@@ -2841,6 +2841,84 @@ def test_completed_metadata_progress_uses_configured_model_fallback(
     ] == "authgpt/gpt-5.6-luna"
 
 
+def test_in_progress_metadata_row_shows_the_model_of_the_request_being_sent(tmp_path):
+    """Owner 2026-11-20: a retranslated metadata row kept the previous run's model while in progress."""
+    progress, _plan, metadata_path = _completed_metadata_rows(tmp_path, "parallel")
+    title_key = "__metadata__:field:title"
+    description_key = "__metadata__:field:description"
+    progress.prog["chapters"][title_key]["key_identifier"] = "KEY 1"
+
+    # A model left on this thread by an earlier request is not this phase's model either.
+    set_current_thread_actual_request_model("stale-thread-model", "KEY 9")
+    entry = progress.update_metadata_status(
+        "in_progress", str(metadata_path), key=title_key
+    )
+    assert entry["status"] == "in_progress"
+    assert "model_name" not in entry
+    assert "key_identifier" not in entry
+
+    # The provider boundary: the request has picked its key and model.
+    set_current_thread_actual_request_model("new-model", "KEY 2")
+    assert progress.publish_metadata_request_model(["title"]) is True
+    assert progress.publish_metadata_request_model(["title"]) is False
+
+    saved = ProgressManager(str(tmp_path)).prog["chapters"]
+    assert saved[title_key]["status"] == "in_progress"
+    assert saved[title_key]["model_name"] == "new-model"
+    assert saved[title_key]["key_identifier"] == "KEY 2"
+    # Rows that are not in progress, and other fields' rows, keep their model.
+    assert saved[description_key]["status"] == "completed"
+    assert saved[description_key]["model_name"] == "old-model"
+
+    progress.update_metadata_status(
+        "in_progress", str(metadata_path), key=description_key
+    )
+    assert progress.publish_metadata_request_model(["title"]) is False
+    assert "model_name" not in progress.prog["chapters"][description_key]
+    set_current_thread_actual_request_model(None, None)
+    assert progress.publish_metadata_request_model(["description"]) is False
+
+
+def test_metadata_translator_names_the_request_fields_before_send(monkeypatch):
+    import TransateKRtoEN
+    from metadata_batch_translator import MetadataTranslator
+
+    seen_callbacks = []
+
+    def fake_send(**kwargs):
+        callback = kwargs.get("before_send_callback")
+        seen_callbacks.append(callback)
+        if callable(callback):
+            callback()
+        return types.SimpleNamespace(
+            content=json.dumps({"title": "Title", "description": "Text"})
+        )
+
+    monkeypatch.setattr(TransateKRtoEN, "send_with_interrupt", fake_send)
+    metadata = {"title": "원제", "description": "설명"}
+    fields = {"title": True, "description": True}
+
+    translator = MetadataTranslator(
+        object(), {"output_language": "English"}, stop_check_fn=lambda: False
+    )
+    reported = []
+    translator.before_send_callback = reported.append
+    translator.translate_metadata(dict(metadata), fields, mode="together")
+    assert reported == [["title", "description"]]
+
+    reported.clear()
+    translator.translate_metadata(dict(metadata), fields, mode="parallel")
+    assert sorted(reported) == [["description"], ["title"]]
+
+    # Without a callback the request keeps the old stop behaviour (no provider-boundary hook).
+    seen_callbacks.clear()
+    plain = MetadataTranslator(
+        object(), {"output_language": "English"}, stop_check_fn=lambda: False
+    )
+    plain.translate_metadata(dict(metadata), fields, mode="together")
+    assert seen_callbacks == [None]
+
+
 def test_vision_ocr_progress_replaces_stale_model_with_active_request(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prog["chapters"]["251"] = {

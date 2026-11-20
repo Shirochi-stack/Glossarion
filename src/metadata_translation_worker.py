@@ -111,6 +111,7 @@ def _translate_title(
     client,
     env: Mapping[str, Any],
     stop_check_fn: StopCheck,
+    before_send_callback=None,
 ) -> tuple[Any, bool]:
     """Run the dedicated title request without consulting per-book globals."""
     title_text = str(title or "").strip()
@@ -169,6 +170,7 @@ def _translate_title(
             max_tokens=_int_setting(env, "MAX_OUTPUT_TOKENS", 8192),
             stop_check_fn=stop_check_fn,
             context="book_title",
+            before_send_callback=before_send_callback,
         )
 
     if hasattr(response, "content"):
@@ -402,6 +404,10 @@ def run_metadata_translation_job(
                 client,
                 env,
                 stop_check,
+                before_send_callback=(
+                    (lambda: progress_manager.publish_metadata_request_model(["title"]))
+                    if progress_manager is not None and title_phase else None
+                ),
             )
             if title_succeeded:
                 original_title = metadata["title"]
@@ -452,6 +458,10 @@ def run_metadata_translation_job(
                     field_progress if mode == "parallel" else None
                 ),
             )
+            if progress_manager is not None:
+                translator.before_send_callback = (
+                    progress_manager.publish_metadata_request_model
+                )
             translator_mode = "parallel" if mode == "parallel" else "together"
             translated_metadata = translator.translate_metadata(
                 metadata,
