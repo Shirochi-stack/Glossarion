@@ -8,6 +8,7 @@ import os
 from urllib.parse import unquote
 import json
 import ast
+import threading
 
 # GUI imports - optional for non-GUI usage
 try:
@@ -3361,6 +3362,10 @@ class MetadataTranslator:
         self.client = client
         self.config = config or {}
         self.progress_callback = progress_callback
+        # Optional: called with the field names of a request right before it reaches the provider
+        # (the key and model are chosen by then), so the caller can show the real model.
+        self.before_send_callback = None
+        self._request_fields = threading.local()
         self.last_completed_fields = set()
         self.last_requested_fields = set()
         self.last_no_request_fields = set()
@@ -3488,6 +3493,19 @@ class MetadataTranslator:
     def _send_with_retry(self, messages, temperature, max_tokens, context=None):
         """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
         self._raise_if_stop_requested()
+        before_send = None
+        request_callback = getattr(self, 'before_send_callback', None)
+        if callable(request_callback):
+            # The fields of this thread's request (set by the two request builders).
+            field_names = list(getattr(
+                getattr(self, '_request_fields', None), 'names', ()
+            ))
+
+            def before_send():
+                try:
+                    request_callback(field_names)
+                except Exception as callback_error:
+                    self._print(f"⚠️ Metadata pre-send callback failed: {callback_error}")
         try:
             from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
             with _skip_thinking_env('METADATA', quiet=self._quiet):
@@ -3498,6 +3516,7 @@ class MetadataTranslator:
                     max_tokens=max_tokens,
                     stop_check_fn=self.stop_check_fn,
                     context=context,
+                    before_send_callback=before_send,
                 )
         except ImportError:
             # Fallback to direct send if send_with_interrupt is not available
@@ -3648,6 +3667,7 @@ class MetadataTranslator:
         if not fields_to_send:
             return {}
         self.last_requested_fields.update(fields_to_send)
+        self._request_fields.names = [str(field) for field in fields_to_send]
         
         # Get configured prompt
         prompt_template = self.config.get('metadata_batch_prompt',
@@ -3840,6 +3860,7 @@ class MetadataTranslator:
         """Translate a single field using configured prompts"""
         if self._is_already_target_language(field_value):
             return field_value
+        self._request_fields.names = [str(field_name)]
         is_list_value = isinstance(field_value, list)
         field_value_text = (
             json.dumps(field_value, ensure_ascii=False)

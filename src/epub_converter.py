@@ -2959,6 +2959,13 @@ class EPUBCompiler:
                                         key=phase['key'],
                                     )
                             metadata_progress_manager.save()
+                            try:
+                                # The in-progress rows show the model of the request being sent.
+                                self.metadata_translator.before_send_callback = (
+                                    metadata_progress_manager.publish_metadata_request_model
+                                )
+                            except AttributeError:
+                                pass
 
                         if not fields_to_translate:
                             self.log(
