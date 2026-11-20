@@ -43,6 +43,9 @@ def sources(path):
     return [tag['src'] for tag in BeautifulSoup(path.read_text(encoding='utf-8'), 'html.parser').find_all('img')]
 
 
+sources_of = sources
+
+
 def state(folder):
     return json.loads((folder / tracking.SIDECAR).read_text(encoding='utf-8'))
 
@@ -310,6 +313,50 @@ def test_run_repair_puts_pictures_back_inside_their_source_links(tmp_path):
     lost.write_text(lost.read_text(encoding='utf-8').replace('<a href="https://host.example/i1/">', '').replace(
         '.webp"/></a></p><p><a', '.webp"/></p><p><a'), encoding='utf-8')
     assert tracking.repair_image_references(tmp_path, only={lost.name}) == 0
+
+
+def test_qa_scan_auto_repair_touches_only_the_pages_it_would_flag(tmp_path):
+    import scan_html_folder as scanner
+
+    inventory(tmp_path, {'OEBPS/Images/a.jpg': b'jpeg-one'}, {'a.jpg': 'chapter0001_img_1.jpg'})
+    renamed = page(tmp_path, 'response_chapter0001.html', ['chapter0001_img_1.jpg'])
+    tracking.snapshot_before_refresh(tmp_path)
+    inventory(tmp_path, {'OEBPS/Images/a.webp': b'webp-one'}, {'a.webp': 'chapter0001_img_1.webp'})
+    sources = {
+        'chapter0001.xhtml': '<html><body><p><img src="../Images/a.webp"/></p></body></html>',
+        'chapter0002.xhtml': '<html><body><p><a href="https://host.example/i1/"><img src="../Images/a.webp"/></a></p></body></html>',
+        'chapter0003.xhtml': '<html><body><p><img src="../Images/a.webp"/></p></body></html>',
+    }
+    epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(epub, 'w') as archive:
+        for name, markup in sources.items():
+            archive.writestr(f'OEBPS/Text/{name}', markup)
+    (tmp_path / 'source_epub.txt').write_text(str(epub), encoding='utf-8')
+    unlinked = page(tmp_path, 'response_chapter0002.html', ['chapter0001_img_1.webp'])
+    fine = page(tmp_path, 'response_chapter0003.html', ['chapter0001_img_1.webp'])
+    fine_before = fine.read_bytes()
+    rename_map = {'a.webp': 'chapter0001_img_1.webp'}
+    image_info = {index: {'image_count': 1, 'image_srcs': ['../Images/a.webp'], 'filename': name}
+                  for index, name in enumerate(sources)}
+    preservation = {name: scanner._html_preservation_profile(markup, rename_map) for name, markup in sources.items()}
+    names = [renamed.name, unlinked.name, fine.name]
+    log = []
+
+    # the link target check is off: only the page with the changed image reference is flagged
+    assert scanner._auto_repair_flagged_pages(
+        str(tmp_path), names, image_info, preservation, rename_map, False, log.append) == [renamed.name]
+    assert sources_of(renamed) == ['images/chapter0001_img_1.webp']
+    assert sources_of(unlinked) == ['images/chapter0001_img_1.webp'] and '<a ' not in unlinked.read_text(encoding='utf-8')
+    assert fine.read_bytes() == fine_before
+
+    # with it on, the page whose picture left its link is flagged and relinked
+    assert scanner._auto_repair_flagged_pages(
+        str(tmp_path), names, image_info, preservation, rename_map, True, log.append) == [unlinked.name]
+    assert '<a href="https://host.example/i1/"><img src="images/chapter0001_img_1.webp"/></a>' in unlinked.read_text(
+        encoding='utf-8')
+    assert fine.read_bytes() == fine_before
+    assert scanner._auto_repair_flagged_pages(
+        str(tmp_path), names, image_info, preservation, rename_map, True, log.append) == []
 
 
 def test_identical_bytes_use_source_path_and_ambiguous_matches_do_not_guess(tmp_path):

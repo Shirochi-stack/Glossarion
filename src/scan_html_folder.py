@@ -9879,9 +9879,15 @@ def process_html_file_batch(args, should_stop=None):
             and source_preservation_profile
             and output_preservation_profile
         ):
+            # Lost or changed link targets are a check of their own, off by
+            # default: models often relink a picture or an address shown as text.
+            check_link_targets = qa_settings.get('check_link_targets', False)
             for resource_issue, resource_preview in _preservation_count_issues(
                     source_preservation_profile,
                     output_preservation_profile):
+                if not check_link_targets and resource_issue.startswith(
+                        ('missing_link_targets_', 'changed_link_targets_')):
+                    continue
                 issues.append(resource_issue)
                 if resource_preview:
                     qa_issue_previews[resource_issue] = resource_preview
@@ -10770,6 +10776,70 @@ def _init_worker_process():
 
 
 @_stops_at_once
+def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,
+                               original_preservation_info, image_rename_map,
+                               check_link_targets, log):
+    """Auto Link / Image Tag Repair: repair the pages this scan would flag.
+
+    A page qualifies when the scan's own comparison with its source page
+    reports a missing, extra or changed image reference, or (with the link
+    target check on) a lost or changed link target. Only those pages get the
+    image link repair and the picture relinking of a translation run, before
+    they are scanned. Returns the flagged page names.
+    """
+    flagged = []
+    try:
+        for filename in html_files:
+            source_profile = _source_preservation_profile_for_output(
+                original_preservation_info, filename)
+            # The image check's own pairing: the file name without response_ and extension.
+            source_name = filename.lower()
+            if source_name.startswith('response_'):
+                source_name = source_name[9:]
+            source_name = os.path.splitext(source_name)[0]
+            image_key = next(
+                (key for key, info in (original_image_info or {}).items()
+                 if isinstance(info, dict)
+                 and os.path.splitext(str(info.get('filename', '')).lower())[0] == source_name),
+                None,
+            )
+            if source_profile is None and image_key is None:
+                continue
+            try:
+                with open(os.path.join(folder_path, filename), 'r', encoding='utf-8') as handle:
+                    content = handle.read()
+            except (OSError, UnicodeError):
+                continue
+            output_profile = _html_preservation_profile(content, image_rename_map)
+            issue = False
+            if image_key is not None:
+                issue, _details = detect_missing_images(
+                    content,
+                    image_key,
+                    original_image_info,
+                    image_rename_map=image_rename_map,
+                    svg_picture_conversion=_svg_picture_conversions(
+                        source_profile, output_profile),
+                )
+            if not issue and check_link_targets and source_profile is not None:
+                issue = any(
+                    code.startswith(('missing_link_targets_', 'changed_link_targets_'))
+                    for code, _preview in _preservation_count_issues(
+                        source_profile, output_profile)
+                )
+            if issue:
+                flagged.append(filename)
+        if flagged:
+            from image_reference_map import repair_image_references, repair_picture_links
+            log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")
+            repaired = repair_image_references(folder_path, log=log, only=flagged)
+            relinked = repair_picture_links(folder_path, log=log, only=flagged)
+            log(f"🛠️ Repaired image links in {repaired} file(s), pictures back in their links in {relinked} file(s)")
+    except Exception as exc:
+        log(f"⚠️ Auto Link / Image Tag Repair skipped: {exc}")
+    return flagged
+
+
 def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
@@ -10873,6 +10943,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_glossary_leakage': True,
             'check_glossary_names': False,
             'check_missing_images': True,
+            'check_link_targets': False,
+            'auto_repair_image_links': True,
             'exclude_ruby_tags': False,
             'min_file_length': 0,
             'min_duplicate_word_count': 500,
@@ -11530,6 +11602,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Glossary leakage check: {'ENABLED' if qa_settings.get('check_glossary_leakage', True) else 'DISABLED'}")
     log(f"   ✓ Glossary name check (experimental): {'ENABLED' if qa_settings.get('check_glossary_names', False) else 'DISABLED'}")
     log(f"   ✓ Source resource preservation (images/links/tables/graphics): {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
+    log(f"   ✓ Link target check (lost or changed links): {'ENABLED' if qa_settings.get('check_link_targets', False) else 'DISABLED'}")
+    log(f"   ✓ Auto Link / Image Tag Repair: {'ENABLED' if qa_settings.get('auto_repair_image_links', True) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
     log(f"   ✓ Source->output p/h tag check (SDLXLIFF + bookmark fallback): {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
@@ -11689,6 +11763,22 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         except Exception:
             pass
     
+    if (
+        qa_settings.get('auto_repair_image_links', True)
+        and check_missing_imgs
+        and not text_file_mode
+        and str(epub_path or '').lower().endswith('.epub')
+    ):
+        _auto_repair_flagged_pages(
+            folder_path,
+            html_files,
+            original_image_info,
+            original_preservation_info,
+            image_rename_map,
+            qa_settings.get('check_link_targets', False),
+            log,
+        )
+
     file_type = "text" if text_file_mode else "HTML"
     log(f"🔍 Found {len(html_files)} {file_type} files. Starting parallel scan...")
     

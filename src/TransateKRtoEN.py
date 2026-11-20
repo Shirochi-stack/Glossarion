@@ -1655,6 +1655,8 @@ def _load_qa_scanner_settings_from_env():
             "check_glossary_leakage": _env_bool("QA_CHECK_GLOSSARY_LEAKAGE", True),
             "check_glossary_names": _env_bool("QA_CHECK_GLOSSARY_NAMES", False),
             "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),
+            "check_link_targets": _env_bool("QA_CHECK_LINK_TARGETS", False),
+            "auto_repair_image_links": _env_bool("QA_AUTO_REPAIR_IMAGE_LINKS", True),
             "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),
             "report_format": os.getenv("QA_REPORT_FORMAT", "detailed"),
             "auto_save_report": _env_bool("QA_AUTO_SAVE_REPORT", True),

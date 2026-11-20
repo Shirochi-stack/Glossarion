@@ -384,13 +384,16 @@ def relink_source_pictures(translated_html, source_html):
     return (str(output), changed) if changed else (translated_html, 0)
 
 
-def repair_picture_links(folder, log=print):
+def repair_picture_links(folder, log=print, only=None):
     """Relink the pictures of every translated page whose source EPUB page has
     more pictures inside links than the page has. Returns the pages changed.
 
     A page is parsed only when that count says a picture left its link, so a
-    repaired book costs one read per page.
+    repaired book costs one read per page. ``only`` limits the repair to the
+    pages with those names.
     """
+    if only is not None:
+        only = {str(name).casefold() for name in only}
     from output_workspace import read_workspace_source_path
     from progress_core import _index_epub_html_members, _normalize_progress_match_name
     import zipfile
@@ -403,6 +406,8 @@ def repair_picture_links(folder, log=print):
         with zipfile.ZipFile(epub_path) as archive:
             by_stem = _index_epub_html_members(archive.namelist())[2]
             for path in _html_files(folder):
+                if only is not None and path.name.casefold() not in only:
+                    continue
                 member = by_stem.get(_normalize_progress_match_name(path.name).lower())
                 if not member:
                     continue

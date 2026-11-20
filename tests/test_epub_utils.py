@@ -686,6 +686,7 @@ def test_pdf_bookmark_qa_preserves_structure_without_exact_sdlxliff_name(tmp_pat
     settings.update({
         "check_word_count_ratio": False,
         "check_missing_images": True,
+        "check_link_targets": True,
         "check_missing_beautifulsoup_tags": True,
         "sdlxliff_tag_retention_threshold": 1.0,
         "sdlxliff_tag_surplus_tolerance": 0.0,
