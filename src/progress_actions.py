@@ -1456,6 +1456,44 @@ def _image_qa_issue_types(output_path, source_html, rename_map):
     return {detail.get('type') for detail in details}
 
 
+def _unlink_added_links(translated_html, source_html):
+    """Turn links whose address the source has in no link back into text.
+
+    The model sometimes makes a link out of an address the source only shows
+    as text. Nothing is done while a source link is missing from the output:
+    an added link may then be a source link with a changed address. An
+    address the source shows as text and the output would no longer show is
+    written after the link's text. Returns ``(html, changed)``.
+    """
+    from collections import Counter
+
+    from bs4 import BeautifulSoup
+
+    source = BeautifulSoup(source_html, 'html.parser')
+    output = BeautifulSoup(translated_html, 'html.parser')
+
+    def addresses(soup):
+        return Counter(
+            str(link.get('href')).strip() for link in soup.find_all('a')
+            if str(link.get('href') or '').strip()
+        )
+
+    source_links, output_links = addresses(source), addresses(output)
+    if source_links - output_links:
+        return translated_html, 0
+    source_text = source.get_text()
+    changed = 0
+    for link in output.find_all('a'):
+        address = str(link.get('href') or '').strip()
+        if not address or address in source_links:
+            continue
+        if address in source_text and address not in output.get_text():
+            link.append(' ' + address)
+        link.unwrap()
+        changed += 1
+    return (str(output), changed) if changed else (translated_html, 0)
+
+
 def _link_qa_issues(output_path, source_html, rename_map):
     """Link target issue codes the QA scanner's comparison still finds in an output."""
     from scan_html_folder import _html_preservation_profile, _preservation_count_issues
@@ -1526,6 +1564,7 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
         )
         rename_map = _output_image_rename_map(output_dir)
         inserted = relinked_files = relinked_pictures = 0
+        unlinked_files = unlinked_links = 0
         image_rows = link_rows = 0
         image_resolved = link_resolved = 0
         cleared = []  # (info, progress entry, patterns of the marks to clear)
@@ -1555,11 +1594,14 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
                 with open(output_path, 'r', encoding='utf-8') as f:
                     translated_html = f.read()
                 relinked_html, pictures = relink_source_pictures(translated_html, source_html)
-                if pictures:
+                relinked_html, links = _unlink_added_links(relinked_html, source_html)
+                if pictures or links:
                     with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(relinked_html)
-                    relinked_files += 1
+                    relinked_files += bool(pictures)
                     relinked_pictures += pictures
+                    unlinked_files += bool(links)
+                    unlinked_links += links
                 if not _link_qa_issues(output_path, source_html, rename_map):
                     link_resolved += 1
                     patterns.append(_LINK_TARGET_QA_RE)
@@ -1593,6 +1635,11 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
             f"Put {relinked_pictures} picture(s) back inside their links in "
             f"{relinked_files} file(s)."
         )
+    if unlinked_files:
+        lines.append(
+            f"Turned {unlinked_links} link(s) the source does not have back into "
+            f"text in {unlinked_files} file(s)."
+        )
     if image_rows:
         lines.append(
             f"Image QA issue cleared on {image_resolved} of {image_rows} selected file(s)."
@@ -1613,7 +1660,7 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
         lines.append(f"Other QA issues remain on {remaining_other_qa} file(s).")
     return (
         'info', "Resolve QA issue", "\n".join(lines),
-        bool(repaired or inserted or relinked_files or cleared),
+        bool(repaired or inserted or relinked_files or unlinked_files or cleared),
     )
 
 

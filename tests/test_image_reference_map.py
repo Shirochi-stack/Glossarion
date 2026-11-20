@@ -255,6 +255,24 @@ def test_resolve_qa_puts_pictures_back_inside_their_source_links(tmp_path):
     assert progress_actions.resolve_image_qa(data, rows, log=lambda _line: None)[3] is False
 
 
+def test_resolve_qa_turns_a_link_the_source_does_not_have_back_into_text():
+    import progress_actions
+
+    source = ('<body><p>Notice</p><p>→https://host.example/n1/</p><p><a href="#note">note</a></p>'
+              '<p>see https://host.example/shown/</p></body>')
+    made_up = ('<body><p><a href="https://host.example/n1/">Notice</a></p><p><a href="#note">chú</a></p>'
+               '<p>see <a href="https://host.example/shown/">https://host.example/shown/</a></p></body>')
+    html, changed = progress_actions._unlink_added_links(made_up, source)
+    assert changed == 2
+    # the address the source shows stays readable; one already shown is not repeated
+    assert html == ('<body><p>Notice https://host.example/n1/</p><p><a href="#note">chú</a></p>'
+                    '<p>see https://host.example/shown/</p></body>')
+    assert progress_actions._unlink_added_links(html, source) == (html, 0)
+    # a source link is missing: the added link may be that link with a changed address
+    changed_address = '<body><p>Notice</p><p><a href="#note-1">chú</a></p></body>'
+    assert progress_actions._unlink_added_links(changed_address, source) == (changed_address, 0)
+
+
 def test_run_repair_puts_pictures_back_inside_their_source_links(tmp_path):
     inventory(tmp_path, {'OEBPS/Images/a.webp': b'one', 'OEBPS/Images/b.webp': b'two'},
               {'a.webp': 'chapter0001_img_1.webp', 'b.webp': 'chapter0001_img_2.webp'})
