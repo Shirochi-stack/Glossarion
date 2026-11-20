@@ -35,6 +35,30 @@ from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import looks_like_valid_html_tag, unescape_valid_html_tag_entities
 from title_tag_translation import should_translate_title_tags
 
+
+class _LinkedImageHTML2Text(html2text.HTML2Text):
+    """html2text that keeps a picture inside the link that wraps it.
+
+    A raw ``<img>`` (``images_as_html``) is written without opening the link
+    it sits in, so ``<a href="u"><img/></a>`` came out as ``<img/>[](<u>)``:
+    the picture first, then an empty link. Open the link before the picture,
+    as html2text itself does for ``![alt](src)`` images.
+    """
+
+    def handle_tag(self, tag, attrs, start):
+        if (
+            tag == "img" and start and not self.ignore_images
+            and attrs.get("src") is not None
+            and getattr(self, "maybe_automatic_link", None) is not None
+            and (self.images_as_html or (
+                self.images_with_size and ("width" in attrs or "height" in attrs)
+            ))
+        ):
+            self.o("[")
+            self.maybe_automatic_link = None
+            self.empty_link = False
+        super().handle_tag(tag, attrs, start)
+
 # Standard HTML / SVG / MathML / common legacy tag names. Used by
 # ``_protect_non_html_angle_brackets`` to decide whether an angle-bracket
 # pattern is a real HTML element (leave alone) or a custom/story tag that
@@ -320,7 +344,7 @@ class EnhancedTextExtractor:
     
     def _configure_html2text(self):
         """Configure html2text with optimal Unicode and CJK settings"""
-        self.h2t = html2text.HTML2Text()
+        self.h2t = _LinkedImageHTML2Text()
         
         # Core settings for Unicode preservation
         self.h2t.unicode_snob = True
