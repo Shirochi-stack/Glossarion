@@ -370,9 +370,10 @@ UI_REACH_EXCLUDE = (INIT_FUNCS | SAVE_FUNCS | {n for names in ENV_SITES.values()
 ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 CONFIG_NAMES = {"config", "cfg", "_cfg", "conf", "_config", "live_config", "config_dict"}
 ENV_SETTER_FUNCS = {"_update_env", "set_env", "putenv", "setdefault", "_set_env", "update_env"}
-WIDGET_FACTORIES = {"_create_styled_checkbox", "_create_preview_pool_button"}
+# _plain_spinbox: relations_diagram_dialog's native spin box (the Glossary Editor's Backup Settings limits)
+WIDGET_FACTORIES = {"_create_styled_checkbox", "_create_preview_pool_button", "_plain_spinbox"}
 # Widgets whose text names the setting they edit (buttons and radios name actions / choices).
-INPUT_FACTORIES = {"_create_styled_checkbox"}
+INPUT_FACTORIES = {"_create_styled_checkbox", "_plain_spinbox"}
 INPUT_SUFFIXES = ("ComboBox", "LineEdit", "SpinBox", "CheckBox", "TextEdit", "Slider", "Combo")
 WIDGET_SUFFIXES = ("ComboBox", "LineEdit", "SpinBox", "CheckBox", "TextEdit", "Slider", "Combo",
                    "RadioButton", "Button", "Label")

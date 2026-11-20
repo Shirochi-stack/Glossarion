@@ -93,8 +93,13 @@ MOVED_BODIES = {
         ("original_path = self.editor_file_entry.text()", "original_path = glossary_path"),
         ("re", r"self\.append_log\(", "append_log("),
         ("json.dump(self.current_glossary_data,", "json.dump(current_glossary_data,"),
+        # 2026-11-20: manual and automatic backups each have their own limit and are pruned apart
+        ("# Optional: Clean old backups if more than limit",
+         "# Optional: Clean old backups of this kind if more than its limit"),
+        ("max_backups = config.get('glossary_max_backups', 50)",
+         "max_backups = glossary_backup_limit(config, operation_name)"),
         ("self._clean_old_backups(backup_dir, original_name, max_backups)",
-         "clean_old_backups(backup_dir, original_name, max_backups, append_log)"),
+         "clean_old_backups(backup_dir, original_name, max_backups, append_log, operation_name)"),
         ("    reply = QMessageBox.question(self, \"Backup Failed\",\n"
          "                              f\"Failed to create backup: {str(e)}\\n\\nContinue anyway?\",\n"
          "                              QMessageBox.Yes | QMessageBox.No)\n"
@@ -104,9 +109,9 @@ MOVED_BODIES = {
          "    return bool(ask_continue(\"Backup Failed\",\n"
          "                             f\"Failed to create backup: {str(e)}\\n\\nContinue anyway?\"))"),
     ]),
-    ("glossary_files", "clean_old_backups"): ([(TG, 10436, 10456)], [
-        ("re", r"self\.append_log\(", "append_log("),
-    ]),
+    # clean_old_backups (frozen lines 10436-10456) is no longer the frozen body: since 2026-11-20 it counts
+    # the manual and the automatic backups apart and orders them by the time in their names
+    # (tests/test_glossary_backups.py); the frozen caller is approved to call it (LEGACY_BACKUP_APPROVED).
     ("glossary_files", "selected_glossary_epubs"): ([(TG, 19465, 19470)], [
         ("files = list(getattr(self, 'selected_files', []) or [])", "files = list(selected_files or [])"),
         ("if not epubs and hasattr(self, 'get_current_epub_path'):",
@@ -568,10 +573,26 @@ class _Stamp:
 # D/F: editor backups (create_glossary_backup / _clean_old_backups)
 # =============================================================================================
 
+#: Owner-approved change to the frozen create_glossary_backup (2026-11-20): the manual and the automatic
+#: backups each have their own limit (glossary_max_manual_backups / glossary_max_backups) and pruning one
+#: kind never removes the other, so the frozen method prunes through glossary_files as the wrapper does.
+LEGACY_BACKUP_APPROVED = [
+    ("            # Optional: Clean old backups if more than limit\n"
+     "            max_backups = self.config.get('glossary_max_backups', 50)\n"
+     "            if max_backups > 0:\n"
+     "                self._clean_old_backups(backup_dir, original_name, max_backups)\n",
+     "            # Optional: Clean old backups of this kind if more than its limit\n"
+     "            max_backups = glossary_files.glossary_backup_limit(self.config, operation_name)\n"
+     "            if max_backups > 0:\n"
+     "                glossary_files.clean_old_backups(backup_dir, original_name, max_backups, self.append_log,\n"
+     "                                                 operation_name)\n"),
+]
+
+
 @needs_qt
 def test_editor_backups_match_frozen(tmp_path, monkeypatch, tg_module):
     TranslatorGUI = tg_module.TranslatorGUI
-    text = git_text(TG)
+    text = _apply_edits(git_text(TG), LEGACY_BACKUP_APPROVED, "frozen create_glossary_backup")
     exercised = {"created": 0, "pruned": 0, "failed": 0, "asked": 0, "skipped": 0}
     for state in range(STATES):
         root = tmp_path / "b"
@@ -593,9 +614,16 @@ def test_editor_backups_match_frozen(tmp_path, monkeypatch, tg_module):
             elif layout < 0.75:
                 backups.mkdir()
                 stem = glossary.stem
-                for i in range(r.randint(0, 6)):
+                for i in range(r.randint(0, 9)):
                     name = r.choice([f"{stem}_auto_{i}.json", f"{stem}x{i}.json", f"other_{i}.json",
-                                     f"{stem}_{i}.txt"])
+                                     f"{stem}_{i}.txt",
+                                     # earlier backups of both kinds, named as every version names them
+                                     f"{stem}_manual_2025010{i}_000000.json",
+                                     f"{stem}_manual_2025010{i}_120000.json",
+                                     f"{stem}_manual_2024010{i}_000000.json",
+                                     f"{stem}_before_save_2025010{i}_000000.json",
+                                     f"{stem}_before_save_2024010{i}_000000.json",
+                                     f"{stem}_before_delete_{i}_2025010{i}_120000.json"])
                     path = backups / name
                     path.write_text(str(i), encoding="utf-8")
                     os.utime(path, (1_700_000_000 + i * 10, 1_700_000_000 + i * 10))
@@ -606,6 +634,8 @@ def test_editor_backups_match_frozen(tmp_path, monkeypatch, tg_module):
                 config["glossary_auto_backup"] = r.choice([True, False, 0, 1])
             if r.random() < 0.8:
                 config["glossary_max_backups"] = r.choice([0, 1, 2, 3, 50, -1])
+            if r.random() < 0.5:
+                config["glossary_max_manual_backups"] = r.choice([0, 1, 2, 50, -1])
             data = r.choice([None, [], {}, [{"raw_name": "김", "translated_name": "Kim"}], {"k": "v"},
                              [{"raw_name": "이", "translated_name": "Lee"}], {"a": "b"}])
             path_text = r.choice([str(glossary), "", str(glossary), str(glossary)])

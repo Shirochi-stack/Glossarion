@@ -243,6 +243,8 @@ tests/**
 # offscreen dialog runs and a desktop-vs-mobile QA quick scan).
 !tests/test_glossary_document.py
 !tests/test_glossary_files.py
+# Glossary Editor backups: manual / automatic kept apart, Restore Backup, the Backup Settings window
+!tests/test_glossary_backups.py
 !tests/test_parallel_epub_core.py
 !tests/test_qa_runtime_additions.py
 # Mobile rewrite (U7+): Retranslate Selected plan/apply + Resolve QA + image-folder view, the

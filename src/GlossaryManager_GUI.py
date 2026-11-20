@@ -8924,7 +8924,7 @@ Do not stop after the glossary."""
                            _ar_timer.stop()
                    except Exception:
                        _ar_timer = None
-                   save_current_glossary()
+                   self._editor_memory_write_ok = save_current_glossary()  # Restore Backup reads it
                    try:
                        self._editor_last_mtime = os.path.getmtime(path)
                    except Exception:
@@ -9144,10 +9144,29 @@ Do not stop after the glossary."""
             )
 
         def backup_settings_dialog():
-            """Show dialog for configuring automatic backup settings"""
-            # Create dialog
-            backup_dialog = QDialog(parent)
-            backup_dialog.setWindowTitle("Automatic Backup Settings")
+            """Show dialog for configuring the editor's backups (automatic and manual)"""
+            from relations_diagram_dialog import _inherited_sheet, _plain_spinbox, _stay_above
+            # Create dialog. No Qt parent, like the Relations edit dialogs: the Glossary Manager's stylesheet
+            # reaches every child window, where its QSpinBox rule replaces a spinbox's own buttons and its
+            # QWidget rule leaves the window without a background (black). The window takes the sheets of
+            # the windows above without the spinbox rules, on the Glossary Manager's own background, is
+            # modal and stays above the Glossary Manager.
+            owner_window = parent.window()
+            backup_dialog = QDialog(None)
+            backup_dialog.setWindowTitle("Backup Settings")
+            backup_dialog.setWindowModality(Qt.ApplicationModal)
+            backup_dialog.setWindowIcon(owner_window.windowIcon())
+            backup_dialog.setFont(parent.font())
+            backup_dialog.setStyleSheet(
+                _inherited_sheet(parent) + "QDialog { background-color: #1e1e1e; color: white; }"
+            )
+            _base_show_event = backup_dialog.showEvent
+            
+            def _show_above_owner(event):
+                _stay_above(backup_dialog, owner_window)
+                _base_show_event(event)
+            
+            backup_dialog.showEvent = _show_above_owner
             # Use screen ratios for sizing
             screen = QApplication.primaryScreen().geometry()
             width = int(screen.width() * 0.26)  # 26% of screen width
@@ -9159,7 +9178,7 @@ Do not stop after the glossary."""
             main_layout.setContentsMargins(20, 20, 20, 20)
             
             # Title
-            title_label = QLabel("Automatic Backup Settings")
+            title_label = QLabel("Backup Settings")
             title_label.setStyleSheet("font-size: 22pt; font-weight: bold;")
             main_layout.addWidget(title_label)
             main_layout.addSpacing(20)
@@ -9176,24 +9195,43 @@ Do not stop after the glossary."""
             settings_layout.setContentsMargins(20, 10, 0, 0)
             main_layout.addWidget(settings_widget)
             
-            # Max backups setting
+            auto_hint = QLabel("Made by the editor before Save, Delete, Clean, Remove Duplicates, Trim, Filter, "
+                               "Convert and Restore.")
+            auto_hint.setStyleSheet("color: gray; font-size: 9pt;")
+            auto_hint.setWordWrap(True)
+            settings_layout.addWidget(auto_hint)
+            
+            # Max backups settings: the automatic and the manual backups each have their own limit
             max_backups_widget = QWidget()
-            max_backups_layout = QHBoxLayout(max_backups_widget)
+            max_backups_layout = QGridLayout(max_backups_widget)
             max_backups_layout.setContentsMargins(0, 5, 0, 5)
+            max_backups_layout.setHorizontalSpacing(8)
+            max_backups_layout.setVerticalSpacing(8)
             settings_layout.addWidget(max_backups_widget)
             
-            max_backups_layout.addWidget(QLabel("Maximum backups to keep:"))
-            max_backups_spinbox = QSpinBox()
-            max_backups_spinbox.setRange(0, 999)
+            import glossary_files
+            # The plain spinbox, like Other Settings' GUI Font Scale (relations_diagram_dialog._plain_spinbox)
+            max_backups_layout.addWidget(QLabel("Automatic backups to keep:"), 0, 0)
+            max_backups_spinbox = _plain_spinbox(0, 999, 50, width=80)
             max_backups_spinbox.setValue(self.config.get('glossary_max_backups', 50))
-            max_backups_spinbox.setFixedWidth(80)
-            self._disable_spinbox_mousewheel(max_backups_spinbox)  # Disable mouse wheel
-            max_backups_layout.addWidget(max_backups_spinbox)
+            max_backups_layout.addWidget(max_backups_spinbox, 0, 1)
             
             unlimited_label = QLabel("(0 = unlimited)")
             unlimited_label.setStyleSheet("color: gray; font-size: 9pt;")
-            max_backups_layout.addWidget(unlimited_label)
-            max_backups_layout.addStretch()
+            max_backups_layout.addWidget(unlimited_label, 0, 2)
+            
+            max_backups_layout.addWidget(QLabel("Manual backups to keep:"), 1, 0)
+            max_manual_backups_spinbox = _plain_spinbox(0, 999, 50, width=80)
+            max_manual_backups_spinbox.setValue(self.config.get('glossary_max_manual_backups', 50))
+            if 'glossary_max_manual_backups' not in self.config:
+                # A config from before the manual limit existed: the one number it had applies to both kinds
+                max_manual_backups_spinbox.setValue(glossary_files.glossary_backup_limit(self.config, "manual"))
+            max_backups_layout.addWidget(max_manual_backups_spinbox, 1, 1)
+            
+            manual_label = QLabel("(0 = unlimited; made by Backup Now)")
+            manual_label.setStyleSheet("color: gray; font-size: 9pt;")
+            max_backups_layout.addWidget(manual_label, 1, 2)
+            max_backups_layout.setColumnStretch(3, 1)
             
             # Backup naming pattern info
             settings_layout.addSpacing(15)
@@ -9225,21 +9263,28 @@ Do not stop after the glossary."""
             location_label.setStyleSheet("font-weight: bold;")
             main_layout.addWidget(location_label)
             
+            count_label = None
+            
+            def refresh_backup_count():
+                """How many backups of each kind this glossary has now."""
+                if count_label is None:
+                    return
+                counts = glossary_document.editor_backup_counts(self.editor_file_entry.text())
+                count_label.setText(
+                    f"This glossary: {counts['auto']} automatic, {counts['manual']} manual backup(s)")
+            
             if self.editor_file_entry.text():
-                glossary_dir = os.path.dirname(self.editor_file_entry.text())
                 backup_path = "Backups"
-                full_path = os.path.join(glossary_dir, "Backups")
                 
                 path_label = QLabel(f"{backup_path}/")
                 path_label.setStyleSheet("color: #7bb3e0; font-size: 9pt; margin-left: 10px;")
                 main_layout.addWidget(path_label)
                 
-                # Check if backup folder exists and show count
-                if os.path.exists(full_path):
-                    backup_count = glossary_document.count_editor_backups(full_path)
-                    count_label = QLabel(f"Currently contains {backup_count} backup(s)")
-                    count_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px;")
-                    main_layout.addWidget(count_label)
+                # Show how many backups of each kind there are
+                count_label = QLabel()
+                count_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px;")
+                main_layout.addWidget(count_label)
+                refresh_backup_count()
             else:
                 backup_label = QLabel("Backups")
                 backup_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 10px;")
@@ -9265,6 +9310,7 @@ Do not stop after the glossary."""
                 # Save backup settings
                 self.config['glossary_auto_backup'] = backup_checkbox.isChecked()
                 self.config['glossary_max_backups'] = max_backups_spinbox.value()
+                self.config['glossary_max_manual_backups'] = max_manual_backups_spinbox.value()
                 
                 # Save to config file (use proper macOS-aware config path)
                 from translator_gui import CONFIG_FILE as _cfg_path
@@ -9274,9 +9320,11 @@ Do not stop after the glossary."""
                 msg = glossary_document.backup_settings_message(
                     backup_checkbox.isChecked(), max_backups_spinbox.value()
                 )
+                self.append_log(f"💾 {msg}")
                     
-                QMessageBox.information(backup_dialog, "Success", msg)
-                backup_dialog.accept()
+                # Confirmed on the button with the Windows sound; the window stays open, Close closes it
+                from qt_widget_helpers import flash_saved
+                flash_saved(save_btn)
             
             def create_manual_backup():
                 """Create a manual backup right now"""
@@ -9285,9 +9333,10 @@ Do not stop after the glossary."""
                     return
                     
                 if self.create_glossary_backup("manual"):
+                    refresh_backup_count()
                     QMessageBox.information(backup_dialog, "Success", "Manual backup created successfully!")
             
-            save_btn = QPushButton("Save Settings")
+            save_btn = QPushButton("💾 Save")
             save_btn.setFixedWidth(120)
             save_btn.clicked.connect(save_settings)
             save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
@@ -9299,7 +9348,7 @@ Do not stop after the glossary."""
             backup_now_btn.setStyleSheet("background-color: #17a2b8; color: white; padding: 8px;")
             button_layout.addWidget(backup_now_btn)
             
-            cancel_btn = QPushButton("Cancel")
+            cancel_btn = QPushButton("Close")
             cancel_btn.setFixedWidth(120)
             cancel_btn.clicked.connect(backup_dialog.reject)
             cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
@@ -9313,7 +9362,128 @@ Do not stop after the glossary."""
                 exec_dialog_with_fade(backup_dialog, duration=250)
             except Exception:
                 backup_dialog.exec()
+            backup_dialog.deleteLater()  # no Qt parent to delete it
     
+        def restore_backup_dialog():
+            """Pick one of this glossary's backups (manual or automatic) and restore it into the editor."""
+            path = self.editor_file_entry.text()
+            if not path or self.current_glossary_data is None:
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
+                return
+            from qt_widget_helpers import BackupBrowserDialog, format_backup_size
+            backup_dir = glossary_document.editor_backup_dir(path)
+            kind_colors = {'manual': "#7bb3e0", 'auto': "#9ae6b4", 'other': "#a0aec0"}
+
+            def backup_rows():
+                """This glossary's backups, newest first, as the browser's rows."""
+                rows = []
+                for backup in glossary_document.editor_backup_rows(path):
+                    when = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(backup['time']))
+                            if backup['time'] else "Unknown")
+                    backup['when'] = when
+                    rows.append({
+                        'cells': [when, glossary_document.BACKUP_KIND_LABELS[backup['kind']],
+                                  glossary_document.backup_operation_label(backup['operation']),
+                                  backup['name'], format_backup_size(backup['size'])],
+                        'key': backup,
+                        'colors': {1: kind_colors[backup['kind']]},
+                    })
+                return rows
+
+            rows = backup_rows()
+            if not rows:
+                QMessageBox.information(parent, "No Backups",
+                    f"This glossary has no backups yet.\n\n"
+                    f"Expected location:\n{backup_dir}\n\n"
+                    "Backups are created automatically before a modification (save, delete, filter, etc) "
+                    "and by Backup Settings > Backup Now.")
+                return
+
+            def restore_selected(backup):
+                try:
+                    data = glossary_document.load_restorable_backup(backup['path'], self.current_glossary_format)
+                except glossary_document.GlossaryEditorError as e:
+                    browser.message(QMessageBox.Critical, "Restore Failed", str(e))
+                    return
+                entry_count = glossary_document.document_entry_count(data, self.current_glossary_format)
+                if self.config.get('glossary_auto_backup', True):
+                    safety = "A backup of the current entries will be created first, and Undo brings them back."
+                else:
+                    safety = ("Automatic backups are off, so no backup of the current entries is made. "
+                              "Undo brings them back.")
+                if not browser.confirm(
+                        "Confirm Restore",
+                        f"This will replace the entries of {os.path.basename(path)} with the "
+                        f"{glossary_document.BACKUP_KIND_LABELS[backup['kind']].lower()} backup from:\n\n"
+                        f"{backup['when']}\n{backup['name']}\n({entry_count} entries)\n\n"
+                        f"{safety}\n\n"
+                        f"Are you sure you want to continue?"):
+                    return
+                # A backup of the current state first (an automatic one, like before every modification)
+                if not self.create_glossary_backup("before_restore"):
+                    return
+                # Then like Undo: a snapshot for Undo, the data written to the file and the tree rebuilt from it
+                self._push_undo_snapshot()
+                self.current_glossary_data = data
+                self._editor_memory_write_ok = False
+                load_glossary_for_editing(skip_file_read=True)
+                if not self._editor_memory_write_ok:
+                    # The file could not be written (its error was shown): the editor shows the file again
+                    if self._undo_stack:
+                        self._undo_stack.pop()
+                    self._undo_btn.setEnabled(len(self._undo_stack) > 0)
+                    return
+                self.append_log(f"↩️ Restored glossary backup: {backup['name']}")
+                browser.message(QMessageBox.Information, "Restore Complete",
+                                f"Restored {backup['name']}\n\nUndo brings the previous entries back.")
+                browser.accept()
+
+            def delete_selected(backup):
+                """Delete the selected backup; True when it is gone (its row is then removed)."""
+                if not browser.confirm("Confirm Delete",
+                                       f"Delete backup from {backup['when']}?\n\n{backup['name']}\n\n"
+                                       f"This action cannot be undone."):
+                    return False
+                try:
+                    os.remove(backup['path'])
+                except Exception as e:
+                    browser.message(QMessageBox.Critical, "Delete Failed", f"Failed to delete backup: {e}")
+                    return False
+                return True
+
+            def create_new_backup():
+                """Backup Now, then the list again."""
+                if not self.current_glossary_data:
+                    browser.message(QMessageBox.Critical, "Error", "No glossary loaded")
+                    return
+                if self.create_glossary_backup("manual"):
+                    browser.set_rows(backup_rows())
+
+            browser = BackupBrowserDialog(
+                parent,
+                window_title="Restore Glossary Backup",
+                heading="Restore Glossary Backup",
+                description=f"Select a manual or automatic backup of {os.path.basename(path)} to restore.",
+                location=backup_dir,
+                columns=[('Date & Time', 170), ('Kind', 95), ('Operation', 220), ('Backup File', 330), ('Size', 70)],
+                rows=rows,
+                on_restore=restore_selected,
+                on_create=create_new_backup,
+                on_open_folder=lambda: _open_backups_folder(),
+                on_delete=delete_selected,
+                icon=parent.window().windowIcon(),
+                sortable=True,
+            )
+            # The Glossary Manager's QWidget rule would leave a child window without a background (black)
+            browser.setStyleSheet("QDialog { background-color: #1e1e1e; color: white; }")
+            browser.resize(max(browser.width(), 980), browser.height())
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(browser, duration=250)
+            except Exception:
+                browser.exec()
+            browser.deleteLater()
+
         def smart_trim_dialog():
             if not self.current_glossary_data:
                 QMessageBox.critical(parent, "Error", "No glossary loaded")
@@ -11203,6 +11373,7 @@ Do not stop after the glossary."""
         add_adv_btn(0, 1, "Clean Empty Fields", clean_empty_fields, "#b45309")
         add_adv_btn(0, 2, "Remove Duplicates", remove_duplicates, "#b45309")
         add_adv_btn(0, 3, "Backup Settings", backup_settings_dialog, "#15803d")
+        add_adv_btn(0, 4, "Restore Backup", restore_backup_dialog, "#0f766e")
 
         add_adv_btn(1, 0, "Trim Entries", smart_trim_dialog, "#1e40af")
         add_adv_btn(1, 1, "Filter Entries", filter_entries_dialog, "#1e40af")

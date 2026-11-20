@@ -6,9 +6,10 @@ translator_gui.py (frozen source: ``git show U6_BASE_SHA``; tests/test_glossary_
 every block and its documented edits), with explicit parameters in place of ``self``:
 
 * ``create_glossary_backup`` + ``_clean_old_backups``: the Glossary Editor's JSON backups
-  (``<glossary folder>/Backups/<stem>_<operation>_<timestamp>.json``, pruned to
-  ``glossary_max_backups``). The editor's file, its data and the "Continue anyway?" question
-  are parameters.
+  (``<glossary folder>/Backups/<stem>_<operation>_<timestamp>.json``; the manual ones pruned
+  to ``glossary_max_manual_backups`` and the automatic ones to ``glossary_max_backups``, each
+  kind on its own). The editor's file, its data and the "Continue anyway?" question are
+  parameters.
 * The 🗑️ / ↩️ closures of the auto-glossary row (``_delete_current_glossary``,
   ``_find_latest_backup``, ``_restore_glossary_backup``): the EPUBs they act on, every
   glossary artifact of a book, moving them to ``Backups/<timestamp>/``, the newest backup and
@@ -36,6 +37,7 @@ from app_paths import _get_app_dir
 __all__ = [
     "ALLOWED_GLOSSARY_EXTENSIONS",
     "analyze_json_errors",
+    "backup_kind",
     "build_glossary_mapping",
     "clean_old_backups",
     "collect_glossary_files_for_inputs",
@@ -45,11 +47,13 @@ __all__ = [
     "create_glossary_backup",
     "delete_glossary_files",
     "find_latest_glossary_backup",
+    "glossary_backup_limit",
     "glossary_delete_display",
     "guess_glossary_for_input_file",
     "is_allowed_glossary_file",
     "mapped_glossary_for_input",
     "normalize_glossary_drop_path",
+    "parse_backup_name",
     "restore_glossary_backup",
     "selected_glossary_epubs",
 ]
@@ -58,6 +62,43 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Glossary Editor backups (TranslatorGUI.create_glossary_backup / _clean_old_backups)
 # ---------------------------------------------------------------------------
+
+#: The two kinds of editor backup. Each has its own limit and is pruned on its own.
+MANUAL_BACKUP = "manual"   # Backup Now (the operation "manual")
+AUTO_BACKUP = "auto"       # made by the editor before a modification (before_save, before_delete_3, ...)
+BACKUP_KINDS = (MANUAL_BACKUP, AUTO_BACKUP)
+
+#: The end of a backup's file name: ``<glossary stem>_<operation>_<YYYYMMDD_HHMMSS>.json``.
+_BACKUP_STAMP = re.compile(r"_(\d{8}_\d{6})\.json$")
+
+
+def backup_kind(operation_name):
+    """``"manual"`` for Backup Now, ``"auto"`` for every other operation."""
+    return MANUAL_BACKUP if operation_name == "manual" else AUTO_BACKUP
+
+
+def parse_backup_name(original_name, file_name):
+    """``(operation, "YYYYMMDD_HHMMSS")`` when ``file_name`` is a backup of the glossary file
+    ``original_name`` (a name or a path), else None. The names are the ones every version wrote,
+    so the kind of an old backup is read from its name: nothing is renamed or moved."""
+    prefix = os.path.splitext(os.path.basename(original_name))[0] + "_"
+    stamp = _BACKUP_STAMP.search(file_name)
+    if stamp is None or not file_name.startswith(prefix) or stamp.start() <= len(prefix):
+        return None
+    return file_name[len(prefix):stamp.start()], stamp.group(1)
+
+
+def glossary_backup_limit(config, operation_name="manual"):
+    """How many backups of ``operation_name``'s kind are kept (0 or less: no limit).
+
+    ``glossary_max_backups`` is the automatic limit (the one number older versions had, then for
+    both kinds together) and ``glossary_max_manual_backups`` the manual one. A config written
+    before the manual limit existed keeps its one number for both kinds, so the first backup
+    after an update never removes more than the old limit would have.
+    """
+    if backup_kind(operation_name) == MANUAL_BACKUP and 'glossary_max_manual_backups' in config:
+        return config.get('glossary_max_manual_backups', 50)
+    return config.get('glossary_max_backups', 50)
 
 
 def create_glossary_backup(glossary_path, current_glossary_data, operation_name="manual", *,
@@ -102,10 +143,10 @@ def create_glossary_backup(glossary_path, current_glossary_data, operation_name=
 
         append_log(f"💾 Backup created: {backup_name}")
 
-        # Optional: Clean old backups if more than limit
-        max_backups = config.get('glossary_max_backups', 50)
+        # Optional: Clean old backups of this kind if more than its limit
+        max_backups = glossary_backup_limit(config, operation_name)
         if max_backups > 0:
-            clean_old_backups(backup_dir, original_name, max_backups, append_log)
+            clean_old_backups(backup_dir, original_name, max_backups, append_log, operation_name)
 
         return True
 
@@ -119,26 +160,33 @@ def create_glossary_backup(glossary_path, current_glossary_data, operation_name=
                                  f"Failed to create backup: {str(e)}\n\nContinue anyway?"))
 
 
-def clean_old_backups(backup_dir, original_name, max_backups, append_log=print):
-    """Remove old backups exceeding the limit"""
+def clean_old_backups(backup_dir, original_name, max_backups, append_log=print, operation_name=None):
+    """Remove old backups exceeding the limit, manual and automatic ones counted apart
+
+    Only backups of ``operation_name``'s kind are counted and removed (without it: each kind is
+    held to ``max_backups`` on its own), so a run of automatic backups never pushes out a manual
+    one and the reverse. Oldest first by the time in the file name, never by file age: a copied
+    or synced folder has new file times. A file whose name is not a backup's is left alone.
+    """
     try:
-        # Find all backups for this glossary
-        prefix = os.path.splitext(original_name)[0]
-        backups = []
+        # Find all backups for this glossary, by kind
+        kinds = BACKUP_KINDS if operation_name is None else (backup_kind(operation_name),)
+        backups = {kind: [] for kind in kinds}
 
         for file in os.listdir(backup_dir):
-            if file.startswith(prefix) and file.endswith('.json'):
-                file_path = os.path.join(backup_dir, file)
-                backups.append((file_path, os.path.getmtime(file_path)))
+            parsed = parse_backup_name(original_name, file)
+            if parsed is not None and backup_kind(parsed[0]) in backups:
+                backups[backup_kind(parsed[0])].append((parsed[1], file))
 
-        # Sort by modification time (oldest first)
-        backups.sort(key=lambda x: x[1])
+        for kind in kinds:
+            # Sort by the time in the name (oldest first)
+            backups[kind].sort()
 
-        # Remove oldest backups if exceeding limit
-        while len(backups) > max_backups:
-            old_backup = backups.pop(0)
-            os.remove(old_backup[0])
-            append_log(f"🗑️ Removed old backup: {os.path.basename(old_backup[0])}")
+            # Remove oldest backups if exceeding limit
+            while len(backups[kind]) > max_backups:
+                old_backup = backups[kind].pop(0)
+                os.remove(os.path.join(backup_dir, old_backup[1]))
+                append_log(f"🗑️ Removed old backup: {old_backup[1]}")
 
     except Exception as e:
         append_log(f"⚠️ Error cleaning old backups: {str(e)}")

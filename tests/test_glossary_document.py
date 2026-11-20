@@ -676,13 +676,23 @@ REWIRE_SPANS = (
     (7601, 7632, 9),
     (7818, 7849, 12), (7867, 7879, 7),
     (7889, 7919, 8),
-    (7944, 7952, 6), (8024, 8030, 4), (8312, 8317, 3), (8420, 8428, 4), (8462, 8480, 1), (8566, 8966, 9),
+    (7944, 7952, 6), (8024, 8030, 4), (8312, 8317, 3), (8420, 8428, 4), (8462, 8480, 1),
+    (8530, 8530, 1),  # the undo / redo / restore write says whether the file was written (Restore Backup)
+    (8566, 8966, 9),
     (9015, 9028, 1),  # Relations Tracker
     (9035, 9167, 9), (9175, 9185, 4), (9196, 9203, 2), (9208, 9212, 2), (9234, 9256, 3), (9270, 9280, 8),
-    (9296, 9306, 3), (9321, 9326, 2), (9422, 9422, 1),
+    (9296, 9306, 3), (9321, 9326, 2),
+    # Backup Settings (2026-11-20): made without a Qt parent on the Glossary Manager's background with the
+    # plain spin box (relations_diagram_dialog), an automatic and a manual limit, the backups of each kind
+    # counted, "💾 Save" confirmed on the button and "Close"
+    (9330, 9333, 23), (9345, 9345, 1), (9362, 9362, 7), (9364, 9364, 1), (9366, 9365, 2), (9368, 9370, 4),
+    (9372, 9374, 1), (9378, 9379, 14), (9411, 9410, 10), (9412, 9412, 0), (9414, 9414, 0), (9420, 9425, 5),
+    (9451, 9450, 1),
     # the backup settings save goes through config_store.save_config_file (atomic, encrypted keys)
     (9454, 9455, 2),
-    (9457, 9463, 3), (9537, 9537, 3), (9582, 9585, 1),
+    (9457, 9463, 4), (9465, 9466, 3), (9475, 9474, 1), (9477, 9477, 1), (9489, 9489, 1), (9503, 9502, 1),
+    (9504, 9503, 120),  # Restore Backup: the editor's backups in the backup browser (qt_widget_helpers)
+    (9537, 9537, 3), (9582, 9585, 1),
     (9616, 9625, 1), (9701, 9701, 3), (9712, 9714, 3), (9732, 9746, 1), (9885, 9937, 12), (9948, 9958, 3),
     (9984, 9988, 1), (10044, 10089, 7), (10096, 10111, 5), (10289, 10494, 17), (10499, 10503, 5), (10523, 10528, 5),
     (10570, 10595, 3), (10607, 10619, 1), (10631, 10637, 1), (10683, 10828, 13),
@@ -696,6 +706,7 @@ REWIRE_SPANS = (
     (12269, 12269, 0),
     (12275, 12290, 4), (12296, 12307, 6),
     (12330, 12329, 19),  # the file row's "Open Folder" button (shows the glossary in the file manager)
+    (12357, 12356, 1),  # the "Restore Backup" button, above "About Format"
     (12467, 12528, 8), (12677, 12679, 1), (12685, 12713, 5), (12803, 12808, 2),
     (12822, 12984, 5),
 )
@@ -852,6 +863,10 @@ LEGACY_GM_APPROVED = [
      "        if name == \"On-device\":\n"
      "            QMessageBox.warning(self, \"Built-in Profile\", f\"The built-in '{name}' glossary prompt profile cannot be deleted.\")\n"
      "            return\n"),
+    # 2026-11-20 the editor's backup settings window is "Backup Settings" (it holds the automatic and the
+    # manual limit; the automatic and manual backups are pruned apart, tests/test_glossary_backups.py)
+    ("            backup_dialog.setWindowTitle(\"Automatic Backup Settings\")\n",
+     "            backup_dialog.setWindowTitle(\"Backup Settings\")\n"),
 ]
 
 
@@ -2241,9 +2256,11 @@ def _handle_dialog(dialog):
         for name in d["buttons"]:
             _button(dialog, name).click()
         dialog.accept()
-    elif title == "Automatic Backup Settings":
+    elif title == "Backup Settings":
         _button(dialog, "Backup Now").click()
-        _button(dialog, "Cancel").click()
+        # "Close" since 2026-11-20 (Save confirms on its button and the window stays open); frozen: "Cancel"
+        closing = [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() in ("Close", "Cancel")]
+        closing[0].click()
     elif title.startswith("Filter "):
         value_list = dialog.findChild(QtWidgets.QListWidget)
         for index in d.get("uncheck", ()):
@@ -2909,7 +2926,9 @@ def isolated_gm(qapp, tmp_path_factory):
     so the editor's shared ``Glossary`` folder next to the module is not the user's src/Glossary."""
     app_dir = tmp_path_factory.mktemp("gm_app")
     fake_file = app_dir / "GlossaryManager_GUI.py"
-    legacy = _load_gm_module(_git_text("src/GlossaryManager_GUI.py"), "_glossary_manager_u6_frozen_iso", fake_file)
+    legacy_text = _apply_edits(_git_text("src/GlossaryManager_GUI.py"), LEGACY_GM_APPROVED,
+                               "frozen GlossaryManager_GUI.py")
+    legacy = _load_gm_module(legacy_text, "_glossary_manager_u6_frozen_iso", fake_file)
     new = _load_gm_module(_current_text("GlossaryManager_GUI.py"), "_glossary_manager_u6_new_iso", fake_file)
     return legacy, new
 
