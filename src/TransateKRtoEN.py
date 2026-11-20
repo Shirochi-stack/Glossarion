@@ -25068,6 +25068,29 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         result = _fix_img_p_nesting(result)
         return result
 
+    # A picture inside a link: enhanced extraction writes it as
+    # [<img .../>](<href>), and wrote it as <img .../>[](<href>) (the picture
+    # before an empty link) until the extractor opened the link first; chapter
+    # extractions cached on disk still have that form. Either one becomes
+    # <a href="..."><img .../></a> here, because the markdown link parser
+    # stops at a "]" inside an alt text.
+    def _linked_picture(m):
+        href = m.group('href') if m.group('href') is not None else m.group('bare')
+        href = re.sub(r'\\([\\\[\]()])', r'\1', href)
+        href = re.sub(r'&(?!(?:#[0-9]+|#x[0-9a-f]+|[0-9a-z]+);)', '&amp;', href, flags=re.IGNORECASE)
+        return '<a href="{}">{}</a>'.format(
+            href.replace('"', '&quot;'), m.group('before') or m.group('inside')
+        )
+
+    _picture = r'<img\b[^<>]*>'
+    plain_text = re.sub(
+        rf'(?:(?P<before>{_picture})\[\]|\[(?P<inside>(?:{_picture})+)\])'
+        r'\((?:<(?P<href>[^<>\n]*)>|(?P<bare>[^\s()<>]+))\)',
+        _linked_picture,
+        plain_text,
+        flags=re.IGNORECASE,
+    )
+
     if os.getenv('PRESERVE_ASTERISK_SEPARATOR_LINES', '1') == '1':
         plain_text = _protect_asterisk_separator_lines(plain_text)
 

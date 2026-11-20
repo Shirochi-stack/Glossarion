@@ -5613,6 +5613,49 @@ _MARKDOWN_LINK_TARGET_WORKER = [
  ),
 ]
 
+# 2026-11-20 A picture inside a link stays inside it: the enhanced-mode markdown-to-HTML step writes
+# [<img/>](<href>) and the older <img/>[](<href>) as <a href><img/></a> (the real diff, applied after the
+# entries above)
+_LINKED_PICTURE_WORKER = [
+ (
+  (
+   '        result = _fix_img_p_nesting(result)\n'
+   '        return result\n'
+   '\n'
+   "    if os.getenv('PRESERVE_ASTERISK_SEPARATOR_LINES', '1') == '1':\n"
+  ),
+  (
+   '        result = _fix_img_p_nesting(result)\n'
+   '        return result\n'
+   '\n'
+   '    # A picture inside a link: enhanced extraction writes it as\n'
+   '    # [<img .../>](<href>), and wrote it as <img .../>[](<href>) (the picture\n'
+   '    # before an empty link) until the extractor opened the link first; chapter\n'
+   '    # extractions cached on disk still have that form. Either one becomes\n'
+   '    # <a href="..."><img .../></a> here, because the markdown link parser\n'
+   '    # stops at a "]" inside an alt text.\n'
+   '    def _linked_picture(m):\n'
+   "        href = m.group('href') if m.group('href') is not None else m.group('bare')\n"
+   "        href = re.sub(r'\\\\([\\\\\\[\\]()])', r'\\1', href)\n"
+   "        href = re.sub(r'&(?!(?:#[0-9]+|#x[0-9a-f]+|[0-9a-z]+);)', '&amp;', href, flags=re.IGNORECASE)\n"
+   '        return \'<a href="{}">{}</a>\'.format(\n'
+   '            href.replace(\'"\', \'&quot;\'), m.group(\'before\') or m.group(\'inside\')\n'
+   '        )\n'
+   '\n'
+   "    _picture = r'<img\\b[^<>]*>'\n"
+   '    plain_text = re.sub(\n'
+   "        rf'(?:(?P<before>{_picture})\\[\\]|\\[(?P<inside>(?:{_picture})+)\\])'\n"
+   "        r'\\((?:<(?P<href>[^<>\\n]*)>|(?P<bare>[^\\s()<>]+))\\)',\n"
+   '        _linked_picture,\n'
+   '        plain_text,\n'
+   '        flags=re.IGNORECASE,\n'
+   '    )\n'
+   '\n'
+   "    if os.getenv('PRESERVE_ASTERISK_SEPARATOR_LINES', '1') == '1':\n"
+  ),
+ ),
+]
+
 # 2026-11-19 A QA-failed metadata row is retranslated on the next run like a Progress Manager reset,
 # unless this run's Partial.b/b2 pass refines it; a completed metadata phase drops its QA marks (the real
 # diff, applied after the entries above)
@@ -7469,6 +7512,17 @@ APPROVED = (
                 "content back with the output's own title text in it (first text node, as the keep-markup "
                 "update); the output heading tag and the rest of the file stay as they are",
         "source": {"src/metadata_batch_translator.py": _HEADING_LINK_RESTORE_HEADERS},
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
+        "what": "A picture inside a link stays inside it: enhanced (html2text) extraction wrote <a href><img/></a> as "
+                "<img/>[](<href>), the picture before an empty link, so the translated chapter had the picture outside "
+                "an empty <a>. The extractor now opens the link before the picture ([<img/>](<href>)), and the "
+                "enhanced-mode markdown-to-HTML step writes either form as <a href><img/></a> (chapter extractions "
+                "cached on disk keep the old form; a ] in an alt text stops the markdown link parser). A picture "
+                "that is not followed by an empty link and a link with text are converted as before",
+        "source": {"src/TransateKRtoEN.py": _LINKED_PICTURE_WORKER},
         "values": {},
     },
 )

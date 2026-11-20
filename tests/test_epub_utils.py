@@ -5353,6 +5353,55 @@ def test_markdown_link_targets_in_angle_brackets_stay_links(monkeypatch):
     assert '&lt;Status Window&gt; opened.' in html
 
 
+def test_linked_picture_stays_inside_its_link(monkeypatch):
+    # <a href><img/></a>: html2text wrote the raw <img> before it opened the
+    # link, so the chapter came back as <img/><a href></a>
+    from bs4 import BeautifulSoup
+    from enhanced_text_extractor import EnhancedTextExtractor
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    href = 'https://52943.mitemin.net/i1279056/?a=1&b=2'
+
+    def pictures(markdown):
+        html = convert_enhanced_text_to_html(markdown, {'preserve_structure': True})
+        soup = BeautifulSoup(html, 'html.parser')
+        # the legacy markdown2 converter curls the quotes of a raw <img>
+        # attribute (smarty-pants); not what this test is about
+        return [
+            (img.get('src').strip('’”'), getattr(img.find_parent('a'), 'attrs', None))
+            for img in soup.find_all('img')
+        ], [a.get('href') for a in soup.find_all('a')]
+
+    def extracted(body):
+        return EnhancedTextExtractor().extract_chapter_content(
+            f'<html><body><p>前の文。</p>{body}<p>後の文。</p></body></html>'
+        )[0]
+
+    # an ASCII tag: one with CJK text in it is shielded from html2text as
+    # prose and was always written inside its link
+    linked = extracted(
+        f'<p><a href="{href.replace("&", "&amp;")}"><img src="../Images/a.webp" alt="fig] 1"/></a></p>'
+    )
+    two = extracted(f'<p><a href="{href.replace("&", "&amp;")}"><img src="a.webp"/><img src="b.webp"/></a></p>')
+    apart = extracted(f'<p><img src="a.webp" alt="a"/></p><p><a href="{href.replace("&", "&amp;")}">リンク</a></p>')
+    assert f'](<{href}>)' in linked and '[](' not in linked
+    # chapter extractions cached before the extractor fix, and a model that
+    # drops the angle brackets of the target
+    cached = f"<img src='../Images/a.webp' alt='挿絵] 1' />[](<{href}>)"
+    bare = "<img src='../Images/a.webp' alt='a' />[](https://example.org/i/1)"
+
+    for markdown2 in ('0', '1'):
+        monkeypatch.setenv('USE_MARKDOWN2_CONVERTER', markdown2)
+        assert pictures(linked) == ([('../Images/a.webp', {'href': href})], [href])
+        assert pictures(cached) == ([('../Images/a.webp', {'href': href})], [href])
+        assert pictures(bare) == (
+            [('../Images/a.webp', {'href': 'https://example.org/i/1'})], ['https://example.org/i/1']
+        )
+        assert pictures(two) == ([('a.webp', {'href': href}), ('b.webp', {'href': href})], [href])
+        assert pictures(apart) == ([('a.webp', None)], [href])
+
+
 _STANDARD_OPF_CONTAINER ="""<?xml version="1.0"?>
 <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
            version="1.0">
