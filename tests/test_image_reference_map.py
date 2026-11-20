@@ -196,6 +196,65 @@ def test_resolve_qa_repairs_links_first_and_inserts_only_missing_images(tmp_path
     assert 'cleared on 2 of 2' in message
 
 
+def test_resolve_qa_puts_pictures_back_inside_their_source_links(tmp_path):
+    import progress_actions
+
+    folder = tmp_path / 'book'
+    folder.mkdir()
+    inventory(folder, {'OEBPS/Images/a.webp': b'one', 'OEBPS/Images/b.webp': b'two'},
+              {'a.webp': 'chapter0001_img_1.webp', 'b.webp': 'chapter0001_img_2.webp'})
+    source = ('<html><body><p><a href="https://host.example/i1/"><img src="../Images/a.webp"/></a></p>'
+              '<p><a href="https://host.example/i2/"><img src="../Images/b.webp"/></a></p>'
+              '<p><a href="#note">note</a></p></body></html>')
+    epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(epub, 'w') as archive:
+        for name in ('chapter0001', 'chapter0002', 'chapter0003'):
+            archive.writestr(f'OEBPS/Text/{name}.xhtml', source)
+    garbled = "<a href='&lt;https: host.example=\"\" i1=\"\"&gt;&lt;/https:&gt;'></a>"
+    pictures = ('<p><img src="images/chapter0001_img_1.webp"/>' + garbled + '</p>'
+                '<p><img src="images/chapter0001_img_2.webp"/></p>')
+    fixed = folder / 'response_chapter0001.html'
+    fixed.write_text(f'<html><body>{pictures}<p><a href="#note">chú</a></p></body></html>', encoding='utf-8')
+    partly = folder / 'response_chapter0002.html'  # the note link is lost as well
+    partly.write_text(f'<html><body>{pictures}<p>chú</p></body></html>', encoding='utf-8')
+    chunk = folder / 'response_chapter0003.html'
+    chunk.write_text(f'<html><body>{pictures}</body></html>', encoding='utf-8')
+    chunk_before = chunk.read_bytes()
+    entries = {
+        '1': {'output_file': fixed.name, 'status': 'qa_failed', 'qa_issues': True,
+              'qa_issues_found': ['changed_link_targets_2_found'],
+              'qa_issue_previews': {'changed_link_targets_2_found': 'missing: https://host.example/i1/'}},
+        '2': {'output_file': partly.name, 'status': 'qa_failed', 'qa_issues': True,
+              'qa_issues_found': ['missing_link_targets_3_lost_(0/3)', 'Chinese_text_found_2_chars']},
+        '3': {'output_file': chunk.name, 'status': 'qa_failed', 'qa_issues': True,
+              'qa_issues_found': ['missing_link_targets_3_lost_(0/3)']},
+    }
+    progress = folder / 'translation_progress.json'
+    progress.write_text(json.dumps({'chapters': entries}), encoding='utf-8')
+    rows = [{'progress_key': key, 'output_file': entry['output_file'], 'is_chunk_progress': key == '3',
+             'original_filename': entry['output_file'].replace('response_', '').replace('.html', '.xhtml'),
+             'info': entry} for key, entry in entries.items()]
+    data = {'output_dir': str(folder), 'file_path': str(epub), 'progress_file': str(progress)}
+
+    kind, _title, message, refreshed = progress_actions.resolve_image_qa(data, rows, log=lambda _line: None)
+
+    assert (kind, refreshed) == ('info', True)
+    linked = ('<p><a href="https://host.example/i1/"><img src="images/chapter0001_img_1.webp"/></a></p>'
+              '<p><a href="https://host.example/i2/"><img src="images/chapter0001_img_2.webp"/></a></p>')
+    assert fixed.read_text(encoding='utf-8') == f'<html><body>{linked}<p><a href="#note">chú</a></p></body></html>'
+    assert partly.read_text(encoding='utf-8') == f'<html><body>{linked}<p>chú</p></body></html>'
+    assert chunk.read_bytes() == chunk_before  # a chunk row is left to its own marks
+    saved = json.loads(progress.read_text(encoding='utf-8'))['chapters']
+    assert 'qa_issues_found' not in saved['1'] and saved['1']['status'] == 'completed'
+    assert saved['2'] == entries['2']  # one link is still lost: the mark stays
+    assert saved['3'] == entries['3']
+    assert 'Put 4 picture(s) back inside their links in 2 file(s).' in message
+    assert 'Link QA issue cleared on 1 of 2' in message
+    # nothing is left to do: the caller may go on to another resolution
+    rows = [{**row, 'info': saved[row['progress_key']]} for row in rows]
+    assert progress_actions.resolve_image_qa(data, rows, log=lambda _line: None)[3] is False
+
+
 def test_identical_bytes_use_source_path_and_ambiguous_matches_do_not_guess(tmp_path):
     inventory(tmp_path, {'OEBPS/Images/a.jpg': b'same', 'OEBPS/Images/b.jpg': b'same'})
     output = page(tmp_path, 'response_Chapter.xhtml', ['a.jpg', 'b.jpg'])

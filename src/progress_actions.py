@@ -59,6 +59,7 @@ from progress_core import (
     _pending_mark_chunk_blocks,
     _pending_mark_output_path,
     _progress_entry_has_image_reference_qa,
+    _progress_entry_has_link_target_qa,
     _progress_entry_has_llm_token_qa,
     _progress_entry_has_missing_image_qa,
     _progress_entry_has_raw_foreign_text_qa,
@@ -66,6 +67,7 @@ from progress_core import (
     _QA_MARK_FIELDS,
     _CHUNK_QA_MIRROR_FIELDS,
     _IMAGE_REFERENCE_QA_RE,
+    _LINK_TARGET_QA_RE,
     _MISSING_IMAGE_QA_RE,
     _qa_value_has_llm_token_issue,
     _restore_pending_mark_record,
@@ -432,9 +434,10 @@ def _clear_missing_image_qa_markers(entry):
             changed = True
     return changed, remaining
 
-def _clear_image_reference_qa_markers(entry):
-    """Clear every image QA mark of the source comparison (missing, extra,
-    changed references); return ``(changed, remaining)``."""
+def _clear_listed_qa_markers(entry, pattern):
+    """Clear the listed QA marks whose code starts with *pattern* (the image
+    marks of the source comparison, or the link target marks); return
+    ``(changed, remaining)``."""
     changed = False
     seen = set()
     current = entry
@@ -444,7 +447,7 @@ def _clear_image_reference_qa_markers(entry):
         if isinstance(found, list):
             kept = [
                 issue for issue in found
-                if not _IMAGE_REFERENCE_QA_RE.match(str(issue).strip())
+                if not pattern.match(str(issue).strip())
             ]
             if kept != found:
                 current['qa_issues_found'] = kept
@@ -453,12 +456,14 @@ def _clear_image_reference_qa_markers(entry):
         if isinstance(previews, dict):
             kept = {
                 key: value for key, value in previews.items()
-                if not _IMAGE_REFERENCE_QA_RE.match(str(key).strip())
+                if not pattern.match(str(key).strip())
             }
             if kept != previews:
                 current['qa_issue_previews'] = kept
                 changed = True
         current = current.get('previous_progress_entry')
+    if pattern is not _IMAGE_REFERENCE_QA_RE and _progress_entry_has_missing_image_qa(entry):
+        return changed, True  # an unresolved missing-image mark keeps the entry failed
     # The missing-image clearing also settles the entry's QA flag and status
     # once no mark of any kind is left.
     missing_changed, remaining = _clear_missing_image_qa_markers(entry)
@@ -1451,8 +1456,50 @@ def _image_qa_issue_types(output_path, source_html, rename_map):
     return {detail.get('type') for detail in details}
 
 
+def _relink_source_pictures(translated_html, source_html):
+    """Put each picture back inside the link that wraps it in the source.
+
+    Pictures are paired by position, so nothing is done unless source and
+    output have the same number of pictures. The empty link an older build
+    left right after the picture is removed. Returns ``(html, changed)``.
+    """
+    from bs4 import BeautifulSoup
+
+    source = BeautifulSoup(source_html, 'html.parser')
+    output = BeautifulSoup(translated_html, 'html.parser')
+    source_images, output_images = source.find_all('img'), output.find_all('img')
+    if len(source_images) != len(output_images):
+        return translated_html, 0
+    changed = 0
+    for source_image, image in zip(source_images, output_images):
+        link = source_image.find_parent('a')
+        if not (link and link.get('href')) or image.find_parent('a'):
+            continue
+        follower = image.next_sibling
+        if getattr(follower, 'name', None) == 'a' and not follower.get_text(strip=True) and not follower.find(True):
+            follower.extract()
+        image.wrap(output.new_tag('a', href=link['href']))
+        changed += 1
+    return (str(output), changed) if changed else (translated_html, 0)
+
+
+def _link_qa_issues(output_path, source_html, rename_map):
+    """Link target issue codes the QA scanner's comparison still finds in an output."""
+    from scan_html_folder import _html_preservation_profile, _preservation_count_issues
+
+    with open(output_path, 'r', encoding='utf-8') as f:
+        translated_html = f.read()
+    return [
+        issue for issue, _preview in _preservation_count_issues(
+            _html_preservation_profile(source_html, rename_map),
+            _html_preservation_profile(translated_html, rename_map),
+        )
+        if _LINK_TARGET_QA_RE.match(issue)
+    ]
+
+
 def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
-    """Resolve QA issue for the image QA marks of the selected rows.
+    """Resolve QA issue for the image and link target QA marks of the selected rows.
 
     The links of images an output already has are repaired first
     (``image_reference_map.repair_image_references``: the rename map and the image
@@ -1461,7 +1508,12 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
     image marks (missing, extra, changed references) are cleared once the scanner's
     own comparison (``detect_missing_images``) finds none; other QA marks stay.
 
-    Returns ``(kind, title, message, refreshed)`` like ``insert_missing_images``.
+    A row with a link target mark (not a chunk row) then gets each picture back
+    inside the link that wraps it in the source (``_relink_source_pictures``); its
+    link marks are cleared once the scanner's link comparison finds no difference.
+
+    Returns ``(kind, title, message, refreshed)`` like ``insert_missing_images``;
+    ``refreshed`` is False when no file and no mark changed.
     """
     from image_reference_map import repair_image_references
 
@@ -1471,14 +1523,22 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
         info = info if isinstance(info, dict) else {}
         progress_entry = info.get('info', {}) or {}
         output_file = info.get('output_file') or progress_entry.get('output_file')
+        image_marked = _progress_entry_has_image_reference_qa(progress_entry)
+        link_marked = (
+            not info.get('is_chunk_progress')
+            and _progress_entry_has_link_target_qa(progress_entry)
+        )
         if (
             output_file
-            and _progress_entry_has_image_reference_qa(progress_entry)
+            and (image_marked or link_marked)
             and os.path.isfile(os.path.join(output_dir, output_file))
         ):
-            rows.setdefault(str(output_file).replace('\\', '/').casefold(), info)
+            rows.setdefault(
+                str(output_file).replace('\\', '/').casefold(),
+                (info, image_marked, link_marked),
+            )
     if not rows:
-        return ('info', "Info", "No selected entry has an image QA issue.", False)
+        return ('info', "Info", "No selected entry has an image or link QA issue.", False)
 
     try:
         repaired = repair_image_references(
@@ -1486,41 +1546,64 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
             log=log,
             only={
                 os.path.basename(info.get('output_file') or info['info']['output_file'])
-                for info in rows.values()
+                for info, _image_marked, _link_marked in rows.values()
             },
         )
         rename_map = _output_image_rename_map(output_dir)
-        inserted = 0
-        resolved = []
-        for info in rows.values():
+        inserted = relinked_files = relinked_pictures = 0
+        image_rows = link_rows = 0
+        image_resolved = link_resolved = 0
+        cleared = []  # (info, progress entry, patterns of the marks to clear)
+        for info, image_marked, link_marked in rows.values():
             progress_entry = info.get('info', {}) or {}
             output_file = info.get('output_file') or progress_entry.get('output_file')
             output_path = os.path.join(output_dir, output_file)
+            image_rows += image_marked
+            link_rows += link_marked
             source_html = _source_chapter_html(data, info)
             if not source_html:
                 continue
-            remaining = _image_qa_issue_types(output_path, source_html, rename_map)
-            if 'missing_images' in remaining:
-                _kind, _title, _message, changed = insert_missing_images(
-                    data, {**info, 'output_file': output_file}, restore_fn
-                )
-                if changed:
-                    inserted += 1
-                    remaining = _image_qa_issue_types(output_path, source_html, rename_map)
-            if not remaining:
-                resolved.append((info, progress_entry))
+            patterns = []
+            if image_marked:
+                remaining = _image_qa_issue_types(output_path, source_html, rename_map)
+                if 'missing_images' in remaining:
+                    _kind, _title, _message, changed = insert_missing_images(
+                        data, {**info, 'output_file': output_file}, restore_fn
+                    )
+                    if changed:
+                        inserted += 1
+                        remaining = _image_qa_issue_types(output_path, source_html, rename_map)
+                if not remaining:
+                    image_resolved += 1
+                    patterns.append(_IMAGE_REFERENCE_QA_RE)
+            if link_marked:
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    translated_html = f.read()
+                relinked_html, pictures = _relink_source_pictures(translated_html, source_html)
+                if pictures:
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        f.write(relinked_html)
+                    relinked_files += 1
+                    relinked_pictures += pictures
+                if not _link_qa_issues(output_path, source_html, rename_map):
+                    link_resolved += 1
+                    patterns.append(_LINK_TARGET_QA_RE)
+            if patterns:
+                cleared.append((info, progress_entry, patterns))
 
         def _apply(prog):
             remaining_other_qa = 0
-            for info, progress_entry in resolved:
+            for info, progress_entry, patterns in cleared:
                 remaining = False
                 for target in _missing_image_qa_targets(prog, info, progress_entry):
-                    remaining = _clear_image_reference_qa_markers(target)[1] or remaining
+                    for pattern in patterns:
+                        target_remaining = _clear_listed_qa_markers(target, pattern)[1]
+                    remaining = remaining or target_remaining
                 remaining_other_qa += bool(remaining)
             return remaining_other_qa
 
         remaining_other_qa = (
-            mutate_progress(data['progress_file'], _apply) if resolved else 0
+            mutate_progress(data['progress_file'], _apply) if cleared else 0
         )
     except Exception as e:
         import traceback
@@ -1530,17 +1613,32 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
     lines = [f"Repaired image links in {repaired} file(s)."]
     if inserted:
         lines.append(f"Inserted missing images in {inserted} file(s).")
-    lines.append(
-        f"Image QA issue cleared on {len(resolved)} of {len(rows)} selected file(s)."
-    )
-    unresolved = len(rows) - len(resolved)
-    if unresolved:
-        lines.append(f"{unresolved} file(s) still differ from the source images.")
+    if relinked_files:
+        lines.append(
+            f"Put {relinked_pictures} picture(s) back inside their links in "
+            f"{relinked_files} file(s)."
+        )
+    if image_rows:
+        lines.append(
+            f"Image QA issue cleared on {image_resolved} of {image_rows} selected file(s)."
+        )
+        if image_rows - image_resolved:
+            lines.append(
+                f"{image_rows - image_resolved} file(s) still differ from the source images."
+            )
+    if link_rows:
+        lines.append(
+            f"Link QA issue cleared on {link_resolved} of {link_rows} selected file(s)."
+        )
+        if link_rows - link_resolved:
+            lines.append(
+                f"{link_rows - link_resolved} file(s) still differ from the source links."
+            )
     if remaining_other_qa:
         lines.append(f"Other QA issues remain on {remaining_other_qa} file(s).")
     return (
         'info', "Resolve QA issue", "\n".join(lines),
-        bool(repaired or inserted or resolved),
+        bool(repaired or inserted or relinked_files or cleared),
     )
 
 
