@@ -6387,6 +6387,37 @@ _QA_REPAIR_OPT_IN_WORKER = [
  ),
 ]
 
+# 2026-11-20 QA scanner: the stop decorator back on scan_html_folder
+# (the real diffs, applied after every entry above)
+_QA_SCAN_STOP_DECORATOR_SCANNER = [
+ (
+  (
+   '\n'
+   '@_stops_at_once\n'
+   'def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,\n'
+  ),
+  (
+   '\n'
+   'def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   '\n'
+   "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+   '    """\n'
+  ),
+  (
+   '\n'
+   '\n'
+   '@_stops_at_once\n'
+   "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+   '    """\n'
+  ),
+ ),
+]
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -8127,6 +8158,16 @@ APPROVED = (
             "src/qa_scan_runtime.py": _QA_REPAIR_OPT_IN_RUNTIME,
             "src/scan_html_folder.py": _QA_REPAIR_OPT_IN_SCANNER,
             "src/TransateKRtoEN.py": _QA_REPAIR_OPT_IN_WORKER,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
+        "what": "QA scanner: @_stops_at_once is on scan_html_folder again. The Auto Link / Image Tag Repair helper "
+                "had been inserted between the decorator and the function, so a stop while the scan read the source "
+                "reading raised instead of ending the scan",
+        "source": {
+            "src/scan_html_folder.py": _QA_SCAN_STOP_DECORATOR_SCANNER,
         },
         "values": {},
     },

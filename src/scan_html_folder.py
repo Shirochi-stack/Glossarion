@@ -10775,7 +10775,6 @@ def _init_worker_process():
         pass
 
 
-@_stops_at_once
 def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,
                                original_preservation_info, image_rename_map,
                                check_link_targets, log, epub_path=None):
@@ -10845,6 +10844,7 @@ def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,
     return flagged
 
 
+@_stops_at_once
 def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
