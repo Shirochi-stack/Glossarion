@@ -9395,8 +9395,8 @@ Do not stop after the glossary."""
                 QMessageBox.information(parent, "No Backups",
                     f"This glossary has no backups yet.\n\n"
                     f"Expected location:\n{backup_dir}\n\n"
-                    "Backups are created automatically before a modification (save, delete, filter, etc) "
-                    "and by Backup Settings > Backup Now.")
+                    "Backups are created automatically after a glossary extraction and before a modification "
+                    "(save, delete, filter, etc), and by Backup Settings > Backup Now.")
                 return
 
             def restore_selected(backup):

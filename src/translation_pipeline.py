@@ -84,6 +84,7 @@ from dataclasses import dataclass, field
 
 from app_paths import _get_app_dir
 from epub_package import find_epub_opf_member, find_opf_path
+from glossary_document import extraction_backup_note
 from image_job import ImageJobMixin
 from job_runner import JobHooksMixin
 from rpgmaker_job import RPGMAKER_GAME_INPUTS_ATTR, RpgMakerJobMixin
@@ -1087,12 +1088,18 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
                 ):
                     successful += 1
                     successful_items.append(f"📄 {output_path}")
+                    successful_items[-1] += extraction_backup_note(
+                        output_path, complete=True, config=self.config, append_log=self.append_log)
                 else:
                     # If failed but we have a partial file (checked inside _extract...), add to success list with note
                     # We need to manually check if partial file exists since _extract returns False on stop
                     partial_path = os.path.splitext(output_path)[0] + '.csv'
                     if os.path.exists(partial_path):
                         successful_items.append(f"📄 {partial_path} (Partial)")
+                        # The stopped run's glossary is backed up too (Glossary Editor > Restore Backup)
+                        successful_items[-1] += extraction_backup_note(
+                            output_path, complete=False, stopped=bool(self.stop_requested),
+                            config=self.config, append_log=self.append_log)
                     failed += 1
             
             # Final summary
