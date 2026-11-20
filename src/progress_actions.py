@@ -1456,33 +1456,6 @@ def _image_qa_issue_types(output_path, source_html, rename_map):
     return {detail.get('type') for detail in details}
 
 
-def _relink_source_pictures(translated_html, source_html):
-    """Put each picture back inside the link that wraps it in the source.
-
-    Pictures are paired by position, so nothing is done unless source and
-    output have the same number of pictures. The empty link an older build
-    left right after the picture is removed. Returns ``(html, changed)``.
-    """
-    from bs4 import BeautifulSoup
-
-    source = BeautifulSoup(source_html, 'html.parser')
-    output = BeautifulSoup(translated_html, 'html.parser')
-    source_images, output_images = source.find_all('img'), output.find_all('img')
-    if len(source_images) != len(output_images):
-        return translated_html, 0
-    changed = 0
-    for source_image, image in zip(source_images, output_images):
-        link = source_image.find_parent('a')
-        if not (link and link.get('href')) or image.find_parent('a'):
-            continue
-        follower = image.next_sibling
-        if getattr(follower, 'name', None) == 'a' and not follower.get_text(strip=True) and not follower.find(True):
-            follower.extract()
-        image.wrap(output.new_tag('a', href=link['href']))
-        changed += 1
-    return (str(output), changed) if changed else (translated_html, 0)
-
-
 def _link_qa_issues(output_path, source_html, rename_map):
     """Link target issue codes the QA scanner's comparison still finds in an output."""
     from scan_html_folder import _html_preservation_profile, _preservation_count_issues
@@ -1509,13 +1482,15 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
     own comparison (``detect_missing_images``) finds none; other QA marks stay.
 
     A row with a link target mark (not a chunk row) then gets each picture back
-    inside the link that wraps it in the source (``_relink_source_pictures``); its
-    link marks are cleared once the scanner's link comparison finds no difference.
+    inside the link that wraps it in the source
+    (``image_reference_map.relink_source_pictures``, which a run's own repair
+    applies to the whole folder); its link marks are cleared once the scanner's
+    link comparison finds no difference.
 
     Returns ``(kind, title, message, refreshed)`` like ``insert_missing_images``;
     ``refreshed`` is False when no file and no mark changed.
     """
-    from image_reference_map import repair_image_references
+    from image_reference_map import relink_source_pictures, repair_image_references
 
     output_dir = data['output_dir']
     rows = {}
@@ -1579,7 +1554,7 @@ def resolve_image_qa(data, selected_infos, restore_fn=None, log=print):
             if link_marked:
                 with open(output_path, 'r', encoding='utf-8') as f:
                     translated_html = f.read()
-                relinked_html, pictures = _relink_source_pictures(translated_html, source_html)
+                relinked_html, pictures = relink_source_pictures(translated_html, source_html)
                 if pictures:
                     with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(relinked_html)

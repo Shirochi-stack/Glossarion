@@ -356,6 +356,81 @@ def _resolve_parent(data, identity, reencoded=False):
     return None
 
 
+_PICTURE_IN_LINK = re.compile(r'<a\b[^>]*>(?:(?!</a\s*>)[\s\S])*?<img\b', re.I)
+
+
+def relink_source_pictures(translated_html, source_html):
+    """Put each picture back inside the link that wraps it in the source.
+
+    Pictures are paired by position, so nothing is done unless source and
+    output have the same number of pictures. The empty link an older build
+    left right after the picture is removed. Returns ``(html, changed)``.
+    """
+    source = BeautifulSoup(source_html, 'html.parser')
+    output = BeautifulSoup(translated_html, 'html.parser')
+    source_images, output_images = source.find_all('img'), output.find_all('img')
+    if len(source_images) != len(output_images):
+        return translated_html, 0
+    changed = 0
+    for source_image, image in zip(source_images, output_images):
+        link = source_image.find_parent('a')
+        if not (link and link.get('href')) or image.find_parent('a'):
+            continue
+        follower = image.next_sibling
+        if getattr(follower, 'name', None) == 'a' and not follower.get_text(strip=True) and not follower.find(True):
+            follower.extract()
+        image.wrap(output.new_tag('a', href=link['href']))
+        changed += 1
+    return (str(output), changed) if changed else (translated_html, 0)
+
+
+def repair_picture_links(folder, log=print):
+    """Relink the pictures of every translated page whose source EPUB page has
+    more pictures inside links than the page has. Returns the pages changed.
+
+    A page is parsed only when that count says a picture left its link, so a
+    repaired book costs one read per page.
+    """
+    from output_workspace import read_workspace_source_path
+    from progress_core import _index_epub_html_members, _normalize_progress_match_name
+    import zipfile
+
+    epub_path = read_workspace_source_path(folder)
+    if not epub_path.lower().endswith('.epub') or not os.path.isfile(epub_path):
+        return 0
+    changed = 0
+    try:
+        with zipfile.ZipFile(epub_path) as archive:
+            by_stem = _index_epub_html_members(archive.namelist())[2]
+            for path in _html_files(folder):
+                member = by_stem.get(_normalize_progress_match_name(path.name).lower())
+                if not member:
+                    continue
+                source = archive.read(member).decode('utf-8', errors='ignore')
+                linked = len(_PICTURE_IN_LINK.findall(source))
+                if not linked:
+                    continue
+                content = path.read_text(encoding='utf-8')
+                if len(_PICTURE_IN_LINK.findall(content)) >= linked:
+                    continue
+                rendered, pictures = relink_source_pictures(content, source)
+                if not pictures:
+                    continue
+                fd, temporary = tempfile.mkstemp(prefix='.image-html-', dir=folder)
+                try:
+                    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
+                        handle.write(rendered)
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+                changed += 1
+                log(f'Put {pictures} picture(s) back inside their links in {path.name}')
+    except (OSError, zipfile.BadZipFile) as error:
+        log(f'Picture link repair skipped: {error}')
+    return changed
+
+
 @_locked
 def record_translated_page(folder, filename):
     """Bind a newly written translation to current parents, replacing old refs."""
@@ -449,4 +524,8 @@ def repair_image_references(folder, source_dir=None, log=print, only=None):
             del data['repairs'][path.name]
             _save(source_dir, data)
     _save(source_dir, data)
+    if only is None:
+        # The whole-folder repair of a run also puts pictures back inside the
+        # links their source has around them.
+        changed += repair_picture_links(folder, log=log)
     return changed

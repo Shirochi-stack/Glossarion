@@ -255,6 +255,45 @@ def test_resolve_qa_puts_pictures_back_inside_their_source_links(tmp_path):
     assert progress_actions.resolve_image_qa(data, rows, log=lambda _line: None)[3] is False
 
 
+def test_run_repair_puts_pictures_back_inside_their_source_links(tmp_path):
+    inventory(tmp_path, {'OEBPS/Images/a.webp': b'one', 'OEBPS/Images/b.webp': b'two'},
+              {'a.webp': 'chapter0001_img_1.webp', 'b.webp': 'chapter0001_img_2.webp'})
+    linked_source = ('<html><body><p><a href="https://host.example/i1/"><img src="../Images/a.webp"/></a></p>'
+                     '<p><a class="x" href="other.xhtml#top"><span><img src="../Images/b.webp"/></span></a></p>'
+                     '</body></html>')
+    plain_source = '<html><body><p><img src="../Images/a.webp"/></p><p><a href="#n">n</a></p></body></html>'
+    epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(epub, 'w') as archive:
+        archive.writestr('OEBPS/Text/chapter0001.xhtml', linked_source)
+        archive.writestr('OEBPS/Text/chapter0002.xhtml', linked_source)
+        archive.writestr('OEBPS/Text/chapter0003.xhtml', plain_source)
+    (tmp_path / 'source_epub.txt').write_text(str(epub), encoding='utf-8')
+    lost = tmp_path / 'response_chapter0001.html'
+    lost.write_text('<html><body><p><img src="images/chapter0001_img_1.webp"/><a href="x"></a></p>'
+                    '<p><img src="images/chapter0001_img_2.webp"/></p></body></html>', encoding='utf-8')
+    uneven = tmp_path / 'response_chapter0002.html'  # one picture is gone: nothing can be paired
+    uneven.write_text('<html><body><p><img src="images/chapter0001_img_1.webp"/></p></body></html>', encoding='utf-8')
+    plain = tmp_path / 'response_chapter0003.html'
+    plain.write_text('<html><body><p><img src="images/chapter0001_img_1.webp"/></p><p><a href="#n">n</a></p></body></html>',
+                     encoding='utf-8')
+    untouched = {path: path.read_bytes() for path in (uneven, plain)}
+    log = []
+
+    assert tracking.repair_image_references(tmp_path, log=log.append) == 1
+
+    assert lost.read_text(encoding='utf-8') == (
+        '<html><body><p><a href="https://host.example/i1/"><img src="images/chapter0001_img_1.webp"/></a></p>'
+        '<p><a href="other.xhtml#top"><img src="images/chapter0001_img_2.webp"/></a></p></body></html>')
+    assert all(path.read_bytes() == contents for path, contents in untouched.items())
+    assert [line for line in log if 'picture' in line] == [
+        'Put 2 picture(s) back inside their links in response_chapter0001.html']
+    assert tracking.repair_image_references(tmp_path, log=log.append) == 0
+    # a repair limited to named files (Resolve QA issue) leaves the pictures to its caller
+    lost.write_text(lost.read_text(encoding='utf-8').replace('<a href="https://host.example/i1/">', '').replace(
+        '.webp"/></a></p><p><a', '.webp"/></p><p><a'), encoding='utf-8')
+    assert tracking.repair_image_references(tmp_path, only={lost.name}) == 0
+
+
 def test_identical_bytes_use_source_path_and_ambiguous_matches_do_not_guess(tmp_path):
     inventory(tmp_path, {'OEBPS/Images/a.jpg': b'same', 'OEBPS/Images/b.jpg': b'same'})
     output = page(tmp_path, 'response_Chapter.xhtml', ['a.jpg', 'b.jpg'])
