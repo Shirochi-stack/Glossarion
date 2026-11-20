@@ -5337,6 +5337,122 @@ _HEADING_LINK_WORKER = [
  ),
 ]
 
+# 2026-11-20 header update restores a heading link the output lost (the real diffs, applied after
+# _HEADING_LINK_HEADERS)
+_HEADING_LINK_RESTORE_HEADERS = [
+ (
+  (
+   '        extra.extract()\n'
+   '    return "updated"\n'
+   '\n'
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+  (
+   '        extra.extract()\n'
+   '    return "updated"\n'
+   '\n'
+   '\n'
+   'def _source_chapter_first_heading(html_dir, html_file):\n'
+   '    """The first heading (h1, else h2 ... h6) of the source EPUB chapter behind\n'
+   '    an output file, parsed on its own, or None."""\n'
+   '    from output_workspace import read_workspace_source_path\n'
+   '    from progress_core import _index_epub_html_members, _normalize_progress_match_name\n'
+   '    epub_path = read_workspace_source_path(html_dir)\n'
+   "    if not epub_path.lower().endswith('.epub') or not os.path.isfile(epub_path):\n"
+   '        return None\n'
+   '    try:\n'
+   "        with zipfile.ZipFile(epub_path, 'r') as zf:\n"
+   '            _by_path, _by_basename, by_stem = _index_epub_html_members(zf.namelist())\n'
+   '            member = by_stem.get(_normalize_progress_match_name(html_file).lower())\n'
+   '            if not member:\n'
+   '                return None\n'
+   "            source = zf.read(member).decode('utf-8', errors='ignore')\n"
+   '    except (OSError, KeyError, zipfile.BadZipFile):\n'
+   '        return None\n'
+   "    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):\n"
+   "        match = re.search(rf'<{tag_name}\\b[^>]*>[\\s\\S]*?</{tag_name}>', source, flags=re.IGNORECASE)\n"
+   '        if match:\n'
+   "            return BeautifulSoup(match.group(0), 'html.parser').find(tag_name)\n"
+   '    return None\n'
+   '\n'
+   '\n'
+   'def restore_source_heading_links(html_dir, html_file):\n'
+   '    """Give the heading of an output file back the link its source heading holds.\n'
+   '\n'
+   '    AO3 / WebToEpub chapters put a link inside the chapter title. An output\n'
+   '    whose heading lost it (the heading was rewritten as plain text) gets the\n'
+   "    source heading's content with the output's own title text in it; the\n"
+   "    output's heading tag and attributes stay. Nothing changes when the output\n"
+   '    heading still holds a link, picture or table, when the source heading has\n'
+   '    no link, or when the output already has every such link somewhere.\n'
+   '\n'
+   '    Returns True when the file was rewritten.\n'
+   '    """\n'
+   '    html_path = os.path.join(html_dir, html_file)\n'
+   '    try:\n'
+   "        with open(html_path, 'r', encoding='utf-8') as rf:\n"
+   '            content = rf.read()\n'
+   '    except OSError:\n'
+   '        return False\n'
+   '    match = None\n'
+   "    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):\n"
+   "        match = re.search(rf'(<{tag_name}\\b[^>]*>)([\\s\\S]*?)(</{tag_name}>)', content, flags=re.IGNORECASE)\n"
+   '        if match:\n'
+   '            break\n'
+   '    if not match:\n'
+   '        return False\n'
+   "    inner = BeautifulSoup(match.group(2), 'html.parser')\n"
+   '    title = inner.get_text().strip()\n'
+   '    if not title or _heading_has_qa_checked_markup(inner):\n'
+   '        return False\n'
+   '    source_heading = _source_chapter_first_heading(html_dir, html_file)\n'
+   '    if source_heading is None:\n'
+   '        return False\n'
+   '    source_links = [\n'
+   "        str(link.get('href')).strip() for link in source_heading.find_all('a')\n"
+   "        if str(link.get('href') or '').strip()\n"
+   '    ]\n'
+   '    output_links = {\n'
+   "        str(link.get('href') or '').strip()\n"
+   "        for link in BeautifulSoup(content, 'html.parser').find_all('a')\n"
+   '    }\n'
+   '    if not any(href not in output_links for href in source_links):\n'
+   '        return False\n'
+   '    if replace_heading_text_keep_markup(source_heading, title) == "kept":\n'
+   '        return False\n'
+   '    new_inner = source_heading.decode_contents().strip()\n'
+   '    content = content[:match.start(2)] + new_inner + content[match.end(2):]\n'
+   "    with open(html_path, 'w', encoding='utf-8') as wf:\n"
+   '        wf.write(content)\n'
+   '    return True\n'
+   '\n'
+   '\n'
+   'class BatchHeaderTranslator:\n'
+  ),
+ ),
+ (
+  (
+   '            html_path = os.path.join(html_dir, html_file)\n'
+   '\n'
+   "            # Skip if the translated name is identical to what's already in the file\n"
+  ),
+  (
+   '            html_path = os.path.join(html_dir, html_file)\n'
+   '\n'
+   '            # A heading that lost the link its source heading holds gets it back\n'
+   '            # first, also when the title itself is already up to date\n'
+   '            try:\n'
+   '                if restore_source_heading_links(html_dir, html_file):\n'
+   '                    print(f"🔗 Restored the heading link of {html_file} from the source")\n'
+   '            except Exception as e:\n'
+   '                print(f"⚠️ Could not restore the heading link of {html_file}: {e}")\n'
+   '\n'
+   "            # Skip if the translated name is identical to what's already in the file\n"
+  ),
+ ),
+]
+
 # 2026-11-19 QA chunk localisation reads markdown chunk sources (enhanced extraction): their [text](<href>)
 # links and pipe tables are rendered before the chunk comparison; the enhanced-mode markdown-to-HTML
 # step keeps [text](<href>) and <https://...> link targets as links (the real diffs, applied after the
@@ -5697,6 +5813,610 @@ _METADATA_QA_RETRANSLATE_WORKER = [
 
 
 
+
+# 2026-11-20 QA scanner: "Check link targets" (off by default) and "Auto Link / Image Tag Repair"
+# (the real diffs, applied after every entry above)
+_QA_LINK_TOGGLES_GUI = [
+ (
+  (
+   '            detection_layout.addWidget(check_potential_truncation_checkbox)\n'
+   '\n'
+   '            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(\n'
+   '                "Use SDLXLIFF subfolder for source -> output h1/p tag checks"\n'
+  ),
+  (
+   '            detection_layout.addWidget(check_potential_truncation_checkbox)\n'
+   '\n'
+   '            check_link_targets_checkbox = self._create_styled_checkbox(\n'
+   '                "Check link targets (links lost or changed from the source)"\n'
+   '            )\n'
+   "            check_link_targets_checkbox.setChecked(qa_settings.get('check_link_targets', False))\n"
+   '            check_link_targets_checkbox.setToolTip(\n'
+   '                _wrapped_tooltip_html(\n'
+   '                    "Flags a chapter whose links differ from its source chapter: a link that is "\n'
+   '                    "missing, or one whose address changed or was added. Needs \\"Check source "\n'
+   '                    "resources\\" on. Off by default: models often move a picture out of its link "\n'
+   '                    "or turn an address shown as text into a link."\n'
+   '                )\n'
+   '            )\n'
+   '            detection_layout.addWidget(check_link_targets_checkbox)\n'
+   '\n'
+   '            auto_repair_image_links_checkbox = self._create_styled_checkbox(\n'
+   '                "Auto Link / Image Tag Repair"\n'
+   '            )\n'
+   "            auto_repair_image_links_checkbox.setChecked(qa_settings.get('auto_repair_image_links', True))\n"
+   '            auto_repair_image_links_checkbox.setToolTip(\n'
+   '                _wrapped_tooltip_html(\n'
+   '                    "Before a chapter is scanned, repairs its image and link tags when the scan "\n'
+   '                    "would flag them: an image link that points at a renamed or re-encoded file "\n'
+   '                    "or at the wrong folder, and a picture that left the link it has in the "\n'
+   '                    "source. Chapters without such an issue are not touched. Needs \\"Check "\n'
+   '                    "source resources\\" on; link issues count only with \\"Check link targets\\" on."\n'
+   '                )\n'
+   '            )\n'
+   '            detection_layout.addWidget(auto_repair_image_links_checkbox)\n'
+   '\n'
+   '            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(\n'
+   '                "Use SDLXLIFF subfolder for source -> output h1/p tag checks"\n'
+  ),
+ ),
+ (
+  (
+   "                        'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),\n"
+   "                        'min_file_length': (min_length_spinbox, lambda x: x.value()),\n"
+  ),
+  (
+   "                        'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),\n"
+   "                        'check_link_targets': (check_link_targets_checkbox, lambda x: x.isChecked()),\n"
+   "                        'auto_repair_image_links': (auto_repair_image_links_checkbox, lambda x: x.isChecked()),\n"
+   "                        'min_file_length': (min_length_spinbox, lambda x: x.value()),\n"
+  ),
+ ),
+ (
+  (
+   "                            ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),\n"
+   "                            ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),\n"
+  ),
+  (
+   "                            ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),\n"
+   "                            ('QA_CHECK_LINK_TARGETS', '1' if qa_settings.get('check_link_targets', False) else '0'),\n"
+   "                            ('QA_AUTO_REPAIR_IMAGE_LINKS', '1' if qa_settings.get('auto_repair_image_links', True) else '0'),\n"
+   "                            ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),\n"
+  ),
+ ),
+ (
+  (
+   "                    ('check_missing_images', check_missing_images_checkbox, True),\n"
+   "                    ('min_file_length', min_length_spinbox, 0),\n"
+  ),
+  (
+   "                    ('check_missing_images', check_missing_images_checkbox, True),\n"
+   "                    ('check_link_targets', check_link_targets_checkbox, False),\n"
+   "                    ('auto_repair_image_links', auto_repair_image_links_checkbox, True),\n"
+   "                    ('min_file_length', min_length_spinbox, 0),\n"
+  ),
+ ),
+ (
+  (
+   '                    check_missing_images_checkbox.setChecked(True)\n'
+   '                    min_length_spinbox.setValue(0)\n'
+  ),
+  (
+   '                    check_missing_images_checkbox.setChecked(True)\n'
+   '                    check_link_targets_checkbox.setChecked(False)\n'
+   '                    auto_repair_image_links_checkbox.setChecked(True)\n'
+   '                    min_length_spinbox.setValue(0)\n'
+  ),
+ ),
+]
+
+_QA_LINK_TOGGLES_RUNTIME = [
+ (
+  (
+   '        "check_missing_images": True,\n'
+   '        "min_file_length": 0,\n'
+  ),
+  (
+   '        "check_missing_images": True,\n'
+   '        "check_link_targets": False,\n'
+   '        "auto_repair_image_links": True,\n'
+   '        "min_file_length": 0,\n'
+  ),
+ ),
+ (
+  (
+   '        "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",\n'
+   '        "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),\n'
+  ),
+  (
+   '        "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",\n'
+   '        "QA_CHECK_LINK_TARGETS": "1" if settings.get("check_link_targets", False) else "0",\n'
+   '        "QA_AUTO_REPAIR_IMAGE_LINKS": "1" if settings.get("auto_repair_image_links", True) else "0",\n'
+   '        "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),\n'
+  ),
+ ),
+]
+
+_QA_LINK_TOGGLES_SCANNER = [
+ (
+  (
+   '        ):\n'
+   '            for resource_issue, resource_preview in _preservation_count_issues(\n'
+  ),
+  (
+   '        ):\n'
+   '            # Lost or changed link targets are a check of their own, off by\n'
+   '            # default: models often relink a picture or an address shown as text.\n'
+   "            check_link_targets = qa_settings.get('check_link_targets', False)\n"
+   '            for resource_issue, resource_preview in _preservation_count_issues(\n'
+  ),
+ ),
+ (
+  (
+   '                    output_preservation_profile):\n'
+   '                issues.append(resource_issue)\n'
+  ),
+  (
+   '                    output_preservation_profile):\n'
+   '                if not check_link_targets and resource_issue.startswith(\n'
+   "                        ('missing_link_targets_', 'changed_link_targets_')):\n"
+   '                    continue\n'
+   '                issues.append(resource_issue)\n'
+  ),
+ ),
+ (
+  (
+   '@_stops_at_once\n'
+   "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+  ),
+  (
+   '@_stops_at_once\n'
+   'def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,\n'
+   '                               original_preservation_info, image_rename_map,\n'
+   '                               check_link_targets, log):\n'
+   '    """Auto Link / Image Tag Repair: repair the pages this scan would flag.\n'
+   '\n'
+   "    A page qualifies when the scan's own comparison with its source page\n"
+   '    reports a missing, extra or changed image reference, or (with the link\n'
+   '    target check on) a lost or changed link target. Only those pages get the\n'
+   '    image link repair and the picture relinking of a translation run, before\n'
+   '    they are scanned. Returns the flagged page names.\n'
+   '    """\n'
+   '    flagged = []\n'
+   '    try:\n'
+   '        for filename in html_files:\n'
+   '            source_profile = _source_preservation_profile_for_output(\n'
+   '                original_preservation_info, filename)\n'
+   "            # The image check's own pairing: the file name without response_ and extension.\n"
+   '            source_name = filename.lower()\n'
+   "            if source_name.startswith('response_'):\n"
+   '                source_name = source_name[9:]\n'
+   '            source_name = os.path.splitext(source_name)[0]\n'
+   '            image_key = next(\n'
+   '                (key for key, info in (original_image_info or {}).items()\n'
+   '                 if isinstance(info, dict)\n'
+   "                 and os.path.splitext(str(info.get('filename', '')).lower())[0] == source_name),\n"
+   '                None,\n'
+   '            )\n'
+   '            if source_profile is None and image_key is None:\n'
+   '                continue\n'
+   '            try:\n'
+   "                with open(os.path.join(folder_path, filename), 'r', encoding='utf-8') as handle:\n"
+   '                    content = handle.read()\n'
+   '            except (OSError, UnicodeError):\n'
+   '                continue\n'
+   '            output_profile = _html_preservation_profile(content, image_rename_map)\n'
+   '            issue = False\n'
+   '            if image_key is not None:\n'
+   '                issue, _details = detect_missing_images(\n'
+   '                    content,\n'
+   '                    image_key,\n'
+   '                    original_image_info,\n'
+   '                    image_rename_map=image_rename_map,\n'
+   '                    svg_picture_conversion=_svg_picture_conversions(\n'
+   '                        source_profile, output_profile),\n'
+   '                )\n'
+   '            if not issue and check_link_targets and source_profile is not None:\n'
+   '                issue = any(\n'
+   "                    code.startswith(('missing_link_targets_', 'changed_link_targets_'))\n"
+   '                    for code, _preview in _preservation_count_issues(\n'
+   '                        source_profile, output_profile)\n'
+   '                )\n'
+   '            if issue:\n'
+   '                flagged.append(filename)\n'
+   '        if flagged:\n'
+   '            from image_reference_map import repair_image_references, repair_picture_links\n'
+   '            log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")\n'
+   '            repaired = repair_image_references(folder_path, log=log, only=flagged)\n'
+   '            relinked = repair_picture_links(folder_path, log=log, only=flagged)\n'
+   '            log(f"🛠️ Repaired image links in {repaired} file(s), pictures back in their links in {relinked} file(s)")\n'
+   '    except Exception as exc:\n'
+   '        log(f"⚠️ Auto Link / Image Tag Repair skipped: {exc}")\n'
+   '    return flagged\n'
+   '\n'
+   '\n'
+   "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+  ),
+ ),
+ (
+  (
+   "            'check_missing_images': True,\n"
+   "            'exclude_ruby_tags': False,\n"
+  ),
+  (
+   "            'check_missing_images': True,\n"
+   "            'check_link_targets': False,\n"
+   "            'auto_repair_image_links': True,\n"
+   "            'exclude_ruby_tags': False,\n"
+  ),
+ ),
+ (
+  (
+   '    log(f"   ✓ Source resource preservation (images/links/tables/graphics): {\'ENABLED\' if qa_settings.get(\'check_missing_images\', True) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Missing HTML tag check: {\'ENABLED\' if qa_settings.get(\'check_missing_html_tag\', False) else \'DISABLED\'}")\n'
+  ),
+  (
+   '    log(f"   ✓ Source resource preservation (images/links/tables/graphics): {\'ENABLED\' if qa_settings.get(\'check_missing_images\', True) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Link target check (lost or changed links): {\'ENABLED\' if qa_settings.get(\'check_link_targets\', False) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Auto Link / Image Tag Repair: {\'ENABLED\' if qa_settings.get(\'auto_repair_image_links\', True) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Missing HTML tag check: {\'ENABLED\' if qa_settings.get(\'check_missing_html_tag\', False) else \'DISABLED\'}")\n'
+  ),
+ ),
+ (
+  (
+   '    \n'
+   '    file_type = "text" if text_file_mode else "HTML"\n'
+  ),
+  (
+   '    \n'
+   '    if (\n'
+   "        qa_settings.get('auto_repair_image_links', True)\n"
+   '        and check_missing_imgs\n'
+   '        and not text_file_mode\n'
+   "        and str(epub_path or '').lower().endswith('.epub')\n"
+   '    ):\n'
+   '        _auto_repair_flagged_pages(\n'
+   '            folder_path,\n'
+   '            html_files,\n'
+   '            original_image_info,\n'
+   '            original_preservation_info,\n'
+   '            image_rename_map,\n'
+   "            qa_settings.get('check_link_targets', False),\n"
+   '            log,\n'
+   '        )\n'
+   '\n'
+   '    file_type = "text" if text_file_mode else "HTML"\n'
+  ),
+ ),
+]
+
+_QA_LINK_TOGGLES_WORKER = [
+ (
+  (
+   '            "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),\n'
+   '            "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),\n'
+  ),
+  (
+   '            "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),\n'
+   '            "check_link_targets": _env_bool("QA_CHECK_LINK_TARGETS", False),\n'
+   '            "auto_repair_image_links": _env_bool("QA_AUTO_REPAIR_IMAGE_LINKS", True),\n'
+   '            "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),\n'
+  ),
+ ),
+]
+
+# 2026-11-20 QA scanner: Auto Link / Image Tag Repair is off by default, sits in File Processing and
+# extracts a stale workspace again before repairing
+# (the real diffs, applied after every entry above)
+_QA_REPAIR_OPT_IN_GUI = [
+ (
+  (
+   '\n'
+   '            auto_repair_image_links_checkbox = self._create_styled_checkbox(\n'
+   '                "Auto Link / Image Tag Repair"\n'
+   '            )\n'
+   "            auto_repair_image_links_checkbox.setChecked(qa_settings.get('auto_repair_image_links', True))\n"
+   '            auto_repair_image_links_checkbox.setToolTip(\n'
+   '                _wrapped_tooltip_html(\n'
+   '                    "Before a chapter is scanned, repairs its image and link tags when the scan "\n'
+   '                    "would flag them: an image link that points at a renamed or re-encoded file "\n'
+   '                    "or at the wrong folder, and a picture that left the link it has in the "\n'
+   '                    "source. Chapters without such an issue are not touched. Needs \\"Check "\n'
+   '                    "source resources\\" on; link issues count only with \\"Check link targets\\" on."\n'
+   '                )\n'
+   '            )\n'
+   '            detection_layout.addWidget(auto_repair_image_links_checkbox)\n'
+   '\n'
+   '            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(\n'
+  ),
+  (
+   '\n'
+   '            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(\n'
+  ),
+ ),
+ (
+  (
+   '            min_spacing_text_layout.addStretch()\n'
+   '            file_layout.addWidget(min_spacing_text_widget)\n'
+   '\n'
+   '            scroll_layout.addSpacing(15)\n'
+  ),
+  (
+   '            min_spacing_text_layout.addStretch()\n'
+   '            file_layout.addWidget(min_spacing_text_widget)\n'
+   '\n'
+   '            # The one QA setting that changes the translated files.\n'
+   '            auto_repair_image_links_checkbox = self._create_styled_checkbox(\n'
+   '                "Auto Link / Image Tag Repair (changes the chapter files)"\n'
+   '            )\n'
+   "            auto_repair_image_links_checkbox.setChecked(qa_settings.get('auto_repair_image_links', False))\n"
+   '            auto_repair_image_links_checkbox.setToolTip(\n'
+   '                _wrapped_tooltip_html(\n'
+   '                    "Before a chapter is scanned, repairs its image and link tags when the scan "\n'
+   '                    "would flag them: an image link that points at a renamed or re-encoded file "\n'
+   '                    "or at the wrong folder, and a picture that left the link it has in the "\n'
+   '                    "source. When the extracted images came from another build of the source "\n'
+   '                    "EPUB, it is extracted again first. Chapters without such an issue are not "\n'
+   '                    "touched. Needs \\"Check source resources\\" on; link issues count only with "\n'
+   '                    "\\"Check link targets\\" on. Off by default: this is the only QA setting that "\n'
+   '                    "rewrites the translated files."\n'
+   '                )\n'
+   '            )\n'
+   '            file_layout.addWidget(auto_repair_image_links_checkbox)\n'
+   '\n'
+   '            scroll_layout.addSpacing(15)\n'
+  ),
+ ),
+ (
+  (
+   "                            ('QA_CHECK_LINK_TARGETS', '1' if qa_settings.get('check_link_targets', False) else '0'),\n"
+   "                            ('QA_AUTO_REPAIR_IMAGE_LINKS', '1' if qa_settings.get('auto_repair_image_links', True) else '0'),\n"
+   "                            ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),\n"
+  ),
+  (
+   "                            ('QA_CHECK_LINK_TARGETS', '1' if qa_settings.get('check_link_targets', False) else '0'),\n"
+   "                            ('QA_AUTO_REPAIR_IMAGE_LINKS', '1' if qa_settings.get('auto_repair_image_links', False) else '0'),\n"
+   "                            ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),\n"
+  ),
+ ),
+ (
+  (
+   "                    ('check_link_targets', check_link_targets_checkbox, False),\n"
+   "                    ('auto_repair_image_links', auto_repair_image_links_checkbox, True),\n"
+   "                    ('min_file_length', min_length_spinbox, 0),\n"
+  ),
+  (
+   "                    ('check_link_targets', check_link_targets_checkbox, False),\n"
+   "                    ('auto_repair_image_links', auto_repair_image_links_checkbox, False),\n"
+   "                    ('min_file_length', min_length_spinbox, 0),\n"
+  ),
+ ),
+ (
+  (
+   '                    check_link_targets_checkbox.setChecked(False)\n'
+   '                    auto_repair_image_links_checkbox.setChecked(True)\n'
+   '                    min_length_spinbox.setValue(0)\n'
+  ),
+  (
+   '                    check_link_targets_checkbox.setChecked(False)\n'
+   '                    auto_repair_image_links_checkbox.setChecked(False)\n'
+   '                    min_length_spinbox.setValue(0)\n'
+  ),
+ ),
+]
+
+_QA_REPAIR_OPT_IN_RUNTIME = [
+ (
+  (
+   '        "check_link_targets": False,\n'
+   '        "auto_repair_image_links": True,\n'
+   '        "min_file_length": 0,\n'
+  ),
+  (
+   '        "check_link_targets": False,\n'
+   '        "auto_repair_image_links": False,\n'
+   '        "min_file_length": 0,\n'
+  ),
+ ),
+ (
+  (
+   '        "QA_CHECK_LINK_TARGETS": "1" if settings.get("check_link_targets", False) else "0",\n'
+   '        "QA_AUTO_REPAIR_IMAGE_LINKS": "1" if settings.get("auto_repair_image_links", True) else "0",\n'
+   '        "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),\n'
+  ),
+  (
+   '        "QA_CHECK_LINK_TARGETS": "1" if settings.get("check_link_targets", False) else "0",\n'
+   '        "QA_AUTO_REPAIR_IMAGE_LINKS": "1" if settings.get("auto_repair_image_links", False) else "0",\n'
+   '        "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),\n'
+  ),
+ ),
+]
+
+_QA_REPAIR_OPT_IN_SCANNER = [
+ (
+  (
+   '                               original_preservation_info, image_rename_map,\n'
+   '                               check_link_targets, log):\n'
+   '    """Auto Link / Image Tag Repair: repair the pages this scan would flag.\n'
+  ),
+  (
+   '                               original_preservation_info, image_rename_map,\n'
+   '                               check_link_targets, log, epub_path=None):\n'
+   '    """Auto Link / Image Tag Repair: repair the pages this scan would flag.\n'
+  ),
+ ),
+ (
+  (
+   '    image link repair and the picture relinking of a translation run, before\n'
+   '    they are scanned. Returns the flagged page names.\n'
+   '    """\n'
+  ),
+  (
+   '    image link repair and the picture relinking of a translation run, before\n'
+   "    they are scanned. When the workspace's extracted images came from another\n"
+   '    build of *epub_path*, the EPUB is extracted again first, as a run does.\n'
+   '    Returns the flagged page names.\n'
+   '    """\n'
+  ),
+ ),
+ (
+  (
+   '        if flagged:\n'
+   '            from image_reference_map import repair_image_references, repair_picture_links\n'
+   '            log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")\n'
+  ),
+  (
+   '        if flagged:\n'
+   '            from image_reference_map import (\n'
+   '                refresh_stale_extraction, repair_image_references, repair_picture_links)\n'
+   '            log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")\n'
+  ),
+ ),
+ (
+  (
+   '            log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")\n'
+   '            repaired = repair_image_references(folder_path, log=log, only=flagged)\n'
+  ),
+  (
+   '            log(f"🛠️ Auto Link / Image Tag Repair: {len(flagged)} file(s) with image or link issues")\n'
+   '            refresh_stale_extraction(folder_path, epub_path, log)\n'
+   '            repaired = repair_image_references(folder_path, log=log, only=flagged)\n'
+  ),
+ ),
+ (
+  (
+   '            repaired = repair_image_references(folder_path, log=log, only=flagged)\n'
+   '            relinked = repair_picture_links(folder_path, log=log, only=flagged)\n'
+   '            log(f"🛠️ Repaired image links in {repaired} file(s), pictures back in their links in {relinked} file(s)")\n'
+  ),
+  (
+   '            repaired = repair_image_references(folder_path, log=log, only=flagged)\n'
+   '            relinked = repair_picture_links(\n'
+   '                folder_path, log=log, only=flagged, epub_path=epub_path)\n'
+   '            log(f"🛠️ Repaired image links in {repaired} file(s), pictures back in their links in {relinked} file(s)")\n'
+  ),
+ ),
+ (
+  (
+   "            'check_link_targets': False,\n"
+   "            'auto_repair_image_links': True,\n"
+   "            'exclude_ruby_tags': False,\n"
+  ),
+  (
+   "            'check_link_targets': False,\n"
+   "            'auto_repair_image_links': False,\n"
+   "            'exclude_ruby_tags': False,\n"
+  ),
+ ),
+ (
+  (
+   '    log(f"   ✓ Link target check (lost or changed links): {\'ENABLED\' if qa_settings.get(\'check_link_targets\', False) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Auto Link / Image Tag Repair: {\'ENABLED\' if qa_settings.get(\'auto_repair_image_links\', True) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Missing HTML tag check: {\'ENABLED\' if qa_settings.get(\'check_missing_html_tag\', False) else \'DISABLED\'}")\n'
+  ),
+  (
+   '    log(f"   ✓ Link target check (lost or changed links): {\'ENABLED\' if qa_settings.get(\'check_link_targets\', False) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Auto Link / Image Tag Repair: {\'ENABLED\' if qa_settings.get(\'auto_repair_image_links\', False) else \'DISABLED\'}")\n'
+   '    log(f"   ✓ Missing HTML tag check: {\'ENABLED\' if qa_settings.get(\'check_missing_html_tag\', False) else \'DISABLED\'}")\n'
+  ),
+ ),
+ (
+  (
+   '    if (\n'
+   "        qa_settings.get('auto_repair_image_links', True)\n"
+   '        and check_missing_imgs\n'
+  ),
+  (
+   '    if (\n'
+   "        qa_settings.get('auto_repair_image_links', False)\n"
+   '        and check_missing_imgs\n'
+  ),
+ ),
+ (
+  (
+   '    ):\n'
+   '        _auto_repair_flagged_pages(\n'
+   '            folder_path,\n'
+  ),
+  (
+   '    ):\n'
+   '        if _auto_repair_flagged_pages(\n'
+   '            folder_path,\n'
+  ),
+ ),
+ (
+  (
+   '            log,\n'
+   '        )\n'
+   '\n'
+  ),
+  (
+   '            log,\n'
+   '            epub_path=epub_path,\n'
+   '        ):\n'
+   '            # A repair may have extracted the EPUB again: the scan compares\n'
+   '            # with the rename map as it is now.\n'
+   '            try:\n'
+   "                with open(image_rename_map_path, 'r', encoding='utf-8') as rename_file:\n"
+   '                    reloaded_rename_map = json.load(rename_file)\n'
+   '            except (OSError, ValueError, TypeError):\n'
+   '                reloaded_rename_map = None\n'
+   '            if isinstance(reloaded_rename_map, dict) and reloaded_rename_map != image_rename_map:\n'
+   '                image_rename_map = reloaded_rename_map\n'
+   '                original_preservation_info = _build_source_preservation_info(\n'
+   '                    original_html_content,\n'
+   '                    image_rename_map=image_rename_map,\n'
+   '                )\n'
+   '\n'
+  ),
+ ),
+]
+
+_QA_REPAIR_OPT_IN_WORKER = [
+ (
+  (
+   '            "check_link_targets": _env_bool("QA_CHECK_LINK_TARGETS", False),\n'
+   '            "auto_repair_image_links": _env_bool("QA_AUTO_REPAIR_IMAGE_LINKS", True),\n'
+   '            "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),\n'
+  ),
+  (
+   '            "check_link_targets": _env_bool("QA_CHECK_LINK_TARGETS", False),\n'
+   '            "auto_repair_image_links": _env_bool("QA_AUTO_REPAIR_IMAGE_LINKS", False),\n'
+   '            "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),\n'
+  ),
+ ),
+]
+
+# 2026-11-20 QA scanner: the stop decorator back on scan_html_folder
+# (the real diffs, applied after every entry above)
+_QA_SCAN_STOP_DECORATOR_SCANNER = [
+ (
+  (
+   '\n'
+   '@_stops_at_once\n'
+   'def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,\n'
+  ),
+  (
+   '\n'
+   'def _auto_repair_flagged_pages(folder_path, html_files, original_image_info,\n'
+  ),
+ ),
+ (
+  (
+   '\n'
+   '\n'
+   "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+   '    """\n'
+  ),
+  (
+   '\n'
+   '\n'
+   '@_stops_at_once\n'
+   "def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):\n"
+   '    """\n'
+  ),
+ ),
+]
 
 APPROVED = (
     {
@@ -7390,6 +8110,16 @@ APPROVED = (
     },
     {
         "date": "2026-11-20",
+        "what": "Header update restores a heading link from the source: before the exact header update of a "
+                "file (also when its title is already up to date), a heading without a link, picture or table "
+                "whose source EPUB heading holds a link the output has nowhere gets the source heading's "
+                "content back with the output's own title text in it (first text node, as the keep-markup "
+                "update); the output heading tag and the rest of the file stay as they are",
+        "source": {"src/metadata_batch_translator.py": _HEADING_LINK_RESTORE_HEADERS},
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
         "what": "A picture inside a link stays inside it: enhanced (html2text) extraction wrote <a href><img/></a> as "
                 "<img/>[](<href>), the picture before an empty link, so the translated chapter had the picture outside "
                 "an empty <a>. The extractor now opens the link before the picture ([<img/>](<href>)), and the "
@@ -7397,6 +8127,48 @@ APPROVED = (
                 "cached on disk keep the old form; a ] in an alt text stops the markdown link parser). A picture "
                 "that is not followed by an empty link and a link with text are converted as before",
         "source": {"src/TransateKRtoEN.py": _LINKED_PICTURE_WORKER},
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
+        "what": "QA scanner: two Detection Options toggles. check_link_targets / QA_CHECK_LINK_TARGETS (off): "
+                "missing_link_targets and changed_link_targets findings are reported only with it on; the rest "
+                "of the source resource check is unchanged. auto_repair_image_links / "
+                "QA_AUTO_REPAIR_IMAGE_LINKS (on): before an EPUB scan, the pages whose own image comparison "
+                "(or, with the link check on, link comparison) differs from the source get the image link "
+                "repair and picture relinking of a translation run; other pages are not touched",
+        "source": {
+            "src/QA_Scanner_GUI.py": _QA_LINK_TOGGLES_GUI,
+            "src/qa_scan_runtime.py": _QA_LINK_TOGGLES_RUNTIME,
+            "src/scan_html_folder.py": _QA_LINK_TOGGLES_SCANNER,
+            "src/TransateKRtoEN.py": _QA_LINK_TOGGLES_WORKER,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
+        "what": "QA scanner: Auto Link / Image Tag Repair (auto_repair_image_links / "
+                "QA_AUTO_REPAIR_IMAGE_LINKS) is off by default and its checkbox sits in File Processing, being "
+                "the one QA setting that rewrites the translated files. When it runs and the workspace's "
+                "extracted images came from another build of the source EPUB (resource marker invalid), the "
+                "EPUB is extracted again first as a translation run does, the scan reloads the rename map, "
+                "and the picture relinking reads the EPUB the scan was given instead of the workspace pointer",
+        "source": {
+            "src/QA_Scanner_GUI.py": _QA_REPAIR_OPT_IN_GUI,
+            "src/qa_scan_runtime.py": _QA_REPAIR_OPT_IN_RUNTIME,
+            "src/scan_html_folder.py": _QA_REPAIR_OPT_IN_SCANNER,
+            "src/TransateKRtoEN.py": _QA_REPAIR_OPT_IN_WORKER,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-20",
+        "what": "QA scanner: @_stops_at_once is on scan_html_folder again. The Auto Link / Image Tag Repair helper "
+                "had been inserted between the decorator and the function, so a stop while the scan read the source "
+                "reading raised instead of ending the scan",
+        "source": {
+            "src/scan_html_folder.py": _QA_SCAN_STOP_DECORATOR_SCANNER,
+        },
         "values": {},
     },
 )

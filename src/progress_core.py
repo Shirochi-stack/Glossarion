@@ -109,6 +109,19 @@ _MISSING_IMAGE_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])missing[_\s-]*images?(?=$|[^a-z0-9])",
     re.IGNORECASE,
 )
+# Every image QA mark of the scanner's source comparison (missing, extra,
+# changed references): the rows whose image links Resolve QA issue repairs.
+_IMAGE_REFERENCE_QA_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:(?:missing|extra)[_\s-]*images?"
+    r"|changed[_\s-]*image[_\s-]*references?)(?=$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+# Lost or changed link targets: Resolve QA issue puts a picture back inside
+# the link that wraps it in the source.
+_LINK_TARGET_QA_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:missing|changed)[_\s-]*link[_\s-]*targets?(?=$|[^a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _progress_total_label(total, chunks):
@@ -350,6 +363,33 @@ def _progress_entry_has_missing_image_qa(entry):
                 return True
         current = current.get('previous_progress_entry')
     return False
+
+
+def _progress_entry_lists_qa_issue(entry, pattern):
+    """Return whether an entry or restorable snapshot lists a QA issue code
+    that starts with *pattern*."""
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        found = current.get('qa_issues_found')
+        if isinstance(found, (list, tuple, set)) and any(
+            pattern.match(str(issue).strip()) for issue in found
+        ):
+            return True
+        current = current.get('previous_progress_entry')
+    return False
+
+
+def _progress_entry_has_image_reference_qa(entry):
+    """Return whether an entry lists an image QA mark (missing, extra or
+    changed references)."""
+    return _progress_entry_lists_qa_issue(entry, _IMAGE_REFERENCE_QA_RE)
+
+
+def _progress_entry_has_link_target_qa(entry):
+    """Return whether an entry lists a missing or changed link target QA mark."""
+    return _progress_entry_lists_qa_issue(entry, _LINK_TARGET_QA_RE)
 
 
 @lru_cache(maxsize=32768)

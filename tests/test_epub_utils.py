@@ -686,6 +686,7 @@ def test_pdf_bookmark_qa_preserves_structure_without_exact_sdlxliff_name(tmp_pat
     settings.update({
         "check_word_count_ratio": False,
         "check_missing_images": True,
+        "check_link_targets": True,
         "check_missing_beautifulsoup_tags": True,
         "sdlxliff_tag_retention_threshold": 1.0,
         "sdlxliff_tag_surplus_tolerance": 0.0,
@@ -2701,6 +2702,48 @@ def test_image_only_chapter_header_translation_keeps_heading_links():
     for orig, trans in zip(soup_body.find_all(["h1"]), soup_headers.find_all(["h1"])):
         assert replace_heading_text_keep_markup(orig, trans.get_text(strip=True)) == "updated"
     assert str(soup_body.h1) == "<h1>Episode 1Start</h1>"
+
+
+def test_header_update_restores_a_heading_link_lost_from_the_output(tmp_path, capsys):
+    # The output heading is plain text (its link went before the keep-markup
+    # fix); the source EPUB heading still has it.
+    epub = tmp_path / "source.epub"
+    with zipfile.ZipFile(epub, "w") as archive:
+        archive.writestr(
+            "OEBPS/Text/0002_Two.xhtml",
+            f'<html><body><h1 class="title">\n  <a href="{_AO3_WORK_LINK}">Chapter 2</a>: Two\n</h1>'
+            '<p>Body <a href="#note">note</a></p></body></html>',
+        )
+        archive.writestr("OEBPS/Text/0003_Three.xhtml", "<html><body><h1>Chapter 3</h1></body></html>")
+    (tmp_path / "source_epub.txt").write_text(str(epub), encoding="utf-8")
+    lost = tmp_path / "response_0002_Two.html"
+    lost.write_text('<html><body><h1>Chương 2: Hai</h1><p>Thân <a href="#note">chú</a></p></body></html>',
+                    encoding="utf-8")
+    plain = tmp_path / "response_0003_Three.html"
+    plain.write_text("<html><body><h1>Chương 3</h1></body></html>", encoding="utf-8")
+    plain_before = plain.read_bytes()
+    current_titles = {
+        2: {"title": "Chương 2: Hai", "filename": lost.name},
+        3: {"title": "Chương 3", "filename": plain.name},
+    }
+    translator = BatchHeaderTranslator(None, {})
+
+    # the titles are already up to date: only the link comes back
+    translator._update_html_headers_exact(str(tmp_path), {2: "Chương 2: Hai", 3: "Chương 3"}, current_titles)
+
+    assert lost.read_text(encoding="utf-8") == (
+        f'<html><body><h1><a href="{_AO3_WORK_LINK}">Chương 2: Hai</a></h1>'
+        '<p>Thân <a href="#note">chú</a></p></body></html>'
+    )
+    assert plain.read_bytes() == plain_before
+    assert capsys.readouterr().out.count("Restored the heading link") == 1
+
+    # a second run changes nothing, and a new title keeps the restored link
+    restored = lost.read_bytes()
+    translator._update_html_headers_exact(str(tmp_path), {2: "Chương 2: Hai"}, current_titles)
+    assert lost.read_bytes() == restored
+    translator._update_html_headers_exact(str(tmp_path), {2: "Chương 2: Số Hai"}, current_titles)
+    assert f'<h1><a href="{_AO3_WORK_LINK}">Chương 2: Số Hai</a></h1>' in lost.read_text(encoding="utf-8")
 
 
 def test_missing_header_html_mappings_are_logged_once(tmp_path, capsys):

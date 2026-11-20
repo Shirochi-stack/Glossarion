@@ -104,6 +104,20 @@ def _replace_basename(url, filename):
     return url[:split] + filename + url[len(path):]
 
 
+def _replace_reference(url, filename, page_folder):
+    """*url* naming *filename*, moved to ``images/`` when its own folder has no such file.
+
+    A page keeps the folder its source EPUB used (``../Images/`` beside
+    ``Text/``), which does not exist next to an output file: the workspace
+    keeps every image in ``images/``.
+    """
+    replacement = _replace_basename(url, filename)
+    path = re.split(r'[?#]', replacement, maxsplit=1)[0]
+    if (Path(page_folder) / unquote(path).replace('\\', '/')).is_file():
+        return replacement
+    return 'images/' + filename + replacement[len(path):]
+
+
 def _references(soup):
     """Yield supported local image URLs and setters, in document order."""
     for tag in soup.find_all(True):
@@ -296,12 +310,41 @@ def publish_extracted_images(folder, zf, categorize_resource):
     _save(folder, data)
 
 
-def _resolve_parent(data, identity):
+def _reencoded_parent(data, old):
+    """Find the image that replaced *old* under another format.
+
+    A source that re-encodes its images (JPEG to WebP, say) changes every
+    byte and the extension, yet keeps the rest of the path. The old path must
+    be gone and exactly one current image may share it, or nothing is guessed.
+    """
+    full_path = '/' in old['source_path']
+
+    def stem(source_path):
+        # Legacy flat maps only provide source basenames.
+        root, extension = posixpath.splitext(source_path if full_path else posixpath.basename(source_path))
+        return root.casefold() if extension.lower() in IMAGE_EXTENSIONS else None
+
+    wanted = stem(old['source_path'])
+    if not wanted:
+        return None
+    matches = [i for i in set(data['current'].values())
+               if stem(data['parents'][i]['source_path']) == wanted]
+    if len(matches) != 1:
+        return None
+    extension = posixpath.splitext(data['parents'][matches[0]]['source_path'])[1]
+    if extension.lower() == posixpath.splitext(old['source_path'])[1].lower():
+        return None  # the same file with new contents: a different image
+    return matches[0]
+
+
+def _resolve_parent(data, identity, reencoded=False):
     old = data['parents'].get(identity)
     if not old:
         return None
     candidates = [i for i in set(data['current'].values())
                   if data['parents'][i]['sha256'] == old['sha256']]
+    if not candidates and reencoded:
+        return _reencoded_parent(data, old)
     same_path = [i for i in candidates if data['parents'][i]['source_path'] == old['source_path']]
     if not same_path and '/' not in old['source_path']:
         # Legacy flat maps only provide source basenames.
@@ -311,6 +354,119 @@ def _resolve_parent(data, identity):
     if len(candidates) == 1:
         return candidates[0]
     return None
+
+
+def refresh_stale_extraction(folder, epub_path, log=print):
+    """Extract the source EPUB again when the workspace's images came from
+    another build of it. Returns True when the extraction ran.
+
+    A workspace keeps the images and the rename map of its last extraction.
+    After the source EPUB is replaced (its images re-encoded, say) they stay
+    as they were until a translation run extracts again, and until then no
+    page can be repaired: the files its links should name are not there. This
+    is that run's extraction step, for the repairs that work without a run.
+    """
+    import zipfile
+
+    if not str(epub_path or '').lower().endswith('.epub') or not os.path.isfile(epub_path):
+        return False
+    marker = os.path.join(folder, '.resources_extracted')
+    if not os.path.isfile(marker):
+        return False  # nothing says which EPUB build the images came from
+    import Chapter_Extractor as extractor
+    try:
+        with zipfile.ZipFile(epub_path) as archive:
+            if extractor._validate_resource_extraction_marker(
+                    marker, folder, extractor._source_epub_content_fingerprint(archive))[0]:
+                return False
+            log('🔄 The extracted images do not match the source EPUB: extracting it again')
+            extractor.extract_chapters(archive, folder, progress_callback=lambda _message: None)
+    except (OSError, zipfile.BadZipFile) as error:
+        log(f'Source EPUB could not be extracted again: {error}')
+        return False
+    return True
+
+
+_PICTURE_IN_LINK = re.compile(r'<a\b[^>]*>(?:(?!</a\s*>)[\s\S])*?<img\b', re.I)
+
+
+def relink_source_pictures(translated_html, source_html):
+    """Put each picture back inside the link that wraps it in the source.
+
+    Pictures are paired by position, so nothing is done unless source and
+    output have the same number of pictures. The empty link an older build
+    left right after the picture is removed. Returns ``(html, changed)``.
+    """
+    source = BeautifulSoup(source_html, 'html.parser')
+    output = BeautifulSoup(translated_html, 'html.parser')
+    source_images, output_images = source.find_all('img'), output.find_all('img')
+    if len(source_images) != len(output_images):
+        return translated_html, 0
+    changed = 0
+    for source_image, image in zip(source_images, output_images):
+        link = source_image.find_parent('a')
+        if not (link and link.get('href')) or image.find_parent('a'):
+            continue
+        follower = image.next_sibling
+        if getattr(follower, 'name', None) == 'a' and not follower.get_text(strip=True) and not follower.find(True):
+            follower.extract()
+        image.wrap(output.new_tag('a', href=link['href']))
+        changed += 1
+    return (str(output), changed) if changed else (translated_html, 0)
+
+
+def repair_picture_links(folder, log=print, only=None, epub_path=None):
+    """Relink the pictures of every translated page whose source EPUB page has
+    more pictures inside links than the page has. Returns the pages changed.
+
+    A page is parsed only when that count says a picture left its link, so a
+    repaired book costs one read per page. ``only`` limits the repair to the
+    pages with those names. ``epub_path`` is the source EPUB when the caller
+    knows it; otherwise the workspace's own source pointer is used (it can
+    name a path of another computer in a copied workspace).
+    """
+    if only is not None:
+        only = {str(name).casefold() for name in only}
+    from output_workspace import read_workspace_source_path
+    from progress_core import _index_epub_html_members, _normalize_progress_match_name
+    import zipfile
+
+    epub_path = str(epub_path or read_workspace_source_path(folder))
+    if not epub_path.lower().endswith('.epub') or not os.path.isfile(epub_path):
+        return 0
+    changed = 0
+    try:
+        with zipfile.ZipFile(epub_path) as archive:
+            by_stem = _index_epub_html_members(archive.namelist())[2]
+            for path in _html_files(folder):
+                if only is not None and path.name.casefold() not in only:
+                    continue
+                member = by_stem.get(_normalize_progress_match_name(path.name).lower())
+                if not member:
+                    continue
+                source = archive.read(member).decode('utf-8', errors='ignore')
+                linked = len(_PICTURE_IN_LINK.findall(source))
+                if not linked:
+                    continue
+                content = path.read_text(encoding='utf-8')
+                if len(_PICTURE_IN_LINK.findall(content)) >= linked:
+                    continue
+                rendered, pictures = relink_source_pictures(content, source)
+                if not pictures:
+                    continue
+                fd, temporary = tempfile.mkstemp(prefix='.image-html-', dir=folder)
+                try:
+                    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
+                        handle.write(rendered)
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+                changed += 1
+                log(f'Put {pictures} picture(s) back inside their links in {path.name}')
+    except (OSError, zipfile.BadZipFile) as error:
+        log(f'Picture link repair skipped: {error}')
+    return changed
 
 
 @_locked
@@ -333,9 +489,14 @@ def record_translated_page(folder, filename):
 
 
 @_locked
-def repair_image_references(folder, source_dir=None, log=print):
-    """Repair by parent identity without renaming physical image resources."""
+def repair_image_references(folder, source_dir=None, log=print, only=None):
+    """Repair by parent identity without renaming physical image resources.
+
+    ``only`` limits the repair to the HTML files with those names.
+    """
     source_dir = source_dir or folder
+    if only is not None:
+        only = {str(name).casefold() for name in only}
     data = _load(source_dir)
     _recover_pages(folder, data)
     if data['pending']:
@@ -349,6 +510,8 @@ def repair_image_references(folder, source_dir=None, log=print):
     changed = 0
     verified = {}
     for path in _html_files(folder):
+        if only is not None and path.name.casefold() not in only:
+            continue
         content = path.read_text(encoding='utf-8')
         soup = BeautifulSoup(content, 'html.parser')
         prior = data['pages'].get(path.name, {})
@@ -356,7 +519,7 @@ def repair_image_references(folder, source_dir=None, log=print):
         for url, setter in _references(soup):
             name = _basename(url)
             identity = _binding(prior, data, name, renames)
-            target = _resolve_parent(data, identity)
+            target = _resolve_parent(data, identity, reencoded=True)
             record = data['parents'].get(target, {})
             filename = record.get('filename', '')
             target_path = Path(folder) / 'images' / filename
@@ -366,12 +529,15 @@ def repair_image_references(folder, source_dir=None, log=print):
                 refs[name] = identity
                 log(f'Unresolved image reference in {path.name}: {name}')
                 continue
-            replacement = _replace_basename(url, filename)
+            replacement = _replace_reference(url, filename, folder)
             refs[filename] = target
             if replacement != url:
                 setter(replacement)
                 modified = True
-                log(f'Repaired image reference in {path.name}: {name} → {filename}')
+                if name == filename:
+                    log(f'Repaired image folder in {path.name}: {url} → {replacement}')
+                else:
+                    log(f'Repaired image reference in {path.name}: {name} → {filename}')
         if modified:
             # A journal disambiguates filename reuse if the process stops
             # between the HTML replacement and its new bindings being saved.
@@ -396,4 +562,8 @@ def repair_image_references(folder, source_dir=None, log=print):
             del data['repairs'][path.name]
             _save(source_dir, data)
     _save(source_dir, data)
+    if only is None:
+        # The whole-folder repair of a run also puts pictures back inside the
+        # links their source has around them.
+        changed += repair_picture_links(folder, log=log)
     return changed

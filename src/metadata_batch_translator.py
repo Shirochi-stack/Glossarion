@@ -2117,9 +2117,84 @@ def replace_heading_text_keep_markup(tag, new_text):
     return "updated"
 
 
+def _source_chapter_first_heading(html_dir, html_file):
+    """The first heading (h1, else h2 ... h6) of the source EPUB chapter behind
+    an output file, parsed on its own, or None."""
+    from output_workspace import read_workspace_source_path
+    from progress_core import _index_epub_html_members, _normalize_progress_match_name
+    epub_path = read_workspace_source_path(html_dir)
+    if not epub_path.lower().endswith('.epub') or not os.path.isfile(epub_path):
+        return None
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            _by_path, _by_basename, by_stem = _index_epub_html_members(zf.namelist())
+            member = by_stem.get(_normalize_progress_match_name(html_file).lower())
+            if not member:
+                return None
+            source = zf.read(member).decode('utf-8', errors='ignore')
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        match = re.search(rf'<{tag_name}\b[^>]*>[\s\S]*?</{tag_name}>', source, flags=re.IGNORECASE)
+        if match:
+            return BeautifulSoup(match.group(0), 'html.parser').find(tag_name)
+    return None
+
+
+def restore_source_heading_links(html_dir, html_file):
+    """Give the heading of an output file back the link its source heading holds.
+
+    AO3 / WebToEpub chapters put a link inside the chapter title. An output
+    whose heading lost it (the heading was rewritten as plain text) gets the
+    source heading's content with the output's own title text in it; the
+    output's heading tag and attributes stay. Nothing changes when the output
+    heading still holds a link, picture or table, when the source heading has
+    no link, or when the output already has every such link somewhere.
+
+    Returns True when the file was rewritten.
+    """
+    html_path = os.path.join(html_dir, html_file)
+    try:
+        with open(html_path, 'r', encoding='utf-8') as rf:
+            content = rf.read()
+    except OSError:
+        return False
+    match = None
+    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        match = re.search(rf'(<{tag_name}\b[^>]*>)([\s\S]*?)(</{tag_name}>)', content, flags=re.IGNORECASE)
+        if match:
+            break
+    if not match:
+        return False
+    inner = BeautifulSoup(match.group(2), 'html.parser')
+    title = inner.get_text().strip()
+    if not title or _heading_has_qa_checked_markup(inner):
+        return False
+    source_heading = _source_chapter_first_heading(html_dir, html_file)
+    if source_heading is None:
+        return False
+    source_links = [
+        str(link.get('href')).strip() for link in source_heading.find_all('a')
+        if str(link.get('href') or '').strip()
+    ]
+    output_links = {
+        str(link.get('href') or '').strip()
+        for link in BeautifulSoup(content, 'html.parser').find_all('a')
+    }
+    if not any(href not in output_links for href in source_links):
+        return False
+    if replace_heading_text_keep_markup(source_heading, title) == "kept":
+        return False
+    new_inner = source_heading.decode_contents().strip()
+    content = content[:match.start(2)] + new_inner + content[match.end(2):]
+    with open(html_path, 'w', encoding='utf-8') as wf:
+        wf.write(content)
+    return True
+
+
 class BatchHeaderTranslator:
     """Translate chapter headers in batches"""
-    
+
     def __init__(self, client, config: dict = None, stop_check_fn=None):
         self.client = client
         self.config = config if config is not None else {}
@@ -3064,6 +3139,14 @@ class BatchHeaderTranslator:
             current_title = current_info['title']
             html_file = current_info['filename']
             html_path = os.path.join(html_dir, html_file)
+
+            # A heading that lost the link its source heading holds gets it back
+            # first, also when the title itself is already up to date
+            try:
+                if restore_source_heading_links(html_dir, html_file):
+                    print(f"🔗 Restored the heading link of {html_file} from the source")
+            except Exception as e:
+                print(f"⚠️ Could not restore the heading link of {html_file}: {e}")
 
             # Skip if the translated name is identical to what's already in the file
             if new_title.strip() == current_title.strip():
