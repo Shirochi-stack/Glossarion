@@ -292,6 +292,14 @@ def ensure_utf8_html_document(content: str) -> str:
 
 
 def write_utf8_html_file(path: str, content: str) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    document = ensure_utf8_html_document(content)
+    try:
+        # An image link that keeps the source EPUB's folder is written as images/...
+        from image_reference_map import localize_image_folders
+        document = localize_image_folders(document, folder)
+    except Exception as e:
+        print(f"⚠️ Image folder check skipped for {os.path.basename(path)}: {e}")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(ensure_utf8_html_document(content))
+        f.write(document)
