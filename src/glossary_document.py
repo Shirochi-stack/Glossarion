@@ -47,6 +47,7 @@ import os
 import re
 import shutil as _shutil
 import time
+import types as _types
 
 from gender_tracking import (
     BINARY_GENDERS,
@@ -62,7 +63,9 @@ from gender_tracking import (
     tracker_entry_for_raw,
     tracker_path_for_glossary,
 )
-from glossary_files import AUTO_BACKUP, BACKUP_KINDS, MANUAL_BACKUP, backup_kind, parse_backup_name
+from glossary_files import (
+    AUTO_BACKUP, BACKUP_KINDS, MANUAL_BACKUP, backup_kind, create_glossary_backup, parse_backup_name,
+)
 from glossary_usage import (
     build_prepared_output_index,
     entry_matches_output_index,
@@ -3142,6 +3145,9 @@ _BACKUP_OPERATION_LABELS = (
     (re.compile(r"^before_remove_(\d+)_dupes$"), "Before removing {} duplicates"),
     (re.compile(r"^before_trim_(\d+)$"), "Before trimming {} entries"),
     (re.compile(r"^before_filter_remove_(\d+)$"), "Before filtering out {} entries"),
+    (re.compile(r"^after_extraction$"), "After glossary extraction"),
+    (re.compile(r"^after_extraction_stopped$"), "After stopped glossary extraction"),
+    (re.compile(r"^after_extraction_partial$"), "After incomplete glossary extraction"),
 )
 
 
@@ -3192,6 +3198,51 @@ def editor_backup_counts(glossary_path):
         if row['kind'] in counts:
             counts[row['kind']] += 1
     return counts
+
+
+def backup_extracted_glossary(output_path, *, complete, stopped=False, config, append_log=print):
+    """An automatic backup of the glossary an extraction run just saved; its file name, or None.
+
+    ``output_path`` is the run's ``<book>_glossary.json``; the ``.csv`` the run wrote next to it
+    is backed up, else the JSON. The backup holds what the Glossary Editor loads from that file,
+    so Restore Backup takes it like one of the editor's own, and it follows the automatic backup
+    setting and limit (glossary_files.create_glossary_backup). When the newest backup already
+    holds these entries (a run that added nothing), that backup is named and none is written.
+    """
+    if not config.get('glossary_auto_backup', True):
+        return None
+    glossary_path = next((path for path in (os.path.splitext(output_path)[0] + '.csv', output_path)
+                          if os.path.isfile(path)), None)
+    if glossary_path is None:
+        return None
+    operation = "after_extraction" if complete else (
+        "after_extraction_stopped" if stopped else "after_extraction_partial")
+    try:
+        doc = _types.SimpleNamespace()
+        reparse_glossary_file(doc, glossary_path, config)
+        data = doc.current_glossary_data
+        if not data:
+            return None
+        rows = editor_backup_rows(glossary_path)
+        for newest in rows:
+            if newest['time'] != rows[0]['time']:
+                break
+            if newest['kind'] != "other" and load_editor_backup(newest['path']) == data:
+                return newest['name']
+    except Exception as e:
+        append_log(f"⚠️ Backup failed: {str(e)}")
+        return None
+    if not create_glossary_backup(glossary_path, data, operation, config=config, append_log=append_log):
+        return None
+    return next((row['name'] for row in editor_backup_rows(glossary_path)
+                 if row['operation'] == operation), None)
+
+
+def extraction_backup_note(output_path, **backup):
+    """The line a glossary extraction summary adds under a saved glossary: the automatic backup
+    :func:`backup_extracted_glossary` made of it (``""`` without one)."""
+    name = backup_extracted_glossary(output_path, **backup)
+    return f"\n        💾 Backup: Backups/{name}" if name else ""
 
 
 def load_restorable_backup(backup_path, glossary_format):

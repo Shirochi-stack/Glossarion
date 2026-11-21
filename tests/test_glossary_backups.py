@@ -292,6 +292,82 @@ def test_restore_list_is_newest_first_with_kind_and_operation(tmp_path):
     assert label("before_restore") == "Before Restore Backup" and label("custom_op") == "custom_op"
 
 
+# =============================================================================================
+# core: the automatic backup of a glossary extraction run (finished, stopped or incomplete)
+# =============================================================================================
+
+def extracted(tmp_path, entries=ENTRIES):
+    """A glossary as an extraction run leaves it: the token CSV; returns the run's ``--output``."""
+    folder = tmp_path / "Glossary" / "book"
+    folder.mkdir(parents=True, exist_ok=True)
+    gd.write_token_csv([dict(e) for e in entries], str(folder / "book_glossary.csv"), [], ["description"])
+    return folder / "book_glossary.json"
+
+
+@pytest.mark.parametrize("run, operation, label", [
+    ({"complete": True}, "after_extraction", "After glossary extraction"),
+    ({"complete": False, "stopped": True}, "after_extraction_stopped", "After stopped glossary extraction"),
+    ({"complete": False}, "after_extraction_partial", "After incomplete glossary extraction"),
+])
+def test_an_extraction_run_backs_up_the_glossary_it_saved(tmp_path, stamps, run, operation, label):
+    output = extracted(tmp_path)
+    glossary = output.with_suffix(".csv")
+    log = []
+    note = gd.extraction_backup_note(str(output), config={}, append_log=log.append, **run)
+    rows = gd.editor_backup_rows(str(glossary))
+    assert [(row["kind"], row["operation"]) for row in rows] == [("auto", operation)]
+    assert gd.backup_operation_label(operation) == label
+    # the summary names it, and the log line is the editor's own
+    assert note == f"\n        💾 Backup: Backups/{rows[0]['name']}"
+    assert log == [f"💾 Backup created: {rows[0]['name']}"]
+    # it holds what the editor loads from the file, so Restore Backup takes it
+    doc = types.SimpleNamespace()
+    gd.reparse_glossary_file(doc, str(glossary), {})
+    assert gd.load_restorable_backup(rows[0]["path"], doc.current_glossary_format) == doc.current_glossary_data
+    assert [e["raw_name"] for e in doc.current_glossary_data] == [e["raw_name"] for e in ENTRIES]
+
+
+def test_a_run_that_added_nothing_names_the_backup_that_holds_the_glossary(tmp_path, stamps):
+    output = extracted(tmp_path)
+    folder = output.parent / "Backups"
+    first = gd.backup_extracted_glossary(str(output), complete=False, stopped=True, config={})
+    # resumed and finished without a new entry: no second copy of the same entries
+    assert gd.backup_extracted_glossary(str(output), complete=True, config={}) == first
+    assert os.listdir(folder) == [first]
+    # new entries: a new backup
+    extracted(tmp_path, ENTRIES + [{"type": "term", "raw_name": "검", "translated_name": "Sword"}])
+    second = gd.backup_extracted_glossary(str(output), complete=True, config={})
+    assert second != first and sorted(os.listdir(folder)) == sorted([first, second])
+    assert "_after_extraction_2" in second
+
+
+def test_extraction_backups_follow_the_automatic_setting_and_limit(tmp_path, stamps):
+    output = extracted(tmp_path)
+    folder = output.parent / "Backups"
+    assert gd.extraction_backup_note(str(output), complete=True, config={"glossary_auto_backup": False}) == ""
+    assert not folder.exists()
+    # no glossary file: nothing to back up
+    assert gd.extraction_backup_note(str(tmp_path / "none_glossary.json"), complete=True, config={}) == ""
+    manual = old_backup(folder, "book_glossary", "manual", "20250101_080000")
+    config = {"glossary_max_backups": 2, "glossary_max_manual_backups": 1}
+    for count in range(1, 5):
+        extracted(tmp_path, ENTRIES[:count])
+        assert gd.backup_extracted_glossary(str(output), complete=False, stopped=True, config=config,
+                                            append_log=lambda _m: None)
+    assert names(folder, "manual") == [manual.name] and len(names(folder, "auto")) == 2
+
+
+def test_an_extraction_run_that_wrote_only_json_is_backed_up(tmp_path, stamps):
+    output = tmp_path / "book_glossary.json"
+    output.write_text(json.dumps(ENTRIES, ensure_ascii=False), encoding="utf-8")
+    name = gd.backup_extracted_glossary(str(output), complete=True, config={}, append_log=lambda _m: None)
+    saved = gd.load_editor_backup(str(tmp_path / "Backups" / name))
+    # as the editor loads it (gender spelling normalised), every entry
+    assert [(e["raw_name"], e["translated_name"]) for e in saved] == [
+        (e["raw_name"], e["translated_name"]) for e in ENTRIES]
+    assert "_after_extraction_2" in name
+
+
 @pytest.mark.parametrize("operation", ["manual", "before_delete_2"])
 def test_document_restores_a_backup_of_either_kind(tmp_path, stamps, operation):
     """GlossaryDocument.restore_backup (the mobile editor and the desktop button share its checks)."""

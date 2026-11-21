@@ -198,6 +198,18 @@ EDITS = {
         ("            payload_summary.auto_update(self)\n            \n",
          "            payload_summary.auto_update(self)\n"
          "            return successful > 0 and failed == 0 and not self.stop_requested\n\n", 1),
+        # 2026-11-21: the glossary a run saved (finished, stopped or incomplete) gets an automatic
+        # backup, named under its line of the summary
+        ('                    successful_items.append(f"📄 {output_path}")\n',
+         '                    successful_items.append(f"📄 {output_path}")\n'
+         "                    successful_items[-1] += extraction_backup_note(\n"
+         "                        output_path, complete=True, config=self.config, append_log=self.append_log)\n", 1),
+        ('                        successful_items.append(f"📄 {partial_path} (Partial)")\n',
+         '                        successful_items.append(f"📄 {partial_path} (Partial)")\n'
+         "                        # The stopped run's glossary is backed up too (Glossary Editor > Restore Backup)\n"
+         "                        successful_items[-1] += extraction_backup_note(\n"
+         "                            output_path, complete=False, stopped=bool(self.stop_requested),\n"
+         "                            config=self.config, append_log=self.append_log)\n", 1),
     ],
     # Relations Tracker: its *_relations_tracker.json sidecar is never a glossary candidate
     "_auto_load_glossary_after_extraction": [
