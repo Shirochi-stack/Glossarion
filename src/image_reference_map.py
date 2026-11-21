@@ -139,6 +139,34 @@ def _references(soup):
                     yield url, set_style
 
 
+_REFERENCE_MARKUP = re.compile(r'<(?:img|image|object|video)\b|url\(', re.I)
+
+
+def localize_image_folders(html, page_folder):
+    """*html* with every link to a file of ``images/`` that names another folder
+    pointed at ``images/``, as ``repair_image_references`` leaves it.
+
+    A page written with the folder of its source EPUB (``../Images/``) was
+    repaired only by the next run; a page written through this is right from
+    the run that translated it, and that next run has nothing to rewrite. The
+    text comes back as it is when no link changes.
+    """
+    images = Path(page_folder) / 'images'
+    if not _REFERENCE_MARKUP.search(html) or not images.is_dir():
+        return html
+    soup = BeautifulSoup(html, 'html.parser')
+    modified = False
+    for url, setter in _references(soup):
+        name = _basename(url)
+        if not (images / name).is_file():
+            continue
+        replacement = _replace_reference(url, name, page_folder)
+        if replacement != url:
+            setter(replacement)
+            modified = True
+    return str(soup) if modified else html
+
+
 def apply_filename_map(soup, rename_map):
     """Apply extraction aliases without losing URL suffixes or changing remotes."""
     lookup = {name.casefold(): target for name, target in rename_map.items()}

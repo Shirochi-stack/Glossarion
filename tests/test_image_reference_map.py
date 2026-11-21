@@ -133,6 +133,35 @@ def test_right_name_in_a_folder_that_does_not_exist_moves_to_images(tmp_path):
     assert tracking.repair_image_references(tmp_path) == 0
 
 
+def test_a_written_page_names_images_and_the_next_repair_leaves_it(tmp_path):
+    from html_output_utils import write_utf8_html_file
+
+    inventory(tmp_path, {'OEBPS/Images/a.webp': b'A'}, {'a.webp': 'chapter0001_img_1.webp'})
+    output = tmp_path / 'response_chapter0001.html'
+    write_utf8_html_file(str(output), '<html><body><img src="../Images/chapter0001_img_1.webp?v=1#top"/>'
+                                      '<img src="images/chapter0001_img_1.webp"/>'
+                                      '<img src="../Images/missing.webp"/>'
+                                      '<img src="https://example.com/Images/chapter0001_img_1.webp"/></body></html>')
+    # the link is right from the write; only a file that images/ holds is moved there
+    assert sources(output) == ['images/chapter0001_img_1.webp?v=1#top', 'images/chapter0001_img_1.webp',
+                               '../Images/missing.webp', 'https://example.com/Images/chapter0001_img_1.webp']
+    before = output.read_bytes()
+    log = []
+    assert tracking.repair_image_references(tmp_path, log=log.append) == 0
+    assert output.read_bytes() == before and not any('Repaired' in line for line in log)
+
+
+def test_a_written_page_without_a_folder_to_fix_keeps_its_text(tmp_path):
+    from html_output_utils import ensure_utf8_html_document, write_utf8_html_file
+
+    inventory(tmp_path, {'OEBPS/Images/a.webp': b'A'})
+    for name, markup in (('plain.html', '<html><body><p>No picture &amp; no link<br></p></body></html>'),
+                         ('right.html', '<html><body><img src="images/a.webp"><br></body></html>'),
+                         ('elsewhere.html', '<html><body><img src="../Images/b.webp"><br></body></html>')):
+        write_utf8_html_file(str(tmp_path / name), markup)
+        assert (tmp_path / name).read_text(encoding='utf-8') == ensure_utf8_html_document(markup)
+
+
 def test_reencoded_repair_does_not_guess_between_two_formats(tmp_path):
     inventory(tmp_path, {'OEBPS/Images/a.jpg': b'original'})
     output = page(tmp_path, 'response_Chapter.xhtml', ['a.jpg'])
