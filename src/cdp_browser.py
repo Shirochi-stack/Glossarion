@@ -213,8 +213,10 @@ class BrowserLeases:
             time.sleep(.2)
 
     @contextmanager
-    def open(self, *, visible=False, cancel_check=None, prepare=None):
+    def open(self, *, visible=False, cancel_check=None, prepare=None, url=None):
+        """A tab of the shared browser on ``url`` (default: the route's ``url``)."""
         prepare = prepare or self.prepare
+        url = url or self.url
         # A visible login needs the profile released by an existing headless browser.
         # Background requests may also share an already visible browser after login.
         while True:
@@ -238,12 +240,12 @@ class BrowserLeases:
             with self.serialized(cancel_check):
                 control = session["control"]
                 target_id = control.call("Target.createTarget",
-                                         {"url": "about:blank" if prepare else self.url})["targetId"]
+                                         {"url": "about:blank" if prepare else url})["targetId"]
                 page = self.page_factory(control.debugger_url.rsplit("/", 1)[0] + "/" + target_id,
                                          cancel_check)
             if prepare:
                 prepare(page)
-                page.call("Page.navigate", {"url": self.url})
+                page.call("Page.navigate", {"url": url})
             self.ready(page, cancel_check)
             yield page
         finally:

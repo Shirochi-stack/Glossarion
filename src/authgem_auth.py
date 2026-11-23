@@ -35,6 +35,7 @@ import secrets
 import uuid
 import logging
 import threading
+from contextlib import contextmanager
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlencode, urlparse, parse_qs
@@ -1387,34 +1388,29 @@ def _build_gemini_request_body(
 
 
 # ===========================================================================
-# authgem/  —  the Gemini app (gemini.google.com) with the Google sign-in's session cookies
+# authgem/  —  the Gemini app (gemini.google.com) on the Google sign-in's own browser session
 #
 # Google retired the Gemini CLI's Code Assist sign-in for personal accounts (Nov 2026:
 # loadCodeAssist answers UNSUPPORTED_CLIENT for every CLI version and points to Antigravity),
-# so authgem/ sends the requests gemini.google.com itself sends, signed in with the google.com
-# session cookies of the Google Login that search/gemini also uses. It runs on the Gemini app's
+# so authgem/ sends the requests gemini.google.com itself sends. It runs on the Gemini app's
 # own usage limits (separate from Antigravity and the API) and offers the app's model picker
 # (Auto, 4 Hydrogen, 4 Neon, and 4 Carbon on plans that include it).
 #
-# The cookies come from a provider. On desktop it is the search/gemini Chrome profile
-# (gemini_free.google_cookies opens a Gemini tab there, so the browser keeps rotating them);
-# the mobile app registers the cookie jar of its in-app Google sign-in with
-# set_web_cookie_provider(). Each request's chat is deleted from the account's history after
+# The requests run INSIDE a signed-in gemini.google.com page (fetch() in the page), never with
+# cookies copied out of it: Google binds the session to the browser and revoked one whose
+# cookies were used from Python. Desktop: a headless tab of the Google Login's Chrome profile
+# (gemini_free.signed_in_tab, the profile search/gemini signs in with). Glossarion Mobile: a
+# hidden page of the registered browser driver, which shares the WebView cookie jar its
+# in-app Google sign-in filled. Each request's chat is deleted from the account's history after
 # the reply, so translations do not fill the user's Gemini history.
 # ===========================================================================
 
 GEMINI_WEB_ORIGIN = "https://gemini.google.com"
 GEMINI_WEB_APP_URL = f"{GEMINI_WEB_ORIGIN}/app?hl=en"
-_GEMINI_WEB_STREAM_URL = (
-    f"{GEMINI_WEB_ORIGIN}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-)
-_GEMINI_WEB_BATCH_URL = f"{GEMINI_WEB_ORIGIN}/_/BardChatUi/data/batchexecute"
+_GEMINI_WEB_STREAM_PATH = "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+_GEMINI_WEB_BATCH_PATH = "/_/BardChatUi/data/batchexecute"
 _GEMINI_WEB_UPLOAD_URL = "https://content-push.googleapis.com/upload"
 _GEMINI_WEB_MODEL_HEADER = "x-goog-ext-525001261-jspb"
-_GEMINI_WEB_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
-)
 _GEMINI_WEB_FORM_HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
     "X-Same-Domain": "1",
@@ -1422,9 +1418,14 @@ _GEMINI_WEB_FORM_HEADERS = {
 #: batchexecute RPC ids the Gemini app uses: its model picker, and "delete this chat".
 _RPC_LIST_MODELS = "otAQ7b"
 _RPC_DELETE_CHAT = "GzXR5e"
-#: A session (cookies + page tokens) is rebuilt after this many seconds, so the cookies are
-#: read again from the sign-in (where the browser keeps them fresh).
-_GEMINI_WEB_SESSION_TTL = 600.0
+#: The model picker list is read again after this many seconds.
+_GEMINI_WEB_MODELS_TTL = 600.0
+#: Seconds between two reads of a request running in the page.
+_GEMINI_WEB_POLL = 0.25
+#: Seconds the page may take to load the Gemini app and its tokens.
+_GEMINI_WEB_LOAD_TIMEOUT = 45.0
+#: The browser driver owner name of authgem/'s pages (Glossarion Mobile).
+WEB_BROWSER_OWNER = "authgem"
 DEFAULT_WEB_MODEL = "auto"
 #: The picker's models as seen on 2026-11-23: name -> (model id, label). The live picker list
 #: (``_RPC_LIST_MODELS``) replaces it whenever the Gemini app answers.
@@ -1459,39 +1460,32 @@ SESSION_ENDED = (
     "The saved Google session ended. Click Google Login next to the model to sign in again."
 )
 
-_web_cookie_provider = None
 _web_session_probe = None
+_web_models_cache: Dict[str, Any] = {"models": None, "at": 0.0}
+_web_models_lock = threading.Lock()
 
 
-def set_web_cookie_provider(provider, has_session=None) -> None:
-    """Use ``provider(cancel_check) -> [{name, value, domain, path}, ...]`` for authgem/'s
-    Google cookies instead of the desktop sign-in (the mobile app registers its WebView
-    cookie jar here). ``has_session()`` answers whether a sign-in was saved."""
-    global _web_cookie_provider, _web_session_probe, _web_session
-    with _web_session_lock:
-        _web_cookie_provider = provider
-        _web_session_probe = has_session
-        old, _web_session = _web_session, None
-    if old is not None:
-        old.close()
+def set_web_session_probe(has_session) -> None:
+    """Glossarion Mobile: ``has_session()`` answers :func:`has_web_session` (its in-app Google sign-in)."""
+    global _web_session_probe
+    _web_session_probe = has_session
+    reset_web_session()
 
 
-def _web_cookies(cancel_check=None) -> List[Dict[str, Any]]:
-    if _web_cookie_provider is not None:
-        return list(_web_cookie_provider(cancel_check) or [])
-    import gemini_free
+def _on_browser_driver() -> bool:
+    """authgem/ pages come from the registered browser driver (Glossarion Mobile) instead of Chrome."""
     try:
-        return gemini_free.google_cookies(GEMINI_WEB_APP_URL, cancel_check=cancel_check)
-    except gemini_free.AIModeError as exc:
-        kind = "auth_error" if exc.kind == gemini_free.KIND_SIGN_IN else exc.kind
-        raise GeminiWebError(str(exc), kind) from exc
+        import browser_driver
+        return browser_driver.use_driver(None)
+    except Exception:
+        return False
 
 
 def has_web_session() -> bool:
-    """Whether a Google sign-in for authgem/ was saved (a hint: requests check it themselves)."""
-    if _web_cookie_provider is not None:
+    """Whether a Google sign-in for authgem/ was saved (a hint: every request checks the page itself)."""
+    if _web_session_probe is not None:
         try:
-            return bool(_web_session_probe()) if _web_session_probe else True
+            return bool(_web_session_probe())
         except Exception:
             return False
     try:
@@ -1499,6 +1493,13 @@ def has_web_session() -> bool:
         return gemini_free.has_session()
     except Exception:
         return False
+
+
+def reset_web_session() -> None:
+    """Forget what was learned from the old session (call after a Google login or logout)."""
+    with _web_models_lock:
+        _web_models_cache["models"] = None
+        _web_models_cache["at"] = 0.0
 
 
 def web_model_name(label: Any) -> str:
@@ -1535,112 +1536,186 @@ def _web_error_codes(value: Any, out: Optional[List[int]] = None) -> List[int]:
     return out
 
 
-class _WebSession:
-    """httpx client with the Google cookies plus the page tokens the Gemini app's requests carry."""
+# ---- the page ------------------------------------------------------------------------------
 
-    def __init__(self, cookies: List[Dict[str, Any]]) -> None:
-        import httpx
-        jar = httpx.Cookies()
-        for cookie in cookies:
-            name, value = cookie.get("name"), cookie.get("value")
-            if name and value is not None:
-                jar.set(str(name), str(value), domain=str(cookie.get("domain") or ".google.com"),
-                        path=str(cookie.get("path") or "/"))
-        self.client = httpx.Client(cookies=jar, follow_redirects=True, headers={
-            "User-Agent": _GEMINI_WEB_USER_AGENT,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Origin": GEMINI_WEB_ORIGIN,
-            "Referer": f"{GEMINI_WEB_ORIGIN}/",
-        })
-        self.created = time.monotonic()
+# Requests run as jobs in the page: ``fetch`` with the page's own cookies, the body read as it
+# arrives into ``window.__agw.jobs[id].chunks``; Python takes the new chunks every
+# ``_GEMINI_WEB_POLL`` seconds (so the live log follows the answer) and can abort a job (Stop).
+_JS_START = r"""(() => {
+  const A = window.__agw || (window.__agw = {seq: 0, jobs: {}});
+  const id = String(++A.seq);
+  const job = A.jobs[id] = {chunks: [], done: false, status: 0, error: ""};
+  const ctl = new AbortController();
+  job.ctl = ctl;
+  const spec = __SPEC__;
+  let body = spec.body;
+  if (spec.file) {
+    const bin = atob(spec.file.b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    body = new FormData();
+    body.append("file", new Blob([bytes], {type: spec.file.mime}), spec.file.name);
+  }
+  fetch(spec.url, {method: "POST", credentials: "include", headers: spec.headers, body, signal: ctl.signal})
+    .then(async (r) => {
+      job.status = r.status;
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const step = await reader.read();
+        if (step.done) break;
+        job.chunks.push(decoder.decode(step.value, {stream: true}));
+      }
+      job.done = true;
+    })
+    .catch((e) => { job.error = String((e && e.message) || e); job.done = true; });
+  return id;
+})()"""
+
+_JS_TAKE = r"""(() => {
+  const A = window.__agw, job = A && A.jobs[__ID__];
+  if (!job) return JSON.stringify({gone: true});
+  const out = {c: job.chunks.splice(0).join(""), done: job.done, status: job.status, error: job.error};
+  if (job.done) delete A.jobs[__ID__];
+  return JSON.stringify(out);
+})()"""
+
+_JS_ABORT = r"""(() => { const A = window.__agw, job = A && A.jobs[__ID__];
+  if (job && job.ctl) job.ctl.abort(); return true; })()"""
+
+_JS_TOKENS = r"""(() => { const w = window.WIZ_global_data || {};
+  return JSON.stringify({at: w.SNlM0e || "", bl: w.cfb2h || "", sid: w.FdrFJe || "", push: w.qKIAYe || "",
+                         host: location.hostname, ready: document.readyState}); })()"""
+
+
+class _WebPage:
+    """A signed-in gemini.google.com page: ``run_js(expression)`` returns the expression's value,
+    ``wait(ms)`` lets it run (cancellable)."""
+
+    def __init__(self, run_js, wait) -> None:
+        self._run_js = run_js
+        self.wait = wait
         self.at = self.bl = self.sid = self.push_id = ""
-        self.models: Optional[Dict[str, Tuple[str, str]]] = None
         self._reqid = secrets.randbelow(90000) + 10000
-        self._lock = threading.Lock()
 
-    def load(self, timeout: float = 30.0) -> None:
-        response = self.client.get(GEMINI_WEB_APP_URL, timeout=timeout)
-        html = response.text
-        tokens = {key: re.search(r'"%s":"([^"]*)"' % key, html) for key in ("SNlM0e", "cfb2h", "FdrFJe", "qKIAYe")}
-        if response.url.host != "gemini.google.com" or not tokens["SNlM0e"]:
+    def js(self, expression: str) -> Any:
+        value = self._run_js(expression)
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return value
+        return value
+
+    def load_tokens(self) -> None:
+        """The page tokens the app's requests carry; auth_error when the page is signed out."""
+        deadline = time.monotonic() + _GEMINI_WEB_LOAD_TIMEOUT
+        info: Dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            if is_cancelled():
+                raise RuntimeError("AuthGem: stream cancelled by user")
+            try:
+                found = self.js(_JS_TOKENS)
+            except Exception:
+                found = None  # a navigation replaced the page's script context
+            info = found if isinstance(found, dict) else {}
+            if info.get("at"):
+                break
+            if info.get("ready") == "complete" and info.get("host") and info.get("host") != "gemini.google.com":
+                break  # sent to accounts.google.com: signed out
+            if info.get("ready") == "complete" and info.get("bl"):
+                break  # the app loaded without a session token: signed out
+            self.wait(250)
+        if not info.get("at"):
             raise GeminiWebError(SESSION_ENDED, "auth_error")
-        self.at = tokens["SNlM0e"].group(1)
-        self.bl = tokens["cfb2h"].group(1) if tokens["cfb2h"] else ""
-        self.sid = tokens["FdrFJe"].group(1) if tokens["FdrFJe"] else ""
-        self.push_id = tokens["qKIAYe"].group(1) if tokens["qKIAYe"] else ""
+        self.at, self.bl, self.sid = info["at"], info.get("bl", ""), info.get("sid", "")
+        self.push_id = info.get("push", "")
 
-    def params(self, **extra) -> Dict[str, str]:
-        with self._lock:
-            self._reqid += 100000
-            reqid = self._reqid
-        params = {"bl": self.bl, "f.sid": self.sid, "hl": "en", "_reqid": str(reqid), "rt": "c"}
+    def query(self, **extra) -> str:
+        self._reqid += 100000
+        params = {"bl": self.bl, "f.sid": self.sid, "hl": "en", "_reqid": str(self._reqid), "rt": "c"}
         params.update(extra)
-        return params
+        return urlencode(params)
 
-    def expired(self) -> bool:
-        return time.monotonic() - self.created > _GEMINI_WEB_SESSION_TTL
-
-    def close(self) -> None:
+    def post(self, url: str, *, body: Optional[str] = None, headers: Optional[Dict[str, str]] = None,
+             file: Optional[Dict[str, Any]] = None, on_text=None, timeout: float = 300.0) -> str:
+        """POST from the page; the whole response text (``on_text(chunk)`` sees it as it arrives)."""
+        spec = {"url": url, "body": body, "headers": headers or {}, "file": file}
+        job = self.js(_JS_START.replace("__SPEC__", json.dumps(spec)))
+        job_id = json.dumps(str(job))
+        take = _JS_TAKE.replace("__ID__", job_id)
+        parts: List[str] = []
+        deadline = time.monotonic() + max(30.0, float(timeout or 300))
+        status = 0
         try:
-            self.client.close()
-        except Exception:
-            pass
-
-
-_web_session: Optional[_WebSession] = None
-_web_session_lock = threading.Lock()
-_web_active_responses: set = set()
-_web_active_lock = threading.Lock()
-
-
-def _get_web_session(*, refresh: bool = False, cancel_check=None) -> _WebSession:
-    """The shared session, built from fresh cookies when missing, expired or ``refresh``."""
-    global _web_session
-    with _web_session_lock:
-        session = _web_session
-        if session is not None and not refresh and not session.expired():
-            return session
-        cookies = _web_cookies(cancel_check)
-        if not any(str(c.get("name")) in ("__Secure-1PSID", "SID") and c.get("value") for c in cookies):
-            raise GeminiWebError(SIGN_IN_NEEDED, "auth_error")
-        fresh = _WebSession(cookies)
-        try:
-            fresh.load()
-        except GeminiWebError:
-            fresh.close()
+            while True:
+                if is_cancelled():
+                    raise RuntimeError("AuthGem: stream cancelled by user")
+                state = self.js(take)
+                if not isinstance(state, dict) or state.get("gone"):
+                    raise RuntimeError("The Gemini app page lost the request")
+                chunk = state.get("c") or ""
+                if chunk:
+                    parts.append(chunk)
+                    if on_text is not None:
+                        on_text(chunk)
+                status = int(state.get("status") or 0)
+                if state.get("done"):
+                    if state.get("error") and not status:
+                        raise RuntimeError(f"The Gemini app request failed: {state['error']}")
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"Gemini app timeout: no complete answer after {timeout:.0f}s")
+                self.wait(int(_GEMINI_WEB_POLL * 1000))
+        except BaseException:
+            try:
+                self.js(_JS_ABORT.replace("__ID__", job_id))
+            except Exception:
+                pass
             raise
-        except Exception as exc:
-            fresh.close()
-            raise GeminiWebError(f"Could not open the Gemini app: {exc}", "api_error") from exc
-        _web_session = fresh
-    if session is not None:
-        session.close()
-    return fresh
+        text = "".join(parts)
+        _raise_for_web_status(status, text[:300])
+        return text
 
 
-def reset_web_session() -> None:
-    """Forget the cached session: the next authgem/ request reads the cookies again
-    (call after a Google login or logout)."""
-    global _web_session
-    with _web_session_lock:
-        old, _web_session = _web_session, None
-    if old is not None:
-        old.close()
+@contextmanager
+def _open_web_page(cancel_check=None):
+    """A signed-in gemini.google.com page with its tokens loaded (see the section comment)."""
+    if _on_browser_driver():
+        import browser_driver
+        driver = browser_driver.require_driver("authgem/")
+        page = driver.open_page(owner=WEB_BROWSER_OWNER, cancel_check=cancel_check)
+        try:
+            page.load(GEMINI_WEB_APP_URL)
+            browser_driver.wait_until_loaded(page, _GEMINI_WEB_LOAD_TIMEOUT)
+            web = _WebPage(page.run_js, page.wait)
+            web.load_tokens()
+            yield web
+        finally:
+            page.close()
+        return
+    import gemini_free
 
+    def wait(ms: int) -> None:
+        end = time.monotonic() + max(1, int(ms)) / 1000.0
+        while time.monotonic() < end:
+            if is_cancelled():
+                raise RuntimeError("AuthGem: stream cancelled by user")
+            time.sleep(min(0.05, max(0.0, end - time.monotonic())))
 
-def _web_rpc(session: _WebSession, rpcid: str, payload: Any, timeout: float = 30.0) -> Any:
-    """One batchexecute call; its decoded payload (None when the app sent none)."""
-    response = session.client.post(
-        _GEMINI_WEB_BATCH_URL,
-        params=session.params(rpcids=rpcid, **{"source-path": "/app"}),
-        data={"at": session.at, "f.req": json.dumps([[[rpcid, json.dumps(payload), None, "generic"]]])},
-        headers=_GEMINI_WEB_FORM_HEADERS, timeout=timeout)
-    _raise_for_web_status(response.status_code, response.text[:300])
-    for frame in _web_frames(response.text):
-        for item in frame:
-            if isinstance(item, list) and len(item) > 2 and item[0] == "wrb.fr" and item[1] == rpcid:
-                return json.loads(item[2]) if item[2] else None
-    return None
+    try:
+        with gemini_free.signed_in_tab(GEMINI_WEB_APP_URL, cancel_check=cancel_check) as tab:
+            web = _WebPage(tab.evaluate, wait)
+            try:
+                web.load_tokens()
+            except GeminiWebError as exc:
+                if exc.kind == "auth_error":
+                    gemini_free.mark_session_ended()
+                raise
+            yield web
+    except gemini_free.AIModeError as exc:
+        kind = "auth_error" if exc.kind == gemini_free.KIND_SIGN_IN else exc.kind
+        raise GeminiWebError(str(exc), kind) from exc
 
 
 def _raise_for_web_status(status: int, body: str = "") -> None:
@@ -1650,6 +1725,18 @@ def _raise_for_web_status(status: int, body: str = "") -> None:
         raise RuntimeError("429 Gemini app rate limit: too many requests")
     if status >= 400:
         raise RuntimeError(f"{status} Gemini app error: {body.strip()[:200]}")
+
+
+def _web_rpc(page: _WebPage, rpcid: str, payload: Any, timeout: float = 30.0) -> Any:
+    """One batchexecute call from the page; its decoded payload (None when the app sent none)."""
+    body = urlencode({"at": page.at, "f.req": json.dumps([[[rpcid, json.dumps(payload), None, "generic"]]])})
+    url = f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_BATCH_PATH}?{page.query(rpcids=rpcid, **{'source-path': '/app'})}"
+    text = page.post(url, body=body, headers=_GEMINI_WEB_FORM_HEADERS, timeout=timeout)
+    for frame in _web_frames(text):
+        for item in frame:
+            if isinstance(item, list) and len(item) > 2 and item[0] == "wrb.fr" and item[1] == rpcid:
+                return json.loads(item[2]) if item[2] else None
+    return None
 
 
 def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
@@ -1675,33 +1762,42 @@ def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
     return found
 
 
-def _web_models(session: _WebSession) -> Dict[str, Tuple[str, str]]:
-    if session.models is None:
-        try:
-            session.models = _parse_web_models(_web_rpc(session, _RPC_LIST_MODELS, [])) or None
-        except GeminiWebError:
-            raise
-        except Exception as exc:
-            logger.debug("AuthGem: model list unavailable: %s", exc)
-        if session.models is None:
-            session.models = dict(GEMINI_WEB_KNOWN_MODELS)
-    return session.models
+def _web_models(page: _WebPage) -> Dict[str, Tuple[str, str]]:
+    """The picker list, cached for ``_GEMINI_WEB_MODELS_TTL``; the known list when it cannot be read."""
+    with _web_models_lock:
+        cached = _web_models_cache["models"]
+        if cached and time.monotonic() - _web_models_cache["at"] < _GEMINI_WEB_MODELS_TTL:
+            return cached
+    try:
+        models = _parse_web_models(_web_rpc(page, _RPC_LIST_MODELS, []))
+    except GeminiWebError:
+        raise
+    except Exception as exc:
+        logger.debug("AuthGem: model list unavailable: %s", exc)
+        models = {}
+    if not models:
+        return dict(GEMINI_WEB_KNOWN_MODELS)
+    with _web_models_lock:
+        _web_models_cache["models"] = models
+        _web_models_cache["at"] = time.monotonic()
+    return models
 
 
 def fetch_web_models(timeout: float = 30.0, cancel_check=None) -> List[str]:
     """authgem/ model names the signed-in account's Gemini picker offers."""
-    session = _get_web_session(cancel_check=cancel_check)
-    models = _parse_web_models(_web_rpc(session, _RPC_LIST_MODELS, [], timeout=timeout))
+    with _open_web_page(cancel_check) as page:
+        models = _parse_web_models(_web_rpc(page, _RPC_LIST_MODELS, [], timeout=timeout))
     if not models:
         raise GeminiWebError("The Gemini app sent no model list.", "api_error")
-    session.models = models
+    with _web_models_lock:
+        _web_models_cache["models"] = models
+        _web_models_cache["at"] = time.monotonic()
     return list(models)
 
 
-def _resolve_web_model(session: _WebSession, model: str) -> Tuple[str, str, str]:
+def _resolve_web_model(models: Dict[str, Tuple[str, str]], model: str) -> Tuple[str, str, str]:
     """(name, model id, label) for an authgem/ model name (empty = ``auto``)."""
     name = web_model_name(model) or DEFAULT_WEB_MODEL
-    models = _web_models(session)
     if name in models:
         return (name,) + tuple(models[name])
     if name in GEMINI_WEB_KNOWN_MODELS:
@@ -1710,30 +1806,140 @@ def _resolve_web_model(session: _WebSession, model: str) -> Tuple[str, str, str]
     raise GeminiWebError(f"The Gemini app has no model '{model}'. Available: {available}.", "config_error")
 
 
-def _upload_web_image(session: _WebSession, image: Dict[str, Any], timeout: float) -> list:
-    """Uploads one prompt image; the file part of the Gemini app's request."""
-    response = session.client.post(
-        _GEMINI_WEB_UPLOAD_URL,
-        headers={"Push-ID": session.push_id or "feeds/mcudyrk2a4khkz", "X-Tenant-Id": "bard-storage"},
-        files={"file": (image["name"], base64.b64decode(image["b64"]), image["mime"])},
-        timeout=timeout)
-    _raise_for_web_status(response.status_code, response.text[:300])
-    file_id = response.text.strip()
+def _upload_web_image(page: _WebPage, image: Dict[str, Any], timeout: float) -> list:
+    """Uploads one prompt image from the page; the file part of the Gemini app's request."""
+    file_id = page.post(_GEMINI_WEB_UPLOAD_URL, timeout=timeout,
+                        headers={"Push-ID": page.push_id or "feeds/mcudyrk2a4khkz", "X-Tenant-Id": "bard-storage"},
+                        file={"b64": image["b64"], "mime": image["mime"], "name": image["name"]}).strip()
     if not file_id:
         raise RuntimeError("Gemini app image upload returned no file id")
     return [[file_id, 1], image["name"]]
 
 
-class _WebAnswer:
-    """Reads the answer frames of a StreamGenerate response as they arrive."""
+class _WebStreamLog:
+    """Live log of an authgem/ answer in the old authgem/ format: the thinking phase, then the answer line by
+    line as it arrives.
 
-    def __init__(self) -> None:
+    The Gemini app sends no thinking text: while a model thinks it sends a keep-alive frame about once a
+    minute (``{"37": [n]}``) and, just before the answer, a short headline of what it worked on
+    (``{"7": [..., ["Translating Korean to English"]]}``). Those become ``🧠 [authgem] Thinking...`` lines.
+    ``log_stream`` / ``stream_thinking``: the streaming log toggles (LOG_STREAM_CHUNKS, the batch
+    ALLOW_AUTHGPT_BATCH_STREAM_LOGS, STREAM_THINKING_LOGS)."""
+
+    _BREAK_AFTER = ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>')
+
+    def __init__(self, log, *, log_stream: bool, stream_thinking: bool) -> None:
+        self.log = log
+        self.log_stream = log_stream
+        self.stream_thinking = stream_thinking
+        self.started = time.time()
+        self.thinking = False
+        self.thinking_done = False
+        self.beats = 0
+        self.seen = ""
+        self.pending = ""
+        self.headlines: List[str] = []
+
+    def _show_thinking(self) -> bool:
+        return self.log_stream and self.stream_thinking
+
+    def _begin_thinking(self) -> None:
+        if not self.thinking:
+            self.thinking = True
+            if self._show_thinking():
+                self.log("🧠 [authgem] Thinking...")
+
+    def heartbeat(self) -> None:
+        if self.thinking_done:
+            return
+        self.beats += 1
+        self._begin_thinking()
+        if self._show_thinking():
+            self.log(f"    … still thinking ({time.time() - self.started:.0f}s)")
+
+    def headline(self, text: str) -> None:
+        text = str(text or "").strip()
+        if not text or text in self.headlines or self.thinking_done:
+            return
+        self.headlines.append(text)
+        self._begin_thinking()
+        if self._show_thinking():
+            self.log(f"    **{text}**")
+
+    def text(self, full: str) -> None:
+        if not full.startswith(self.seen):
+            self.seen = full  # the app rewrote earlier text: log only what follows from here
+            return
+        delta = full[len(self.seen):]
+        self.seen = full
+        if not delta:
+            return
+        if self.thinking and not self.thinking_done and self._show_thinking():
+            self.log(f"🧠 [authgem] Thinking complete ({time.time() - self.started:.1f}s)")
+            self.log("─" * 50)
+            self.log("📡 Text streaming...")
+        self.thinking_done = True
+        if not self.log_stream:
+            return
+        combined = self.pending + delta
+        for tag in self._BREAK_AFTER:
+            combined = combined.replace(tag, tag + "\n")
+        *lines, self.pending = combined.split("\n")
+        for line in lines:
+            if line.strip():
+                self.log(line.replace('\x1f', '\\x1F'))
+
+    def finish(self) -> None:
+        if self.log_stream and self.pending.strip():
+            self.log(self.pending.strip().replace('\x1f', '\\x1F'))
+        self.pending = ""
+
+
+def _web_stream_log(log) -> _WebStreamLog:
+    """The streaming log toggles, as the API routes of this module read them (authgem/ always streams)."""
+    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+        log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+    return _WebStreamLog(log, log_stream=log_stream, stream_thinking=stream_thinking)
+
+
+class _WebAnswer:
+    """Reads the answer frames of a StreamGenerate response as they arrive (``stream_log``: the live log).
+    ``feed`` takes any piece of the response; whole lines are parsed."""
+
+    def __init__(self, stream_log: Optional[_WebStreamLog] = None) -> None:
         self.text = ""
         self.chat_id = ""
         self.served = ""
         self.codes: List[int] = []
+        self.stream_log = stream_log
+        self._pending = ""
 
-    def feed(self, line: str) -> None:
+    def feed(self, chunk: str) -> None:
+        *lines, self._pending = (self._pending + chunk).split("\n")
+        for line in lines:
+            self._line(line)
+
+    def close(self) -> None:
+        if self._pending:
+            self._line(self._pending)
+            self._pending = ""
+        if self.stream_log is not None:
+            self.stream_log.finish()
+
+    def _status(self, part: Any) -> None:
+        """Frames without an answer: the thinking keep-alive (key 37) and the thinking headline (key 7)."""
+        log = self.stream_log
+        if log is None or not isinstance(part, dict):
+            return
+        if "37" in part:
+            log.heartbeat()
+        headline = part.get("7")
+        if isinstance(headline, list) and headline and isinstance(headline[-1], list) and headline[-1]:
+            log.headline(headline[-1][0])
+
+    def _line(self, line: str) -> None:
         for frame in _web_frames(line):
             for item in frame:
                 if not (isinstance(item, list) and len(item) > 2 and item[0] == "wrb.fr"):
@@ -1747,75 +1953,47 @@ class _WebAnswer:
                     inner = json.loads(item[2])
                 except ValueError:
                     continue
+                if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+                    self._status(inner[0])
+                    continue
                 try:
                     if inner[1] and inner[1][0]:
                         self.chat_id = str(inner[1][0])
                 except (IndexError, TypeError):
                     pass
+                if isinstance(inner, list) and len(inner) > 2:
+                    self._status(inner[2])
                 try:
                     text = inner[4][0][1][0]
                 except (IndexError, TypeError):
                     continue
                 if isinstance(text, str) and len(text) >= len(self.text):
                     self.text = text
+                    if self.stream_log is not None:
+                        self.stream_log.text(text)
 
 
-def _delete_web_chat(session: _WebSession, chat_id: str) -> None:
+def _delete_web_chat(page: _WebPage, chat_id: str) -> None:
     if not chat_id:
         return
     try:
-        _web_rpc(session, _RPC_DELETE_CHAT, [chat_id], timeout=20)
+        _web_rpc(page, _RPC_DELETE_CHAT, [chat_id], timeout=20)
     except Exception as exc:
         logger.debug("AuthGem: could not delete chat %s: %s", chat_id, exc)
 
 
-def _web_generate(session, prompt, images, model_id, timeout, connect_timeout, _log) -> _WebAnswer:
-    import httpx
-    files = [_upload_web_image(session, image, connect_timeout or 60) for image in images]
+def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log) -> _WebAnswer:
+    files = [_upload_web_image(page, image, 120) for image in images]
     inner = [[prompt, 0, None, files or None, None, None, 0], ["en"],
              ["", "", "", None, None, None, None, None, None, ""]]
     headers = dict(_GEMINI_WEB_FORM_HEADERS)
     headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
-    answer = _WebAnswer()
-    request_timeout = httpx.Timeout(timeout, connect=connect_timeout or 30.0)
-    with session.client.stream("POST", _GEMINI_WEB_STREAM_URL, params=session.params(),
-                               data={"at": session.at, "f.req": json.dumps([None, json.dumps(inner)])},
-                               headers=headers, timeout=request_timeout) as response:
-        with _web_active_lock:
-            _web_active_responses.add(response)
-        try:
-            if response.status_code >= 400:
-                _raise_for_web_status(response.status_code, response.read().decode("utf-8", "replace"))
-            pending = ""
-            for chunk in response.iter_text():
-                if is_cancelled():
-                    raise RuntimeError("AuthGem: stream cancelled by user")
-                pending += chunk
-                *lines, pending = pending.split("\n")
-                for line in lines:
-                    answer.feed(line)
-            answer.feed(pending)
-        except httpx.StreamClosed as exc:
-            if is_cancelled():
-                raise RuntimeError("AuthGem: stream cancelled by user") from exc
-            raise
-        finally:
-            with _web_active_lock:
-                _web_active_responses.discard(response)
-    if is_cancelled():
-        raise RuntimeError("AuthGem: stream cancelled by user")
+    answer = _WebAnswer(_web_stream_log(_log))
+    body = urlencode({"at": page.at, "f.req": json.dumps([None, json.dumps(inner)])})
+    page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
+              on_text=answer.feed, timeout=timeout)
+    answer.close()
     return answer
-
-
-def _close_web_streams() -> None:
-    """Ends every authgem/ response being read (Stop)."""
-    with _web_active_lock:
-        responses = list(_web_active_responses)
-    for response in responses:
-        try:
-            response.close()
-        except Exception:
-            pass
 
 
 def send_chat_completion_web(
@@ -1829,27 +2007,21 @@ def send_chat_completion_web(
 
     The chat messages become one prompt (``authds_auth.build_prompt``: a ``[role]`` header per
     message when there are several); prompt images are uploaded the way the Gemini app uploads
-    them. The answer is checked against the model asked for (the app silently answers with
-    4 Hydrogen when the plan lacks a model) and the chat is deleted afterwards.
+    them. The answer streams into the log, is checked against the model asked for (the app
+    silently answers with 4 Hydrogen when the plan lacks a model) and the chat is deleted afterwards.
     """
     import authds_auth
+    del connect_timeout  # the page's own connection
     if is_cancelled():
         raise RuntimeError("AuthGem: stream cancelled by user")
     _log = log_fn or (lambda *a, **kw: None)
     images: List[Dict[str, Any]] = []
     prompt = authds_auth.build_prompt(messages, error=GeminiWebError, label="AuthGem", images=images)
     started = time.time()
-    session = _get_web_session(cancel_check=is_cancelled)
-    name, model_id, label = _resolve_web_model(session, model)
-    for attempt in (0, 1):
-        try:
-            answer = _web_generate(session, prompt, images, model_id, timeout, connect_timeout, _log)
-            break
-        except GeminiWebError as exc:
-            if exc.kind != "auth_error" or attempt:
-                raise
-            session = _get_web_session(refresh=True, cancel_check=is_cancelled)
-    _delete_web_chat(session, answer.chat_id)
+    with _open_web_page(cancel_check=is_cancelled) as page:
+        name, model_id, label = _resolve_web_model(_web_models(page), model)
+        answer = _web_generate(page, prompt, images, model_id, timeout, _log)
+        _delete_web_chat(page, answer.chat_id)
     elapsed = time.time() - started
     if not answer.text:
         if set(answer.codes) & _GEMINI_WEB_LIMIT_CODES:
@@ -1864,6 +2036,11 @@ def send_chat_completion_web(
     content = _CITE_MARKER_RE.sub("", answer.text)
     _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
     return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}
+
+
+def _close_web_streams() -> None:
+    """Stop: the requests running in pages see the cancel flag on their next read and abort."""
+    return None
 
 
 # The 403 verification helper below serves the OAuth routes (authgem-vertex/, authgem-key/).

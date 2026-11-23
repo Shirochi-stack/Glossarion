@@ -1,24 +1,23 @@
 """Google sign-in for authgem/ (the Gemini app) on the phone, with no manual step.
 
-authgem/ sends the Gemini app's own requests signed in with the google.com session cookies
-(``authgem_auth``, "authgem/ — the Gemini app"). Google refuses its sign-in page to agents that name an
-embedded web view, so the native extension opens a full-screen sign-in page with the phone's browser agent
-(``web_sign_in``, contract version 2 of ``flet_glossarion_native.web_pages``). The session then lives in the
-WebView cookie jar every in-app page shares, and authgem/ reads it from there (``web_cookies``) whenever it
-builds a session: first a hidden page visits gemini.google.com, so the jar holds the session cookies Google
-just rotated (desktop does the same in its Chrome profile), then the cookies go to ``authgem_auth`` through
-``set_web_cookie_provider``. Sign-out expires the jar's google.com cookies (``web_clear_cookies``).
+authgem/ sends the Gemini app's own requests from inside a signed-in gemini.google.com page (``authgem_auth``,
+"authgem/ — the Gemini app"): on the phone a hidden page of the browser driver, which shares the WebView
+cookie jar every in-app page uses. The cookies never leave that jar (Google ends a session whose cookies are
+used elsewhere). Google refuses its sign-in page to agents that name an embedded web view, so the native
+extension opens a full-screen sign-in page with the phone's browser agent (``web_sign_in``, the extension's
+sign-in family), which fills that jar. This module runs the sign-in, remembers that it happened (authgem/'s
+``has_web_session``) and signs out by expiring the jar's google.com cookies (``web_clear_cookies``).
+``check_session`` reads the jar (``web_cookies``) to correct that memory.
 
 Because the jar is shared, search/gemini's hidden AI Mode pages are signed in by the same sign-in.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
 import os
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -30,12 +29,7 @@ DONE_COOKIE = "__Secure-1PSID"
 COOKIE_URL = "https://www.google.com/"
 COOKIE_DOMAIN = ".google.com"
 TITLE = "Sign in to Google"
-#: The google.com cookies authgem/ needs; the jar is read for these URLs.
-COOKIE_URLS = (GEMINI_APP_URL, COOKIE_URL)
 MARKER_NAME = "google_web_signed_in"
-#: Seconds a worker waits for one cookie read, and for the hidden page that renews them.
-READ_TIMEOUT = 20.0
-RENEW_TIMEOUT = 20.0
 UNAVAILABLE = "Google sign-in needs the in-app browser of the Android / iOS app."
 
 _current: Optional["GoogleSignIn"] = None
@@ -71,12 +65,10 @@ def parse_cookie_header(text: Any) -> list:
 class GoogleSignIn:
     """The phone's Google sign-in: ``native`` is the app's ``NativeBridge``, ``dispatcher`` its UiDispatcher."""
 
-    def __init__(self, native: Any, dispatcher: Any, *, marker_dir: Optional[str] = None,
-                 page_driver: Optional[Callable[[], Any]] = None) -> None:
+    def __init__(self, native: Any, dispatcher: Any, *, marker_dir: Optional[str] = None) -> None:
         self.native = native
         self.dispatcher = dispatcher
         self.marker = os.path.join(marker_dir or _marker_dir(), MARKER_NAME)
-        self._page_driver = page_driver
 
     # ---- state -----------------------------------------------------------------------------------
 
@@ -126,69 +118,20 @@ class GoogleSignIn:
         self._reset_session()
         await self.native.call("web_clear_cookies", COOKIE_URL, COOKIE_DOMAIN, default=None)
 
-    # ---- worker threads (authgem_auth's cookie provider) ------------------------------------------
-
-    def _renew(self, cancel_check: Optional[Callable[[], bool]]) -> None:
-        """Best effort: a hidden page loads the Gemini app so Google's own scripts renew the rotating
-        session cookies in the jar before they are read."""
-        driver = None
-        try:
-            if self._page_driver is not None:
-                driver = self._page_driver()
-            else:
-                from glossarion_mobile.services import webview_bridge
-
-                driver = webview_bridge.current()
-        except Exception:
-            driver = None
-        if driver is None:
-            return
-        page = None
-        try:
-            import browser_driver
-
-            page = driver.open_page(owner="authgem", cancel_check=cancel_check)
-            page.load(GEMINI_APP_URL)
-            browser_driver.wait_until_loaded(page, RENEW_TIMEOUT)
-            page.wait(1500)
-        except Exception as exc:
-            log.debug("Google cookie renewal skipped: %s", type(exc).__name__)
-        finally:
-            if page is not None:
-                try:
-                    page.close()
-                except Exception:
-                    pass
-
-    def _read(self, url: str) -> str:
-        future = self.dispatcher.submit(self.native.call, "web_cookies", url)
-        if future is None:
-            raise RuntimeError("the app's UI loop is not running")
-        try:
-            answer = future.result(timeout=READ_TIMEOUT)
-        except concurrent.futures.TimeoutError as exc:
-            raise RuntimeError("reading the Google sign-in timed out") from exc
+    async def check_session(self) -> bool:
+        """Read the jar (loop thread): whether it holds a Google session; the saved hint follows it."""
+        answer = await self.native.call("web_cookies", COOKIE_URL, default=None)
         if not isinstance(answer, dict) or not answer.get("ok"):
-            reason = answer.get("message") if isinstance(answer, dict) else None
-            raise RuntimeError(reason or UNAVAILABLE)
-        return str(answer.get("cookies") or "")
-
-    def cookies(self, cancel_check: Optional[Callable[[], bool]] = None) -> list:
-        """``authgem_auth`` cookie provider: the jar's google.com cookies (worker thread)."""
-        self._renew(cancel_check)
-        merged: dict = {}
-        for url in COOKIE_URLS:
-            for cookie in parse_cookie_header(self._read(url)):
-                merged.setdefault(cookie["name"], cookie)
-        cookies = list(merged.values())
+            return self.has_session()
+        cookies = parse_cookie_header(answer.get("cookies"))
         signed = any(c["name"] in (DONE_COOKIE, "SID") and c["value"] for c in cookies)
         if signed != self.has_session():
             self._mark(signed)
-        return cookies
+        return signed
 
 
 async def install(app: Any) -> Optional[GoogleSignIn]:
-    """Register the phone's Google sign-in as authgem/'s cookie source (loop thread), or None where the
+    """Register the phone's Google sign-in for authgem/ (loop thread), or None where the
     native extension has no sign-in (desktop, ``flet run``, an older build without ``web_pages["sign_in"]``)."""
     global _current
     native = getattr(app, "native", None)
@@ -209,7 +152,7 @@ async def install(app: Any) -> Optional[GoogleSignIn]:
     service = GoogleSignIn(native, dispatcher)
     import authgem_auth
 
-    authgem_auth.set_web_cookie_provider(service.cookies, has_session=service.has_session)
+    authgem_auth.set_web_session_probe(service.has_session)
     _current = service
     app.google_signin = service
     return service

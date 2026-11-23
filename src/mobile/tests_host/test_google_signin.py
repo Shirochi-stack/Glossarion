@@ -49,12 +49,12 @@ def phone(tmp_path):
     fake = FakeWebPagesNative(capability=dict(DEFAULT_CAPABILITY, sign_in=True))
     bridge = NativeBridge(native=fake)
     dispatcher = LoopDispatcher()
-    service = gs.GoogleSignIn(bridge, dispatcher, marker_dir=str(tmp_path), page_driver=lambda: None)
+    service = gs.GoogleSignIn(bridge, dispatcher, marker_dir=str(tmp_path))
     yield fake, bridge, dispatcher, service
     dispatcher.close()
     import authgem_auth
 
-    authgem_auth.set_web_cookie_provider(None)
+    authgem_auth.set_web_session_probe(None)
     gs._current = None
 
 
@@ -75,10 +75,9 @@ def test_sign_in_reads_and_clears_the_shared_jar(phone):
     (call,) = fake.calls_of("web_sign_in")[-1:]
     assert call["url"] == gs.SIGN_IN_URL and call["done_url"] == gs.DONE_URL
     assert call["done_cookie"] == "__Secure-1PSID" and call["cookie_url"] == gs.COOKIE_URL
-    cookies = {c["name"]: c["value"] for c in service.cookies()}  # worker thread
-    assert cookies == {"__Secure-1PSID": "psid", "SID": "sid", "NID": "n"}
+    assert dispatcher.run(service.check_session()) is True
     dispatcher.run(service.sign_out())
-    assert not service.has_session() and service.cookies() == []
+    assert not service.has_session() and dispatcher.run(service.check_session()) is False
     assert fake.calls_of("web_clear_cookies")[-1]["domain"] == ".google.com"
 
 
@@ -86,11 +85,11 @@ def test_a_cookie_read_corrects_the_marker(phone):
     fake, _bridge, dispatcher, service = phone
     fake.cookie_jar = {"google.com": {"__Secure-1PSID": "x"}}  # signed in elsewhere (search/gemini page)
     assert not service.has_session()
-    service.cookies()
+    assert dispatcher.run(service.check_session()) is True
     assert service.has_session()
 
 
-def test_install_registers_the_cookie_provider(phone, tmp_path):
+def test_install_registers_the_session_probe(phone, tmp_path):
     fake, bridge, dispatcher, _service = phone
     import authgem_auth
     import types
@@ -102,8 +101,7 @@ def test_install_registers_the_cookie_provider(phone, tmp_path):
     assert authgem_auth.has_web_session() is False
     fake.sign_in_cookies = {"__Secure-1PSID": "psid"}
     assert dispatcher.run(service.sign_in()) is True
-    assert authgem_auth.has_web_session() is True
-    assert [c["name"] for c in authgem_auth._web_cookies()] == ["__Secure-1PSID"]
+    assert authgem_auth.has_web_session() is True  # authgem/'s pages share the jar the sign-in filled
 
 
 def test_install_skips_a_build_without_the_sign_in(phone):
