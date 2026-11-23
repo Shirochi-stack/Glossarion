@@ -50,7 +50,7 @@ Supported models and their prefixes (Updated July 2025):
 - Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
 - AuthGPT: authgpt/* (e.g., authgpt/gpt-4o, authgpt/o3) – ChatGPT subscription via OAuth
 - AuthGrok: authgrok/* (e.g., authgrok/grok-4.5) – Grok account via xAI OAuth
-- AuthGem: authgem/* (e.g., authgem/gemini-2.5-flash) – Gemini via Google OAuth + AI Studio (no API key)
+- AuthGem: authgem/* (e.g., authgem/gemini-4-neon) – the Gemini app (gemini.google.com) with the Google Login's cookies
 - AuthGem-Key: authgem-key/* (e.g., authgem-key/gemini-2.5-flash) – Gemini via AI Studio API key
 - AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
 - Z.AI: za/* (e.g., za/glm-4-plus) – Zhipu AI via API key
@@ -1560,25 +1560,25 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
 try:
     from authgem_auth import get_default_store as _authgem_get_store
     from authgem_auth import get_store as _authgem_get_store_by_id
-    from authgem_auth import send_chat_completion_aistudio as _authgem_send_aistudio
+    from authgem_auth import send_chat_completion_web as _authgem_send_web
+    from authgem_auth import GeminiWebError as _AuthGemWebError
     from authgem_auth import send_chat_completion_aistudio_key as _authgem_send_aistudio_key
     from authgem_auth import send_chat_completion_vertex as _authgem_send_vertex
     from authgem_auth import send_chat_completion as _authgem_send  # backward-compat alias
     from authgem_auth import cancel_stream as _authgem_cancel_stream
     from authgem_auth import reset_cancel as _authgem_reset_cancel
-    from authgem_auth import _reset_code_assist_setup
     from authgem_auth import reset_verification as _authgem_reset_verification
     AUTHGEM_AVAILABLE = True
 except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authgem_get_store = None
     _authgem_get_store_by_id = None
-    _authgem_send_aistudio = None
+    _authgem_send_web = None
+    _AuthGemWebError = None
     _authgem_send_aistudio_key = None
     _authgem_send_vertex = None
     _authgem_send = None
     _authgem_cancel_stream = None
     _authgem_reset_cancel = None
-    _reset_code_assist_setup = None
     _authgem_reset_verification = None
     AUTHGEM_AVAILABLE = False
 
@@ -12168,6 +12168,12 @@ class UnifiedClient:
                 # (each retry opened DeepSeek again and saved the request as a failed payload).
                 if self.client_type == "authds" and e.error_type in ("auth_error", "config_error"):
                     print("DeepSeek (authds/) sign-in/setup error - sign in to DeepSeek first; not retrying")
+                    raise
+
+                # Gemini app (authgem/): no Google sign-in, or a model the account's plan lacks.
+                if self.client_type == "authgem" and e.error_type in ("auth_error", "config_error",
+                                                                      "model_unavailable"):
+                    print("Gemini app (authgem/) sign-in/model error - not retrying")
                     raise
 
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
@@ -29523,6 +29529,12 @@ class UnifiedClient:
             except RuntimeError as exc:
                 error_str = str(exc)
 
+                # authgem/ errors a retry cannot fix: no Google sign-in, a model the plan lacks,
+                # a prompt the route cannot send.
+                if (_AuthGemWebError is not None and isinstance(exc, _AuthGemWebError)
+                        and exc.kind in ("auth_error", "config_error", "model_unavailable")):
+                    raise UnifiedClientError(f"{label}: {error_str}", error_type=exc.kind)
+
                 # Stream cancelled
                 if "stream cancelled" in error_str.lower() or "cancelled" in error_str.lower():
                     self._log_once(f"⏹️ {label}: Stream cancelled by user")
@@ -29551,10 +29563,7 @@ class UnifiedClient:
                     except Exception:
                         pass
 
-                # 403 — verification or permissions issue; reset Code Assist
-                # setup so the next attempt re-runs loadCodeAssist.
-                # Only reset Code Assist state for authgem/ — NOT for authgem-vertex/,
-                # because that would wipe the GUI-selected GCP project.
+                # 403 — verification or permissions issue (OAuth routes): refresh the token.
                 if "403" in error_str:
                     # If verification is required, abort immediately — don't retry
                     if "verif" in error_str.lower():
@@ -29562,8 +29571,6 @@ class UnifiedClient:
                             f"{label}: Account verification required. Complete it in your browser, then retry.",
                             error_type="auth",
                         )
-                    if _reset_code_assist_setup is not None and label != "AuthGem-Vertex":
-                        _reset_code_assist_setup()
                     if store is not None and attempt < max_retries - 1:
                         print(f"🔄 {label}: 403 received, resetting setup and refreshing token…")
                         try:
@@ -29721,40 +29728,32 @@ class UnifiedClient:
         return content
 
     # ------------------------------------------------------------------
-    # authgem/  →  Google AI Studio  +  OAuth Bearer token
+    # authgem/  →  the Gemini app (gemini.google.com)  +  Google session cookies
     # ------------------------------------------------------------------
 
     def _send_authgem(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request via Google AI Studio using OAuth (no GCP project needed).
+        """Send a request through the Gemini app with the Google Login's session cookies.
 
-        Model names prefixed with 'authgem/' or 'authgemN/' (e.g. authgem2/gemini-2.5-flash).
-        Numbered variants use a separate Google account per slot.
+        Model names are the app's picker entries: authgem/auto, authgem/gemini-4-hydrogen,
+        authgem/gemini-4-neon, authgem/gemini-4-carbon. The app has one signed-in Google
+        account, so numbered prefixes (authgem2/...) use the same sign-in. Temperature and
+        output-token limits do not apply: the Gemini app has no such settings.
         """
-        if not AUTHGEM_AVAILABLE or _authgem_get_store is None or _authgem_send_aistudio is None:
+        if not AUTHGEM_AVAILABLE or _authgem_send_web is None:
             raise UnifiedClientError(
                 "AuthGem is not available. Ensure 'authgem_auth.py' exists under src/.",
                 error_type="config_error"
             )
 
         request_model = self._get_active_request_model()
-        actual_model = self._strip_authgem_prefix(request_model)
-        account_id = self._extract_authgem_account_id(request_model)
-        if account_id is None:
-            account_id = getattr(self, '_authgem_account_id', None)
-
-        try:
-            if _authgem_get_store_by_id is not None and account_id:
-                store = _authgem_get_store_by_id(account_id)
-                acct_label = f" (Account #{account_id})"
-            else:
-                store = _authgem_get_store()
-                acct_label = ""
-            access_token = store.get_valid_access_token(auto_login=True)
-        except Exception as exc:
+        match = re.match(r'^authgem\d{0,4}/(.*)$', str(request_model or ''), re.IGNORECASE | re.DOTALL)
+        actual_model = (match.group(1) if match else '').strip() or 'auto'
+        label = "AuthGem"
+        if self._authgem_image_output(actual_model) is not None:
             raise UnifiedClientError(
-                f"AuthGem{acct_label if 'acct_label' in dir() else ''} authentication failed: {exc}\n"
-                "Make sure you have a Google account and try again.",
-                error_type="auth_error"
+                f"{label}: authgem/ answers in text; the Gemini app's image generation is not available "
+                "on this route. Use authgem-vertex/ or authgem-key/ with an image model for image output.",
+                error_type="config_error",
             )
 
         _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
@@ -29766,29 +29765,19 @@ class UnifiedClient:
             except (ValueError, TypeError):
                 pass
 
-        label = f"AuthGem{acct_label}" if 'acct_label' in dir() and acct_label else "AuthGem"
-        print(f"\U0001f510 {label}: Sending request via Gemini CLI (model={actual_model})")
-
-        # Mutable token holder so retry loop can refresh it
-        token = [access_token]
-        image_output = self._authgem_image_output(actual_model)
+        print(f"\U0001f510 {label}: Sending request via the Gemini app (model={actual_model})")
 
         def _do_send(attempt):
-            return _authgem_send_aistudio(
-                access_token=token[0],
+            return _authgem_send_web(
                 messages=messages,
                 model=actual_model,
-                temperature=temperature,
-                max_tokens=max_tokens,
                 timeout=_read_timeout,
                 log_fn=print,
                 connect_timeout=_connect_timeout,
-                account_id=account_id or 0,
-                image_output=image_output,
             )
 
         return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens,
-                                        store=store, response_name=response_name)
+                                        store=None, response_name=response_name)
 
     # ------------------------------------------------------------------
     # authgem-key/  →  Google AI Studio  +  API key (no OAuth)

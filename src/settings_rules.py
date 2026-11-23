@@ -66,7 +66,8 @@ __all__ = [
     "iter_enabled_key_pool_models", "is_vertex_route", "model_needs_google_creds",
     "has_google_creds_model_in_key_pools", "has_vertex_model_in_key_pools",
     "has_authgpt_in_key_pools", "has_authgrok_in_key_pools", "has_authgem_in_key_pools",
-    "has_authgem_vertex_in_key_pools", "has_authcd_in_key_pools", "has_authnan_in_key_pools",
+    "has_authgem_vertex_in_key_pools", "has_authgem_web_in_key_pools", "has_authcd_in_key_pools",
+    "has_authnan_in_key_pools", "google_login_needed",
     "authgpt_pool_route_requested", "authgrok_pool_route_requested", "authgem_vertex_control_model", "authnan_pool_route_requested",
     "collect_auth_account_ids_from_pools", "model_account_ids",
     "google_credentials_route", "google_creds_ready_text", "google_creds_missing_text", "google_creds_status",
@@ -650,11 +651,45 @@ def authcd_login_needed(model, config=None, *, in_key_pools=None):
     return needs_authcd
 
 
-def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=None):
-    """``(needs_authgem, needs_vertex)``: Gemini (AuthGem) login, and its GCP project picker.
+def has_authgem_web_in_key_pools(config):
+    """Whether an enabled key pool holds an enabled authgem/ (Gemini app) model."""
+    try:
+        for pool_key, toggle_key in LOGIN_KEY_POOL_TOGGLES.items():
+            if config.get(toggle_key, False):
+                for key_data in config.get(pool_key, []):
+                    if isinstance(key_data, dict):
+                        if not key_data.get('enabled', True):
+                            continue
+                        m = key_data.get('model', '')
+                    else:
+                        m = getattr(key_data, 'model', '')
+                    if re.match(r'^authgem\d{0,4}/', str(m or '').strip(), re.I):
+                        return True
+    except Exception:
+        pass
+    return False
 
-    The project picker is ONLY needed for authgem-vertex/ (Vertex AI); authgem/ uses AI
-    Studio, which needs no GCP project. *vertex_model* is a zero-argument callable (desktop:
+
+def google_login_needed(model, config=None, *, in_key_pools=None):
+    """Whether the Google Login control applies to *model* (on_model_change).
+
+    search/gemini and authgem/ share one Google sign-in: search/gemini runs AI Mode signed in
+    with it, authgem/ sends the Gemini app's requests with its cookies.
+    """
+    if in_key_pools is None:
+        def in_key_pools():
+            return has_authgem_web_in_key_pools(config)
+    value = str(model or '').strip().lower()
+    if value.startswith('search/gemini') or re.match(r'^authgem\d{0,4}/', value):
+        return True
+    return bool(in_key_pools())
+
+
+def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=None):
+    """``(needs_authgem, needs_vertex)``: Gemini OAuth (AuthGem) login, and its GCP project picker.
+
+    Only authgem-vertex/ uses the OAuth login (authgem/ uses the Google Login,
+    ``google_login_needed``). *vertex_model* is a zero-argument callable (desktop:
     ``_authgem_vertex_control_model``) evaluated after the route test, as on desktop.
     """
     if vertex_model is None:
@@ -662,8 +697,8 @@ def authgem_login_needed(model, config=None, *, vertex_model=None, in_key_pools=
             return authgem_vertex_control_model(model, '', config)
     if in_key_pools is None:
         def in_key_pools():
-            return has_authgem_in_key_pools(config)
-    _ag_match = re.match(r'^authgem(?:-vertex)?\d{0,4}/', model)
+            return has_authgem_vertex_in_key_pools(config)
+    _ag_match = re.match(r'^authgem-vertex\d{0,4}/', model)
     vertex = vertex_model()
     needs_authgem = _ag_match is not None or bool(vertex)
 
@@ -788,6 +823,8 @@ def route_controls(model, config=None, *, platform='mobile', hints=None, api_key
     needs_authgem, needs_vertex = authgem_login_needed(model, config, vertex_model=vertex_model)
     if needs_authgem:
         logins.append('authgem')
+    if google_login_needed(model, config):
+        logins.append('google')
     ids = model_account_ids(model, config)
     return RouteControls(
         model=model,

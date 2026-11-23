@@ -1,16 +1,15 @@
-# authgem_auth.py - Gemini subscription OAuth authentication
-# Uses the same OAuth2 credentials as Gemini CLI (google-gemini/gemini-cli).
+# authgem_auth.py - Gemini routes: the Gemini app (session cookies), AI Studio key, Vertex OAuth
 #
 # Routing prefixes:
-#   authgem/         → Google AI Studio via OAuth (no GCP project needed)
+#   authgem/         → the Gemini app (gemini.google.com) with the Google Login's session cookies
 #   authgem-key/     → Google AI Studio via GEMINI_API_KEY (no OAuth needed)
 #   authgem-vertex/  → Vertex AI via OAuth (requires GCP project w/ billing)
 """
-OAuth 2.0 flow for Gemini API authentication via Google Account, persistent
-token storage with automatic refresh, and Gemini API adapters.
+Gemini adapters, plus the Google OAuth flow and token store authgem-vertex/ uses (the same
+OAuth2 client as Gemini CLI).
 
 Three endpoint modes:
-  - OAuth (authgem/): cloudcode-pa.googleapis.com Code Assist proxy (same as Gemini CLI)
+  - Gemini app (authgem/): gemini.google.com's own requests, signed in with google.com cookies
   - AI Studio + API key: generativelanguage.googleapis.com with ?key= param
   - Vertex AI + OAuth: {region}-aiplatform.googleapis.com with Bearer token
 
@@ -27,6 +26,7 @@ split it for callers that open the browser themselves (Glossarion Mobile)
 and add a paste-the-redirect-URL fallback.
 """
 import os
+import re
 import json
 import time
 import hashlib
@@ -53,6 +53,7 @@ _cancel_event = threading.Event()
 def cancel_stream():
     """Signal any active AuthGem stream to abort immediately."""
     _cancel_event.set()
+    _close_web_streams()
 
 
 def reset_cancel():
@@ -974,8 +975,6 @@ class AuthGemTokenStore(oauth_session.PendingOAuthMixin):
                 logger.warning("Failed to remove token file: %s", exc)
         # Clear cached GCP project so re-login detects the new account's project
         reset_cached_project(self._account_id)
-        # Reset Code Assist setup state as well
-        _reset_code_assist_setup(self._account_id)
         self._fire_change_callbacks()
 
     # ------------------------------------------------------------------
@@ -1388,64 +1387,501 @@ def _build_gemini_request_body(
 
 
 # ===========================================================================
-# Code Assist proxy (cloudcode-pa.googleapis.com) — OAuth Bearer token
-# No GCP project required.  Used by the  authgem/  prefix.
-# This is the same endpoint the Gemini CLI uses with "Sign in with Google".
-# Accepts the cloud-platform scope; no generative-language.retriever needed.
+# authgem/  —  the Gemini app (gemini.google.com) with the Google sign-in's session cookies
+#
+# Google retired the Gemini CLI's Code Assist sign-in for personal accounts (Nov 2026:
+# loadCodeAssist answers UNSUPPORTED_CLIENT for every CLI version and points to Antigravity),
+# so authgem/ sends the requests gemini.google.com itself sends, signed in with the google.com
+# session cookies of the Google Login that search/gemini also uses. It runs on the Gemini app's
+# own usage limits (separate from Antigravity and the API) and offers the app's model picker
+# (Auto, 4 Hydrogen, 4 Neon, and 4 Carbon on plans that include it).
+#
+# The cookies come from a provider. On desktop it is the search/gemini Chrome profile
+# (gemini_free.google_cookies opens a Gemini tab there, so the browser keeps rotating them);
+# the mobile app registers the cookie jar of its in-app Google sign-in with
+# set_web_cookie_provider(). Each request's chat is deleted from the account's history after
+# the reply, so translations do not fill the user's Gemini history.
 # ===========================================================================
 
-_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
-_CODE_ASSIST_API_VERSION = "v1internal"
+GEMINI_WEB_ORIGIN = "https://gemini.google.com"
+GEMINI_WEB_APP_URL = f"{GEMINI_WEB_ORIGIN}/app?hl=en"
+_GEMINI_WEB_STREAM_URL = (
+    f"{GEMINI_WEB_ORIGIN}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+)
+_GEMINI_WEB_BATCH_URL = f"{GEMINI_WEB_ORIGIN}/_/BardChatUi/data/batchexecute"
+_GEMINI_WEB_UPLOAD_URL = "https://content-push.googleapis.com/upload"
+_GEMINI_WEB_MODEL_HEADER = "x-goog-ext-525001261-jspb"
+_GEMINI_WEB_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+)
+_GEMINI_WEB_FORM_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+    "X-Same-Domain": "1",
+}
+#: batchexecute RPC ids the Gemini app uses: its model picker, and "delete this chat".
+_RPC_LIST_MODELS = "otAQ7b"
+_RPC_DELETE_CHAT = "GzXR5e"
+#: A session (cookies + page tokens) is rebuilt after this many seconds, so the cookies are
+#: read again from the sign-in (where the browser keeps them fresh).
+_GEMINI_WEB_SESSION_TTL = 600.0
+DEFAULT_WEB_MODEL = "auto"
+#: The picker's models as seen on 2026-11-23: name -> (model id, label). The live picker list
+#: (``_RPC_LIST_MODELS``) replaces it whenever the Gemini app answers.
+GEMINI_WEB_KNOWN_MODELS: Dict[str, Tuple[str, str]] = {
+    "auto": ("8c46e95b1a07cecc", "Auto"),
+    "gemini-4-hydrogen": ("56fdd199312815e2", "4 Hydrogen"),
+    "gemini-4-neon": ("e6fa609c3fa255c0", "4 Neon"),
+    "gemini-4-carbon": ("95a4c0abcba24364", "4 Carbon"),
+}
+#: Gemini app error codes inside an answer frame that mean "this model's usage limit is used up".
+_GEMINI_WEB_LIMIT_CODES = {1037}
+_HEX16 = re.compile(r"^[0-9a-f]{16}$")
+#: Source markers the Gemini app writes into answers about attached files (``[cite: 1]``).
+_CITE_MARKER_RE = re.compile(r"\[cite(?:_start|_end)?(?::\s*[\d,\s]*)?\]")
+_SERVED_MODEL_RE = re.compile(r'"([0-9a-f]{16})",null,null,"([^"]{1,40})",(?:true|false)')
 
-# Cached Code Assist project ID (set once per session by _code_assist_setup)
-# Per-account dicts keyed by account_id (0 = default)
-_code_assist_project_id: Dict[int, Optional[str]] = {}
-_code_assist_setup_done: Dict[int, bool] = {}
-_code_assist_has_credits: Dict[int, bool] = {}  # Whether user has GOOGLE_ONE_AI credits
-# Session ID for Code Assist — generated once per process, like Gemini CLI
-_code_assist_session_id: str = str(uuid.uuid4())
-# Tracks whether verification has been opened — prevents spam
-_verification_pending = False
 
-def _code_assist_base_url() -> str:
-    return f"{_CODE_ASSIST_ENDPOINT}/{_CODE_ASSIST_API_VERSION}"
+class GeminiWebError(RuntimeError):
+    """An authgem/ request failed. ``kind``: auth_error (no / ended Google session),
+    config_error (bad request), model_unavailable (the plan lacks the model), api_error."""
+
+    def __init__(self, message: str, kind: str = "api_error") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
-def _reset_code_assist_setup(account_id: int = 0):
-    """Reset Code Assist setup state so the next authgem/ call re-runs setup.
+SIGN_IN_NEEDED = (
+    "authgem/ needs a Google sign-in. Click Google Login next to the model and sign in to the "
+    "Google account whose Gemini plan you want to use."
+)
+SESSION_ENDED = (
+    "The saved Google session ended. Click Google Login next to the model to sign in again."
+)
 
-    Call this when a 403 suggests the setup is stale or verification is needed.
-    Does NOT clear the Vertex AI cached project when it was explicitly set
-    by the GUI dropdown — that selection should persist across retries.
+_web_cookie_provider = None
+_web_session_probe = None
+
+
+def set_web_cookie_provider(provider, has_session=None) -> None:
+    """Use ``provider(cancel_check) -> [{name, value, domain, path}, ...]`` for authgem/'s
+    Google cookies instead of the desktop sign-in (the mobile app registers its WebView
+    cookie jar here). ``has_session()`` answers whether a sign-in was saved."""
+    global _web_cookie_provider, _web_session_probe, _web_session
+    with _web_session_lock:
+        _web_cookie_provider = provider
+        _web_session_probe = has_session
+        old, _web_session = _web_session, None
+    if old is not None:
+        old.close()
+
+
+def _web_cookies(cancel_check=None) -> List[Dict[str, Any]]:
+    if _web_cookie_provider is not None:
+        return list(_web_cookie_provider(cancel_check) or [])
+    import gemini_free
+    try:
+        return gemini_free.google_cookies(GEMINI_WEB_APP_URL, cancel_check=cancel_check)
+    except gemini_free.AIModeError as exc:
+        kind = "auth_error" if exc.kind == gemini_free.KIND_SIGN_IN else exc.kind
+        raise GeminiWebError(str(exc), kind) from exc
+
+
+def has_web_session() -> bool:
+    """Whether a Google sign-in for authgem/ was saved (a hint: requests check it themselves)."""
+    if _web_cookie_provider is not None:
+        try:
+            return bool(_web_session_probe()) if _web_session_probe else True
+        except Exception:
+            return False
+    try:
+        import gemini_free
+        return gemini_free.has_session()
+    except Exception:
+        return False
+
+
+def web_model_name(label: Any) -> str:
+    """The authgem/ name of a picker label: ``4 Neon`` -> ``gemini-4-neon``, ``Auto`` -> ``auto``."""
+    text = re.sub(r"[^a-z0-9.]+", "-", str(label or "").strip().lower()).strip("-")
+    if not text or text == "auto":
+        return text
+    return text if text.startswith("gemini-") else f"gemini-{text}"
+
+
+def _web_frames(text: str):
+    """The JSON arrays of a Gemini app response (``)]}'`` prefix, length lines, frames)."""
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("["):
+            continue
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(frame, list):
+            yield frame
+
+
+def _web_error_codes(value: Any, out: Optional[List[int]] = None) -> List[int]:
+    """Integer codes nested in a frame's error part (``[..., [[..., [1037]]]]``)."""
+    out = [] if out is None else out
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, int) and not isinstance(item, bool) and 1000 <= item < 10000:
+                out.append(item)
+            else:
+                _web_error_codes(item, out)
+    return out
+
+
+class _WebSession:
+    """httpx client with the Google cookies plus the page tokens the Gemini app's requests carry."""
+
+    def __init__(self, cookies: List[Dict[str, Any]]) -> None:
+        import httpx
+        jar = httpx.Cookies()
+        for cookie in cookies:
+            name, value = cookie.get("name"), cookie.get("value")
+            if name and value is not None:
+                jar.set(str(name), str(value), domain=str(cookie.get("domain") or ".google.com"),
+                        path=str(cookie.get("path") or "/"))
+        self.client = httpx.Client(cookies=jar, follow_redirects=True, headers={
+            "User-Agent": _GEMINI_WEB_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": GEMINI_WEB_ORIGIN,
+            "Referer": f"{GEMINI_WEB_ORIGIN}/",
+        })
+        self.created = time.monotonic()
+        self.at = self.bl = self.sid = self.push_id = ""
+        self.models: Optional[Dict[str, Tuple[str, str]]] = None
+        self._reqid = secrets.randbelow(90000) + 10000
+        self._lock = threading.Lock()
+
+    def load(self, timeout: float = 30.0) -> None:
+        response = self.client.get(GEMINI_WEB_APP_URL, timeout=timeout)
+        html = response.text
+        tokens = {key: re.search(r'"%s":"([^"]*)"' % key, html) for key in ("SNlM0e", "cfb2h", "FdrFJe", "qKIAYe")}
+        if response.url.host != "gemini.google.com" or not tokens["SNlM0e"]:
+            raise GeminiWebError(SESSION_ENDED, "auth_error")
+        self.at = tokens["SNlM0e"].group(1)
+        self.bl = tokens["cfb2h"].group(1) if tokens["cfb2h"] else ""
+        self.sid = tokens["FdrFJe"].group(1) if tokens["FdrFJe"] else ""
+        self.push_id = tokens["qKIAYe"].group(1) if tokens["qKIAYe"] else ""
+
+    def params(self, **extra) -> Dict[str, str]:
+        with self._lock:
+            self._reqid += 100000
+            reqid = self._reqid
+        params = {"bl": self.bl, "f.sid": self.sid, "hl": "en", "_reqid": str(reqid), "rt": "c"}
+        params.update(extra)
+        return params
+
+    def expired(self) -> bool:
+        return time.monotonic() - self.created > _GEMINI_WEB_SESSION_TTL
+
+    def close(self) -> None:
+        try:
+            self.client.close()
+        except Exception:
+            pass
+
+
+_web_session: Optional[_WebSession] = None
+_web_session_lock = threading.Lock()
+_web_active_responses: set = set()
+_web_active_lock = threading.Lock()
+
+
+def _get_web_session(*, refresh: bool = False, cancel_check=None) -> _WebSession:
+    """The shared session, built from fresh cookies when missing, expired or ``refresh``."""
+    global _web_session
+    with _web_session_lock:
+        session = _web_session
+        if session is not None and not refresh and not session.expired():
+            return session
+        cookies = _web_cookies(cancel_check)
+        if not any(str(c.get("name")) in ("__Secure-1PSID", "SID") and c.get("value") for c in cookies):
+            raise GeminiWebError(SIGN_IN_NEEDED, "auth_error")
+        fresh = _WebSession(cookies)
+        try:
+            fresh.load()
+        except GeminiWebError:
+            fresh.close()
+            raise
+        except Exception as exc:
+            fresh.close()
+            raise GeminiWebError(f"Could not open the Gemini app: {exc}", "api_error") from exc
+        _web_session = fresh
+    if session is not None:
+        session.close()
+    return fresh
+
+
+def reset_web_session() -> None:
+    """Forget the cached session: the next authgem/ request reads the cookies again
+    (call after a Google login or logout)."""
+    global _web_session
+    with _web_session_lock:
+        old, _web_session = _web_session, None
+    if old is not None:
+        old.close()
+
+
+def _web_rpc(session: _WebSession, rpcid: str, payload: Any, timeout: float = 30.0) -> Any:
+    """One batchexecute call; its decoded payload (None when the app sent none)."""
+    response = session.client.post(
+        _GEMINI_WEB_BATCH_URL,
+        params=session.params(rpcids=rpcid, **{"source-path": "/app"}),
+        data={"at": session.at, "f.req": json.dumps([[[rpcid, json.dumps(payload), None, "generic"]]])},
+        headers=_GEMINI_WEB_FORM_HEADERS, timeout=timeout)
+    _raise_for_web_status(response.status_code, response.text[:300])
+    for frame in _web_frames(response.text):
+        for item in frame:
+            if isinstance(item, list) and len(item) > 2 and item[0] == "wrb.fr" and item[1] == rpcid:
+                return json.loads(item[2]) if item[2] else None
+    return None
+
+
+def _raise_for_web_status(status: int, body: str = "") -> None:
+    if status in (401, 403):
+        raise GeminiWebError(SESSION_ENDED, "auth_error")
+    if status == 429:
+        raise RuntimeError("429 Gemini app rate limit: too many requests")
+    if status >= 400:
+        raise RuntimeError(f"{status} Gemini app error: {body.strip()[:200]}")
+
+
+def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
+    """name -> (model id, label) from the model picker RPC (entries ``[id, ..., label]``)."""
+    found: Dict[str, Tuple[str, str]] = {}
+
+    def walk(value: Any) -> None:
+        if not isinstance(value, list):
+            return
+        entries = [item for item in value if isinstance(item, list) and len(item) > 3
+                   and isinstance(item[0], str) and _HEX16.match(item[0])]
+        if len(entries) >= 2:
+            for entry in entries:
+                label = entry[-1] if isinstance(entry[-1], str) and entry[-1].strip() else entry[2]
+                name = web_model_name(label)
+                if name and name not in found:
+                    found[name] = (entry[0], str(label).strip())
+            return
+        for item in value:
+            walk(item)
+
+    walk(payload)
+    return found
+
+
+def _web_models(session: _WebSession) -> Dict[str, Tuple[str, str]]:
+    if session.models is None:
+        try:
+            session.models = _parse_web_models(_web_rpc(session, _RPC_LIST_MODELS, [])) or None
+        except GeminiWebError:
+            raise
+        except Exception as exc:
+            logger.debug("AuthGem: model list unavailable: %s", exc)
+        if session.models is None:
+            session.models = dict(GEMINI_WEB_KNOWN_MODELS)
+    return session.models
+
+
+def fetch_web_models(timeout: float = 30.0, cancel_check=None) -> List[str]:
+    """authgem/ model names the signed-in account's Gemini picker offers."""
+    session = _get_web_session(cancel_check=cancel_check)
+    models = _parse_web_models(_web_rpc(session, _RPC_LIST_MODELS, [], timeout=timeout))
+    if not models:
+        raise GeminiWebError("The Gemini app sent no model list.", "api_error")
+    session.models = models
+    return list(models)
+
+
+def _resolve_web_model(session: _WebSession, model: str) -> Tuple[str, str, str]:
+    """(name, model id, label) for an authgem/ model name (empty = ``auto``)."""
+    name = web_model_name(model) or DEFAULT_WEB_MODEL
+    models = _web_models(session)
+    if name in models:
+        return (name,) + tuple(models[name])
+    if name in GEMINI_WEB_KNOWN_MODELS:
+        return (name,) + GEMINI_WEB_KNOWN_MODELS[name]
+    available = ", ".join(f"authgem/{key}" for key in models)
+    raise GeminiWebError(f"The Gemini app has no model '{model}'. Available: {available}.", "config_error")
+
+
+def _upload_web_image(session: _WebSession, image: Dict[str, Any], timeout: float) -> list:
+    """Uploads one prompt image; the file part of the Gemini app's request."""
+    response = session.client.post(
+        _GEMINI_WEB_UPLOAD_URL,
+        headers={"Push-ID": session.push_id or "feeds/mcudyrk2a4khkz", "X-Tenant-Id": "bard-storage"},
+        files={"file": (image["name"], base64.b64decode(image["b64"]), image["mime"])},
+        timeout=timeout)
+    _raise_for_web_status(response.status_code, response.text[:300])
+    file_id = response.text.strip()
+    if not file_id:
+        raise RuntimeError("Gemini app image upload returned no file id")
+    return [[file_id, 1], image["name"]]
+
+
+class _WebAnswer:
+    """Reads the answer frames of a StreamGenerate response as they arrive."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.chat_id = ""
+        self.served = ""
+        self.codes: List[int] = []
+
+    def feed(self, line: str) -> None:
+        for frame in _web_frames(line):
+            for item in frame:
+                if not (isinstance(item, list) and len(item) > 2 and item[0] == "wrb.fr"):
+                    continue
+                if not item[2]:
+                    self.codes.extend(_web_error_codes(item[5:] if len(item) > 5 else []))
+                    continue
+                for match in _SERVED_MODEL_RE.finditer(item[2]):
+                    self.served = match.group(2)
+                try:
+                    inner = json.loads(item[2])
+                except ValueError:
+                    continue
+                try:
+                    if inner[1] and inner[1][0]:
+                        self.chat_id = str(inner[1][0])
+                except (IndexError, TypeError):
+                    pass
+                try:
+                    text = inner[4][0][1][0]
+                except (IndexError, TypeError):
+                    continue
+                if isinstance(text, str) and len(text) >= len(self.text):
+                    self.text = text
+
+
+def _delete_web_chat(session: _WebSession, chat_id: str) -> None:
+    if not chat_id:
+        return
+    try:
+        _web_rpc(session, _RPC_DELETE_CHAT, [chat_id], timeout=20)
+    except Exception as exc:
+        logger.debug("AuthGem: could not delete chat %s: %s", chat_id, exc)
+
+
+def _web_generate(session, prompt, images, model_id, timeout, connect_timeout, _log) -> _WebAnswer:
+    import httpx
+    files = [_upload_web_image(session, image, connect_timeout or 60) for image in images]
+    inner = [[prompt, 0, None, files or None, None, None, 0], ["en"],
+             ["", "", "", None, None, None, None, None, None, ""]]
+    headers = dict(_GEMINI_WEB_FORM_HEADERS)
+    headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
+    answer = _WebAnswer()
+    request_timeout = httpx.Timeout(timeout, connect=connect_timeout or 30.0)
+    with session.client.stream("POST", _GEMINI_WEB_STREAM_URL, params=session.params(),
+                               data={"at": session.at, "f.req": json.dumps([None, json.dumps(inner)])},
+                               headers=headers, timeout=request_timeout) as response:
+        with _web_active_lock:
+            _web_active_responses.add(response)
+        try:
+            if response.status_code >= 400:
+                _raise_for_web_status(response.status_code, response.read().decode("utf-8", "replace"))
+            pending = ""
+            for chunk in response.iter_text():
+                if is_cancelled():
+                    raise RuntimeError("AuthGem: stream cancelled by user")
+                pending += chunk
+                *lines, pending = pending.split("\n")
+                for line in lines:
+                    answer.feed(line)
+            answer.feed(pending)
+        except httpx.StreamClosed as exc:
+            if is_cancelled():
+                raise RuntimeError("AuthGem: stream cancelled by user") from exc
+            raise
+        finally:
+            with _web_active_lock:
+                _web_active_responses.discard(response)
+    if is_cancelled():
+        raise RuntimeError("AuthGem: stream cancelled by user")
+    return answer
+
+
+def _close_web_streams() -> None:
+    """Ends every authgem/ response being read (Stop)."""
+    with _web_active_lock:
+        responses = list(_web_active_responses)
+    for response in responses:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+
+def send_chat_completion_web(
+    messages: List[Dict],
+    model: str = DEFAULT_WEB_MODEL,
+    timeout: int = 300,
+    log_fn=None,
+    connect_timeout: Optional[float] = None,
+) -> Dict:
+    """One authgem/ request on gemini.google.com; ``{content, finish_reason, usage, model}``.
+
+    The chat messages become one prompt (``authds_auth.build_prompt``: a ``[role]`` header per
+    message when there are several); prompt images are uploaded the way the Gemini app uploads
+    them. The answer is checked against the model asked for (the app silently answers with
+    4 Hydrogen when the plan lacks a model) and the chat is deleted afterwards.
     """
-    global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits
-    _code_assist_project_id.pop(account_id, None)
-    _code_assist_setup_done.pop(account_id, None)
-    _code_assist_has_credits.pop(account_id, None)
-    # Only clear the cached Vertex AI project if it was auto-detected.
-    # If the user explicitly picked a project in the GUI, preserve it.
-    if not _project_set_by_gui.get(account_id, False):
-        reset_cached_project(account_id)
+    import authds_auth
+    if is_cancelled():
+        raise RuntimeError("AuthGem: stream cancelled by user")
+    _log = log_fn or (lambda *a, **kw: None)
+    images: List[Dict[str, Any]] = []
+    prompt = authds_auth.build_prompt(messages, error=GeminiWebError, label="AuthGem", images=images)
+    started = time.time()
+    session = _get_web_session(cancel_check=is_cancelled)
+    name, model_id, label = _resolve_web_model(session, model)
+    for attempt in (0, 1):
+        try:
+            answer = _web_generate(session, prompt, images, model_id, timeout, connect_timeout, _log)
+            break
+        except GeminiWebError as exc:
+            if exc.kind != "auth_error" or attempt:
+                raise
+            session = _get_web_session(refresh=True, cancel_check=is_cancelled)
+    _delete_web_chat(session, answer.chat_id)
+    elapsed = time.time() - started
+    if not answer.text:
+        if set(answer.codes) & _GEMINI_WEB_LIMIT_CODES:
+            raise RuntimeError(f"429 The Gemini app's usage limit for {label} is used up for now.")
+        detail = f" (error code {answer.codes[0]})" if answer.codes else ""
+        raise RuntimeError(f"The Gemini app sent no answer{detail}.")
+    served = answer.served
+    if name != DEFAULT_WEB_MODEL and served and served.casefold() != label.casefold():
+        raise GeminiWebError(
+            f"Gemini answered with {served} instead of {label}: this Google account's Gemini plan "
+            f"does not include {label}. Choose another authgem/ model.", "model_unavailable")
+    content = _CITE_MARKER_RE.sub("", answer.text)
+    _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
+    return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}
+
+
+# The 403 verification helper below serves the OAuth routes (authgem-vertex/, authgem-key/).
+_verification_pending = False
 
 
 def _handle_403_verification(error_body: str, _log, account_id: int = 0) -> None:
     """Check a 403 error response for account verification URLs and open them.
-
-    The Code Assist proxy may return 403 with a verification URL when the
-    user's account needs additional verification (phone, ID, etc.).  This
-    mirrors the Gemini CLI's ``validateLoadCodeAssistResponse()`` logic.
 
     Only opens the browser ONCE per session — subsequent 403s log a reminder
     without spamming new tabs.
     """
     global _verification_pending
 
-    # Reset setup so the next attempt re-runs loadCodeAssist (which also
-    # checks for verification requirements).
-    # But DON'T reset if verification is already pending — that would cause
-    # setup to re-run and spam the browser again.
-    if not _verification_pending:
-        _reset_code_assist_setup(account_id)
+    # An auto-detected Vertex project is looked up again on the next attempt; a project the
+    # user picked in the GUI stays.
+    if not _verification_pending and not _project_set_by_gui.get(account_id, False):
+        reset_cached_project(account_id)
 
     # If we already opened verification, raise immediately — don't let
     # the caller fall through to generic error handling that would retry.
@@ -1505,496 +1941,6 @@ def _handle_403_verification(error_body: str, _log, account_id: int = 0) -> None
     else:
         _log(f"⚠️ AuthGem: 403 Forbidden — account may need verification or permissions are insufficient")
         logger.warning("AuthGem 403 with no verification URL detected. Body: %s", error_body[:500])
-
-def _code_assist_setup(access_token: str, _log=None, account_id: int = 0) -> Optional[str]:
-    """Onboard user with Code Assist (mirrors Gemini CLI's setupUser).
-
-    Calls ``loadCodeAssist`` to register the user and obtain a managed
-    GCP project ID.  For free-tier users the server creates a project
-    automatically — no user configuration needed.
-
-    Returns the project ID (may be None for some tiers).
-    """
-    global _code_assist_project_id, _code_assist_setup_done, _code_assist_has_credits, _verification_pending
-    if _code_assist_setup_done.get(account_id, False):
-        return _code_assist_project_id.get(account_id)
-
-    _log = _log or (lambda *a, **kw: None)
-    url = f"{_code_assist_base_url()}:loadCodeAssist"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
-    # Match Gemini CLI's setup.ts loadCodeAssist payload exactly
-    # NOTE: CLI does NOT use mode:"HEALTH_CHECK" — that returns reduced data
-    payload = {
-        "metadata": {
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI",
-        },
-    }
-
-    try:
-        import httpx as _httpx
-        resp = _httpx.post(url, json=payload, headers=headers, timeout=30)
-        resp_data = resp.json()
-    except ImportError:
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        resp_data = resp.json()
-    except Exception as exc:
-        logger.warning("Code Assist setup failed: %s", exc)
-        # Do NOT set _code_assist_setup_done = True here — allow retry
-        # on the next call so transient failures don't permanently block setup.
-        return None
-
-    project = resp_data.get("cloudaicompanionProject")
-
-    # Log raw response for debugging verification issues
-    logger.info("Code Assist loadCodeAssist raw keys: %s", list(resp_data.keys()))
-    if resp_data.get("ineligibleTiers"):
-        logger.info("Code Assist ineligibleTiers raw: %s", json.dumps(resp_data["ineligibleTiers"])[:2000])
-
-    # Handle account verification — matching Gemini CLI's validateLoadCodeAssistResponse()
-    # The CLI checks ineligibleTiers for entries with:
-    #   reasonCode === "VALIDATION_REQUIRED" AND validationUrl present
-    for inelig in resp_data.get("ineligibleTiers", []):
-        v_url = inelig.get("validationUrl", "")
-        v_msg = inelig.get("reasonMessage", "Account verification required")
-        reason_code = inelig.get("reasonCode", "")
-
-        if v_url and reason_code == "VALIDATION_REQUIRED":
-            _log(f"⚠️ {v_msg}")
-            # Only open browser ONCE — use shared _verification_pending flag
-            if not _verification_pending:
-                _verification_pending = True
-                _log(f"🔗 Opening verification in browser…")
-                logger.warning("Code Assist VALIDATION_REQUIRED: %s", v_url)
-                try:
-                    import webbrowser
-                    webbrowser.open(v_url)
-                except Exception:
-                    _log(f"🔗 Could not open browser. Visit: {v_url}")
-            else:
-                _log(f"⚠️ Verification still pending — complete it in your browser, then retry.")
-        elif v_msg:
-            _log(f"⚠️ {v_msg}")
-
-    # Gemini CLI prioritizes paidTier over currentTier (setup.ts)
-    paid_tier = resp_data.get("paidTier") or {}
-    current_tier = resp_data.get("currentTier") or {}
-    # Use paidTier if available, fall back to currentTier
-    tier = paid_tier if paid_tier else current_tier
-    tier_name = paid_tier.get("name") or current_tier.get("name", "unknown")
-    tier_id = paid_tier.get("id") or current_tier.get("id", "unknown")
-    allowed_tiers = resp_data.get("allowedTiers", [])
-    allowed_names = [t.get("name", t.get("id", "?")) for t in allowed_tiers] if allowed_tiers else []
-
-    # Check for GOOGLE_ONE_AI credits (billing.ts: getG1CreditBalance)
-    available_credits = tier.get("availableCredits", [])
-    g1_credits = [c for c in available_credits if c.get("creditType") == "GOOGLE_ONE_AI"]
-    g1_balance = sum(int(c.get("creditAmount", 0)) for c in g1_credits) if g1_credits else 0
-    # Enable credits if: paid tier detected OR explicit credit balance found
-    has_paid_tier = bool(paid_tier)
-    has_g1_credits = has_paid_tier or g1_balance >= 50
-
-    # Determine subscription level for user-friendly display
-    tier_lower = tier_name.lower() if tier_name else ""
-    if "ultra" in tier_lower:
-        sub_label = "Google AI Ultra ✨"
-    elif "pro" in tier_lower:
-        sub_label = "Google AI Pro ⭐"
-    elif "enterprise" in tier_lower:
-        sub_label = "Enterprise 🏢"
-    elif "standard" in tier_lower:
-        sub_label = "Standard"
-    elif tier_name and tier_name != "unknown":
-        sub_label = tier_name
-    else:
-        sub_label = "Free tier"
-
-    # Credit status
-    if g1_balance > 0:
-        credit_label = f"GOOGLE_ONE_AI ({g1_balance} credits)"
-    elif has_paid_tier:
-        credit_label = "enabled (paid tier)"
-    else:
-        credit_label = "free tier (no credits)"
-
-    # Log raw paidTier for debugging
-    logger.info("Code Assist setup: tier=%s (id=%s)  project=%s  paid_tier_raw=%s  g1_balance=%s  allowed=%s",
-                tier_name, tier_id, project, json.dumps(paid_tier)[:500], g1_balance, allowed_names)
-    _log(f"🔧 Code Assist: tier={tier_name}")
-    _log(f"🔑 Subscription: {sub_label} | Credits: {credit_label}")
-    if allowed_names:
-        logger.info("Code Assist allowed tiers: %s", allowed_names)
-
-    # Cache credit eligibility for request building
-    global _code_assist_has_credits
-    _code_assist_has_credits[account_id] = has_g1_credits
-
-    # If user needs onboarding (no currentTier), trigger it
-    if not tier and resp_data.get("allowedTiers"):
-        allowed = resp_data["allowedTiers"]
-        default_tier = next((t for t in allowed if t.get("isDefault")), allowed[0] if allowed else {})
-        tier_id = default_tier.get("id", "STANDARD")
-        onboard_url = f"{_code_assist_base_url()}:onboardUser"
-        onboard_payload = {
-            "tierId": tier_id,
-            "metadata": {
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED",
-                "pluginType": "GEMINI",
-            },
-        }
-        try:
-            import httpx as _httpx
-            ob_resp = _httpx.post(onboard_url, json=onboard_payload, headers=headers, timeout=60)
-            ob_data = ob_resp.json()
-        except ImportError:
-            ob_resp = requests.post(onboard_url, json=onboard_payload, headers=headers, timeout=60)
-            ob_data = ob_resp.json()
-
-        # Poll LRO if needed
-        if not ob_data.get("done") and ob_data.get("name"):
-            op_name = ob_data["name"]
-            for _ in range(12):  # up to 60s
-                time.sleep(5)
-                try:
-                    import httpx as _httpx
-                    poll = _httpx.get(
-                        f"{_code_assist_base_url()}/{op_name}",
-                        headers=headers, timeout=30,
-                    )
-                    ob_data = poll.json()
-                except ImportError:
-                    poll = requests.get(
-                        f"{_code_assist_base_url()}/{op_name}",
-                        headers=headers, timeout=30,
-                    )
-                    ob_data = poll.json()
-                if ob_data.get("done"):
-                    break
-
-        project = (ob_data.get("response", {})
-                   .get("cloudaicompanionProject", {})
-                   .get("id", project))
-        _log(f"🔧 Code Assist: onboarded (project={project})")
-
-    _code_assist_project_id[account_id] = project
-    # Only cache as "done" if we actually got a project.
-    # If verification was needed (project=None), let setup re-run next time
-    # so it picks up the project after the user completes verification.
-    if project:
-        _code_assist_setup_done[account_id] = True
-
-    # Query server-side quota (Gemini CLI: retrieveUserQuota)
-    try:
-        quota_url = f"{_code_assist_base_url()}:retrieveUserQuota"
-        quota_payload = {"project": project} if project else {}
-        try:
-            import httpx as _httpx
-            q_resp = _httpx.post(quota_url, json=quota_payload, headers=headers, timeout=15)
-            q_data = q_resp.json()
-        except ImportError:
-            q_resp = requests.post(quota_url, json=quota_payload, headers=headers, timeout=15)
-            q_data = q_resp.json()
-
-        buckets = q_data.get("buckets", [])
-        if buckets:
-            quota_lines = []
-            any_remaining = False
-            for b in buckets:
-                fraction = b.get("remainingFraction", 0) or 0
-                reset_time = b.get("resetTime", "")
-                model_id = b.get("modelId", "all")
-                pct_used = (1.0 - fraction) * 100
-
-                # Format reset time like CLI: "6:06 PM (20h 18m)"
-                reset_str = ""
-                if reset_time:
-                    try:
-                        from datetime import datetime, timezone
-                        rt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
-                        local_rt = rt.astimezone()
-                        delta = rt - datetime.now(timezone.utc)
-                        hrs, rem = divmod(max(int(delta.total_seconds()), 0), 3600)
-                        mins = rem // 60
-                        reset_str = f"{local_rt.strftime('%I:%M %p').lstrip('0')} ({hrs}h {mins}m)"
-                    except Exception:
-                        reset_str = reset_time[:16]
-                else:
-                    reset_str = "midnight PT"
-
-                if fraction > 0.01:
-                    any_remaining = True
-                quota_lines.append(f"  {model_id}: {pct_used:.1f}% used  resets {reset_str}")
-
-            # Show summary line + details
-            if any_remaining:
-                _log("📊 Daily Quota:")
-            else:
-                _log("⚠️ Daily Quota: LOW/EXHAUSTED (paid credits used if available)")
-            for ql in quota_lines:
-                _log(ql)
-            logger.info("Code Assist quota buckets: %s", json.dumps(buckets)[:1000])
-        else:
-            logger.info("Code Assist retrieveUserQuota: no buckets returned. Raw: %s", json.dumps(q_data)[:500])
-    except Exception as exc:
-        logger.debug("retrieveUserQuota failed (non-fatal): %s", exc)
-
-    return project
-
-
-# ===========================================================================
-# Public status check — called by GUI "Check Status" button
-# ===========================================================================
-
-def check_account_status(access_token: str, account_id: int = 0) -> Dict:
-    """Check quota and verification status without side effects.
-
-    Calls ``loadCodeAssist`` and ``retrieveUserQuota`` and returns a dict:
-
-    - ``verified`` (bool): True if account is verified and has a project.
-    - ``verification_url`` (str|None): URL the user must visit if unverified.
-    - ``verification_message`` (str|None): Human message from the server.
-    - ``tier_name`` (str): Subscription tier name (e.g. "Standard", "Pro").
-    - ``sub_label`` (str): User-friendly subscription label.
-    - ``credit_label`` (str): Credit status string.
-    - ``g1_balance`` (int): Google One AI credit balance.
-    - ``project`` (str|None): Companion project ID.
-    - ``quota_buckets`` (list[dict]): Raw quota buckets from retrieveUserQuota.
-    - ``quota_lines`` (list[str]): Pre-formatted quota lines for display.
-    - ``quota_exhausted`` (bool): True if all buckets are ≈ empty.
-    - ``error`` (str|None): Error message if something went wrong.
-    """
-    result: Dict[str, Any] = {
-        "verified": True,
-        "verification_url": None,
-        "verification_message": None,
-        "tier_name": "unknown",
-        "sub_label": "Free tier",
-        "credit_label": "free tier (no credits)",
-        "g1_balance": 0,
-        "project": None,
-        "quota_buckets": [],
-        "quota_lines": [],
-        "quota_exhausted": False,
-        "error": None,
-    }
-
-    base = _code_assist_base_url()
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "metadata": {
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI",
-        },
-    }
-
-    # --- 1. loadCodeAssist (tier + verification) ---
-    try:
-        try:
-            import httpx as _httpx
-            resp = _httpx.post(f"{base}:loadCodeAssist", json=payload, headers=headers, timeout=30)
-            resp_data = resp.json()
-        except ImportError:
-            resp = requests.post(f"{base}:loadCodeAssist", json=payload, headers=headers, timeout=30)
-            resp_data = resp.json()
-    except Exception as exc:
-        result["error"] = f"loadCodeAssist failed: {exc}"
-        return result
-
-    project = resp_data.get("cloudaicompanionProject")
-    result["project"] = project
-
-    # Check verification
-    for inelig in resp_data.get("ineligibleTiers", []):
-        v_url = inelig.get("validationUrl", "")
-        v_msg = inelig.get("reasonMessage", "Account verification required")
-        reason_code = inelig.get("reasonCode", "")
-        if v_url and reason_code == "VALIDATION_REQUIRED":
-            result["verified"] = False
-            result["verification_url"] = v_url
-            result["verification_message"] = v_msg
-            break
-
-    # Parse tier info
-    paid_tier = resp_data.get("paidTier") or {}
-    current_tier = resp_data.get("currentTier") or {}
-    tier = paid_tier if paid_tier else current_tier
-    tier_name = paid_tier.get("name") or current_tier.get("name", "unknown")
-    result["tier_name"] = tier_name
-
-    # Credits
-    available_credits = tier.get("availableCredits", [])
-    g1_credits = [c for c in available_credits if c.get("creditType") == "GOOGLE_ONE_AI"]
-    g1_balance = sum(int(c.get("creditAmount", 0)) for c in g1_credits) if g1_credits else 0
-    has_paid_tier = bool(paid_tier)
-    result["g1_balance"] = g1_balance
-
-    # Sub label
-    tier_lower = tier_name.lower() if tier_name else ""
-    if "ultra" in tier_lower:
-        result["sub_label"] = "Google AI Ultra ✨"
-    elif "pro" in tier_lower:
-        result["sub_label"] = "Google AI Pro ⭐"
-    elif "enterprise" in tier_lower:
-        result["sub_label"] = "Enterprise 🏢"
-    elif "standard" in tier_lower:
-        result["sub_label"] = "Standard"
-    elif tier_name and tier_name != "unknown":
-        result["sub_label"] = tier_name
-    else:
-        result["sub_label"] = "Free tier"
-
-    # Credit label
-    if g1_balance > 0:
-        result["credit_label"] = f"GOOGLE_ONE_AI ({g1_balance} credits)"
-    elif has_paid_tier:
-        result["credit_label"] = "enabled (paid tier)"
-    else:
-        result["credit_label"] = "free tier (no credits)"
-
-    # --- 2. retrieveUserQuota ---
-    try:
-        quota_url = f"{base}:retrieveUserQuota"
-        quota_payload = {"project": project} if project else {}
-        try:
-            import httpx as _httpx
-            q_resp = _httpx.post(quota_url, json=quota_payload, headers=headers, timeout=15)
-            q_data = q_resp.json()
-        except ImportError:
-            q_resp = requests.post(quota_url, json=quota_payload, headers=headers, timeout=15)
-            q_data = q_resp.json()
-
-        buckets = q_data.get("buckets", [])
-        result["quota_buckets"] = buckets
-        if buckets:
-            any_remaining = False
-            for b in buckets:
-                fraction = b.get("remainingFraction", 0) or 0
-                reset_time = b.get("resetTime", "")
-                model_id = b.get("modelId", "all")
-                pct_used = (1.0 - fraction) * 100
-
-                reset_str = ""
-                if reset_time:
-                    try:
-                        from datetime import datetime, timezone
-                        rt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
-                        local_rt = rt.astimezone()
-                        delta = rt - datetime.now(timezone.utc)
-                        hrs, rem = divmod(max(int(delta.total_seconds()), 0), 3600)
-                        mins = rem // 60
-                        reset_str = f"{local_rt.strftime('%I:%M %p').lstrip('0')} ({hrs}h {mins}m)"
-                    except Exception:
-                        reset_str = reset_time[:16]
-                else:
-                    reset_str = "midnight PT"
-
-                if fraction > 0.01:
-                    any_remaining = True
-                result["quota_lines"].append(f"  {model_id}: {pct_used:.1f}% used — resets {reset_str}")
-
-            result["quota_exhausted"] = not any_remaining
-    except Exception as exc:
-        logger.debug("check_account_status: retrieveUserQuota failed: %s", exc)
-
-    return result
-
-
-def fetch_available_models(
-    access_token: str,
-    timeout: int = 15,
-    account_id: int = 0,
-) -> List[str]:
-    """Return Code Assist models exposed by account-specific quota buckets."""
-    del timeout  # ``check_account_status`` owns bounded per-request timeouts.
-    status = check_account_status(access_token, account_id=account_id)
-    error = str(status.get("error") or "").strip()
-    if error:
-        raise RuntimeError(error)
-    models: List[str] = []
-    seen = set()
-    for bucket in status.get("quota_buckets", []) or []:
-        if not isinstance(bucket, dict):
-            continue
-        model = str(
-            bucket.get("modelId")
-            or bucket.get("model_id")
-            or bucket.get("model")
-            or ""
-        ).strip()
-        key = model.casefold()
-        if model and key not in seen:
-            seen.add(key)
-            models.append(model)
-    return models
-
-
-def send_chat_completion_aistudio(
-    access_token: str,
-    messages: List[Dict],
-    model: str = "gemini-2.5-flash",
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-    timeout: int = 300,
-    log_fn=None,
-    connect_timeout: Optional[float] = None,
-    account_id: int = 0,
-    image_output: Optional[Dict] = None,
-) -> Dict:
-    """Send a chat completion via Google Code Assist proxy using OAuth.
-
-    Routes through ``cloudcode-pa.googleapis.com`` (same as Gemini CLI).
-    No GCP project required — works with any Google account.
-    """
-    if is_cancelled():
-        raise RuntimeError("AuthGem: stream cancelled by user")
-
-    _log = log_fn or (lambda *a, **kw: None)
-
-    # Ensure user is set up with Code Assist (runs once per session per account)
-    project_id = _code_assist_setup(access_token, _log, account_id=account_id)
-
-    if not project_id:
-        # Don't block — the Code Assist proxy works without a pre-existing
-        # project.  It auto-provisions one for the user's Google account.
-        # The Gemini CLI sends an empty project string in this case.
-        logger.info("AuthGem: No project from loadCodeAssist — proceeding with empty project (proxy auto-provisions)")
-        _log("⚠️ No project assigned yet — proxy will auto-provision")
-
-    inner_body = _build_gemini_request_body(messages, temperature, max_tokens, model=model,
-                                            image_output=image_output)
-
-    # Wrap in Code Assist envelope matching Gemini CLI's converter.ts format:
-    # {model, project, user_prompt_id, enabled_credit_types?, request: {contents, ..., session_id}}
-    inner_body["session_id"] = _code_assist_session_id
-    body: Dict = {
-        "model": model,
-        "project": project_id or "",
-        "user_prompt_id": str(uuid.uuid4()),
-        "request": inner_body,
-    }
-    # Only enable credits when user has GOOGLE_ONE_AI balance (Gemini CLI: shouldEnableCredits)
-    if _code_assist_has_credits.get(account_id, False):
-        body["enabled_credit_types"] = ["GOOGLE_ONE_AI"]
-
-    url = f"{_code_assist_base_url()}:streamGenerateContent?alt=sse"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-    }
-
-    logger.info("AuthGem-CodeAssist: POST %s  model=%s  credits=GOOGLE_ONE_AI", url.split("?")[0], model)
-
-    return _stream_gemini_common(url, body, headers, timeout, _log, connect_timeout, account_id=account_id)
 
 
 # ===========================================================================
@@ -2253,18 +2199,9 @@ def _stream_gemini_common(
     connect_timeout: Optional[float] = None,
     account_id: int = 0,
 ) -> Dict:
-    """Shared streaming logic for all Gemini endpoints (AI Studio & Vertex)."""
-    # Check if this is the Code Assist proxy (authgem/) — it ONLY supports
-    # streamGenerateContent; generateContent returns HTTP 200 but empty content.
-    # The Gemini CLI exclusively uses streaming, so we must do the same.
-    _is_code_assist = "cloudcode-pa.googleapis.com" in url
-
-    # Respect the "Enable streaming responses" toggle from other_settings.py,
-    # but FORCE streaming for the Code Assist proxy (authgem/).
-    if _is_code_assist:
-        _enable_streaming = True
-    else:
-        _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
+    """Shared streaming logic for the API Gemini endpoints (AI Studio key & Vertex)."""
+    # Respect the "Enable streaming responses" toggle from other_settings.py.
+    _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
     log_stream = _enable_streaming and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
     if os.getenv("BATCH_TRANSLATION", "0") == "1":
         # AuthGem always streams (like AuthGPT/Antigravity), so use the

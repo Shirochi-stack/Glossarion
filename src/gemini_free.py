@@ -2231,6 +2231,30 @@ def logout(cancel_check=None) -> None:
             page.call("Network.clearBrowserCookies")
 
 
+def google_cookies(url: str, cancel_check=None) -> List[Dict[str, Any]]:
+    """The signed-in profile's cookies for ``url`` and google.com (``authgem/`` sends the Gemini
+    app's requests with them). They are read from a headless tab after a google.com page
+    loaded, so the browser has renewed the rotating session cookies the way a visit does."""
+    if not has_session():
+        raise AIModeError(
+            "authgem/ needs a Google sign-in. Click Google Login next to the model and sign in to "
+            "the Google account whose Gemini plan you want to use.", KIND_SIGN_IN)
+
+    def prepare(page) -> None:
+        _prepare_google_tab(page)
+        if not _google_signed_in(page):
+            _mark_session(False)
+            raise AIModeError(
+                "The saved Google session ended. Click Google Login next to the model to sign in again.",
+                KIND_SIGN_IN)
+
+    urls = [url, "https://www.google.com/", "https://accounts.google.com/"]
+    with _LEASES.open(cancel_check=cancel_check, prepare=prepare) as page:
+        cookies = page.call("Network.getCookies", {"urls": urls}).get("cookies") or []
+    return [{"name": c.get("name"), "value": c.get("value"), "domain": c.get("domain"), "path": c.get("path")}
+            for c in cookies if c.get("name")]
+
+
 def _load_ai_mode_answer_chrome(
     request: Dict[str, Any],
     *,

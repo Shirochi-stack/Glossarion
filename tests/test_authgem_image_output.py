@@ -64,14 +64,12 @@ def test_text_request_is_unchanged():
 def test_every_sender_forwards_image_output(monkeypatch):
     seen = []
     monkeypatch.setattr(auth, "_stream_gemini_common", lambda url, body, *a, **kw: seen.append(body) or {})
-    monkeypatch.setattr(auth, "_code_assist_setup", lambda *a, **kw: "project")
     monkeypatch.setattr(auth, "detect_gcp_project", lambda *a, **kw: "project")
     opts = {"size": "1K", "aspect_ratio": "auto"}
-    auth.send_chat_completion_aistudio("token", MESSAGES, model="m", image_output=opts)
     auth.send_chat_completion_aistudio_key("key", MESSAGES, model="m", image_output=opts)
     auth.send_chat_completion_vertex("token", MESSAGES, model="m", image_output=opts)
     configs = [b.get("request", b)["generationConfig"] for b in seen]
-    assert len(configs) == 3
+    assert len(configs) == 2
     assert all(c["responseModalities"] == ["TEXT", "IMAGE"] for c in configs)
 
 

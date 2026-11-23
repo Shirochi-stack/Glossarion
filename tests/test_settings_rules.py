@@ -176,7 +176,14 @@ def test_route_controls_match_the_frozen_desktop_handler(legacy_owner_class, tmp
         rc = sr.route_controls(model, config, hints=hints, api_key_check=False)
         where = (model, pool, hints, creds_path)
         for provider in ("authgpt", "authgrok", "authcd", "authgem"):
-            assert getattr(owner, f"{provider}_login_btn").isVisible() == (provider in rc.logins), where
+            shown = getattr(owner, f"{provider}_login_btn").isVisible()
+            if provider == "authgem" and shown and "authgem" not in rc.logins:
+                # Deliberate change (Nov 2026): authgem/ left Google's retired Code Assist OAuth for
+                # the Gemini app with the Google Login's cookies, so an authgem/ route shows the
+                # Google Login; the OAuth button stays for authgem-vertex/ only.
+                assert "google" in rc.logins and not rc.authgem_vertex, where
+                continue
+            assert shown == (provider in rc.logins), where
         assert owner.gcloud_button.isEnabled() == rc.needs_google_creds, where
         assert owner.vertex_location_entry.isVisible() == rc.vertex_location, where
         assert owner.gcloud_status_label.text() == rc.google_creds_text, where
