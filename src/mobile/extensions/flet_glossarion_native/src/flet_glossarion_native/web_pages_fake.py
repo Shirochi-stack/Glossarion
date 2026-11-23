@@ -528,3 +528,55 @@ class FakeWebPagesNative:
         live = any(not p.gone for p in self.pages.values())
         extra: dict[str, Any] = {"activity": True, "density": 2.0} if self.platform == "android" else {"window": True}
         return _ok(pages=pages, attached=live, **extra)
+
+    # ---------------------------------------------------- sign-in + cookies (version 2)
+    #
+    # ``cookie_jar`` maps a site (registrable domain such as "google.com") to {name: value}; a URL gets
+    # the cookies of every site its host ends with. ``sign_in_cookies`` is what a finished
+    # ``web_sign_in`` adds for ``cookie_url``'s site (None: the user cancels, answering signed_in False).
+
+    cookie_jar: dict
+    sign_in_cookies: Optional[dict] = None
+
+    def _jar(self) -> dict:
+        if not hasattr(self, "cookie_jar"):
+            self.cookie_jar = {}
+        return self.cookie_jar
+
+    @staticmethod
+    def _host(url: str) -> str:
+        from urllib.parse import urlsplit
+        return (urlsplit(url).hostname or "").lower()
+
+    async def web_sign_in(self, url: str, *, done_url: str, done_cookie: str, cookie_url: str,
+                          user_agent: Optional[str] = None, title: Optional[str] = None) -> dict:
+        self._record("web_sign_in", url=url, done_url=done_url, done_cookie=done_cookie, cookie_url=cookie_url,
+                     user_agent=user_agent, title=title)
+        await asyncio.sleep(0)
+        if not all(is_http_url(u) for u in (url, done_url, cookie_url)) or not done_cookie:
+            return error_result(WebPageError.BAD_ARGS, "url, done_url, cookie_url and done_cookie are required")
+        if self.sign_in_cookies is None:
+            return _ok(signed_in=False)
+        host = self._host(cookie_url)
+        site = ".".join(host.split(".")[-2:])
+        self._jar().setdefault(site, {}).update(self.sign_in_cookies)
+        return _ok(signed_in=bool(self.sign_in_cookies.get(done_cookie)))
+
+    async def web_cookies(self, url: str) -> dict:
+        self._record("web_cookies", url=url)
+        await asyncio.sleep(0)
+        if not is_http_url(url):
+            return error_result(WebPageError.BAD_ARGS, "only http(s) cookies can be read")
+        host = self._host(url)
+        pairs = [f"{name}={value}" for site, cookies in self._jar().items()
+                 if host == site or host.endswith("." + site) for name, value in cookies.items()]
+        return _ok(cookies="; ".join(pairs) if pairs else None)
+
+    async def web_clear_cookies(self, url: str, domain: str) -> dict:
+        self._record("web_clear_cookies", url=url, domain=domain)
+        await asyncio.sleep(0)
+        if not is_http_url(url):
+            return error_result(WebPageError.BAD_ARGS, "only http(s) cookies can be cleared")
+        site = str(domain or "").lstrip(".").lower() or self._host(url)
+        cleared = self._jar().pop(site, {})
+        return _ok(cleared=len(cleared))

@@ -55,6 +55,14 @@ const Set<String> _kWebMethods = <String>{
   'web_status',
 };
 
+/// The sign-in family (WebSignIn.kt / WebSignIn.swift; web_pages.SIGN_IN_METHODS): a visible
+/// sign-in page and the shared cookie jar. Answers carry session cookies: never printed.
+const Set<String> _kSignInMethods = <String>{
+  'web_sign_in',
+  'web_cookies',
+  'web_clear_cookies',
+};
+
 /// Flet service behind the Python `GlossarionNative` control.
 ///
 /// Python -> Dart: `control.addInvokeMethodListener` (method names below).
@@ -377,6 +385,13 @@ class GlossarionNativeService extends FletService {
           if (!_isMobile) return _defaultResult(name);
           final dynamic webAnswer = await _platform(name, args);
           return webAnswer is Map ? webAnswer : _defaultResult(name);
+        case 'web_sign_in':
+        case 'web_cookies':
+        case 'web_clear_cookies':
+          // The sign-in family: no debugPrint of args or answers (web_cookies answers session cookies).
+          if (!_isMobile) return _defaultResult(name);
+          final dynamic signInAnswer = await _platform(name, args);
+          return signInAnswer is Map ? signInAnswer : _defaultResult(name);
         default:
           throw Exception('Unknown GlossarionNative method: $name');
       }
@@ -462,6 +477,13 @@ class GlossarionNativeService extends FletService {
         'ok': false,
         'error': 'unavailable',
         'message': 'In-app browser pages are not available on this platform',
+      };
+    }
+    if (_kSignInMethods.contains(name)) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'unavailable',
+        'message': 'The in-app sign-in is not available on this platform',
       };
     }
     switch (name) {

@@ -95,6 +95,7 @@ final class HiddenWebPages: NSObject, WKNavigationDelegate {
   private let send: ([String: Any]) -> Void
   private var pages: [String: Page] = [:]
   private var containerView: UIView?
+  private let signIn = WebSignIn()
 
   init(send: @escaping ([String: Any]) -> Void) {
     self.send = send
@@ -103,13 +104,21 @@ final class HiddenWebPages: NSObject, WKNavigationDelegate {
 
   /// get_platform_info()["web_pages"].
   func capability() -> [String: Any] {
-    return ["version": HiddenWebPages.version, "max_pages": HiddenWebPages.maxPages, "provider": "WKWebView"]
+    // "sign_in": the WebSignIn methods (web_pages.SIGN_IN_METHODS) are here.
+    return [
+      "version": HiddenWebPages.version, "max_pages": HiddenWebPages.maxPages, "provider": "WKWebView",
+      "sign_in": true,
+    ]
   }
 
   // MARK: - Dispatch (main thread)
 
   func handle(_ method: String, _ args: [String: Any], result: @escaping FlutterResult) {
     let reply = Reply(result)
+    if WebSignIn.methods.contains(method) {
+      signIn.handle(method, args) { answer in reply.send(answer) }
+      return
+    }
     switch method {
     case "web_open":
       openPage(args, reply)
@@ -249,6 +258,7 @@ final class HiddenWebPages: NSObject, WKNavigationDelegate {
   /// Close every page of this plugin instance (web_reset, engine detach); how many there were.
   @discardableResult
   func reset() -> Int {
+    signIn.dispose()
     let all = Array(pages.values)
     pages.removeAll()
     for page in all {

@@ -967,15 +967,6 @@ class OAuthBridge:
 
     # ---- Gemini extras ---------------------------------------------------------------------------
 
-    def gemini_status(self, account_id: int = 0) -> dict:
-        """Blocking: desktop 📊 (``authgem_auth.check_account_status``) for a signed-in slot."""
-        module = self.module("authgem")
-        store = self.store(account_id, "authgem")
-        if not store.has_tokens:
-            raise RuntimeError("Not logged in — sign in to Gemini first.")
-        token = store.get_valid_access_token(auto_login=False)
-        return dict(module.check_account_status(token, int(account_id or 0)) or {})
-
     def gemini_projects(self, account_id: int = 0) -> list:
         """Blocking: ``[(project_id, "billed"|"unknown"|"unbilled")]`` for the GCP project picker.
 

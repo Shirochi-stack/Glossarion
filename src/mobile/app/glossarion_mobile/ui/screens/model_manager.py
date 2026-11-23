@@ -1273,7 +1273,7 @@ class ModelsKeysFeature:
             read_clipboard=getattr(getattr(app, "clipboard", None), "get", None),
             run_io=self.run_io, spawn=self.spawn, sign_in=self.sign_in, signed_in_keys=self.signed_in_keys,
             test_key=self.test_key, add_key=self.add_key, tablet=self._tablet, next_slot=self.next_slot,
-            gemini_status=self.gemini_status, gcp_project_picker=self.gcp_project_picker,
+            gcp_project_picker=self.gcp_project_picker,
             open_local_models=self.open_local_models, local_engine=self.local_engine,
         ))
         shell = getattr(app, "shell", None)
@@ -1450,17 +1450,6 @@ class ModelsKeysFeature:
         if key in ("use_main_key_fallback", "fallback_key_shuffle"):
             pool = "fallback"
         return self.make_screen(parse_route(build_route("settings.keys.pool", {"pool": pool})))
-
-    async def gemini_status(self, account_id: int) -> Any:
-        """ModelSheet › 📊: ``accounts.open_gemini_status`` with the chat feature's OAuthBridge."""
-        oauth = getattr(getattr(self.app, "chat_feature", None), "oauth", None)
-        if oauth is None:
-            return None
-        from glossarion_mobile.ui.screens.accounts import open_gemini_status
-
-        notify = getattr(self.app, "notify", None)
-        return await open_gemini_status(oauth, account_id, io=self.run_io, page=getattr(self.app, "page", None),
-                                        say=notify)
 
     def detach(self) -> None:
         for unsub in self._unsubs:

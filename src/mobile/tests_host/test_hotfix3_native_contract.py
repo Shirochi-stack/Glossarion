@@ -325,7 +325,8 @@ def test_the_driver_uses_exactly_the_web_methods_dart_forwards():
 
 
 def test_the_wrapper_sends_each_method_under_its_own_name():
-    assert set(WRAPPER) == set(WEB_METHODS)
+    # the page methods and the sign-in family (web_pages.SIGN_IN_METHODS; tests_host/test_google_signin.py)
+    assert set(WRAPPER) == set(WEB_METHODS) | set(WP.SIGN_IN_METHODS)
     for method, info in WRAPPER.items():
         assert info["sent"] == [method], (method, info["sent"])
 
@@ -406,7 +407,8 @@ def test_capability_handshake_keys():
     kotlin, swift = _text(KOTLIN_WEB), _text(SWIFT_WEB)
     produced_kotlin = set(re.findall(r'"([a-z_]+)" to', _function_body(kotlin, "fun", "computeCapability")))
     produced_swift = set(re.findall(r'"([a-z_]+)":', _function_body(swift, "func", "capability")))
-    assert produced_kotlin == produced_swift == {"version", "max_pages", "provider"}
+    # "sign_in": the sign-in family is there (web_pages.SIGN_IN_METHODS)
+    assert produced_kotlin == produced_swift == {"version", "max_pages", "provider", "sign_in"}
     assert 'info["web_pages"] = it' in _text(KOTLIN_PLUGIN) and 'info["web_pages"] = webPages.capability()' in _text(SWIFT_PLUGIN)
     platform_info = _dart_slice(_text(DART), "Future<Map<String, dynamic>> _platformInfo()", "Future<void> _clearShared(")
     assert "info.addAll(_stringMap(native));" in platform_info  # the platform map reaches Python whole

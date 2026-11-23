@@ -49,6 +49,21 @@ code never raises a channel error for these methods. Off-device the answer is ``
                at shutdown).
 ``web_status`` -> ``{pages: [{page_id, url, gone, width, height, pending}], attached, ...}``.
 
+The sign-in family (:data:`SIGN_IN_METHODS`; ``web_pages["sign_in"] is True`` announces it) is a visible
+site sign-in and the cookie jar it fills (``WebSignIn.kt`` / ``WebSignIn.swift``; authgem/ runs the Gemini
+app on the google.com session cookies):
+
+``web_sign_in``       ``url`` (where the sign-in starts), ``done_url`` (URL prefix of the page it lands on),
+                      ``done_cookie`` + ``cookie_url`` (the cookie a finished sign-in leaves for that URL),
+                      ``user_agent`` (optional; default: the platform's browser agent, since Google refuses
+                      sign-in to embedded web views), ``title`` -> ``{signed_in: bool}``: a full-screen
+                      page the user signs in on; False when they cancelled it. Errors: ``bad_args``,
+                      ``unavailable`` (no Activity / window on screen), ``native_error``.
+``web_cookies``       ``url`` -> ``{cookies: "name=value; ..." | None}``: what the shared jar sends to the URL,
+                      HttpOnly cookies included. Never logged.
+``web_clear_cookies`` ``url``, ``domain`` -> ``{cleared: int}``: expires the jar's cookies for that site
+                      (sign-out).
+
 Error codes: :class:`WebPageError` (``timeout`` is Python's own: the Flet call did not answer in time).
 Messages never carry page content; exceptions are reported by their type name only (Flet's
 ``TimeoutError`` text embeds the call arguments, i.e. the script and the prompt).
@@ -94,6 +109,8 @@ __all__ = [
     "NATIVE_MAX_PAGES",
     "OPEN_TIMEOUT",
     "QUERY_TIMEOUT",
+    "SIGN_IN_METHODS",
+    "SIGN_IN_TIMEOUT",
     "WEB_EVENT_KEYS",
     "WEB_EVENT_TYPES",
     "WEB_METHODS",
@@ -118,6 +135,8 @@ MAX_SIDE = 4096
 WEB_METHODS: tuple[str, ...] = (
     "web_open", "web_load", "web_eval", "web_title", "web_close", "web_reset", "web_status",
 )
+#: The sign-in family (``WebSignIn.kt`` / ``WebSignIn.swift``), announced by ``web_pages["sign_in"] is True``.
+SIGN_IN_METHODS: tuple[str, ...] = ("web_sign_in", "web_cookies", "web_clear_cookies")
 WEB_EVENT_TYPES: tuple[str, ...] = ("started", "finished", "url", "error", "gone")
 WEB_EVENT_KEYS: tuple[str, ...] = ("page_id", "type", "url", "ok", "error", "code", "main_frame", "crashed")
 
@@ -129,6 +148,8 @@ QUERY_TIMEOUT = 10.0
 #: ``web_eval`` waits the script's own timeout plus this much for the answer to travel back.
 EVAL_SLACK = 5.0
 DEFAULT_EVAL_TIMEOUT = 30.0
+#: ``web_sign_in`` waits this long for the user to finish signing in.
+SIGN_IN_TIMEOUT = 900.0
 
 
 class WebPageError(str, Enum):

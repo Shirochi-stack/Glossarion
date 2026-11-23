@@ -172,50 +172,6 @@ def _sign_in_title(state: SignInState) -> str:
     return f"{label} #{state.account_id}" if state.account_id else label
 
 
-def gemini_status_sheet(oauth: Any, status: dict, account_id: int) -> InfoSheet:
-    """The 📊 Gemini status sheet (desktop authgem status button): verification, plan, credits, quota."""
-    suffix = f" #{account_id}" if account_id else ""
-    lines: list[str] = []
-    actions: list[ft.Control] = []
-    if status.get("error"):
-        lines.append(f"❌ Gemini{suffix} status: {status['error']}")
-    elif not status.get("verified", True):
-        lines.append(f"⚠️ Gemini{suffix}: {status.get('verification_message') or 'Account verification required'}")
-        url = status.get("verification_url") or ""
-        if url:
-            actions.append(ft.FilledTonalButton(content="Open verification page",
-                                                on_click=lambda e, u=url: oauth.open_url(u)))
-        lines.append("💡 After completing verification, check the status again to confirm.")
-    else:
-        lines.append(f"✅ Gemini{suffix}: Account verified")
-        lines.append(f"📊 {status.get('sub_label', '')} | Credits: {status.get('credit_label', '')}")
-        if status.get("project"):
-            lines.append(f"Project: {status['project']}")
-        quota = list(status.get("quota_lines") or [])
-        if quota:
-            lines.append("⚠️ Daily Quota: EXHAUSTED" if status.get("quota_exhausted") else "📊 Daily Quota:")
-            lines.extend(str(q) for q in quota)
-        else:
-            lines.append("No quota data available")
-    return InfoSheet(title=f"Gemini{suffix} status", body="\n".join(lines), actions=actions or None)
-
-
-async def open_gemini_status(oauth: Any, account_id: int, *, io: Callable[..., Any], page: Any = None,
-                             say: Optional[Callable[[str], Any]] = None) -> Optional[InfoSheet]:
-    """Read ``OAuthBridge.gemini_status`` on a worker and show the status sheet (Accounts › slot ⋯ ›
-    📊 Status and the ModelSheet route row's 📊 chip)."""
-    try:
-        status = await io(oauth.gemini_status, account_id)
-    except Exception as exc:
-        if say is not None:
-            say(f"❌ Gemini status check failed: {exc}")
-        return None
-    sheet = gemini_status_sheet(oauth, dict(status or {}), int(account_id or 0))
-    if page is not None:
-        sheet.show(page)
-    return sheet
-
-
 class LoginPanel(ft.Column):
     """Sign-in progress + paste fallback (loopback) or device code (Grok) for one provider slot.
 
@@ -894,6 +850,7 @@ class AccountsScreen(Screen):
     def build_body(self) -> ft.Control:
         controls: list[ft.Control] = [self._provider_card(provider) for provider in self.providers]
         controls.append(self._deepseek_card())
+        controls.append(self._google_card())
         controls.append(self._antigravity_card())
         controls.append(self._zai_card())
         controls.append(self._experimental_tile())
@@ -1000,6 +957,83 @@ class AccountsScreen(Screen):
             except Exception:
                 pass
         return ok
+
+    # ---- Google (authgem/: the Gemini app; search/gemini shares it) ------------------------------------
+
+    def _google_card(self) -> ft.Control:
+        """Google sign-in for authgem/: Google's own sign-in page in a full-screen in-app page; the Gemini
+        app's requests then run on that session (``services.google_signin``)."""
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return unavailable_tile("Google (authgem/)", reason="Needs the in-app sign-in",
+                                    detail=google_signin.UNAVAILABLE, subtitle="authgem/gemini-4-neon · authgem/auto",
+                                    dense=False, key="account-google")
+        signed = service.has_session()
+        self.google_status = ft.Text("✓ Signed in" if signed else "Not signed in",
+                                     theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                     color=ft.Colors.PRIMARY if signed else ft.Colors.ON_SURFACE_VARIANT,
+                                     key="account-google-status")
+        buttons = [ft.FilledTonalButton(content="Sign in again" if signed else "Sign in", icon=ft.Icons.LOGIN,
+                                        on_click=lambda e: self._spawn(self.google_sign_in()),
+                                        key="account-google-signin")]
+        if signed:
+            buttons.append(ft.TextButton(content="Sign out", on_click=lambda e: self._spawn(self.google_sign_out()),
+                                         key="account-google-signout"))
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED),
+                        ft.Text("Google (authgem/)", theme_style=ft.TextThemeStyle.TITLE_SMALL, expand=True)],
+                       spacing=8),
+                ft.Text("Your Google account's Gemini app (its own usage limits), no API key. Each request's chat "
+                        "is deleted from your Gemini history afterwards.",
+                        theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                self.google_status,
+                ft.Row(buttons, wrap=True, spacing=8),
+            ], spacing=6, tight=True),
+            padding=12, border_radius=tokens.RADII["card"], bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            key="account-google")
+
+    def _set_google_status(self, signed: bool) -> None:
+        status = getattr(self, "google_status", None)
+        if status is None:
+            return
+        status.value = "✓ Signed in" if signed else "Not signed in"
+        status.color = ft.Colors.PRIMARY if signed else ft.Colors.ON_SURFACE_VARIANT
+        try:
+            status.update()
+        except Exception:
+            pass
+
+    async def google_sign_in(self) -> bool:
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return False
+        try:
+            signed = await service.sign_in()
+        except Exception as exc:
+            self._say(f"Google sign-in: {exc}")
+            return False
+        self._set_google_status(service.has_session())
+        if not signed:
+            self._say("Google sign-in cancelled")
+        return signed
+
+    async def google_sign_out(self) -> None:
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return
+        try:
+            await service.sign_out()
+        except Exception as exc:
+            self._say(f"Google sign-out: {exc}")
+            return
+        self._set_google_status(False)
 
     # ---- DeepSeek web (authds/, U13 item 4) ----------------------------------------------------------
 
@@ -1285,9 +1319,6 @@ class AccountsScreen(Screen):
             ActionItem("Re-login", lambda: self.open_login(provider, account_id), icon="LOGIN"),
             ActionItem("Log out", lambda: self.confirm_sign_out(provider, account_id), icon="LOGOUT", destructive=True),
         ]
-        if provider == "authgem":
-            items.insert(1, ActionItem("📊 Status", lambda: self._spawn(self.show_gemini_status(account_id)),
-                                       icon="QUERY_STATS"))
         sheet = ActionSheet(items, title=label, subtitle=slot_status_line(self.statuses.get(provider, {}).get(account_id, {})),
                             tablet=self.tablet)
         self.sheet = sheet
@@ -1340,12 +1371,6 @@ class AccountsScreen(Screen):
             self.on_signed_in_changed(True)
         if provider == "authgem" and self.project_dropdown is not None and not self.projects:
             self._spawn(self.load_projects())
-
-    async def show_gemini_status(self, account_id: int) -> Optional[InfoSheet]:
-        sheet = await open_gemini_status(self.oauth, account_id, io=self._io, page=self._page(), say=self._say)
-        if sheet is not None:
-            self.sheet = sheet
-        return sheet
 
     def _spawn(self, coro: Any) -> Any:
         try:

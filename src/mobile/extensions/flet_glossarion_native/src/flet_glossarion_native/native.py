@@ -46,6 +46,7 @@ from flet_glossarion_native.web_pages import (
     LOAD_TIMEOUT,
     OPEN_TIMEOUT,
     QUERY_TIMEOUT as WEB_QUERY_TIMEOUT,
+    SIGN_IN_TIMEOUT,
     WebPageError,
     clamp_side,
     is_http_url,
@@ -988,4 +989,48 @@ class GlossarionNative(ft.Service):
         if result.get("ok"):
             pages = result.get("pages")
             result["pages"] = [dict(p) for p in pages if isinstance(p, Mapping)] if isinstance(pages, list) else []
+        return result
+
+    async def web_sign_in(
+        self,
+        url: str,
+        *,
+        done_url: str,
+        done_cookie: str,
+        cookie_url: str,
+        user_agent: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """A full-screen sign-in page (contract version 2): ``{"ok": True, "signed_in": bool}`` once the user
+        reached ``done_url`` with ``done_cookie`` set for ``cookie_url``, or cancelled (False)."""
+        if not all(is_http_url(u) for u in (url, done_url, cookie_url)) or not done_cookie:
+            return web_error_result(WebPageError.BAD_ARGS, "url, done_url, cookie_url and done_cookie are required")
+        args = {"url": url, "done_url": done_url, "done_cookie": str(done_cookie), "cookie_url": cookie_url,
+                "user_agent": user_agent or "", "title": title or "Sign in"}
+        result = await self._web_call("web_sign_in", args, timeout=SIGN_IN_TIMEOUT)
+        if result.get("ok"):
+            result["signed_in"] = result.get("signed_in") is True
+        return result
+
+    async def web_cookies(self, url: str) -> dict[str, Any]:
+        """``{"ok": True, "cookies": "name=value; ..." | None}``: the shared jar's cookies for ``url``
+        (HttpOnly included; contract version 2). Never logged."""
+        if not is_http_url(url):
+            return web_error_result(WebPageError.BAD_ARGS, "only http(s) cookies can be read")
+        result = await self._web_call("web_cookies", {"url": url}, timeout=WEB_QUERY_TIMEOUT)
+        if result.get("ok") and not isinstance(result.get("cookies"), str):
+            result["cookies"] = None
+        return result
+
+    async def web_clear_cookies(self, url: str, domain: str) -> dict[str, Any]:
+        """Expire the shared jar's cookies of a site: ``{"ok": True, "cleared": int}`` (contract version 2)."""
+        if not is_http_url(url):
+            return web_error_result(WebPageError.BAD_ARGS, "only http(s) cookies can be cleared")
+        result = await self._web_call("web_clear_cookies", {"url": url, "domain": str(domain or "")},
+                                      timeout=WEB_QUERY_TIMEOUT)
+        if result.get("ok"):
+            try:
+                result["cleared"] = int(result.get("cleared") or 0)
+            except (TypeError, ValueError):
+                result["cleared"] = 0
         return result

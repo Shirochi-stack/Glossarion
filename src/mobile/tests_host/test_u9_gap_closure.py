@@ -622,23 +622,6 @@ def test_check_environment_runs_the_shared_methods_and_redacts():
         "plain <REDACTED> (18 chars) here"
 
 
-@needs_flet
-def test_gemini_status_sheet_is_shared_by_accounts_and_the_model_sheet():
-    from glossarion_mobile.ui.screens.accounts import gemini_status_sheet, open_gemini_status
-
-    oauth = types.SimpleNamespace(open_url=lambda url: None,
-                                  gemini_status=lambda account: {"verified": False, "verification_url": "https://v",
-                                                                 "verification_message": "Verify your account"})
-    sheet = gemini_status_sheet(oauth, oauth.gemini_status(2), 2)
-    assert sheet.title == "Gemini #2 status" and "Verify your account" in sheet.body
-
-    async def io(fn, *args):
-        return fn(*args)
-
-    shown = asyncio.run(open_gemini_status(oauth, 0, io=io, page=None))
-    assert shown.title == "Gemini status"
-
-
 # ==========================================================================
 # Glossary
 # ==========================================================================

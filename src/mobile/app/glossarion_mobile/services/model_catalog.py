@@ -421,7 +421,7 @@ def rank_models(models: Sequence[str], query: str, *, current: str = "", limit: 
 
 _LOGIN_ROUTE = re.compile(r"^(authgpt|authgem-vertex|authgem-key|authgem|authcd|authgrok)(\d{0,4})/", re.IGNORECASE)
 LOGIN_TITLES = {"authgpt": "ChatGPT", "authgem": "Vertex (Pay as you go)", "authcd": "Claude", "authgrok": "Grok",
-                "authnan": "NanoGPT", "authds": "DeepSeek"}
+                "authnan": "NanoGPT", "authds": "DeepSeek", "google": "Google"}
 
 #: The sign-in routes the mobile app offers, in the order it lists them (Welcome, ModelSheet, Model Manager).
 AUTH_ROUTES = ("authgpt", "authgem", "authcd", "authgrok", "authnan")
