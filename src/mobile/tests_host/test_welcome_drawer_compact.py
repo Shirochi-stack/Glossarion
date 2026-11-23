@@ -187,10 +187,18 @@ def test_page_one_fits_the_phone_without_scrolling(width, with_engine, tmp_path)
         assert s.page_area.content.scroll == ft.ScrollMode.AUTO
     else:
         assert height <= budget, (width, height, budget)
-    # the cells are half the row: the longest short label fits its button (8 dp padding each side)
-    cell = (content_w - 8) / 2
+    # sign-in cells take their grid columns (a third; Vertex two thirds), the keyless cells half the row: the
+    # short label fits its button (8 dp padding each side)
+    from glossarion_mobile.ui.screens.welcome import SIGN_IN_COLS
+
+    third = (content_w - 2 * 8) / 3
     for provider, label in SIGN_INS + KEYLESS:
         short = label.replace("Sign in with ", "")
+        if provider in dict(KEYLESS):
+            cell = (content_w - 8) / 2
+        else:
+            cols = SIGN_IN_COLS.get(provider, 4)
+            cell = third * cols / 4 + 8 * (cols / 4 - 1)
         size = tokens.TYPE_SCALE["label_small" if provider in SMALL_LABELS else "label_large"].size
         assert text_width(short, size) + 16 + 2 <= cell, (short, cell)
     # the on-device cells are a quarter of the row: name and size line fit (6 dp padding each side)
@@ -214,8 +222,9 @@ def test_page_one_signed_in_button_keeps_its_half_row():
     s.render()
     grid = by_key(s.page_area.content)["welcome-sign-ins"]
     cols = {c.content.key: c.col for c in grid.controls if getattr(c.content, "key", None)}
-    assert cols["welcome-signed-authgem"] == {"xs": 6}
-    assert all(v == {"xs": 6} for v in cols.values())
+    # its own cell: two thirds for Vertex (the long "Pay as you go" label), a third for the rest
+    assert cols["welcome-signed-authgem"] == {"xs": 8}
+    assert all(v == {"xs": 4} for k, v in cols.items() if k != "welcome-signed-authgem")
 
 
 # ==========================================================================

@@ -182,9 +182,64 @@ def test_route_row_shows_the_google_chip(phone, monkeypatch):
     rows = sheet._route_controls(info)
     chip = rows[0].controls[0]
     assert isinstance(chip, ft.Chip) and chip.key == "route-login-google"
-    assert chip.label.value == "Sign in with Google"
+    assert chip.label.value == "Sign in with Gemini"
     service._mark(True)
     chip = sheet._route_controls(info)[0].controls[0]
-    assert chip.label.value == "Google ✓"
+    assert chip.label.value == "Gemini ✓"
     gs._current = None
     assert sheet._route_controls(info)[0].controls[0].key != "route-login-google"
+
+
+# ---------------------------------------------------------------- Welcome and the switch-sign-in menu
+
+def test_gemini_recommends_its_everyday_model():
+    from glossarion_mobile.services import model_catalog as mc
+
+    models = ["authgem/auto", "authgem/gemini-4-hydrogen", "authgem/gemini-4-neon", "authgem-vertex/gemini-2.5-pro"]
+    assert mc.recommended_model("google", models) == "authgem/gemini-4-hydrogen"
+    assert mc.recommended_model("google", ["authgem/auto", "authgem-vertex/x"]) == "authgem/auto"
+    assert mc.recommended_model("google", ["authgem-vertex/x"]) is None
+    assert mc.LOGIN_TITLES["google"] == "Gemini"
+
+
+def test_welcome_lists_gemini_next_to_vertex():
+    from glossarion_mobile.ui.screens import welcome
+
+    providers = [p for p, _label in welcome.SIGN_INS]
+    assert providers.index("google") + 1 == providers.index("authgem")
+    assert dict(welcome.SIGN_INS)["google"] == "Sign in with Gemini"
+    assert dict(welcome.SIGN_INS)["authgem"] == "Sign in with Vertex (Pay as you go)"
+    assert welcome.PROVIDER_MODEL_QUERY["google"] == "authgem/"
+
+
+def test_welcome_gemini_cell_signs_in_and_reports(phone):
+    pytest.importorskip("flet")
+    from glossarion_mobile.ui.screens.welcome import WelcomeScreen
+
+    fake, _bridge, dispatcher, service = phone
+    gs._current = service
+    screen = WelcomeScreen.__new__(WelcomeScreen)
+    screen.signing_in, screen.provider_status, screen.model_notes = set(), {}, {}
+    seen = []
+    screen.render = lambda: None
+    screen._provider_signed_in = lambda provider, status: seen.append(provider)
+    cell = screen._sign_in_control("google", "Sign in with Gemini")
+    assert cell.controls[0].key == "welcome-signin-google"
+    fake.sign_in_cookies = {"__Secure-1PSID": "psid"}
+    dispatcher.run(screen._gemini_sign_in())
+    assert seen == ["google"] and service.has_session()
+    gs._current = None
+    assert screen._sign_in_control("google", "Sign in with Gemini").controls[1].reason == "Needs the in-app sign-in"
+
+
+def test_switch_sign_in_menu_offers_gemini(phone):
+    pytest.importorskip("flet")
+    from glossarion_mobile.ui.sheets.model_sheet import ModelSheet, SheetEnv
+
+    _fake, _bridge, _dispatcher, service = phone
+    gs._current = service
+    sheet = ModelSheet(env=SheetEnv(), current_model="authgem/gemini-4-neon")
+    item = sheet._gemini_item(["authgem/auto", "authgem/gemini-4-hydrogen"])
+    assert item.label == "Gemini · Sign in" and item.key == "auth-menu-google"
+    service._mark(True)
+    assert sheet._gemini_item(["authgem/gemini-4-hydrogen"]).label == "Gemini ✓ · authgem/gemini-4-hydrogen"

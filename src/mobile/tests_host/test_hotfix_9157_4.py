@@ -106,7 +106,7 @@ def test_deepseek_tap_without_a_marker_opens_the_sheet_at_once_and_spins(welcome
         keys = _keys(welcome.page_area.content)
         assert "welcome-signin-authds" not in keys and _state(keys["welcome-use-authds"]) == "done"
         cell = next(c for c in keys["welcome-sign-ins"].controls if c.content.key == "welcome-signed-authds")
-        assert cell.col == {"xs": 6}
+        assert cell.col == {"xs": 4}  # its grid cell (a third since Gemini joined the sign-ins)
 
     asyncio.run(scenario())
 

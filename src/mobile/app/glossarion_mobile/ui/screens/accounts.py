@@ -967,7 +967,7 @@ class AccountsScreen(Screen):
 
         service = google_signin.current()
         if service is None:
-            return unavailable_tile("Google (authgem/)", reason="Needs the in-app sign-in",
+            return unavailable_tile("Gemini subscription (authgem/)", reason="Needs the in-app sign-in",
                                     detail=google_signin.UNAVAILABLE, subtitle="authgem/gemini-4-neon · authgem/auto",
                                     dense=False, key="account-google")
         signed = service.has_session()
@@ -984,10 +984,11 @@ class AccountsScreen(Screen):
         return ft.Container(
             content=ft.Column([
                 ft.Row([ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED),
-                        ft.Text("Google (authgem/)", theme_style=ft.TextThemeStyle.TITLE_SMALL, expand=True)],
+                        ft.Text("Gemini subscription (authgem/)", theme_style=ft.TextThemeStyle.TITLE_SMALL,
+                                expand=True)],
                        spacing=8),
-                ft.Text("Your Google account's Gemini app (its own usage limits), no API key. Each request's chat "
-                        "is deleted from your Gemini history afterwards.",
+                ft.Text("Your Google account's Gemini app and its subscription limits, no API key (Vertex below "
+                        "is pay as you go). Each request's chat is deleted from your Gemini history afterwards.",
                         theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
                 self.google_status,
                 ft.Row(buttons, wrap=True, spacing=8),
@@ -1015,11 +1016,11 @@ class AccountsScreen(Screen):
         try:
             signed = await service.sign_in()
         except Exception as exc:
-            self._say(f"Google sign-in: {exc}")
+            self._say(f"Gemini sign-in: {exc}")
             return False
         self._set_google_status(service.has_session())
         if not signed:
-            self._say("Google sign-in cancelled")
+            self._say("Gemini sign-in cancelled")
         return signed
 
     async def google_sign_out(self) -> None:
@@ -1031,7 +1032,7 @@ class AccountsScreen(Screen):
         try:
             await service.sign_out()
         except Exception as exc:
-            self._say(f"Google sign-out: {exc}")
+            self._say(f"Gemini sign-out: {exc}")
             return
         self._set_google_status(False)
 

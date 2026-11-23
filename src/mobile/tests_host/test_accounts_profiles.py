@@ -940,9 +940,10 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     chosen: list = []
     polled: list = []
 
-    class Catalog:
-        snapshot = types.SimpleNamespace(models=("authgem/gemini-3.5-flash", "authgem/gemini-3.5-pro",
-                                                 "authgem/gemini-3-flash-preview", "authgpt/gpt-5.6-luna"))
+    class Catalog:  # authgem: the Vertex sign-in (authgem-vertex/); authgem/ is the Gemini subscription
+        snapshot = types.SimpleNamespace(models=("authgem-vertex/gemini-3.5-flash", "authgem-vertex/gemini-3.5-pro",
+                                                 "authgem-vertex/gemini-3-flash-preview", "authgem/gemini-4-neon",
+                                                 "authgpt/gpt-5.6-luna"))
 
         async def refresh(self, provider, explicit=True):
             polled.append(provider)
@@ -964,8 +965,8 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     screen.go("sign_in")
     screen.provider_status["authgem"] = {"email": "gem@example.com"}
     screen.flow.signed_in = True
-    assert asyncio.run(screen.check_model("authgem")) == "authgem/gemini-3.5-flash"
-    assert polled == ["authgem"] and chosen == ["authgem/gemini-3.5-flash"] and queries == []
+    assert asyncio.run(screen.check_model("authgem")) == "authgem-vertex/gemini-3.5-flash"
+    assert polled == ["authgem"] and chosen == ["authgem-vertex/gemini-3.5-flash"] and queries == []
     rows = {getattr(c, "key", None): c for c in _welcome_controls(screen.page_area.content)}
     signed = rows["welcome-signed-authgem"]
     texts = [getattr(c, "value", "") for c in signed.controls]
@@ -974,10 +975,10 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     use = rows["welcome-use-authgem"]
     assert "change model" in use.tooltip and "gem@example.com" in use.tooltip
     use.on_click(None)
-    assert queries == ["authgem"]
+    assert queries == ["authgem-vertex"]
     # the ModelSheet's pick (the global model, ChatView.open_model_sheet(global_scope=True)) comes back to that row
-    screen.model_chosen("authgem/gemini-3.5-pro")
-    assert screen.model_notes["authgem"] == "✓ Using authgem/gemini-3.5-pro" and screen.changing_provider is None
+    screen.model_chosen("authgem-vertex/gemini-3.5-pro")
+    assert screen.model_notes["authgem"] == "✓ Using authgem-vertex/gemini-3.5-pro" and screen.changing_provider is None
     # ChatGPT: the default GPT-6 Luna is gone from the catalog -> the newest Luna, said so
     assert asyncio.run(screen.check_model("authgpt")) == "authgpt/gpt-5.6-luna"
     assert "no longer offered" in screen.model_notes["authgpt"]
@@ -985,8 +986,9 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     bare = WelcomeScreen(parse_route("/welcome"))
     bare.get_body()
     controls = _welcome_controls(bare.page_area.content)
+    # DeepSeek and Gemini sign in in the app itself (in-app browser / sign-in page), not through the bridge
     assert not any(str(getattr(c, "key", "")).startswith("welcome-signin") for c in controls
-                   if getattr(c, "key", None) != "welcome-signin-authds")  # DeepSeek: the in-app browser
+                   if getattr(c, "key", None) not in ("welcome-signin-authds", "welcome-signin-google"))
     assert any(getattr(c, "key", None) == "welcome-local" for c in controls)
 
 

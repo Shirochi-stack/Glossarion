@@ -421,7 +421,7 @@ def rank_models(models: Sequence[str], query: str, *, current: str = "", limit: 
 
 _LOGIN_ROUTE = re.compile(r"^(authgpt|authgem-vertex|authgem-key|authgem|authcd|authgrok)(\d{0,4})/", re.IGNORECASE)
 LOGIN_TITLES = {"authgpt": "ChatGPT", "authgem": "Vertex (Pay as you go)", "authcd": "Claude", "authgrok": "Grok",
-                "authnan": "NanoGPT", "authds": "DeepSeek", "google": "Google"}
+                "authnan": "NanoGPT", "authds": "DeepSeek", "google": "Gemini"}
 
 #: The sign-in routes the mobile app offers, in the order it lists them (Welcome, ModelSheet, Model Manager).
 AUTH_ROUTES = ("authgpt", "authgem", "authcd", "authgrok", "authnan")
@@ -480,8 +480,17 @@ def recommended_model(route: str, models: Any) -> Optional[str]:
     the newest, largest Nemotron (:func:`_nemotron_key`: version after "nemotron", total size, Ultra > Super >
     Nano). Preview builds lose ties."""
     route = str(route or "").lower()
-    names = [str(m) for m in (models or ()) if str(m).lower().startswith(route + "/")
-             or re.match(rf"^{re.escape(route)}\d*/", str(m).lower())]
+    if route == "google":  # the Gemini subscription (authgem/): its everyday model, else Auto
+        web = [str(m) for m in (models or ()) if re.match(r"^authgem\d*/", str(m).lower())]
+        for wanted in ("authgem/gemini-4-hydrogen", "authgem/auto"):
+            if any(n.lower() == wanted for n in web):
+                return next(n for n in web if n.lower() == wanted)
+        return web[0] if web else None
+    if route == "authgem":  # the Vertex sign-in (pay as you go): its authgem-vertex/ models, not authgem/
+        names = [str(m) for m in (models or ()) if re.match(r"^authgem-vertex\d*/", str(m).lower())]
+    else:
+        names = [str(m) for m in (models or ()) if str(m).lower().startswith(route + "/")
+                 or re.match(rf"^{re.escape(route)}\d*/", str(m).lower())]
     if route == "authgpt" and any(n.lower() == DEFAULT_AUTH_MODEL for n in names):
         return next(n for n in names if n.lower() == DEFAULT_AUTH_MODEL)
 
