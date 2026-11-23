@@ -1825,9 +1825,10 @@ class _WebStreamLog:
     """Live log of an authgem/ answer in the old authgem/ format: the thinking phase, then the answer line by
     line as it arrives.
 
-    The Gemini app sends no thinking text: while a model thinks it sends a keep-alive frame about once a
-    minute (``{"37": [n]}``) and, just before the answer, a short headline of what it worked on
-    (``{"7": [..., ["Translating Korean to English"]]}``). Those become ``🧠 [authgem] Thinking...`` lines.
+    The Gemini app streams no thinking text: while a model thinks it sends a keep-alive frame about once a
+    minute (``{"37": [n]}``) and a short topic line (``{"7": [..., ["Translating Korean to English"]]}``).
+    Its thought summary (the web app's "Show thinking") comes whole in the first answer frame, before any
+    answer text. Those become the ``🧠 [authgem] Thinking...`` lines.
     ``log_stream`` / ``stream_thinking``: the streaming log toggles (LOG_STREAM_CHUNKS, the batch
     ALLOW_AUTHGPT_BATCH_STREAM_LOGS, STREAM_THINKING_LOGS)."""
 
@@ -1844,6 +1845,7 @@ class _WebStreamLog:
         self.seen = ""
         self.pending = ""
         self.headlines: List[str] = []
+        self.summarized = False
 
     def _show_thinking(self) -> bool:
         return self.log_stream and self.stream_thinking
@@ -1870,6 +1872,18 @@ class _WebStreamLog:
         self._begin_thinking()
         if self._show_thinking():
             self.log(f"    **{text}**")
+
+    def summary(self, text: str) -> None:
+        """The thought summary, logged once, line by line, before the answer."""
+        text = str(text or "").strip()
+        if not text or self.summarized or self.thinking_done:
+            return
+        self.summarized = True
+        self._begin_thinking()
+        if self._show_thinking():
+            for line in text.split("\n"):
+                if line.strip():
+                    self.log(f"    {line.rstrip()}")
 
     def text(self, full: str) -> None:
         if not full.startswith(self.seen):
@@ -1907,6 +1921,17 @@ def _web_stream_log(log) -> _WebStreamLog:
         log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
     return _WebStreamLog(log, log_stream=log_stream, stream_thinking=stream_thinking)
+
+
+def _web_thoughts(inner: Any) -> str:
+    """The thought summary of an answer frame (slot 37 of the candidate: [[step, ...], ...]), or ""."""
+    try:
+        steps = inner[4][0][37][0]
+    except (IndexError, TypeError, KeyError):
+        return ""
+    if not isinstance(steps, list):
+        return ""
+    return "\n\n".join(s.strip() for s in steps if isinstance(s, str) and s.strip())
 
 
 class _WebAnswer:
@@ -1968,6 +1993,8 @@ class _WebAnswer:
                     pass
                 if isinstance(inner, list) and len(inner) > 2:
                     self._status(inner[2])
+                if self.stream_log is not None:
+                    self.stream_log.summary(_web_thoughts(inner))
                 try:
                     text = inner[4][0][1][0]
                 except (IndexError, TypeError):

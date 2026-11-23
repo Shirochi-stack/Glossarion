@@ -29,10 +29,14 @@ def isolation(monkeypatch):
 COMPACT = (",", ":")  # the Gemini app sends compact JSON
 
 
-def answer_frame(text, chat_id="c_f25d9ecb07f4bcdd", model_id="56fdd199312815e2", label="4 Hydrogen"):
-    inner = [None, [chat_id, "r_1"], None, None, [["rc_1", [text], None, None, None, None, None, None,
-                                                  None, None, None, None, None, None, None, None, model_id,
-                                                  None, None, label, True]]]
+def answer_frame(text, chat_id="c_f25d9ecb07f4bcdd", model_id="56fdd199312815e2", label="4 Hydrogen",
+                 thoughts=None):
+    candidate = ["rc_1", [text], None, None, None, None, None, None, None, None, None, None, None, None,
+                 None, None, model_id, None, None, label, True]
+    if thoughts is not None:  # the thought summary rides in slot 37, as the Gemini app sends it
+        candidate += [None] * (38 - len(candidate))
+        candidate[37] = [thoughts, [[thoughts, "", "", ""]]]
+    inner = [None, [chat_id, "r_1"], None, None, [candidate]]
     return json.dumps([["wrb.fr", None, json.dumps(inner, separators=COMPACT)]], separators=COMPACT)
 
 
@@ -104,6 +108,25 @@ def test_thinking_keepalives_and_headline_then_the_answer_line_by_line():
     assert "    **Translating Korean to English**" in seen
     assert any(s.startswith("🧠 [authgem] Thinking complete") for s in seen)
     assert seen[-3:] == ["<p>One.</p>", "<p>Two.</p>", "<p>Three"]
+
+
+def test_thought_summary_is_logged_once_before_the_answer():
+    summary = "**Evaluated prime divisibility**\n\nTested division of 221 by primes up to fifteen."
+    seen = run_log([HEADLINE, answer_frame("", thoughts=[summary]),
+                    answer_frame("<p>Not prime.</p>", thoughts=[summary]),
+                    answer_frame("<p>Not prime.</p><p>13 × 17</p>", thoughts=[summary])])
+    assert seen[:4] == ["🧠 [authgem] Thinking...", "    **Translating Korean to English**",
+                        "    **Evaluated prime divisibility**", "    Tested division of 221 by primes up to fifteen."]
+    assert seen[4].startswith("🧠 [authgem] Thinking complete")
+    assert seen[-2:] == ["<p>Not prime.</p>", "<p>13 × 17</p>"]
+    assert sum("Evaluated prime divisibility" in s for s in seen) == 1
+
+
+def test_thought_summary_steps_and_the_thinking_toggle():
+    seen = run_log([answer_frame("", thoughts=["**One**", "**Two**"]), answer_frame("<p>A</p>")])
+    assert seen[:3] == ["🧠 [authgem] Thinking...", "    **One**", "    **Two**"]
+    off = run_log([answer_frame("", thoughts=["**One**"]), answer_frame("<p>A</p>")], stream_thinking=False)
+    assert off == ["<p>A</p>"]
 
 
 def test_thinking_toggle_off_keeps_the_answer_lines():
