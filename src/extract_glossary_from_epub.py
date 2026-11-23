@@ -8512,6 +8512,39 @@ def seed_glossary_with_minimal_pass(
     return merged
 
 
+def _apply_gemini_thinking_env(config):
+    """Use Gemini thinking settings exactly as saved in Other Settings / config.
+
+    An unsaved switch is the settings schema's default (on), which is what Settings shows: Glossarion
+    Mobile writes only changed settings, so a profile that never touched the switch has no key."""
+    enable_thinking = bool(config.get("enable_gemini_thinking", True))
+    model_name = (os.getenv("MODEL") or config.get("model", "") or "").lower()
+    is_gemini_flash = "gemini-3" in model_name and "flash" in model_name
+    is_gemini_pro = "gemini-3" in model_name and "pro" in model_name
+
+    if enable_thinking:
+        os.environ["ENABLE_GEMINI_THINKING"] = "1"
+        thinking_level = config.get("thinking_level")
+        if thinking_level is not None:
+            os.environ["GEMINI_THINKING_LEVEL"] = str(thinking_level)
+        if "thinking_budget_tokens" in config or "thinking_budget" in config:
+            budget_val = config.get("thinking_budget_tokens", config.get("thinking_budget"))
+            try:
+                os.environ["THINKING_BUDGET"] = str(int(budget_val))
+            except Exception:
+                pass
+    else:
+        # Explicitly disable and set fallback level per TransateKRtoEN behavior
+        os.environ["ENABLE_GEMINI_THINKING"] = "0"
+        if is_gemini_flash:
+            os.environ["GEMINI_THINKING_LEVEL"] = "minimal"
+        elif is_gemini_pro:
+            os.environ["GEMINI_THINKING_LEVEL"] = "low"
+        else:
+            os.environ.pop("GEMINI_THINKING_LEVEL", None)
+        os.environ.pop("THINKING_BUDGET", None)
+
+
 def main(log_callback=None, stop_callback=None):
     # Declare global variables at the very start of the function
     global _skipped_chapters
@@ -8696,34 +8729,8 @@ def main(log_callback=None, stop_callback=None):
     if os.getenv("MAX_RETRY_TOKENS") is None:
         os.environ["MAX_RETRY_TOKENS"] = str(config.get("max_retry_tokens", -1))
 
-    # Use Gemini thinking settings exactly as saved in Other Settings / config
-    enable_thinking = bool(config.get("enable_gemini_thinking", False))
-    model_name = (os.getenv("MODEL") or config.get("model", "") or "").lower()
-    is_gemini_flash = "gemini-3" in model_name and "flash" in model_name
-    is_gemini_pro = "gemini-3" in model_name and "pro" in model_name
+    _apply_gemini_thinking_env(config)
 
-    if enable_thinking:
-        os.environ["ENABLE_GEMINI_THINKING"] = "1"
-        thinking_level = config.get("thinking_level")
-        if thinking_level is not None:
-            os.environ["GEMINI_THINKING_LEVEL"] = str(thinking_level)
-        if "thinking_budget_tokens" in config or "thinking_budget" in config:
-            budget_val = config.get("thinking_budget_tokens", config.get("thinking_budget"))
-            try:
-                os.environ["THINKING_BUDGET"] = str(int(budget_val))
-            except Exception:
-                pass
-    else:
-        # Explicitly disable and set fallback level per TransateKRtoEN behavior
-        os.environ["ENABLE_GEMINI_THINKING"] = "0"
-        if is_gemini_flash:
-            os.environ["GEMINI_THINKING_LEVEL"] = "minimal"
-        elif is_gemini_pro:
-            os.environ["GEMINI_THINKING_LEVEL"] = "low"
-        else:
-            os.environ.pop("GEMINI_THINKING_LEVEL", None)
-        os.environ.pop("THINKING_BUDGET", None)
-    
     # Skip thinking / lightweight thinking for title & metadata
     # (env vars may not be set if glossary runs in-process before user opens settings)
     if os.getenv('SKIP_BOOK_TITLE_THINKING') is None:
