@@ -355,6 +355,20 @@ def test_the_model_asked_for_logs_no_swap():
     assert reader.text == "ok" and not any("swapped" in s for s in seen)
 
 
+@pytest.mark.parametrize("config, expected", [
+    ({}, "high"),  # nothing saved (Glossarion Mobile writes only changed settings): Settings shows on · high
+    ({"thinking_level": "medium"}, "medium"),
+    ({"enable_gemini_thinking": True, "thinking_level": "high", "thinking_budget": -1}, "high"),
+    ({"enable_gemini_thinking": False, "thinking_level": "high"}, "low"),  # switched off: the app's lightest
+])
+def test_the_glossary_step_keeps_the_saved_or_default_thinking_level(monkeypatch, config, expected):
+    import extract_glossary_from_epub as glossary
+    for name in ("ENABLE_GEMINI_THINKING", "THINKING_BUDGET", "GEMINI_THINKING_LEVEL", "MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    glossary._apply_gemini_thinking_env(dict(config, model="authgem/gemini-4-hydrogen"))
+    assert auth.web_thinking_level() == expected
+
+
 def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
     scripted = ScriptedPage(chunks=[answer_frame("ok")])
     page = web_page(scripted)
