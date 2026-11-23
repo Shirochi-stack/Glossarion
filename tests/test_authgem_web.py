@@ -260,7 +260,8 @@ def fake_app(monkeypatch):
         yield page
 
     def generate(pg, prompt, images, model_id, timeout, log, thinking="high", expect=""):
-        state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images, "thinking": thinking})
+        state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images, "thinking": thinking,
+                              "expect": expect})
         reader = auth._WebAnswer()
         for frame in state["frames"]:
             reader.feed(frame + "\n")
@@ -317,30 +318,26 @@ def test_the_request_line_says_whether_the_model_thinks(monkeypatch, fake_app, m
     assert seen[0] == line
 
 
-def test_a_swapped_model_stops_on_its_first_frame_with_a_log_line():
+SWAP_LINE = ("⚠️ AuthGem: the Gemini app swapped 4 Carbon for 3.5 Flash-Lite (this Google account cannot "
+             "use 4 Carbon right now); the answer comes from 3.5 Flash-Lite")
+
+
+def test_a_swapped_model_is_logged_once_on_its_first_frame_and_its_answer_kept():
     seen = []
     log = auth._WebStreamLog(seen.append, log_stream=True, stream_thinking=True)
     reader = auth._WebAnswer(log, expect="4 Carbon", log=seen.append)
-    with pytest.raises(auth.GeminiWebError) as caught:
-        reader.feed(answer_frame("type,raw_name", label="3.5 Flash-Lite", chat_id="c_swap") + "\n")
-    assert caught.value.kind == "model_unavailable" and "3.5 Flash-Lite instead of 4 Carbon" in str(caught.value)
-    assert seen == ["⚠️ AuthGem: the Gemini app swapped 4 Carbon for 3.5 Flash-Lite; "
-                    "stopping the request (its answer is not used)"]  # none of the swapped answer is logged
-    assert reader.chat_id == "c_swap"
+    reader.feed(answer_frame("<p>A</p>", label="3.5 Flash-Lite") + "\n")
+    reader.feed(answer_frame("<p>A</p><p>B</p>", label="3.5 Flash-Lite") + "\n")
+    reader.close()
+    assert seen == [SWAP_LINE, "<p>A</p>", "<p>B</p>"]
+    assert reader.text == "<p>A</p><p>B</p>" and reader.served == "3.5 Flash-Lite"
 
 
-def test_the_swapped_request_is_aborted_in_the_page_and_its_chat_deleted(monkeypatch):
-    deleted = []
-    monkeypatch.setattr(auth, "_delete_web_chat", lambda pg, chat_id: deleted.append(chat_id))
-    scripted = ScriptedPage(chunks=[answer_frame("a", label="3.5 Flash-Lite", chat_id="c_swap") + "\n",
-                                    answer_frame("ab", label="3.5 Flash-Lite", chat_id="c_swap") + "\n"])
-    page = web_page(scripted)
-    with pytest.raises(auth.GeminiWebError):
-        auth._web_generate(page, "hi", [], "95a4c0abcba24364", 60, lambda m: None, "high", expect="4 Carbon")
-    assert deleted == ["c_swap"] and scripted.aborted
+def test_the_model_asked_for_logs_no_swap():
+    seen = []
     reader = auth._web_generate(web_page(ScriptedPage(chunks=[answer_frame("ok", label="4 Carbon")])),
-                                "hi", [], "95a4c0abcba24364", 60, lambda m: None, "high", expect="4 Carbon")
-    assert reader.text == "ok"
+                                "hi", [], "95a4c0abcba24364", 60, seen.append, "high", expect="4 Carbon")
+    assert reader.text == "ok" and not any("swapped" in s for s in seen)
 
 
 def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
@@ -355,11 +352,14 @@ def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
         assert len(inner) == 81 and inner[80] == code
 
 
-def test_a_model_the_plan_lacks_is_refused_not_swapped(fake_app):
-    fake_app["frames"] = [answer_frame("Hi!", label="4 Hydrogen")]
-    with pytest.raises(auth.GeminiWebError) as caught:
-        auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model="gemini-4-carbon")
-    assert caught.value.kind == "model_unavailable" and "4 Carbon" in str(caught.value)
+def test_a_swapped_answer_is_returned_under_the_model_that_wrote_it(fake_app):
+    fake_app["frames"] = [answer_frame("Hi!", label="3.5 Flash-Lite")]
+    seen = []
+    reply = auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model="gemini-4-carbon",
+                                          log_fn=seen.append)
+    assert reply["content"] == "Hi!" and reply["model"] == "3.5 Flash-Lite"
+    assert fake_app["sent"][0]["expect"] == "4 Carbon"
+    assert seen[-1].startswith("📡 AuthGem: 3.5 Flash-Lite answered")
 
 
 def test_auto_accepts_whatever_model_answered(fake_app):

@@ -1450,7 +1450,7 @@ _SERVED_MODEL_RE = re.compile(r'"([0-9a-f]{16})",null,null,"([^"]{1,40})",(?:tru
 
 class GeminiWebError(RuntimeError):
     """An authgem/ request failed. ``kind``: auth_error (no / ended Google session),
-    config_error (bad request), model_unavailable (the account cannot use the model), browser_error
+    config_error (bad request), model_unavailable (no such model), browser_error
     (the Google Login browser is held by another Glossarion), api_error."""
 
     def __init__(self, message: str, kind: str = "api_error") -> None:
@@ -1965,8 +1965,9 @@ class _WebAnswer:
         self.served = ""
         self.codes: List[int] = []
         self.stream_log = stream_log
-        #: The model label asked for ("" = any, for Auto): another one answering stops the request at once.
+        #: The model label asked for ("" = any, for Auto): another one answering is logged on its first frame.
         self.expect = expect
+        self.swap_logged = False
         self.log = log or (lambda *a, **kw: None)
         self._pending = ""
 
@@ -1993,15 +1994,6 @@ class _WebAnswer:
         if isinstance(headline, list) and headline and isinstance(headline[-1], list) and headline[-1]:
             log.headline(headline[-1][0])
 
-    def _chat_id_of(self, raw: str) -> None:
-        """Keep the chat id of a frame that is not parsed further (so the chat can still be deleted)."""
-        try:
-            inner = json.loads(raw)
-            if inner[1] and inner[1][0]:
-                self.chat_id = str(inner[1][0])
-        except (ValueError, IndexError, TypeError, KeyError):
-            pass
-
     def _line(self, line: str) -> None:
         for frame in _web_frames(line):
             for item in frame:
@@ -2012,11 +2004,12 @@ class _WebAnswer:
                     continue
                 for match in _SERVED_MODEL_RE.finditer(item[2]):
                     self.served = match.group(2)
-                if self.expect and self.served and self.served.casefold() != self.expect.casefold():
-                    self._chat_id_of(item[2])
-                    self.log(f"⚠️ AuthGem: the Gemini app swapped {self.expect} for {self.served}; "
-                             "stopping the request (its answer is not used)")
-                    raise GeminiWebError(_swapped_message(self.served, self.expect), "model_unavailable")
+                if (self.expect and self.served and not self.swap_logged
+                        and self.served.casefold() != self.expect.casefold()):
+                    self.swap_logged = True
+                    self.log(f"⚠️ AuthGem: the Gemini app swapped {self.expect} for {self.served} "
+                             f"(this Google account cannot use {self.expect} right now); "
+                             f"the answer comes from {self.served}")
                 try:
                     inner = json.loads(item[2])
                 except ValueError:
@@ -2064,16 +2057,9 @@ def web_thinking_level() -> str:
     return level if level in _GEMINI_WEB_THINKING_CODES else "high"
 
 
-def _swapped_message(served: str, label: str) -> str:
-    return (f"Gemini answered with {served} instead of {label}: this Google account cannot use {label} "
-            f"right now (its Gemini plan does not include it, or its {label} limit is used up). "
-            "Choose another authgem/ model.")
-
-
 def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, thinking: str = "high",
                   expect: str = "") -> _WebAnswer:
-    """One StreamGenerate request. ``expect``: the model label asked for (see ``_WebAnswer``); a swap
-    stops the request, deletes its chat and raises ``model_unavailable``."""
+    """One StreamGenerate request. ``expect``: the model label asked for (see ``_WebAnswer``)."""
     files = [_upload_web_image(page, image, 120) for image in images]
     inner = [[prompt, 0, None, files or None, None, None, 0], ["en"],
              ["", "", "", None, None, None, None, None, None, ""]]
@@ -2083,13 +2069,8 @@ def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, think
     headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
     answer = _WebAnswer(_web_stream_log(_log), expect=expect, log=_log)
     body = urlencode({"at": page.at, "f.req": json.dumps([None, json.dumps(inner)])})
-    try:
-        page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
-                  on_text=answer.feed, timeout=timeout)
-    except GeminiWebError as exc:
-        if exc.kind == "model_unavailable":
-            _delete_web_chat(page, answer.chat_id)
-        raise
+    page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
+              on_text=answer.feed, timeout=timeout)
     answer.close()
     return answer
 
@@ -2105,9 +2086,9 @@ def send_chat_completion_web(
 
     The chat messages become one prompt (``authds_auth.build_prompt``: a ``[role]`` header per
     message when there are several); prompt images are uploaded the way the Gemini app uploads
-    them. The answer streams into the log, is checked against the model asked for (the app
-    silently answers with another model when the account cannot use one) and the chat is deleted
-    afterwards.
+    them. The answer streams into the log; when the app answers with another model than the one asked
+    for (it does that silently when the account cannot use one) the log says so on the first frame.
+    The chat is deleted afterwards.
     """
     import authds_auth
     del connect_timeout  # the page's own connection
@@ -2134,8 +2115,6 @@ def send_chat_completion_web(
         detail = f" (error code {answer.codes[0]})" if answer.codes else ""
         raise RuntimeError(f"The Gemini app sent no answer{detail}.")
     served = answer.served
-    if name != DEFAULT_WEB_MODEL and served and served.casefold() != label.casefold():
-        raise GeminiWebError(_swapped_message(served, label), "model_unavailable")  # backstop
     content = _CITE_MARKER_RE.sub("", answer.text)
     _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
     return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}
