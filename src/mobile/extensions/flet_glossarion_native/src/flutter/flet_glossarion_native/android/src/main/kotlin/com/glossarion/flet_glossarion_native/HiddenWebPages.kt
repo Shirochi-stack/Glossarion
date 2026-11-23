@@ -73,6 +73,7 @@ internal class HiddenWebPages(
         set(value) {
             field = value
             if (value == null) {
+                signIn.dispose()  // its Dialog belongs to the Activity that is going away
                 detachContainer()
             } else {
                 mainHandler.post { if (activity === value) attachContainer() }
@@ -80,6 +81,7 @@ internal class HiddenWebPages(
         }
 
     private val pages = LinkedHashMap<String, Page>()
+    private val signIn = WebSignIn(this)
     private var container: HiddenContainer? = null
     private val capabilityInfo: Map<String, Any?>? by lazy { computeCapability() }
 
@@ -156,13 +158,14 @@ internal class HiddenWebPages(
         }
     }
 
-    fun handles(method: String): Boolean = method in METHODS
+    fun handles(method: String): Boolean = method in METHODS || method in WebSignIn.METHODS
 
     /** get_platform_info()["web_pages"], or null when this phone has no WebView provider. */
     fun capability(): Map<String, Any?>? = capabilityInfo
 
     /** The engine is going away: destroy this instance's pages only. */
     fun dispose() {
+        signIn.dispose()
         reset()
         container = null
     }
@@ -180,6 +183,19 @@ internal class HiddenWebPages(
                 "web_close" -> close(call.argument<String>("page_id"), reply)
                 "web_reset" -> reply.send(ok("closed" to reset()))
                 "web_status" -> reply.send(status())
+                "web_sign_in" -> signIn.signIn(
+                    activity,
+                    call.argument<String>("url"),
+                    call.argument<String>("done_url"),
+                    call.argument<String>("done_cookie"),
+                    call.argument<String>("cookie_url"),
+                    call.argument<String>("user_agent"),
+                    call.argument<String>("title"),
+                ) { answer -> reply.send(answer) }
+                "web_cookies" -> reply.send(signIn.cookies(call.argument<String>("url")))
+                "web_clear_cookies" -> reply.send(
+                    signIn.clearCookies(call.argument<String>("url"), call.argument<String>("domain"))
+                )
                 else -> reply.send(fail(ERR_BAD_ARGS, "unknown in-app browser method"))
             }
         } catch (e: Exception) {
@@ -522,7 +538,10 @@ internal class HiddenWebPages(
             }
             if (missing) return null
         }
-        return hashMapOf<String, Any?>("version" to VERSION, "max_pages" to MAX_PAGES, "provider" to provider)
+        // "sign_in": the WebSignIn methods (web_pages.SIGN_IN_METHODS) are here.
+        return hashMapOf<String, Any?>(
+            "version" to VERSION, "max_pages" to MAX_PAGES, "provider" to provider, "sign_in" to true,
+        )
     }
 
     // ------------------------------------------------------------------- clients

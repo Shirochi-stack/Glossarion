@@ -63,6 +63,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -225,9 +226,15 @@ def suspends_hidden_pages() -> bool:
         return False
 
 
+#: authgem/ (and authgemN/, not authgem-vertex/ / authgem-key/): the Gemini app's requests run in a hidden
+#: gemini.google.com page (``authgem_auth``).
+_AUTHGEM_WEB_ROUTE = re.compile(r"^authgem\d{0,4}/")
+
+
 def uses_browser_route(model: Any) -> bool:
-    """``model`` runs on these hidden pages (authchatgpt/, authnd/, authds/, search/gemini)."""
-    return str(model or "").strip().lower().startswith(BROWSER_ROUTE_PREFIXES)
+    """``model`` runs on these hidden pages (authchatgpt/, authnd/, authds/, search/gemini, authgem/)."""
+    value = str(model or "").strip().lower()
+    return value.startswith(BROWSER_ROUTE_PREFIXES) or _AUTHGEM_WEB_ROUTE.match(value) is not None
 
 
 def job_models(snap: Any) -> list:

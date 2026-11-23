@@ -2200,6 +2200,9 @@ def login(log_fn: Callable[[str], None] = print, cancel_check=None, timeout: int
     target = f"{GOOGLE_SIGN_IN_URL}?{urlencode({'hl': 'en', 'continue': _build_search_base_url()})}"
     with _login_gate:
         with _LEASES.open_interactive(cancel_check) as page:
+            # A session Google ended keeps its cookies: without this the SID check below would pass at
+            # once and "save" the dead session. The profile holds nothing but this Google sign-in.
+            page.call("Network.clearBrowserCookies")
             page.call("Page.navigate", {"url": target})
             log_fn("Gemini Free: Sign in on the Google window that opened. "
                    "Glossarion does not receive your Google password.")
@@ -2229,6 +2232,34 @@ def logout(cancel_check=None) -> None:
     with _login_gate:
         with _LEASES.open(cancel_check=cancel_check, prepare=lambda page: None) as page:
             page.call("Network.clearBrowserCookies")
+
+
+GOOGLE_SIGN_IN_NEEDED = (
+    "authgem/ needs a Google sign-in. Click Google Login next to the model and sign in to the Google "
+    "account whose Gemini plan you want to use.")
+GOOGLE_SESSION_ENDED = "The saved Google session ended. Click Google Login next to the model to sign in again."
+
+
+def mark_session_ended() -> None:
+    """A page found the saved Google session signed out (``authgem/``): show Google Login again."""
+    _mark_session(False)
+
+
+@contextmanager
+def signed_in_tab(url: str, cancel_check=None):
+    """A headless tab of the signed-in profile on ``url`` (``authgem/`` sends the Gemini app's requests
+    from it, so the session cookies never leave the browser that owns them)."""
+    if not has_session():
+        raise AIModeError(GOOGLE_SIGN_IN_NEEDED, KIND_SIGN_IN)
+
+    def prepare(page) -> None:
+        _prepare_google_tab(page)
+        if not _google_signed_in(page):
+            _mark_session(False)
+            raise AIModeError(GOOGLE_SESSION_ENDED, KIND_SIGN_IN)
+
+    with _LEASES.open(cancel_check=cancel_check, prepare=prepare, url=url) as page:
+        yield page
 
 
 def _load_ai_mode_answer_chrome(

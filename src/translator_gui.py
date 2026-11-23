@@ -12280,7 +12280,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 self._update_authds_login_status()
 
         if hasattr(self, 'search_gemini_login_btn'):
-            needs_search_gemini = str(model).lower().startswith('search/gemini')
+            # search/gemini and authgem/ share this Google sign-in (settings_rules).
+            from settings_rules import google_login_needed
+            needs_search_gemini = google_login_needed(model, getattr(self, 'config', None))
             self.search_gemini_login_btn.setVisible(needs_search_gemini)
             if needs_search_gemini:
                 self._update_search_gemini_login_status()
@@ -12336,18 +12338,16 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         # Show/hide AuthGem login button + project dropdown
         if hasattr(self, 'authgem_login_btn'):
-            # GCP project dropdown is ONLY needed for authgem-vertex/ (Vertex AI)
-            # authgem/ uses AI Studio which doesn't require a GCP project
+            # The Gemini OAuth login and its GCP project dropdown serve authgem-vertex/ only;
+            # authgem/ uses the Google Login (search_gemini_login_btn above).
             needs_authgem, needs_vertex = authgem_login_needed(
                 model,
                 vertex_model=lambda: self._authgem_vertex_control_model(),
-                in_key_pools=lambda: self._has_authgem_in_key_pools(),
+                in_key_pools=lambda: self._has_authgem_vertex_in_key_pools(),
             )
 
             if needs_authgem:
                 self.authgem_login_btn.show()
-                if hasattr(self, 'authgem_status_btn'):
-                    self.authgem_status_btn.show()
                 self._update_authgem_login_status(needs_vertex=needs_vertex)
                 # Show project dropdown ONLY for authgem-vertex/ (Vertex AI needs GCP project)
                 if hasattr(self, 'authgem_project_combo'):
@@ -12367,8 +12367,6 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         self.authgem_project_combo.hide()
             else:
                 self.authgem_login_btn.hide()
-                if hasattr(self, 'authgem_status_btn'):
-                    self.authgem_status_btn.hide()
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.hide()
 
@@ -13358,14 +13356,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             )
 
     def _search_gemini_login_clicked(self):
-        """Google Login for search/gemini: sign in to Google in the route's own Chrome/Edge profile
-        (optional; signed in, google.com AI Mode offers its larger models), or log out of it."""
+        """Google Login for search/gemini and authgem/: sign in to Google in Glossarion's own
+        Chrome/Edge profile (search/gemini: optional, AI Mode's larger models; authgem/: required,
+        the Gemini app runs with its cookies), or log out of it."""
         from gemini_free import has_session
         if has_session():
             self._update_search_gemini_login_status()
             reply = QMessageBox.question(
-                self, "Google Account (search/gemini)",
-                "Currently signed in to Google for AI Mode.\n\nDo you want to log out?",
+                self, "Google Account (search/gemini, authgem/)",
+                "Currently signed in to Google for AI Mode and the Gemini app.\n\nDo you want to log out?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply != QMessageBox.Yes:
@@ -13378,6 +13377,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     from gemini_free import logout, reset_cancel
                     reset_cancel()
                     logout()
+                    self._reset_authgem_web_session()
                     self._search_gemini_login_result = "🔓 Gemini Free: Logged out of Google"
                 except Exception as exc:
                     self._search_gemini_login_result = f"🔓 Gemini Free: Logged out locally ({exc})"
@@ -13395,7 +13395,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 from gemini_free import login, reset_cancel
                 reset_cancel()
                 login(log_fn=lambda message: None)
-                self._search_gemini_login_result = "✅ Gemini Free: Google session saved. search/gemini now runs signed in."
+                self._reset_authgem_web_session()
+                self._search_gemini_login_result = ("✅ Gemini Free: Google session saved. search/gemini runs signed in "
+                                                    "and authgem/ uses this account's Gemini app.")
             except Exception as exc:
                 self._search_gemini_login_result = f"❌ Gemini Free: {exc}"
             QMetaObject.invokeMethod(self, "_search_gemini_login_finished", Qt.QueuedConnection)
@@ -13409,21 +13411,32 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.search_gemini_login_btn.setEnabled(True)
         self._update_search_gemini_login_status()
         self.append_log(self._search_gemini_login_result or "Gemini Free: Google login finished.")
-        # the account decides which AI Mode models there are: read the model menu again
+        # the account decides which models there are: read the model menu again
         try:
-            self._start_provider_model_catalog_refresh(only_provider='search-gemini', automatic=True)
+            provider = 'authgem' if str(self.model_var).lower().startswith('authgem') else 'search-gemini'
+            self._start_provider_model_catalog_refresh(only_provider=provider, automatic=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _reset_authgem_web_session():
+        """authgem/ reads the Google cookies again on its next request (after a login or logout)."""
+        try:
+            import authgem_auth
+            authgem_auth.reset_web_session()
         except Exception:
             pass
 
     def _update_search_gemini_login_status(self):
-        """Show the saved Google session of search/gemini on its login button, like DeepSeek's."""
+        """Show the saved Google session of search/gemini and authgem/ on its login button."""
         from gemini_free import has_session
         if has_session():
             self.search_gemini_login_btn.setText("✅ Google")
             self.search_gemini_login_btn.setToolTip(
                 "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
                 "Signed in to Google in Glossarion's own Chrome/Edge profile: search/gemini runs "
-                "google.com AI Mode with your account's models. Click to log out.</p></qt>"
+                "google.com AI Mode with your account's models, and authgem/ uses your account's "
+                "Gemini app (its own usage limits). Click to log out.</p></qt>"
             )
             self.search_gemini_login_btn.setStyleSheet(
                 "background-color: #28a745; color: white; font-weight: bold; "
@@ -13433,9 +13446,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self.search_gemini_login_btn.setText("🔐 Google Login")
             self.search_gemini_login_btn.setToolTip(
                 "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-                "Optional. search/gemini works signed out with AI Mode's small model. Sign in on "
-                "Google's own page in a dedicated Chrome/Edge profile to use your account's AI Mode "
-                "models (search/gemini-4-carbon, ...). No API key needed. Desktop only.</p></qt>"
+                "Sign in on Google's own page in a dedicated Chrome/Edge profile. authgem/ needs it: "
+                "it runs your account's Gemini app (authgem/gemini-4-neon, ...). For search/gemini it "
+                "is optional: signed out, AI Mode has one small model. No API key needed.</p></qt>"
             )
             self.search_gemini_login_btn.setStyleSheet(
                 "background-color: #4385f4; color: white; font-weight: bold; "
@@ -13756,8 +13769,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
-                # Populate projects ONLY for authgem-vertex/ (Vertex AI needs GCP project)
-                # authgem/ uses AI Studio which doesn't require a GCP project
+                # Populate projects for authgem-vertex/ (Vertex AI needs a GCP project)
                 if hasattr(self, 'authgem_project_combo'):
                     if needs_vertex:
                         if self.authgem_project_combo.count() == 0:
@@ -14026,100 +14038,6 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         err = getattr(self, '_authgem_login_error', 'Unknown error')
         self.append_log(f"❌ Gemini login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"Gemini login failed:\n{err}")
-
-    # ==================================================================
-    # AuthGem Status — check quota / verification
-    # ==================================================================
-
-    def _authgem_status_clicked(self):
-        """Handle Status button click — check quota & verification in background."""
-        try:
-            store = self._get_authgem_store_for_current_model()
-        except ImportError:
-            self.append_log("❌ AuthGem module is not installed.")
-            return
-
-        if not store.has_tokens:
-            self.append_log("⚠️ Not logged in — click the 🔐 Gemini Login button first.")
-            return
-
-        # Disable while checking
-        self.authgem_status_btn.setEnabled(False)
-        self.authgem_status_btn.setText("⏳")
-        account_id = self._get_authgem_account_id()
-        acct_suffix = f" #{account_id}" if account_id else ""
-        self.append_log(f"📊 Gemini{acct_suffix}: Checking account status…")
-
-        def _worker():
-            try:
-                token = store.get_valid_access_token(auto_login=False)
-                from authgem_auth import check_account_status
-                status = check_account_status(token, account_id)
-                self._authgem_status_data = status
-                QMetaObject.invokeMethod(
-                    self, "_authgem_status_result",
-                    Qt.QueuedConnection,
-                )
-            except Exception as exc:
-                self._authgem_status_error_msg = str(exc)
-                QMetaObject.invokeMethod(
-                    self, "_authgem_status_error",
-                    Qt.QueuedConnection,
-                )
-
-        import threading
-        threading.Thread(target=_worker, daemon=True).start()
-
-    @Slot()
-    def _authgem_status_result(self):
-        """Display status check results in the log panel."""
-        self.authgem_status_btn.setEnabled(True)
-        self.authgem_status_btn.setText("📊")
-
-        status = getattr(self, '_authgem_status_data', {})
-        account_id = self._get_authgem_account_id()
-        acct_suffix = f" #{account_id}" if account_id else ""
-
-        if status.get("error"):
-            self.append_log(f"❌ Gemini{acct_suffix} status: {status['error']}")
-            return
-
-        # If verification is needed, open the URL
-        if not status.get("verified", True):
-            v_url = status.get("verification_url", "")
-            v_msg = status.get("verification_message", "Account verification required")
-            self.append_log(f"⚠️ Gemini{acct_suffix}: {v_msg}")
-            if v_url:
-                self.append_log(f"🔗 Opening verification page…")
-                import webbrowser
-                webbrowser.open(v_url)
-            self.append_log(f"💡 After completing verification, click 📊 again to confirm.")
-            return
-
-        # Log summary
-        self.append_log(f"✅ Gemini{acct_suffix}: Account verified")
-        self.append_log(f"📊 Gemini{acct_suffix}: {status.get('sub_label', '')} | Credits: {status.get('credit_label', '')}")
-        if status.get("project"):
-            self.append_log(f"   Project: {status['project']}")
-
-        quota_lines = status.get("quota_lines", [])
-        if quota_lines:
-            if status.get("quota_exhausted"):
-                self.append_log("⚠️ Daily Quota: EXHAUSTED")
-            else:
-                self.append_log("📊 Daily Quota:")
-            for ql in quota_lines:
-                self.append_log(ql)
-        else:
-            self.append_log("   No quota data available")
-
-    @Slot()
-    def _authgem_status_error(self):
-        """Display status check error in the log panel."""
-        self.authgem_status_btn.setEnabled(True)
-        self.authgem_status_btn.setText("📊")
-        err = getattr(self, '_authgem_status_error_msg', 'Unknown error')
-        self.append_log(f"❌ Gemini status check failed: {err}")
 
     # ==================================================================
     # OpenCode Antigravity account controls
@@ -16648,23 +16566,6 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.authgem_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgem', idx))
         self.authgem_acct_combo.hide()
         model_btn_layout.addWidget(self.authgem_acct_combo)
-        
-        # AuthGem Status button — check quota / verify account (next to login)
-        self.authgem_status_btn = QPushButton("📊")
-        self.authgem_status_btn.setFixedWidth(36)
-        self.authgem_status_btn.setStyleSheet(
-            "background-color: #344c68; color: white; font-weight: bold; "
-            "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
-            "border: 1px solid #4385f4;"
-        )
-        self.authgem_status_btn.setToolTip(
-            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "Check your Gemini quota and account verification status.<br>"
-            "If your account needs verification, opens the verification page.</p></qt>"
-        )
-        self.authgem_status_btn.clicked.connect(self._authgem_status_clicked)
-        self.authgem_status_btn.hide()
-        model_btn_layout.addWidget(self.authgem_status_btn)
         
         # AuthGem GCP Project dropdown (visible after login, managed separately)
         self.authgem_project_combo = QComboBox()

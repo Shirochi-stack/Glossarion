@@ -754,22 +754,15 @@ def test_signed_in_authgpt_numbered_account_polls_codex_manifest(tmp_path, monke
     ]
 
 
-def test_authgem_poll_uses_selected_account_quota_catalog(tmp_path, monkeypatch):
+def test_authgem_poll_reads_the_gemini_app_picker(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
     fetch_calls = []
 
-    class FakeStore:
-        has_tokens = True
-
-        def get_valid_access_token(self, auto_login=True):
-            assert auto_login is False
-            return "google-oauth"
-
     fake_authgem = types.SimpleNamespace(
-        get_store=lambda account_id: FakeStore(),
-        fetch_available_models=lambda token, timeout, account_id: (
-            fetch_calls.append((token, timeout, account_id))
-            or ["gemini-account-live"]
+        has_web_session=lambda: True,
+        get_store=lambda account_id: pytest.fail("authgem/ polled with the OAuth store"),
+        fetch_web_models=lambda timeout: (
+            fetch_calls.append(timeout) or ["auto", "gemini-4-neon"]
         ),
     )
     monkeypatch.setitem(sys.modules, "authgem_auth", fake_authgem)
@@ -780,9 +773,9 @@ def test_authgem_poll_uses_selected_account_quota_catalog(tmp_path, monkeypatch)
         timeout=0.1,
     )
 
-    assert fetch_calls == [("google-oauth", 1, 7)]
+    assert fetch_calls == [1]
     assert result.provider_models["authgem:7"] == [
-        "authgem7/gemini-account-live",
+        "authgem7/auto", "authgem7/gemini-4-neon",
     ]
 
 

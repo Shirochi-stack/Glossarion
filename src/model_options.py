@@ -390,6 +390,9 @@ def _get_static_model_options() -> List[str]:
         "sam/Llama-4-Maverick-17B-128E-Instruct", "sam/Meta-Llama-3.3-70B-Instruct",
         "sam/MiniMax-M2.5",
 
+        # AuthGem – the Gemini app (gemini.google.com) with the Google Login's session cookies
+        "authgem/auto", "authgem/gemini-4-hydrogen", "authgem/gemini-4-neon", "authgem/gemini-4-carbon",
+
         # AuthGem – Gemini-cli via Google OAuth (Uses Vertex AI)
         "authgem-vertex/gemini-2.5-flash", "authgem-vertex/gemini-2.5-flash-lite",
         "authgem-vertex/gemini-2.5-pro",
@@ -1494,6 +1497,10 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
         # NVIDIA's advertised model list is public; WebEngine/hCaptcha is only
         # needed when the user actually sends a request.
         return True
+    if route == "authgem":
+        # The Gemini app's own picker, read with the Google Login's cookies.
+        import authgem_auth
+        return authgem_auth.has_web_session()
     module_name = {
         "authnan": "authnan_auth",
         "authgpt": "authgpt_auth",
@@ -1542,12 +1549,15 @@ def _fetch_authenticated_catalog(
             account_id=account_id,
             timeout=max(1, int(round(timeout))),
         )
+    elif route == "authgem":
+        import authgem_auth
+
+        raw_models = authgem_auth.fetch_web_models(timeout=max(1, int(round(timeout))))
     else:
         module_name = {
             "authnan": "authnan_auth",
             "authgpt": "authgpt_auth",
             "authcd": "authcd_auth",
-            "authgem": "authgem_auth",
             "authgem-vertex": "authgem_auth",
         }[route]
         module = __import__(module_name)
@@ -1559,7 +1569,7 @@ def _fetch_authenticated_catalog(
             store = pool[0][1]
         access_token = store.get_valid_access_token(auto_login=False)
         kwargs = {"timeout": max(1, int(round(timeout)))}
-        if route in ("authgem", "authgem-vertex"):
+        if route == "authgem-vertex":
             kwargs["account_id"] = account_id
         fetch_models = module.fetch_vertex_models if route == "authgem-vertex" else module.fetch_available_models
         raw_models = fetch_models(access_token, **kwargs)

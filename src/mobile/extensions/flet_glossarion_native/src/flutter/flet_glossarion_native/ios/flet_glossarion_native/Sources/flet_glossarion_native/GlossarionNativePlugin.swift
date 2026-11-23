@@ -106,7 +106,7 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
       documents.handle(call.method, args, result: result)
       return
     }
-    if HiddenWebPages.methods.contains(call.method) {
+    if HiddenWebPages.methods.contains(call.method) || WebSignIn.methods.contains(call.method) {
       webPages.handle(call.method, args, result: result)
       return
     }

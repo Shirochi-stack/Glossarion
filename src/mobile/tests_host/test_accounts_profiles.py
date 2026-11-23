@@ -484,9 +484,8 @@ def test_gemini_projects_status_and_project_cache(fake_auth):
     assert bridge.gemini_projects(0) == [("p-billed", "billed"), ("p-unknown", "unknown"), ("p-unbilled", "unbilled")]
     bridge.set_gemini_project("p-billed", 2)
     assert gem._cached_project_id[2] == "p-billed" and gem._project_set_by_gui[2] is True
-    assert bridge.gemini_status(0)["sub_label"] == "Pro"
-    with pytest.raises(RuntimeError, match="Not logged in"):
-        bridge.gemini_status(4)
+    # the Code Assist status (📊) went with authgem/'s OAuth route (Google retired it, Nov 2026)
+    assert not hasattr(bridge, "gemini_status")
 
 
 # ==========================================================================
@@ -730,8 +729,9 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
     body = screen.get_body()
     keys = [getattr(c, "key", None) for c in body.controls]
     # U12 item 1: the routes that cannot work on mobile are not listed
+    # U13; account-google: authgem/'s Google sign-in (the Gemini app, Nov 2026)
     assert keys == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem", "account-authnan",
-                    "account-authds", "account-antigravity", "account-zai", "accounts-experimental"]  # U13
+                    "account-authds", "account-google", "account-antigravity", "account-zai", "accounts-experimental"]
     assert body.controls[-1].title == f"Experimental ({len(EXPERIMENTAL_ACCOUNTS)})"
     fake_auth.modules["authgem"].get_store(2).save_tokens({"access_token": "g", "email": "gem@example.com",
                                                           "expires_at": time.time() + 3 * 3600 + 60})
@@ -742,7 +742,7 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
     assert isinstance(row.trailing, ft.IconButton)
     assert screen.slot_rows[("authgem", 0)].trailing.content == "Sign in"
     actions = screen.slot_actions("authgem", 2)
-    assert [item.label for item in actions.items] == ["Re-login", "📊 Status", "Log out"]
+    assert [item.label for item in actions.items] == ["Re-login", "Log out"]
     dialog = screen.confirm_sign_out("authgem", 2)
     assert "Currently logged in as: gem@example.com #2" in dialog.title + dialog.dialog.content.content.controls[0].value
     # + Add account takes the next free slot and opens its LoginSheet
@@ -757,12 +757,6 @@ def test_accounts_screen_cards_slots_actions_and_project_picker(fake_auth):
     assert screen.project_note.value == "Found 1 GCP project(s) with billing enabled"
     assert screen.select_project("p1") == "p1" and writes[-1] == {"authgem_project": "p1"}
     assert fake_auth.modules["authgem"]._cached_project_id[2] == "p1"
-    status_sheet = _run(screen.show_gemini_status(2))
-    assert "✅ Gemini #2: Account verified" in status_sheet.body and "gemini-pro: 10%" in status_sheet.body
-    fake_auth.modules["authgem"].status_result = {"verified": False, "verification_url": "https://verify.example",
-                                                  "verification_message": "Verify your account"}
-    status_sheet = _run(screen.show_gemini_status(2))
-    assert "⚠️ Gemini #2: Verify your account" in status_sheet.body
     # sign out through the screen
     assert _run(screen.sign_out("authgem", 2)) and signed == [False]
     assert screen.slot_rows[("authgem", 2)].subtitle.value == "Not signed in"
@@ -946,9 +940,10 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     chosen: list = []
     polled: list = []
 
-    class Catalog:
-        snapshot = types.SimpleNamespace(models=("authgem/gemini-3.5-flash", "authgem/gemini-3.5-pro",
-                                                 "authgem/gemini-3-flash-preview", "authgpt/gpt-5.6-luna"))
+    class Catalog:  # authgem: the Vertex sign-in (authgem-vertex/); authgem/ is the Gemini subscription
+        snapshot = types.SimpleNamespace(models=("authgem-vertex/gemini-3.5-flash", "authgem-vertex/gemini-3.5-pro",
+                                                 "authgem-vertex/gemini-3-flash-preview", "authgem/gemini-4-neon",
+                                                 "authgpt/gpt-5.6-luna"))
 
         async def refresh(self, provider, explicit=True):
             polled.append(provider)
@@ -970,8 +965,8 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     screen.go("sign_in")
     screen.provider_status["authgem"] = {"email": "gem@example.com"}
     screen.flow.signed_in = True
-    assert asyncio.run(screen.check_model("authgem")) == "authgem/gemini-3.5-flash"
-    assert polled == ["authgem"] and chosen == ["authgem/gemini-3.5-flash"] and queries == []
+    assert asyncio.run(screen.check_model("authgem")) == "authgem-vertex/gemini-3.5-flash"
+    assert polled == ["authgem"] and chosen == ["authgem-vertex/gemini-3.5-flash"] and queries == []
     rows = {getattr(c, "key", None): c for c in _welcome_controls(screen.page_area.content)}
     signed = rows["welcome-signed-authgem"]
     texts = [getattr(c, "value", "") for c in signed.controls]
@@ -980,10 +975,10 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     use = rows["welcome-use-authgem"]
     assert "change model" in use.tooltip and "gem@example.com" in use.tooltip
     use.on_click(None)
-    assert queries == ["authgem"]
+    assert queries == ["authgem-vertex"]
     # the ModelSheet's pick (the global model, ChatView.open_model_sheet(global_scope=True)) comes back to that row
-    screen.model_chosen("authgem/gemini-3.5-pro")
-    assert screen.model_notes["authgem"] == "✓ Using authgem/gemini-3.5-pro" and screen.changing_provider is None
+    screen.model_chosen("authgem-vertex/gemini-3.5-pro")
+    assert screen.model_notes["authgem"] == "✓ Using authgem-vertex/gemini-3.5-pro" and screen.changing_provider is None
     # ChatGPT: the default GPT-6 Luna is gone from the catalog -> the newest Luna, said so
     assert asyncio.run(screen.check_model("authgpt")) == "authgpt/gpt-5.6-luna"
     assert "no longer offered" in screen.model_notes["authgpt"]
@@ -991,8 +986,9 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     bare = WelcomeScreen(parse_route("/welcome"))
     bare.get_body()
     controls = _welcome_controls(bare.page_area.content)
+    # DeepSeek and Gemini sign in in the app itself (in-app browser / sign-in page), not through the bridge
     assert not any(str(getattr(c, "key", "")).startswith("welcome-signin") for c in controls
-                   if getattr(c, "key", None) != "welcome-signin-authds")  # DeepSeek: the in-app browser
+                   if getattr(c, "key", None) not in ("welcome-signin-authds", "welcome-signin-google"))
     assert any(getattr(c, "key", None) == "welcome-local" for c in controls)
 
 

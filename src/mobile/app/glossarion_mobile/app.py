@@ -173,6 +173,7 @@ class GlossarionApp:
         # series, _install_keyboard sets keyboard (the Ctrl+= / - / 0 text-size shortcuts).
         self.manga: Any = None
         self.webview_bridge: Any = None
+        self.google_signin: Any = None  # authgem/'s Google sign-in (services/google_signin.py)
         self.updates_feature: Any = None
         self.series: Any = None
         # U10: CloudSyncService.install sets cloud_sync (Library books -> a folder of the user's own cloud
@@ -454,6 +455,13 @@ class GlossarionApp:
             await WebViewBridgeFeature.install(self)  # sets self.webview_bridge (None when unsupported)
         except Exception:
             log.exception("webview bridge unavailable; authnd/ and search/gemini report it")
+        try:
+            from glossarion_mobile.services import google_signin
+
+            # authgem/'s Google sign-in: the full-screen sign-in page and the shared cookie jar
+            await google_signin.install(self)  # sets self.google_signin (None when unsupported)
+        except Exception:
+            log.exception("Google sign-in unavailable; authgem/ reports it")
 
     async def _install_updates(self) -> None:
         """About › Updates (Check now, Check on startup, skip version, release notes, APK /

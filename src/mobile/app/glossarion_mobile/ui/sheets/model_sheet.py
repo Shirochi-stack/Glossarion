@@ -226,9 +226,6 @@ class SheetEnv:
     tablet: Callable[[], bool] = field(default=lambda: False)
     # U9: (route) -> the next free account slot ("+ Add account": OAuthBridge.next_slot)
     next_slot: Optional[Callable[[str], int]] = None
-    # U9: (account id) -> shows the 📊 Gemini status sheet (OAuthBridge.gemini_status; desktop authgem
-    # status button next to the Gemini login)
-    gemini_status: Optional[Callable[[int], Any]] = None
     # U9: (model) -> an ``accounts.GcpProjectPicker`` for the route row of authgem-vertex/ models (the Accounts
     # project dropdown: billing marks, desktop selection rule, authgem_auth project cache)
     gcp_project_picker: Optional[Callable[[str], Any]] = None
@@ -1548,6 +1545,9 @@ class ModelSheet:
             own_route, _own_account = mc.login_route(info.model)
             chips: list = []
             for login in info.logins:
+                if login == "google":  # authgem/ / search/gemini: the in-app Google sign-in, no account slots
+                    chips.append(self._google_chip())
+                    continue
                 account = info.account if login == own_route else 0
                 signed = self.signed_in(info.model, login, account)
                 title = mc.LOGIN_TITLES.get(login, login)
@@ -1558,10 +1558,6 @@ class ModelSheet:
                                      on_click=lambda e, r=login, a=account: self.open_auth_menu(r, a),
                                      key=f"route-login-{login}"))
                 chips.append(self._slot_menu(login, account))
-                if login == "authgem" and signed and self.env.gemini_status is not None:
-                    chips.append(ft.IconButton(icon=ft.Icons.INSIGHTS, tooltip="📊 Gemini status (quota, verification)",
-                                               on_click=lambda e, a=account: self._gemini_status(a),
-                                               size_constraints=HIT_TARGET, key="route-authgem-status"))
             controls.append(ft.Row([*chips, ft.TextButton(content="Accounts", on_click=lambda e: self._accounts())],
                                    wrap=True, spacing=6))
         if info.needs_key and self.env.store is not None:
@@ -1606,6 +1602,71 @@ class ModelSheet:
                 controls.append(ft.TextButton(content=f"Set {key} in Settings",
                                               on_click=lambda e: self._nav("settings")))
         return controls
+
+    def _google_chip(self) -> ft.Control:
+        """The route row's Google sign-in (authgem/: the Gemini app runs on its session cookies; search/gemini's
+        AI Mode pages share it): signed out it opens the sign-in page, signed in it offers sign in again / out."""
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return ReasonChip(reason="Google sign-in unavailable", detail=google_signin.UNAVAILABLE)
+        signed = service.has_session()
+        return ft.Chip(label=ft.Text("Gemini ✓" if signed else "Sign in with Gemini"),
+                       leading=ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED, size=18),
+                       on_click=lambda e: self.open_google_menu(), key="route-login-google")
+
+    def open_google_menu(self) -> Any:
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return None
+        if not service.has_session():
+            return self._spawn_task(self.google_sign_in())
+        items = [ActionItem("Sign in to Gemini again", lambda: self._spawn_task(self.google_sign_in()),
+                            icon="REFRESH", key="google-menu-again"),
+                 ActionItem("Sign out of Gemini", lambda: self._spawn_task(self.google_sign_out()),
+                            icon="LOGOUT", key="google-menu-out")]
+        sheet = ActionSheet(items, title="Gemini", subtitle="authgem/ uses your Google account's Gemini subscription",
+                            tablet=bool(self.env.tablet()))
+        if self._page is not None:
+            sheet.show(self._page)
+        self.action_sheet = sheet
+        return sheet
+
+    def _spawn_task(self, coro: Any) -> Any:
+        spawn = self.env.spawn
+        return spawn(coro) if spawn is not None else asyncio.ensure_future(coro)
+
+    async def google_sign_in(self) -> bool:
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return False
+        try:
+            signed = await service.sign_in()
+        except Exception as exc:
+            self._say(f"Gemini sign-in: {exc}")
+            return False
+        self._say("Signed in to Gemini" if signed else "Gemini sign-in cancelled")
+        self._push_all()
+        return signed
+
+    async def google_sign_out(self) -> None:
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None:
+            return
+        try:
+            await service.sign_out()
+        except Exception as exc:
+            self._say(f"Gemini sign-out: {exc}")
+            return
+        self._say("Signed out of Gemini")
+        self._push_all()
 
     def _gcp_picker(self, model: str) -> Any:
         """The GCP project picker control for ``model`` (built once per sheet and model), else None."""
@@ -1801,6 +1862,7 @@ class ModelSheet:
                 items.append(ActionItem(f"{title} · Sign in{mark}",
                                         lambda r=route, m=best: self._sign_in_route(r, 0, then_select=m),
                                         icon="LOGIN", key=f"auth-menu-{route}"))
+        items.append(self._gemini_item(models))
         items.append(self._deepseek_item(models))
         title = mc.LOGIN_TITLES.get(current, current)
         slot = f" #{account}" if account else ""
@@ -1813,6 +1875,27 @@ class ModelSheet:
             sheet.show(self._page)
         self.action_sheet = sheet
         return sheet
+
+    def _gemini_item(self, models: Sequence[str]) -> ActionItem:
+        """Gemini (the subscription, authgem/: the in-app Google sign-in, not an OAuth slot): signed in, it
+        switches to its everyday model; else the full-screen Google sign-in, then the switch."""
+        from glossarion_mobile.services import google_signin
+
+        title = mc.LOGIN_TITLES.get("google", "Gemini")
+        best = mc.recommended_model("google", models) or "authgem/auto"
+        service = google_signin.current()
+        if service is None:
+            return ActionItem(title, None, icon="ACCOUNT_CIRCLE", key="auth-menu-google",
+                              disabled_reason="Needs the in-app sign-in")
+        if service.has_session():
+            return ActionItem(f"{title} ✓ · {best}", lambda m=best: self.select("model", m), icon="ACCOUNT_CIRCLE",
+                              key="auth-menu-google")
+        return ActionItem(f"{title} · Sign in", lambda m=best: self._spawn_task(self._gemini_switch(m)),
+                          icon="LOGIN", key="auth-menu-google")
+
+    async def _gemini_switch(self, model: str) -> None:
+        if await self.google_sign_in():
+            self.select("model", model)
 
     def _deepseek_item(self, models: Sequence[str]) -> ActionItem:
         """DeepSeek (authds/: its own site in the in-app browser, not an OAuth slot): signed in, it switches to
@@ -1861,17 +1944,6 @@ class ModelSheet:
             call_handler(self.on_accounts)
         else:
             self._nav("settings.accounts")
-
-    def _gemini_status(self, account_id: int) -> Any:
-        """The route row's 📊: the same Gemini status sheet as Accounts › slot ⋯ › 📊 Status."""
-        handler = self.env.gemini_status
-        if handler is None:
-            return None
-        result = handler(int(account_id or 0))
-        if asyncio.iscoroutine(result):
-            spawn = self.env.spawn
-            return spawn(result) if spawn is not None else asyncio.ensure_future(result)
-        return result
 
     def _nav(self, route_name: str, params: Optional[dict] = None) -> None:
         self.close()

@@ -67,12 +67,18 @@ from glossarion_mobile.ui.theme import number_keyboard, semantic
 log = logging.getLogger(__name__)
 
 #: Step 1 sign-ins, all equal (U11 item 1): (provider, button label).
+#: "google" is the Gemini subscription (authgem/: the Gemini app on the in-app Google sign-in);
+#: "authgem" is the Vertex OAuth sign-in (authgem-vertex/, Google Cloud billing per request).
 SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
-            ("authgem", "Sign in with Vertex (Pay as you go)"), ("authgrok", "Sign in with Grok"),
-            ("authnan", "Sign in with NanoGPT"), ("authds", "Sign in with DeepSeek"))
-#: sign-ins whose long label uses smaller type to fit its half row. authgem/ bills Google Cloud
+            ("google", "Sign in with Gemini"), ("authgem", "Sign in with Vertex (Pay as you go)"),
+            ("authgrok", "Sign in with Grok"), ("authnan", "Sign in with NanoGPT"),
+            ("authds", "Sign in with DeepSeek"))
+#: sign-ins whose long label uses smaller type to fit its half row. authgem-vertex/ bills Google Cloud
 #: Vertex AI per request; it is not a Gemini subscription, so it is not labelled "Gemini".
 SMALL_LABELS = frozenset({"authgem"})
+#: grid columns (of 12) of a sign-in cell; the rest take 4 (a third): ChatGPT · Claude · Gemini /
+#: Vertex (Pay as you go) · Grok / NanoGPT · DeepSeek
+SIGN_IN_COLS = {"authgem": 8}
 OTHER_SIGN_INS = SIGN_INS[1:]
 #: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
 #: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
@@ -95,7 +101,8 @@ RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower d
                       "own web chat; keep them at batch size 1 with a delay, or the site may limit or block you.")
 #: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
 #: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
-PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
+PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem-vertex", "google": "authgem/",
+                        "authgrok": "authgrok/",
                         "authnan": "authnan/", "authds": "authds/", "authnd": "authnd/", "authchatgpt": "authchatgpt/"}
 
 #: the on-device preset Welcome suggests (Qwen3.5 2B: quick drafts on most phones)
@@ -568,8 +575,9 @@ class WelcomeScreen(Screen):
                        ReasonChip(reason="Settings › Endpoints")], wrap=True, key="welcome-local")
 
     def _sign_in_row(self, provider: str, label: str) -> ft.Control:
-        """One sign-in cell: half the row (two per row on a phone), signed in or not."""
-        return ft.Container(content=self._sign_in_control(provider, label), col={"xs": 6})
+        """One sign-in cell, signed in or not: a third of the row (three per row on a phone); Vertex's long
+        "Pay as you go" label takes two thirds. Seven sign-ins stay three rows, so page 1 still fits."""
+        return ft.Container(content=self._sign_in_control(provider, label), col={"xs": SIGN_IN_COLS.get(provider, 4)})
 
     def _sign_in_control(self, provider: str, label: str) -> ft.Control:
         """The provider's button, in place through the whole sign-in (v9.15.7 hotfix 4, owner: it "stayed silent
@@ -589,6 +597,17 @@ class WelcomeScreen(Screen):
                                      key=f"welcome-model-{provider}"))
             return ft.Column(lines, spacing=2, tight=True, key=f"welcome-signed-{provider}")
         state = "busy" if provider in self.signing_in else "idle"
+        if provider == "google":  # the Gemini subscription: the in-app Google sign-in (not an OAuth slot)
+            from glossarion_mobile.services import google_signin
+
+            available = google_signin.current() is not None
+            self._google_drawn_available = available
+            if not available:
+                return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
+                               ReasonChip(reason="Needs the in-app sign-in", detail=google_signin.UNAVAILABLE)],
+                              wrap=True, key="welcome-signin-google")
+            return self._cell_button(short, label, lambda e: self.open_gemini_sign_in(), "welcome-signin-google",
+                                     state=state)
         if provider == "authds":  # DeepSeek's own site in the in-app browser (not an OAuth sign-in)
             from glossarion_mobile.services import webview_bridge
 
@@ -609,7 +628,7 @@ class WelcomeScreen(Screen):
     @staticmethod
     def _cell_button(text: str, tooltip: str, on_click: Callable[[Any], Any], key: str,
                      small: bool = False, state: str = "idle") -> ft.Control:
-        """A half-row button: the provider's name only (the section title says what it does).
+        """A grid-cell button: the provider's name only (the section title says what it does).
         ``small`` uses smaller type for a long name. ``state``: "busy" spins (and ignores taps), "done" shows
         a checkmark; the label cross-fades between them."""
         style = ft.TextThemeStyle.LABEL_SMALL if small else None
@@ -1207,14 +1226,42 @@ class WelcomeScreen(Screen):
     def refresh_availability(self) -> bool:
         """The app installed the in-app browser after this page was drawn (the Welcome opens before every
         feature is up, v9.15.7 hotfix 5): draw the DeepSeek button now. True when it re-rendered."""
-        from glossarion_mobile.services import webview_bridge
+        from glossarion_mobile.services import google_signin, webview_bridge
 
-        if getattr(self, "_authds_drawn_available", True) or self.flow.step_id != "sign_in":
+        if self.flow.step_id != "sign_in":
             return False
-        if not webview_bridge.availability()[0]:
+        deepseek_late = not getattr(self, "_authds_drawn_available", True) and webview_bridge.availability()[0]
+        gemini_late = not getattr(self, "_google_drawn_available", True) and google_signin.current() is not None
+        if not (deepseek_late or gemini_late):
             return False
         self.render()
         return True
+
+    def open_gemini_sign_in(self) -> Any:
+        """Gemini (the subscription, authgem/): Google's own sign-in page, full screen; used at once when a
+        sign-in is already saved."""
+        call_handler(self._gemini_sign_in)
+        return None
+
+    async def _gemini_sign_in(self) -> None:
+        from glossarion_mobile.services import google_signin
+
+        service = google_signin.current()
+        if service is None or "google" in self.signing_in:
+            return
+        self._sign_in_started("google")
+        if service.has_session():
+            self._provider_signed_in("google", {})
+            return
+        try:
+            signed = await service.sign_in()
+        except Exception as exc:
+            log.info("Gemini sign-in failed: %s", exc)
+            signed = False
+        if signed:
+            self._provider_signed_in("google", {})
+        else:
+            self._sign_in_ended("google")
 
     def _sign_in_started(self, provider: str) -> None:
         self.signing_in.add(provider)
