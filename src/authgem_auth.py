@@ -1450,7 +1450,8 @@ _SERVED_MODEL_RE = re.compile(r'"([0-9a-f]{16})",null,null,"([^"]{1,40})",(?:tru
 
 class GeminiWebError(RuntimeError):
     """An authgem/ request failed. ``kind``: auth_error (no / ended Google session),
-    config_error (bad request), model_unavailable (the plan lacks the model), api_error."""
+    config_error (bad request), model_unavailable (no such model), browser_error
+    (the Google Login browser is held by another Glossarion), api_error."""
 
     def __init__(self, message: str, kind: str = "api_error") -> None:
         super().__init__(message)
@@ -1463,6 +1464,10 @@ SIGN_IN_NEEDED = (
 )
 SESSION_ENDED = (
     "The saved Google session ended. Click Google Login next to the model to sign in again."
+)
+BROWSER_IN_USE = (
+    "authgem/ could not open its Google Login browser: another Glossarion window or process is using "
+    "it. Close the other Google Login window (or the other Glossarion) and try again."
 )
 
 _web_session_probe = None
@@ -1719,6 +1724,12 @@ def _open_web_page(cancel_check=None):
                 raise
             yield web
     except gemini_free.AIModeError as exc:
+        if exc.kind == gemini_free.KIND_CANCELLED:
+            raise RuntimeError("AuthGem: stream cancelled by user") from exc
+        if exc.kind == gemini_free.KIND_BROWSER:
+            # Chrome hands a second start on the Google Login profile to the browser already on it
+            # (another Glossarion window or process) and exits; a retry meets the same browser.
+            raise GeminiWebError(BROWSER_IN_USE, "browser_error") from exc
         kind = "auth_error" if exc.kind == gemini_free.KIND_SIGN_IN else exc.kind
         raise GeminiWebError(str(exc), kind) from exc
 
@@ -1744,9 +1755,9 @@ def _web_rpc(page: _WebPage, rpcid: str, payload: Any, timeout: float = 30.0) ->
     return None
 
 
-def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
-    """name -> (model id, label) from the model picker RPC (entries ``[id, ..., label]``)."""
-    found: Dict[str, Tuple[str, str]] = {}
+def _web_model_entries(payload: Any) -> List[Tuple[str, list]]:
+    """(name, entry) for each model of the model picker RPC (entries ``[id, ..., label]``)."""
+    found: List[Tuple[str, list]] = []
 
     def walk(value: Any) -> None:
         if not isinstance(value, list):
@@ -1757,14 +1768,32 @@ def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
             for entry in entries:
                 label = entry[-1] if isinstance(entry[-1], str) and entry[-1].strip() else entry[2]
                 name = web_model_name(label)
-                if name and name not in found:
-                    found[name] = (entry[0], str(label).strip())
+                if name and all(name != seen for seen, _entry in found):
+                    found.append((name, entry))
             return
         for item in value:
             walk(item)
 
     walk(payload)
     return found
+
+
+def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
+    """name -> (model id, label) from the model picker RPC."""
+    found: Dict[str, Tuple[str, str]] = {}
+    for name, entry in _web_model_entries(payload):
+        label = entry[-1] if isinstance(entry[-1], str) and entry[-1].strip() else entry[2]
+        found[name] = (entry[0], str(label).strip())
+    return found
+
+
+def _cache_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
+    models = _parse_web_models(payload)
+    if models:
+        with _web_models_lock:
+            _web_models_cache["models"] = models
+            _web_models_cache["at"] = time.monotonic()
+    return models
 
 
 def _web_models(page: _WebPage) -> Dict[str, Tuple[str, str]]:
@@ -1774,29 +1803,21 @@ def _web_models(page: _WebPage) -> Dict[str, Tuple[str, str]]:
         if cached and time.monotonic() - _web_models_cache["at"] < _GEMINI_WEB_MODELS_TTL:
             return cached
     try:
-        models = _parse_web_models(_web_rpc(page, _RPC_LIST_MODELS, []))
+        models = _cache_web_models(_web_rpc(page, _RPC_LIST_MODELS, []))
     except GeminiWebError:
         raise
     except Exception as exc:
         logger.debug("AuthGem: model list unavailable: %s", exc)
         models = {}
-    if not models:
-        return dict(GEMINI_WEB_KNOWN_MODELS)
-    with _web_models_lock:
-        _web_models_cache["models"] = models
-        _web_models_cache["at"] = time.monotonic()
-    return models
+    return models or dict(GEMINI_WEB_KNOWN_MODELS)
 
 
 def fetch_web_models(timeout: float = 30.0, cancel_check=None) -> List[str]:
     """authgem/ model names the signed-in account's Gemini picker offers."""
     with _open_web_page(cancel_check) as page:
-        models = _parse_web_models(_web_rpc(page, _RPC_LIST_MODELS, [], timeout=timeout))
+        models = _cache_web_models(_web_rpc(page, _RPC_LIST_MODELS, [], timeout=timeout))
     if not models:
         raise GeminiWebError("The Gemini app sent no model list.", "api_error")
-    with _web_models_lock:
-        _web_models_cache["models"] = models
-        _web_models_cache["at"] = time.monotonic()
     return list(models)
 
 
@@ -1825,9 +1846,10 @@ class _WebStreamLog:
     """Live log of an authgem/ answer in the old authgem/ format: the thinking phase, then the answer line by
     line as it arrives.
 
-    The Gemini app sends no thinking text: while a model thinks it sends a keep-alive frame about once a
-    minute (``{"37": [n]}``) and, just before the answer, a short headline of what it worked on
-    (``{"7": [..., ["Translating Korean to English"]]}``). Those become ``🧠 [authgem] Thinking...`` lines.
+    The Gemini app streams no thinking text: while a model thinks it sends a keep-alive frame about once a
+    minute (``{"37": [n]}``) and a short topic line (``{"7": [..., ["Translating Korean to English"]]}``).
+    Its thought summary (the web app's "Show thinking") comes whole in the first answer frame, before any
+    answer text. Those become the ``🧠 [authgem] Thinking...`` lines.
     ``log_stream`` / ``stream_thinking``: the streaming log toggles (LOG_STREAM_CHUNKS, the batch
     ALLOW_AUTHGPT_BATCH_STREAM_LOGS, STREAM_THINKING_LOGS)."""
 
@@ -1844,6 +1866,7 @@ class _WebStreamLog:
         self.seen = ""
         self.pending = ""
         self.headlines: List[str] = []
+        self.summarized = False
 
     def _show_thinking(self) -> bool:
         return self.log_stream and self.stream_thinking
@@ -1853,6 +1876,11 @@ class _WebStreamLog:
             self.thinking = True
             if self._show_thinking():
                 self.log("🧠 [authgem] Thinking...")
+
+    def waiting(self) -> None:
+        """The request is sent: the Gemini app sends nothing while it thinks but a keep-alive about once a
+        minute, so the thinking phase is shown from here, not from the first keep-alive."""
+        self._begin_thinking()
 
     def heartbeat(self) -> None:
         if self.thinking_done:
@@ -1870,6 +1898,18 @@ class _WebStreamLog:
         self._begin_thinking()
         if self._show_thinking():
             self.log(f"    **{text}**")
+
+    def summary(self, text: str) -> None:
+        """The thought summary, logged once, line by line, before the answer."""
+        text = str(text or "").strip()
+        if not text or self.summarized or self.thinking_done:
+            return
+        self.summarized = True
+        self._begin_thinking()
+        if self._show_thinking():
+            for line in text.split("\n"):
+                if line.strip():
+                    self.log(f"    {line.rstrip()}")
 
     def text(self, full: str) -> None:
         if not full.startswith(self.seen):
@@ -1909,16 +1949,31 @@ def _web_stream_log(log) -> _WebStreamLog:
     return _WebStreamLog(log, log_stream=log_stream, stream_thinking=stream_thinking)
 
 
+def _web_thoughts(inner: Any) -> str:
+    """The thought summary of an answer frame (slot 37 of the candidate: [[step, ...], ...]), or ""."""
+    try:
+        steps = inner[4][0][37][0]
+    except (IndexError, TypeError, KeyError):
+        return ""
+    if not isinstance(steps, list):
+        return ""
+    return "\n\n".join(s.strip() for s in steps if isinstance(s, str) and s.strip())
+
+
 class _WebAnswer:
     """Reads the answer frames of a StreamGenerate response as they arrive (``stream_log``: the live log).
     ``feed`` takes any piece of the response; whole lines are parsed."""
 
-    def __init__(self, stream_log: Optional[_WebStreamLog] = None) -> None:
+    def __init__(self, stream_log: Optional[_WebStreamLog] = None, expect: str = "", log=None) -> None:
         self.text = ""
         self.chat_id = ""
         self.served = ""
         self.codes: List[int] = []
         self.stream_log = stream_log
+        #: The model label asked for ("" = any, for Auto): another one answering is logged on its first frame.
+        self.expect = expect
+        self.swap_logged = False
+        self.log = log or (lambda *a, **kw: None)
         self._pending = ""
 
     def feed(self, chunk: str) -> None:
@@ -1954,6 +2009,12 @@ class _WebAnswer:
                     continue
                 for match in _SERVED_MODEL_RE.finditer(item[2]):
                     self.served = match.group(2)
+                if (self.expect and self.served and not self.swap_logged
+                        and self.served.casefold() != self.expect.casefold()):
+                    self.swap_logged = True
+                    self.log(f"⚠️ AuthGem: the Gemini app swapped {self.expect} for {self.served} "
+                             f"(this Google account cannot use {self.expect} right now); "
+                             f"the answer comes from {self.served}")
                 try:
                     inner = json.loads(item[2])
                 except ValueError:
@@ -1968,6 +2029,8 @@ class _WebAnswer:
                     pass
                 if isinstance(inner, list) and len(inner) > 2:
                     self._status(inner[2])
+                if self.stream_log is not None:
+                    self.stream_log.summary(_web_thoughts(inner))
                 try:
                     text = inner[4][0][1][0]
                 except (IndexError, TypeError):
@@ -1999,7 +2062,9 @@ def web_thinking_level() -> str:
     return level if level in _GEMINI_WEB_THINKING_CODES else "high"
 
 
-def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, thinking: str = "high") -> _WebAnswer:
+def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, thinking: str = "high",
+                  expect: str = "") -> _WebAnswer:
+    """One StreamGenerate request. ``expect``: the model label asked for (see ``_WebAnswer``)."""
     files = [_upload_web_image(page, image, 120) for image in images]
     inner = [[prompt, 0, None, files or None, None, None, 0], ["en"],
              ["", "", "", None, None, None, None, None, None, ""]]
@@ -2007,8 +2072,10 @@ def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, think
     inner[_GEMINI_WEB_THINKING_SLOT] = _GEMINI_WEB_THINKING_CODES.get(thinking, _GEMINI_WEB_THINKING_CODES["high"])
     headers = dict(_GEMINI_WEB_FORM_HEADERS)
     headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
-    answer = _WebAnswer(_web_stream_log(_log))
+    stream_log = _web_stream_log(_log)
+    answer = _WebAnswer(stream_log, expect=expect, log=_log)
     body = urlencode({"at": page.at, "f.req": json.dumps([None, json.dumps(inner)])})
+    stream_log.waiting()
     page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
               on_text=answer.feed, timeout=timeout)
     answer.close()
@@ -2026,8 +2093,9 @@ def send_chat_completion_web(
 
     The chat messages become one prompt (``authds_auth.build_prompt``: a ``[role]`` header per
     message when there are several); prompt images are uploaded the way the Gemini app uploads
-    them. The answer streams into the log, is checked against the model asked for (the app
-    silently answers with 4 Hydrogen when the plan lacks a model) and the chat is deleted afterwards.
+    them. The answer streams into the log; when the app answers with another model than the one asked
+    for (it does that silently when the account cannot use one) the log says so on the first frame.
+    The chat is deleted afterwards.
     """
     import authds_auth
     del connect_timeout  # the page's own connection
@@ -2040,8 +2108,12 @@ def send_chat_completion_web(
     with _open_web_page(cancel_check=is_cancelled) as page:
         name, model_id, label = _resolve_web_model(_web_models(page), model)
         thinking = web_thinking_level()
-        _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
-        answer = _web_generate(page, prompt, images, model_id, timeout, _log, thinking)
+        if name == DEFAULT_WEB_MODEL:
+            _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()} (when Auto picks a thinking model)")
+        else:
+            _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
+        answer = _web_generate(page, prompt, images, model_id, timeout, _log, thinking,
+                               expect="" if name == DEFAULT_WEB_MODEL else label)
         _delete_web_chat(page, answer.chat_id)
     elapsed = time.time() - started
     if not answer.text:
@@ -2050,10 +2122,6 @@ def send_chat_completion_web(
         detail = f" (error code {answer.codes[0]})" if answer.codes else ""
         raise RuntimeError(f"The Gemini app sent no answer{detail}.")
     served = answer.served
-    if name != DEFAULT_WEB_MODEL and served and served.casefold() != label.casefold():
-        raise GeminiWebError(
-            f"Gemini answered with {served} instead of {label}: this Google account's Gemini plan "
-            f"does not include {label}. Choose another authgem/ model.", "model_unavailable")
     content = _CITE_MARKER_RE.sub("", answer.text)
     _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
     return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}

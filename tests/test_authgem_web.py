@@ -29,10 +29,14 @@ def isolation(monkeypatch):
 COMPACT = (",", ":")  # the Gemini app sends compact JSON
 
 
-def answer_frame(text, chat_id="c_f25d9ecb07f4bcdd", model_id="56fdd199312815e2", label="4 Hydrogen"):
-    inner = [None, [chat_id, "r_1"], None, None, [["rc_1", [text], None, None, None, None, None, None,
-                                                  None, None, None, None, None, None, None, None, model_id,
-                                                  None, None, label, True]]]
+def answer_frame(text, chat_id="c_f25d9ecb07f4bcdd", model_id="56fdd199312815e2", label="4 Hydrogen",
+                 thoughts=None):
+    candidate = ["rc_1", [text], None, None, None, None, None, None, None, None, None, None, None, None,
+                 None, None, model_id, None, None, label, True]
+    if thoughts is not None:  # the thought summary rides in slot 37, as the Gemini app sends it
+        candidate += [None] * (38 - len(candidate))
+        candidate[37] = [thoughts, [[thoughts, "", "", ""]]]
+    inner = [None, [chat_id, "r_1"], None, None, [candidate]]
     return json.dumps([["wrb.fr", None, json.dumps(inner, separators=COMPACT)]], separators=COMPACT)
 
 
@@ -104,6 +108,25 @@ def test_thinking_keepalives_and_headline_then_the_answer_line_by_line():
     assert "    **Translating Korean to English**" in seen
     assert any(s.startswith("🧠 [authgem] Thinking complete") for s in seen)
     assert seen[-3:] == ["<p>One.</p>", "<p>Two.</p>", "<p>Three"]
+
+
+def test_thought_summary_is_logged_once_before_the_answer():
+    summary = "**Evaluated prime divisibility**\n\nTested division of 221 by primes up to fifteen."
+    seen = run_log([HEADLINE, answer_frame("", thoughts=[summary]),
+                    answer_frame("<p>Not prime.</p>", thoughts=[summary]),
+                    answer_frame("<p>Not prime.</p><p>13 × 17</p>", thoughts=[summary])])
+    assert seen[:4] == ["🧠 [authgem] Thinking...", "    **Translating Korean to English**",
+                        "    **Evaluated prime divisibility**", "    Tested division of 221 by primes up to fifteen."]
+    assert seen[4].startswith("🧠 [authgem] Thinking complete")
+    assert seen[-2:] == ["<p>Not prime.</p>", "<p>13 × 17</p>"]
+    assert sum("Evaluated prime divisibility" in s for s in seen) == 1
+
+
+def test_thought_summary_steps_and_the_thinking_toggle():
+    seen = run_log([answer_frame("", thoughts=["**One**", "**Two**"]), answer_frame("<p>A</p>")])
+    assert seen[:3] == ["🧠 [authgem] Thinking...", "    **One**", "    **Two**"]
+    off = run_log([answer_frame("", thoughts=["**One**"]), answer_frame("<p>A</p>")], stream_thinking=False)
+    assert off == ["<p>A</p>"]
 
 
 def test_thinking_toggle_off_keeps_the_answer_lines():
@@ -198,6 +221,23 @@ def test_a_signed_out_page_is_a_sign_in_error():
         web_page(redirected)
 
 
+def test_a_browser_held_by_another_glossarion_is_an_authgem_error_that_is_not_retried(monkeypatch):
+    import contextlib
+    import gemini_free
+
+    @contextlib.contextmanager
+    def closed(*_a, **_kw):
+        raise gemini_free.AIModeError("The Gemini Free browser closed.", gemini_free.KIND_BROWSER)
+        yield
+
+    monkeypatch.setattr(gemini_free, "signed_in_tab", closed)
+    with pytest.raises(auth.GeminiWebError) as caught:
+        with auth._open_web_page():
+            pass
+    assert caught.value.kind == "browser_error"
+    assert "authgem/" in str(caught.value) and "Gemini Free" not in str(caught.value)
+
+
 def test_image_upload_sends_the_file_from_the_page():
     scripted = ScriptedPage(chunks=["/contrib_service/ttl_1d/abc"])
     page = web_page(scripted)
@@ -219,8 +259,9 @@ def fake_app(monkeypatch):
     def open_page(cancel_check=None):
         yield page
 
-    def generate(pg, prompt, images, model_id, timeout, log, thinking="high"):
-        state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images, "thinking": thinking})
+    def generate(pg, prompt, images, model_id, timeout, log, thinking="high", expect=""):
+        state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images, "thinking": thinking,
+                              "expect": expect})
         reader = auth._WebAnswer()
         for frame in state["frames"]:
             reader.feed(frame + "\n")
@@ -264,6 +305,56 @@ def test_the_gemini_thinking_settings_pick_the_app_thinking_level(monkeypatch, f
     assert fake_app["sent"][-1]["thinking"] == expected
 
 
+@pytest.mark.parametrize("model, served, line", [
+    ("gemini-4-neon", "4 Neon", "🧠 AuthGem: 4 Neon · thinking level High"),
+    ("gemini-4-hydrogen", "4 Hydrogen", "🧠 AuthGem: 4 Hydrogen · thinking level High"),
+    ("auto", "4 Hydrogen", "🧠 AuthGem: Auto · thinking level High (when Auto picks a thinking model)"),
+])
+def test_the_request_line_says_whether_the_model_thinks(monkeypatch, fake_app, model, served, line):
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "high")
+    fake_app["frames"] = [answer_frame("ok", label=served)]
+    seen = []
+    auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model=model, log_fn=seen.append)
+    assert seen[0] == line
+
+
+SWAP_LINE = ("⚠️ AuthGem: the Gemini app swapped 4 Carbon for 3.5 Flash-Lite (this Google account cannot "
+             "use 4 Carbon right now); the answer comes from 3.5 Flash-Lite")
+
+
+def test_a_swapped_model_is_logged_once_on_its_first_frame_and_its_answer_kept():
+    seen = []
+    log = auth._WebStreamLog(seen.append, log_stream=True, stream_thinking=True)
+    reader = auth._WebAnswer(log, expect="4 Carbon", log=seen.append)
+    reader.feed(answer_frame("<p>A</p>", label="3.5 Flash-Lite") + "\n")
+    reader.feed(answer_frame("<p>A</p><p>B</p>", label="3.5 Flash-Lite") + "\n")
+    reader.close()
+    assert seen == [SWAP_LINE, "<p>A</p>", "<p>B</p>"]
+    assert reader.text == "<p>A</p><p>B</p>" and reader.served == "3.5 Flash-Lite"
+
+
+def test_thinking_is_shown_as_soon_as_the_request_is_sent():
+    seen = []
+
+    class Watched(ScriptedPage):
+        def run_js(self, expression):
+            if "fetch(" in expression:
+                seen.append("<sent>")
+            return super().run_js(expression)
+
+    auth._web_generate(web_page(Watched(chunks=[answer_frame("<p>A</p>")])), "hi", [], "e6fa609c3fa255c0",
+                       60, seen.append, "high", expect="4 Hydrogen")
+    assert seen[:2] == ["🧠 [authgem] Thinking...", "<sent>"]
+    assert seen[2].startswith("🧠 [authgem] Thinking complete") and seen[-1] == "<p>A</p>"
+
+
+def test_the_model_asked_for_logs_no_swap():
+    seen = []
+    reader = auth._web_generate(web_page(ScriptedPage(chunks=[answer_frame("ok", label="4 Carbon")])),
+                                "hi", [], "95a4c0abcba24364", 60, seen.append, "high", expect="4 Carbon")
+    assert reader.text == "ok" and not any("swapped" in s for s in seen)
+
+
 def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
     scripted = ScriptedPage(chunks=[answer_frame("ok")])
     page = web_page(scripted)
@@ -276,11 +367,14 @@ def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
         assert len(inner) == 81 and inner[80] == code
 
 
-def test_a_model_the_plan_lacks_is_refused_not_swapped(fake_app):
-    fake_app["frames"] = [answer_frame("Hi!", label="4 Hydrogen")]
-    with pytest.raises(auth.GeminiWebError) as caught:
-        auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model="gemini-4-carbon")
-    assert caught.value.kind == "model_unavailable" and "4 Carbon" in str(caught.value)
+def test_a_swapped_answer_is_returned_under_the_model_that_wrote_it(fake_app):
+    fake_app["frames"] = [answer_frame("Hi!", label="3.5 Flash-Lite")]
+    seen = []
+    reply = auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model="gemini-4-carbon",
+                                          log_fn=seen.append)
+    assert reply["content"] == "Hi!" and reply["model"] == "3.5 Flash-Lite"
+    assert fake_app["sent"][0]["expect"] == "4 Carbon"
+    assert seen[-1].startswith("📡 AuthGem: 3.5 Flash-Lite answered")
 
 
 def test_auto_accepts_whatever_model_answered(fake_app):
@@ -340,7 +434,7 @@ def test_client_empty_model_name_means_auto(monkeypatch, tmp_path):
     assert sent["model"] == "auto"
 
 
-@pytest.mark.parametrize("kind", ["auth_error", "model_unavailable", "config_error"])
+@pytest.mark.parametrize("kind", ["auth_error", "model_unavailable", "config_error", "browser_error"])
 def test_errors_a_retry_cannot_fix_stop_at_once(monkeypatch, tmp_path, kind):
     client = make_client(monkeypatch, tmp_path, "authgem/gemini-4-carbon")
     calls = []
