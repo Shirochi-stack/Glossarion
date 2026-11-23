@@ -221,6 +221,23 @@ def test_a_signed_out_page_is_a_sign_in_error():
         web_page(redirected)
 
 
+def test_a_browser_held_by_another_glossarion_is_an_authgem_error_that_is_not_retried(monkeypatch):
+    import contextlib
+    import gemini_free
+
+    @contextlib.contextmanager
+    def closed(*_a, **_kw):
+        raise gemini_free.AIModeError("The Gemini Free browser closed.", gemini_free.KIND_BROWSER)
+        yield
+
+    monkeypatch.setattr(gemini_free, "signed_in_tab", closed)
+    with pytest.raises(auth.GeminiWebError) as caught:
+        with auth._open_web_page():
+            pass
+    assert caught.value.kind == "browser_error"
+    assert "authgem/" in str(caught.value) and "Gemini Free" not in str(caught.value)
+
+
 def test_image_upload_sends_the_file_from_the_page():
     scripted = ScriptedPage(chunks=["/contrib_service/ttl_1d/abc"])
     page = web_page(scripted)
@@ -285,6 +302,34 @@ def test_the_gemini_thinking_settings_pick_the_app_thinking_level(monkeypatch, f
     fake_app["frames"] = [answer_frame("ok", model_id="e6fa609c3fa255c0", label="4 Neon")]
     auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model="gemini-4-neon")
     assert fake_app["sent"][-1]["thinking"] == expected
+
+
+def test_the_picker_capability_says_which_models_think():
+    plain, thinks = [2, 140, 3, 5, 6], [2, 140, 3, 32]
+    payload = [1, None, [
+        ["8c46e95b1a07cecc", "Auto", "Adapts to your needs", plain, 2, None, [], False, "", 1, "Auto"],
+        ["56fdd199312815e2", "4 Hydrogen", "4 Hydrogen", plain, 2, None, [], False, "", 20, "4 Hydrogen"],
+        ["e6fa609c3fa255c0", "Neon", "4 Neon", thinks, 2, None, [], True, "Neon4p0", 4, "4 Neon"],
+        ["95a4c0abcba24364", "Carbon", "4 Carbon", thinks, 2, None, None, False, "", 4, "4 Carbon"],
+    ]]
+    assert auth._parse_web_thinking(payload) == {"gemini-4-neon", "gemini-4-carbon"}
+    assert not auth.web_model_thinks("gemini-4-hydrogen") and auth.web_model_thinks("gemini-4-neon")  # known list
+    auth._cache_web_models([1, None, [entry[:3] + [plain] + entry[4:] for entry in payload[2]]])
+    assert not auth.web_model_thinks("gemini-4-neon")  # the live list wins
+
+
+@pytest.mark.parametrize("model, served, line", [
+    ("gemini-4-neon", "4 Neon", "🧠 AuthGem: 4 Neon · thinking level High"),
+    ("gemini-4-hydrogen", "4 Hydrogen",
+     "🧠 AuthGem: 4 Hydrogen · no thinking (the Gemini app has no thinking level for this model)"),
+    ("auto", "4 Hydrogen", "🧠 AuthGem: Auto · thinking level High (when Auto picks a thinking model)"),
+])
+def test_the_request_line_says_whether_the_model_thinks(monkeypatch, fake_app, model, served, line):
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "high")
+    fake_app["frames"] = [answer_frame("ok", label=served)]
+    seen = []
+    auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model=model, log_fn=seen.append)
+    assert seen[0] == line
 
 
 def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
@@ -363,7 +408,7 @@ def test_client_empty_model_name_means_auto(monkeypatch, tmp_path):
     assert sent["model"] == "auto"
 
 
-@pytest.mark.parametrize("kind", ["auth_error", "model_unavailable", "config_error"])
+@pytest.mark.parametrize("kind", ["auth_error", "model_unavailable", "config_error", "browser_error"])
 def test_errors_a_retry_cannot_fix_stop_at_once(monkeypatch, tmp_path, kind):
     client = make_client(monkeypatch, tmp_path, "authgem/gemini-4-carbon")
     calls = []

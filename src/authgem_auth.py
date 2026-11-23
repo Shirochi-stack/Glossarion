@@ -1442,6 +1442,10 @@ _GEMINI_WEB_LIMIT_CODES = {1037}
 #: "minimal": those send Low, its lightest level.
 _GEMINI_WEB_THINKING_SLOT = 80
 _GEMINI_WEB_THINKING_CODES = {"low": 1, "medium": 4, "high": 2}
+#: The picker capability a model with a thinking level carries (2026-11-23: 4 Neon and 4 Carbon have it;
+#: 4 Hydrogen and Auto do not, and 4 Hydrogen sends no thinking at any level).
+_GEMINI_WEB_THINKING_CAP = 32
+GEMINI_WEB_THINKING_MODELS = {"gemini-4-neon", "gemini-4-carbon"}
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 #: Source markers the Gemini app writes into answers about attached files (``[cite: 1]``).
 _CITE_MARKER_RE = re.compile(r"\[cite(?:_start|_end)?(?::\s*[\d,\s]*)?\]")
@@ -1450,7 +1454,8 @@ _SERVED_MODEL_RE = re.compile(r'"([0-9a-f]{16})",null,null,"([^"]{1,40})",(?:tru
 
 class GeminiWebError(RuntimeError):
     """An authgem/ request failed. ``kind``: auth_error (no / ended Google session),
-    config_error (bad request), model_unavailable (the plan lacks the model), api_error."""
+    config_error (bad request), model_unavailable (the account cannot use the model), browser_error
+    (the Google Login browser is held by another Glossarion), api_error."""
 
     def __init__(self, message: str, kind: str = "api_error") -> None:
         super().__init__(message)
@@ -1464,9 +1469,13 @@ SIGN_IN_NEEDED = (
 SESSION_ENDED = (
     "The saved Google session ended. Click Google Login next to the model to sign in again."
 )
+BROWSER_IN_USE = (
+    "authgem/ could not open its Google Login browser: another Glossarion window or process is using "
+    "it. Close the other Google Login window (or the other Glossarion) and try again."
+)
 
 _web_session_probe = None
-_web_models_cache: Dict[str, Any] = {"models": None, "at": 0.0}
+_web_models_cache: Dict[str, Any] = {"models": None, "thinking": None, "at": 0.0}
 _web_models_lock = threading.Lock()
 
 
@@ -1504,6 +1513,7 @@ def reset_web_session() -> None:
     """Forget what was learned from the old session (call after a Google login or logout)."""
     with _web_models_lock:
         _web_models_cache["models"] = None
+        _web_models_cache["thinking"] = None
         _web_models_cache["at"] = 0.0
 
 
@@ -1719,6 +1729,12 @@ def _open_web_page(cancel_check=None):
                 raise
             yield web
     except gemini_free.AIModeError as exc:
+        if exc.kind == gemini_free.KIND_CANCELLED:
+            raise RuntimeError("AuthGem: stream cancelled by user") from exc
+        if exc.kind == gemini_free.KIND_BROWSER:
+            # Chrome hands a second start on the Google Login profile to the browser already on it
+            # (another Glossarion window or process) and exits; a retry meets the same browser.
+            raise GeminiWebError(BROWSER_IN_USE, "browser_error") from exc
         kind = "auth_error" if exc.kind == gemini_free.KIND_SIGN_IN else exc.kind
         raise GeminiWebError(str(exc), kind) from exc
 
@@ -1744,9 +1760,9 @@ def _web_rpc(page: _WebPage, rpcid: str, payload: Any, timeout: float = 30.0) ->
     return None
 
 
-def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
-    """name -> (model id, label) from the model picker RPC (entries ``[id, ..., label]``)."""
-    found: Dict[str, Tuple[str, str]] = {}
+def _web_model_entries(payload: Any) -> List[Tuple[str, list]]:
+    """(name, entry) for each model of the model picker RPC (entries ``[id, ..., label]``)."""
+    found: List[Tuple[str, list]] = []
 
     def walk(value: Any) -> None:
         if not isinstance(value, list):
@@ -1757,14 +1773,47 @@ def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
             for entry in entries:
                 label = entry[-1] if isinstance(entry[-1], str) and entry[-1].strip() else entry[2]
                 name = web_model_name(label)
-                if name and name not in found:
-                    found[name] = (entry[0], str(label).strip())
+                if name and all(name != seen for seen, _entry in found):
+                    found.append((name, entry))
             return
         for item in value:
             walk(item)
 
     walk(payload)
     return found
+
+
+def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
+    """name -> (model id, label) from the model picker RPC."""
+    found: Dict[str, Tuple[str, str]] = {}
+    for name, entry in _web_model_entries(payload):
+        label = entry[-1] if isinstance(entry[-1], str) and entry[-1].strip() else entry[2]
+        found[name] = (entry[0], str(label).strip())
+    return found
+
+
+def _parse_web_thinking(payload: Any) -> set:
+    """Names of the models whose picker capabilities (entry[3]) include the thinking level."""
+    return {name for name, entry in _web_model_entries(payload)
+            if isinstance(entry[3], list) and _GEMINI_WEB_THINKING_CAP in entry[3]}
+
+
+def _cache_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
+    models = _parse_web_models(payload)
+    if models:
+        with _web_models_lock:
+            _web_models_cache["models"] = models
+            _web_models_cache["thinking"] = _parse_web_thinking(payload)
+            _web_models_cache["at"] = time.monotonic()
+    return models
+
+
+def web_model_thinks(name: str) -> bool:
+    """Whether the Gemini app offers a thinking level for this authgem/ model (the last picker list read,
+    else the known models)."""
+    with _web_models_lock:
+        thinking = _web_models_cache.get("thinking") if _web_models_cache["models"] else None
+    return name in (thinking if thinking is not None else GEMINI_WEB_THINKING_MODELS)
 
 
 def _web_models(page: _WebPage) -> Dict[str, Tuple[str, str]]:
@@ -1774,29 +1823,21 @@ def _web_models(page: _WebPage) -> Dict[str, Tuple[str, str]]:
         if cached and time.monotonic() - _web_models_cache["at"] < _GEMINI_WEB_MODELS_TTL:
             return cached
     try:
-        models = _parse_web_models(_web_rpc(page, _RPC_LIST_MODELS, []))
+        models = _cache_web_models(_web_rpc(page, _RPC_LIST_MODELS, []))
     except GeminiWebError:
         raise
     except Exception as exc:
         logger.debug("AuthGem: model list unavailable: %s", exc)
         models = {}
-    if not models:
-        return dict(GEMINI_WEB_KNOWN_MODELS)
-    with _web_models_lock:
-        _web_models_cache["models"] = models
-        _web_models_cache["at"] = time.monotonic()
-    return models
+    return models or dict(GEMINI_WEB_KNOWN_MODELS)
 
 
 def fetch_web_models(timeout: float = 30.0, cancel_check=None) -> List[str]:
     """authgem/ model names the signed-in account's Gemini picker offers."""
     with _open_web_page(cancel_check) as page:
-        models = _parse_web_models(_web_rpc(page, _RPC_LIST_MODELS, [], timeout=timeout))
+        models = _cache_web_models(_web_rpc(page, _RPC_LIST_MODELS, [], timeout=timeout))
     if not models:
         raise GeminiWebError("The Gemini app sent no model list.", "api_error")
-    with _web_models_lock:
-        _web_models_cache["models"] = models
-        _web_models_cache["at"] = time.monotonic()
     return list(models)
 
 
@@ -2054,7 +2095,8 @@ def send_chat_completion_web(
     The chat messages become one prompt (``authds_auth.build_prompt``: a ``[role]`` header per
     message when there are several); prompt images are uploaded the way the Gemini app uploads
     them. The answer streams into the log, is checked against the model asked for (the app
-    silently answers with 4 Hydrogen when the plan lacks a model) and the chat is deleted afterwards.
+    silently answers with another model when the account cannot use one) and the chat is deleted
+    afterwards.
     """
     import authds_auth
     del connect_timeout  # the page's own connection
@@ -2067,7 +2109,12 @@ def send_chat_completion_web(
     with _open_web_page(cancel_check=is_cancelled) as page:
         name, model_id, label = _resolve_web_model(_web_models(page), model)
         thinking = web_thinking_level()
-        _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
+        if name == DEFAULT_WEB_MODEL:
+            _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()} (when Auto picks a thinking model)")
+        elif web_model_thinks(name):
+            _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
+        else:
+            _log(f"🧠 AuthGem: {label} · no thinking (the Gemini app has no thinking level for this model)")
         answer = _web_generate(page, prompt, images, model_id, timeout, _log, thinking)
         _delete_web_chat(page, answer.chat_id)
     elapsed = time.time() - started
@@ -2079,8 +2126,9 @@ def send_chat_completion_web(
     served = answer.served
     if name != DEFAULT_WEB_MODEL and served and served.casefold() != label.casefold():
         raise GeminiWebError(
-            f"Gemini answered with {served} instead of {label}: this Google account's Gemini plan "
-            f"does not include {label}. Choose another authgem/ model.", "model_unavailable")
+            f"Gemini answered with {served} instead of {label}: this Google account cannot use {label} "
+            f"right now (its Gemini plan does not include it, or its {label} limit is used up). "
+            "Choose another authgem/ model.", "model_unavailable")
     content = _CITE_MARKER_RE.sub("", answer.text)
     _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
     return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}

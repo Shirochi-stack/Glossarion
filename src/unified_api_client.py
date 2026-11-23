@@ -12170,10 +12170,11 @@ class UnifiedClient:
                     print("DeepSeek (authds/) sign-in/setup error - sign in to DeepSeek first; not retrying")
                     raise
 
-                # Gemini app (authgem/): no Google sign-in, or a model the account's plan lacks.
+                # Gemini app (authgem/): no Google sign-in, a model the account's plan lacks, or its
+                # Google Login browser held by another Glossarion.
                 if self.client_type == "authgem" and e.error_type in ("auth_error", "config_error",
-                                                                      "model_unavailable"):
-                    print("Gemini app (authgem/) sign-in/model error - not retrying")
+                                                                      "model_unavailable", "browser_error"):
+                    print("Gemini app (authgem/) sign-in/model/browser error - not retrying")
                     raise
 
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
@@ -29530,9 +29531,9 @@ class UnifiedClient:
                 error_str = str(exc)
 
                 # authgem/ errors a retry cannot fix: no Google sign-in, a model the plan lacks,
-                # a prompt the route cannot send.
+                # a prompt the route cannot send, its browser held by another Glossarion.
                 if (_AuthGemWebError is not None and isinstance(exc, _AuthGemWebError)
-                        and exc.kind in ("auth_error", "config_error", "model_unavailable")):
+                        and exc.kind in ("auth_error", "config_error", "model_unavailable", "browser_error")):
                     raise UnifiedClientError(f"{label}: {error_str}", error_type=exc.kind)
 
                 # Stream cancelled
