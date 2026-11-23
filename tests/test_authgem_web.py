@@ -333,6 +333,21 @@ def test_a_swapped_model_is_logged_once_on_its_first_frame_and_its_answer_kept()
     assert reader.text == "<p>A</p><p>B</p>" and reader.served == "3.5 Flash-Lite"
 
 
+def test_thinking_is_shown_as_soon_as_the_request_is_sent():
+    seen = []
+
+    class Watched(ScriptedPage):
+        def run_js(self, expression):
+            if "fetch(" in expression:
+                seen.append("<sent>")
+            return super().run_js(expression)
+
+    auth._web_generate(web_page(Watched(chunks=[answer_frame("<p>A</p>")])), "hi", [], "e6fa609c3fa255c0",
+                       60, seen.append, "high", expect="4 Hydrogen")
+    assert seen[:2] == ["🧠 [authgem] Thinking...", "<sent>"]
+    assert seen[2].startswith("🧠 [authgem] Thinking complete") and seen[-1] == "<p>A</p>"
+
+
 def test_the_model_asked_for_logs_no_swap():
     seen = []
     reader = auth._web_generate(web_page(ScriptedPage(chunks=[answer_frame("ok", label="4 Carbon")])),

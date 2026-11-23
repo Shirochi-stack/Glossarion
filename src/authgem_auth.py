@@ -1877,6 +1877,11 @@ class _WebStreamLog:
             if self._show_thinking():
                 self.log("🧠 [authgem] Thinking...")
 
+    def waiting(self) -> None:
+        """The request is sent: the Gemini app sends nothing while it thinks but a keep-alive about once a
+        minute, so the thinking phase is shown from here, not from the first keep-alive."""
+        self._begin_thinking()
+
     def heartbeat(self) -> None:
         if self.thinking_done:
             return
@@ -2067,8 +2072,10 @@ def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, think
     inner[_GEMINI_WEB_THINKING_SLOT] = _GEMINI_WEB_THINKING_CODES.get(thinking, _GEMINI_WEB_THINKING_CODES["high"])
     headers = dict(_GEMINI_WEB_FORM_HEADERS)
     headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
-    answer = _WebAnswer(_web_stream_log(_log), expect=expect, log=_log)
+    stream_log = _web_stream_log(_log)
+    answer = _WebAnswer(stream_log, expect=expect, log=_log)
     body = urlencode({"at": page.at, "f.req": json.dumps([None, json.dumps(inner)])})
+    stream_log.waiting()
     page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
               on_text=answer.feed, timeout=timeout)
     answer.close()
