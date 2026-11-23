@@ -1437,6 +1437,11 @@ GEMINI_WEB_KNOWN_MODELS: Dict[str, Tuple[str, str]] = {
 }
 #: Gemini app error codes inside an answer frame that mean "this model's usage limit is used up".
 _GEMINI_WEB_LIMIT_CODES = {1037}
+#: The Gemini app's thinking levels (its picker's "Thinking level": Low / Medium / High), sent at this
+#: position of the request (protobuf field 81 of the app's own request). The app has no "off" or
+#: "minimal": those send Low, its lightest level.
+_GEMINI_WEB_THINKING_SLOT = 80
+_GEMINI_WEB_THINKING_CODES = {"low": 1, "medium": 4, "high": 2}
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 #: Source markers the Gemini app writes into answers about attached files (``[cite: 1]``).
 _CITE_MARKER_RE = re.compile(r"\[cite(?:_start|_end)?(?::\s*[\d,\s]*)?\]")
@@ -1982,10 +1987,24 @@ def _delete_web_chat(page: _WebPage, chat_id: str) -> None:
         logger.debug("AuthGem: could not delete chat %s: %s", chat_id, exc)
 
 
-def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log) -> _WebAnswer:
+def web_thinking_level() -> str:
+    """The Gemini app thinking level for the Gemini thinking settings (the other Gemini routes' settings):
+    GEMINI_THINKING_LEVEL minimal / low -> low, medium -> medium, high -> high; thinking off
+    (ENABLE_GEMINI_THINKING 0, or THINKING_BUDGET 0) -> low, the app's lightest level."""
+    if os.getenv("ENABLE_GEMINI_THINKING", "1") != "1" or os.getenv("THINKING_BUDGET", "-1").strip() == "0":
+        return "low"
+    level = os.getenv("GEMINI_THINKING_LEVEL", "high").strip().lower()
+    if level == "minimal":
+        return "low"
+    return level if level in _GEMINI_WEB_THINKING_CODES else "high"
+
+
+def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, thinking: str = "high") -> _WebAnswer:
     files = [_upload_web_image(page, image, 120) for image in images]
     inner = [[prompt, 0, None, files or None, None, None, 0], ["en"],
              ["", "", "", None, None, None, None, None, None, ""]]
+    inner += [None] * (_GEMINI_WEB_THINKING_SLOT + 1 - len(inner))
+    inner[_GEMINI_WEB_THINKING_SLOT] = _GEMINI_WEB_THINKING_CODES.get(thinking, _GEMINI_WEB_THINKING_CODES["high"])
     headers = dict(_GEMINI_WEB_FORM_HEADERS)
     headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
     answer = _WebAnswer(_web_stream_log(_log))
@@ -2020,7 +2039,9 @@ def send_chat_completion_web(
     started = time.time()
     with _open_web_page(cancel_check=is_cancelled) as page:
         name, model_id, label = _resolve_web_model(_web_models(page), model)
-        answer = _web_generate(page, prompt, images, model_id, timeout, _log)
+        thinking = web_thinking_level()
+        _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
+        answer = _web_generate(page, prompt, images, model_id, timeout, _log, thinking)
         _delete_web_chat(page, answer.chat_id)
     elapsed = time.time() - started
     if not answer.text:

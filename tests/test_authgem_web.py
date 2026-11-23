@@ -219,8 +219,8 @@ def fake_app(monkeypatch):
     def open_page(cancel_check=None):
         yield page
 
-    def generate(pg, prompt, images, model_id, timeout, log):
-        state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images})
+    def generate(pg, prompt, images, model_id, timeout, log, thinking="high"):
+        state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images, "thinking": thinking})
         reader = auth._WebAnswer()
         for frame in state["frames"]:
             reader.feed(frame + "\n")
@@ -243,6 +243,37 @@ def test_send_flattens_messages_picks_the_model_and_deletes_the_chat(fake_app):
     assert fake_app["sent"][0]["model_id"] == "e6fa609c3fa255c0"
     assert fake_app["sent"][0]["prompt"] == "[system]\nYou are a translator.\n\n[user]\n오늘은 날씨가 좋네요."
     assert fake_app["deleted"] == ["c_f25d9ecb07f4bcdd"]
+
+
+@pytest.mark.parametrize("env,expected", [
+    ({}, "high"),  # the Gemini thinking level's default
+    ({"GEMINI_THINKING_LEVEL": "medium"}, "medium"),
+    ({"GEMINI_THINKING_LEVEL": "low"}, "low"),
+    ({"GEMINI_THINKING_LEVEL": "minimal"}, "low"),  # the app has no minimal
+    ({"ENABLE_GEMINI_THINKING": "0", "GEMINI_THINKING_LEVEL": "high"}, "low"),  # no off: its lightest level
+    ({"THINKING_BUDGET": "0", "GEMINI_THINKING_LEVEL": "high"}, "low"),
+    ({"GEMINI_THINKING_LEVEL": "nonsense"}, "high"),
+])
+def test_the_gemini_thinking_settings_pick_the_app_thinking_level(monkeypatch, fake_app, env, expected):
+    for name in ("ENABLE_GEMINI_THINKING", "THINKING_BUDGET", "GEMINI_THINKING_LEVEL"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    fake_app["frames"] = [answer_frame("ok", model_id="e6fa609c3fa255c0", label="4 Neon")]
+    auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model="gemini-4-neon")
+    assert fake_app["sent"][-1]["thinking"] == expected
+
+
+def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():
+    scripted = ScriptedPage(chunks=[answer_frame("ok")])
+    page = web_page(scripted)
+    for level, code in (("low", 1), ("medium", 4), ("high", 2)):
+        scripted.chunks = [answer_frame("ok")]
+        auth._web_generate(page, "hi", [], "e6fa609c3fa255c0", 60, lambda m: None, level)
+        body = scripted.started[-1]["body"]
+        from urllib.parse import parse_qs
+        inner = json.loads(json.loads(parse_qs(body)["f.req"][0])[1])
+        assert len(inner) == 81 and inner[80] == code
 
 
 def test_a_model_the_plan_lacks_is_refused_not_swapped(fake_app):
