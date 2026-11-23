@@ -259,7 +259,7 @@ def fake_app(monkeypatch):
     def open_page(cancel_check=None):
         yield page
 
-    def generate(pg, prompt, images, model_id, timeout, log, thinking="high"):
+    def generate(pg, prompt, images, model_id, timeout, log, thinking="high", expect=""):
         state["sent"].append({"prompt": prompt, "model_id": model_id, "images": images, "thinking": thinking})
         reader = auth._WebAnswer()
         for frame in state["frames"]:
@@ -304,24 +304,9 @@ def test_the_gemini_thinking_settings_pick_the_app_thinking_level(monkeypatch, f
     assert fake_app["sent"][-1]["thinking"] == expected
 
 
-def test_the_picker_capability_says_which_models_think():
-    plain, thinks = [2, 140, 3, 5, 6], [2, 140, 3, 32]
-    payload = [1, None, [
-        ["8c46e95b1a07cecc", "Auto", "Adapts to your needs", plain, 2, None, [], False, "", 1, "Auto"],
-        ["56fdd199312815e2", "4 Hydrogen", "4 Hydrogen", plain, 2, None, [], False, "", 20, "4 Hydrogen"],
-        ["e6fa609c3fa255c0", "Neon", "4 Neon", thinks, 2, None, [], True, "Neon4p0", 4, "4 Neon"],
-        ["95a4c0abcba24364", "Carbon", "4 Carbon", thinks, 2, None, None, False, "", 4, "4 Carbon"],
-    ]]
-    assert auth._parse_web_thinking(payload) == {"gemini-4-neon", "gemini-4-carbon"}
-    assert not auth.web_model_thinks("gemini-4-hydrogen") and auth.web_model_thinks("gemini-4-neon")  # known list
-    auth._cache_web_models([1, None, [entry[:3] + [plain] + entry[4:] for entry in payload[2]]])
-    assert not auth.web_model_thinks("gemini-4-neon")  # the live list wins
-
-
 @pytest.mark.parametrize("model, served, line", [
     ("gemini-4-neon", "4 Neon", "🧠 AuthGem: 4 Neon · thinking level High"),
-    ("gemini-4-hydrogen", "4 Hydrogen",
-     "🧠 AuthGem: 4 Hydrogen · no thinking (the Gemini app has no thinking level for this model)"),
+    ("gemini-4-hydrogen", "4 Hydrogen", "🧠 AuthGem: 4 Hydrogen · thinking level High"),
     ("auto", "4 Hydrogen", "🧠 AuthGem: Auto · thinking level High (when Auto picks a thinking model)"),
 ])
 def test_the_request_line_says_whether_the_model_thinks(monkeypatch, fake_app, model, served, line):
@@ -330,6 +315,32 @@ def test_the_request_line_says_whether_the_model_thinks(monkeypatch, fake_app, m
     seen = []
     auth.send_chat_completion_web([{"role": "user", "content": "hi"}], model=model, log_fn=seen.append)
     assert seen[0] == line
+
+
+def test_a_swapped_model_stops_on_its_first_frame_with_a_log_line():
+    seen = []
+    log = auth._WebStreamLog(seen.append, log_stream=True, stream_thinking=True)
+    reader = auth._WebAnswer(log, expect="4 Carbon", log=seen.append)
+    with pytest.raises(auth.GeminiWebError) as caught:
+        reader.feed(answer_frame("type,raw_name", label="3.5 Flash-Lite", chat_id="c_swap") + "\n")
+    assert caught.value.kind == "model_unavailable" and "3.5 Flash-Lite instead of 4 Carbon" in str(caught.value)
+    assert seen == ["⚠️ AuthGem: the Gemini app swapped 4 Carbon for 3.5 Flash-Lite; "
+                    "stopping the request (its answer is not used)"]  # none of the swapped answer is logged
+    assert reader.chat_id == "c_swap"
+
+
+def test_the_swapped_request_is_aborted_in_the_page_and_its_chat_deleted(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(auth, "_delete_web_chat", lambda pg, chat_id: deleted.append(chat_id))
+    scripted = ScriptedPage(chunks=[answer_frame("a", label="3.5 Flash-Lite", chat_id="c_swap") + "\n",
+                                    answer_frame("ab", label="3.5 Flash-Lite", chat_id="c_swap") + "\n"])
+    page = web_page(scripted)
+    with pytest.raises(auth.GeminiWebError):
+        auth._web_generate(page, "hi", [], "95a4c0abcba24364", 60, lambda m: None, "high", expect="4 Carbon")
+    assert deleted == ["c_swap"] and scripted.aborted
+    reader = auth._web_generate(web_page(ScriptedPage(chunks=[answer_frame("ok", label="4 Carbon")])),
+                                "hi", [], "95a4c0abcba24364", 60, lambda m: None, "high", expect="4 Carbon")
+    assert reader.text == "ok"
 
 
 def test_the_thinking_level_goes_to_the_request_slot_the_app_uses():

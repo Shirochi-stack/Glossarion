@@ -1442,10 +1442,6 @@ _GEMINI_WEB_LIMIT_CODES = {1037}
 #: "minimal": those send Low, its lightest level.
 _GEMINI_WEB_THINKING_SLOT = 80
 _GEMINI_WEB_THINKING_CODES = {"low": 1, "medium": 4, "high": 2}
-#: The picker capability a model with a thinking level carries (2026-11-23: 4 Neon and 4 Carbon have it;
-#: 4 Hydrogen and Auto do not, and 4 Hydrogen sends no thinking at any level).
-_GEMINI_WEB_THINKING_CAP = 32
-GEMINI_WEB_THINKING_MODELS = {"gemini-4-neon", "gemini-4-carbon"}
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 #: Source markers the Gemini app writes into answers about attached files (``[cite: 1]``).
 _CITE_MARKER_RE = re.compile(r"\[cite(?:_start|_end)?(?::\s*[\d,\s]*)?\]")
@@ -1475,7 +1471,7 @@ BROWSER_IN_USE = (
 )
 
 _web_session_probe = None
-_web_models_cache: Dict[str, Any] = {"models": None, "thinking": None, "at": 0.0}
+_web_models_cache: Dict[str, Any] = {"models": None, "at": 0.0}
 _web_models_lock = threading.Lock()
 
 
@@ -1513,7 +1509,6 @@ def reset_web_session() -> None:
     """Forget what was learned from the old session (call after a Google login or logout)."""
     with _web_models_lock:
         _web_models_cache["models"] = None
-        _web_models_cache["thinking"] = None
         _web_models_cache["at"] = 0.0
 
 
@@ -1792,28 +1787,13 @@ def _parse_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
     return found
 
 
-def _parse_web_thinking(payload: Any) -> set:
-    """Names of the models whose picker capabilities (entry[3]) include the thinking level."""
-    return {name for name, entry in _web_model_entries(payload)
-            if isinstance(entry[3], list) and _GEMINI_WEB_THINKING_CAP in entry[3]}
-
-
 def _cache_web_models(payload: Any) -> Dict[str, Tuple[str, str]]:
     models = _parse_web_models(payload)
     if models:
         with _web_models_lock:
             _web_models_cache["models"] = models
-            _web_models_cache["thinking"] = _parse_web_thinking(payload)
             _web_models_cache["at"] = time.monotonic()
     return models
-
-
-def web_model_thinks(name: str) -> bool:
-    """Whether the Gemini app offers a thinking level for this authgem/ model (the last picker list read,
-    else the known models)."""
-    with _web_models_lock:
-        thinking = _web_models_cache.get("thinking") if _web_models_cache["models"] else None
-    return name in (thinking if thinking is not None else GEMINI_WEB_THINKING_MODELS)
 
 
 def _web_models(page: _WebPage) -> Dict[str, Tuple[str, str]]:
@@ -1979,12 +1959,15 @@ class _WebAnswer:
     """Reads the answer frames of a StreamGenerate response as they arrive (``stream_log``: the live log).
     ``feed`` takes any piece of the response; whole lines are parsed."""
 
-    def __init__(self, stream_log: Optional[_WebStreamLog] = None) -> None:
+    def __init__(self, stream_log: Optional[_WebStreamLog] = None, expect: str = "", log=None) -> None:
         self.text = ""
         self.chat_id = ""
         self.served = ""
         self.codes: List[int] = []
         self.stream_log = stream_log
+        #: The model label asked for ("" = any, for Auto): another one answering stops the request at once.
+        self.expect = expect
+        self.log = log or (lambda *a, **kw: None)
         self._pending = ""
 
     def feed(self, chunk: str) -> None:
@@ -2010,6 +1993,15 @@ class _WebAnswer:
         if isinstance(headline, list) and headline and isinstance(headline[-1], list) and headline[-1]:
             log.headline(headline[-1][0])
 
+    def _chat_id_of(self, raw: str) -> None:
+        """Keep the chat id of a frame that is not parsed further (so the chat can still be deleted)."""
+        try:
+            inner = json.loads(raw)
+            if inner[1] and inner[1][0]:
+                self.chat_id = str(inner[1][0])
+        except (ValueError, IndexError, TypeError, KeyError):
+            pass
+
     def _line(self, line: str) -> None:
         for frame in _web_frames(line):
             for item in frame:
@@ -2020,6 +2012,11 @@ class _WebAnswer:
                     continue
                 for match in _SERVED_MODEL_RE.finditer(item[2]):
                     self.served = match.group(2)
+                if self.expect and self.served and self.served.casefold() != self.expect.casefold():
+                    self._chat_id_of(item[2])
+                    self.log(f"⚠️ AuthGem: the Gemini app swapped {self.expect} for {self.served}; "
+                             "stopping the request (its answer is not used)")
+                    raise GeminiWebError(_swapped_message(self.served, self.expect), "model_unavailable")
                 try:
                     inner = json.loads(item[2])
                 except ValueError:
@@ -2067,7 +2064,16 @@ def web_thinking_level() -> str:
     return level if level in _GEMINI_WEB_THINKING_CODES else "high"
 
 
-def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, thinking: str = "high") -> _WebAnswer:
+def _swapped_message(served: str, label: str) -> str:
+    return (f"Gemini answered with {served} instead of {label}: this Google account cannot use {label} "
+            f"right now (its Gemini plan does not include it, or its {label} limit is used up). "
+            "Choose another authgem/ model.")
+
+
+def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, thinking: str = "high",
+                  expect: str = "") -> _WebAnswer:
+    """One StreamGenerate request. ``expect``: the model label asked for (see ``_WebAnswer``); a swap
+    stops the request, deletes its chat and raises ``model_unavailable``."""
     files = [_upload_web_image(page, image, 120) for image in images]
     inner = [[prompt, 0, None, files or None, None, None, 0], ["en"],
              ["", "", "", None, None, None, None, None, None, ""]]
@@ -2075,10 +2081,15 @@ def _web_generate(page: _WebPage, prompt, images, model_id, timeout, _log, think
     inner[_GEMINI_WEB_THINKING_SLOT] = _GEMINI_WEB_THINKING_CODES.get(thinking, _GEMINI_WEB_THINKING_CODES["high"])
     headers = dict(_GEMINI_WEB_FORM_HEADERS)
     headers[_GEMINI_WEB_MODEL_HEADER] = json.dumps([1, None, None, None, model_id, None, None, 0, [4]])
-    answer = _WebAnswer(_web_stream_log(_log))
+    answer = _WebAnswer(_web_stream_log(_log), expect=expect, log=_log)
     body = urlencode({"at": page.at, "f.req": json.dumps([None, json.dumps(inner)])})
-    page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
-              on_text=answer.feed, timeout=timeout)
+    try:
+        page.post(f"{GEMINI_WEB_ORIGIN}{_GEMINI_WEB_STREAM_PATH}?{page.query()}", body=body, headers=headers,
+                  on_text=answer.feed, timeout=timeout)
+    except GeminiWebError as exc:
+        if exc.kind == "model_unavailable":
+            _delete_web_chat(page, answer.chat_id)
+        raise
     answer.close()
     return answer
 
@@ -2111,11 +2122,10 @@ def send_chat_completion_web(
         thinking = web_thinking_level()
         if name == DEFAULT_WEB_MODEL:
             _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()} (when Auto picks a thinking model)")
-        elif web_model_thinks(name):
-            _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
         else:
-            _log(f"🧠 AuthGem: {label} · no thinking (the Gemini app has no thinking level for this model)")
-        answer = _web_generate(page, prompt, images, model_id, timeout, _log, thinking)
+            _log(f"🧠 AuthGem: {label} · thinking level {thinking.capitalize()}")
+        answer = _web_generate(page, prompt, images, model_id, timeout, _log, thinking,
+                               expect="" if name == DEFAULT_WEB_MODEL else label)
         _delete_web_chat(page, answer.chat_id)
     elapsed = time.time() - started
     if not answer.text:
@@ -2125,10 +2135,7 @@ def send_chat_completion_web(
         raise RuntimeError(f"The Gemini app sent no answer{detail}.")
     served = answer.served
     if name != DEFAULT_WEB_MODEL and served and served.casefold() != label.casefold():
-        raise GeminiWebError(
-            f"Gemini answered with {served} instead of {label}: this Google account cannot use {label} "
-            f"right now (its Gemini plan does not include it, or its {label} limit is used up). "
-            "Choose another authgem/ model.", "model_unavailable")
+        raise GeminiWebError(_swapped_message(served, label), "model_unavailable")  # backstop
     content = _CITE_MARKER_RE.sub("", answer.text)
     _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
     return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}
