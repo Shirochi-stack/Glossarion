@@ -401,6 +401,37 @@ def test_cite_markers_are_removed(fake_app):
     assert auth.send_chat_completion_web([{"role": "user", "content": "colors?"}], model="auto")["content"] == "Red and blue"
 
 
+# The placeholder line the Gemini app wrote under a live answer that came with a web picture.
+PICTURE_LINK = "http://googleusercontent.com/lmdx_content/IATxvJNMUtJWkvqLsvRbZefniEIbJzgGciAJPYiXx72812"
+
+
+@pytest.mark.parametrize("text, expected", [
+    (f"<p>One.</p>\n\n{PICTURE_LINK}", "<p>One.</p>"),
+    (f"First.\n\n{PICTURE_LINK}\n\nSecond.", "First.\n\nSecond."),
+    (f"{PICTURE_LINK}\n\nFirst.", "First."),
+    (f"See {PICTURE_LINK} here.", "See  here."),
+    ("A real picture: https://lh3.googleusercontent.com/abc123", "A real picture: https://lh3.googleusercontent.com/abc123"),
+])
+def test_attachment_placeholder_links_are_removed(fake_app, text, expected):
+    fake_app["frames"] = [answer_frame(text)]
+    assert auth.send_chat_completion_web([{"role": "user", "content": "translate"}], model="auto")["content"] == expected
+
+
+def test_attachment_placeholder_links_are_not_logged():
+    seen = run_log([answer_frame(f"<p>One.</p>\n{PICTURE_LINK}\n<p>Two.</p>\n")])
+    assert seen[-2:] == ["<p>One.</p>", "<p>Two.</p>"]
+    assert not any("googleusercontent" in s for s in seen)
+
+
+def test_a_card_answer_reads_its_text_from_slot_22():
+    inner = json.loads(json.loads(answer_frame("http://googleusercontent.com/card_content/0"))[0][2])
+    inner[4][0] += [None] * (23 - len(inner[4][0]))
+    inner[4][0][22] = ["The card's text."]
+    reader = auth._WebAnswer()
+    reader.feed(json.dumps([["wrb.fr", None, json.dumps(inner)]]) + "\n")
+    assert reader.text == "The card's text."
+
+
 def test_usage_limit_reads_as_a_rate_limit(fake_app):
     fake_app["frames"] = [json.dumps([["wrb.fr", None, None, None, None, [8, None, None, [[1, [1037]]]]]])]
     with pytest.raises(RuntimeError, match="429"):
