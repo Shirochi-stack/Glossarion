@@ -1445,6 +1445,22 @@ _GEMINI_WEB_THINKING_CODES = {"low": 1, "medium": 4, "high": 2}
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 #: Source markers the Gemini app writes into answers about attached files (``[cite: 1]``).
 _CITE_MARKER_RE = re.compile(r"\[cite(?:_start|_end)?(?::\s*[\d,\s]*)?\]")
+#: Placeholder links the Gemini app writes into the answer where it renders an attachment (a web
+#: picture: ``http://googleusercontent.com/lmdx_content/<id>``, image_collection/..., card_content/0).
+#: Only the bare host: real image links use subdomains (lh3.googleusercontent.com).
+_PLACEHOLDER_LINK = r"https?://googleusercontent\.com/[\w\-/]+"
+_PLACEHOLDER_LINE_RE = re.compile(rf"\n*^[ \t]*{_PLACEHOLDER_LINK}[ \t]*$", re.MULTILINE)
+_PLACEHOLDER_LINK_RE = re.compile(_PLACEHOLDER_LINK)
+_CARD_CONTENT_RE = re.compile(r"\s*https?://googleusercontent\.com/card_content/\d+\s*")
+
+
+def _strip_placeholder_links(text: str) -> str:
+    """The answer without the app's attachment placeholders: a placeholder line goes with the blank
+    lines before it, an inline one on its own."""
+    if "googleusercontent.com/" not in text:
+        return text
+    stripped = _PLACEHOLDER_LINK_RE.sub("", _PLACEHOLDER_LINE_RE.sub("", text))
+    return stripped.lstrip("\n") if not text.startswith("\n") else stripped
 _SERVED_MODEL_RE = re.compile(r'"([0-9a-f]{16})",null,null,"([^"]{1,40})",(?:true|false)')
 
 
@@ -1931,6 +1947,7 @@ class _WebStreamLog:
             combined = combined.replace(tag, tag + "\n")
         *lines, self.pending = combined.split("\n")
         for line in lines:
+            line = _PLACEHOLDER_LINK_RE.sub("", line)
             if line.strip():
                 self.log(line.replace('\x1f', '\\x1F'))
 
@@ -2035,6 +2052,14 @@ class _WebAnswer:
                     text = inner[4][0][1][0]
                 except (IndexError, TypeError):
                     continue
+                if isinstance(text, str) and _CARD_CONTENT_RE.fullmatch(text):
+                    # A card answer: the text slot holds only the card's link, the text is in slot 22.
+                    try:
+                        card = inner[4][0][22][0]
+                    except (IndexError, TypeError):
+                        card = None
+                    if isinstance(card, str) and card:
+                        text = card
                 if isinstance(text, str) and len(text) >= len(self.text):
                     self.text = text
                     if self.stream_log is not None:
@@ -2122,7 +2147,7 @@ def send_chat_completion_web(
         detail = f" (error code {answer.codes[0]})" if answer.codes else ""
         raise RuntimeError(f"The Gemini app sent no answer{detail}.")
     served = answer.served
-    content = _CITE_MARKER_RE.sub("", answer.text)
+    content = _strip_placeholder_links(_CITE_MARKER_RE.sub("", answer.text))
     _log(f"📡 AuthGem: {served or label} answered in {elapsed:.1f}s ({len(content)} chars)")
     return {"content": content, "finish_reason": "stop", "usage": None, "model": served or label}
 

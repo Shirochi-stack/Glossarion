@@ -705,10 +705,10 @@ class GlossarionWeb:
         os.environ['ENABLE_GPT_THINKING'] = '1' if config('enable_gpt_thinking', True) else '0'
         os.environ['GPT_THINKING_EFFORT'] = config('gpt_thinking_effort', 'medium')
         os.environ['OR_THINKING_TOKENS'] = str(config('or_thinking_tokens', 2000))
-        os.environ['ENABLE_GEMINI_THINKING'] = '1' if config('enable_gemini_thinking', False) else '0'
-        os.environ['GEMINI_THINKING_BUDGET'] = str(config('gemini_thinking_budget', 0))
+        os.environ['ENABLE_GEMINI_THINKING'] = '1' if config('enable_gemini_thinking', True) else '0'
+        os.environ['GEMINI_THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
         # IMPORTANT: Also set THINKING_BUDGET for unified_api_client compatibility
-        os.environ['THINKING_BUDGET'] = str(config('gemini_thinking_budget', 0))
+        os.environ['THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
         
         # Translation Settings
         os.environ['CONTEXTUAL'] = '1' if config('contextual', False) else '0'
@@ -6037,17 +6037,17 @@ CRITICAL EXTRACTION RULES:
                             gr.Markdown("**Gemini Thinking Mode**")
                             enable_gemini_thinking = gr.Checkbox(
                                 label="Enable Gemini Thinking",
-                                value=self.get_config_value('enable_gemini_thinking', False),
+                                value=self.get_config_value('enable_gemini_thinking', True),
                                 info="Control Gemini's thinking process",
                                 interactive=True
                             )
                             
                             gemini_thinking_budget = gr.Number(
                                 label="Budget",
-                                value=self.get_config_value('gemini_thinking_budget', 0),
-                                minimum=0,
+                                value=self.get_config_value('gemini_thinking_budget', -1),
+                                minimum=-1,
                                 maximum=50000,
-                                info="tokens (0 = disabled)",
+                                info="tokens (-1 = dynamic, 0 = disabled)",
                                 interactive=True
                             )
                             
@@ -6240,8 +6240,8 @@ CRITICAL EXTRACTION RULES:
                     self.get_config_value('enable_gpt_thinking', True),  # enable_gpt_thinking
                     self.get_config_value('gpt_thinking_effort', 'medium'),  # gpt_thinking_effort
                     self.get_config_value('or_thinking_tokens', 2000),  # or_thinking_tokens
-                    self.get_config_value('enable_gemini_thinking', False),  # enable_gemini_thinking - disabled by default
-                    self.get_config_value('gemini_thinking_budget', 0),  # gemini_thinking_budget - 0 = disabled
+                    self.get_config_value('enable_gemini_thinking', True),  # enable_gemini_thinking - on by default, like Settings
+                    self.get_config_value('gemini_thinking_budget', -1),  # gemini_thinking_budget - -1 = dynamic, 0 = off
                     # Manga settings
                     self.get_config_value('model', 'authgpt/gpt-5.2'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
