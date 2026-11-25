@@ -4,7 +4,9 @@ A row is ``{"name", "repo", "file", "quant", "note", "n_ctx"}`` plus, when known
 and ``sha256`` (Hugging Face's LFS oid; the download re-reads both from Hugging Face), and for a vision
 model its projector: ``mmproj`` (the ``mmproj-*.gguf`` file of the same repository, downloaded when
 an image first needs it), ``mmproj_size`` and ``mmproj_sha256``. Without ``mmproj`` the repository's own projector is
-used when it has one (``hf.pick_projector``). ``file`` may be
+used when it has one (``hf.pick_projector``). ``mmproj_repo`` (optional) names another repository the projector
+comes from (listed, picked, downloaded and checked there: ``projector_repo``), for model repositories that carry
+none, such as mradermacher's imatrix (``i1``) quants beside their static-quant sibling. ``file`` may be
 empty (the auto-pick of ``hf.pick_file`` applies), ``quant`` may name one (``Q5_K_M``), ``n_ctx`` 0
 means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a saved list (even an empty
 one) wins. ``CUSTOM_FAMILIES`` are the fixed Custom rows beside the saved list: a family's parameter sizes,
@@ -29,9 +31,10 @@ log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
     "BACKENDS", "CUSTOM_FAMILIES", "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "NO_QUANT", "NPU_OVER_SESSION",
-    "PREF_KEY", "add_row", "backend_of", "custom_family", "custom_row", "custom_size_for", "download_size",
-    "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row", "load_presets", "npu_quant_kind", "npu_size_note",
-    "quant_label", "remove_row", "restore_defaults", "retire_old_gpu_rows", "save_presets", "validate_preset",
+    "OLD_STOCK_PRESETS", "PREF_KEY", "add_row", "backend_of", "custom_family", "custom_row", "custom_size_for",
+    "download_size", "file_quant", "is_gpu_quant", "is_no_quant", "is_old_gpu_row", "load_presets", "npu_quant_kind",
+    "npu_size_note", "projector_repo", "quant_label", "remove_row", "restore_defaults", "retire_old_gpu_rows",
+    "save_presets", "validate_preset",
 ]
 
 PREF_KEY = "local_model_presets"
@@ -52,29 +55,45 @@ def uses_normal_settings(entry: dict) -> bool:
     """Sigma Q8_0 uses normal defaults; its on-device controls remain editable."""
     return is_sigma(entry.get("repo")) and entry.get("file") == SIGMA_Q8_FILE
 
-#: First-run presets (verified on Hugging Face 2026-10-16: size and sha256 = the LFS oid; the vision
-#: projectors 2026-10-17). Garbage, Light and Medium use Unsloth's UD-Q4_K_XL (2026-10-18: lower KL
-#: divergence than Q4_K_M for 2-6 % more bytes). Sigma replaces Heavy and selects from its live HF files.
-#: The Qwen rows are Apache-2.0, architecture ``qwen35``, 262,144 trained context. Qwen3.5 is
-#: natively multimodal: with its ``mmproj-F16.gguf`` (llama.cpp's mtmd, libmtmd in our own
-#: llama-cpp-python build) the same model reads images, for the chat's Vision mode and image jobs.
+#: First-run presets. Owner 2026-11-25: every offered on-device model is an uncensored build, because the stock
+#: models refused many novel passages. These are Heretic builds (p-e-w's automatic abliteration: it removes the
+#: refusal direction from the text weights) in mradermacher's imatrix (``i1``) quants: Garbage, Light and Medium
+#: use i1-Q4_K_M (the same quality tier as the Unsloth UD-Q4_K_XL files they replace). The i1 repositories hold no
+#: vision projector, so ``mmproj_repo`` names where it comes from: the static-quant sibling of the same model
+#: (4B), or, where no Heretic projector exists (0.8B, 2B), Unsloth's stock Qwen3.5 repository (Heretic leaves the
+#: vision tower alone, so the stock projector fits). Verified on Hugging Face 2026-11-25
+#: (``/api/models/<repo>?blobs=true``: not gated; size and sha256 = the LFS oid).
+#: Sigma replaces Heavy, is already uncensored, and selects from its live HF files.
+#: The Qwen rows are architecture ``qwen35``, 262,144 trained context. Qwen3.5 is natively multimodal: with its
+#: projector (llama.cpp's mtmd, libmtmd in our own llama-cpp-python build) the same model reads images, for the
+#: chat's Vision mode and image jobs.
 DEFAULT_PRESETS: tuple = (
-    {"name": "Garbage", "repo": "unsloth/Qwen3.5-0.8B-GGUF", "file": "Qwen3.5-0.8B-UD-Q4_K_XL.gguf", "quant": "",
-     "note": "Qwen3.5 0.8B · fastest, rough translations · ~1 GB RAM", "n_ctx": 0, "size": 558772480,
-     "sha256": "3177ebd67afe4438374da19e690bc1b98756f7e0fea9240e1be404336156a7b5",
-     "mmproj": "mmproj-F16.gguf", "mmproj_size": 204987232,
+    {"name": "Garbage", "repo": "mradermacher/Qwen3.5-0.8B-heretic-v3-i1-GGUF",
+     "file": "Qwen3.5-0.8B-heretic-v3.i1-Q4_K_M.gguf", "quant": "",
+     "note": "Qwen3.5 0.8B uncensored · fastest, rough translations · ~1 GB RAM", "n_ctx": 0, "size": 529298208,
+     "sha256": "3c1a21ee949303cbb65e8a8380ffa17161901680080e12e08c397528e110c0d1",
+     "mmproj_repo": "unsloth/Qwen3.5-0.8B-GGUF", "mmproj": "mmproj-F16.gguf", "mmproj_size": 204987232,
      "mmproj_sha256": "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"},
-    {"name": "Light", "repo": "unsloth/Qwen3.5-2B-GGUF", "file": "Qwen3.5-2B-UD-Q4_K_XL.gguf", "quant": "",
-     "note": "Qwen3.5 2B · quick drafts on most phones · ~2 GB RAM", "n_ctx": 0, "size": 1339752704,
-     "sha256": "0af96165ea615bea39a04118d63f0b6d35908aea850ee4a51aa6151d851b8b35",
-     "mmproj": "mmproj-F16.gguf", "mmproj_size": 668227264,
+    {"name": "Light", "repo": "mradermacher/Qwen3.5-2B-heretic-i1-GGUF",
+     "file": "Qwen3.5-2B-heretic.i1-Q4_K_M.gguf", "quant": "",
+     "note": "Qwen3.5 2B uncensored · quick drafts on most phones · ~2 GB RAM", "n_ctx": 0, "size": 1270809248,
+     "sha256": "66e55c4ccdb612daed6ff4149b46ab1fde736ad56f6de6903de6709dbe760c90",
+     "mmproj_repo": "unsloth/Qwen3.5-2B-GGUF", "mmproj": "mmproj-F16.gguf", "mmproj_size": 668227264,
      "mmproj_sha256": "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7"},
-    {"name": "Medium", "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-UD-Q4_K_XL.gguf", "quant": "",
-     "note": "Qwen3.5 4B · better quality · needs ~4 GB free RAM", "n_ctx": 0, "size": 2912109728,
-     "sha256": "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7",
-     "mmproj": "mmproj-F16.gguf", "mmproj_size": 672423616,
-     "mmproj_sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"},
+    {"name": "Medium", "repo": "mradermacher/Qwen3.5-4B-heretic-i1-GGUF",
+     "file": "Qwen3.5-4B-heretic.i1-Q4_K_M.gguf", "quant": "",
+     "note": "Qwen3.5 4B uncensored · better quality · needs ~4 GB free RAM", "n_ctx": 0, "size": 2707515008,
+     "sha256": "a50ab7af6dabdb6b59b342c4aa89aaad4dc1b4d82bfc67286bb276a5c84f1018",
+     "mmproj_repo": "mradermacher/Qwen3.5-4B-heretic-GGUF", "mmproj": "Qwen3.5-4B-heretic.mmproj-f16.gguf",
+     "mmproj_size": 672423552, "mmproj_sha256": "e638dc8de3b75309a190092ba006307759343b62ae0d21ed8359df76b9b76c3b"},
     SIGMA_PRESET,
+)
+#: The stock first-run rows of earlier versions (Unsloth's censored Qwen3.5 UD-Q4_K_XL): a saved row with one's
+#: name, repo and file becomes the default row of that name (``load_presets``). Kept only to recognise them.
+OLD_STOCK_PRESETS: tuple = (
+    ("Garbage", "unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-UD-Q4_K_XL.gguf"),
+    ("Light", "unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-UD-Q4_K_XL.gguf"),
+    ("Medium", "unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-UD-Q4_K_XL.gguf"),
 )
 #: The GPU-friendly variants of the four defaults that earlier versions added to the saved list on Android:
 #: kept only to recognise those rows (``is_old_gpu_row``). Nothing adds them any more (owner 2026-10-31: the
@@ -106,37 +125,49 @@ GPU_PRESETS: tuple = (
      "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
 )
 #: The Custom rows (owner 2026-10-31): family -> parameter sizes. Tapping one lists the real files of the
-#: chosen size's repository (``hf.list_repo``), so nothing here names a quant. Checked 2026-10-31 on
-#: https://huggingface.co/api/models/<repo>?blobs=true: every repo exists, is not gated (no Hugging Face
-#: login) and has a Q4_0 file. llama-cpp-python 0.3.37 vendors llama.cpp a956a852, whose llama-arch.cpp knows
-#: all four architectures (qwen35, llama, gemma3 and gemma4, lfm2) and whose libmtmd knows the Qwen3.5 and
-#: Gemma projectors. Gemma 3 4B and Gemma 4 ship an mmproj ("Reads images"); so does every Qwen 3.5 size.
-#: LFM2 is the lightweight family: 350M to 1.2B parameters, 219-696 MB at Q4_0, and it was trained for
-#: English, Arabic, Chinese, French, German, Japanese, Korean and Spanish (SmolLM2 is mostly English).
+#: chosen size's repository (``hf.list_repo``), so nothing here names a quant. Owner 2026-11-25: every size is an
+#: uncensored build: Heretic (p-e-w's automatic abliteration) where one has a Q4_0 file, else huihui-ai's
+#: abliterated Gemma 3 1B. Checked 2026-11-25 on https://huggingface.co/api/models/<repo>?blobs=true: every repo
+#: exists, is not gated (no Hugging Face login) and has a Q4_0 file. mradermacher's ``i1`` (imatrix) repositories
+#: carry no projector: a size's ``mmproj_repo`` names the repository its vision projector is listed, downloaded
+#: and checked in (the static-quant sibling of the same model; Unsloth's stock Qwen3.5 0.8B / 2B, which have no
+#: Heretic projector). llama-cpp-python 0.3.37 vendors llama.cpp a956a852, whose llama-arch.cpp knows all four
+#: architectures (qwen35, llama, gemma3 and gemma4, lfm2) and whose libmtmd knows the Qwen3.5 and Gemma
+#: projectors. Gemma 3 4B and Gemma 4 read images; so does every Qwen 3.5 size. LFM2 is the lightweight family:
+#: 350M to 1.2B parameters, 220-698 MB at Q4_0, trained for English, Arabic, Chinese, French, German, Japanese,
+#: Korean and Spanish (LFM2.5 also Portuguese).
 CUSTOM_FAMILIES: tuple = (
     {"id": "qwen35", "name": "Qwen 3.5", "sizes": (
-        {"label": "0.8B", "name": "Qwen 3.5 0.8B", "repo": "unsloth/Qwen3.5-0.8B-GGUF"},
-        {"label": "2B", "name": "Qwen 3.5 2B", "repo": "unsloth/Qwen3.5-2B-GGUF"},
-        {"label": "4B", "name": "Qwen 3.5 4B", "repo": "unsloth/Qwen3.5-4B-GGUF"},
-        {"label": "9B", "name": "Qwen 3.5 9B", "repo": "unsloth/Qwen3.5-9B-GGUF"},
+        {"label": "0.8B", "name": "Qwen 3.5 0.8B", "repo": "mradermacher/Qwen3.5-0.8B-heretic-v3-i1-GGUF",
+         "mmproj_repo": "unsloth/Qwen3.5-0.8B-GGUF"},
+        {"label": "2B", "name": "Qwen 3.5 2B", "repo": "mradermacher/Qwen3.5-2B-heretic-i1-GGUF",
+         "mmproj_repo": "unsloth/Qwen3.5-2B-GGUF"},
+        {"label": "4B", "name": "Qwen 3.5 4B", "repo": "mradermacher/Qwen3.5-4B-heretic-i1-GGUF",
+         "mmproj_repo": "mradermacher/Qwen3.5-4B-heretic-GGUF"},
+        {"label": "9B", "name": "Qwen 3.5 9B", "repo": "mradermacher/Qwen3.5-9B-heretic-v2-i1-GGUF",
+         "mmproj_repo": "mradermacher/Qwen3.5-9B-heretic-v2-GGUF"},
     )},
     {"id": "llama", "name": "Llama", "sizes": (
-        {"label": "1B", "name": "Llama 3.2 1B", "repo": "unsloth/Llama-3.2-1B-Instruct-GGUF"},
-        {"label": "3B", "name": "Llama 3.2 3B", "repo": "unsloth/Llama-3.2-3B-Instruct-GGUF"},
-        {"label": "8B", "name": "Llama 3.1 8B", "repo": "unsloth/Llama-3.1-8B-Instruct-GGUF"},
+        {"label": "1B", "name": "Llama 3.2 1B", "repo": "mradermacher/Llama-3.2-1B-Instruct-heretic-i1-GGUF"},
+        {"label": "3B", "name": "Llama 3.2 3B", "repo": "mradermacher/Llama-3.2-3B-Instruct-heretic-i1-GGUF"},
+        {"label": "8B", "name": "Llama 3.1 8B", "repo": "bartowski/p-e-w_Llama-3.1-8B-Instruct-heretic-GGUF"},
     )},
     # mobile hotfix 1 #4: a ``group`` heads its sizes in the menu, so Gemma 4 reads as its own generation
     {"id": "gemma", "name": "Gemma", "sizes": (
-        {"label": "270M", "name": "Gemma 3 270M", "repo": "unsloth/gemma-3-270m-it-GGUF", "group": "Gemma 3"},
-        {"label": "1B", "name": "Gemma 3 1B", "repo": "unsloth/gemma-3-1b-it-GGUF", "group": "Gemma 3"},
-        {"label": "4B", "name": "Gemma 3 4B", "repo": "unsloth/gemma-3-4b-it-GGUF", "group": "Gemma 3"},
-        {"label": "E2B", "name": "Gemma 4 E2B", "repo": "unsloth/gemma-4-E2B-it-GGUF", "group": "Gemma 4"},
-        {"label": "E4B", "name": "Gemma 4 E4B", "repo": "unsloth/gemma-4-E4B-it-GGUF", "group": "Gemma 4"},
+        {"label": "270M", "name": "Gemma 3 270M", "repo": "ZuzeTt/gemma-3-270m-it-heretic-GGUF", "group": "Gemma 3"},
+        {"label": "1B", "name": "Gemma 3 1B", "repo": "bartowski/huihui-ai_gemma-3-1b-it-abliterated-GGUF",
+         "group": "Gemma 3"},
+        {"label": "4B", "name": "Gemma 3 4B", "repo": "mradermacher/gemma-3-4b-it-heretic-v1.2-i1-GGUF",
+         "mmproj_repo": "mradermacher/gemma-3-4b-it-heretic-v1.2-GGUF", "group": "Gemma 3"},
+        {"label": "E2B", "name": "Gemma 4 E2B", "repo": "mradermacher/gemma-4-E2B-it-ultra-uncensored-heretic-i1-GGUF",
+         "mmproj_repo": "mradermacher/gemma-4-E2B-it-ultra-uncensored-heretic-GGUF", "group": "Gemma 4"},
+        {"label": "E4B", "name": "Gemma 4 E4B", "repo": "mradermacher/gemma-4-E4B-it-ultra-uncensored-heretic-i1-GGUF",
+         "mmproj_repo": "mradermacher/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF", "group": "Gemma 4"},
     )},
     {"id": "lfm2", "name": "LFM2", "sizes": (
-        {"label": "350M", "name": "LFM2 350M", "repo": "unsloth/LFM2-350M-GGUF"},
-        {"label": "700M", "name": "LFM2 700M", "repo": "unsloth/LFM2-700M-GGUF"},
-        {"label": "1.2B", "name": "LFM2.5 1.2B", "repo": "unsloth/LFM2.5-1.2B-Instruct-GGUF"},
+        {"label": "350M", "name": "LFM2.5 350M", "repo": "mradermacher/LFM2.5-350M-heretic-i1-GGUF"},
+        {"label": "700M", "name": "LFM2 700M", "repo": "mradermacher/LFM2-700M-Heretic-i1-GGUF"},
+        {"label": "1.2B", "name": "LFM2.5 1.2B", "repo": "mradermacher/LFM2.5-1.2B-Instruct-Heretic-i1-GGUF"},
     )},
 )
 #: The unquantized GGUF kinds: what "No quant" in the Custom menu stands for
@@ -148,7 +179,7 @@ BACKEND_LABELS = {"auto": "Auto", "npu": "NPU", "gpu": "GPU", "cpu": "CPU"}
 #: one NPU session maps about 3.5 GB (llama.cpp docs/backend/snapdragon at the pin); bigger files are slower
 NPU_OVER_SESSION = "over the NPU's 3.5 GB: slower"
 #: the Custom sizes whose files are all over one NPU session (the Custom sheet notes it where the NPU is offered)
-_NPU_OVER_SESSION_REPOS = {"unsloth/qwen3.5-9b-gguf"}
+_NPU_OVER_SESSION_REPOS = {"mradermacher/qwen3.5-9b-heretic-v2-i1-gguf"}
 
 
 def npu_size_note(size: Optional[dict]) -> str:
@@ -214,6 +245,9 @@ def _clean(row: Any) -> Optional[dict]:
     npu_layers = _int(row.get("npu_layers"), 1, 10_000)
     if npu_layers:
         out["npu_layers"] = npu_layers
+    mmproj_repo = _projector_repo_field(row.get("mmproj_repo"), repo)
+    if mmproj_repo:
+        out["mmproj_repo"] = mmproj_repo
     mmproj = str(row.get("mmproj") or "").strip()
     if mmproj:
         try:
@@ -228,6 +262,30 @@ def _clean(row: Any) -> Optional[dict]:
         if _SHA_RE.match(mmproj_sha):
             out["mmproj_sha256"] = mmproj_sha
     return out
+
+
+def _projector_repo_field(value: Any, repo: Any) -> str:
+    """A row's ``mmproj_repo`` as stored: a Hugging Face repo id other than the row's own ``repo``, else ""."""
+    text = str(value or "").strip()
+    if not text or text.casefold() == str(repo or "").strip().casefold():
+        return ""
+    try:
+        return hf._check_repo(text)
+    except hf.HfError:
+        return ""
+
+
+def projector_repo(row: Optional[dict], repo: Any = None) -> str:
+    """The repository a row's vision projector comes from: its ``mmproj_repo``, else the ``mmproj_repo`` of the
+    Custom size of its repository (a downloaded model whose preset row is gone, or a row saved before the field
+    existed), else the row's own ``repo``. ``repo`` stands in for a missing ``row["repo"]``."""
+    row = row or {}
+    own = str(row.get("repo") or repo or "").strip()
+    named = _projector_repo_field(row.get("mmproj_repo"), own)
+    if named:
+        return named
+    found = custom_size_for(own)
+    return _projector_repo_field((found[1] if found else {}).get("mmproj_repo"), own) or own
 
 
 def download_size(row: dict) -> int:
@@ -253,7 +311,7 @@ def load_presets(prefs: Any) -> list:
     rows = [row for row in (_clean(r) for r in saved) if row is not None]
     repaired = _repair_projector_rows(rows)
     migrated = False
-    renamed = repaired
+    renamed = _uncensor_stock_rows(rows) or repaired
     for row in rows:
         if is_sigma(row["repo"]) and row["name"] == "Sigma (Best)":
             row["name"] = "Sigma"
@@ -270,6 +328,34 @@ def load_presets(prefs: Any) -> list:
     if renamed:
         return save_presets(prefs, rows)
     return rows
+
+
+def _uncensor_stock_rows(rows: list) -> bool:
+    """Owner 2026-11-25: the saved stock Garbage / Light / Medium rows of earlier versions (``OLD_STOCK_PRESETS``:
+    stock name, repo and file) become today's uncensored default rows of the same name, in place. Renamed or edited
+    rows and Custom picks are the user's own and stay; a downloaded old file stays on the phone (the Model manager
+    lists and deletes it). A stock row whose replacement is already in the list is dropped. True when anything
+    changed (in place)."""
+    changed = False
+    for row in list(rows):
+        stock = next((name for name, repo, file in OLD_STOCK_PRESETS
+                      if row["name"] == name and row["repo"].casefold() == repo.casefold() and row["file"] == file), None)
+        if stock is None:
+            continue
+        new = next(p for p in DEFAULT_PRESETS if p["name"] == stock)
+        changed = True
+        if any(other is not row and _same_file(other, new) for other in rows):
+            rows.remove(row)
+            continue
+        replacement = copy.deepcopy(new)
+        for key in ("n_ctx", "backend", "npu_layers"):  # the user's own settings of the row stay
+            if row.get(key):
+                replacement[key] = row[key]
+        row.clear()
+        row.update(replacement)
+    if changed:
+        log.info("on-device presets: the stock Qwen3.5 rows now use the uncensored models")
+    return changed
 
 
 def _repair_projector_rows(rows: list) -> bool:
@@ -378,12 +464,16 @@ def custom_size_for(repo: Any) -> Optional[tuple]:
 
 
 def custom_row(size: dict, file: Any, projector: Any = None) -> dict:
-    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile``."""
+    """The preset row of a quant chosen in the Custom menu: ``file`` and ``projector`` are ``hf.HfFile`` (the
+    projector one of ``projector_repo(size)``, which the row keeps as ``mmproj_repo`` when it is another one)."""
     label = quant_label(file.path)
     row = {"name": f"{size['name']} · {label}", "repo": size["repo"], "file": file.path, "quant": "",
            "note": f"Custom · {size['name']} · {label}", "n_ctx": 0, "size": int(file.size or 0)}
     if file.sha256:
         row["sha256"] = file.sha256
+    mmproj_repo = _projector_repo_field(size.get("mmproj_repo"), size["repo"])
+    if mmproj_repo:
+        row["mmproj_repo"] = mmproj_repo
     if projector is not None:
         row["mmproj"], row["mmproj_size"] = projector.path, int(projector.size or 0)
         if projector.sha256:
@@ -485,8 +575,8 @@ def validate_preset(row: dict, presets: Sequence[dict], index: Optional[int] = N
             for key in ("size", "sha256"):
                 if old.get(key):
                     clean[key] = old[key]
-        if old.get("repo") == clean["repo"]:  # the same repository keeps its vision projector
-            for key in ("mmproj", "mmproj_size", "mmproj_sha256"):
+        if old.get("repo") == clean["repo"]:  # the same repository keeps its vision projector (and where it is from)
+            for key in ("mmproj_repo", "mmproj", "mmproj_size", "mmproj_sha256"):
                 if old.get(key):
                     clean[key] = old[key]
     return clean, None

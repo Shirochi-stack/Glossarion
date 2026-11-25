@@ -37,8 +37,8 @@ from glossarion_mobile.services.local_llm import service as svc  # noqa: E402
 from test_bootstrap import _fake_session, _shutdown, _spike_main, app_env, storage  # noqa: E402,F401 - fixtures
 
 GIB = 1024 ** 3
-REPO = "unsloth/Qwen3.5-2B-GGUF"
-NINE = "unsloth/Qwen3.5-9B-GGUF"
+REPO = "mradermacher/Qwen3.5-2B-heretic-i1-GGUF"
+NINE = "mradermacher/Qwen3.5-9B-heretic-v2-i1-GGUF"
 TREE = [("Qwen3.5-2B-Q4_K_M.gguf", 3000, "a" * 64), ("Qwen3.5-2B-Q4_0.gguf", 2000, "b" * 64),
         ("Qwen3.5-2B-IQ4_XS.gguf", 1500, "c" * 64), ("Qwen3.5-2B-Q8_0.gguf", 5000, "d" * 64),
         ("mmproj-F16.gguf", 500, "f" * 64)]
@@ -498,7 +498,7 @@ def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
     light = next(p for p in presets.DEFAULT_PRESETS if p["name"] == "Light")
     q4_file = "Qwen3.5-2B-Q4_0.gguf"
     assert presets.is_gpu_quant(q4_file)
-    assert presets.file_quant(light["file"]) == "Q4_K_XL" and not presets.is_gpu_quant(light["file"])
+    assert presets.file_quant(light["file"]) == "Q4_K_M" and not presets.is_gpu_quant(light["file"])
 
     def downloaded(service, stem, file):
         with open(service.registry.file_path(stem), "wb") as handle:  # the registry lists files on disk
@@ -517,7 +517,7 @@ def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
 
     panel, prefs, service, current = panel_for("android")
     assert panel.gpu_swap_box.visible
-    assert panel.gpu_swap_text.value.startswith("Light is Q4_K_XL, which can be slow on this GPU")
+    assert panel.gpu_swap_text.value.startswith("Light is Q4_K_M, which can be slow on this GPU")
     assert panel.gpu_swap_button.content == "Choose Q4_0 · Qwen 3.5 2B"
     # the tap: the Custom menu at that family and size, Q4_0 highlighted; nothing joins the list yet
     spawned = []

@@ -75,6 +75,25 @@ def test_list_files_leaves_out_projectors_imatrix_and_later_shards(fake_hf):
     assert any(f"/tree/{fakes.FakeHF.COMMIT}" in path for path, _r in fake_hf.requests)
 
 
+def test_an_imatrix_repository_offers_only_its_runnable_models(fake_hf):
+    """mradermacher's ``i1`` repositories (the uncensored defaults, owner 2026-11-25) hold the importance matrix
+    (``….imatrix.gguf``: quantization data, never a model) and older ones the ARM-repacked ``Q4_0_4_4`` / ``_4_8`` /
+    ``_8_8`` files llama.cpp no longer loads; neither is offered nor auto-picked."""
+    repo = "mradermacher/Llama-3.2-1B-Instruct-heretic-i1-GGUF"
+    base = "Llama-3.2-1B-Instruct-heretic"
+    fake_hf.trees[repo] = [
+        (f"{base}.imatrix.gguf", 1328000, "1" * 64), ("imatrix.gguf", 10, "2" * 64),
+        (f"{base}.i1-Q4_0.gguf", 773026688, "3" * 64), (f"{base}.i1-Q4_0_4_4.gguf", 771, "4" * 64),
+        (f"{base}.i1-Q4_0_4_8.gguf", 771, "5" * 64), (f"{base}.i1-Q4_0_8_8.gguf", 771, "6" * 64),
+        (f"{base}.i1-Q4_K_M.gguf", 807695232, "7" * 64), (f"{base}.i1-IQ4_XS.gguf", 700, "8" * 64)]
+    listing = hf.list_repo(hf.HfRef(repo))
+    assert [f.name for f in listing.files] == [f"{base}.i1-IQ4_XS.gguf", f"{base}.i1-Q4_0.gguf",
+                                               f"{base}.i1-Q4_K_M.gguf"]
+    assert listing.projectors == ()
+    assert hf.pick_file(listing.files).name == f"{base}.i1-Q4_K_M.gguf"
+    assert hf.pick_file(listing.files, quant="Q4_0").name == f"{base}.i1-Q4_0.gguf"
+
+
 def test_list_files_errors(fake_hf):
     with pytest.raises(hf.HfError) as info:
         hf.list_files(hf.HfRef("nobody/missing-GGUF"))

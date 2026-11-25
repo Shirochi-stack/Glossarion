@@ -280,13 +280,13 @@ def test_no_separate_npu_rows_the_existing_slots_are_auto():
         assert not hasattr(presets, name)
     assert presets.custom_family("npu") is None
     assert all(presets.backend_of(row) == "auto" for row in presets.DEFAULT_PRESETS)
-    for row in presets.DEFAULT_PRESETS[:3]:                                    # Garbage, Light, Medium: UD-Q4_K_XL
+    for row in presets.DEFAULT_PRESETS[:3]:                                    # Garbage, Light, Medium: i1-Q4_K_M
         assert presets.npu_quant_kind(row["file"]) == "ok"
     sizes = [s for f in presets.CUSTOM_FAMILIES for s in f["sizes"]]
     assert all("npu_note" not in s for s in sizes)                             # the table is unchanged
     assert [s["name"] for s in sizes if presets.npu_size_note(s)] == ["Qwen 3.5 9B"]
     assert presets.npu_size_note(sizes[-1]) == "" and presets.npu_size_note(None) == ""
-    nine = presets.custom_size_for("unsloth/Qwen3.5-9B-GGUF")[1]
+    nine = presets.custom_size_for("mradermacher/Qwen3.5-9B-heretic-v2-i1-GGUF")[1]
     assert presets.npu_size_note(nine) == "over the NPU's 3.5 GB: slower"
 
 
