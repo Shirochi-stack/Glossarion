@@ -95,6 +95,7 @@ jobs:
           tests/test_job_runner.py \
           tests/test_text_jobs.py \
           tests/test_translation_pipeline.py \
+          tests/test_epub_extension_detect.py \
           tests/test_direct_text_core.py \
           tests/test_settings_rules.py \
           tests/test_model_catalog_core.py \

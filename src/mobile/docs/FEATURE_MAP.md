@@ -146,7 +146,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 0 | Run Translation (single input) | Chat: attach → Send → Plan card → Start; Library › Translate… (TranslateSheet) |  |
 | 1 | Multiple input files / batch queue | ＋ Files multi-select → BatchPlanCard (one job, sub-items); Jobs queue |  |
 | 2 | Browse folder + Deep scan | BatchPlanCard "Include subfolders" switch |  |
-| 3 | Input normalization & workspace collision rename | FileBridge copies with a " (2)" suffix | Automatic; originals are never renamed |
+| 3 | Input normalization & workspace collision rename | FileBridge copies with a " (2)" suffix; an EPUB under another extension (or none) is copied as `.epub` | Automatic; originals are never renamed |
 | 4 | ZIP / CBZ / standalone HTML input conversion | Plan card "ZIP → EPUB on start" | Automatic |
 | 5 | Subtitle & synced-lyrics ZIP bundles (SRT/ASS/LRC) | Attach .zip → Plan card; Book › Chapters subtitle rows | Also SSA, VTT and SBV |
 | 6 | PDF translation | Attach PDF → Plan card; Settings › PDF |  |
