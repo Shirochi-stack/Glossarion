@@ -39,6 +39,9 @@ jobs:
         working-directory: src
       
       - name: Upload DMG artifact
+        # On a tag the release upload below is what ships; a GitHub artifact-service
+        # timeout here (v9.15.24 ARM) must not skip it.
+        continue-on-error: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-Lite-macOS-ARM
@@ -85,6 +88,9 @@ jobs:
         working-directory: src
 
       - name: Upload NoCuda DMG artifact
+        # On a tag the release upload below is what ships; a GitHub artifact-service
+        # timeout here (v9.15.24 ARM) must not skip it.
+        continue-on-error: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-NoCuda-macOS-ARM
@@ -131,6 +137,9 @@ jobs:
         working-directory: src
       
       - name: Upload DMG artifact
+        # On a tag the release upload below is what ships; a GitHub artifact-service
+        # timeout here (v9.15.24 ARM) must not skip it.
+        continue-on-error: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-Lite-macOS-Intel
@@ -177,6 +186,9 @@ jobs:
         working-directory: src
 
       - name: Upload NoCuda DMG artifact
+        # On a tag the release upload below is what ships; a GitHub artifact-service
+        # timeout here (v9.15.24 ARM) must not skip it.
+        continue-on-error: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
           name: Z_Glossarion-NoCuda-macOS-Intel
