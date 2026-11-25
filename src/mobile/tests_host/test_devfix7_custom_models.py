@@ -35,7 +35,9 @@ from glossarion_mobile.ui.screens import local_models_panel as lmp  # noqa: E402
 from test_local_llm_server import make_service  # noqa: E402
 
 GIB = 1024 ** 3
-REPO = "unsloth/Qwen3.5-2B-GGUF"
+REPO = "mradermacher/Qwen3.5-2B-heretic-i1-GGUF"
+#: the 2B size's ``mmproj_repo``: the i1 repository has no projector (owner 2026-11-25, uncensored models)
+PROJ_REPO = "unsloth/Qwen3.5-2B-GGUF"
 QWEN = presets.custom_family("qwen35")
 TWO_B = next(size for size in QWEN["sizes"] if size["repo"] == REPO)
 Q4_0 = "Qwen3.5-2B-Q4_0.gguf"
@@ -43,9 +45,9 @@ Q4_0 = "Qwen3.5-2B-Q4_0.gguf"
 TREE = [
     ("Qwen3.5-2B-Q4_K_M.gguf", 3000, "a" * 64), (Q4_0, 2000, "b" * 64), ("Qwen3.5-2B-UD-Q4_K_XL.gguf", 4000, None),
     ("Qwen3.5-2B-BF16.gguf", 9000, "c" * 64), ("Qwen3.5-2B-Q8_0-00001-of-00002.gguf", 8000, "d" * 64),
-    ("Qwen3.5-2B-Q8_0-00002-of-00002.gguf", 8000, "e" * 64), ("mmproj-F16.gguf", 500, "f" * 64),
-    ("mmproj-F32.gguf", 900, "9" * 64),
+    ("Qwen3.5-2B-Q8_0-00002-of-00002.gguf", 8000, "e" * 64), ("Qwen3.5-2B.imatrix.gguf", 70, "1" * 64),
 ]
+PROJ_TREE = [("mmproj-F16.gguf", 500, "f" * 64), ("mmproj-F32.gguf", 900, "9" * 64)]
 
 
 @pytest.fixture
@@ -53,6 +55,7 @@ def fake_hf(monkeypatch):
     server = fakes.FakeHF()
     monkeypatch.setattr(hf, "HF_ENDPOINT", server.url)
     server.trees[REPO] = TREE
+    server.trees[PROJ_REPO] = PROJ_TREE
     yield server
     server.close()
 
@@ -106,9 +109,12 @@ def test_the_table_has_the_four_families_and_real_looking_refs():
     assert [size["label"] for size in QWEN["sizes"]] == ["0.8B", "2B", "4B", "9B"]
     repos = [size["repo"] for family in presets.CUSTOM_FAMILIES for size in family["sizes"]]
     assert len(set(repos)) == len(repos)
-    for repo in repos:
-        assert hf.parse_ref(repo).repo == repo and repo.startswith("unsloth/")
-    assert presets.custom_size_for("UNSLOTH/qwen3.5-2b-gguf") == (QWEN, TWO_B)
+    for repo in repos:  # owner 2026-11-25: uncensored builds only, never Unsloth's stock (censored) models
+        assert hf.parse_ref(repo).repo == repo and not repo.startswith("unsloth/")
+        assert any(word in repo.lower() for word in ("heretic", "abliterated"))
+    for size in (s for family in presets.CUSTOM_FAMILIES for s in family["sizes"] if s.get("mmproj_repo")):
+        assert hf.parse_ref(size["mmproj_repo"]).repo == size["mmproj_repo"] != size["repo"]
+    assert presets.custom_size_for("MRADERMACHER/qwen3.5-2b-heretic-i1-gguf") == (QWEN, TWO_B)
     assert presets.custom_size_for("me/other") is None and presets.custom_family("nope") is None
     # the defaults stay the first-run data
     assert [p["name"] for p in presets.DEFAULT_PRESETS] == ["Garbage", "Light", "Medium", "Sigma"]
@@ -154,7 +160,7 @@ def test_sizes_first_then_the_real_files_of_that_repository(tmp_path, fake_hf):
         # smallest first; the split set and the projectors are not offered; "No quant" in plain words
         labels = [t for t in texts if t in ("Q4_0", "Q4_K_M", "Q4_K_XL", "No quant (BF16)")]
         assert labels == ["Q4_0", "Q4_K_M", "Q4_K_XL", "No quant (BF16)"]
-        assert not any("00001" in t or "mmproj" in t or "Q8_0" in t for t in texts)
+        assert not any("00001" in t or "mmproj" in t or "Q8_0" in t or "imatrix" in t for t in texts)
         assert "Reads images" in texts and "Not quantized: full precision, the largest file" in texts
         requests = len(fake_hf.requests)
         # another size and back: the second visit asks nothing
@@ -227,6 +233,8 @@ def test_an_old_answer_does_not_replace_the_newer_size_or_touch_a_closed_sheet(t
     gates: dict = {}
 
     async def resolve(ref):
+        if ref.repo.startswith("unsloth/"):  # a size's projector repository: answers at once
+            return hf.RepoFiles("c", (), ())
         gate = gates[ref.repo] = asyncio.Event()
         await gate.wait()
         return hf.RepoFiles("c", (hf.HfFile(f"{ref.repo.split('/')[1]}-Q4_0.gguf", 10),), ())
@@ -301,7 +309,9 @@ def test_a_row_fits_a_narrow_phone_by_construction(tmp_path, fake_hf):
 
 def _real_files(fake_hf):
     fake_hf.trees.pop(REPO)
-    fake_hf.add(REPO, {Q4_0: b"Q" * 4096, "Qwen3.5-2B-BF16.gguf": b"B" * 8192, "mmproj-F16.gguf": b"M" * 1024})
+    fake_hf.trees.pop(PROJ_REPO)
+    fake_hf.add(REPO, {Q4_0: b"Q" * 4096, "Qwen3.5-2B-BF16.gguf": b"B" * 8192})
+    fake_hf.add(PROJ_REPO, {"mmproj-F16.gguf": b"M" * 1024})
 
 
 def _tap_quant(sheet, label):
@@ -328,6 +338,7 @@ def test_choosing_a_quant_downloads_it_as_an_ordinary_row_with_image_support(tmp
         row = presets.load_presets(prefs)[-1]
         assert row["name"] == "Qwen 3.5 2B · Q4_0" and row["repo"] == REPO and row["file"] == Q4_0
         assert row["mmproj"] == "mmproj-F16.gguf" and row["size"] == 4096 and row["mmproj_size"] == 1024
+        assert row["mmproj_repo"] == PROJ_REPO  # where the projector is listed and downloaded
         assert [p["name"] for p in presets.load_presets(prefs)][:4] == ["Garbage", "Light", "Medium", "Sigma"]
         stem = flow.stem_of_preset(row)
         assert service.registry.resolve(stem) and used == [f"local/{stem}"] and after == used
@@ -343,6 +354,34 @@ def test_choosing_a_quant_downloads_it_as_an_ordinary_row_with_image_support(tmp
         assert [r for r in fake_hf.requests if "/resolve/" in r[0]] == requests
 
     asyncio.run(scenario())
+
+
+def test_image_support_of_a_custom_pick_comes_from_its_mmproj_repo(tmp_path, fake_hf):
+    _real_files(fake_hf)
+    flow, prefs, service, _used = _flow(tmp_path)
+    asked: list = []
+    flow.confirm_fn = lambda title, body, label: asked.append(body) or True
+
+    async def scenario():
+        sheet = await _listed(flow)
+        assert "Reads images" in _texts(sheet.quant_box)  # the projector is listed in the sibling repository
+        row = presets.custom_row(TWO_B, hf.HfFile(Q4_0, 4096), hf.pick_projector(sheet.projectors()))
+        stem = await flow.get_custom(row)
+        stem = stem[len("local/"):]
+        assert not service.is_vision(stem)  # image support waits for the first image
+        index = next(i for i, p in enumerate(presets.load_presets(prefs)) if p["file"] == Q4_0)
+        assert await flow.add_vision(index) and service.is_vision(stem)
+        return stem
+
+    stem = asyncio.run(scenario())
+    entry = service.registry.load()[stem]
+    assert entry["repo"] == REPO and entry["mmproj"]["repo"] == PROJ_REPO and entry["mmproj"]["file"] == "mmproj-F16.gguf"
+    with open(service.registry.projector_path(stem), "rb") as handle:
+        assert handle.read() == b"M" * 1024
+    fetched = [path for path, _range in fake_hf.requests if "/resolve/" in path]
+    assert any(path.startswith(f"/{PROJ_REPO}/resolve/") for path in fetched)
+    assert not any(path.startswith(f"/{REPO}/resolve/") and "mmproj" in path for path in fetched)
+    assert f"Image support from {PROJ_REPO}" in asked[-1]
 
 
 def test_no_quant_downloads_too(tmp_path, fake_hf):

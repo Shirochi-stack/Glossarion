@@ -251,13 +251,15 @@ def _ensure_model(row: dict, registry: dl.Registry, say: Any, *, projector: bool
     if projector:
         have = (registry.load().get(stem) or {}).get("mmproj") or {}
         if str(have.get("sha256") or "") != row.get("mmproj_sha256"):
-            listing = listing or hf.list_repo(hf.HfRef(row["repo"], row["file"]))
+            repo = presets.projector_repo(row)  # ``mmproj_repo`` when the projector lives in a sibling repository
+            if repo.casefold() != row["repo"].casefold() or listing is None:
+                listing = hf.list_repo(hf.HfRef(repo))
             file = hf.pick_projector(listing.projectors, row.get("mmproj"))
             if file is None or file.sha256 != row.get("mmproj_sha256"):
-                raise AssertionError(f"Hugging Face lists {file and file.sha256} for {row.get('mmproj')}, "
+                raise AssertionError(f"Hugging Face lists {file and file.sha256} for {repo}/{row.get('mmproj')}, "
                                      f"expected {row.get('mmproj_sha256')}")
             started = time.monotonic()
-            entry = dl.download_blocking(dl.DownloadSpec(row["repo"], file.path, listing.commit, file.size, file.sha256,
+            entry = dl.download_blocking(dl.DownloadSpec(repo, file.path, listing.commit, file.size, file.sha256,
                                                          registry.projector_key(stem), "mmproj", stem), registry,
                                          progress=_progress(say, f"{stem} projector"), should_stop=lambda: None)
             downloaded = True
@@ -876,8 +878,8 @@ def _client_send_image(model: str, png: bytes, *, max_tokens: int) -> tuple:
 
 
 def llama_vision_suite(*, emit: Optional[Any] = None, log: Optional[Any] = None) -> dict:
-    """The smallest vision preset (``GLOSSARION_LLAMA_SUITE_PRESET``, default Garbage: Qwen3.5 0.8B and its
-    mmproj-F16): download (or reuse) the model and its projector, load it, describe a tiny test picture
+    """The smallest vision preset (``GLOSSARION_LLAMA_SUITE_PRESET``, default Garbage: uncensored Qwen3.5 0.8B and
+    its f16 projector from the sibling ``mmproj_repo``): download (or reuse) the model and its projector, load it, describe a tiny test picture
     through ``UnifiedClient.send_image`` -> ``local/`` -> libmtmd, unload; the GLOSSARION_LLAMA_VISION
     payload. Passes on a non-empty description with verified files (``red`` says whether it saw red)."""
     say = log or (lambda text: None)

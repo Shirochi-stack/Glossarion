@@ -2767,7 +2767,8 @@ class LocalEngineService:
                                self.registry.stem_for(repo, file.path))
 
     def projector_spec_for(self, stem: str, repo: str, commit: str, file: hf.HfFile) -> dl.DownloadSpec:
-        """The download of ``stem``'s vision projector ``file`` (same repository and commit)."""
+        """The download of ``stem``'s vision projector ``file`` at ``repo``'s ``commit``: the model's own repository,
+        or the sibling one a preset names (``presets.projector_repo``)."""
         return dl.DownloadSpec(repo, file.path, commit, int(file.size or 0), file.sha256,
                                self.registry.projector_key(stem), kind="mmproj", owner=stem)
 

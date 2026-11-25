@@ -220,7 +220,7 @@ def test_custom_gemma_menu_names_both_generations():
     groups = size_groups(gemma)
     assert [(g, [s["label"] for _i, s in sizes]) for g, sizes in groups] == [
         ("Gemma 3", ["270M", "1B", "4B"]), ("Gemma 4", ["E2B", "E4B"])]
-    assert all(s["repo"].startswith(f"unsloth/gemma-{g[-1]}-") for g, sizes in groups for _i, s in sizes)
+    assert all(f"gemma-{g[-1]}-" in s["repo"] for g, sizes in groups for _i, s in sizes)
     assert custom_note(gemma) == "Choose a size and a quant: Gemma 3 270M · 1B · 4B · Gemma 4 E2B · E4B"
     qwen = presets.custom_family("qwen35")
     assert size_groups(qwen)[0][0] == "" and custom_note(qwen) == "Choose a size and a quant: 0.8B · 2B · 4B · 9B"

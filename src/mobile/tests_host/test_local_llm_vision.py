@@ -87,11 +87,11 @@ def test_qwen_presets_keep_vision_and_sigma_has_no_projector():
     qwen = [row for row in presets.DEFAULT_PRESETS if not presets.is_sigma(row["repo"])]
     assert len(qwen) == 3
     assert "mmproj" not in presets.DEFAULT_PRESETS[3]  # Sigma's repository has text-only GGUFs
-    for row in qwen:
-        assert row["mmproj"] == "mmproj-F16.gguf" and row["mmproj_size"] > 100_000_000
-        assert len(row["mmproj_sha256"]) == 64
+    for row in qwen:  # the f16 projector of the row's ``mmproj_repo`` (its i1 repository has none)
+        assert row["mmproj"].lower().endswith("mmproj-f16.gguf") and row["mmproj_size"] > 100_000_000
+        assert len(row["mmproj_sha256"]) == 64 and row["mmproj_repo"] != row["repo"]
     light = next(r for r in presets.DEFAULT_PRESETS if r["name"] == "Light")
-    assert presets.download_size(light) == 1339752704  # the projector downloads on the first image
+    assert presets.download_size(light) == 1270809248  # the projector downloads on the first image
     prefs = fakes.FakePrefs()
     rows = presets.restore_defaults(prefs)
     assert rows[1]["mmproj_sha256"] == light["mmproj_sha256"]
@@ -451,3 +451,34 @@ def test_system_info_names_the_runtime_selected_cpu_variant(monkeypatch):
     assert eng.cpu_variant() is None and eng.system_info().endswith("REPACK = 1 |")
     del modules["llama_cpp"]
     assert eng.system_info() is None
+
+def test_the_suite_downloads_a_preset_projector_from_its_mmproj_repo(monkeypatch, tmp_path):
+    """``selfcheck._ensure_model``: a preset whose projector lives in ``mmproj_repo`` (the uncensored defaults'
+    i1 repositories carry none) is listed, sha256-checked and downloaded there and recorded on the model."""
+    from glossarion_mobile.services.local_llm import selfcheck
+
+    server = fakes.FakeHF()
+    monkeypatch.setattr(hf, "HF_ENDPOINT", server.url)
+    try:
+        server.add("tester/Tiny-i1-GGUF", {"Tiny.i1-Q4_K_M.gguf": PAYLOAD, "Tiny.imatrix.gguf": b"I" * 10})
+        server.add("tester/Tiny-GGUF", {"Tiny.mmproj-f16.gguf": PROJECTOR})
+        row = {"name": "Tiny", "repo": "tester/Tiny-i1-GGUF", "file": "Tiny.i1-Q4_K_M.gguf",
+               "sha256": hashlib.sha256(PAYLOAD).hexdigest(), "mmproj_repo": "tester/Tiny-GGUF",
+               "mmproj": "Tiny.mmproj-f16.gguf", "mmproj_sha256": hashlib.sha256(PROJECTOR).hexdigest()}
+        registry = dl.Registry(str(tmp_path / "models"))
+        stem, sha_ok, downloaded = selfcheck._ensure_model(row, registry, lambda _text: None, projector=True)
+        assert sha_ok and downloaded
+        entry = registry.load()[stem]
+        assert entry["repo"] == "tester/Tiny-i1-GGUF" and entry["mmproj"]["repo"] == "tester/Tiny-GGUF"
+        with open(registry.projector_path(stem), "rb") as handle:
+            assert handle.read() == PROJECTOR
+        resolved = [path for path, _range in server.requests if "/resolve/" in path]
+        assert resolved == [f"/tester/Tiny-i1-GGUF/resolve/{fakes.FakeHF.COMMIT}/Tiny.i1-Q4_K_M.gguf",
+                            f"/tester/Tiny-GGUF/resolve/{fakes.FakeHF.COMMIT}/Tiny.mmproj-f16.gguf"]
+        # a wrong sha256 in the sibling repository is refused
+        bad = dict(row, mmproj_sha256="0" * 64)
+        registry.remove(stem)
+        with pytest.raises(AssertionError, match="tester/Tiny-GGUF/Tiny.mmproj-f16.gguf"):
+            selfcheck._ensure_model(bad, registry, lambda _text: None, projector=True)
+    finally:
+        server.close()

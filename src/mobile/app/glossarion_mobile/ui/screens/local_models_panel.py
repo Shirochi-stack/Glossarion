@@ -427,6 +427,13 @@ class CustomModelSheet:
     def listing(self) -> Optional[hf.RepoFiles]:
         return self.listings.get(self.size["repo"]) if self.size else None
 
+    def projectors(self) -> tuple:
+        """The vision projectors of the chosen size: its repository's, or those of its ``mmproj_repo``."""
+        if not self.size:
+            return ()
+        listing = self.listings.get(presets.projector_repo(self.size))
+        return listing.projectors if listing else ()
+
     def select_size(self, size: dict) -> None:
         self.size = size
         self.error = ""
@@ -456,6 +463,12 @@ class CustomModelSheet:
         except Exception as exc:  # a spawned task: nothing else would end the "Looking up…" line
             log.warning("listing %s failed: %s", size["repo"], exc)
             error = f"Could not reach Hugging Face ({type(exc).__name__})"
+        projector_repo = presets.projector_repo(size)
+        if not error and projector_repo not in self.listings:
+            try:  # the sibling repository of the projector ("Reads images"); without it the model still lists
+                self.listings[projector_repo] = await self.flow.service.resolve(hf.HfRef(projector_repo))
+            except Exception as exc:
+                log.warning("listing the projectors of %s failed: %s", projector_repo, exc)
         if ticket != self._ticket:
             return
         self.loading, self.error = False, error
@@ -471,8 +484,7 @@ class CustomModelSheet:
         return [(f, label if labels.count(label) == 1 else f.name) for f, label in zip(runnable, labels)]
 
     def pick(self, file: hf.HfFile) -> None:
-        listing = self.listing()
-        row = presets.custom_row(self.size, file, hf.pick_projector(listing.projectors) if listing else None)
+        row = presets.custom_row(self.size, file, hf.pick_projector(self.projectors()))
         self.close()
         self.flow.spawn(self._use(row))
 
@@ -531,7 +543,7 @@ class CustomModelSheet:
         if npu_note:
             controls.append(_small(f"{self.size['name']}: {npu_note}", color=semantic("warning"),
                                    key="custom-npu-size-note"))
-        if hf.pick_projector(listing.projectors) is not None:
+        if hf.pick_projector(self.projectors()) is not None:
             controls.append(_vision_line("custom-vision"))
         controls.extend(self._quant_row(i, file, label) for i, (file, label) in enumerate(files))
         return controls
@@ -785,14 +797,24 @@ class OnDeviceFlow:
                     return None
         except hf.HfError as exc:
             raise _Failed(str(exc)) from exc
-        projector = hf.pick_projector(listing.projectors, (preset or {}).get("mmproj") or None)
+        projector, projector_repo, projector_commit = None, ref.repo, listing.commit
+        if image_support:  # the projector is listed where the preset says it lives (``mmproj_repo``)
+            projector_repo = presets.projector_repo(preset, ref.repo)
+            projectors = listing.projectors
+            if projector_repo.casefold() != ref.repo.casefold():
+                try:
+                    projector_listing = await self.service.resolve(hf.HfRef(projector_repo))
+                except hf.HfError as exc:
+                    raise _Failed(str(exc)) from exc
+                projectors, projector_commit = projector_listing.projectors, projector_listing.commit
+            projector = hf.pick_projector(projectors, (preset or {}).get("mmproj") or None)
         registry = self.service.registry
         existing = registry.find(ref.repo, file.path)
         stem = existing or self.service.spec_for(ref.repo, listing.commit, file).stem
         if preset is not None:
             self.preset_stems[self.preset_key(preset)] = stem
         if image_support and projector is None:
-            self.say(f"{ref.repo} has no vision projector: this model reads text only")
+            self.say(f"{projector_repo} has no vision projector: this model reads text only")
         need_projector = image_support and projector is not None and not (existing and self.service.is_vision(existing))
         total = (0 if existing else int(file.size or 0)) + (int(projector.size or 0) if need_projector else 0)
         pending = self.downloads.pending_spec(stem) or self.downloads.pending_spec(registry.projector_key(stem))
@@ -803,6 +825,8 @@ class OnDeviceFlow:
             label = str((preset or {}).get("name") or "").strip()
             title = "Download image support?" if existing else (f"Download {label}?" if label else "Download model?")
             body = f"Download {dl.format_bytes(total)} from Hugging Face?\n\n{ref.repo} · {' + '.join(names)}"
+            if need_projector and projector_repo.casefold() != ref.repo.casefold():
+                body += f"\nImage support from {projector_repo}"
             if total >= dl.CONFIRM_BYTES:
                 body += "\n\nThis is a large download: use Wi-Fi unless your mobile data plan allows it."
             body += "\n\nYou can pause or cancel it while it downloads."
@@ -818,8 +842,8 @@ class OnDeviceFlow:
             if not state.done:
                 return None
         if need_projector:
-            state = await self.service.download(self.service.projector_spec_for(stem, ref.repo, listing.commit,
-                                                                                projector))
+            state = await self.service.download(self.service.projector_spec_for(stem, projector_repo,
+                                                                                projector_commit, projector))
             if state.error:
                 self.say(f"Image support was not downloaded ({state.error}); the model still works for text")
             elif not state.done:

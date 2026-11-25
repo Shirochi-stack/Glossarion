@@ -9,7 +9,8 @@ Accepted (``parse_ref``):
   ``…/resolve/<rev>/<file>.gguf``.
 
 ``list_repo`` lists a repository's runnable GGUF files (not the ``mtp-*`` assistant heads Gemma 4 repos carry
-beside the models, nor block drafters) and, apart, its vision projectors (every ``*mmproj*.gguf``:
+beside the models, nor block drafters, ``imatrix`` files or the retired ``Q4_0_4_4`` / ``_4_8`` / ``_8_8``
+layouts) and, apart, its vision projectors (every ``*mmproj*.gguf``:
 ``is_projector_name``; a projector is never offered or picked as the model); ``pick_projector`` chooses the
 one downloaded with a model (F16 first).
 
@@ -204,11 +205,19 @@ _DRAFTER_RE = re.compile(r"(?:^mtp-|(?:^|[-_.])(?:dflash\d*|drafter)(?=[-_.]))",
 _HEAD_RE = re.compile(r"(?:^|[-_.])mtp(?=[-_.])", re.IGNORECASE)
 
 
+#: the ARM repacked Q4_0 layouts (``…-Q4_0_4_4.gguf``, ``_4_8``, ``_8_8``) older repositories still carry: llama.cpp
+#: dropped those tensor types (it repacks Q4_0 itself at load), so such a file no longer loads
+_REPACKED_Q4_0_RE = re.compile(r"(?:^|[-_.])q4_0_[48]_[48](?=\.gguf$)", re.IGNORECASE)
+
+
 def _is_candidate(path: str) -> bool:
+    """A runnable model file: not a projector, a drafter, an importance matrix (``imatrix.gguf``,
+    ``….imatrix.gguf``: quantization data, not a model) or a repacked Q4_0 layout llama.cpp no longer loads."""
     name = path.rsplit("/", 1)[-1].lower()
     if not name.endswith(".gguf"):
         return False
-    return not (is_projector_name(name) or _DRAFTER_RE.search(name) or "imatrix" in name)
+    return not (is_projector_name(name) or _DRAFTER_RE.search(name) or "imatrix" in name
+                or _REPACKED_Q4_0_RE.search(name))
 
 
 @dataclasses.dataclass(frozen=True)

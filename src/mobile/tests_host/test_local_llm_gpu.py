@@ -349,19 +349,22 @@ def test_gpu_state_without_our_loader(monkeypatch):
 # ---- presets ----------------------------------------------------------------------------------------------
 
 def test_former_gpu_presets_are_q4_0_of_the_default_repos():
-    defaults = {p["repo"]: p for p in presets.DEFAULT_PRESETS}
+    # the stock (Unsloth) repos of the earlier defaults: the uncensored defaults (owner 2026-11-25) moved away
+    old_repos = {repo for _name, repo, _file in presets.OLD_STOCK_PRESETS}
     assert [p["file"] for p in presets.GPU_PRESETS] == [
         "Qwen3.5-0.8B-Q4_0.gguf", "Qwen3.5-2B-Q4_0.gguf", "Qwen3.5-4B-Q4_0.gguf", "Qwen3.5-9B-Q4_0.gguf"]
     assert [p["size"] for p in presets.GPU_PRESETS] == [507154688, 1214873856, 2583221408, 5379417312]
     for row in presets.GPU_PRESETS:
         assert presets._clean(row) == row                        # a valid preset row, nothing dropped
+        assert presets.custom_size_for(row["repo"]) is None and row["mmproj"] == "mmproj-F16.gguf"
+        assert "mmproj_repo" not in row and presets.projector_repo(row) == row["repo"]  # their own projector
         if row["repo"] == "unsloth/Qwen3.5-9B-GGUF":
-            assert presets.custom_size_for(row["repo"])[1]["label"] == "9B"
-            assert row["mmproj"] == "mmproj-F16.gguf"
             assert row["mmproj_sha256"] == "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
             continue
-        assert row["repo"] in defaults and row["mmproj"] == defaults[row["repo"]]["mmproj"]
-        assert row["mmproj_sha256"] == defaults[row["repo"]]["mmproj_sha256"] and "Q4_0" in row["name"]
+        assert row["repo"] in old_repos and "Q4_0" in row["name"]
+    # Unsloth's 0.8B / 2B projectors are the ones the uncensored Garbage / Light use from there
+    for row, default in zip(presets.GPU_PRESETS[:2], presets.DEFAULT_PRESETS[:2]):
+        assert default["mmproj_repo"] == row["repo"] and default["mmproj_sha256"] == row["mmproj_sha256"]
     # the defaults (CPU, iOS) are unchanged and hold no Q4_0 file
     assert not any("Q4_0" in p["file"] for p in presets.DEFAULT_PRESETS)
 
