@@ -733,14 +733,20 @@ _HOOK_SCRIPT = r"""((window) => {
     const data = await response.json();
     state.pollFailures = 0;
     state.pollFailure = null;
-    let best = null;
+    // the answer is the visible message; hidden ones are its segments (see StreamParser)
+    let best = null, bestHidden = null;
     for (const node of Object.values(data.mapping || {})) {
      const m = node && node.message, c = (m && m.content) || {};
      if (!m || !m.author || m.author.role !== 'assistant' || c.content_type !== 'text') continue;
      if ((m.recipient || 'all') !== 'all' || !(m.channel == null || m.channel === 'final')) continue;
      if (m.status !== 'finished_successfully' || m.end_turn === false) continue;
-     if (!best || (m.create_time || 0) >= (best.create_time || 0)) best = m;
+     const hidden = !!(m.metadata && m.metadata.is_visually_hidden_from_conversation);
+     if (hidden ? (!bestHidden || (m.create_time || 0) >= (bestHidden.create_time || 0))
+                : (!best || (m.create_time || 0) >= (best.create_time || 0))) {
+      if (hidden) bestHidden = m; else best = m;
+     }
     }
+    best = best || bestHidden;
     if (best) state.final = {text:(best.content.parts || []).filter(p => typeof p === 'string').join(''),
      model:(best.metadata || {}).resolved_model_slug || (best.metadata || {}).model_slug || null};
     // generated images: the image tool's multimodal messages (one per variant)
@@ -993,12 +999,22 @@ class StreamParser:
 
     Only the assistant's visible text message is the answer; reasoning summaries, tool
     calls and system messages are kept out of it.
+
+    A frame's ``c`` is the index of the message it changes (frames without one keep the last).
+    Thinking models write one answer as several messages at once: hidden segments
+    (``is_visually_hidden_from_conversation``), each with one stretch of the text, and the
+    visible message that gets the whole text. Applying every frame to the newest message wove
+    them together, so the answer came back doubled, or cut to a part of it.
     """
 
     def __init__(self):
         self.buffer = ""
         self.message = None  # the message the patches apply to
+        self.messages = {}  # ``c`` index -> message
+        self.index = None  # the ``c`` of the message the next frames change
         self.answer = None  # the latest visible assistant text message
+        self.segments = []  # hidden answer segments, in order (the answer only if no visible one comes)
+        self.streamed = ""  # the answer text already returned by ``feed``
         self.path = None
         self.operation = None
         self.reasoning = ""
@@ -1011,23 +1027,35 @@ class StreamParser:
         self.handoff = False
         self.generated = []  # (generation index, asset pointer) of generated images
 
+    @staticmethod
+    def _text(message):
+        return "".join(p for p in message["content"].get("parts", []) if isinstance(p, str))
+
+    @property
+    def raw_content(self):
+        if self.answer:
+            return self._text(self.answer)
+        return "".join(self._text(m) for m in self.segments if self._visible(m, hidden=True))
+
     @property
     def content(self):
-        if not self.answer:
-            return ""
-        return clean_markup("".join(p for p in self.answer["content"].get("parts", []) if isinstance(p, str)))
+        return clean_markup(self.raw_content)
 
     @staticmethod
-    def _visible(message):
+    def _hidden(message):
+        return bool((message.get("metadata") or {}).get("is_visually_hidden_from_conversation"))
+
+    @classmethod
+    def _visible(cls, message, hidden=False):
         content = message.get("content")
         content = content if isinstance(content, dict) else {}
         return ((message.get("author") or {}).get("role") == "assistant" and
                 content.get("content_type") == "text" and message.get("recipient", "all") == "all" and
-                message.get("channel") in (None, "final"))
+                message.get("channel") in (None, "final") and (hidden or not cls._hidden(message)))
 
     def feed(self, text):
+        """Parse ``text``; returns the answer text added since the last call (as a list)."""
         self.buffer = (self.buffer + text).replace("\r\n", "\n")
-        outputs = []
         while "\n\n" in self.buffer:
             frame, self.buffer = self.buffer.split("\n\n", 1)
             if frame.startswith("event: delta_encoding"):
@@ -1044,40 +1072,47 @@ class StreamParser:
             except ValueError as exc:
                 raise AuthChatGPTError("AuthChatGPT returned an invalid stream frame.") from exc
             if isinstance(payload, dict):
-                outputs.extend(self._event(payload))
-        return outputs
+                self._event(payload)
+        # The log gets what the answer gained. An answer that is not a continuation of what was
+        # logged (another message took over) is logged from its current length on.
+        text = self.raw_content
+        added = text[len(self.streamed):] if text.startswith(self.streamed) else ""
+        self.streamed = text
+        return [added] if added else []
 
     def _event(self, payload):
         if payload.get("type") == "stream_handoff":
             self.handoff = True
-            return []
+            return
         if payload.get("type") == "message_stream_complete":
             self.finished = not self.handoff
-            return []
+            return
         if payload.get("error"):
             error = payload["error"]
             self.error = error if isinstance(error, str) else (error.get("message") if isinstance(error, dict) else None) or "error"
-            return []
+            return
         if "type" in payload and "v" not in payload:
-            return []  # markers, metadata, resume tokens
+            return  # markers, metadata, resume tokens
+        if "c" in payload:
+            self.index = payload["c"]
+            if self.index in self.messages:
+                self.message = self.messages[self.index]
         value = payload.get("v")
         if isinstance(value, dict) and isinstance(value.get("message"), dict):
-            return self._start(value["message"])
+            self._start(value["message"])
+            return
         if "p" in payload:
             self.path, self.operation = payload.get("p"), payload.get("o", self.operation)
         elif "o" in payload:
             self.operation = payload["o"]
         is_patch = isinstance(value, list) and value and all(isinstance(v, dict) and "p" in v for v in value)
         if isinstance(value, list) and (payload.get("o") == "patch" or ("p" not in payload and is_patch)):
-            outputs = []
             for patch in value:
                 if isinstance(patch, dict) and "p" in patch:
                     self.path, self.operation = patch["p"], patch.get("o", "replace")
-                    outputs.extend(self._apply(self.path, self.operation, patch.get("v")))
-            return outputs
-        if self.path is not None:
-            return self._apply(self.path, self.operation or "append", value)
-        return []
+                    self._apply(self.path, self.operation, patch.get("v"))
+        elif self.path is not None:
+            self._apply(self.path, self.operation or "append", value)
 
     def _collect_images(self, message):
         # the pointer shows up while the image is still being made: only a finished one is ready
@@ -1092,20 +1127,24 @@ class StreamParser:
 
     def _start(self, message):
         self.message = message
+        if self.index is not None:
+            self.messages[self.index] = message
         self.path = self.operation = None
         self._collect_images(message)
         metadata = message.get("metadata") or {}
         self.model = metadata.get("resolved_model_slug") or metadata.get("model_slug") or self.model
-        if not self._visible(message):
-            content = message.get("content")
-            if isinstance(content, dict) and content.get("content_type") == "thoughts":
-                self._thoughts(content.get("thoughts"))
-            elif isinstance(content, dict) and content.get("content_type") == "reasoning_recap":
-                self._thoughts([f"({content.get('content') or 'Finished reasoning'})\n"])  # e.g. "Worked for 48s"
-            return []
-        message.setdefault("content", {}).setdefault("parts", [""])
-        self.answer = message
-        return [p for p in message["content"]["parts"] if isinstance(p, str) and p]
+        if self._visible(message, hidden=True):
+            message.setdefault("content", {}).setdefault("parts", [""])
+            if self._hidden(message):
+                self.segments.append(message)
+            else:
+                self.answer = message
+            return
+        content = message.get("content")
+        if isinstance(content, dict) and content.get("content_type") == "thoughts":
+            self._thoughts(content.get("thoughts"))
+        elif isinstance(content, dict) and content.get("content_type") == "reasoning_recap":
+            self._thoughts([f"({content.get('content') or 'Finished reasoning'})\n"])  # e.g. "Worked for 48s"
 
     def _thoughts(self, thoughts):
         for thought in thoughts or ():
@@ -1117,24 +1156,24 @@ class StreamParser:
 
     def _apply(self, path, operation, value):
         if self.message is None or not isinstance(path, str) or not path.startswith("/message"):
-            return []
+            return
         keys = [k for k in path.split("/")[2:] if k != ""]
         if not keys:
-            return []
+            return
         node = self.message
         for key in keys[:-1]:
             if isinstance(node, list):
                 if not key.isdigit() or int(key) >= len(node):
-                    return []
+                    return
                 node = node[int(key)]
             elif isinstance(node, dict):
                 node = node.setdefault(key, {})
             else:
-                return []
+                return
         last = keys[-1]
         if isinstance(node, list):
             if not last.isdigit():
-                return []
+                return
             index = int(last)
             while len(node) <= index:
                 node.append("")
@@ -1142,38 +1181,35 @@ class StreamParser:
         elif isinstance(node, dict):
             current = node.get(last)
         else:
-            return []
-        if operation == "append" and isinstance(current, str) and isinstance(value, str):
-            new = current + value
-        elif operation == "append" and isinstance(current, list):
-            new = current + (value if isinstance(value, list) else [value])
-        elif operation == "append" and isinstance(current, dict) and isinstance(value, dict):
-            new = {**current, **value}
-        elif operation in ("append", "replace", "add"):
-            new = value
-        elif operation == "remove" and isinstance(node, dict):
-            node.pop(last, None)
-            return []
+            return
+        if operation == "remove" and isinstance(node, dict):
+            node.pop(last, None)  # e.g. the hidden flag of an answer that becomes the visible one
+        elif operation not in ("append", "replace", "add"):
+            return
         else:
-            return []
-        if isinstance(node, list):
-            node[int(last)] = new
-        else:
-            node[last] = new
-        if keys == ["content", "thoughts"] and operation == "append":
-            self._thoughts(value if isinstance(value, list) else [value])
-            return []
+            if operation == "append" and isinstance(current, str) and isinstance(value, str):
+                new = current + value
+            elif operation == "append" and isinstance(current, list):
+                new = current + (value if isinstance(value, list) else [value])
+            elif operation == "append" and isinstance(current, dict) and isinstance(value, dict):
+                new = {**current, **value}
+            else:
+                new = value
+            if isinstance(node, list):
+                node[int(last)] = new
+            else:
+                node[last] = new
+            if keys == ["content", "thoughts"] and operation == "append":
+                self._thoughts(value if isinstance(value, list) else [value])
+                return
         if keys[:2] == ["content", "parts"] or keys == ["status"]:
             self._collect_images(self.message)
-        text = value if isinstance(value, str) and operation == "append" else ""
         if self._visible(self.message):
             self.answer = self.message
-            return [text] if text and keys[:2] == ["content", "parts"] else []
-        if text and "thoughts" in keys:
-            self.reasoning += text
+        elif operation == "append" and isinstance(value, str) and value and "thoughts" in keys:
+            self.reasoning += value
             if self.on_thinking:
-                self.on_thinking(text)
-        return []
+                self.on_thinking(value)
 
 
 def _thought_text(thought):
