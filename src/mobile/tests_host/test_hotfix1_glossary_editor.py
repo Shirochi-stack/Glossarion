@@ -386,6 +386,10 @@ def test_a_gender_choice_updates_its_row_at_once_and_saves_like_the_desktop(iso)
     assert Path(path).read_bytes() == Path(ref_path).read_bytes()
     saved = json.loads(tracker.read_text(encoding="utf-8"))
     expected = json.loads(Path(ref_path).with_name("Book_gender_tracker.json").read_text(encoding="utf-8"))
+    # updated_at is the save time to the second; the two saves can straddle a second (gender_tracking._comparable
+    # drops it too)
+    for tracker_data in (saved, expected):
+        tracker_data.pop("updated_at", None)
     assert saved == expected and saved["entries"]["루나"]["decision"] == "male"
 
 

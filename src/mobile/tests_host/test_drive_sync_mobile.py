@@ -29,6 +29,7 @@ import importlib.util
 import os
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 from typing import Any, Optional
@@ -81,6 +82,17 @@ async def settle(rounds: int = 40) -> None:
     await asyncio.sleep(0.02)
     for _ in range(rounds):
         await asyncio.sleep(0)
+
+
+async def until(condition: Any, timeout: float = 10.0) -> bool:
+    """Wait for *condition*: a spawned handler's Drive call runs in a worker thread (asyncio.to_thread), which a
+    loaded CI runner may not finish within settle()'s fixed 20 ms."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
 
 
 def texts(control: Any, out: Optional[list] = None) -> list:
@@ -575,6 +587,7 @@ def test_cloud_tab_and_the_settings_page_show_the_same_drive_sync_state(tmp_path
             await settle()
             assert tab.section.folder_field.value == "Books/Novels"
             tab.section._on_switch(types.SimpleNamespace(control=types.SimpleNamespace(value=True)))
+            await until(lambda: screen.drive_section.switch.value is True and service.active())
             await settle()
             assert screen.drive_section.switch.value is True and service.active()
             # a typed but unsaved folder survives a refresh caused by another change
