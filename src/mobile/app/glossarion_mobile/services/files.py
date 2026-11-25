@@ -209,6 +209,18 @@ def unique_destination(directory: str, name: str, *, folder: bool = False) -> st
         counter += 1
 
 
+def _is_epub_zip(path: str) -> bool:
+    """``image_archive_epub.is_epub_zip`` (shared): a ZIP with EPUB structure, whatever its name."""
+    try:
+        from image_archive_epub import is_epub_zip  # shared (archive inputs)
+    except Exception:
+        return False
+    try:
+        return bool(is_epub_zip(path))
+    except Exception:
+        return False
+
+
 def _sha1(path: str) -> str:
     digest = hashlib.sha1()
     with open(path, "rb") as handle:
@@ -434,6 +446,12 @@ class FileBridge:
                 log.warning("import skipped, not a file: %s", source)
                 continue
             display = names[index] if index < len(names) and names[index] else os.path.basename(source)
+            display_stem, display_ext = os.path.splitext(display)
+            if display_ext.lower().lstrip(".") not in IMPORT_EXTENSIONS and _is_epub_zip(source):
+                # An EPUB under another extension (or none): its app-storage copy is named .epub,
+                # like the desktop input rename (translation_pipeline._windows_supported_input_path).
+                log.info("%s is an EPUB; importing it as %s.epub", display, display_stem)
+                display = f"{display_stem or 'book'}.epub"
             kept = None
             if (target in ("library", "translated") and self.library_import is not None
                     and self._record_library_input is None and not self.is_cache_copy(source)

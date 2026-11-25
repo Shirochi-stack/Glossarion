@@ -124,6 +124,86 @@ UNSHARED_UI_REQUESTS = {
     "trigger_qa_scan": "⚠️ The post-translation QA scan is not available in this build yet; skipped",
 }
 
+#: Input extensions a run handles by name (the desktop Browse filter); a file with another
+#: extension is checked for EPUB content by ``_windows_supported_input_path``.
+SUPPORTED_INPUT_EXTENSIONS = frozenset({
+    '.epub', '.zip', '.cbz', '.pdf', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv', '.md',
+    '.sdlxliff', '.xliff', *SUBTITLE_EXTENSIONS, *IMAGE_ATTACHMENT_EXTENSIONS, '.mp4', '.exe',
+})
+
+
+def _windows_long_path(path):
+    """The long form of a Windows short (8.3) path such as ``61B035~1.EPU``; *path* otherwise."""
+    if not sys.platform.startswith('win') or '~' not in str(path or ''):
+        return path
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        get_long = ctypes.windll.kernel32.GetLongPathNameW
+        get_long.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        get_long.restype = wintypes.DWORD
+        source = os.path.normpath(str(path))
+        size = 1024
+        for _attempt in range(3):
+            buffer = ctypes.create_unicode_buffer(size)
+            length = get_long(source, buffer, size)
+            if not length:
+                return path
+            if length < size:
+                long_path = buffer.value
+                if os.path.normcase(long_path) == os.path.normcase(source):
+                    return path
+                return long_path
+            size = length + 1
+    except Exception:
+        pass
+    return path
+
+
+def _copy_disguised_epub_input(owner, path, name):
+    """Copy an EPUB that cannot be renamed in place into the work or output folder as ``.epub``."""
+    try:
+        folder = (
+            getattr(owner, '_direct_text_archive_conversion_dir', '')
+            or os.environ.get('OUTPUT_DIRECTORY')
+            or (getattr(owner, 'config', None) or {}).get('output_directory')
+        )
+        if not folder:
+            try:
+                folder = owner._get_output_base_dir(path)
+            except Exception:
+                folder = os.path.join(_get_app_dir(), "Converted Inputs")
+        os.makedirs(folder, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(name))[0].rstrip(" .") or "input"
+        candidate = os.path.join(folder, stem + '.epub')
+        counter = 2
+        while os.path.exists(candidate):
+            try:
+                # The same book picked again reuses its earlier copy.
+                if (os.path.getsize(candidate) == os.path.getsize(path)
+                        and os.path.getmtime(candidate) >= os.path.getmtime(path)):
+                    owner.append_log(f"📝 Using the earlier .epub copy of {os.path.basename(path)}: {candidate}")
+                    return candidate
+            except OSError:
+                pass
+            candidate = os.path.join(folder, f"{stem}_windows_safe_{counter}.epub")
+            counter += 1
+        import shutil
+
+        shutil.copy2(path, candidate)
+        owner.append_log(
+            f"📝 {os.path.basename(path)} is an EPUB; copied it as {os.path.basename(candidate)} "
+            f"into {folder} so it can be translated"
+        )
+        return candidate
+    except Exception as exc:
+        try:
+            owner.append_log(f"⚠️ Could not copy {os.path.basename(path)} as an .epub: {exc}")
+        except Exception:
+            pass
+        return path
+
 #: Every name PipelineHooksMixin defines (desktop hooks / GUI method defaults).
 PIPELINE_HOOKS = (
     "_ui_request",
@@ -2107,28 +2187,66 @@ Important rules:
         return False
 
     def _windows_supported_input_path(self, path):
-        """Rename Windows-hostile input filenames before output-folder creation."""
+        """Rename Windows-hostile input filenames before output-folder creation.
+
+        On every platform an EPUB whose extension is not a supported input type
+        (``.EPU``, ``.zip``-less download, no extension) is renamed to ``.epub``.
+        A Windows short (8.3) name is expanded first and never renamed: the long
+        name usually ends in ``.epub`` already. When the rename fails, the EPUB is
+        copied into the work or output folder instead.
+        """
         try:
-            if not sys.platform.startswith('win'):
+            if not path or path == "__generative_mode__":
                 return path
-            if not path or path == "__generative_mode__" or not os.path.isfile(path):
+            long_path = _windows_long_path(path)
+            if long_path != path and os.path.isfile(long_path):
+                try:
+                    self.append_log(
+                        f"📝 Using the full file name instead of the Windows short name: "
+                        f"{os.path.basename(path)} → {os.path.basename(long_path)}"
+                    )
+                except Exception:
+                    pass
+                path = long_path
+            if not os.path.isfile(path):
                 return path
             folder, filename = os.path.split(path)
             stem, ext = os.path.splitext(filename)
-            safe_stem = stem.rstrip(" .")
-            if safe_stem == stem:
+            new_ext = ext
+            if ext.lower() not in SUPPORTED_INPUT_EXTENSIONS:
+                from image_archive_epub import is_epub_zip
+
+                if is_epub_zip(path):
+                    new_ext = '.epub'
+            if new_ext != ext and long_path != path:
+                # An unexpanded short name: renaming it would replace the real file name.
+                return _copy_disguised_epub_input(self, path, os.path.basename(long_path))
+            safe_stem = stem.rstrip(" .") if sys.platform.startswith('win') else stem
+            if safe_stem == stem and new_ext == ext:
                 return path
             if not safe_stem:
                 safe_stem = "input"
 
-            candidate = os.path.join(folder, safe_stem + ext)
+            candidate = os.path.join(folder, safe_stem + new_ext)
             if os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(os.path.abspath(path)):
                 return path
 
             counter = 2
             while os.path.exists(candidate):
-                candidate = os.path.join(folder, f"{safe_stem}_windows_safe_{counter}{ext}")
+                candidate = os.path.join(folder, f"{safe_stem}_windows_safe_{counter}{new_ext}")
                 counter += 1
+
+            if new_ext != ext:
+                try:
+                    os.rename(path, candidate)
+                except OSError as exc:
+                    self.append_log(f"⚠️ Could not rename {filename} to .epub ({exc}); copying it instead")
+                    return _copy_disguised_epub_input(self, path, safe_stem + new_ext)
+                self.append_log(
+                    f"📝 {filename} is an EPUB; renamed it so it can be translated: "
+                    f"{filename} → {os.path.basename(candidate)}"
+                )
+                return candidate
 
             os.rename(path, candidate)
             if ext.lower() == '.epub':

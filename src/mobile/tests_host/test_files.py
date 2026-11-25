@@ -138,6 +138,48 @@ def test_import_collisions_dedupe_and_cache_copy_cleanup(tmp_path):
     assert files.import_paths([str(tmp_path / "missing.epub"), None]) == []
 
 
+def _epub_bytes(tmp_path: Path) -> bytes:
+    import zipfile
+
+    archive = tmp_path / "_build.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", "<container/>")
+        zf.writestr("OEBPS/content.opf", "<package/>")
+    data = archive.read_bytes()
+    archive.unlink()
+    return data
+
+
+def test_an_epub_under_another_extension_is_imported_as_epub(tmp_path):
+    files, cache, _ = bridge(tmp_path)
+    epub = _epub_bytes(tmp_path)
+    [a] = files.import_paths([write(cache / "61B035~1.EPU", epub)])
+    assert a.name == "61B035~1.epub" and a.extension == ".epub"
+    # the picker's display name keeps the real title
+    [b] = files.import_paths([write(cache / "doc123", epub)], names=["Lets raise my cousin raw"])
+    assert b.name == "Lets raise my cousin raw.epub"
+    # a taken name gets the usual " (2)" suffix instead of replacing the other book
+    write(tmp_path / "data" / "Inbox" / "Novel.epub", b"another book")
+    [c] = files.import_paths([write(cache / "Novel.dat", epub)])
+    assert c.name == "Novel (2).epub"
+    assert (tmp_path / "data" / "Inbox" / "Novel.epub").read_bytes() == b"another book"
+
+
+def test_a_zip_that_is_not_an_epub_keeps_its_name(tmp_path):
+    import zipfile
+
+    files, cache, _ = bridge(tmp_path)
+    plain = cache / "notes.dat"
+    with zipfile.ZipFile(plain, "w") as zf:
+        zf.writestr("readme.txt", "hello")
+    [a] = files.import_paths([str(plain)])
+    assert a.name == "notes.dat"
+    epub = _epub_bytes(tmp_path)
+    [z] = files.import_paths([write(cache / "Book.zip", epub)])
+    assert z.name == "Book.zip"  # ZIP inputs are supported; the backend resolves an EPUB inside
+
+
 def test_desktop_never_removes_the_source_file(tmp_path):
     files, cache, _ = bridge(tmp_path, platform="desktop")
     source = write(cache / "Book.epub")
