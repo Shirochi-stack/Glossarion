@@ -76,6 +76,61 @@ def test_reply_continued_on_resume_stream():
     assert parser.finished and parser.content == "Hello"
 
 
+HIDDEN = {"is_visually_hidden_from_conversation": True}
+
+
+def answer_message(id, parts, hidden=False):
+    return {"message": {"id": id, "author": {"role": "assistant"}, "content": {"content_type": "text", "parts": parts},
+                        "recipient": "all", "channel": "final", "metadata": dict(HIDDEN) if hidden else {}}}
+
+
+def test_answer_written_as_hidden_segments_and_a_visible_message():
+    # chatgpt.com's thinking models (recorded 2026-11-25): each piece goes to a hidden segment (c 7, then c 10)
+    # and, in a patch frame, to the visible message (c 8) that gets the whole answer
+    def piece(segment, text):
+        return (frame({"p": "/message/content/parts/0", "o": "append", "v": text, "c": segment}, "delta")
+                + frame({"p": "", "o": "patch", "c": 8, "v": [
+                    {"p": "/message/update_time", "o": "replace", "v": 1.0},
+                    {"p": "/message/content/parts/0", "o": "append", "v": text}]}, "delta"))
+    stream = (frame('"v1"', "delta_encoding")
+              + frame({"p": "", "o": "add", "v": message("user", ["source"]), "c": 0}, "delta")
+              + frame({"p": "", "o": "add", "v": answer_message("s1", [""], hidden=True), "c": 7}, "delta")
+              + frame({"p": "", "o": "add", "v": answer_message("all", [""]), "c": 8}, "delta")
+              + piece(7, "# Title\n\nOne")
+              + frame({"v": " two.\n\n", "c": 7}, "delta")  # a frame without a path keeps segment 7's
+              + frame({"p": "", "o": "patch", "c": 8, "v": [
+                  {"p": "/message/content/parts/0", "o": "append", "v": " two.\n\n"}]}, "delta")
+              + frame({"p": "", "o": "add", "v": answer_message("s2", [""], hidden=True), "c": 10}, "delta")
+              + piece(10, "Three.")
+              + frame("[DONE]"))
+    parser = gpt.StreamParser()
+    deltas = []
+    for i in range(0, len(stream), 11):
+        deltas += parser.feed(stream[i:i + 11])
+    assert parser.finished
+    assert parser.content == "# Title\n\nOne two.\n\nThree."
+    assert "".join(deltas) == parser.content  # the log shows it once too
+
+
+def test_hidden_answer_that_becomes_visible():
+    stream = (frame({"p": "", "o": "add", "v": answer_message("a", ["Hel"], hidden=True)}, "delta")
+              + frame({"p": "/message/content/parts/0", "o": "append", "v": "lo"}, "delta")
+              + frame({"p": "/message/metadata/is_visually_hidden_from_conversation", "o": "remove"}, "delta")
+              + frame({"p": "/message/content/parts/0", "o": "append", "v": " there"}, "delta") + frame("[DONE]"))
+    parser = gpt.StreamParser()
+    deltas = parser.feed(stream)
+    assert parser.content == "Hello there" and "".join(deltas) == "Hello there"
+
+
+def test_hidden_segments_alone_are_the_answer():
+    stream = (frame({"p": "", "o": "add", "v": answer_message("s1", ["One "], hidden=True), "c": 7}, "delta")
+              + frame({"p": "", "o": "add", "v": answer_message("s2", ["two"], hidden=True), "c": 9}, "delta")
+              + frame("[DONE]"))
+    parser = gpt.StreamParser()
+    parser.feed(stream)
+    assert parser.content == "One two"
+
+
 def test_stream_error_frame():
     parser = gpt.StreamParser()
     parser.feed(frame({"message": None, "error": "Something went wrong"}))
