@@ -115,9 +115,34 @@ async def _resume(chat) -> dict:
     return _job_config(chat.store, jobs.submitted[-1])
 
 
+def _record_panels(monkeypatch) -> list:
+    """Every RunOptionsPanel built from now on, with the thread and stack that built it: a leaked config
+    observer (failed once on the v9.15.25 tag build, never locally) then names where its panel came from."""
+    import threading
+    import traceback
+
+    from glossarion_mobile.ui.chat import plan_card
+
+    built: list = []
+    init = plan_card.RunOptionsPanel.__init__
+
+    def recording_init(self, *args: Any, **kwargs: Any) -> None:
+        built.append((self, threading.current_thread().name, "".join(traceback.format_stack(limit=14)[:-1])))
+        init(self, *args, **kwargs)
+
+    monkeypatch.setattr(plan_card.RunOptionsPanel, "__init__", recording_init)
+    return built
+
+
+def _unreleased(built: list) -> str:
+    return "\n\n".join(f"panel {getattr(p, '_key', '?')!r} built on thread {thread}:\n{stack}"
+                       for p, thread, stack in built if getattr(p, "_unsub", None) is not None)
+
+
 @needs_flet
-def test_resume_runs_with_what_the_result_card_shows(desktop_store_cls, isolated_env):
+def test_resume_runs_with_what_the_result_card_shows(desktop_store_cls, isolated_env, monkeypatch):
     tmp_path = isolated_env
+    built = _record_panels(monkeypatch)
 
     async def scenario():
         chat = TC._chat_view(desktop_store_cls, tmp_path)
@@ -170,7 +195,7 @@ def test_resume_runs_with_what_the_result_card_shows(desktop_store_cls, isolated
             assert store.get("batch_size") == 6 and store.get("translation_temperature") == 0.9
             # every released panel stopped observing the config (only the view's own observers are left)
             assert not view.run_panels
-            assert store._observers.get("batch_size", []) == []
+            assert store._observers.get("batch_size", []) == [], _unreleased(built)
         finally:
             TC._close(chat)
 
