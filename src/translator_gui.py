@@ -9496,12 +9496,6 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     protect_file_from_writes(CONFIG_FILE)
 
         self._init_config_state()
-        try:
-            # A 404 on a custom prefix finds the real endpoint (custom_endpoint_discovery) and tells the owner.
-            from custom_endpoint_discovery import register_route_listener
-            register_route_listener(self._on_custom_prefix_endpoint_found)
-        except Exception:
-            pass
              
         # Initialize update manager AFTER config is loaded
         try:
@@ -30518,6 +30512,12 @@ if __name__ == "__main__":
         
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()
+        try:
+            # A 404 on a custom prefix finds the real endpoint (custom_endpoint_discovery) and tells the owner.
+            from custom_endpoint_discovery import register_route_listener
+            register_route_listener(main_window._on_custom_prefix_endpoint_found)
+        except Exception:
+            pass
 
         should_start_manga_imports = bool(globals().get('manga_available', False)) and not MANGA_SUPPORT
         if should_start_manga_imports:
