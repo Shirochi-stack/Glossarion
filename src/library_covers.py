@@ -89,7 +89,9 @@ _QT_SNIFFED_FORMATS = frozenset({
 #: Of those, the formats Qt still returns a (partially decoded, non-null) image for
 #: when the data is truncated (Pillow raises on ``load()``): the bytes of pixel data Qt
 #: needs past the header (Pillow's tile offset) before the image is non-null.
-_QT_PARTIAL_MIN_DATA = {"BMP": 1, "GIF": 2, "JPEG": 0, "MPO": 0, "XBM": 7}
+#: XBM counts from the first value after the opening brace (Qt needs its "0x"), not from
+#: Pillow's tile offset, which moved from before the brace (Pillow 12) to after it (13).
+_QT_PARTIAL_MIN_DATA = {"BMP": 1, "GIF": 2, "JPEG": 0, "MPO": 0, "XBM": 2}
 
 
 def _looks_like_svg(data: bytes) -> bool:
@@ -280,6 +282,9 @@ def _image_bytes_decodable(data: bytes) -> bool:
                 offset = int(image.tile[0][2]) if image.tile else 0
             except Exception:
                 offset = 0
+            if fmt == "XBM":
+                brace = data.find(b"{")
+                offset = len(data) - len(data[brace + 1:].lstrip()) if brace >= 0 else len(data)
             try:
                 image.load()
             except Exception:
