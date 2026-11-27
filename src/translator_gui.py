@@ -10226,6 +10226,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             target_loggers = [
                 'unified_api_client',
                 'httpx',
+                'httpx2',
                 'requests.packages.urllib3',
                 'openai'
             ]

@@ -821,15 +821,16 @@ class SplashManager(QObject):
             tiktoken.get_encoding("cl100k_base")
         except Exception:
             pass
-        # Vertex AI chain is enormous (1,265+ proto submodules, ~215 MB RAM),
-        # so only warm it when the configured model actually targets Vertex —
-        # the first API call would import it anyway; doing it here moves the
-        # 10-20s frozen-build import off the Run Translation click.
+        # Vertex AI runs over REST (google-genai vertexai=True, anthropic
+        # AnthropicVertex, google-auth service-account tokens; no aiplatform /
+        # vertexai packages any more). Only warm the auth imports when the
+        # configured model actually targets Vertex; the first API call would
+        # import them anyway.
         if self._configured_model_uses_vertex():
             for _mod_name in (
-                "google.cloud.aiplatform",
-                "vertexai",
-                "vertexai.generative_models",
+                "google.genai",
+                "google.oauth2.service_account",
+                "google.auth.transport.requests",
             ):
                 try:
                     importlib.import_module(_mod_name)

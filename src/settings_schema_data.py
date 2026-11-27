@@ -4519,6 +4519,28 @@ SETTINGS = {
      'type': 'int',
      'ui_sites': ('glossary.general',),
      'var_names': ('fuzzy_auto_mapping_threshold_var',)},
+    'gemini_long_decode': {'choices': (('auto', 'Auto'), ('off', 'Off'), ('on', 'On')),
+     'default': 'off',
+     'default_source': 'init',
+     'dialog_default': 'off',
+     'env': (('GEMINI_LONG_DECODE', 'translation', 'off'),
+             ('GEMINI_LONG_DECODE', 'glossary', 'off'),
+             ('GEMINI_LONG_DECODE', 'startup', 'off'),
+             ('GEMINI_LONG_DECODE', 'startup', '<none>')),
+     'init_default': 'off',
+     'label': 'Long Decode (Gemini 4):',
+     'origins': ('init', 'dialog', 'env'),
+     'tooltip': "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>Gemini 4 models "
+                'write at most 65,536 output tokens per decode hop. Long Decode lets the answer '
+                'continue in further hops (continuation token) up to the output token limit; each '
+                'hop is billed and re-reads the prompt.<br><b>Auto</b>: on when the output token '
+                'limit is above 65,536.<br><b>Off</b>: the answer stops after one hop (handled as '
+                'truncated).<br><b>On</b>: always continue.<br>Gemini API and Vertex AI through '
+                'the google-genai SDK only (not the gRPC transport).</p></qt>',
+     'type': 'choice',
+     'ui_group': 'Response Handling & Retry Logic',
+     'ui_sites': ('other.response',),
+     'var_names': ('gemini_long_decode_var',)},
     'gemini_openai_endpoint': {'converter': ('str',),
      'default': 'generativelanguage.googleapis.com',
      'default_source': 'init',
@@ -11432,7 +11454,7 @@ SETTINGS = {
      'ui_group': 'Response Handling & Retry Logic',
      'ui_sites': ('other.response',),
      'var_names': ('thinking_budget_var',)},
-    'thinking_level': {'choices': ('minimal', 'low', 'medium', 'high'),
+    'thinking_level': {'choices': ('minimal', 'low', 'medium', 'high', 'xhigh'),
      'converter': ('str',),
      'default': 'high',
      'default_source': 'init',

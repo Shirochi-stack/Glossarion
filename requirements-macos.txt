@@ -1,4 +1,4 @@
-# Python 3.12.9 - macOS requirements
+# Python 3.12 (3.11+ required: google-genai 3, httpx2) - macOS requirements
 # Core packages
 pyinstaller
 pyinstaller-hooks-contrib
@@ -15,16 +15,15 @@ langdetect
 PySide6
 
 # AI/API Clients
-openai
-anthropic
-mistralai
-cohere
-tiktoken
+openai>=3.60.0,<4
+anthropic[vertex]>=2.14.0,<3
+mistralai>=3.9.0
+cohere>=7.3.2
+tiktoken>=0.14.0
 poe-api-wrapper
-google-genai
-google-cloud-aiplatform
-deepl
-vertexai
+# google-genai 3 needs Python 3.11+; the Gemini Developer API stays on v1beta (gemini_policy)
+google-genai>=3.6.1,<4
+deepl>=2.0.0
 
 # Data processing
 datasketch
@@ -34,6 +33,10 @@ scipy
 # HTTP/Networking
 httpx
 httpcore
+# httpx2: the HTTP client of openai 3, anthropic 2, mistralai 3 and google-genai 3
+httpx2>=2.16.2
+httpcore2>=2.16.2
+truststore>=0.10.5
 anyio
 sniffio
 websocket-client
@@ -70,18 +73,19 @@ opencv-python-headless
 typing-extensions
 
 # Google Cloud Services
-google-cloud-vision
-google-cloud-translate
+google-cloud-vision>=3.16.0
+google-cloud-translate>=3.28.0
+google-cloud-texttospeech>=2.38.0
 google-cloud-storage>=3.0.0
-google-auth
+google-auth>=2.63.1
 google-auth-httplib2
-google-api-core
-googleapis-common-protos
-google-ai-generativelanguage
-grpcio
-grpcio-status
-proto-plus
-protobuf<6.0.0dev
+google-api-core>=2.44.0
+googleapis-common-protos>=1.76.0
+google-ai-generativelanguage>=0.12.1
+grpcio>=1.85.4
+grpcio-status>=1.85.4
+proto-plus>=1.29.0
+protobuf>=6.33.5,<8
 
 # Azure Vision APIs
 azure-ai-vision-imageanalysis==1.0.0

@@ -1648,6 +1648,7 @@ class RunEnvMixin:
             'THINKING_BUDGET': self.thinking_budget_var if self.enable_gemini_thinking_var else '0',
             'GEMINI_THINKING_LEVEL': getattr(self, 'thinking_level_var', 'high'),
             'GEMINI_SERVICE_TIER': getattr(self, 'gemini_service_tier_var', 'off'),
+            'GEMINI_LONG_DECODE': getattr(self, 'gemini_long_decode_var', 'off'),
             'FORCE_SERVICE_TIER_UNKNOWN_ROUTES': '1' if self.force_service_tier_unknown_routes_var else '0',
             # GPT/OpenRouter reasoning
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
@@ -2041,6 +2042,7 @@ class RunEnvMixin:
             # AI Model settings
             'ENABLE_GEMINI_THINKING': 'Enable Gemini thinking mode',
             'THINKING_BUDGET': 'Gemini thinking budget',
+            'GEMINI_LONG_DECODE': 'Gemini 4 Long Decode (auto / off / on)',
             'ENABLE_GPT_THINKING': 'Enable GPT-4o reasoning',
             'GPT_REASONING_TOKENS': 'GPT reasoning effort tokens',
             'GPT_EFFORT': 'GPT reasoning effort level',
@@ -2359,6 +2361,7 @@ class RunEnvMixin:
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
                 ('GEMINI_SERVICE_TIER', str(self.config.get('gemini_service_tier', 'off') or 'off')),
+                ('GEMINI_LONG_DECODE', str(self.config.get('gemini_long_decode', 'off') or 'off')),
                 ('STREAM_THINKING_LOGS', '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0'),
                 ('AUTHZA_USE_GENERAL_API', '1' if _bool_config('authza_use_general_api', False) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
@@ -2746,6 +2749,7 @@ class RunEnvMixin:
                 ('ENABLE_GEMINI_THINKING', '1' if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
                 ('THINKING_BUDGET', str(getattr(self, 'thinking_budget_var', '-1')) if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
                 ('GEMINI_THINKING_LEVEL', getattr(self, 'thinking_level_var', 'high')),
+                ('GEMINI_LONG_DECODE', getattr(self, 'gemini_long_decode_var', 'off')),
                 ('ENABLE_GPT_THINKING', '1' if getattr(self, 'enable_gpt_thinking_var', True) else '0'),
                 ('GPT_REASONING_TOKENS', str(getattr(self, 'gpt_reasoning_tokens_var', '2000')) if getattr(self, 'enable_gpt_thinking_var', True) else ''),
                 ('GPT_EFFORT', getattr(self, 'gpt_effort_var', 'medium')),

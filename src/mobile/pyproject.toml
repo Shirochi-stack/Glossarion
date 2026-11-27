@@ -26,7 +26,7 @@ dependencies = [
   "six==1.17.0",
 
   # Text / tokens
-  "tiktoken==0.13.0",
+  "tiktoken==0.14.0",
   "regex==2026.5.9",
   "rapidfuzz==3.14.5",
   "langdetect==1.0.9",
@@ -45,19 +45,22 @@ dependencies = [
   "httpcore==1.0.9",
   "anyio==4.14.2",
 
-  # LLM SDKs: the httpx-based majors the desktop is tested with
-  "openai>=2.32,<3",
-  "anthropic>=0.92,<1",
-  "google-genai>=1.73.1,<2",
+  # LLM SDKs: the same majors as the desktop (httpx2-based; httpx stays for our own streaming code)
+  "openai>=3.60,<4",
+  "anthropic>=2.14,<3",
+  "google-genai>=3.6.1,<4",
+  "httpx2==2.16.2",
+  "httpcore2==2.16.2",
+  "truststore==0.10.5",
   "pydantic==2.13.4",
   "pydantic-core==2.46.4",
-  "jiter==0.15.0",
+  "jiter==0.19.0",
   "websockets>=13,<17",
-  "deepl==1.29.0",
+  "deepl==2.0.0",
   "deep-translator==1.11.4",
 
   # Auth / crypto
-  "google-auth==2.49.1",
+  "google-auth==2.63.1",
   "cryptography==50.0.2",  # includes PKCS#7 oracle fix; mobile builds need patched wheels
   "cffi==2.0.0",
 
@@ -98,11 +101,11 @@ dependencies = [
   "google-cloud-vision==3.16.0",           # manga OCR (google_vision_rest stays the no-SDK fallback)
 ]
 # Tier B outcomes that add no pin (U9; details in tests_host/test_tier_b.py):
-# * google-cloud-aiplatform / vertexai: every release requires protobuf<7, which conflicts with
-#   protobuf==7.35.0 (the only Android/iOS protobuf build). Vertex routes run without them:
-#   Gemini through google-genai (vertexai=True) and Claude through anthropic.AnthropicVertex,
-#   both REST with google-auth service-account tokens; unified_api_client skips the unused
-#   aiplatform / vertexai imports on mobile only.
+# * google-cloud-aiplatform / vertexai: aiplatform 2.x requires google-genai<3 (1.x needed
+#   protobuf<7) and the vertexai package pins aiplatform 1.71.1, so neither is installed on
+#   desktop or mobile. Vertex routes run without them: Gemini through google-genai
+#   (vertexai=True) and Claude through anthropic.AnthropicVertex, both REST with google-auth
+#   service-account tokens.
 # * Azure Document Intelligence: azure-ai-documentintelligence 1.0.2 (and azure-ai-formrecognizer
 #   3.3.3) resolve, but ocr_manager imports azure.ai.formrecognizer, never documentintelligence
 #   (DISCREPANCIES "U8 Integrate", OCR providers, desktop bug 3), so the REST client

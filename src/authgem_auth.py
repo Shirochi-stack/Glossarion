@@ -1312,13 +1312,14 @@ def _build_gemini_request_body(
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
 
     model_lower = model.lower() if model else ""
-    from gemini_policy import uses_gemini_thinking_level, omit_gemini_legacy_parameters
+    from gemini_policy import (uses_gemini_thinking_level, omit_gemini_legacy_parameters,
+                               gemini_thinking_level, GEMINI_THINKING_LEVELS)
     is_gemini_3 = uses_gemini_thinking_level(model_lower)
 
     if is_gemini_3:
         omit_gemini_legacy_parameters(gen_config, model_lower)
 
-    if thinking_level not in ("minimal", "low", "medium", "high"):
+    if thinking_level not in GEMINI_THINKING_LEVELS:
         thinking_level = "high"
 
     if enable_thinking:
@@ -1331,6 +1332,7 @@ def _build_gemini_request_body(
                     thinking_level = "minimal"
                 else:
                     thinking_level = "low"
+            thinking_level = gemini_thinking_level(model_lower, thinking_level)
             thinking_config["thinkingLevel"] = thinking_level.upper()
             # Gemini 3 Pro doesn't support minimal
             if "pro" in model_lower and "flash" not in model_lower:

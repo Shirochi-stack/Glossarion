@@ -244,7 +244,7 @@ def source_check(r):
 
 def desktop_tests(r):
     if not r.plan:
-        platform_required("linux", (3, 10))
+        platform_required("linux", (3, 12))
         require_tests("tests")
         prepare_oracles(r)
         check_oracle_history(r.env)
@@ -252,7 +252,7 @@ def desktop_tests(r):
     r.env.update(QT_QPA_PLATFORM="offscreen", PYTHONPATH=str(ROOT / "src"),
                  PYTEST_ADDOPTS=f'--maxfail=1 --tb=short -o faulthandler_timeout=180 --junitxml={r.report / "desktop-tests.xml"}')
     for name in ("Install dependencies", "Force CPU-only PyTorch wheels", "Check Python syntax", "Run basic smoke test",
-                 "Mobile shared-module and backend patch tests (Python 3.10)",
+                 "Mobile shared-module and backend patch tests (Python 3.12)",
                  "Import hygiene of the shared GUI-free modules (PySide6 blocked)"):
         r.step("python-app.yml", "test", name)
 

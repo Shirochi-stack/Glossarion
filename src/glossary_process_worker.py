@@ -263,7 +263,7 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
         # Batching configuration
         'BATCHING_MODE', 'BATCH_GROUP_SIZE', 'CONSERVATIVE_BATCHING', 'BATCH_TRANSLATION', 'BATCH_SIZE',
         # Thinking parameters for Gemini 3/2.5
-        'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET', 'GEMINI_SERVICE_TIER',
+        'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET', 'GEMINI_SERVICE_TIER', 'GEMINI_LONG_DECODE',
         # Watchdog directory for cross-process API tracking
         'GLOSSARION_WATCHDOG_DIR'
     ]

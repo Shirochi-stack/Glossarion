@@ -742,6 +742,10 @@ api_modules = [
     'google',
 	'google.genai',
 	'google.genai.types',
+	# Interactions (Gemini Omni, Lyria 3) are imported lazily by Client.interactions
+	'google.genai.interactions',
+	'google.genai._gaos',
+	'google.genai._gaos.google_genai',
     'google.auth',
     'google.auth.transport',
     'google.auth.transport.requests',
@@ -794,13 +798,12 @@ api_modules = [
 	
 	# DeepL
 	'deepl',
-	'deepl.translator',
+	'deepl.deepl_client',
+	'deepl.api_data',
+	'deepl._base_client',
+	'deepl._http_client',
 	'deepl.exceptions',
-	'deepl.api',
-	'deepl.http',
 	'deepl.util',
-	'deepl.auth',
-	'deepl.model',	
     
     'proto',
     'proto.message',
@@ -808,13 +811,6 @@ api_modules = [
     'grpcio_status',
     'googleapis_common_protos',
 	
-	# Google Vertex AI:
-    'google.cloud.aiplatform',
-    'google.cloud.aiplatform_v1', 
-    'google.cloud.aiplatform_v1beta1',
-    'vertexai',
-    'vertexai.generative_models',
-    'vertexai.language_models',
     
     # OpenAI
     'openai',
@@ -879,6 +875,21 @@ api_modules = [
     'anyio._core._eventloop',
     'anyio.streams',
     'anyio.streams.memory',
+    # httpx2 stack: openai 3, anthropic 2, mistralai 3, google-genai 3
+    'httpx2',
+    'httpx2._client',
+    'httpx2._config',
+    'httpx2._transports',
+    'httpx2._transports.default',
+    'httpcore2',
+    'truststore',
+    'jiter',
+    'distro',
+    'docstring_parser',
+    'opentelemetry',
+    'opentelemetry.trace',
+    'opentelemetry.context',
+    'opentelemetry.context.contextvars_context',
 	
 	# POE API Wrapper (add these at the end)
     'poe_api_wrapper',
@@ -1378,7 +1389,6 @@ excludes = [
     'numpy.tests',
     'numpy.distutils',
     'numpy.distutils.*',
-    'docstring_parser.numpydoc',  # This is pulling in numpy incorrectly
     'numpy.doc',
     'numpy.conftest',
     # ============================================================================
