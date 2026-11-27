@@ -8376,8 +8376,25 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         dialog._pm_register_glossary = _register_glossary
         if 'glossary' in pages:
             dialog._gp_refresh_visible = _window_gp_refresh_visible
+        dialog._pm_images_output_dirs = {}
+
+        def _register_images(key, output_dir):
+            # A file's page registers its output folder for the Interactive Images tab.
+            if output_dir:
+                dialog._pm_images_output_dirs[_pm_file_key(key)] = output_dir
+
+        def _build_images_page(window, host):
+            try:
+                from interactive_images_gui import build_images_page
+            except Exception as exc:
+                print(f"⚠️ Interactive Images tab unavailable: {exc}")
+                _build_images_placeholder(window, host)
+                return
+            build_images_page(self, window, host)
+
+        dialog._pm_register_images = _register_images
         if 'images' in pages:
-            dialog._pm_tab_factories['images'] = _build_images_placeholder
+            dialog._pm_tab_factories['images'] = _build_images_page
 
         count_timer = QTimer(dialog)
         count_timer.setInterval(3000)
@@ -12428,6 +12445,31 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             parent_dialog._pm_register_glossary(file_path, _build_gp_file_panel, _build_glossary_page)
         glossary_progress_btn.clicked.connect(_show_glossary_progress)
         title_layout.addWidget(glossary_progress_btn)
+
+        # ── Interactive Images: this file's output folder for the window's tab, and the shortcut to it ──
+        if callable(getattr(parent_dialog, '_pm_register_images', None)):
+            parent_dialog._pm_register_images(file_path, output_dir)
+            interactive_images_btn = QPushButton("🖼 Interactive Images")
+            interactive_images_btn.setCursor(Qt.PointingHandCursor)
+            interactive_images_btn.setToolTip("Illustrations and style classes for the translated chapters")
+            interactive_images_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4c2f73;
+                    color: #ede0ff;
+                    border: 1px solid #7a52b3;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #6d47a3;
+                    border-color: #c084fc;
+                }
+            """)
+            interactive_images_btn.clicked.connect(
+                lambda _checked=False, _fp=file_path: parent_dialog._pm_show_tab('images', _fp))
+            title_layout.addWidget(interactive_images_btn)
         
         # Periodic check: show/hide button based on file existence (3s)
         # Uses single-pass caching to avoid redundant filesystem scans

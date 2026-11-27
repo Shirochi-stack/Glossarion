@@ -7585,7 +7585,7 @@ class BookDetailsMixin:
         extra_dirs: list[str] = []
         output_folder = self._book.get("output_folder")
         if output_folder and os.path.isdir(output_folder):
-            for sub in ("images", "translated_images"):
+            for sub in ("images", "translated_images", "Interactive_Images"):
                 candidate = os.path.join(output_folder, sub)
                 if os.path.isdir(candidate):
                     extra_dirs.append(candidate)
@@ -7612,6 +7612,10 @@ class BookDetailsMixin:
                 dirs.append(output_folder)
         except OSError:
             pass
+        # Interactive styles (glossarion_interactive.css), read after the book's own CSS.
+        interactive_dir = os.path.join(output_folder, "Interactive_Images")
+        if os.path.isfile(os.path.join(interactive_dir, "glossarion_interactive.css")):
+            dirs.append(interactive_dir)
         return dirs
 
     def _plan_open_reader(self, initial_chapter: int | None = None,

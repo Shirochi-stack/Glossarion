@@ -1,0 +1,1467 @@
+"""Interactive Images: the desktop (PySide6) layer over the shared cores.
+
+- ``add_interactive_styles_rows``: the rows under Attach CSS in Other Settings (EPUB section).
+- ``InteractiveImagesDialog``: profiles, images per chapter, prompts, models (+ the Image keys
+  preview), max reference images, run options and the per-book reference images.
+- ``InteractiveStylesDialog``: the 12 built-in CSS presets and the user's own, with a live preview
+  (Qt WebEngine when the build has it, else a QTextBrowser).
+- ``build_images_page``: the Progress Manager's Interactive Images tab.
+
+All logic lives in ``interactive_images_core`` / ``interactive_images_progress_core`` /
+``interactive_images_runner`` / ``interactive_css_presets``; this module only shows it. It never
+imports ``epub_library`` (Lite builds exclude it and Qt WebEngine).
+"""
+
+import os
+import threading
+import traceback
+
+from PySide6.QtCore import QEvent, QObject, QFileSystemWatcher, QItemSelectionModel, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QGroupBox,
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+                               QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QTextBrowser, QVBoxLayout, QWidget)
+
+import interactive_css_presets as presets
+import interactive_images_core as core
+import interactive_images_progress_core as ipc
+
+# Qt WebEngine for the style preview (animations, hover, <details>); Lite builds have none.
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEngineSettings
+    _HAS_WEBENGINE = True
+except ImportError:
+    _HAS_WEBENGINE = False
+
+FALLBACK_NOTE = "Animations, hover and collapsibles need Qt WebEngine (not in Lite builds)"
+
+#: The dialogs' own sheet (no QSpinBox / QLineEdit rule: the spin box stays native).
+DIALOG_STYLE = """
+QDialog { background-color: #1e1e1e; color: white; }
+QLabel { color: #e2e8f0; }
+QGroupBox { color: #5a9fd4; border: 1px solid #3a4555; border-radius: 4px; margin-top: 10px; padding-top: 12px; }
+QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #5a9fd4; }
+QPlainTextEdit, QTextBrowser { background-color: #2d2d2d; color: white; border: 1px solid #4a5568;
+    border-radius: 3px; padding: 4px; }
+QPushButton { background-color: #3d3d3d; color: white; border: 1px solid #4a5568; border-radius: 3px;
+    padding: 5px 10px; }
+QPushButton:hover { background-color: #4d4d4d; border-color: #5a9fd4; }
+QPushButton:disabled { color: #777777; }
+QComboBox { background-color: #2d2d2d; color: white; border: 1px solid #4a5568; border-radius: 3px; padding: 4px; }
+QComboBox QAbstractItemView { background-color: #2d2d2d; color: white; selection-background-color: #5a9fd4; }
+QTabWidget::pane { border: 1px solid #3a4555; }
+QTabBar::tab { background: #2d2d2d; color: #cbd5e1; padding: 5px 12px; border: 1px solid #3a4555; }
+QTabBar::tab:selected { background: #3a4555; color: white; }
+QCheckBox { color: white; spacing: 6px; }
+QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #5a9fd4; border-radius: 2px;
+    background-color: #2d2d2d; }
+QCheckBox::indicator:checked { background-color: #5a9fd4; border-color: #5a9fd4; }
+QCheckBox::indicator:hover { border-color: #7bb3e0; }
+QTableWidget, QListWidget { background-color: #252526; color: white; border: 1px solid #3a4555; }
+QHeaderView::section { background-color: #2d2d2d; color: #cbd5e1; border: 1px solid #3a4555; padding: 3px; }
+"""
+
+_LINE_STYLE = ("QLineEdit { background-color: #2d2d2d; color: white; border: 1px solid #4a5568; "
+               "border-radius: 3px; padding: 4px; }")
+
+
+def _house_combo(combo, extra=""):
+    """The app's dropdown (Halgakos arrow, mouse wheel off): ``qt_widget_helpers.style_combo``."""
+    from qt_widget_helpers import style_combo
+    style_combo(combo, extra)
+    return combo
+
+
+def _line(text='', placeholder=''):
+    edit = QLineEdit(text)
+    edit.setStyleSheet(_LINE_STYLE)
+    if placeholder:
+        edit.setPlaceholderText(placeholder)
+    return edit
+
+
+def _button(text, kind='default', tooltip=''):
+    colors = {
+        'primary': ('#2f5f8f', '#4a78a8', '#3f78ad'),
+        'success': ('#2d6a4f', '#40916c', '#40916c'),
+        'danger': ('#6f2f2f', '#944545', '#8a3a3a'),
+        'accent': ('#5b3a8a', '#7a52b3', '#6d47a3'),
+        'info': ('#17a2b8', '#138496', '#138496'),
+        'default': ('#3d3d3d', '#4a5568', '#4d4d4d'),
+    }
+    background, border, hover = colors.get(kind, colors['default'])
+    button = QPushButton(text)
+    button.setAutoDefault(False)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setStyleSheet(
+        f"QPushButton {{ background-color: {background}; color: white; border: 1px solid {border}; "
+        f"border-radius: 4px; padding: 4px 10px; font-weight: bold; }} "
+        f"QPushButton:hover {{ background-color: {hover}; }} QPushButton:disabled {{ color: #888888; }}")
+    if tooltip:
+        button.setToolTip(tooltip)
+    return button
+
+
+def _styled_checkbox(owner, text):
+    try:
+        from other_settings import _create_styled_checkbox
+        return _create_styled_checkbox(owner, text)
+    except Exception:
+        from PySide6.QtWidgets import QCheckBox
+        return QCheckBox(text)
+
+
+def _config(owner):
+    config = getattr(owner, 'config', None)
+    if not isinstance(config, dict):
+        config = {}
+        try:
+            owner.config = config
+        except Exception:
+            pass
+    return config
+
+
+def _persist(owner):
+    try:
+        result = owner.save_config(show_message=False)
+        return result is not False
+    except Exception:
+        return False
+
+
+def _log(owner, message):
+    try:
+        owner.append_log(message)
+    except Exception:
+        print(message)
+
+
+def _stay_above(window, owner_widget):
+    """A parentless window kept above ``owner_widget`` (its spin box must not inherit an ancestor sheet)."""
+    if owner_widget is None:
+        return
+    try:
+        window.winId()
+        owner_widget.window().winId()
+        handle = window.windowHandle()
+        parent_handle = owner_widget.window().windowHandle()
+        if handle is not None and parent_handle is not None:
+            handle.setTransientParent(parent_handle)
+    except Exception:
+        pass
+
+
+def toggle_window(owner, attr, factory):
+    """Show the window stored as ``owner.<attr>`` (made by ``factory()``), or close it when it is open:
+    the button that opens it closes it on the second click."""
+    window = getattr(owner, attr, None)
+    try:
+        if window is not None and window.isVisible():
+            window.close()
+            return None
+    except RuntimeError:
+        window = None
+    if window is None:
+        window = factory()
+        window.setAttribute(Qt.WA_DeleteOnClose, True)
+        window.destroyed.connect(lambda *_a, o=owner, a=attr: setattr(o, a, None) if getattr(o, a, None) is window
+                                 else None)
+        setattr(owner, attr, window)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    return window
+
+
+def _placeholder_menu(editor, names):
+    """Right-click "Available placeholders" on a prompt editor (inserts the clicked one)."""
+    def show_menu(pos):
+        menu = editor.createStandardContextMenu()
+        menu.setStyleSheet("QMenu { background-color: #2b2b2b; color: white; } "
+                           "QMenu::item:selected { background-color: #17a2b8; }")
+        sub = menu.addMenu("Available placeholders")
+        for name in names:
+            action = sub.addAction("{" + name + "}")
+            action.triggered.connect(lambda _c=False, n=name: editor.insertPlainText("{" + n + "}"))
+        menu.exec(editor.mapToGlobal(pos))
+        menu.deleteLater()
+    editor.setContextMenuPolicy(Qt.CustomContextMenu)
+    editor.customContextMenuRequested.connect(show_menu)
+
+
+def _model_names():
+    try:
+        from model_options import get_model_options
+        return list(get_model_options())
+    except Exception:
+        return []
+
+
+def _model_combo(current, placeholder):
+    combo = QComboBox()
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.NoInsert)
+    combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    _house_combo(combo)
+    combo.addItems(_model_names())
+    combo.setEditText(str(current or ''))
+    combo.lineEdit().setPlaceholderText(placeholder)
+    combo.setMinimumWidth(320)
+    return combo
+
+
+def _book_output_dirs(owner, extra=None):
+    """``[(label, output_dir)]`` for the books the user has open (selected files) plus ``extra``."""
+    found = []
+
+    def add(label, folder):
+        if folder and os.path.isdir(folder) and all(os.path.normcase(folder) != os.path.normcase(f) for _l, f in found):
+            found.append((label, folder))
+
+    for label, folder in extra or ():
+        add(label, folder)
+    sources = []
+    for attr in ('selected_files',):
+        value = getattr(owner, attr, None)
+        if isinstance(value, (list, tuple)):
+            sources.extend(str(v) for v in value if v)
+    last = _config(owner).get('last_epub_path')
+    if last:
+        sources.append(str(last))
+    try:
+        from progress_core import resolve_output_dir
+    except Exception:
+        resolve_output_dir = None
+    for source in sources:
+        if resolve_output_dir is None:
+            break
+        try:
+            folder = resolve_output_dir(owner, source)
+        except Exception:
+            folder = None
+        add(os.path.splitext(os.path.basename(source))[0], folder)
+    return found
+
+
+# =============================================================================================
+# Style preview (Qt WebEngine, else QTextBrowser)
+# =============================================================================================
+
+class StylePreview(QWidget):
+    """A live preview of the sample chapter under a stylesheet."""
+
+    def __init__(self, parent=None, *, force_fallback=False):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self.uses_webengine = bool(_HAS_WEBENGINE and not force_fallback)
+        self._css = None
+        if self.uses_webengine:
+            self.view = QWebEngineView(self)
+            try:
+                self.view.settings().setAttribute(QWebEngineSettings.JavascriptEnabled, False)
+            except Exception:
+                pass
+            self.note = None
+        else:
+            self.view = QTextBrowser(self)
+            self.view.setOpenLinks(False)
+            self.note = QLabel(FALLBACK_NOTE)
+            self.note.setStyleSheet("color: #f6ad55; font-size: 9pt;")
+            layout.addWidget(self.note)
+        layout.addWidget(self.view, 1)
+
+    def set_css(self, css):
+        if css == self._css:
+            return
+        self._css = css
+        document = presets.preview_document(css or '')
+        if self.uses_webengine:
+            self.view.setHtml(document)
+        else:
+            self.view.setHtml(document)
+
+
+# =============================================================================================
+# Styles dialog
+# =============================================================================================
+
+class InteractiveStylesDialog(QDialog):
+    """The CSS presets: pick one, duplicate a built-in, write one from a prompt, edit, save, delete, apply to a book."""
+
+    preset_changed = Signal(str)
+
+    def __init__(self, owner, parent=None, *, output_dir=None, force_fallback=False):
+        super().__init__(parent)
+        self.owner = owner
+        self.output_dir = output_dir
+        self.setWindowTitle("Interactive Styles")
+        self.setStyleSheet(DIALOG_STYLE)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(screen.width() * 0.62), int(screen.height() * 0.72))
+        layout = QVBoxLayout(self)
+
+        intro = QLabel("CSS-only styles for the translated chapters (EPUB readers strip scripts). Every rule is scoped "
+                       "under a .glx- class, so a style only touches what Interactive Images marked. The book's "
+                       "stylesheet is glossarion_interactive.css, linked after your Attach CSS file.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #a0aec0;")
+        layout.addWidget(intro)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Style:"))
+        self.combo = _house_combo(QComboBox())
+        self.combo.setMinimumWidth(260)
+        row.addWidget(self.combo)
+        self.duplicate_btn = _button("⧉ Duplicate", 'default', "Make an editable copy of this style")
+        self.prompt_btn = _button("✨ New from prompt…", 'accent', "Describe a style; the text model writes the CSS")
+        self.edit_btn = _button("✏ Edit CSS", 'default', "Show or hide the CSS editor")
+        self.save_btn = _button("💾 Save", 'primary', "Save this style's CSS")
+        self.delete_btn = _button("🗑 Delete", 'danger', "Delete this user style")
+        self.apply_btn = _button("📌 Apply to book…", 'success', "Write this style as a book's glossarion_interactive.css")
+        for button in (self.duplicate_btn, self.prompt_btn, self.edit_btn, self.save_btn, self.delete_btn,
+                       self.apply_btn):
+            row.addWidget(button)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self.warnings = QLabel("")
+        self.warnings.setWordWrap(True)
+        self.warnings.setStyleSheet("color: #f6ad55; font-size: 9pt;")
+        self.warnings.hide()
+        layout.addWidget(self.warnings)
+
+        splitter = QSplitter(Qt.Horizontal)
+        self.editor = QPlainTextEdit()
+        self.editor.setFont(QFont('Consolas', 9))
+        self.editor.hide()
+        splitter.addWidget(self.editor)
+        self.preview = StylePreview(force_fallback=force_fallback)
+        splitter.addWidget(self.preview)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(300)
+        self._debounce.timeout.connect(lambda: self.preview.set_css(self.editor.toPlainText()))
+        self.editor.textChanged.connect(self._debounce.start)
+
+        self.combo.currentTextChanged.connect(self._on_select)
+        self.duplicate_btn.clicked.connect(self._duplicate)
+        self.prompt_btn.clicked.connect(self._new_from_prompt)
+        self.edit_btn.clicked.connect(lambda: self.editor.setVisible(not self.editor.isVisible()))
+        self.save_btn.clicked.connect(self._save)
+        self.delete_btn.clicked.connect(self._delete)
+        self.apply_btn.clicked.connect(self._apply_to_book)
+        self._fill(presets.active_preset_name(_config(owner)))
+
+    # ---- helpers --------------------------------------------------------------------------------
+    def _fill(self, selected):
+        blocked = self.combo.blockSignals(True)
+        try:
+            self.combo.clear()
+            self.combo.addItems(presets.preset_names(_config(self.owner)))
+            index = self.combo.findText(selected)
+            self.combo.setCurrentIndex(max(0, index))
+        finally:
+            self.combo.blockSignals(blocked)
+        self._on_select(self.combo.currentText())
+
+    def current_name(self):
+        return self.combo.currentText()
+
+    def _on_select(self, name):
+        config = _config(self.owner)
+        css = presets.preset_css(config, name) or ''
+        builtin = presets.is_builtin_preset(name)
+        blocked = self.editor.blockSignals(True)
+        self.editor.setPlainText(css)
+        self.editor.blockSignals(blocked)
+        self.editor.setReadOnly(builtin)
+        self.save_btn.setEnabled(not builtin)
+        self.delete_btn.setEnabled(not builtin)
+        self.preview.set_css(css)
+        self._show_warnings([])
+        if name and config.get(presets.PRESET_KEY) != name:
+            config[presets.PRESET_KEY] = name
+            _persist(self.owner)
+        self.preset_changed.emit(name)
+
+    def _show_warnings(self, warnings):
+        if warnings:
+            self.warnings.setText("Adjusted: " + "; ".join(warnings[:6]) + (" …" if len(warnings) > 6 else ""))
+            self.warnings.show()
+        else:
+            self.warnings.hide()
+
+    def _store(self, name, css):
+        config = _config(self.owner)
+        name, warnings = presets.save_user_preset(config, name, css)
+        config[presets.PRESET_KEY] = name
+        _persist(self.owner)
+        self._fill(name)
+        self._show_warnings(warnings)
+        return name
+
+    # ---- actions --------------------------------------------------------------------------------
+    def _duplicate(self):
+        config = _config(self.owner)
+        base = self.current_name()
+        name = presets.unique_preset_name(config, f"{base} copy")
+        self._store(name, self.editor.toPlainText() or presets.preset_css(config, base) or '')
+        self.editor.show()
+
+    def _save(self):
+        name = self.current_name()
+        if presets.is_builtin_preset(name):
+            return
+        self._store(name, self.editor.toPlainText())
+        try:
+            from qt_widget_helpers import flash_saved
+            flash_saved(self.save_btn)
+        except Exception:
+            pass
+
+    def _delete(self):
+        name = self.current_name()
+        if presets.is_builtin_preset(name):
+            return
+        try:
+            from review_dialog import confirm_prompt_profile_action
+            if not confirm_prompt_profile_action(self, "Delete Style", f"Delete the style '{name}'?"):
+                return
+        except Exception:
+            pass
+        presets.delete_user_preset(_config(self.owner), name)
+        _persist(self.owner)
+        self._fill(presets.active_preset_name(_config(self.owner)))
+
+    def _new_from_prompt(self):
+        request, ok = QInputDialog.getMultiLineText(
+            self, "New Style from Prompt", "Describe the style you want (it becomes {user_request} in the CSS prompt):")
+        if not ok or not str(request).strip():
+            return
+        from interactive_images_runner import generate_stylesheet
+        try:
+            from qt_widget_helpers import run_with_progress
+            css, warnings = run_with_progress(self, "Writing the style", lambda: generate_stylesheet(
+                _config(self.owner), request), text="Asking the text model for a stylesheet…")
+        except Exception as exc:
+            QMessageBox.warning(self, "New Style", f"The text model did not return a stylesheet:\n{exc}")
+            return
+        if not str(css or '').strip():
+            QMessageBox.warning(self, "New Style", "The text model returned no CSS.")
+            return
+        words = ' '.join(str(request).split()[:4]) or 'My style'
+        name = presets.unique_preset_name(_config(self.owner), words.title())
+        self._store(name, css)
+        self._show_warnings(warnings)
+        self.editor.show()
+
+    def _apply_to_book(self):
+        folder = self.output_dir
+        if not folder:
+            folder = QFileDialog.getExistingDirectory(self, "Select the book's output folder")
+        if not folder:
+            return
+        css = self.editor.toPlainText() if not presets.is_builtin_preset(self.current_name()) else \
+            presets.preset_css(_config(self.owner), self.current_name())
+        path, warnings = presets.write_book_stylesheet(folder, css or '')
+        self._show_warnings(warnings)
+        _log(self.owner, f"🎨 Interactive styles '{self.current_name()}' written to {path}")
+        QMessageBox.information(self, "Interactive Styles",
+                                f"Wrote {os.path.basename(path)} for this book.\nIt is linked when the EPUB is compiled.")
+
+
+# =============================================================================================
+# Settings dialog
+# =============================================================================================
+
+class InteractiveImagesDialog(QDialog):
+    """Interactive Images settings: profile, images per chapter, prompts, models, references."""
+
+    def __init__(self, owner, parent=None, *, output_dir=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.setWindowTitle("Interactive Images")
+        self.setStyleSheet(DIALOG_STYLE)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(screen.width() * 0.6), int(screen.height() * 0.78))
+        config = _config(owner)
+        settings = core.settings_from_config(config)
+        layout = QVBoxLayout(self)
+
+        intro = QLabel("A step after translation: a text model picks where illustrations go in each translated chapter "
+                       "(and which style classes paragraphs get), an image model draws them, and Glossarion inserts "
+                       "them. A chapter whose text would change is rejected; translation output is never touched "
+                       "otherwise.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #a0aec0;")
+        layout.addWidget(intro)
+
+        # ---- profile row --------------------------------------------------------------------
+        from review_dialog import build_prompt_profile_row, refresh_prompt_profile_row, confirm_prompt_profile_action
+        self._refresh_row = refresh_prompt_profile_row
+        self._confirm = confirm_prompt_profile_action
+        self.profiles = core.InteractiveImagesProfiles(owner, persist=lambda: _persist(owner),
+                                                       log=lambda message: _log(owner, message))
+        row, self.profile_combo, self.profile_buttons = build_prompt_profile_row(
+            "Profile:", "interactive_images",
+            "Select an Interactive Images profile, or edit its name and save to rename it.\n"
+            "Each profile stores the planner, image and CSS prompts and the images per chapter.",
+            {'new': self._new_profile, 'save': self._save_profile, 'delete': self._delete_profile},
+            self._select_profile)
+        layout.addWidget(row)
+
+        per_row = QHBoxLayout()
+        per_row.addWidget(QLabel("Images per chapter:"))
+        self.per_chapter = _house_combo(QComboBox())
+        self.per_chapter.addItems([str(n) for n in range(0, core.MAX_IMAGES_PER_CHAPTER + 1)])
+        self.per_chapter.setFixedWidth(80)
+        self.per_chapter.setToolTip("0 = styles only (classes, no images)")
+        per_row.addWidget(self.per_chapter)
+        hint = QLabel("0 = styles only: classes from the book's interactive stylesheet, no image model needed")
+        hint.setStyleSheet("color: gray; font-size: 9pt;")
+        per_row.addWidget(hint)
+        per_row.addStretch(1)
+        layout.addLayout(per_row)
+
+        tabs = QTabWidget()
+        self.editors = {}
+        for field_name, label, names in (
+                ('planner', "Planner", core.PLANNER_PLACEHOLDERS),
+                ('image', "Image", core.IMAGE_PLACEHOLDERS),
+                ('image_system', "Image system", ()),
+                ('css', "CSS", core.CSS_PLACEHOLDERS)):
+            editor = QPlainTextEdit()
+            editor.setFont(QFont('Consolas', 9))
+            if names:
+                _placeholder_menu(editor, names)
+            tabs.addTab(editor, label)
+            self.editors[field_name] = editor
+        self.editors['image_system'].setPlaceholderText("Optional system prompt for the image request")
+        layout.addWidget(tabs, 2)
+
+        # ---- models -------------------------------------------------------------------------
+        models = QGroupBox("Models")
+        grid = QVBoxLayout(models)
+        text_row = QHBoxLayout()
+        text_row.addWidget(QLabel("Text model:"))
+        self.text_model = _model_combo(settings.text_model, "Main translation model")
+        text_row.addWidget(self.text_model, 1)
+        grid.addLayout(text_row)
+        image_row = QHBoxLayout()
+        image_row.addWidget(QLabel("Image model:"))
+        self.image_model = _model_combo(settings.image_model, "Image Gen / Edit key pool model")
+        image_row.addWidget(self.image_model, 1)
+        try:
+            from multi_api_key_manager import create_preview_pool_button
+            self.keys_btn = create_preview_pool_button(
+                self, owner, 'inpainter', "🔑 Image Keys",
+                "Open the Multi API Key Manager focused on the Image Gen/Edit key pool.")
+            image_row.addWidget(self.keys_btn)
+        except Exception:
+            self.keys_btn = None
+        grid.addLayout(image_row)
+        self.ref_warning = QLabel("")
+        self.ref_warning.setStyleSheet("color: #f6ad55; font-size: 9pt;")
+        self.ref_warning.setWordWrap(True)
+        grid.addWidget(self.ref_warning)
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("Resolution:"))
+        self.resolution = _house_combo(QComboBox())
+        self.resolution.addItems(list(core.RESOLUTIONS))
+        self.resolution.setCurrentText(settings.resolution)
+        self.resolution.setFixedWidth(84)
+        out_row.addWidget(self.resolution)
+        out_row.addWidget(QLabel("Aspect ratio:"))
+        self.aspect = _house_combo(QComboBox())
+        self.aspect.addItems(list(core.ASPECT_RATIOS))
+        self.aspect.setCurrentText(settings.aspect_ratio)
+        self.aspect.setFixedWidth(96)
+        out_row.addWidget(self.aspect)
+        out_row.addWidget(QLabel("Max reference images sent:"))
+        self.max_refs = QSpinBox()   # native: no stylesheet rule reaches it
+        self.max_refs.setRange(0, core.MAX_REFERENCES)
+        self.max_refs.setValue(settings.max_references)
+        self.max_refs.setFixedWidth(96)
+        self.max_refs.wheelEvent = lambda event: event.ignore()
+        out_row.addWidget(self.max_refs)
+        out_row.addStretch(1)
+        grid.addLayout(out_row)
+        run_row = QHBoxLayout()
+        self.auto_cb = _styled_checkbox(owner, "Run after each translation")
+        self.auto_cb.setChecked(settings.auto_after_translation)
+        self.recompile_cb = _styled_checkbox(owner, "Recompile the EPUB/PDF afterwards (if it was compiled)")
+        self.recompile_cb.setChecked(settings.recompile_after)
+        run_row.addWidget(self.auto_cb)
+        run_row.addWidget(self.recompile_cb)
+        run_row.addStretch(1)
+        grid.addLayout(run_row)
+        layout.addWidget(models)
+        self.image_model.currentTextChanged.connect(self._update_reference_warning)
+
+        # ---- references ---------------------------------------------------------------------
+        self.references = ReferencesEditor(owner, output_dir=output_dir, parent=self)
+        layout.addWidget(self.references, 2)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.save_btn = _button("💾 Save", 'primary', "Save the settings, this profile and the book's references")
+        self.save_btn.clicked.connect(self._save_all)
+        close_btn = _button("Close")
+        close_btn.clicked.connect(self.close)
+        buttons.addWidget(self.save_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        self._show_selected()
+        self._update_reference_warning()
+
+    # ---- profiles -----------------------------------------------------------------------------
+    def editor_texts(self):
+        texts = {name: editor.toPlainText() for name, editor in self.editors.items()}
+        texts['per_chapter'] = self.per_chapter.currentText()
+        return texts
+
+    def _show_selected(self):
+        texts = self.profiles.texts
+        for name, editor in self.editors.items():
+            editor.setPlainText(texts.get(name, ''))
+        self.per_chapter.setCurrentText(str(core.parse_per_chapter(texts.get('per_chapter', '1'))))
+        self._refresh_row(self.profile_combo, self.profile_buttons, self.profiles,
+                          "Restore the built-in '{name}' Interactive Images prompts",
+                          "Delete the selected Interactive Images profile")
+
+    def _box(self, box):
+        if box:
+            QMessageBox.warning(self, box[0], box[1])
+        return box
+
+    def _select_profile(self, name):
+        name = str(name or '').strip()
+        if not name or name == self.profiles.selected_name() or self.profiles.profile_texts(name) is None:
+            return
+        self.profiles.stage(self.profiles.selected_name(), self.editor_texts())
+        if self.profiles.select(name) is None:
+            return
+        self._show_selected()
+        _persist(self.owner)
+
+    def _new_profile(self):
+        self.profiles.stage(self.profiles.selected_name(), self.editor_texts())
+        box = self.profiles.new()
+        self._show_selected()
+        self._box(box)
+
+    def _save_profile(self):
+        box = self.profiles.save(self.profile_combo.currentText(), self.editor_texts())
+        if self._box(box):
+            return False
+        self._show_selected()
+        return True
+
+    def _delete_profile(self):
+        name = self.profiles.selected_name()
+        if self.profiles.is_builtin(name):
+            if not self._confirm(self, "Reset Profile",
+                                 f"Reset the built-in '{name}' Interactive Images profile to its shipped prompts?"):
+                return
+            box = self.profiles.reset(name)
+        else:
+            box = self.profiles.delete(name, confirm=lambda n: self._confirm(
+                self, "Delete Profile", f"Delete Interactive Images profile '{n}'?"))
+        self._show_selected()
+        self._box(box)
+
+    # ---- the rest -----------------------------------------------------------------------------
+    def _update_reference_warning(self, *_args):
+        model = self.image_model.currentText().strip()
+        limit = core.reference_limit(model) if model else None
+        if model and limit == 0:
+            self.ref_warning.setText("⚠ " + core.NO_REFERENCE_WARNING)
+        elif model and limit is not None:
+            self.ref_warning.setText(f"ℹ This image model takes up to {limit} reference image"
+                                     f"{'s' if limit != 1 else ''}; more are not sent")
+        else:
+            self.ref_warning.setText("")
+        self.ref_warning.setVisible(bool(self.ref_warning.text()))
+
+    def apply_settings(self):
+        config = _config(self.owner)
+        config['interactive_images_text_model'] = self.text_model.currentText().strip()
+        config['interactive_images_image_model'] = self.image_model.currentText().strip()
+        config['interactive_images_max_references'] = int(self.max_refs.value())
+        config['interactive_images_resolution'] = self.resolution.currentText()
+        config['interactive_images_aspect_ratio'] = self.aspect.currentText()
+        config['interactive_images_auto_after_translation'] = bool(self.auto_cb.isChecked())
+        config['interactive_images_recompile_after'] = bool(self.recompile_cb.isChecked())
+
+    def _save_all(self):
+        self.apply_settings()
+        if not self._save_profile():
+            return
+        self.references.save()
+        if not _persist(self.owner):
+            QMessageBox.warning(self, "Save Failed", "Could not save the settings. Please try again.")
+            return
+        try:
+            from qt_widget_helpers import flash_saved
+            flash_saved(self.save_btn)
+        except Exception:
+            pass
+        _log(self.owner, "✅ Saved the Interactive Images settings")
+
+
+class ReferencesEditor(QGroupBox):
+    """Reference images per book: character name -> images, plus art-style images (``references.json``)."""
+
+    def __init__(self, owner, *, output_dir=None, parent=None):
+        super().__init__("Reference images", parent)
+        self.owner = owner
+        self.refs = core.empty_references()
+        self.output_dir = None
+        layout = QVBoxLayout(self)
+        book_row = QHBoxLayout()
+        book_row.addWidget(QLabel("Book:"))
+        self.book_combo = _house_combo(QComboBox())
+        self.book_combo.setMinimumWidth(280)
+        book_row.addWidget(self.book_combo, 1)
+        browse = _button("📁 Output folder…", 'default', "Pick a book's output folder")
+        browse.clicked.connect(self._browse)
+        book_row.addWidget(browse)
+        layout.addLayout(book_row)
+        note = QLabel("Images are copied into Interactive_Images/references/ of the book. The scene's characters "
+                      "fill the reference slots first, then the art-style images.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray; font-size: 9pt;")
+        layout.addWidget(note)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Character", "Images", "", ""])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.table, 2)
+        char_row = QHBoxLayout()
+        self.name_edit = _line(placeholder="Character name")
+        add_char = _button("+ Character", 'success')
+        add_char.clicked.connect(self._add_character)
+        load_names = _button("Load names from glossary", 'info')
+        load_names.clicked.connect(self._load_names)
+        char_row.addWidget(self.name_edit, 1)
+        char_row.addWidget(add_char)
+        char_row.addWidget(load_names)
+        layout.addLayout(char_row)
+
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("Art style:"))
+        self.style_list = QListWidget()
+        self.style_list.setMaximumHeight(64)
+        self.style_list.setFlow(QListWidget.LeftToRight)
+        style_row.addWidget(self.style_list, 1)
+        add_style = _button("Add…")
+        add_style.clicked.connect(self._add_style)
+        remove_style = _button("Remove")
+        remove_style.clicked.connect(self._remove_style)
+        style_row.addWidget(add_style)
+        style_row.addWidget(remove_style)
+        layout.addLayout(style_row)
+
+        extra = [(os.path.basename(output_dir), output_dir)] if output_dir else []
+        for label, folder in _book_output_dirs(owner, extra):
+            self.book_combo.addItem(label, folder)
+            self.book_combo.setItemData(self.book_combo.count() - 1, folder, Qt.ToolTipRole)
+        self.book_combo.currentIndexChanged.connect(lambda _i: self._load(self.book_combo.currentData()))
+        self._load(self.book_combo.currentData())
+
+    def _browse(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select the book's output folder")
+        if not folder:
+            return
+        self.book_combo.addItem(os.path.basename(folder), folder)
+        self.book_combo.setCurrentIndex(self.book_combo.count() - 1)
+
+    def _load(self, folder):
+        self.output_dir = folder or None
+        self.refs = core.load_references(folder) if folder else core.empty_references()
+        self._render()
+
+    def _render(self):
+        enabled = bool(self.output_dir)
+        self.table.setEnabled(enabled)
+        self.table.setRowCount(0)
+        for name, paths in sorted(self.refs.get('characters', {}).items(), key=lambda kv: kv[0].casefold()):
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(name))
+            names = ', '.join(os.path.basename(p) for p in paths) or '(none)'
+            item = QTableWidgetItem(f"{len(paths)}: {names}")
+            item.setToolTip('\n'.join(paths))
+            self.table.setItem(row, 1, item)
+            add = _button("Add…")
+            add.clicked.connect(lambda _c=False, n=name: self._add_images(n))
+            clear = _button("Clear")
+            clear.clicked.connect(lambda _c=False, n=name: self._clear(n))
+            self.table.setCellWidget(row, 2, add)
+            self.table.setCellWidget(row, 3, clear)
+        self.style_list.clear()
+        for path in self.refs.get('style', []):
+            self.style_list.addItem(os.path.basename(path))
+
+    def _need_book(self):
+        if self.output_dir:
+            return True
+        QMessageBox.information(self, "Reference images", "Pick a book (its output folder) first.")
+        return False
+
+    def _pick_images(self):
+        files, _f = QFileDialog.getOpenFileNames(self, "Select reference images", "",
+                                                 "Images (*.png *.jpg *.jpeg *.webp)")
+        return files
+
+    def _add_character(self):
+        name = ' '.join(self.name_edit.text().split())
+        if not name or not self._need_book():
+            return
+        self.refs.setdefault('characters', {}).setdefault(name, [])
+        self.name_edit.clear()
+        self._render()
+
+    def _load_names(self):
+        if not self._need_book():
+            return
+        entries = core.load_glossary_entries(self.output_dir)
+        names = core.character_names(entries)
+        if not names:
+            QMessageBox.information(self, "Reference images", "No character names found in this book's glossary.")
+            return
+        chars = self.refs.setdefault('characters', {})
+        for name in names:
+            chars.setdefault(name, [])
+        self._render()
+
+    def _add_images(self, name):
+        if not self._need_book():
+            return
+        for path in self._pick_images():
+            try:
+                core.add_reference_image(self.output_dir, self.refs, path, name)
+            except OSError as exc:
+                QMessageBox.warning(self, "Reference images", f"Could not copy {path}:\n{exc}")
+        self._render()
+
+    def _clear(self, name):
+        for rel in list(self.refs.get('characters', {}).get(name, [])):
+            core.remove_reference_image(self.output_dir, self.refs, rel)
+        self.refs.get('characters', {}).pop(name, None)
+        self._render()
+
+    def _add_style(self):
+        if not self._need_book():
+            return
+        for path in self._pick_images():
+            try:
+                core.add_reference_image(self.output_dir, self.refs, path, None)
+            except OSError as exc:
+                QMessageBox.warning(self, "Reference images", f"Could not copy {path}:\n{exc}")
+        self._render()
+
+    def _remove_style(self):
+        row = self.style_list.currentRow()
+        styles = self.refs.get('style', [])
+        if 0 <= row < len(styles):
+            core.remove_reference_image(self.output_dir, self.refs, styles[row])
+            self._render()
+
+    def save(self):
+        if self.output_dir:
+            core.save_references(self.output_dir, self.refs)
+
+
+def open_settings_dialog(owner, anchor=None, output_dir=None):
+    """The settings window (toggles: a second click on its button closes it). Parentless, tied above
+    ``anchor``'s window: Other Settings' sheet styles QSpinBox, which would break the native spin box."""
+    def make():
+        dialog = InteractiveImagesDialog(owner, None, output_dir=output_dir)
+        _stay_above(dialog, anchor)
+        return dialog
+    return toggle_window(owner, '_interactive_images_dialog', make)
+
+
+def open_styles_dialog(owner, anchor=None, output_dir=None, on_preset=None):
+    def make():
+        dialog = InteractiveStylesDialog(owner, None, output_dir=output_dir)
+        _stay_above(dialog, anchor)
+        if on_preset is not None:
+            dialog.preset_changed.connect(on_preset)
+        return dialog
+    return toggle_window(owner, '_interactive_styles_dialog', make)
+
+
+# =============================================================================================
+# Other Settings rows (EPUB section, under Attach CSS)
+# =============================================================================================
+
+def add_interactive_styles_rows(owner, section_layout, parent=None):
+    """The "Interactive styles" row (checkbox, style dropdown, Styles & Preview, Clear) and the
+    "Interactive Images…" row, under the Attach CSS row. The two stylesheets stay separate files:
+    Clear here only turns interactive styles off; it never touches the Attach CSS override."""
+    config = _config(owner)
+    row = QWidget()
+    h = QHBoxLayout(row)
+    h.setContentsMargins(0, 0, 0, 5)
+    h.setSpacing(8)
+    enabled_cb = _styled_checkbox(owner, "Interactive styles")
+    enabled_cb.setChecked(bool(config.get(presets.ENABLED_KEY, False)))
+    enabled_cb.setToolTip("Link the book's glossarion_interactive.css (after your Attach CSS file) and mark the "
+                          "chapter bodies with glx-book when Interactive Images runs.\nCSS only: every rule is "
+                          "scoped under a .glx- class.")
+    h.addWidget(enabled_cb)
+    combo = _house_combo(QComboBox())
+    combo.addItems(presets.preset_names(config))
+    combo.setCurrentText(presets.active_preset_name(config))
+    combo.setMinimumWidth(200)
+    combo.setToolTip("The style the next Interactive Images run writes as the book's stylesheet")
+    h.addWidget(combo)
+    styles_btn = _button("🎨 Styles & Preview…", 'info', "Preview, duplicate, edit or write styles")
+    h.addWidget(styles_btn)
+    clear_btn = QPushButton("Clear")
+    clear_btn.setToolTip("Turn interactive styles off (the Attach CSS file is not touched)")
+    clear_btn.setMinimumWidth(60)
+    clear_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; "
+                            "border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #5a6268; }")
+    h.addWidget(clear_btn)
+    h.addStretch(1)
+    section_layout.addWidget(row)
+
+    row2 = QWidget()
+    h2 = QHBoxLayout(row2)
+    h2.setContentsMargins(0, 0, 0, 5)
+    h2.setSpacing(8)
+    images_btn = _button("🖼 Interactive Images…", 'accent',
+                         "Illustrations and style classes for translated chapters (a separate step after translation)")
+    h2.addWidget(images_btn)
+    images_note = QLabel("Illustrations after translation, from the Progress Manager's Interactive Images tab")
+    images_note.setStyleSheet("color: gray; font-size: 9pt;")
+    h2.addWidget(images_note)
+    h2.addStretch(1)
+    section_layout.addWidget(row2)
+
+    def on_toggle(checked):
+        _config(owner)[presets.ENABLED_KEY] = bool(checked)
+
+    def on_preset(name):
+        if name:
+            _config(owner)[presets.PRESET_KEY] = name
+
+    def sync_combo(name):
+        try:
+            blocked = combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(presets.preset_names(_config(owner)))
+            combo.setCurrentText(name)
+            combo.blockSignals(blocked)
+        except RuntimeError:
+            pass
+
+    enabled_cb.toggled.connect(on_toggle)
+    combo.currentTextChanged.connect(on_preset)
+    clear_btn.clicked.connect(lambda: enabled_cb.setChecked(False))
+    styles_btn.clicked.connect(lambda: open_styles_dialog(owner, parent or row, on_preset=sync_combo))
+    images_btn.clicked.connect(lambda: open_settings_dialog(owner, parent or row))
+    owner.interactive_css_enabled_checkbox = enabled_cb
+    owner.interactive_css_preset_combo = combo
+    return row, row2
+
+
+# =============================================================================================
+# Runs (one at a time; a worker thread with a stop event)
+# =============================================================================================
+
+class _RunBridge(QObject):
+    progress = Signal(str, str, str)   # output_dir, key, status
+    finished = Signal(str, object)     # output_dir, RunResult or exception
+
+
+def run_bridge(owner):
+    bridge = getattr(owner, '_interactive_images_bridge', None)
+    if bridge is None:
+        bridge = _RunBridge()
+        owner._interactive_images_bridge = bridge
+    return bridge
+
+
+def current_run(owner):
+    run = getattr(owner, '_interactive_images_run', None)
+    if run and run['thread'].is_alive():
+        return run
+    return None
+
+
+def _recompile_for(owner):
+    def recompile(folder):
+        names = os.listdir(folder)
+        if any(n.lower().endswith('.epub') for n in names) and hasattr(owner, '_run_epub_compile'):
+            owner._run_epub_compile(folder)
+        elif any(n.lower().endswith('.pdf') for n in names) and hasattr(owner, '_run_pdf_compile'):
+            owner._run_pdf_compile(folder)
+    return recompile
+
+
+def start_run(owner, output_dir, keys=None):
+    """Start the Interactive Images step for one book on a worker thread. Returns False when one is running."""
+    if current_run(owner):
+        _log(owner, "⚠️ Interactive Images is already running")
+        return False
+    from interactive_images_runner import run_interactive_images
+
+    bridge = run_bridge(owner)
+    stop = threading.Event()
+
+    def work():
+        try:
+            result = run_interactive_images(
+                _config(owner), output_dir, keys, log=lambda message: _log(owner, message), stop_event=stop,
+                on_progress=lambda key, status: bridge.progress.emit(output_dir, key, status),
+                recompile=_recompile_for(owner))
+        except Exception as exc:
+            _log(owner, f"❌ Interactive Images failed: {exc}\n{traceback.format_exc()}")
+            result = exc
+        bridge.finished.emit(output_dir, result)
+
+    thread = threading.Thread(target=work, name='interactive-images', daemon=True)
+    owner._interactive_images_run = {'thread': thread, 'stop': stop, 'output_dir': output_dir}
+    thread.start()
+    return True
+
+
+def stop_run(owner):
+    run = current_run(owner)
+    if run:
+        run['stop'].set()
+        _log(owner, "⏹ Interactive Images: stopping after the current request")
+        return True
+    return False
+
+
+# =============================================================================================
+# Progress Manager tab
+# =============================================================================================
+
+def _pm_key(path):
+    return os.path.normcase(os.path.abspath(str(path or '')))
+
+
+class ImagesFilePanel(QWidget):
+    """One book's Interactive Images progress (the PM tab page of the file in the shared dropdown)."""
+
+    def __init__(self, owner, window, output_dir, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.window_ref = window
+        self.output_dir = output_dir
+        self.model = ipc.open_progress(output_dir)
+        self._rows = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.stats_labels = {}
+        stats = QHBoxLayout()
+        stats.setContentsMargins(0, 3, 0, 3)
+        self.total_label = QLabel("Total: 0 | ")
+        self.total_label.setStyleSheet("font-size: 9pt;")
+        stats.addWidget(self.total_label)
+        for group, text, color in (('built', "✅ Built", '#27ae60'), ('partial', "⚠️ Partial", 'orange'),
+                                   ('stale', "🕒 Stale", '#d69e2e'), ('failed', "❌ Failed", '#e74c3c'),
+                                   ('rejected', "🚫 Rejected", '#e74c3c'), ('not_built', "⬜ Not built", '#5a9fd4')):
+            label = QLabel(f"{text}: 0")
+            label.setStyleSheet(f"color: {color}; font-size: 9pt;")
+            label.setCursor(Qt.PointingHandCursor)
+            label.setToolTip("Click to select the next row with this status")
+            label.mousePressEvent = self._make_cycle(ipc.STATUS_GROUPS[group])
+            stats.addWidget(label)
+            if group != 'not_built':
+                stats.addWidget(QLabel("|"))
+            self.stats_labels[group] = (label, text)
+        stats.addStretch(1)
+        layout.addLayout(stats)
+
+        self.list = QListWidget()
+        try:
+            owner._apply_compact_inline_list_style(self.list, QFont('Courier', 10))
+        except Exception:
+            self.list.setFont(QFont('Courier', 10))
+        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
+        self.list.itemDoubleClicked.connect(lambda item: self._show_plan([self._row_for(item)]))
+        layout.addWidget(self.list, 1)
+
+        path_row = QHBoxLayout()
+        self.path_label = QLabel(f"📁 {core.interactive_dir(output_dir)}")
+        self.path_label.setStyleSheet("color: #666; font-size: 8pt;")
+        self.path_label.setWordWrap(True)
+        path_row.addWidget(self.path_label, 1)
+        open_folder = _button("📂 Open Folder", 'default')
+        open_folder.clicked.connect(lambda: self._open_path(core.interactive_dir(self.output_dir), make=True))
+        path_row.addWidget(open_folder)
+        layout.addLayout(path_row)
+
+        actions = QHBoxLayout()
+        self.build_btn = _button("▶ Build pending", 'success', "Plan, draw and insert images for chapters that need it")
+        self.stop_btn = _button("⏹ Stop", 'danger', "Stop after the current request")
+        settings_btn = _button("⚙ Settings", 'default', "Interactive Images settings and this book's references")
+        styles_btn = _button("🎨 Styles", 'info', "Interactive styles and the preview")
+        try:
+            from Retranslation_GUI import AnimatedRefreshButton
+            self.refresh_btn = AnimatedRefreshButton("  Refresh")
+        except Exception:
+            self.refresh_btn = QPushButton("  Refresh")
+        self.build_btn.clicked.connect(lambda: self._build(None))
+        self.stop_btn.clicked.connect(lambda: stop_run(self.owner))
+        settings_btn.clicked.connect(lambda: open_settings_dialog(self.owner, self, self.output_dir))
+        styles_btn.clicked.connect(lambda: open_styles_dialog(self.owner, self, self.output_dir))
+        self.refresh_btn.clicked.connect(self.full_refresh)
+        for button in (self.build_btn, self.stop_btn, settings_btn, styles_btn, self.refresh_btn):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        try:
+            from progress_core import _PROGRESS_WATCH_DEBOUNCE_MS
+        except Exception:
+            _PROGRESS_WATCH_DEBOUNCE_MS = 500
+        self._debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)
+        self._debounce.timeout.connect(self.refresh)
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.fileChanged.connect(self._on_watch)
+        self.watcher.directoryChanged.connect(self._on_watch)
+        self._watch()
+        self._signature = None
+        bridge = run_bridge(owner)
+        bridge.progress.connect(self._on_run_progress)
+        bridge.finished.connect(self._on_run_finished)
+        self.refresh(force=True)
+        self._update_buttons()
+
+    # ---- refresh --------------------------------------------------------------------------------
+    def _watch(self):
+        paths = [core.progress_path(self.output_dir), os.path.join(self.output_dir, 'translation_progress.json'),
+                 core.interactive_dir(self.output_dir)]
+        present = [p for p in paths if os.path.exists(p)]
+        missing = [p for p in present if p not in self.watcher.files() + self.watcher.directories()]
+        if missing:
+            self.watcher.addPaths(missing)
+
+    def _on_watch(self, *_args):
+        if self.isVisible():
+            self._debounce.start()
+
+    def _row_for(self, item):
+        index = self.list.row(item)
+        return self._rows[index] if 0 <= index < len(self._rows) else None
+
+    def refresh(self, force=False):
+        signature = ipc.book_signature(self.output_dir)
+        if not force and signature == self._signature:
+            return
+        self._signature = signature
+        self._watch()
+        ipc.reload_progress(self.model)
+        rows = ipc.image_rows(self.model)
+        selected = {self._rows[self.list.row(i)].key for i in self.list.selectedItems()
+                    if 0 <= self.list.row(i) < len(self._rows)}
+        if [r.key for r in rows] != [r.key for r in self._rows]:
+            self.list.clear()
+            for row in rows:
+                item = QListWidgetItem(row.display)
+                try:
+                    self.owner._set_compact_inline_item_size(self.list, item)
+                except Exception:
+                    pass
+                self.list.addItem(item)
+        for index, row in enumerate(rows):
+            item = self.list.item(index)
+            if item.text() != row.display:
+                item.setText(row.display)
+            item.setForeground(QColor(row.color))
+            item.setData(Qt.UserRole, row.status)
+            item.setToolTip(row.error or ipc.STATUS_LABELS.get(row.status, row.status))
+            item.setSelected(row.key in selected)
+        self._rows = rows
+        stats = ipc.image_stats(self.model, rows)
+        self.total_label.setText(f"Total: {stats['total']} | Images: {stats['images']} | ")
+        for group, (label, text) in self.stats_labels.items():
+            label.setText(f"{text}: {stats.get(group, 0)}")
+        self.stats = stats
+        callback = getattr(self, 'on_stats', None)
+        if callable(callback):
+            callback(self, stats)
+
+    def full_refresh(self):
+        try:
+            self.refresh_btn.start_animation()
+        except Exception:
+            pass
+        self.refresh(force=True)
+        QTimer.singleShot(800, lambda: self._finish_refresh_animation())
+
+    def _finish_refresh_animation(self):
+        try:
+            self.refresh_btn.stop_animation()
+        except Exception:
+            pass
+
+    def _make_cycle(self, statuses):
+        statuses = set(statuses)
+
+        def handler(_event=None):
+            indices = [i for i in range(self.list.count()) if self.list.item(i).data(Qt.UserRole) in statuses]
+            if not indices:
+                return
+            current = self.list.currentRow()
+            nxt = next((i for i in indices if i > current), indices[0])
+            self.list.setCurrentRow(nxt, QItemSelectionModel.ClearAndSelect)
+            self.list.scrollToItem(self.list.item(nxt), QListWidget.PositionAtCenter)
+        return handler
+
+    # ---- runs -----------------------------------------------------------------------------------
+    def _update_buttons(self):
+        run = current_run(self.owner)
+        running_here = bool(run and _pm_key(run['output_dir']) == _pm_key(self.output_dir))
+        self.build_btn.setEnabled(run is None)
+        self.stop_btn.setEnabled(running_here)
+
+    def _on_run_progress(self, output_dir, _key, _status):
+        if _pm_key(output_dir) == _pm_key(self.output_dir):
+            self.refresh(force=True)
+
+    def _on_run_finished(self, output_dir, _result):
+        self._update_buttons()
+        if _pm_key(output_dir) == _pm_key(self.output_dir):
+            self.refresh(force=True)
+
+    def _build(self, keys):
+        if start_run(self.owner, self.output_dir, keys):
+            self._update_buttons()
+
+    # ---- context menu ---------------------------------------------------------------------------
+    def selected_rows(self):
+        return [row for row in (self._row_for(item) for item in self.list.selectedItems()) if row is not None]
+
+    def _context_menu(self, pos):
+        rows = self.selected_rows()
+        if not rows:
+            item = self.list.itemAt(pos)
+            if item is None:
+                return
+            item.setSelected(True)
+            rows = self.selected_rows()
+        try:
+            from qt_widget_helpers import CONTEXT_MENU_STYLE
+        except Exception:
+            CONTEXT_MENU_STYLE = ''
+        menu = QMenu(self)
+        menu.setStyleSheet(CONTEXT_MENU_STYLE)
+        running = current_run(self.owner) is not None
+        build = menu.addAction(f"🖼 Build / Rebuild ({len(rows)})")
+        build.setEnabled(not running)
+        failed_rows = [r for r in rows if r.status in ('failed', 'partial', 'rejected')]
+        retry = menu.addAction(f"🔁 Retry failed ({len(failed_rows)})")
+        retry.setEnabled(bool(failed_rows) and not running)
+        mark = menu.addAction("❓ Mark for rebuild")
+        menu.addSeparator()
+        built = [r for r in rows if r.stored_status]
+        delete = menu.addAction(f"🗑 Delete images ({len(built)})")
+        delete.setEnabled(bool(built) and not running)
+        menu.addSeparator()
+        open_images = menu.addAction("🖼 Open image(s)")
+        open_images.setEnabled(any(r.images for r in rows))
+        open_chapter = menu.addAction("📄 Open chapter")
+        show_plan = menu.addAction("📋 Show plan")
+        open_folder = menu.addAction("📂 Open folder")
+        chosen = menu.exec(self.list.mapToGlobal(pos))
+        menu.deleteLater()
+        if chosen is None:
+            return
+        if chosen == build:
+            self._build([r.key for r in rows])
+        elif chosen == retry:
+            self._build([r.key for r in failed_rows])
+        elif chosen == mark:
+            ipc.mark_for_rerun(core.progress_path(self.output_dir), rows)
+            self.refresh(force=True)
+        elif chosen == delete:
+            self._delete(built)
+        elif chosen == open_images:
+            for row in rows:
+                for path in ipc.open_targets(self.output_dir, row)['images']:
+                    self._open_path(path)
+        elif chosen == open_chapter:
+            for row in rows[:5]:
+                self._open_path(ipc.open_targets(self.output_dir, row)['chapter'])
+        elif chosen == show_plan:
+            self._show_plan(rows)
+        elif chosen == open_folder:
+            self._open_path(core.interactive_dir(self.output_dir), make=True)
+
+    def _delete(self, rows):
+        try:
+            from review_dialog import confirm_prompt_profile_action
+            ok = confirm_prompt_profile_action(
+                self, "Delete Images",
+                f"Delete the interactive images of {len(rows)} chapter(s)?\n"
+                "The image files are deleted and the figures and classes Glossarion inserted are removed "
+                "from the chapter files (the text stays as it is).")
+        except Exception:
+            ok = True
+        if not ok:
+            return
+        count = ipc.delete_entries(self.output_dir, rows)
+        _log(self.owner, f"🗑 Interactive Images: deleted the images of {count} chapter(s)")
+        self.refresh(force=True)
+
+    def _show_plan(self, rows):
+        rows = [r for r in rows if r is not None]
+        if not rows:
+            return
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.setWindowTitle("Interactive Images plan")
+        dialog.setStyleSheet(DIALOG_STYLE)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText('\n\n'.join(f"── {row.key} ──\n{ipc.plan_text(row)}" for row in rows))
+        layout.addWidget(text)
+        close = _button("Close")
+        close.clicked.connect(dialog.close)
+        layout.addWidget(close, 0, Qt.AlignRight)
+        dialog.resize(720, 520)
+        dialog.show()
+
+    def _open_path(self, path, make=False):
+        if make:
+            os.makedirs(path, exist_ok=True)
+        if not os.path.exists(path):
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except Exception:
+            pass
+
+
+def build_images_page(owner, window, host):
+    """The Progress Manager's Interactive Images tab (``window._pm_tab_factories['images']``): a per-file stack
+    built lazily for the file selected in the shared dropdown, a 2 s fallback refresh that runs only while the
+    window is visible and this tab is current, and the tab label count."""
+    layout = host.layout()
+    title = QLabel("Interactive Images")
+    title.setStyleSheet("color: #c084fc; font-size: 11pt; font-weight: bold;")
+    layout.addWidget(title)
+    note = QLabel("ℹ️ Illustrations and style classes added after translation, per chapter. A chapter shows as stale "
+                  "after it is retranslated; rebuild it from the context menu.")
+    note.setWordWrap(True)
+    note.setStyleSheet("color: #7a8a9e; font-size: 9pt;")
+    layout.addWidget(note)
+    stack = QStackedWidget(host)
+    layout.addWidget(stack, 1)
+    empty = QLabel("No translated output for this file yet")
+    empty.setAlignment(Qt.AlignCenter)
+    empty.setStyleSheet("color: #7a8a9e; font-size: 10pt; font-weight: bold;")
+    stack.addWidget(empty)
+    panels = {}
+    host._ix_panels = panels
+    host._ix_stack = stack
+
+    def output_dir_for(fp):
+        dirs = getattr(window, '_pm_images_output_dirs', {}) or {}
+        return dirs.get(_pm_key(fp)) if fp is not None else None
+
+    def on_stats(panel, stats):
+        try:
+            if getattr(window, '_pm_current_file', lambda: None)() is not None and \
+                    panels.get(_pm_key(window._pm_current_file())) is panel:
+                window._pm_set_tab_count('images', ipc.tab_count_text(stats))
+        except RuntimeError:
+            pass
+
+    def show_file(fp=None):
+        fp = fp if fp is not None else window._pm_current_file()
+        folder = output_dir_for(fp)
+        if not folder or not os.path.isdir(folder):
+            stack.setCurrentWidget(empty)
+            window._pm_set_tab_count('images')
+            return None
+        key = _pm_key(fp)
+        panel = panels.get(key)
+        if panel is None:
+            panel = ImagesFilePanel(owner, window, folder, stack)
+            panel.on_stats = on_stats
+            panels[key] = panel
+            stack.addWidget(panel)
+        stack.setCurrentWidget(panel)
+        panel.refresh()
+        on_stats(panel, getattr(panel, 'stats', {}))
+        return panel
+
+    timer = QTimer(host)
+    timer.setInterval(2000)
+
+    def tick():
+        try:
+            if window.isVisible() and window._pm_tabs.currentWidget() is host:
+                panel = stack.currentWidget()
+                if isinstance(panel, ImagesFilePanel):
+                    panel.refresh()
+                    panel._update_buttons()
+        except RuntimeError:
+            timer.stop()
+
+    timer.timeout.connect(tick)
+
+    def on_shown():
+        show_file()
+        timer.start()
+
+    def on_hidden():
+        timer.stop()
+
+    window._pm_tab_callbacks['images'] = (on_shown, on_hidden)
+
+    def on_file_changed(fp):
+        try:
+            if window._pm_current_tab_name() == 'images':
+                show_file(fp)
+        except RuntimeError:
+            pass
+
+    window._pm_file_changed_callbacks.append(on_file_changed)
+    host._ix_show_file = show_file
+    host._ix_timer = timer
+    show_file()
+    if window.isVisible() and window._pm_tabs.currentWidget() is host:
+        timer.start()
+    return host
+
+
+__all__ = [
+    'DIALOG_STYLE', 'FALLBACK_NOTE', 'ImagesFilePanel', 'InteractiveImagesDialog', 'InteractiveStylesDialog',
+    'ReferencesEditor', 'StylePreview', 'add_interactive_styles_rows', 'build_images_page', 'current_run',
+    'open_settings_dialog', 'open_styles_dialog', 'run_bridge', 'start_run', 'stop_run', 'toggle_window',
+]

@@ -137,12 +137,16 @@ def test_glossary_tab_and_its_file_pages_build_lazily(tmp_path, monkeypatch):
     window._pm_file_combo.setCurrentIndex(2)
     pl.pump(30, timeout=0.5)
     assert [name for name, _out in built] == ["Book1.epub", "Book3.epub"]
-    # the Interactive Images tab is a placeholder in this version
-    from PySide6.QtWidgets import QLabel
+    # the Interactive Images tab builds on first open, with the current file's page
+    import interactive_images_gui as ixg
 
+    assert not window._pm_tab_pages["images"].findChildren(ixg.ImagesFilePanel)
     window._pm_show_tab("images")
-    texts = [label.text() for label in window._pm_tab_pages["images"].findChildren(QLabel)]
-    assert "No interactive images yet" in texts
+    pl.pump(30, timeout=0.3)
+    panels = window._pm_tab_pages["images"].findChildren(ixg.ImagesFilePanel)
+    assert len(panels) == 1
+    assert os.path.normcase(panels[0].output_dir) == os.path.normcase(
+        window._pm_images_output_dirs[os.path.normcase(os.path.abspath(sources[2]))])
 
 
 def test_each_book_uses_its_own_output_folder(tmp_path, monkeypatch):

@@ -4337,6 +4337,13 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
                 )
                 translation_completed = self.run_translation_direct()
             
+            # Interactive Images: its own step after a finished run (interactive_images_runner; a failure only logs)
+            try:
+                from interactive_images_runner import run_after_translation
+                run_after_translation(self, bool(translation_completed) and not self.stop_requested)
+            except Exception as e:
+                self.append_log(f"⚠️ Interactive Images after translation failed: {e}")
+            
             # Post-translation scanning phase
             # If scanning phase toggle is enabled, launch scanner after translation
             # BUT only if translation completed successfully (not stopped by user)
