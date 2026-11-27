@@ -20527,7 +20527,7 @@ class UnifiedClient:
             'ollama': self._send_openai_provider_router,
             'lmstudio': self._send_openai_provider_router,
             'local': self._send_openai_provider_router,
-            'custom_openai': self._send_openai_provider_router,
+            'custom_openai': self._send_custom_openai_with_endpoint_discovery,
             'gemini': self._send_gemini,
             'deepseek': self._send_openai_provider_router,  # Consolidated
             'anthropic': self._send_anthropic,
@@ -32734,6 +32734,29 @@ class UnifiedClient:
             usage=usage,
             raw_response=json_resp,
         )
+
+    def _send_custom_openai_with_endpoint_discovery(self, *args, **kwargs) -> UnifiedResponse:
+        """Custom prefix request; a 404 searches the real endpoint once (custom_endpoint_discovery)."""
+        try:
+            return self._send_openai_provider_router(*args, **kwargs)
+        except Exception as exc:
+            if self._extract_http_status_from_exception(exc) != 404 or self._is_stop_requested():
+                raise
+            try:
+                route = self._get_custom_prefix_route_for_model(getattr(self, 'model', ''))
+                if not route:
+                    raise exc
+                from custom_endpoint_discovery import handle_not_found
+                new_base = handle_not_found(
+                    route.get('prefix', ''), route.get('routing', ''),
+                    route.get('endpoint_type', '/chat/completions'), getattr(self, 'api_key', '') or '',
+                )
+            except Exception:
+                new_base = None
+            if not new_base:
+                raise exc
+        # The route now points at the found base (the environment was rewritten): one retry.
+        return self._send_openai_provider_router(*args, **kwargs)
 
     def _send_openai_provider_router(self, messages, temperature, max_tokens, max_completion_tokens_or_response_name=None, response_name=None) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""

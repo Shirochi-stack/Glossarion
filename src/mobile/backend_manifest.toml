@@ -54,6 +54,8 @@ modules = [
   # glossarion-key-pools v1, key tests, refusal defaults) and the OAuth begin/complete helpers
   # authgem/authcd/authgrok share. The profile screens load prompt_profiles via importlib.
   "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
+  # A 404 on a custom prefix searches the real endpoint (unified_api_client imports it lazily).
+  "custom_endpoint_discovery",
   # U5 shared core: the Library (library_core above: scans, resolvers, card data, Book Details,
   # Organize / Undo / Delete / Import / Scan for raw), covers, the reader document (mobile page
   # shell, bilingual chapters) and live stream the Reader renders, and the Progress Manager /
