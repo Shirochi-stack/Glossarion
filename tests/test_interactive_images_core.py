@@ -292,3 +292,51 @@ def test_profiles_seed_builtins_write_runtime_keys_and_reset():
     assert core.settings_from_config(owner.config).per_chapter == 0
     assert profiles.delete('Illustrated')[0] == "Built-in Profile"
     assert saves
+
+
+# ---------------------------------------------------------------------------------------------
+# Shared helpers the desktop dialog and the mobile screens both use
+# ---------------------------------------------------------------------------------------------
+
+def test_reference_note_and_settings_values():
+    assert core.reference_note('dall-e-3') == ('warning', core.NO_REFERENCE_WARNING)
+    assert core.reference_note('gpt-image-1') == (
+        'info', "This image model takes up to 1 reference image; more are not sent")
+    assert core.reference_note('nano-banana')[1].startswith("This image model takes up to 14 reference images")
+    assert core.reference_note('') == ('', '') and core.reference_note('unknown-model') == ('', '')
+    values = core.settings_values({})
+    assert values == {key: core.DEFAULTS[key] for key in values}
+    assert core.coerce_setting('interactive_images_max_references', '99') == core.MAX_REFERENCES
+    assert core.coerce_setting('interactive_images_max_references', 'x') == 5
+    assert core.coerce_setting('interactive_images_resolution', '8K') == '1K'
+    assert core.coerce_setting('interactive_images_aspect_ratio', '16:9') == '16:9'
+    assert core.coerce_setting('interactive_css_enabled', 'true') is True
+    assert core.PER_CHAPTER_CHOICES == tuple(str(n) for n in range(0, 11))
+
+
+def test_settings_schema_choices_match_the_core():
+    import settings_schema as schema
+
+    assert schema.CHOICES_OVERRIDES['interactive_images_resolution'] == core.RESOLUTIONS
+    assert schema.CHOICES_OVERRIDES['interactive_images_aspect_ratio'] == core.ASPECT_RATIOS
+
+
+def test_reference_helpers(tmp_path):
+    from io import BytesIO
+    from PIL import Image
+
+    good = tmp_path / 'a.png'
+    buffer = BytesIO()
+    Image.new('RGB', (4, 4), (1, 2, 3)).save(buffer, format='PNG')
+    good.write_bytes(buffer.getvalue())
+    bad = tmp_path / 'b.png'
+    bad.write_bytes(b'not an image')
+    assert core.is_reference_image(str(good)) and not core.is_reference_image(str(bad))
+    assert not core.is_reference_image(str(tmp_path / 'c.gif'))
+    refs = core.empty_references()
+    assert core.add_reference_names(refs, ['  Seo  Ha-eun ', 'baek', 'baek', '']) == 2
+    assert [name for name, _paths in core.reference_rows(refs)] == ['baek', 'Seo Ha-eun']
+    rel = core.add_reference_image(str(tmp_path), refs, str(good), 'baek')
+    assert (tmp_path / 'Interactive_Images' / rel).is_file()
+    core.clear_reference_character(str(tmp_path), refs, 'baek')
+    assert 'baek' not in refs['characters'] and not (tmp_path / 'Interactive_Images' / rel).exists()

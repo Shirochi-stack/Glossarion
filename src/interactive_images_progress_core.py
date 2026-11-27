@@ -69,6 +69,15 @@ STATUS_GROUPS = {
     'rejected': ('rejected',),
     'not_built': ('not_built', 'pending', 'skipped', 'in_progress'),
 }
+#: The stats chips, in order: (group, label, colour) (desktop tab and mobile Images tab).
+STAT_CHIPS = (
+    ('built', "✅ Built", '#27ae60'),
+    ('partial', "⚠️ Partial", 'orange'),
+    ('stale', "🕒 Stale", '#d69e2e'),
+    ('failed', "❌ Failed", '#e74c3c'),
+    ('rejected', "🚫 Rejected", '#e74c3c'),
+    ('not_built', "⬜ Not built", '#5a9fd4'),
+)
 #: Statuses "Build pending" leaves alone (when not stale).
 DONE_STATUSES = ('completed', 'css_only')
 
@@ -457,6 +466,71 @@ def delete_entries(output_dir, targets, strip_html=True):
     return changed
 
 
+#: Statuses "Retry failed" rebuilds.
+RETRY_STATUSES = ('failed', 'partial', 'rejected')
+
+#: Row actions of the Progress Manager tab (desktop context menu) and the mobile Images tab (row sheet /
+#: selection bar), in menu order: id -> label.
+ROW_ACTIONS = (
+    ('build', "🖼 Build / Rebuild"),
+    ('retry', "🔁 Retry failed"),
+    ('mark', "❓ Mark for rebuild"),
+    ('delete', "🗑 Delete images"),
+    ('open_images', "🖼 Open image(s)"),
+    ('open_chapter', "📄 Open chapter"),
+    ('show_plan', "📋 Show plan"),
+    ('open_folder', "📂 Open folder"),
+)
+
+
+def retry_rows(rows):
+    return [row for row in rows or () if row is not None and row.status in RETRY_STATUSES]
+
+
+def deletable_rows(rows):
+    """Rows with something to delete (a stored entry)."""
+    return [row for row in rows or () if row is not None and row.stored_status]
+
+
+def action_targets(action, rows):
+    """The rows an action works on (``retry``: the failed ones; ``delete``: those with an entry)."""
+    if action == 'retry':
+        return retry_rows(rows)
+    if action == 'delete':
+        return deletable_rows(rows)
+    return [row for row in rows or () if row is not None]
+
+
+def action_reason(action, rows, *, running=False):
+    """Why an action is unavailable for ``rows`` (None = available); the same rules on desktop and mobile."""
+    targets = action_targets(action, rows)
+    if action in ('build', 'retry', 'delete') and running:
+        return "Interactive Images is running"
+    if action == 'retry' and not targets:
+        return "No failed, partial or rejected chapter selected"
+    if action == 'delete' and not targets:
+        return "Nothing built for the selected chapters"
+    if action == 'open_images' and not any(row.images for row in targets):
+        return "No images yet"
+    if action not in ('open_folder',) and not targets:
+        return "No chapter selected"
+    return None
+
+
+def action_label(action, rows):
+    label = dict(ROW_ACTIONS)[action]
+    if action in ('build', 'retry', 'delete'):
+        label += f" ({len(action_targets(action, rows))})"
+    return label
+
+
+def delete_confirmation(count):
+    """The Delete images question (desktop dialog and mobile)."""
+    return (f"Delete the interactive images of {count} chapter(s)?\n"
+            "The image files are deleted and the figures and classes Glossarion inserted are removed "
+            "from the chapter files (the text stays as it is).")
+
+
 def open_targets(output_dir, row):
     """``{'images': [paths], 'chapter': path, 'folder': path}`` for a row's Open actions."""
     folder = core.interactive_dir(output_dir)
@@ -505,7 +579,8 @@ def plan_text(row):
 
 
 __all__ = [
-    'DONE_STATUSES', 'ImagesModel', 'ImagesRow', 'STATUS_COLORS', 'STATUS_GROUPS', 'STATUS_ICONS', 'STATUS_LABELS',
+    'DONE_STATUSES', 'ImagesModel', 'ImagesRow', 'RETRY_STATUSES', 'ROW_ACTIONS', 'action_label', 'action_reason',
+    'action_targets', 'delete_confirmation', 'deletable_rows', 'retry_rows', 'STAT_CHIPS', 'STATUS_COLORS', 'STATUS_GROUPS', 'STATUS_ICONS', 'STATUS_LABELS',
     'STORED_STATUSES', 'TranslatedChapter', 'book_signature', 'delete_entries', 'empty_progress', 'entry_status',
     'find_progress', 'image_rows', 'image_stats', 'mark_for_rerun', 'mutate', 'needs_build', 'now_iso',
     'open_progress', 'open_targets', 'pending_keys', 'plan_text', 'progress_signature', 'read_progress_file',

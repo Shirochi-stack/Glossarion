@@ -32,7 +32,7 @@ __all__ = ["IMPLEMENTED_ROUTES", "SCREEN_ROUTES", "ToolsFeature"]
 log = logging.getLogger("glossarion.tools")
 
 SCREEN_ROUTES = ("tools", "tools.qa", "tools.qa.report", "tools.glossary-names", "tools.convert", "tools.headers", "tools.async",
-                 "tools.review", "tools.sdlxliff", "tools.rpgmaker")
+                 "tools.review", "tools.sdlxliff", "tools.rpgmaker", "tools.interactive-images")
 #: Routes this feature ships (Integrate merges them into the hub / drawer "implemented" sets).
 IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES)
 
@@ -228,6 +228,10 @@ class ToolsFeature:
             from glossarion_mobile.ui.tools.rpgmaker import RpgMakerScreen
 
             return RpgMakerScreen(match, ctx)
+        if name == "tools.interactive-images":
+            from glossarion_mobile.ui.tools.interactive_images import InteractiveImagesScreen
+
+            return InteractiveImagesScreen(match, ctx)
         return None
 
     def screen_factory(self, match: RouteMatch) -> Any:

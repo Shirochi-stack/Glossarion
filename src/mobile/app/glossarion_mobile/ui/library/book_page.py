@@ -53,10 +53,12 @@ __all__ = ["BOOK_TABS", "BookPageScreen", "GLOSSARY_RUN_KINDS", "TRANSLATION_RUN
 
 log = logging.getLogger("glossarion.library.ui")
 
-BOOK_TABS = ("overview", "chapters", "glossary", "output")
+#: "images" (Interactive Images) is appended, so the earlier indices and ``?tab=`` links keep working
+BOOK_TABS = ("overview", "chapters", "glossary", "output", "images")
 #: Tabs beside the Overview pane on wide screens (master-detail).
 WIDE_TABS = BOOK_TABS[1:]
-_TAB_LABELS = {"overview": "Overview", "chapters": "Chapters", "glossary": "Glossary", "output": "Output"}
+_TAB_LABELS = {"overview": "Overview", "chapters": "Chapters", "glossary": "Glossary", "output": "Output",
+               "images": "Images"}
 
 #: Hotfix 1 issue 7: the translation runs and the glossary runs (job kinds) that Chapters › Run translation and
 #: Run QA scan wait for - while one of them runs (any book: jobs run one at a time) or is queued for this book.
@@ -150,10 +152,14 @@ class BookPageScreen(Screen):
         self.details_phase = ""
         self.progress: Optional[pm.ProgressView] = None
         self.glossary: Optional[pm.GlossaryView] = None
+        self.images: Optional[pm.ImagesView] = None  # Interactive Images (loaded when its tab opens)
         self.job: Any = None
         self.job_view: Any = None
         self._signature: Any = None
         self._gp_signature: Any = None
+        self._ix_signature: Any = None
+        self._loading_images = False
+        self._images_lock = None  # asyncio.Lock, created on the loop
         self._unsubs: list = []
         self._loading_progress = False
         self._loading_glossary = False
@@ -172,6 +178,7 @@ class BookPageScreen(Screen):
                              foreground=self.ctx.foreground, spawn=self.ctx.spawn, name="book")
         from glossarion_mobile.ui.library.chapters_tab import ChaptersTab, take_range_request
         from glossarion_mobile.ui.library.glossary_tab import GlossaryTab
+        from glossarion_mobile.ui.library.images_tab import ImagesTab
         from glossarion_mobile.ui.library.output_tab import OutputTab
         from glossarion_mobile.ui.library.overview_tab import OverviewTab
 
@@ -180,6 +187,7 @@ class BookPageScreen(Screen):
                                     initial_range=take_range_request(self.bid))  # U9 /retranslate <range>
         self.glossary_tab = GlossaryTab(self)
         self.output = OutputTab(self)
+        self.images_tab = ImagesTab(self)
 
     # ---- app bar ---------------------------------------------------------------------------------
 
@@ -277,7 +285,8 @@ class BookPageScreen(Screen):
         )
         self.overview.columns = self._overview_columns(surface.size_class(self.ctx.page))
         self.tab_bodies = {"overview": self.overview.build(), "chapters": self.chapters.build(),
-                           "glossary": self.glossary_tab.build(), "output": self.output.build()}
+                           "glossary": self.glossary_tab.build(), "output": self.output.build(),
+                           "images": self.images_tab.build()}
         self.layout_slot = ft.Container(expand=True, key="book-layout")
         self._arrange(surface.is_wide(self.ctx.page), self.initial_tab)
         return ft.Column([self.strip, self.layout_slot], spacing=0, expand=True)
@@ -357,6 +366,8 @@ class BookPageScreen(Screen):
             self.ctx.spawn(self.reload_glossary())
         if tab == "output":
             self.ctx.spawn(self.output.reload())
+        if tab == "images" and self.images is None:
+            self.ctx.spawn(self.reload_images())
 
     # ---- lifecycle ---------------------------------------------------------------------------------------
 
@@ -387,7 +398,7 @@ class BookPageScreen(Screen):
 
     def handle_back(self) -> bool:
         """Android back leaves the Chapters / Glossary selection mode first (UI_SPEC §1.6 rule 2)."""
-        for tab in (self.chapters, self.glossary_tab):
+        for tab in (self.chapters, self.glossary_tab, self.images_tab):
             if getattr(tab, "selecting", False):
                 tab.exit_selection()
                 return True
@@ -412,6 +423,8 @@ class BookPageScreen(Screen):
             await self.reload_glossary()
         if self.initial_tab == "output":
             await self.output.reload()
+        if self.initial_tab == "images":
+            await self.reload_images()
 
     async def _tick(self) -> None:
         """2 s poll: a changed workspace signature refreshes the rows (read-only); the details (EPUB
@@ -429,6 +442,10 @@ class BookPageScreen(Screen):
                                              self.progress)
             if gp_signature != self._gp_signature:
                 await self.reload_glossary()
+        if self.images is not None:
+            ix_signature = await self.ctx.io(pm.images_signature, self.service, self.book)
+            if ix_signature != self._ix_signature:
+                await self.reload_images()
 
     def _on_output_mode_changed(self, _key: str, _value: Any) -> None:
         def refresh():
@@ -467,6 +484,8 @@ class BookPageScreen(Screen):
             await self.reload_details("full")
             if self.glossary is not None:
                 await self.reload_glossary()
+            if self.images is not None:
+                await self.reload_images(force=True)
             await self.service.refresh(reason="book page")
         finally:
             self._full_refreshing = False
@@ -539,6 +558,25 @@ class BookPageScreen(Screen):
         self.overview.render()
         return view
 
+    async def reload_images(self, *, force: bool = False) -> Optional[pm.ImagesView]:
+        """Reload the Interactive Images view (the Glossary tab's rule: a poll tick that finds a load running
+        is skipped; ``force`` waits for it and reads again)."""
+        if self._loading_images and not force:
+            return self.images
+        if self._images_lock is None:
+            self._images_lock = asyncio.Lock()
+        async with self._images_lock:
+            self._loading_images = True
+            try:
+                previous = self.images
+                view = await self.ctx.io(lambda: pm.load_images_view(self.service, self.book, previous=previous))
+            finally:
+                self._loading_images = False
+        self.images = view
+        self._ix_signature = view.signature
+        self.images_tab.apply(view)
+        return view
+
     def details_model(self) -> Any:
         """``library_core.BookDetailsModel`` over the loaded details (cached per payload)."""
         key = (id(self.details), bool(self.chapters.show_special), id(self.book))
@@ -588,11 +626,14 @@ class BookPageScreen(Screen):
         self._render_strip()
         self.chapters.sync_run_buttons(view)  # issue 7: Run translation / Run QA scan follow every job event
         self.glossary_tab.sync_extract_button(view)
+        self.images_tab.sync_build_button(view)
         self._maybe_review(job)
         if finished:
             self.ctx.spawn(self.reload_progress())
             if self.glossary is not None:  # a glossary extraction may have written its progress
                 self.ctx.spawn(self.reload_glossary())
+            if self.images is not None:  # an Interactive Images run, or a retranslation (stale rows)
+                self.ctx.spawn(self.reload_images())
 
     # ---- U9: the Library glossary review gate (UI_SPEC §3.10, Appendix C) -------------------------------
 

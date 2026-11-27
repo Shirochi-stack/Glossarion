@@ -298,3 +298,38 @@ def test_generated_stylesheet_is_scoped(book):
     assert '.glx-book {' in css and '.glx-dialogue {' in css and 'body' not in css
     assert warnings
     assert Client.prompt.startswith("Write a CSS stylesheet for an EPUB novel: pirate theme\n")
+
+
+def test_shared_row_action_rules_and_owner_recompiler(tmp_path):
+    from types import SimpleNamespace
+
+    from interactive_images_runner import owner_recompiler
+
+    def row(key, status, stored='', images=0):
+        return ipc.ImagesRow('chapter', key, key, status, '', '', images=images, stored_status=stored)
+
+    rows = [row('a', 'completed', 'completed', 1), row('b', 'failed', 'failed'), row('c', 'not_built')]
+    assert [r.key for r in ipc.action_targets('retry', rows)] == ['b']
+    assert [r.key for r in ipc.action_targets('delete', rows)] == ['a', 'b']
+    assert ipc.action_label('build', rows) == "\U0001f5bc Build / Rebuild (3)"
+    assert ipc.action_label('retry', rows) == "\U0001f501 Retry failed (1)"
+    assert ipc.action_reason('build', rows) is None
+    assert ipc.action_reason('build', rows, running=True) == "Interactive Images is running"
+    assert ipc.action_reason('retry', rows[2:]) and ipc.action_reason('delete', rows[2:])
+    assert ipc.action_reason('open_images', rows[1:]) == "No images yet"
+    assert ipc.action_reason('open_images', rows) is None
+    assert [a for a, _l in ipc.ROW_ACTIONS] == ['build', 'retry', 'mark', 'delete', 'open_images', 'open_chapter',
+                                                'show_plan', 'open_folder']
+    assert "3 chapter(s)" in ipc.delete_confirmation(3)
+    assert [g for g, _t, _c in ipc.STAT_CHIPS] == list(ipc.STATUS_GROUPS)
+
+    calls = []
+    owner = SimpleNamespace(_run_epub_compile=lambda f: calls.append(('epub', f)),
+                            _run_pdf_compile=lambda f: calls.append(('pdf', f)))
+    recompile = owner_recompiler(owner)
+    (tmp_path / 'book.pdf').write_bytes(b'%PDF')
+    recompile(str(tmp_path))
+    (tmp_path / 'book.epub').write_bytes(b'PK')
+    recompile(str(tmp_path))
+    assert calls == [('pdf', str(tmp_path)), ('epub', str(tmp_path))]
+    assert owner_recompiler(SimpleNamespace()) is None

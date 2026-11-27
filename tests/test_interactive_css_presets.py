@@ -114,3 +114,12 @@ def test_preview_document_has_every_sample_part_and_no_script():
                  'class="glx-figure"', 'data:image/svg+xml;base64,', 'class="glx-system-message"'):
         assert part in html, part
     assert html.count('<tr>') == 7  # header + 6 rows
+
+
+def test_preset_names_for_new_and_duplicate():
+    config = {}
+    assert presets.preset_name_for_request(config, "  cozy   rainy night in the city ") == "Cozy Rainy Night In"
+    assert presets.preset_name_for_request(config, "") == "My Style"
+    assert presets.duplicate_name(config, "Classic Book") == "Classic Book copy"
+    presets.save_user_preset(config, "Classic Book copy", ".glx-book p { color: red; }")
+    assert presets.duplicate_name(config, "Classic Book") == "Classic Book copy 2"

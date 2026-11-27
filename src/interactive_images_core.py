@@ -706,6 +706,45 @@ def effective_reference_count(model, max_refs):
 NO_REFERENCE_WARNING = "This image model takes no reference images; characters are described by name only"
 
 
+def reference_note(model):
+    """``(level, text)`` the settings screens show next to the image model (desktop dialog and mobile):
+    ``('warning', NO_REFERENCE_WARNING)`` for a model that takes none, ``('info', ...)`` with its limit,
+    ``('', '')`` for an unknown or empty model."""
+    model = str(model or '').strip()
+    limit = reference_limit(model) if model else None
+    if model and limit == 0:
+        return 'warning', NO_REFERENCE_WARNING
+    if model and limit is not None:
+        return 'info', (f"This image model takes up to {limit} reference image"
+                        f"{'s' if limit != 1 else ''}; more are not sent")
+    return '', ''
+
+
+def reference_rows(refs):
+    """``[(name, [relative paths])]`` of the characters, sorted case-insensitively (the references editors)."""
+    chars = (refs or {}).get('characters') or {}
+    return sorted(((name, list(paths)) for name, paths in chars.items()), key=lambda kv: kv[0].casefold())
+
+
+def add_reference_names(refs, names):
+    """List ``names`` (typed or from the glossary) as characters without images; returns how many were new."""
+    chars = refs.setdefault('characters', {})
+    added = 0
+    for name in names or ():
+        name = ' '.join(str(name or '').split())
+        if name and name not in chars:
+            chars[name] = []
+            added += 1
+    return added
+
+
+def clear_reference_character(output_dir, refs, name):
+    """Delete a character's reference images and its row."""
+    for rel in list((refs.get('characters') or {}).get(name, [])):
+        remove_reference_image(output_dir, refs, rel)
+    (refs.get('characters') or {}).pop(name, None)
+
+
 def empty_references():
     return {'version': 1, 'characters': {}, 'style': []}
 
@@ -738,6 +777,19 @@ def save_references(output_dir, refs):
 def _safe_stem(text):
     stem = re.sub(r'[^\w-]+', '_', str(text or '').strip().lower(), flags=re.U).strip('_')
     return stem[:40] or 'ref'
+
+
+def is_reference_image(path):
+    """True when ``path`` decodes as a PNG / JPEG / WebP image (``safe_image.open_image``, the rule for
+    images Glossarion did not make itself); the references editors refuse anything else."""
+    if os.path.splitext(str(path or ''))[1].lower() not in IMAGE_EXTENSIONS:
+        return False
+    try:
+        from safe_image import open_image
+        with open_image(path) as image:
+            return bool(image.size)
+    except Exception:
+        return False
 
 
 def add_reference_image(output_dir, refs, source, character=None, *, data=None, ext=None):
@@ -846,6 +898,40 @@ DEFAULTS = {
 
 RESOLUTIONS = ('1K', '2K', '4K')
 ASPECT_RATIOS = ('auto', '1:1', '3:4', '4:3', '2:3', '3:2', '9:16', '16:9')
+#: The images-per-chapter dropdown (0 = styles only)
+PER_CHAPTER_CHOICES = tuple(str(n) for n in range(0, MAX_IMAGES_PER_CHAPTER + 1))
+
+
+def settings_values(config):
+    """The plain (non-prompt) settings as ``{config key: value}`` with their defaults (the settings screens'
+    starting values; the same keys :func:`settings_from_config` reads)."""
+    s = settings_from_config(config)
+    return {
+        'interactive_images_text_model': s.text_model,
+        'interactive_images_image_model': s.image_model,
+        'interactive_images_max_references': s.max_references,
+        'interactive_images_resolution': s.resolution,
+        'interactive_images_aspect_ratio': s.aspect_ratio,
+        'interactive_images_auto_after_translation': s.auto_after_translation,
+        'interactive_images_recompile_after': s.recompile_after,
+    }
+
+
+def coerce_setting(key, value):
+    """A settings screen's value for ``key`` as the step reads it (clamped / typed)."""
+    if key == 'interactive_images_max_references':
+        try:
+            return max(0, min(MAX_REFERENCES, int(value)))
+        except (TypeError, ValueError):
+            return DEFAULTS[key]
+    if key in ('interactive_images_auto_after_translation', 'interactive_images_recompile_after',
+               'interactive_css_enabled'):
+        return _bool(value)
+    if key == 'interactive_images_resolution':
+        return value if value in RESOLUTIONS else DEFAULTS[key]
+    if key == 'interactive_images_aspect_ratio':
+        return value if value in ASPECT_RATIOS else DEFAULTS[key]
+    return str(value or '').strip()
 
 
 def parse_per_chapter(value, default=1):

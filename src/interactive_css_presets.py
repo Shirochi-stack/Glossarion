@@ -617,6 +617,16 @@ def unique_preset_name(config, base):
     return f"{base} {k}"
 
 
+def preset_name_for_request(config, request):
+    """A new user preset's name from the words the user typed for "New from prompt" (first four words)."""
+    words = ' '.join(str(request or '').split()[:4]) or 'My style'
+    return unique_preset_name(config, words.title())
+
+
+def duplicate_name(config, name):
+    return unique_preset_name(config, f"{name} copy")
+
+
 def save_user_preset(config, name, css):
     """Store a user preset (scoped first). Returns ``(name, warnings)``; built-in names are refused."""
     name = str(name or '').strip()
@@ -754,7 +764,8 @@ __all__ = [
     'BUILTIN_PRESETS', 'BUILTIN_PRESET_NAMES', 'CLASS_VOCABULARY', 'DEFAULT_PRESET', 'ENABLED_KEY',
     'INTERACTIVE_FOLDER', 'PLACEHOLDER_IMAGE_URI', 'PRESET_KEY', 'SAMPLE_CHAPTER_HTML', 'STRUCTURAL_CLASSES',
     'STYLESHEET_FILENAME', 'USER_PRESETS_KEY', 'active_preset_name', 'assignable_classes', 'book_stylesheet_path',
-    'css_problems', 'defined_classes', 'delete_user_preset', 'extract_css_block', 'is_builtin_preset', 'preset_css',
+    'css_problems', 'defined_classes', 'delete_user_preset', 'duplicate_name', 'extract_css_block',
+    'is_builtin_preset', 'preset_css', 'preset_name_for_request',
     'preset_names', 'preview_document', 'read_book_stylesheet', 'remove_book_stylesheet', 'save_user_preset',
     'scope_css', 'unique_preset_name', 'user_presets', 'write_book_stylesheet',
 ]

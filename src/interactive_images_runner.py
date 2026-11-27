@@ -537,6 +537,26 @@ def _remove(path):
 # After a translation run (translation_pipeline's post-run block; desktop and mobile)
 # ---------------------------------------------------------------------------------------------
 
+def owner_recompiler(owner):
+    """``recompile(folder)`` over an owner's compile methods (``text_jobs``: desktop and the mobile
+    HeadlessOwner): the EPUB when the folder has one, else the PDF; None when the owner has neither."""
+    compile_epub = getattr(owner, '_run_epub_compile', None)
+    compile_pdf = getattr(owner, '_run_pdf_compile', None)
+    if not callable(compile_epub) and not callable(compile_pdf):
+        return None
+
+    def recompile(folder):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        if any(n.lower().endswith('.epub') for n in names) and callable(compile_epub):
+            compile_epub(folder)
+        elif any(n.lower().endswith('.pdf') for n in names) and callable(compile_pdf):
+            compile_pdf(folder)
+    return recompile
+
+
 class _OwnerStop:
     """A stop event that follows the owner's Stop button."""
 
@@ -551,6 +571,28 @@ class _OwnerStop:
         self._event.set()
 
 
+def run_output_dir(owner, source):
+    """The output folder the run just wrote for ``source``: the translation run's own resolver
+    (``run_env._resolve_translation_output_dir``, desktop and the mobile HeadlessOwner), else the Progress
+    Manager's (``progress_core.resolve_output_dir``)."""
+    resolvers = [getattr(owner, '_resolve_translation_output_dir', None)]
+    try:
+        from progress_core import resolve_output_dir
+        resolvers.append(lambda path: resolve_output_dir(owner, path))
+    except Exception:
+        pass
+    for resolve in resolvers:
+        if not callable(resolve):
+            continue
+        try:
+            folder = resolve(source)
+        except Exception:
+            folder = None
+        if folder and os.path.isdir(folder):
+            return folder
+    return None
+
+
 def run_after_translation(owner, completed):
     """Run the step on the books of a translation run that ended normally, when
     ``interactive_images_auto_after_translation`` is on. Never raises: a failure is logged."""
@@ -559,27 +601,22 @@ def run_after_translation(owner, completed):
         config = getattr(owner, 'config', None) or {}
         if not completed or not core.settings_from_config(config).auto_after_translation:
             return []
-        from progress_core import resolve_output_dir
-
         results = []
         seen = set()
         for source in list(getattr(owner, 'selected_files', None) or ()):
             if not str(source).lower().endswith(('.epub', '.txt', '.pdf', '.html', '.htm', '.docx', '.md')):
                 continue
-            try:
-                folder = resolve_output_dir(owner, source)
-            except Exception:
-                folder = None
+            folder = run_output_dir(owner, source)
             if not folder or not os.path.isfile(os.path.join(folder, 'translation_progress.json')):
+                log(f"ℹ️ Interactive Images after translation: no translation output found for "
+                    f"{os.path.basename(str(source))}")
                 continue
             key = os.path.normcase(os.path.abspath(folder))
             if key in seen:
                 continue
             seen.add(key)
-            compile_epub = getattr(owner, '_run_epub_compile', None)
             results.append(run_interactive_images(
-                config, folder, log=log, stop_event=_OwnerStop(owner),
-                recompile=(lambda path: compile_epub(path)) if callable(compile_epub) else None))
+                config, folder, log=log, stop_event=_OwnerStop(owner), recompile=owner_recompiler(owner)))
         return results
     except Exception as exc:
         log(f"⚠️ Interactive Images after translation failed: {exc}")
@@ -609,4 +646,5 @@ def generate_stylesheet(config, user_request, *, client_factory=None, output_dir
 
 
 __all__ = ['RunResult', 'build_planner_prompts', 'configure_image_key_pool', 'generate_stylesheet',
-           'image_pool_model', 'prepare_stylesheet', 'run_interactive_images']
+           'image_pool_model', 'owner_recompiler', 'prepare_stylesheet', 'run_after_translation',
+           'run_interactive_images']

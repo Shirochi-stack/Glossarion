@@ -506,6 +506,9 @@ class ChaptersTab:
             ft.PopupMenuItem(content="\U0001f50d Edit Translation", key="m-edit-translation",
                              on_click=lambda e: self.ctx.spawn(self.open_reviewer())),
             ft.PopupMenuItem(content="\U0001f4ca Glossary Progress", on_click=lambda e: self.page.set_tab("glossary")),
+            # the desktop Translation tab's "🖼 Interactive Images" button (switches to that tab)
+            ft.PopupMenuItem(content="\U0001f5bc Interactive Images", on_click=lambda e: self.page.set_tab("images"),
+                             key="m-interactive-images"),
             ft.PopupMenuItem(content="⟳ Refresh", on_click=lambda e: self.ctx.spawn(self.page.full_refresh())),
             ft.PopupMenuItem(content="Files", on_click=lambda e: self.page.open_files()),
         ]

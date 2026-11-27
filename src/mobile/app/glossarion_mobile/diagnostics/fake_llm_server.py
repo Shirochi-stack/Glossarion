@@ -271,7 +271,27 @@ def classify_request(payload: dict) -> str:
     lowered = text.lower()
     if "glossary extraction" in lowered or ("extract" in lowered and _EXTRACTION_COLUMNS.search(text)):
         return "glossary"
+    if '"after_paragraph"' in text and _NUMBERED_BLOCK.search(text):
+        return "planner"  # Interactive Images: the planner prompt's JSON shape + its numbered paragraphs
+    if ".glx-book" in text and "css" in lowered:
+        return "stylesheet"  # Interactive Images › New style from prompt
     return "translation"
+
+
+#: ``[n] text`` lines of an Interactive Images planner request (``interactive_images_core.format_paragraphs``)
+_NUMBERED_BLOCK = re.compile(r"^\[(\d+)\]\s+(.+)$", re.M)
+FAKE_SCENE_PROMPT = "A quiet workshop at dawn; a young inventor holds a brass tool"
+FAKE_STYLESHEET = ".glx-book p { line-height: 1.6; }\n.glx-dialogue { color: #2b6cb0; }\n"
+
+
+def planner_reply(text: str) -> str:
+    """A valid plan for the chapter in a planner request: one image after the first numbered paragraph whose
+    text is longer than a heading, quoted by its first words (no characters, no classes)."""
+    blocks = [(int(n), body.strip()) for n, body in _NUMBERED_BLOCK.findall(str(text))]
+    pick = next(((n, body) for n, body in blocks if len(body) > 30), blocks[0] if blocks else (1, ""))
+    plan = {"images": [{"after_paragraph": pick[0], "quote": " ".join(pick[1].split()[:5]), "characters": [],
+                        "prompt": FAKE_SCENE_PROMPT}], "classes": []}
+    return json.dumps(plan, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +644,10 @@ class FakeLLMServer:
         record.chapters = chapter_numbers(last_user)
         if record.kind == "glossary":
             return glossary_csv(last_user or full_text, self.glossary)
+        if record.kind == "planner":
+            return planner_reply(last_user or full_text)
+        if record.kind == "stylesheet":
+            return f"```css\n{FAKE_STYLESHEET}```"
         if record.kind == "vision":
             ocr_text = self.ocr_text
             return FAKE_OCR_TEXT if ocr_text is None else ocr_text

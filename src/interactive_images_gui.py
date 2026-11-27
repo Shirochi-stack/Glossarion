@@ -105,7 +105,8 @@ def _button(text, kind='default', tooltip=''):
     return button
 
 
-def _styled_checkbox(owner, text):
+def _create_styled_checkbox(owner, text):
+    """Other Settings' styled checkbox (the same name, so the settings schema generator reads its label)."""
     try:
         from other_settings import _create_styled_checkbox
         return _create_styled_checkbox(owner, text)
@@ -201,14 +202,13 @@ def _model_names():
         return []
 
 
-def _model_combo(current, placeholder):
-    combo = QComboBox()
+def _model_combo(combo, placeholder):
+    """An editable model dropdown (the model list, house style); the caller sets its text."""
     combo.setEditable(True)
     combo.setInsertPolicy(QComboBox.NoInsert)
     combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
     _house_combo(combo)
     combo.addItems(_model_names())
-    combo.setEditText(str(current or ''))
     combo.lineEdit().setPlaceholderText(placeholder)
     combo.setMinimumWidth(320)
     return combo
@@ -414,7 +414,7 @@ class InteractiveStylesDialog(QDialog):
     def _duplicate(self):
         config = _config(self.owner)
         base = self.current_name()
-        name = presets.unique_preset_name(config, f"{base} copy")
+        name = presets.duplicate_name(config, base)
         self._store(name, self.editor.toPlainText() or presets.preset_css(config, base) or '')
         self.editor.show()
 
@@ -459,8 +459,7 @@ class InteractiveStylesDialog(QDialog):
         if not str(css or '').strip():
             QMessageBox.warning(self, "New Style", "The text model returned no CSS.")
             return
-        words = ' '.join(str(request).split()[:4]) or 'My style'
-        name = presets.unique_preset_name(_config(self.owner), words.title())
+        name = presets.preset_name_for_request(_config(self.owner), request)
         self._store(name, css)
         self._show_warnings(warnings)
         self.editor.show()
@@ -553,13 +552,21 @@ class InteractiveImagesDialog(QDialog):
         models = QGroupBox("Models")
         grid = QVBoxLayout(models)
         text_row = QHBoxLayout()
+        # The widgets are bound with ``config.get(key, default)`` (defaults = interactive_images_core.DEFAULTS)
+        # so the settings schema generator reads these keys, labels and defaults for the mobile settings.
         text_row.addWidget(QLabel("Text model:"))
-        self.text_model = _model_combo(settings.text_model, "Main translation model")
+        self.text_model_combo = QComboBox()
+        _model_combo(self.text_model_combo, "Main translation model")
+        self.text_model_combo.setEditText(str(config.get('interactive_images_text_model', '') or ''))
+        self.text_model = self.text_model_combo
         text_row.addWidget(self.text_model, 1)
         grid.addLayout(text_row)
         image_row = QHBoxLayout()
         image_row.addWidget(QLabel("Image model:"))
-        self.image_model = _model_combo(settings.image_model, "Image Gen / Edit key pool model")
+        self.image_model_combo = QComboBox()
+        _model_combo(self.image_model_combo, "Image Gen / Edit key pool model")
+        self.image_model_combo.setEditText(str(config.get('interactive_images_image_model', '') or ''))
+        self.image_model = self.image_model_combo
         image_row.addWidget(self.image_model, 1)
         try:
             from multi_api_key_manager import create_preview_pool_button
@@ -576,31 +583,37 @@ class InteractiveImagesDialog(QDialog):
         grid.addWidget(self.ref_warning)
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Resolution:"))
-        self.resolution = _house_combo(QComboBox())
-        self.resolution.addItems(list(core.RESOLUTIONS))
-        self.resolution.setCurrentText(settings.resolution)
+        self.resolution_combo = QComboBox()
+        self.resolution = _house_combo(self.resolution_combo)
+        self.resolution_combo.addItems(list(core.RESOLUTIONS))
+        self.resolution_combo.setCurrentText(core.coerce_setting(
+            'interactive_images_resolution', config.get('interactive_images_resolution', '1K')))
         self.resolution.setFixedWidth(84)
         out_row.addWidget(self.resolution)
         out_row.addWidget(QLabel("Aspect ratio:"))
-        self.aspect = _house_combo(QComboBox())
-        self.aspect.addItems(list(core.ASPECT_RATIOS))
-        self.aspect.setCurrentText(settings.aspect_ratio)
+        self.aspect_combo = QComboBox()
+        self.aspect = _house_combo(self.aspect_combo)
+        self.aspect_combo.addItems(list(core.ASPECT_RATIOS))
+        self.aspect_combo.setCurrentText(core.coerce_setting(
+            'interactive_images_aspect_ratio', config.get('interactive_images_aspect_ratio', '3:4')))
         self.aspect.setFixedWidth(96)
         out_row.addWidget(self.aspect)
         out_row.addWidget(QLabel("Max reference images sent:"))
-        self.max_refs = QSpinBox()   # native: no stylesheet rule reaches it
-        self.max_refs.setRange(0, core.MAX_REFERENCES)
-        self.max_refs.setValue(settings.max_references)
+        self.max_refs_spin = QSpinBox()   # native: no stylesheet rule reaches it
+        self.max_refs = self.max_refs_spin
+        self.max_refs_spin.setRange(0, core.MAX_REFERENCES)
+        self.max_refs_spin.setValue(core.coerce_setting('interactive_images_max_references',
+                                                        config.get('interactive_images_max_references', 5)))
         self.max_refs.setFixedWidth(96)
         self.max_refs.wheelEvent = lambda event: event.ignore()
         out_row.addWidget(self.max_refs)
         out_row.addStretch(1)
         grid.addLayout(out_row)
         run_row = QHBoxLayout()
-        self.auto_cb = _styled_checkbox(owner, "Run after each translation")
-        self.auto_cb.setChecked(settings.auto_after_translation)
-        self.recompile_cb = _styled_checkbox(owner, "Recompile the EPUB/PDF afterwards (if it was compiled)")
-        self.recompile_cb.setChecked(settings.recompile_after)
+        self.auto_cb = _create_styled_checkbox(owner, "Run after each translation")
+        self.auto_cb.setChecked(bool(config.get('interactive_images_auto_after_translation', False)))
+        self.recompile_cb = _create_styled_checkbox(owner, "Recompile the EPUB/PDF afterwards (if it was compiled)")
+        self.recompile_cb.setChecked(bool(config.get('interactive_images_recompile_after', True)))
         run_row.addWidget(self.auto_cb)
         run_row.addWidget(self.recompile_cb)
         run_row.addStretch(1)
@@ -683,15 +696,8 @@ class InteractiveImagesDialog(QDialog):
 
     # ---- the rest -----------------------------------------------------------------------------
     def _update_reference_warning(self, *_args):
-        model = self.image_model.currentText().strip()
-        limit = core.reference_limit(model) if model else None
-        if model and limit == 0:
-            self.ref_warning.setText("⚠ " + core.NO_REFERENCE_WARNING)
-        elif model and limit is not None:
-            self.ref_warning.setText(f"ℹ This image model takes up to {limit} reference image"
-                                     f"{'s' if limit != 1 else ''}; more are not sent")
-        else:
-            self.ref_warning.setText("")
+        level, text = core.reference_note(self.image_model.currentText())
+        self.ref_warning.setText((("⚠ " if level == 'warning' else "ℹ ") + text) if text else "")
         self.ref_warning.setVisible(bool(self.ref_warning.text()))
 
     def apply_settings(self):
@@ -800,7 +806,7 @@ class ReferencesEditor(QGroupBox):
         enabled = bool(self.output_dir)
         self.table.setEnabled(enabled)
         self.table.setRowCount(0)
-        for name, paths in sorted(self.refs.get('characters', {}).items(), key=lambda kv: kv[0].casefold()):
+        for name, paths in core.reference_rows(self.refs):
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(name))
@@ -827,13 +833,16 @@ class ReferencesEditor(QGroupBox):
     def _pick_images(self):
         files, _f = QFileDialog.getOpenFileNames(self, "Select reference images", "",
                                                  "Images (*.png *.jpg *.jpeg *.webp)")
-        return files
+        bad = [path for path in files if not core.is_reference_image(path)]
+        if bad:
+            QMessageBox.warning(self, "Reference images", "Not a PNG, JPEG or WebP image:\n" + "\n".join(bad[:5]))
+        return [path for path in files if path not in bad]
 
     def _add_character(self):
         name = ' '.join(self.name_edit.text().split())
         if not name or not self._need_book():
             return
-        self.refs.setdefault('characters', {}).setdefault(name, [])
+        core.add_reference_names(self.refs, [name])
         self.name_edit.clear()
         self._render()
 
@@ -845,9 +854,7 @@ class ReferencesEditor(QGroupBox):
         if not names:
             QMessageBox.information(self, "Reference images", "No character names found in this book's glossary.")
             return
-        chars = self.refs.setdefault('characters', {})
-        for name in names:
-            chars.setdefault(name, [])
+        core.add_reference_names(self.refs, names)
         self._render()
 
     def _add_images(self, name):
@@ -861,9 +868,7 @@ class ReferencesEditor(QGroupBox):
         self._render()
 
     def _clear(self, name):
-        for rel in list(self.refs.get('characters', {}).get(name, [])):
-            core.remove_reference_image(self.output_dir, self.refs, rel)
-        self.refs.get('characters', {}).pop(name, None)
+        core.clear_reference_character(self.output_dir, self.refs, name)
         self._render()
 
     def _add_style(self):
@@ -921,8 +926,8 @@ def add_interactive_styles_rows(owner, section_layout, parent=None):
     h = QHBoxLayout(row)
     h.setContentsMargins(0, 0, 0, 5)
     h.setSpacing(8)
-    enabled_cb = _styled_checkbox(owner, "Interactive styles")
-    enabled_cb.setChecked(bool(config.get(presets.ENABLED_KEY, False)))
+    enabled_cb = _create_styled_checkbox(owner, "Interactive styles")
+    enabled_cb.setChecked(bool(config.get('interactive_css_enabled', False)))
     enabled_cb.setToolTip("Link the book's glossarion_interactive.css (after your Attach CSS file) and mark the "
                           "chapter bodies with glx-book when Interactive Images runs.\nCSS only: every rule is "
                           "scoped under a .glx- class.")
@@ -1008,22 +1013,12 @@ def current_run(owner):
     return None
 
 
-def _recompile_for(owner):
-    def recompile(folder):
-        names = os.listdir(folder)
-        if any(n.lower().endswith('.epub') for n in names) and hasattr(owner, '_run_epub_compile'):
-            owner._run_epub_compile(folder)
-        elif any(n.lower().endswith('.pdf') for n in names) and hasattr(owner, '_run_pdf_compile'):
-            owner._run_pdf_compile(folder)
-    return recompile
-
-
 def start_run(owner, output_dir, keys=None):
     """Start the Interactive Images step for one book on a worker thread. Returns False when one is running."""
     if current_run(owner):
         _log(owner, "⚠️ Interactive Images is already running")
         return False
-    from interactive_images_runner import run_interactive_images
+    from interactive_images_runner import owner_recompiler, run_interactive_images
 
     bridge = run_bridge(owner)
     stop = threading.Event()
@@ -1033,7 +1028,7 @@ def start_run(owner, output_dir, keys=None):
             result = run_interactive_images(
                 _config(owner), output_dir, keys, log=lambda message: _log(owner, message), stop_event=stop,
                 on_progress=lambda key, status: bridge.progress.emit(output_dir, key, status),
-                recompile=_recompile_for(owner))
+                recompile=owner_recompiler(owner))
         except Exception as exc:
             _log(owner, f"❌ Interactive Images failed: {exc}\n{traceback.format_exc()}")
             result = exc
@@ -1082,9 +1077,7 @@ class ImagesFilePanel(QWidget):
         self.total_label = QLabel("Total: 0 | ")
         self.total_label.setStyleSheet("font-size: 9pt;")
         stats.addWidget(self.total_label)
-        for group, text, color in (('built', "✅ Built", '#27ae60'), ('partial', "⚠️ Partial", 'orange'),
-                                   ('stale', "🕒 Stale", '#d69e2e'), ('failed', "❌ Failed", '#e74c3c'),
-                                   ('rejected', "🚫 Rejected", '#e74c3c'), ('not_built', "⬜ Not built", '#5a9fd4')):
+        for group, text, color in ipc.STAT_CHIPS:
             label = QLabel(f"{text}: 0")
             label.setStyleSheet(f"color: {color}; font-size: 9pt;")
             label.setCursor(Qt.PointingHandCursor)
@@ -1277,55 +1270,44 @@ class ImagesFilePanel(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(CONTEXT_MENU_STYLE)
         running = current_run(self.owner) is not None
-        build = menu.addAction(f"🖼 Build / Rebuild ({len(rows)})")
-        build.setEnabled(not running)
-        failed_rows = [r for r in rows if r.status in ('failed', 'partial', 'rejected')]
-        retry = menu.addAction(f"🔁 Retry failed ({len(failed_rows)})")
-        retry.setEnabled(bool(failed_rows) and not running)
-        mark = menu.addAction("❓ Mark for rebuild")
-        menu.addSeparator()
-        built = [r for r in rows if r.stored_status]
-        delete = menu.addAction(f"🗑 Delete images ({len(built)})")
-        delete.setEnabled(bool(built) and not running)
-        menu.addSeparator()
-        open_images = menu.addAction("🖼 Open image(s)")
-        open_images.setEnabled(any(r.images for r in rows))
-        open_chapter = menu.addAction("📄 Open chapter")
-        show_plan = menu.addAction("📋 Show plan")
-        open_folder = menu.addAction("📂 Open folder")
+        actions = {}
+        for action, _label in ipc.ROW_ACTIONS:   # the shared table (the mobile Images tab shows the same)
+            if action in ('delete', 'open_images'):
+                menu.addSeparator()
+            entry = menu.addAction(ipc.action_label(action, rows))
+            entry.setEnabled(ipc.action_reason(action, rows, running=running) is None)
+            actions[entry] = action
         chosen = menu.exec(self.list.mapToGlobal(pos))
         menu.deleteLater()
-        if chosen is None:
+        if chosen is None or chosen not in actions:
             return
-        if chosen == build:
-            self._build([r.key for r in rows])
-        elif chosen == retry:
-            self._build([r.key for r in failed_rows])
-        elif chosen == mark:
-            ipc.mark_for_rerun(core.progress_path(self.output_dir), rows)
+        self.run_action(actions[chosen], rows)
+
+    def run_action(self, action, rows):
+        targets = ipc.action_targets(action, rows)
+        if action in ('build', 'retry'):
+            self._build([r.key for r in targets])
+        elif action == 'mark':
+            ipc.mark_for_rerun(core.progress_path(self.output_dir), targets)
             self.refresh(force=True)
-        elif chosen == delete:
-            self._delete(built)
-        elif chosen == open_images:
-            for row in rows:
+        elif action == 'delete':
+            self._delete(targets)
+        elif action == 'open_images':
+            for row in targets:
                 for path in ipc.open_targets(self.output_dir, row)['images']:
                     self._open_path(path)
-        elif chosen == open_chapter:
-            for row in rows[:5]:
+        elif action == 'open_chapter':
+            for row in targets[:5]:
                 self._open_path(ipc.open_targets(self.output_dir, row)['chapter'])
-        elif chosen == show_plan:
-            self._show_plan(rows)
-        elif chosen == open_folder:
+        elif action == 'show_plan':
+            self._show_plan(targets)
+        elif action == 'open_folder':
             self._open_path(core.interactive_dir(self.output_dir), make=True)
 
     def _delete(self, rows):
         try:
             from review_dialog import confirm_prompt_profile_action
-            ok = confirm_prompt_profile_action(
-                self, "Delete Images",
-                f"Delete the interactive images of {len(rows)} chapter(s)?\n"
-                "The image files are deleted and the figures and classes Glossarion inserted are removed "
-                "from the chapter files (the text stays as it is).")
+            ok = confirm_prompt_profile_action(self, "Delete Images", ipc.delete_confirmation(len(rows)))
         except Exception:
             ok = True
         if not ok:

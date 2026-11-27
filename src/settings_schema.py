@@ -702,6 +702,10 @@ CHOICES_OVERRIDES = {
     # no desktop control; manga_models.rapidocr_model_sets reads it (other values count as auto)
     "rapidocr_language": (("auto", "Auto (from the OCR language hints)"), ("manga", "Japanese / Chinese (manga)"),
                           ("korean", "Korean"), ("builtin", "Built-in (RapidOCR's own Chinese models)")),
+    # Interactive Images settings dialog combos (interactive_images_core.RESOLUTIONS / ASPECT_RATIOS; pinned
+    # equal by tests/test_interactive_images_core.py)
+    "interactive_images_resolution": ("1K", "2K", "4K"),
+    "interactive_images_aspect_ratio": ("auto", "1:1", "3:4", "4:3", "2:3", "3:2", "9:16", "16:9"),
 }
 
 # U9: types the generator inferred from a text widget although the stored value is structured
@@ -978,6 +982,10 @@ LABEL_OVERRIDES = {
     "token_limit_disabled": "Disable input token limit",
     "max_output_tokens": "Max output tokens",
     "remove_excessive_empty_tags_on_device": "Remove excessive empty p and br tags (On-device)",
+    # Interactive Images settings dialog (interactive_images_gui): checkbox texts the generator cannot read
+    "interactive_images_auto_after_translation": "Run Interactive Images after each translation",
+    "interactive_images_recompile_after": "Recompile the EPUB/PDF afterwards (if it was compiled)",
+    "interactive_css_enabled": "Interactive styles",
 }
 
 

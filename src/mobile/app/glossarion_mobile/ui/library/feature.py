@@ -44,6 +44,7 @@ SCREEN_ROUTES = (
     "library.book.metadata",
     "tools.progress",
     "tools.progress.glossary",
+    "tools.progress.images",  # Interactive Images progress (the Book page's Images tab)
 )
 #: Routes this feature ships (for the Tools hub / drawer "implemented" sets; Integrate merges them).
 IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES)
@@ -360,7 +361,7 @@ class LibraryFeature:
             from glossarion_mobile.ui.library.metadata_editor import MetadataEditorScreen
 
             return MetadataEditorScreen(match, ctx)
-        if name in ("tools.progress", "tools.progress.glossary"):
+        if name in ("tools.progress", "tools.progress.glossary", "tools.progress.images"):
             return self.progress_tool_screen(match, ctx)
         return None
 
@@ -371,13 +372,14 @@ class LibraryFeature:
         from glossarion_mobile.ui.router import parse_route
 
         out = match.get("out")
-        tab = "glossary" if match.name == "tools.progress.glossary" else "chapters"
+        tab = {"tools.progress.glossary": "glossary", "tools.progress.images": "images"}.get(match.name, "chapters")
+        titles = {"glossary": "Glossary progress", "images": "Interactive Images"}
         if out:
             book_match = parse_route(f"/library/book/{out}?tab={tab}")
             if book_match is not None:
                 screen = BookPageScreen(book_match, ctx)
                 screen.match = match
-                screen.title = "Glossary progress" if tab == "glossary" else "Progress manager"
+                screen.title = titles.get(tab, "Progress manager")
                 return screen
         from glossarion_mobile.ui.components.empty_state import EmptyState
         from glossarion_mobile.ui.screens.base import Screen
@@ -389,7 +391,7 @@ class LibraryFeature:
             """No ``?out=``: the SourcePicker (Recent outputs · Library · Chat workspaces · Browse; UI_SPEC
             §4.2 / §4.3), then the chosen output folder's Book page (Chapters / Glossary)."""
 
-            title = "Glossary progress" if tab == "glossary" else "Progress manager"
+            title = titles.get(tab, "Progress manager")
             picker: Any = None
             _opened = False
 
