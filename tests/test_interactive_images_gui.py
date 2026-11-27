@@ -171,7 +171,9 @@ def _book(tmp_path):
     import interactive_images_core as core
     import interactive_images_progress_core as ipc
     path = core.progress_path(str(out))
-    html1 = (out / 'response_001_c.html').read_text(encoding='utf-8')
+    html1 = (out / 'response_001_c.html').read_text(encoding='utf-8').replace(
+        '</p>', '</p>' + core.figure_html(core.image_src('Glossarion_ch001_1.png')), 1)
+    (out / 'response_001_c.html').write_text(html1, encoding='utf-8')  # built: the file holds its figure
     ipc.set_entry(path, 'response_001_c.html', {'chapter': 1, 'status': 'completed',
                                                'source_hash': core.visible_text_hash(html1),
                                                'images': [{'file': 'Glossarion_ch001_1.png', 'status': 'completed'}]})
