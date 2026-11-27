@@ -221,19 +221,28 @@ class ImagesModel:
     chapters: List[TranslatedChapter] = field(default_factory=list)
     _hash_cache: dict = field(default_factory=dict)
 
-    def current_hash(self, chapter):
-        """Visible-text hash of a chapter file now (cached per file signature)."""
+    def _read(self, chapter):
+        """``(visible-text hash, has Glossarion markup)`` of a chapter file now (cached per file signature)."""
         sig = progress_signature(chapter.path)
         cached = self._hash_cache.get(chapter.path)
         if cached and cached[0] == sig:
-            return cached[1]
+            return cached[1], cached[2]
         try:
             with open(chapter.path, 'r', encoding='utf-8') as handle:
-                value = core.visible_text_hash(handle.read())
+                html = handle.read()
+            value, injected = core.visible_text_hash(html), core.has_injections(html)
         except OSError:
-            value = ''
-        self._hash_cache[chapter.path] = (sig, value)
-        return value
+            value, injected = '', False
+        self._hash_cache[chapter.path] = (sig, value, injected)
+        return value, injected
+
+    def current_hash(self, chapter):
+        """Visible-text hash of a chapter file now (cached per file signature)."""
+        return self._read(chapter)[0]
+
+    def has_markup(self, chapter):
+        """Whether the chapter file still holds Glossarion's figures / classes / book wrapper."""
+        return self._read(chapter)[1]
 
 
 def open_progress(output_dir):
@@ -274,6 +283,11 @@ def entry_status(model, chapter, entry=None):
     status = str(entry.get('status') or 'pending')
     if status in ('completed', 'css_only', 'partial') and entry.get('source_hash'):
         if model.current_hash(chapter) != entry.get('source_hash'):
+            return 'stale', True
+        # rewritten with the same text (a retranslation that came out identical): the insertions are gone
+        built = any(isinstance(image, dict) and image.get('status') == 'completed'
+                    for image in entry.get('images') or ()) or bool(entry.get('classes'))
+        if built and not model.has_markup(chapter):
             return 'stale', True
     return status, False
 

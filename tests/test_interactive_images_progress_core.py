@@ -205,6 +205,14 @@ def test_retranslated_chapter_shows_stale_and_a_rerun_replaces_images(book):
     assert row.status == 'completed'
 
 
+def test_a_retranslation_with_the_same_text_shows_stale(book):
+    runner.run_interactive_images(dict(CONFIG), str(book), ['response_001_ch1.html'],
+                                  client_factory=_factory({'Ch 1': PLAN1}, []))
+    (book / 'response_001_ch1.html').write_text(CH1, encoding='utf-8')  # same text, the insertions are gone
+    row = next(r for r in ipc.image_rows(ipc.open_progress(str(book))) if r.key == 'response_001_ch1.html')
+    assert row.status == 'stale' and row.stale
+
+
 def test_a_plan_failure_never_touches_the_chapter(book):
     runner.run_interactive_images(dict(CONFIG), str(book), ['response_002_ch2.html'],
                                   client_factory=_factory({'Ch 2': 'I cannot help with that.'}, []))
