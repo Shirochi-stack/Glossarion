@@ -115,3 +115,20 @@ def test_qa_image_counts_ignore_interactive_images():
     assert detect_missing_images(translated, 1, info) == (False, [])
     plain = '<p><img src="images/a.png"/></p>'
     assert _html_preservation_profile(translated)['image_srcs'] == _html_preservation_profile(plain)['image_srcs']
+
+
+def test_pdf_workspace_preflight_counts_interactive_images_as_present(workspace):
+    """Found in the live PDF run: the Rapid PDF compiler's image preflight looked only in images/ and logged
+    "Missing PDF images: Glossarion_ch001_1.png, ..." although the images render from Interactive_Images/."""
+    import pdf_workspace_compiler as pwc
+
+    logs = []
+    contents, stats = pwc._repair_pdf_image_references(str(workspace), [CHAPTER], log_callback=logs.append)
+    assert stats['unresolved'] == 0
+    assert 'src="Interactive_Images/Glossarion_ch001_1.png"' in contents[0]
+    assert not any('Missing PDF images' in str(line) for line in logs)
+    assert any('1 already valid' in str(line) for line in logs)
+    # a missing interactive image is still reported
+    gone = CHAPTER.replace('Glossarion_ch001_1.png', 'Glossarion_ch005_1.png')
+    _contents, stats = pwc._repair_pdf_image_references(str(workspace), [gone], log_callback=logs.append)
+    assert stats['unresolved'] == 1
