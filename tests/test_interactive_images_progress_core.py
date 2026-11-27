@@ -333,3 +333,38 @@ def test_shared_row_action_rules_and_owner_recompiler(tmp_path):
     recompile(str(tmp_path))
     assert calls == [('pdf', str(tmp_path)), ('epub', str(tmp_path))]
     assert owner_recompiler(SimpleNamespace()) is None
+
+
+class _SavingClient(FakeClient):
+    """Like an authgpt/ image reply: the client saves its own copy in the output folder and returns the
+    [GENERATED_IMAGE:path] marker (unified_api_client._save_route_image)."""
+
+    def __init__(self, kind, plans, sent, out):
+        super().__init__(kind, plans, sent)
+        self.out = out
+
+    def send(self, messages, temperature=None, max_tokens=None, context=None):
+        if self.kind == 'text':
+            return super().send(messages, temperature, max_tokens, context)
+        self.count += 1
+        path = os.path.join(self.out, f'image_generation_response_{self.count}_abc_A0.png')
+        data = _png((10, 10, 200))
+        with open(path, 'wb') as handle:
+            handle.write(data)
+        self.tls._last_generated_image_bytes = data
+        self.tls._last_generated_image_path = path
+        return f'[GENERATED_IMAGE:{path}]', 'stop'
+
+
+def test_the_clients_own_saved_copy_of_an_image_is_removed(book):
+    """Found in the live authgpt/ run: the reply's image_generation_response_*.png copy stayed in the book's
+    output folder next to Interactive_Images/Glossarion_ch001_1.png (two copies of every image)."""
+    clients = {}
+
+    def make(kind, model, config, output_dir):
+        return clients.setdefault(kind, _SavingClient(kind, {'Ch 1': PLAN1}, [], output_dir))
+
+    result = runner.run_interactive_images(dict(CONFIG), str(book), ['response_001_ch1.html'], client_factory=make)
+    assert result.completed == 1
+    assert (book / core.INTERACTIVE_FOLDER / 'Glossarion_ch001_1.png').read_bytes() == _png((10, 10, 200))
+    assert not list(book.glob('image_generation_response_*'))

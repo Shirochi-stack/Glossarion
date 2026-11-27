@@ -94,38 +94,47 @@ def image_pool_model(config):
 
 def _image_bytes_from_response(client, content):
     """``(bytes, ext)`` of the image a request returned (thread-local bytes / path, data URI or the
-    ``[GENERATED_IMAGE:path]`` marker); raises when there is none."""
+    ``[GENERATED_IMAGE:path]`` marker); raises when there is none.
+
+    The client also saves its own copy of the reply (``image_generation_response_*.png`` in the book's
+    output folder); the step keeps only its ``Glossarion_chNNN_k`` file, so that copy is removed."""
+    text = str(content or '').strip()
+    match = re.search(r'\[GENERATED_IMAGE:(.*?)\]', text)
+    saved = {match.group(1).strip()} if match else set()
+    found = None
     try:
         tls = client._get_thread_local_client()
+        path = getattr(tls, '_last_generated_image_path', None)
+        if path:
+            saved.add(str(path))
+            try:
+                tls._last_generated_image_path = None
+            except Exception:
+                pass
         data = getattr(tls, '_last_generated_image_bytes', None)
         if data:
             try:
                 tls._last_generated_image_bytes = None
             except Exception:
                 pass
-            return bytes(data), _sniff_ext(data)
-        path = getattr(tls, '_last_generated_image_path', None)
-        if path and os.path.isfile(path):
-            try:
-                tls._last_generated_image_path = None
-            except Exception:
-                pass
+            found = bytes(data)
+        elif path and os.path.isfile(path):
             with open(path, 'rb') as handle:
-                data = handle.read()
-            return data, _sniff_ext(data)
+                found = handle.read()
     except Exception:
         pass
-    text = str(content or '').strip()
-    if text.startswith('data:image/'):
+    if found is None and text.startswith('data:image/'):
         header, _, payload = text.partition(',')
-        data = base64.b64decode(payload)
-        return data, _sniff_ext(data)
-    match = re.search(r'\[GENERATED_IMAGE:(.*?)\]', text)
-    if match and os.path.isfile(match.group(1).strip()):
+        found = base64.b64decode(payload)
+    if found is None and match and os.path.isfile(match.group(1).strip()):
         with open(match.group(1).strip(), 'rb') as handle:
-            data = handle.read()
-        return data, _sniff_ext(data)
-    raise RuntimeError("the image model returned no image")
+            found = handle.read()
+    if found is None:
+        raise RuntimeError("the image model returned no image")
+    ext = _sniff_ext(found)
+    for path in saved:
+        _remove(path)
+    return found, ext
 
 
 def _sniff_ext(data):
