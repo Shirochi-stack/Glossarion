@@ -80,7 +80,9 @@ __all__ = [
 STOP_CLICK_WINDOW = 1.0
 
 #: HTTP client loggers a graceful stop silences (stop_translation).
-HTTP_LOGGER_NAMES = ['httpx', 'httpx2', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']
+HTTP_LOGGER_NAMES = ['httpx', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']
+#: The httpx2 logger (openai 3, anthropic 2, mistralai 3, google-genai 3), silenced with them.
+SDK_HTTP_LOGGER_NAMES = ['httpx2']
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +848,7 @@ def silence_http_loggers():
     """A graceful stop silences the HTTP client loggers (``HTTP_LOGGER_NAMES``)."""
     try:
         import logging
-        for logger_name in HTTP_LOGGER_NAMES:
+        for logger_name in HTTP_LOGGER_NAMES + SDK_HTTP_LOGGER_NAMES:
             logging.getLogger(logger_name).setLevel(logging.CRITICAL)
     except Exception:
         pass
