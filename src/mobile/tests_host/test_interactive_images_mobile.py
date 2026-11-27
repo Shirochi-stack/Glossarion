@@ -411,7 +411,10 @@ def test_tools_screen_styles_presets_native_preview_and_new_from_prompt(tmp_path
         try:
             assert [o.key for o in screen.style_dropdown.options] == list(presets.BUILTIN_PRESET_NAMES)
             assert len(presets.BUILTIN_PRESET_NAMES) == 12
-            # no WebView on a host run: the native view (note, the classes the style defines, its CSS)
+            # nothing renders before the Styles tab is on screen; then, with no WebView on a host run, the native
+            # view (note, the classes the style defines, its CSS)
+            assert screen.preview.renderer == "pending"
+            screen.set_tab("styles")
             assert screen.preview.renderer == "native"
             screen.select_style("LitRPG Status Window")
             assert store[presets.PRESET_KEY] == "LitRPG Status Window"
@@ -457,6 +460,8 @@ def test_preview_webview_serves_the_shared_sample_and_falls_back(tmp_path):
         screen, _ctx, _store, _jobs = _screen(tmp_path, webview=True)
         preview = screen.preview
         try:
+            assert preview.renderer == "pending" and preview.webview is None  # built when the tab shows
+            screen.set_tab("styles")
             assert preview.renderer == "webview"
             url = preview.webview.url
             assert url.startswith("http://127.0.0.1:")

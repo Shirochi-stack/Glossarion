@@ -135,6 +135,9 @@ class StylePreview:
         self.page_ready = False
         self.version = 0
         self.disposed = False
+        #: the WebView is built when the Styles tab is on screen (a TabBarView builds only the visible page, so a
+        #: WebView on a hidden tab never loads and the grace check would give up on it)
+        self.active = False
         self.html = ""
         self._debounce: Any = None
         self._check: Any = None
@@ -156,6 +159,9 @@ class StylePreview:
         """Render ``css`` at once (the first show, a preset switch)."""
         self.css = str(css or "")
         self.html = _presets().preview_document(self.css)
+        if not self.active and self.renderer != "webview":
+            self.renderer = "pending"
+            return self.renderer
         if self.renderer != "native" and self._webview_ok():
             try:
                 self._show_webview()
@@ -164,6 +170,13 @@ class StylePreview:
                 log.exception("the style preview WebView failed; using the native view")
         self._show_native()
         return self.renderer
+
+    def activate(self) -> str:
+        """The Styles tab is on screen: render (the WebView now, so its page can load)."""
+        if self.active and self.renderer in ("webview", "native"):
+            return self.renderer
+        self.active = True
+        return self.show(self.css)
 
     def update_css(self, css: str) -> None:
         """CSS edits: re-rendered after a 300 ms pause in typing."""
@@ -195,14 +208,25 @@ class StylePreview:
             self.page_ready = False
             self.webview = fwv.WebView(
                 url=url, expand=True, on_page_ended=self._on_loaded,
-                prevent_links=["https:", "http:", "intent:", "javascript:", "file:", "content:", "mailto:", "tel:"])
+                prevent_links=["https:", "intent:", "javascript:", "file:", "content:", "mailto:", "tel:"])
             self.slot.content = self.webview
             self.renderer = "webview"
             self.ctx.push(self.slot)
             self._schedule_check(STYLE_PREVIEW_GRACE)
         else:
-            self.webview.url = url
-            self.ctx.push(self.webview)
+            # flet-webview reads ``url`` only when built: the Reader's navigate_webview (load_request) loads it
+            self.ctx.spawn(self._navigate(url))
+
+    async def _navigate(self, url: str) -> None:
+        from glossarion_mobile.ui.reader.reader_view import navigate_webview
+
+        webview = self.webview
+        if webview is None or self.disposed:
+            return
+        try:
+            await navigate_webview(webview, url)
+        except Exception:
+            log.debug("style preview navigation failed", exc_info=True)
 
     def _on_loaded(self, e: Any = None) -> None:
         self.page_ready = True
@@ -297,7 +321,7 @@ class InteractiveImagesScreen(Screen):
         bodies = {"profile": self._profile_tab(), "models": self._models_tab(),
                   "references": self._references_tab(), "styles": self._styles_tab()}
         self.tabs = ft.Tabs(
-            length=len(TABS), selected_index=TABS.index(self.initial_tab), expand=True,
+            length=len(TABS), selected_index=TABS.index(self.initial_tab), expand=True, on_change=self._on_tab,
             content=ft.Column([
                 ft.TabBar(tabs=[ft.Tab(label=_TAB_LABELS[t]) for t in TABS], scrollable=True, key="ix-tabbar"),
                 ft.TabBarView(controls=[bodies[t] for t in TABS], expand=True, key="ix-tabview"),
@@ -320,6 +344,11 @@ class InteractiveImagesScreen(Screen):
         if name in TABS and getattr(self, "tabs", None) is not None:
             self.tabs.selected_index = TABS.index(name)
             self.ctx.push(self.tabs)
+            self._on_tab()
+
+    def _on_tab(self, e: Any = None) -> None:
+        if self.current_tab == "styles":
+            self.preview.activate()
 
     # ---- book ---------------------------------------------------------------------------------------
 
@@ -362,6 +391,7 @@ class InteractiveImagesScreen(Screen):
         self._render_book()
         if self.preview.renderer == "":
             self.preview.show(self._css_for(self.style_name))
+        self._on_tab()
 
     def dispose(self) -> None:
         self.watch.stop()
