@@ -10863,6 +10863,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                 target_loggers = [
                     'unified_api_client',
                     'httpx',
+                    'httpx2',
                     'requests.packages.urllib3',
                     'openai',
                     'bubble_detector',

@@ -98,11 +98,11 @@ dependencies = [
   "google-cloud-vision==3.16.0",           # manga OCR (google_vision_rest stays the no-SDK fallback)
 ]
 # Tier B outcomes that add no pin (U9; details in tests_host/test_tier_b.py):
-# * google-cloud-aiplatform / vertexai: every release requires protobuf<7, which conflicts with
-#   protobuf==7.35.0 (the only Android/iOS protobuf build). Vertex routes run without them:
-#   Gemini through google-genai (vertexai=True) and Claude through anthropic.AnthropicVertex,
-#   both REST with google-auth service-account tokens; unified_api_client skips the unused
-#   aiplatform / vertexai imports on mobile only.
+# * google-cloud-aiplatform / vertexai: aiplatform 2.x requires google-genai<3 (1.x needed
+#   protobuf<7) and the vertexai package pins aiplatform 1.71.1, so neither is installed on
+#   desktop or mobile. Vertex routes run without them: Gemini through google-genai
+#   (vertexai=True) and Claude through anthropic.AnthropicVertex, both REST with google-auth
+#   service-account tokens.
 # * Azure Document Intelligence: azure-ai-documentintelligence 1.0.2 (and azure-ai-formrecognizer
 #   3.3.3) resolve, but ocr_manager imports azure.ai.formrecognizer, never documentintelligence
 #   (DISCREPANCIES "U8 Integrate", OCR providers, desktop bug 3), so the REST client

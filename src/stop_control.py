@@ -80,7 +80,7 @@ __all__ = [
 STOP_CLICK_WINDOW = 1.0
 
 #: HTTP client loggers a graceful stop silences (stop_translation).
-HTTP_LOGGER_NAMES = ['httpx', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']
+HTTP_LOGGER_NAMES = ['httpx', 'httpx2', 'openai', 'google', 'google.api_core', 'google.generativeai', 'urllib3']
 
 
 # ---------------------------------------------------------------------------

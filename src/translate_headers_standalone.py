@@ -1440,6 +1440,7 @@ def _attach_logging_handlers(gui_instance):
         target_loggers = [
             'unified_api_client',
             'httpx',
+            'httpx2',
             'requests.packages.urllib3',
             'openai'
         ]

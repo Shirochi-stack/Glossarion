@@ -102,6 +102,62 @@ def gemini_ignores_sampling(model) -> bool:
     return bool(version and version >= (3, 5))
 
 
+#: google-genai 3.0 moved the Gemini Developer API default from v1beta to v1. The -latest
+#: aliases, most -preview models, the Live API (Lyria RealTime), caches and batch jobs on
+#: preview models exist only on v1beta, so every Developer-API client stays on v1beta (the
+#: google-genai 1.x behaviour). Vertex clients (vertexai=True) keep the SDK default (v1beta1).
+GEMINI_DEVELOPER_API_VERSION = 'v1beta'
+
+
+def new_gemini_api_client(api_key, genai_module=None):
+    """``genai.Client`` for the Gemini Developer API, pinned to GEMINI_DEVELOPER_API_VERSION.
+    Not for Vertex clients. ``genai_module`` defaults to ``google.genai``."""
+    if genai_module is None:
+        from google import genai as genai_module
+    types = getattr(genai_module, 'types', None)
+    http_options_cls = getattr(types, 'HttpOptions', None) if types is not None else None
+    if http_options_cls is None:
+        return genai_module.Client(api_key=api_key)
+    return genai_module.Client(api_key=api_key,
+                               http_options=http_options_cls(api_version=GEMINI_DEVELOPER_API_VERSION))
+
+
+#: Other Settings "Long Decode" values (config ``gemini_long_decode``, env GEMINI_LONG_DECODE).
+GEMINI_LONG_DECODE_MODES = ('auto', 'off', 'on')
+#: One Gemini 4 decode hop ends at this many output tokens; more needs continuation.
+GEMINI_LONG_DECODE_HOP_TOKENS = 65536
+
+
+def uses_gemini_long_decode(model) -> bool:
+    """Gemini 4 models (carbon/argon/neon/hydrogen) continue past one hop with a continuation token."""
+    version = _gemini_version(model)
+    return bool(version and version[0] >= 4)
+
+
+def gemini_long_decode(model, max_output_tokens, mode=None):
+    """``(enabled, reason)``: whether to let google-genai continue a Gemini 4 answer past
+    GEMINI_LONG_DECODE_HOP_TOKENS (automatic continuation). ``mode`` defaults to
+    GEMINI_LONG_DECODE ('off' when unset or unknown). Auto turns on when the output token
+    limit is above one hop. ``reason`` is None when off."""
+    import os
+    if mode is None:
+        mode = os.getenv('GEMINI_LONG_DECODE', 'off')
+    mode = str(mode or 'off').strip().lower()
+    if mode not in GEMINI_LONG_DECODE_MODES:
+        mode = 'off'
+    if mode == 'off' or not uses_gemini_long_decode(model):
+        return False, None
+    if mode == 'on':
+        return True, "Long Decode is On"
+    try:
+        limit = int(max_output_tokens or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit > GEMINI_LONG_DECODE_HOP_TOKENS:
+        return True, f"Long Decode is Auto and the output token limit {limit:,} is above {GEMINI_LONG_DECODE_HOP_TOKENS:,}"
+    return False, None
+
+
 _SAMPLING_KEYS = ('temperature', 'top_p', 'top_k', 'topP', 'topK')
 
 

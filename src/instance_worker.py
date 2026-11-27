@@ -422,7 +422,7 @@ class _ProcessHost:
 
 #: Loggers whose records the API client log handlers forward to the log (as the GUI log shows them);
 #: they reach run_instance_N.log through stdout, so the file handler leaves them out.
-_CLIENT_LOGGERS = ("unified_api_client", "httpx", "requests.packages.urllib3", "openai")
+_CLIENT_LOGGERS = ("unified_api_client", "httpx", "httpx2", "requests.packages.urllib3", "openai")
 
 
 def _configure_output(log_path, instance):
