@@ -20,14 +20,11 @@ jobs:
         # tests/parity) read `git show <base sha>:src/...` and fail in CI when it is missing.
         fetch-depth: 0
     
-    - name: Set up uv
-      uses: astral-sh/setup-uv@v10.2.0
-
-    - name: Set up Python 3.10
-      run: |
-        # Use Astral's CPython distribution because the runner no longer caches 3.10.
-        uv venv --seed --python 3.10 "$RUNNER_TEMP/glossarion-test-venv"
-        echo "$RUNNER_TEMP/glossarion-test-venv/bin" >> "$GITHUB_PATH"
+    - name: Set up Python 3.12
+      # Same interpreter as the desktop build jobs (build-windows/linux/macos/all).
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
     
     - name: Install Cairo and headless Qt dependencies
       run: |
@@ -67,7 +64,7 @@ jobs:
         python -c "import sys; sys.path.insert(0, 'src'); import unified_api_client"
         echo "Basic import test passed!"
 
-    - name: Mobile shared-module and backend patch tests (Python 3.10)
+    - name: Mobile shared-module and backend patch tests (Python 3.12)
       env:
         # tests/conftest.py (which puts src/ on sys.path locally) is not tracked.
         PYTHONPATH: ${{ github.workspace }}/src

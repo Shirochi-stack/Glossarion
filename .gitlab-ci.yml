@@ -208,7 +208,7 @@ desktop-tests:
   - if: $GLOSSARION_TASK == "desktop-tests" || $GLOSSARION_TASK == "ci"
   script:
   - python .gitlab/ci.py desktop-tests
-  image: python:3.10-bookworm
+  image: python:3.12-bookworm
   before_script:
   - apt-get update -qq && apt-get install -y --no-install-recommends libcairo2-dev
     pkg-config python3-dev libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3 libfontconfig1
