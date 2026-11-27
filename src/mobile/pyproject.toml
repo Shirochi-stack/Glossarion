@@ -26,7 +26,7 @@ dependencies = [
   "six==1.17.0",
 
   # Text / tokens
-  "tiktoken==0.13.0",
+  "tiktoken==0.14.0",
   "regex==2026.5.9",
   "rapidfuzz==3.14.5",
   "langdetect==1.0.9",
@@ -45,19 +45,22 @@ dependencies = [
   "httpcore==1.0.9",
   "anyio==4.14.2",
 
-  # LLM SDKs: the httpx-based majors the desktop is tested with
-  "openai>=2.32,<3",
-  "anthropic>=0.92,<1",
-  "google-genai>=1.73.1,<2",
+  # LLM SDKs: the same majors as the desktop (httpx2-based; httpx stays for our own streaming code)
+  "openai>=3.60,<4",
+  "anthropic>=2.14,<3",
+  "google-genai>=3.6.1,<4",
+  "httpx2==2.16.2",
+  "httpcore2==2.16.2",
+  "truststore==0.10.5",
   "pydantic==2.13.4",
   "pydantic-core==2.46.4",
-  "jiter==0.15.0",
+  "jiter==0.19.0",
   "websockets>=13,<17",
-  "deepl==1.29.0",
+  "deepl==2.0.0",
   "deep-translator==1.11.4",
 
   # Auth / crypto
-  "google-auth==2.49.1",
+  "google-auth==2.63.1",
   "cryptography==50.0.2",  # includes PKCS#7 oracle fix; mobile builds need patched wheels
   "cffi==2.0.0",
 
