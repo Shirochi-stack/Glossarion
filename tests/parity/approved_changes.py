@@ -6424,6 +6424,11 @@ _LONG_DECODE_LEGACY = {'src/translator_gui.py': [("        os.environ['GEMINI_SE
 _LONG_DECODE_SCHEMA = {'src/settings_schema_data.py': [("     'var_names': ('fuzzy_auto_mapping_threshold_var',)},\n    'gemini_openai_endpoint': {", '     \'var_names\': (\'fuzzy_auto_mapping_threshold_var\',)},\n    \'gemini_long_decode\': {\'choices\': ((\'auto\', \'Auto\'), (\'off\', \'Off\'), (\'on\', \'On\')),\n     \'default\': \'off\',\n     \'default_source\': \'init\',\n     \'dialog_default\': \'off\',\n     \'env\': ((\'GEMINI_LONG_DECODE\', \'translation\', \'off\'),\n             (\'GEMINI_LONG_DECODE\', \'glossary\', \'off\'),\n             (\'GEMINI_LONG_DECODE\', \'startup\', \'off\'),\n             (\'GEMINI_LONG_DECODE\', \'startup\', \'<none>\')),\n     \'init_default\': \'off\',\n     \'label\': \'Long Decode (Gemini 4):\',\n     \'origins\': (\'init\', \'dialog\', \'env\'),\n     \'tooltip\': "<qt><p style=\'white-space: normal; max-width: 32em; margin: 0;\'>Gemini 4 models "\n                \'write at most 65,536 output tokens per decode hop. Long Decode lets the answer \'\n                \'continue in further hops (continuation token) up to the output token limit; each \'\n                \'hop is billed and re-reads the prompt.<br><b>Auto</b>: on when the output token \'\n                \'limit is above 65,536.<br><b>Off</b>: the answer stops after one hop (handled as \'\n                \'truncated).<br><b>On</b>: always continue.<br>Gemini API and Vertex AI through \'\n                \'the google-genai SDK only (not the gRPC transport).</p></qt>\',\n     \'type\': \'choice\',\n     \'ui_group\': \'Response Handling & Retry Logic\',\n     \'ui_sites\': (\'other.response\',),\n     \'var_names\': (\'gemini_long_decode_var\',)},\n    \'gemini_openai_endpoint\': {')], 'src/settings_schema.py': [('    "gemini_service_tier": ("off", "standard", "flex", "fast", "priority"),  # gemini_service_tier_combo\n    "epub_layout_mode"', '    "gemini_service_tier": ("off", "standard", "flex", "fast", "priority"),  # gemini_service_tier_combo\n    "gemini_long_decode": (("auto", "Auto"), ("off", "Off"), ("on", "On")),  # gemini_long_decode_combo\n    "epub_layout_mode"')]}
 
 
+# 2026-11-27 google-genai 3 (AI SDK upgrade): Gemini batch clients come from
+# gemini_policy.new_gemini_api_client, pinned to the v1beta Developer API version
+_GENAI3_BATCH_CLIENT = [('\n                client = genai.Client(api_key=api_key)\n', '\n                from gemini_policy import new_gemini_api_client\n                client = new_gemini_api_client(api_key, genai)\n'), ('\n            client = genai.Client(api_key=api_key)\n', '\n            from gemini_policy import new_gemini_api_client\n            client = new_gemini_api_client(api_key, genai)\n')]
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -8185,6 +8190,16 @@ APPROVED = (
         "source": {
             **_LONG_DECODE_LEGACY,
             **_LONG_DECODE_SCHEMA,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-27",
+        "what": "google-genai 3 defaults the Gemini Developer API to v1 (no -latest aliases, previews, Live API "
+                "or caches there): the Gemini batch submit / status / results / cancel clients stay on v1beta "
+                "through gemini_policy.new_gemini_api_client",
+        "source": {
+            "src/async_api_processor.py": _GENAI3_BATCH_CLIENT,
         },
         "values": {},
     },
