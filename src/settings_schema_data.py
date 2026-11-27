@@ -11432,7 +11432,7 @@ SETTINGS = {
      'ui_group': 'Response Handling & Retry Logic',
      'ui_sites': ('other.response',),
      'var_names': ('thinking_budget_var',)},
-    'thinking_level': {'choices': ('minimal', 'low', 'medium', 'high'),
+    'thinking_level': {'choices': ('minimal', 'low', 'medium', 'high', 'xhigh'),
      'converter': ('str',),
      'default': 'high',
      'default_source': 'init',

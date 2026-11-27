@@ -74,6 +74,27 @@ def uses_gemini_thinking_level(model) -> bool:
     return bool(version and version[0] >= 3)
 
 
+GEMINI_THINKING_LEVELS = ('minimal', 'low', 'medium', 'high', 'xhigh')
+
+
+def gemini_thinking_level(model, level) -> str:
+    """The level to send for *model*: unknown values become ``high``; ``xhigh`` exists only on
+    Gemini 4 Neon/Hydrogen (``high`` elsewhere); ``minimal`` is rejected by Gemini 3 Pro,
+    Gemini 4 and gemini-3.8-flash (``low`` there)."""
+    level = str(level or '').strip().lower()
+    if level not in GEMINI_THINKING_LEVELS:
+        level = 'high'
+    name = str(model or '').lower()
+    version = _gemini_version(name)
+    if level == 'xhigh' and not ('gemini-4-neon' in name or 'gemini-4-hydrogen' in name):
+        level = 'high'
+    if level == 'minimal' and version and (
+            version[0] >= 4 or version == (3, 8)
+            or (version[0] == 3 and 'pro' in name and 'flash' not in name)):
+        level = 'low'
+    return level
+
+
 def gemini_ignores_sampling(model) -> bool:
     """Gemini 3.5 and later ignore temperature, top_p and top_k (deprecated 2026-07-21; Gemini 4
     Argon: "If provided, they are ignored"). Gemini 3 and 3.1 still use them."""

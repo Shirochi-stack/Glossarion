@@ -179,12 +179,15 @@ import html
 import builtins as _builtins
 try:
     from gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
-                               omit_gemini_legacy_parameters, gemini_ignores_sampling,
+                               gemini_thinking_level, GEMINI_THINKING_LEVELS, omit_gemini_legacy_parameters, gemini_ignores_sampling,
                                gemini_safety_thresholds, describe_gemini_safety)
 except ImportError:
     from .gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
-                                omit_gemini_legacy_parameters, gemini_ignores_sampling,
+                                gemini_thinking_level, GEMINI_THINKING_LEVELS, omit_gemini_legacy_parameters, gemini_ignores_sampling,
                                 gemini_safety_thresholds, describe_gemini_safety)
+import warnings as _warnings
+# google-genai 1.x has no XHIGH enum member; it still sends "xhigh", which the API accepts.
+_warnings.filterwarnings('ignore', message=r'xhigh is not a valid ThinkingLevel')
 try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
@@ -16851,16 +16854,8 @@ class UnifiedClient:
                         _thinking_budget_v = 0
 
                     # Thinking level (Gemini 3)
-                    _thinking_level_v = (os.getenv("GEMINI_THINKING_LEVEL", "high") or "high").strip().lower()
-                    if _thinking_level_v not in ("minimal", "low", "medium", "high"):
-                        _thinking_level_v = "high"
-
-                    # Gemini 3 Pro (non-flash) does not accept thinking_level=minimal
-                    if ("gemini-3" in _model_lower_vertex
-                            and "pro" in _model_lower_vertex
-                            and "flash" not in _model_lower_vertex
-                            and _thinking_level_v == "minimal"):
-                        _thinking_level_v = "low"
+                    _thinking_level_v = gemini_thinking_level(
+                        _model_lower_vertex, os.getenv("GEMINI_THINKING_LEVEL", "high"))
 
                     # Gemini 2.5 Pro cannot fully disable thinking (budget=0 → error)
                     if "gemini-2.5-pro" in _model_lower_vertex and _thinking_budget_v == 0:
@@ -18058,9 +18053,7 @@ class UnifiedClient:
                 except Exception:
                     is_gemini_3 = uses_gemini_thinking_level(model_lower)
             if is_gemini_3:
-                level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
-                if level not in ('minimal', 'low', 'medium', 'high'):
-                    level = 'high'
+                level = gemini_thinking_level(_model_for_detect, os.getenv('GEMINI_THINKING_LEVEL', 'high'))
                 return f" (thinking level: {level})"
             # Gemini 2.x / Gemma: budget-based
             try:
@@ -22046,12 +22039,7 @@ class UnifiedClient:
             level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
             if level == 'none':
                 return None
-            if level not in ('minimal', 'low', 'medium', 'high'):
-                level = 'high'
-
-            # Gemini 3 Pro variants do not accept the minimal level.
-            if 'pro' in model_lower and 'flash' not in model_lower and level == 'minimal':
-                level = 'low'
+            level = gemini_thinking_level(model_lower, level)
             return {
                 "thinking_level": level.upper(),
                 "include_thoughts": True,
@@ -22923,7 +22911,7 @@ class UnifiedClient:
         model_lower = request_model.lower() if request_model else ""
 
         # Normalize unexpected values defensively
-        if thinking_level not in ("minimal", "low", "medium", "high"):
+        if thinking_level not in GEMINI_THINKING_LEVELS:
             thinking_level = "high"
 
         # If user tries to disable thinking via budget=0, map to the lowest supported level per model
@@ -22950,13 +22938,15 @@ class UnifiedClient:
             if not self._is_stop_requested() and not getattr(self, '_gemini25_thinking_alert_shown', False):
                 print("   ⚠️ Gemini 2.5 Pro does not support disabled thinking; using minimal budget of 128 instead of 0")
                 self._gemini25_thinking_alert_shown = True
-        # Gemini 3.x Pro (non-flash) does not support thinking_level=minimal; coerce to low.
-        if "gemini-3" in model_lower and "pro" in model_lower and "flash" not in model_lower:
-            if thinking_level == "minimal":
-                thinking_level = "low"
-                if not getattr(self.__class__, '_gemini3_pro_minimal_alert_shown', False) and not self._is_stop_requested():
-                    print("   ⚠️ Gemini 3 Pro does not support thinking_level=minimal; falling back to low")
-                    self.__class__._gemini3_pro_minimal_alert_shown = True
+        # Levels a model does not have (minimal on Gemini 3 Pro / Gemini 4, xhigh outside
+        # Gemini 4 Neon/Hydrogen) fall back to the nearest one it accepts.
+        _supported_level = gemini_thinking_level(model_lower, thinking_level)
+        if _supported_level != thinking_level:
+            _alert_key = f"_gemini_level_alert_{thinking_level}_{model_lower}"
+            if not getattr(self.__class__, _alert_key, False) and not self._is_stop_requested():
+                print(f"   ⚠️ {request_model} does not support thinking_level={thinking_level}; using {_supported_level}")
+                setattr(self.__class__, _alert_key, True)
+            thinking_level = _supported_level
         
         # Check if image output mode is enabled
         enable_image_output = self._image_output_mode_enabled()
