@@ -318,6 +318,8 @@ class ConfigStateMixin:
         self.enable_thoughts_var = self.config.get('enable_thoughts', True)
         self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off')
         os.environ['GEMINI_SERVICE_TIER'] = self.gemini_service_tier_var
+        self.gemini_long_decode_var = str(self.config.get('gemini_long_decode', 'off') or 'off').lower()
+        os.environ['GEMINI_LONG_DECODE'] = self.gemini_long_decode_var
         self.force_service_tier_unknown_routes_var = bool(
             self.config.get('force_service_tier_unknown_routes', False)
         )

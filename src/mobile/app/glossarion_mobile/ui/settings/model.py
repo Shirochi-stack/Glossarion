@@ -245,7 +245,7 @@ CURATED_SECTIONS: tuple = (
     )),
     ("thinking", "Thinking & reasoning", "Models & keys", (
         # Enable thoughts follows the Streaming switch (Response handling & retries, owner 2026-10-08)
-        ("Gemini", ("enable_gemini_thinking", "thinking_budget", "thinking_level")),
+        ("Gemini", ("enable_gemini_thinking", "thinking_budget", "thinking_level", "gemini_long_decode")),
         ("OpenAI / OpenRouter", ("enable_gpt_thinking", "gpt_effort", "gpt_reasoning_tokens",
                                  "openrouter_use_reasoning_tokens", "pass_thinking_all_openai")),
         ("Anthropic", ("enable_anthropic_thinking", "anthropic_effort", "anthropic_force_adaptive",

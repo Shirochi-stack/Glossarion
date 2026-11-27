@@ -967,6 +967,7 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
                 os.environ['THINKING_BUDGET'] = self.thinking_budget_var if self.enable_gemini_thinking_var else '0'
                 os.environ['GEMINI_THINKING_LEVEL'] = getattr(self, 'thinking_level_var', 'high')
                 os.environ['GEMINI_SERVICE_TIER'] = getattr(self, 'gemini_service_tier_var', 'off')
+                os.environ['GEMINI_LONG_DECODE'] = getattr(self, 'gemini_long_decode_var', 'off')
                 os.environ['FORCE_SERVICE_TIER_UNKNOWN_ROUTES'] = '1' if self.force_service_tier_unknown_routes_var else '0'
                 # GPT/OpenRouter reasoning
                 os.environ['ENABLE_GPT_THINKING'] = "1" if self.enable_gpt_thinking_var else "0"

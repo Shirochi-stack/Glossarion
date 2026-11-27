@@ -174,6 +174,7 @@ jobs:
           tests/test_auth_pool_dropdowns.py \
           tests/test_image_pool_config_persistence.py \
           tests/test_gemini_future_and_br_chapters.py \
+          tests/test_gemini_long_decode.py \
           tests/test_webtoon_run_fixes.py \
           tests/test_console_window.py \
           tests/test_relations_tracking.py \

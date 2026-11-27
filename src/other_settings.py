@@ -3609,6 +3609,44 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for Gemini controls
     self.toggle_thinking_budget()
 
+    # Long Decode (Gemini 4): answers longer than one 65,536-token hop continue with a
+    # continuation token (google-genai automatic continuation). Not tied to thinking.
+    if not hasattr(self, 'gemini_long_decode_var'):
+        self.gemini_long_decode_var = str(self.config.get('gemini_long_decode', 'off') or 'off').lower()
+    long_decode_row = QWidget()
+    long_decode_h = QHBoxLayout(long_decode_row)
+    long_decode_h.setContentsMargins(20, 2, 0, 0)
+    long_decode_h.addWidget(QLabel("Long Decode (Gemini 4):"))
+    self.gemini_long_decode_combo = QComboBox()
+    for label, data in [("Auto", "auto"), ("Off", "off"), ("On", "on")]:
+        self.gemini_long_decode_combo.addItem(label, data)
+    self.gemini_long_decode_combo.setFixedWidth(80)
+    self.gemini_long_decode_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.gemini_long_decode_combo)
+    self._disable_combobox_mousewheel(self.gemini_long_decode_combo)
+    self.gemini_long_decode_combo.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Gemini 4 models write at most 65,536 output tokens per decode hop. Long Decode lets the "
+        "answer continue in further hops (continuation token) up to the output token limit; "
+        "each hop is billed and re-reads the prompt.<br>"
+        "<b>Auto</b>: on when the output token limit is above 65,536.<br>"
+        "<b>Off</b>: the answer stops after one hop (handled as truncated).<br>"
+        "<b>On</b>: always continue.<br>"
+        "Gemini API and Vertex AI through the google-genai SDK only (not the gRPC transport)."
+        "</p></qt>"
+    )
+    self.gemini_long_decode_combo.setCurrentIndex(
+        max(0, self.gemini_long_decode_combo.findData(self.gemini_long_decode_var)))
+    def _on_long_decode_changed(_index):
+        value = self.gemini_long_decode_combo.currentData() or 'off'
+        self.gemini_long_decode_var = value
+        self.config['gemini_long_decode'] = value
+        os.environ['GEMINI_LONG_DECODE'] = value
+    self.gemini_long_decode_combo.currentIndexChanged.connect(_on_long_decode_changed)
+    long_decode_h.addWidget(self.gemini_long_decode_combo)
+    long_decode_h.addStretch()
+    section_v.addWidget(long_decode_row)
+
     # DeepSeek Thinking Mode
     deepseek_title = QLabel("DeepSeek Thinking Mode")
     deepseek_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
