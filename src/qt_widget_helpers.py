@@ -61,10 +61,11 @@ ARROW_STYLE = ("QPushButton { background: #444; color: white; border-radius: 4px
                "QPushButton:hover { background: #666; }")
 
 
-def style_combo(combo):
+def style_combo(combo, extra=""):
     """The app's dropdown look: the Halgakos icon as the arrow (``review_dialog._halgakos_arrow_style``, as on the
     Glossary Manager's "Earlier relations shown"), and the mouse wheel does not change the choice. (Moved here
-    from relations_diagram_dialog so the Library settings use the same one.)"""
+    from relations_diagram_dialog so the Library settings use the same one.) ``extra`` is appended to the
+    sheet (colours, font size; the Progress Manager's file dropdown)."""
     combo.wheelEvent = lambda event: event.ignore()
     try:
         from review_dialog import _halgakos_arrow_style
@@ -76,7 +77,7 @@ def style_combo(combo):
                 width: 22px;
                 border-left: 1px solid #4a5568;
             }
-        """)
+        """ + (extra or ""))
     except Exception:
         pass
 
