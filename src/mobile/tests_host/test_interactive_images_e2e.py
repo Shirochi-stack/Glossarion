@@ -41,6 +41,14 @@ isolated = I7.isolated
 IMAGE_MODEL = "gpt-image-1"  # an OpenAI image model: the custom endpoint's /images/generations
 
 
+async def _translation(js):
+    """The translate job Start queued (already in the history on a fast runner)."""
+    snap = await I7._until(lambda: next((s for s in [js.snapshot(), *js.view().history]
+                                         if s is not None and I7._kind(s) == "translate"), None), 60)
+    assert snap is not None, "Start did not run a translation"
+    return snap
+
+
 def test_translate_then_build_interactive_images_from_the_images_tab(isolated):
     from glossarion_mobile.diagnostics.fake_llm_server import FAKE_PNG, FakeLLMServer
 
@@ -64,8 +72,7 @@ def test_translate_then_build_interactive_images_from_the_images_tab(isolated):
             await driver.tap(key="start", timeout=10)
             if await driver.exists(text="Keep translations running", timeout=2):
                 await driver.tap(text="Not now")
-            snap = await I7._until(lambda: js.snapshot(), 60)
-            assert snap is not None and I7._kind(snap) == "translate"
+            snap = await _translation(js)
             done = await I7._wait_end(js, snap.id)
             assert I7._state(done) == "DONE", getattr(done, "error", done)
 
@@ -141,7 +148,7 @@ def test_run_after_each_translation_illustrates_inside_the_translation_job(isola
             await driver.tap(key="start", timeout=10)
             if await driver.exists(text="Keep translations running", timeout=2):
                 await driver.tap(text="Not now")
-            snap = await I7._until(lambda: js.snapshot(), 60)
+            snap = await _translation(js)
             done = await I7._wait_end(js, snap.id)
             assert I7._state(done) == "DONE", getattr(done, "error", done)
             kinds = [r.kind for r in server.requests]

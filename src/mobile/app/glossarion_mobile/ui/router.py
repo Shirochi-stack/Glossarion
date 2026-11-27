@@ -145,7 +145,7 @@ _TOOLS = (
     # slug, title, milestone, query
     ("progress", "Progress manager", "U5"),
     ("progress/glossary", "Glossary progress", "U5"),
-    ("progress/images", "Interactive Images progress", "U9"),
+    ("progress/images", "Interactive Images progress", "U10"),
     ("qa", "QA scanner", "U6"),
     ("glossary-names", "Glossary name mismatches", "U6"),
     ("convert", "Compile EPUB / PDF", "U6"),
@@ -155,7 +155,7 @@ _TOOLS = (
     ("sdlxliff", "SDLXLIFF reviewer", "U7"),
     ("manga", "Manga translator", "U8"),
     ("rpgmaker", "RPG Maker", "U7"),
-    ("interactive-images", "Interactive Images", "U9"),
+    ("interactive-images", "Interactive Images", "U10"),
 )
 
 ROUTES: tuple[RouteSpec, ...] = (

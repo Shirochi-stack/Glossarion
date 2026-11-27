@@ -1655,7 +1655,9 @@ def test_tools_feature_wraps_the_screen_factory(tmp_path):
         assert IMPLEMENTED_ROUTES == {"tools", "tools.qa", "tools.qa.report", "tools.glossary-names",
                                       "tools.convert", "tools.headers",
                                       # U7 (screens: tests_host/test_tools_u7.py)
-                                      "tools.async", "tools.review", "tools.sdlxliff", "tools.rpgmaker"}
+                                      "tools.async", "tools.review", "tools.sdlxliff", "tools.rpgmaker",
+                                      # Interactive Images (tests_host/test_interactive_images_mobile.py)
+                                      "tools.interactive-images"}
 
     asyncio.run(scenario())
 

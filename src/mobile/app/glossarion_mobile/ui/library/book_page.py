@@ -398,7 +398,7 @@ class BookPageScreen(Screen):
 
     def handle_back(self) -> bool:
         """Android back leaves the Chapters / Glossary selection mode first (UI_SPEC §1.6 rule 2)."""
-        for tab in (self.chapters, self.glossary_tab, self.images_tab):
+        for tab in (self.chapters, self.glossary_tab, getattr(self, "images_tab", None)):
             if getattr(tab, "selecting", False):
                 tab.exit_selection()
                 return True
@@ -442,7 +442,7 @@ class BookPageScreen(Screen):
                                              self.progress)
             if gp_signature != self._gp_signature:
                 await self.reload_glossary()
-        if self.images is not None:
+        if getattr(self, "images", None) is not None:
             ix_signature = await self.ctx.io(pm.images_signature, self.service, self.book)
             if ix_signature != self._ix_signature:
                 await self.reload_images()
@@ -484,7 +484,7 @@ class BookPageScreen(Screen):
             await self.reload_details("full")
             if self.glossary is not None:
                 await self.reload_glossary()
-            if self.images is not None:
+            if getattr(self, "images", None) is not None:
                 await self.reload_images(force=True)
             await self.service.refresh(reason="book page")
         finally:
@@ -626,13 +626,15 @@ class BookPageScreen(Screen):
         self._render_strip()
         self.chapters.sync_run_buttons(view)  # issue 7: Run translation / Run QA scan follow every job event
         self.glossary_tab.sync_extract_button(view)
-        self.images_tab.sync_build_button(view)
+        images_tab = getattr(self, "images_tab", None)
+        if images_tab is not None:
+            images_tab.sync_build_button(view)
         self._maybe_review(job)
         if finished:
             self.ctx.spawn(self.reload_progress())
             if self.glossary is not None:  # a glossary extraction may have written its progress
                 self.ctx.spawn(self.reload_glossary())
-            if self.images is not None:  # an Interactive Images run, or a retranslation (stale rows)
+            if getattr(self, "images", None) is not None:  # an Interactive Images run, or a retranslation (stale rows)
                 self.ctx.spawn(self.reload_images())
 
     # ---- U9: the Library glossary review gate (UI_SPEC §3.10, Appendix C) -------------------------------
