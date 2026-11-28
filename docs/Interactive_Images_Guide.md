@@ -51,7 +51,6 @@ The image model never sees your HTML, and the planner never rewrites your chapte
   - **Interactive styles** checkbox, the **style dropdown**, **🎨 Styles & Preview…** and its own **Clear**
   - **🖼 Interactive Images…** — the main settings window
 - **Progress Manager → 🖼 Interactive Images tab** — build, rebuild, delete and browse (section 10)
-- **Progress Manager → 📖 Translation tab** — a **🖼 Interactive Images** button
 
 **Mobile:** **Tools → Interactive Images**, a book's **Images** tab, and **Settings → EPUB output → Interactive images**.
 
@@ -63,7 +62,7 @@ The image model never sees your HTML, and the planner never rewrites your chapte
 
 ✅ **DO** have a glossary for the book. Character names come from it, so the planner uses the same spelling every time. Interactive Images uses **the same glossary translation uses**: the one you loaded with **Load Glossary** in the main window (or the one Glossarion auto-loaded for the book), otherwise the glossary the **Glossary Mode** (Balanced / Full / and so on) wrote. There is nothing to load or pick in Interactive Images itself.
 
-✅ **DO** pick an image model that can take **reference images** (for example Nano Banana / Gemini image models or `authgpt/` models). The settings window warns you when the chosen image model takes none.
+✅ **DO** pick an image model that can take **reference images** (for example Nano Banana / Gemini image models or `authgpt/` models). The settings window warns you when the chosen image model takes none. If you translate with an `authgpt/` or `authgem/` model, you need no separate image model: see the quick start in section 4.
 
 ⚠️ **DON'T** expect small local text models to plan well on long chapters. The planner must answer in JSON; a weak model may fail some chapters (they are marked failed and can be retried).
 
@@ -83,6 +82,19 @@ The image model never sees your HTML, and the planner never rewrites your chapte
 Watch the log. Each finished chapter shows ✅, and the book is recompiled at the end (if *Recompile after* is on), so the new pictures are in your EPUB/PDF.
 
 > **Try it on a few chapters first.** Select a few rows in the tab and use **Build / Rebuild** from the right-click menu.
+
+### Quick start with an `authgpt/` model (nothing else to set up)
+
+If you translate with an `authgpt/` model (ChatGPT sign-in), that same model can plan **and** draw, so you need no image model and no extra keys:
+
+1. Make sure your translation model is the `authgpt/` model and you are signed in (translate one chapter if you are unsure).
+2. **Turn the 🔑 Image Gen/Edit pool off**, or leave it empty. When it is on, its model draws instead.
+3. **⚙️ Other Setting → 🖼 Interactive Images…** → profile **Default**, leave **Text model** and **Image model** empty. The Art style is already `Anime illustration, clean line art, cel shading`.
+4. Optional: add reference pictures for the main characters, and tick **Interactive styles** in Other Settings (with a style picked) for styled frames and status windows.
+5. **💾 Save**.
+6. **Progress Manager → 🖼 Interactive Images tab** → select a few rows → right-click → **Build / Rebuild**. When those look right, click **▶ Build pending** for the rest.
+
+The log shows `the text model` as the image source. To have it run by itself after every translation, tick **Run after each translation**.
 
 ---
 
