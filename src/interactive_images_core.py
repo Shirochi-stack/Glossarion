@@ -1017,12 +1017,25 @@ def _bool(value):
     return bool(value)
 
 
+def upgrade_draft_planner(text):
+    """A stored planner prompt that is exactly the earlier draft default (before the ``{image_subjects}`` line was
+    added) becomes the current default, so a config that already saved the draft gets the Image subjects
+    setting; any text the user edited stays as it is."""
+    import prompt_defaults as pd
+
+    current = pd.DEFAULT_INTERACTIVE_IMAGES_PLANNER_PROMPT
+    legacy = current.replace('{image_subjects}\n', '', 1)
+    return current if str(text) == legacy else text
+
+
 def settings_from_config(config):
     """The step's settings from an owner config (the active profile's prompts are its runtime keys)."""
     import prompt_defaults as pd
 
     def prompt(key, default):
         value = (config or {}).get(key)
+        if value is not None and key == 'interactive_images_planner_prompt':
+            value = upgrade_draft_planner(value)
         return default if value is None else str(value)
 
     try:
@@ -1397,6 +1410,11 @@ class InteractiveImagesProfiles(_profiles_base()):
     def __init__(self, owner, *, persist=None, log=None, on_runtime=None):
         self.on_runtime = on_runtime
         super().__init__(owner, dict(self.DEFAULT_BUILTIN), persist=persist, log=log)
+
+    def _clean_set(self, value, fallback):
+        cleaned = super()._clean_set(value, fallback)
+        cleaned['planner'] = upgrade_draft_planner(cleaned.get('planner', ''))
+        return cleaned
 
     def _write_runtime(self, texts):
         values = dict(texts)

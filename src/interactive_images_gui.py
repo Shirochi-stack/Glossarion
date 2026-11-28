@@ -3,8 +3,11 @@
 - ``add_interactive_styles_rows``: the rows under Attach CSS in Other Settings (EPUB section).
 - ``InteractiveImagesDialog``: profiles, images per chapter, prompts, models (+ the Image keys
   preview), max reference images, run options and the per-book reference images.
-- ``InteractiveStylesDialog``: the 12 built-in CSS presets and the user's own, with a live preview
+- ``InteractiveStylesDialog``: the 22 built-in CSS presets and the user's own, with a live preview
   (Qt WebEngine when the build has it, else a QTextBrowser).
+- ``PlaceholderTextDialog``: the editable texts the placeholders expand to (right-click a prompt editor >
+  "Edit placeholder text…").
+- ``InteractiveImagesGalleryDialog``: the book's images as cards with multi-select delete.
 - ``build_images_page``: the Progress Manager's Interactive Images tab.
 
 All logic lives in ``interactive_images_core`` / ``interactive_images_progress_core`` /

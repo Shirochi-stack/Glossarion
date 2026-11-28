@@ -469,3 +469,21 @@ def test_gallery_delete_skips_a_chapter_whose_text_would_change(gallery_book, mo
     assert 'Glossarion_ch001_1.png' in (gallery_book / 'response_001_a.html').read_text(encoding='utf-8')
     assert ipc.delete_gallery_images(str(gallery_book), []).deleted == 0
     assert '2 image' in ipc.gallery_delete_confirmation(2)
+
+
+def test_a_saved_draft_planner_prompt_is_upgraded_but_an_edited_one_is_not():
+    current = prompt_defaults.DEFAULT_INTERACTIVE_IMAGES_PLANNER_PROMPT
+    draft = current.replace('{image_subjects}\n', '')
+    assert draft != current and core.upgrade_draft_planner(draft) == current
+    assert core.upgrade_draft_planner(current) == current
+    edited = draft + '\nMy extra rule.'
+    assert core.upgrade_draft_planner(edited) == edited
+    # the runner reads the runtime key: a config that saved the draft gets the Image subjects line
+    assert core.settings_from_config({'interactive_images_planner_prompt': draft}).planner_prompt == current
+    assert core.settings_from_config({'interactive_images_planner_prompt': edited}).planner_prompt == edited
+    # ... and so does the profile engine (the saved Default / named profiles)
+    from types import SimpleNamespace
+    owner = SimpleNamespace(config={core.InteractiveImagesProfiles.DEFAULT_KEY: {
+        'planner': draft, 'image_system': '', 'image': 'img', 'css': 'css', 'per_chapter': '1'}})
+    profiles = core.InteractiveImagesProfiles(owner)
+    assert profiles.texts['planner'] == current and owner.config['interactive_images_planner_prompt'] == current

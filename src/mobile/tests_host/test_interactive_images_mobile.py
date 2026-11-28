@@ -705,6 +705,7 @@ def _gallery(tmp_path, **kwargs):
     u7 = _u7()
     _conn, session = u7._tb()._fake_session("android")
     ctx = u7._tools_ctx(session.page)
+    ctx._keepalive = (_conn, session)   # the page only holds a weak reference to its session
     folder = _gallery_book(tmp_path)
     return ImagesGallery(ctx, str(folder), **kwargs), ctx, folder
 
