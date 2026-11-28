@@ -220,7 +220,7 @@ To use a style: tick **Interactive styles** in Other Settings and pick it in the
 
 ## 10. The Progress Manager tab
 
-**Progress Manager → 🖼 Interactive Images** lists **every chapter whose translation is completed**, in the book's **reading order (the OPF spine)** (chapters that are image-only, empty, skipped, failed or still translating are left out; each row shows its place in the book like the Translation tab, `[003]`), including chapters you have not built yet. The tab label counts built chapters (Completed and Styles only) out of that list, for example `🖼 Interactive Images (12/39)`, plus `, 2 stale` when chapters changed since they were built. It shows the count before you open the tab.
+**Progress Manager → 🖼 Interactive Images** lists **every chapter whose translation is completed**, in the book's **reading order (the OPF spine)** (chapters whose translation failed or is still running are left out; each row shows its place in the book like the Translation tab, `[003]`), including chapters you have not built yet. The tab label counts built chapters (Completed and Styles only) out of that list, for example `🖼 Interactive Images (12/39)`, plus `, 2 stale` when chapters changed since they were built. It shows the count before you open the tab.
 
 | Status | Meaning |
 |---|---|
@@ -230,8 +230,9 @@ To use a style: tick **Interactive styles** in Other Settings and pick it in the
 | **Failed** | The planner or the image model failed; see the reason |
 | **Rejected** | The changes would have altered the chapter's text, so nothing was written |
 | **Stale** | The chapter was retranslated after it was built; rebuild it |
+| **Skipped** | Glossary extraction skips this chapter too (image-only, empty, title/header-only or a special file); it is never built |
 
-**What is skipped:** Interactive Images skips exactly what glossary extraction skips. A chapter is not listed, not counted and never sent to the planner (the log says `⏭️ ... skipped: image-only` and so on) when its translated page is **image-only** or **empty**, or **title/header-only** (only while the Glossary setting *Skip title/header-only chapters* is on), or when its source file is a **special file** (cover, title page, copyright, notice, ...) and the translation setting *Translate special files* is off, with the same keyword lists and the same "never treat in-between files as special" rule the glossary uses.
+**What is skipped:** Interactive Images skips exactly what glossary extraction skips. Such a chapter shows as a **Skipped** row at its place in the book, with the Glossary tab's icon and reason (📸 Image Only, 📄 Empty, 🏷️ Title/Header Only, ⏭️ Special File), is counted in the **⏭️ Skipped** chip but not in the tab total, and is never built or sent to the planner (the log says `⏭️ ... skipped: image-only` and so on). A chapter is skipped when its translated page is **image-only** or **empty**, or **title/header-only** (only while the Glossary setting *Skip title/header-only chapters* is on), or when its source file is a **special file** (cover, title page, copyright, notice, ...) and the translation setting *Translate special files* is off, with the same keyword lists and the same "never treat in-between files as special" rule the glossary uses.
 
 **Buttons:** **▶ Build pending** (Not built, Failed, Partial, Rejected and Stale chapters), **Stop**, **Settings**, **🎨 Styles**, **🖼 Gallery**, **Refresh**. The stats chips at the top filter the list.
 
